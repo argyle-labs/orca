@@ -15,7 +15,6 @@ use files as _;
 use notifications as _;
 use orca_inventory as _;
 use plugins as _;
-use pod as _;
 use system as _;
 
 /// The gate is useless if nothing is gated. This guards against the exact

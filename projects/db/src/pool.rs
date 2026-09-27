@@ -7,7 +7,7 @@
 //! `Arc<Mutex<Connection>>`. 116 sites were coupled to *how* a connection is
 //! acquired, so any concurrency change (a reader pool, `spawn_blocking`, a
 //! BUSY-retry, tracing) had to touch all of them. That coupling is the real
-//! problem behind the measured concurrency collapse (concurrent-100 `pod.list`
+//! problem behind the measured concurrency collapse (concurrent-100 `system.list`
 //! = 8.64s vs sequential 3.47s — 2.5× WORSE — every read fighting one mutex).
 //!
 //! [`Db`] is the fix: a single handle every call site goes through, exposing

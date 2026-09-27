@@ -2,7 +2,7 @@
 
 > Status: **Living doc.** The four-role binary, three-surface tool model, ports, identity, and state ownership.
 
-Orca is a single Rust binary that runs on every host in a pod and
+Orca is a single Rust binary that runs on every system in the mesh and
 exposes one tool surface (CLI / REST / MCP) via the
 `#[orca_tool]` macro. Every host runs the same daemon; lifecycle,
 storage, services, and observability are all orca verbs.
@@ -54,13 +54,13 @@ projects/
   namespace/       resource grouping — shareable per-user workspaces
   notifications/   backend-agnostic event/notification dispatcher
   openapi/         OpenAPI parser + navigable view
-  orca-inventory/  topology aggregator (pod members + system nodes)
+  orca-inventory/  topology aggregator (mesh members + system nodes)
   plugin-abi/      plain-serde plugin capability contract (re-exported as plugin_toolkit::abi)
   plugin-proto/    out-of-process plugin wire protocol (Unix socket, JSON frames)
   plugin-loader/   spawns + supervises subprocess plugins; capability delegation
   plugin-toolkit/  the single dependency a native plugin author needs
   plugin-toolkit-build/  build.rs codegen for typed OpenAPI/GraphQL clients
-  pod/             mesh: mTLS, mDNS discovery, pairing, dispatch, cert rotation
+  system/mesh/     mesh: mTLS, mDNS discovery, pairing, dispatch, cert rotation
   runtime/         plugin host (package name `plugins`): registry + KV + install
   server/          thin HTTP+MCP transport layer (binary `orca`)
   service/         generic service domain (deployable services, location-agnostic)
@@ -136,7 +136,7 @@ a fixed path on systems where `$HOME` churns). Pairing = mutual mTLS trust;
 no asserted-role fallbacks. Self-secure = Tier-2 cred sync opt-in.
 
 Cross-host dispatch is opt-out via `local_only` flag. `--peer <name>` on CLI and
-`X-Orca-Peer` header on REST route the call through pod mesh.
+`X-Orca-Peer` header on REST route the call through the mesh.
 
 Secrets never cross to non-secure hosts; sensitive operations
 delegate back to a holder via callback.

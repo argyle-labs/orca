@@ -37,7 +37,6 @@ db         = { package = "db", path = "../db" }
 identities = { path = "../identities" }
 # Domain crates
 auth     = { path = "../auth" }
-pod      = { path = "../pod" }
 orca-inventory = { path = "../orca-inventory" }
 system   = { path = "../system" }
 # Notifications dispatcher — linked so the daemon can register the in-tree
@@ -97,15 +96,15 @@ anyhow    = { workspace = true }
 # TTY echo-off password prompt for `orca admin reset-password`.
 rpassword = { workspace = true }
 
-# Bootstrap signing for pod offer / join-confirm frames.
+# Bootstrap signing for mesh offer / join-confirm frames.
 
-# mDNS for pod peer discovery on the LAN. Pure-Rust, no avahi/bonjour dep.
+# mDNS for mesh peer discovery on the LAN. Pure-Rust, no avahi/bonjour dep.
 # We bridge its flume::Receiver<ServiceEvent> into a tokio task at startup.
 
 # Enumerate local network interfaces for host addressing autodetect
 # (host_identity::detect_all). Pure Rust, cross-platform.
 
-# Cross-platform system snapshot for system.runtime-spec / pod.list.
+# Cross-platform system snapshot for system.runtime-spec / system.list.
 
 # Text width measurement (TUI from merged conversation)
 

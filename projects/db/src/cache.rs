@@ -19,7 +19,7 @@ use moka::sync::Cache;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-/// Latest `host_status` payload per peer. Hot read path — every `pod.list`
+/// Latest `host_status` payload per peer. Hot read path — every `system.list`
 /// builds DTOs from this. TTL short enough that a write-then-read race
 /// resolves within one tick of the writer cadence (2s fast, 30s slow).
 pub static HOST_STATUS_LATEST: LazyLock<Cache<String, HostStatusEntry>> = LazyLock::new(|| {

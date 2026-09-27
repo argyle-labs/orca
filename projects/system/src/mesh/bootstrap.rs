@@ -29,12 +29,12 @@ use utils::pki::PeerRole;
 use utils::pki::SignedEnvelope;
 
 use super::pki_dir;
-use db::pod as pdb;
+use db::mesh as pdb;
 
-const POD_OFFER_METHOD: &str = "pod/offer";
-const POD_JOIN_CONFIRM_METHOD: &str = "pod/join-confirm";
-const POD_REQUEST_OFFER_METHOD: &str = "pod/request-offer";
-const POD_REFRESH_CERT_BOOTSTRAP_METHOD: &str = "pod/refresh-cert-bootstrap";
+const MESH_OFFER_METHOD: &str = "mesh/offer";
+const MESH_JOIN_CONFIRM_METHOD: &str = "mesh/join-confirm";
+const MESH_REQUEST_OFFER_METHOD: &str = "mesh/request-offer";
+const MESH_REFRESH_CERT_BOOTSTRAP_METHOD: &str = "mesh/refresh-cert-bootstrap";
 
 /// Joiner → inviter, sent over an unauthenticated bootstrap TLS session (the
 /// joiner doesn't know the inviter's fp yet — TOFU). The inviter responds
@@ -69,7 +69,7 @@ struct RequestOfferResult {
     inviter_addr: String,
     inviter_port: u16,
     mesh_ca_cert_pem: String,
-    pod_id: String,
+    mesh_id: String,
     code_hash: String,
     expires_at: i64,
     #[serde(default)]
@@ -101,7 +101,7 @@ struct OfferBody {
     inviter_addr: String,
     inviter_port: u16,
     mesh_ca_cert_pem: String,
-    pod_id: String,
+    mesh_id: String,
     code_hash: String,
     expires_at: i64,
     /// Human-readable hostname (slice 7). Optional + serde(default) so an
@@ -151,10 +151,10 @@ struct JoinConfirmResult {
     server_cert_pem: String,
     ca_cert_pem: String,
     inviter_peer_id: String,
-    pod_id: String,
+    mesh_id: String,
 }
 
-pub async fn handle_pod_bootstrap_connection(
+pub async fn handle_mesh_bootstrap_connection(
     mut tls: TlsStream<tokio::net::TcpStream>,
     peer: std::net::SocketAddr,
 ) -> Result<()> {
@@ -178,7 +178,7 @@ pub async fn handle_pod_bootstrap_connection(
     // Ack is on the wire — now safe to dial back for auto-accept.
     if let Some(code) = auto_accept_code {
         tokio::spawn(async move {
-            if let Err(e) = crate::cli::cmd_pod_accept(&code).await {
+            if let Err(e) = crate::mesh::cli::cmd_mesh_accept(&code).await {
                 warn!("[pod-bootstrap] auto-accept failed: {e:#}");
             } else {
                 info!("[pod-bootstrap] auto-accept succeeded");
@@ -218,28 +218,28 @@ async fn dispatch(request: Request, peer: std::net::SocketAddr) -> (Response, Op
     };
 
     match method {
-        POD_OFFER_METHOD => match handle_offer(&env, peer) {
+        MESH_OFFER_METHOD => match handle_offer(&env, peer) {
             Ok((ack, auto_accept_code)) => (value_response(id, &ack), auto_accept_code),
             Err(e) => (
                 Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
                 None,
             ),
         },
-        POD_JOIN_CONFIRM_METHOD => match handle_join_confirm(&env) {
+        MESH_JOIN_CONFIRM_METHOD => match handle_join_confirm(&env) {
             Ok(r) => (value_response(id, &r), None),
             Err(e) => (
                 Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
                 None,
             ),
         },
-        POD_REQUEST_OFFER_METHOD => match handle_request_offer(&env, peer) {
+        MESH_REQUEST_OFFER_METHOD => match handle_request_offer(&env, peer) {
             Ok(r) => (value_response(id, &r), None),
             Err(e) => (
                 Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
                 None,
             ),
         },
-        POD_REFRESH_CERT_BOOTSTRAP_METHOD => match handle_refresh_cert_bootstrap(&env) {
+        MESH_REFRESH_CERT_BOOTSTRAP_METHOD => match handle_refresh_cert_bootstrap(&env) {
             Ok(r) => (value_response(id, &r), None),
             Err(e) => (
                 Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
@@ -309,7 +309,7 @@ fn handle_offer(
         &body.code_hash,
         Some(&body.mesh_ca_cert_pem),
         Some(&body.inviter_peer_id),
-        Some(&body.pod_id),
+        Some(&body.mesh_id),
         ttl,
         body.code_plain.as_deref(),
         &candidate_addrs,
@@ -378,7 +378,7 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     // signed the CSR) is a strictly stronger signal than the old forget.
     if let Err(e) = pdb::clear_forget_tombstone(&conn, &joiner_peer_id) {
         tracing::warn!(
-            "[pod] join-confirm: clear forget-tombstone for {joiner_peer_id} failed: {e:#}"
+            "[mesh] join-confirm: clear forget-tombstone for {joiner_peer_id} failed: {e:#}"
         );
     }
     // Drop any legacy `"unknown"` stub that points at the same joiner. These
@@ -394,9 +394,9 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     let inviter_peer_id = offer
         .inviter_peer_id
         .clone()
-        .unwrap_or_else(|| system::host_identity::machine_id().to_string());
-    let pod_id = offer
-        .pod_id
+        .unwrap_or_else(|| crate::host_identity::machine_id().to_string());
+    let mesh_id = offer
+        .mesh_id
         .clone()
         .unwrap_or_else(|| "default".to_string());
 
@@ -405,7 +405,7 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
         server_cert_pem,
         ca_cert_pem,
         inviter_peer_id,
-        pod_id,
+        mesh_id,
     })
 }
 
@@ -432,7 +432,7 @@ struct RefreshCertBootstrapResult {
 /// Sign refreshed CSRs for a peer over the bootstrap channel. Authorization
 /// mirrors the mTLS `handle_refresh_cert` CN check, but binds identity to the
 /// envelope signer's bootstrap fp: the signer must be a known, non-departed
-/// pod member whose pinned bootstrap fp matches AND whose peer_id equals the
+/// mesh member whose pinned bootstrap fp matches AND whose peer_id equals the
 /// claimed `joiner_hostname` (== machine_id). This ensures an unauthenticated
 /// bootstrap caller can only mint leaves for the identity it already owns.
 fn handle_refresh_cert_bootstrap(env: &SignedEnvelope) -> Result<RefreshCertBootstrapResult> {
@@ -480,7 +480,7 @@ fn handle_refresh_cert_bootstrap(env: &SignedEnvelope) -> Result<RefreshCertBoot
 
 /// Joiner-initiated handshake (Slice JU-3). Joiner calls this over TOFU TLS
 /// asking "please offer me membership". We treat the request like an mDNS
-/// discovery hit: record the joiner in `pod_discovery`, mint a pairing code,
+/// discovery hit: record the joiner in `mesh_discovery`, mint a pairing code,
 /// insert an outbound pending offer keyed by `joiner_pubkey_fp`, and return
 /// the offer details so the joiner can land an inbound pending row in the
 /// same round-trip.
@@ -501,11 +501,11 @@ fn handle_request_offer(
     }
 
     let conn = db::open_default()?;
-    // Inviter must already be a pod member (have a mesh CA) to invite peers.
+    // Inviter must already be a mesh member (have a mesh CA) to invite peers.
     let pki_d = pki_dir();
     let mesh_ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
         .context("this host has no mesh CA; run `orca pod init` first")?;
-    let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());
+    let mesh_id = pdb::get_mesh_id(&conn)?.unwrap_or_else(|| "default".to_string());
 
     // Record the joiner in discovery (idempotent — same fp = same row).
     let joiner_label =
@@ -528,15 +528,15 @@ fn handle_request_offer(
         );
     }
 
-    let code = crate::scheduler::mint_pairing_code();
+    let code = crate::mesh::scheduler::mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
     let offer_id = utils::id::new();
-    let expires_at = now_secs() + crate::scheduler::OFFER_TTL_SECS;
+    let expires_at = now_secs() + crate::mesh::scheduler::OFFER_TTL_SECS;
     // Persist the inviter's own peer_id on the pending offer so the matching
     // `pod/join-confirm` step can echo it back to the joiner. Without this
     // the joiner records the inviter as `"unknown"` and roster-sync skips
     // every row that references it.
-    let inviter_peer_id = system::host_identity::machine_id().to_string();
+    let inviter_peer_id = crate::host_identity::machine_id().to_string();
     pdb::insert_pending_offer(
         &conn,
         &offer_id,
@@ -549,7 +549,7 @@ fn handle_request_offer(
         None,
         Some(&inviter_peer_id),
         None,
-        crate::scheduler::OFFER_TTL_SECS,
+        crate::mesh::scheduler::OFFER_TTL_SECS,
         None,
         &[], // outbound offer: the joiner dials us, not the reverse
     )?;
@@ -563,8 +563,8 @@ fn handle_request_offer(
 
     let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
     let inviter_fp = utils::pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
-    let inviter_hostname = system::host_identity::hostname().to_string();
-    let inviter_display_name = system::host_identity::display_hostname().to_string();
+    let inviter_hostname = crate::host_identity::hostname().to_string();
+    let inviter_display_name = crate::host_identity::display_hostname().to_string();
 
     Ok(RequestOfferResult {
         inviter_pubkey_fp: inviter_fp,
@@ -573,7 +573,7 @@ fn handle_request_offer(
         inviter_addr: String::new(), // joiner already knows our addr — it dialed us
         inviter_port: db::ports::mesh_port(),
         mesh_ca_cert_pem,
-        pod_id,
+        mesh_id,
         code_hash,
         expires_at,
         inviter_display_name: Some(inviter_display_name),
@@ -585,7 +585,7 @@ fn handle_request_offer(
         // `code_hint` populated so manual `pod accept` still works for
         // out-of-band flows.
         code_plain: Some(code.clone()),
-        inviter_addrs: crate::scheduler::self_advertised_addrs(),
+        inviter_addrs: crate::mesh::scheduler::self_advertised_addrs(),
     })
 }
 
@@ -598,7 +598,7 @@ fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
 
 use utils::time::now_secs_since_epoch as now_secs;
 
-/// Pick the human-readable label to store in `pod_peers.peer_hostname` (or
+/// Pick the human-readable label to store in `mesh_peers.peer_hostname` (or
 /// `pending_offers.peer_hostname`) for a peer that's announcing itself.
 ///
 /// rc.25+ peers send both an identity CN (`*_hostname` = `machine_id_short`)
@@ -640,7 +640,7 @@ mod tests {
             "inviter_addr": "10.0.0.1",
             "inviter_port": 12002,
             "mesh_ca_cert_pem": "",
-            "pod_id": "p1",
+            "mesh_id": "p1",
             "code_hash": "h",
             "expires_at": 0,
         });
@@ -657,7 +657,7 @@ mod tests {
             "inviter_addr": "10.0.0.1",
             "inviter_port": 12002,
             "mesh_ca_cert_pem": "",
-            "pod_id": "p1",
+            "mesh_id": "p1",
             "code_hash": "h",
             "expires_at": 0,
             "inviter_display_name": "host-g",
@@ -712,7 +712,7 @@ mod tests {
             inviter_addr: String::new(),
             inviter_port: 12002,
             mesh_ca_cert_pem: "ca".into(),
-            pod_id: "p1".into(),
+            mesh_id: "p1".into(),
             code_hash: "h".into(),
             expires_at: 1234,
             inviter_display_name: Some("host-g.local".into()),
@@ -750,7 +750,7 @@ mod tests {
             "inviter_addr": "10.0.0.1",
             "inviter_port": 12002,
             "mesh_ca_cert_pem": "",
-            "pod_id": "p1",
+            "mesh_id": "p1",
             "code_hash": "h",
             "expires_at": 0,
         });
@@ -766,7 +766,7 @@ mod tests {
             "inviter_addr": "10.0.0.1",
             "inviter_port": 12002,
             "mesh_ca_cert_pem": "",
-            "pod_id": "p1",
+            "mesh_id": "p1",
             "code_hash": "h",
             "expires_at": 0,
             "code_plain": "ABCDEF",
@@ -785,7 +785,7 @@ mod tests {
             "inviter_addr": "",
             "inviter_port": 12002,
             "mesh_ca_cert_pem": "",
-            "pod_id": "p",
+            "mesh_id": "p",
             "code_hash": "h",
             "expires_at": 0,
         });
@@ -812,7 +812,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_missing_params_is_internal_error() {
-        let req = Request::new(1, POD_OFFER_METHOD, None);
+        let req = Request::new(1, MESH_OFFER_METHOD, None);
         let (resp, auto) = dispatch(req, test_peer()).await;
         assert!(auto.is_none());
         let err = resp.error.expect("expected error");
@@ -828,7 +828,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_unparseable_params_is_internal_error() {
         // A bare number is not a SignedEnvelope object.
-        let req = Request::new(7, POD_OFFER_METHOD, Some(Value::from(42)));
+        let req = Request::new(7, MESH_OFFER_METHOD, Some(Value::from(42)));
         let (resp, auto) = dispatch(req, test_peer()).await;
         assert!(auto.is_none());
         let err = resp.error.expect("expected error");
@@ -842,13 +842,13 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_method_is_method_not_found() {
-        let req = Request::new("abc", "pod/does-not-exist", Some(dummy_envelope_value()));
+        let req = Request::new("abc", "mesh/does-not-exist", Some(dummy_envelope_value()));
         let (resp, auto) = dispatch(req, test_peer()).await;
         assert!(auto.is_none());
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, -32601);
         assert!(
-            err.message.contains("pod/does-not-exist"),
+            err.message.contains("mesh/does-not-exist"),
             "got: {}",
             err.message
         );
@@ -885,7 +885,7 @@ mod tests {
             inviter_addr: String::new(),
             inviter_port: 12002,
             mesh_ca_cert_pem: String::new(),
-            pod_id: "p".into(),
+            mesh_id: "p".into(),
             code_hash: "h".into(),
             expires_at: 0,
             inviter_display_name: None,
@@ -924,14 +924,14 @@ mod tests {
             server_cert_pem: "SERVER".into(),
             ca_cert_pem: "CA".into(),
             inviter_peer_id: "host-g".into(),
-            pod_id: "p1".into(),
+            mesh_id: "p1".into(),
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains(r#""client_cert_pem":"CLIENT""#));
         assert!(s.contains(r#""server_cert_pem":"SERVER""#));
         assert!(s.contains(r#""ca_cert_pem":"CA""#));
         assert!(s.contains(r#""inviter_peer_id":"host-g""#));
-        assert!(s.contains(r#""pod_id":"p1""#));
+        assert!(s.contains(r#""mesh_id":"p1""#));
     }
 
     #[test]
@@ -962,7 +962,7 @@ mod tests {
         let json = r#"{
             "inviter_peer_id":"abc","inviter_hostname":"abc123",
             "inviter_addr":"10.0.0.1","inviter_port":12002,
-            "mesh_ca_cert_pem":"","pod_id":"p1","code_hash":"h","expires_at":0
+            "mesh_ca_cert_pem":"","mesh_id":"p1","code_hash":"h","expires_at":0
         }"#;
         let body: OfferBody = serde_json::from_str(json).unwrap();
         assert!(body.inviter_addrs.is_empty());
@@ -973,7 +973,7 @@ mod tests {
         let json = r#"{
             "inviter_peer_id":"abc","inviter_hostname":"abc123",
             "inviter_addr":"10.0.0.1","inviter_port":12002,
-            "mesh_ca_cert_pem":"","pod_id":"p1","code_hash":"h","expires_at":0,
+            "mesh_ca_cert_pem":"","mesh_id":"p1","code_hash":"h","expires_at":0,
             "inviter_addrs":["10.0.0.1","100.64.0.1"]
         }"#;
         let body: OfferBody = serde_json::from_str(json).unwrap();
@@ -1007,7 +1007,7 @@ mod tests {
             inviter_addr: "10.0.0.1".into(),
             inviter_port: 12002,
             mesh_ca_cert_pem: String::new(),
-            pod_id: "p1".into(),
+            mesh_id: "p1".into(),
             code_hash: "h".into(),
             expires_at: 0,
             inviter_display_name: None,
@@ -1017,7 +1017,7 @@ mod tests {
         let env = utils::pki::sign_envelope(&key, &body).unwrap();
         let (back, vk): (OfferBody, _) = utils::pki::verify_envelope(&env).unwrap();
         assert_eq!(back.inviter_peer_id, "abc");
-        assert_eq!(back.pod_id, "p1");
+        assert_eq!(back.mesh_id, "p1");
         let fp = utils::pki::bootstrap_pubkey_fingerprint(&vk);
         let fp_direct = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
         assert_eq!(fp, fp_direct);
@@ -1034,7 +1034,7 @@ mod tests {
             inviter_addr: "10.0.0.1".into(),
             inviter_port: 12002,
             mesh_ca_cert_pem: String::new(),
-            pod_id: "p1".into(),
+            mesh_id: "p1".into(),
             code_hash: "h".into(),
             expires_at: 0,
             inviter_display_name: None,
@@ -1051,7 +1051,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_rejects_missing_params() {
-        let req = Request::new(1u64, POD_OFFER_METHOD, None);
+        let req = Request::new(1u64, MESH_OFFER_METHOD, None);
         let (resp, auto) = dispatch(req, test_peer()).await;
         assert!(auto.is_none());
         let err = resp.error.expect("error expected");
@@ -1063,7 +1063,7 @@ mod tests {
     async fn dispatch_rejects_unparseable_params() {
         // An empty object is not a valid SignedEnvelope (missing fields).
         let params = serde_json::to_value(serde_json::Map::new()).unwrap();
-        let req = Request::new(1u64, POD_OFFER_METHOD, Some(params));
+        let req = Request::new(1u64, MESH_OFFER_METHOD, Some(params));
         let (resp, auto) = dispatch(req, test_peer()).await;
         assert!(auto.is_none());
         let err = resp.error.expect("error expected");
@@ -1081,7 +1081,7 @@ mod tests {
             signature_b64: String::new(),
         };
         let params = serde_json::to_value(&env).unwrap();
-        let req = Request::new(1u64, "pod/does-not-exist", Some(params));
+        let req = Request::new(1u64, "mesh/does-not-exist", Some(params));
         let (resp, auto) = dispatch(req, test_peer()).await;
         assert!(auto.is_none());
         let err = resp.error.expect("error expected");
@@ -1108,7 +1108,7 @@ mod tests {
     async fn dispatch_join_confirm_bad_envelope_is_internal_error() {
         let req = Request::new(
             1u64,
-            POD_JOIN_CONFIRM_METHOD,
+            MESH_JOIN_CONFIRM_METHOD,
             Some(unverifiable_envelope_params()),
         );
         let (resp, auto) = dispatch(req, test_peer()).await;
@@ -1121,7 +1121,7 @@ mod tests {
     async fn dispatch_request_offer_bad_envelope_is_internal_error() {
         let req = Request::new(
             1u64,
-            POD_REQUEST_OFFER_METHOD,
+            MESH_REQUEST_OFFER_METHOD,
             Some(unverifiable_envelope_params()),
         );
         let (resp, auto) = dispatch(req, test_peer()).await;
@@ -1137,7 +1137,7 @@ mod tests {
         // internal errors, neither touches the pod DB.
         let req = Request::new(
             1u64,
-            POD_REFRESH_CERT_BOOTSTRAP_METHOD,
+            MESH_REFRESH_CERT_BOOTSTRAP_METHOD,
             Some(unverifiable_envelope_params()),
         );
         let (resp, auto) = dispatch(req, test_peer()).await;
@@ -1258,7 +1258,7 @@ mod tests {
             inviter_addr: "10.0.0.1".into(),
             inviter_port: 12002,
             mesh_ca_cert_pem: String::new(),
-            pod_id: "p1".into(),
+            mesh_id: "p1".into(),
             code_hash: "h".into(),
             expires_at: 0,
             inviter_display_name: None,
@@ -1279,7 +1279,7 @@ mod tests {
         let json = r#"{
             "inviter_peer_id":"abc","inviter_hostname":"abc123",
             "inviter_addr":"10.0.0.1",
-            "mesh_ca_cert_pem":"","pod_id":"p1","code_hash":"h","expires_at":0
+            "mesh_ca_cert_pem":"","mesh_id":"p1","code_hash":"h","expires_at":0
         }"#;
         let res: std::result::Result<OfferBody, _> = serde_json::from_str(json);
         assert!(res.is_err());
@@ -1311,7 +1311,7 @@ mod tests {
         let json = r#"{
             "inviter_pubkey_fp":"fp","inviter_peer_id":"x","inviter_hostname":"x",
             "inviter_addr":"","inviter_port":12002,"mesh_ca_cert_pem":"",
-            "pod_id":"p","code_hash":"h","expires_at":0
+            "mesh_id":"p","code_hash":"h","expires_at":0
         }"#;
         let r: RequestOfferResult = serde_json::from_str(json).unwrap();
         assert!(r.inviter_addrs.is_empty());
@@ -1327,7 +1327,7 @@ mod tests {
             server_cert_pem: "S".into(),
             ca_cert_pem: "A".into(),
             inviter_peer_id: "host-g".into(),
-            pod_id: "p1".into(),
+            mesh_id: "p1".into(),
         };
         let resp = value_response(serde_json::Value::from("req-1"), &r);
         assert!(!resp.is_error());
@@ -1351,7 +1351,7 @@ mod tests {
             inviter_addr: "10.0.0.1".into(),
             inviter_port: 12002,
             mesh_ca_cert_pem: "CA-PEM".into(),
-            pod_id: "pod-x".into(),
+            mesh_id: "pod-x".into(),
             code_hash: "hash-x".into(),
             expires_at,
             inviter_display_name: Some("Inviter Host".into()),
@@ -1384,7 +1384,7 @@ mod tests {
             // Non-empty inviter_addr is stored as the primary peer_addr.
             assert_eq!(o.peer_addr, "10.0.0.1");
             assert_eq!(o.peer_port, 12002);
-            assert_eq!(o.pod_id.as_deref(), Some("pod-x"));
+            assert_eq!(o.mesh_id.as_deref(), Some("pod-x"));
             assert_eq!(o.inviter_peer_id.as_deref(), Some("inv-peer"));
             // Candidate order: advertised addrs first (deduped), then inviter_addr.
             assert_eq!(o.candidate_addrs, vec!["10.0.0.2", "10.0.0.1"]);
@@ -1458,7 +1458,7 @@ mod tests {
             body.code_plain = Some("AUTO-1".into());
             let env = utils::pki::sign_envelope(&key, &body).unwrap();
             let params = serde_json::to_value(&env).unwrap();
-            let req = Request::new(1u64, POD_OFFER_METHOD, Some(params));
+            let req = Request::new(1u64, MESH_OFFER_METHOD, Some(params));
             let (resp, auto) = dispatch(req, test_peer()).await;
             assert!(!resp.is_error(), "valid offer must succeed");
             assert_eq!(auto.as_deref(), Some("AUTO-1"));
@@ -1482,7 +1482,7 @@ mod tests {
     const JOINER_UUID: &str = "019e7105-0000-7000-8000-0000000abc07";
 
     fn run_with_home<T>(with_ca: bool, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
-        let _guard = crate::HOME_ENV_LOCK
+        let _guard = crate::mesh::HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
@@ -1494,7 +1494,7 @@ mod tests {
         std::fs::create_dir_all(&pki).unwrap();
         // `handle_request_offer` reads the local machine id; init the global
         // host identity once (idempotent OnceCell — later calls are no-ops).
-        drop(system::host_identity::init(home.path()));
+        drop(crate::host_identity::init(home.path()));
         if with_ca {
             utils::pki::init_mesh_ca(&pki, "host-inviter").unwrap();
         }
@@ -1644,7 +1644,7 @@ mod tests {
                 assert!(res.server_cert_pem.contains("BEGIN CERTIFICATE"));
                 assert!(res.ca_cert_pem.contains("BEGIN CERTIFICATE"));
                 assert_eq!(res.inviter_peer_id, "inv-peer-id");
-                assert_eq!(res.pod_id, "pod-z");
+                assert_eq!(res.mesh_id, "pod-z");
 
                 // The joiner is now a trusted peer pinned to the signer fp…
                 let peers = pdb::list_peers(&conn).unwrap();

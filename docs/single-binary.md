@@ -52,7 +52,7 @@ in-process — orca self-updates without sudo. Channels: stable / beta
 (prerelease; tags stay `-rc.N`). Dev is a *state* (the `ORCA_DEV` env /
 a `-dev+` build), not a channel. `--version <semver>` pins and bypasses the monotonic-newer
 veto. Updates fan
-out across the pod via mesh-relay — non-networked peers update via
+out across the mesh via mesh-relay — non-networked peers update via
 a connected relay.
 
 ## Why one binary

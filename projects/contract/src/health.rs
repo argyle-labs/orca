@@ -1,7 +1,7 @@
 //! Cross-cutting operational-health primitive shared across every surface.
 //!
 //! [`Health`] is the single typed answer to "is this thing working?" that
-//! runtime adapters, service providers, and pod/system projections all populate
+//! runtime adapters, service providers, and system projections all populate
 //! and consumers all read — so no domain reinvents its own health enum.
 //!
 //! ## Layered precedence rule

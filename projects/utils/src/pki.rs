@@ -108,18 +108,18 @@ pub struct NodeBundle {
     pub ca_cert_pem: String,
 }
 
-// ── Pod / mesh-CA file paths ─────────────────────────────────────────────────
+// ── Mesh-CA file paths ─────────────────────────────────────────────────
 //
-// Pod material lives in a separate subtree from plugin material so the two
+// Mesh material lives in a separate subtree from plugin material so the two
 // trust contexts can never accidentally cross-contaminate, even when both
 // listen on the same port via SNI:
 //
-//   <pki_dir>/mesh/ca.cert.pem         — pod CA cert (replicated to every peer)
-//   <pki_dir>/mesh/ca.key.pem          — pod CA private key (ONLY on secure hosts)
-//   <pki_dir>/mesh/server/node.{cert,key}.pem — this host's pod-server cert (SAN=pod.orca.local)
-//   <pki_dir>/mesh/client/node.{cert,key}.pem — this host's pod-client cert (used outbound to peers)
+//   <pki_dir>/mesh/ca.cert.pem         — mesh CA cert (replicated to every peer)
+//   <pki_dir>/mesh/ca.key.pem          — mesh CA private key (ONLY on secure hosts)
+//   <pki_dir>/mesh/server/node.{cert,key}.pem — this host's mesh-server cert (SAN=mesh.orca.local)
+//   <pki_dir>/mesh/client/node.{cert,key}.pem — this host's mesh-client cert (used outbound to peers)
 //
-// Server cert SAN: `pod.orca.local` (the SNI the client sends to reach this surface).
+// Server cert SAN: `mesh.orca.local` (the SNI the client sends to reach this surface).
 // Client cert CN:  `<hostname>` so server-side handlers can identify the caller.
 
 pub fn mesh_dir(pki_dir: &Path) -> PathBuf {
@@ -144,11 +144,11 @@ pub fn mesh_client_key_path(pki_dir: &Path) -> PathBuf {
     mesh_dir(pki_dir).join("client/node.key.pem")
 }
 
-// Two-slot CA rotation. During an overlap window after `pod ca-rotate`, both
+// Two-slot CA rotation. During an overlap window after a CA rotation, both
 // the current CA (`ca.cert.pem`) and the previous CA (`ca.previous.cert.pem`)
 // are in the trust store, so certs signed by EITHER are accepted. New certs
 // (auto-rotation refreshes, new joiners) are issued under the current CA.
-// `pod_self.ca_previous_expires_at` is the deadline at which the previous
+// `mesh_self.ca_previous_expires_at` is the deadline at which the previous
 // slot is dropped from disk + trust.
 pub fn mesh_ca_previous_cert_path(pki_dir: &Path) -> PathBuf {
     mesh_dir(pki_dir).join("ca.previous.cert.pem")
@@ -160,12 +160,83 @@ pub fn has_mesh_ca_previous(pki_dir: &Path) -> bool {
     mesh_ca_previous_cert_path(pki_dir).exists()
 }
 
-pub const POD_SERVER_SAN: &str = "pod.orca.local";
+/// SNI the paired-peer mTLS surface answers on, and the DNS name a mesh
+/// server cert is issued for.
+pub const MESH_SERVER_SAN: &str = "mesh.orca.local";
 
-// ── Pod / mesh-CA init + issuance ────────────────────────────────────────────
+/// The name this surface answered on before the mesh stopped being called a
+/// "pod". Every mesh server cert is issued carrying BOTH names, and the
+/// listener still answers to this one, for exactly one reason: a cert is valid
+/// for 30 days and only rotates lazily under 7 days remaining, so a hard
+/// cutover would leave a host holding a legacy-only cert unreachable — by up
+/// to 23 days — from any already-upgraded peer. That is a mesh partition, not
+/// an upgrade ([[orca-must-never-bring-down-host]]).
+///
+/// The convergence is automatic: a daemon whose mesh server cert lacks
+/// [`MESH_SERVER_SAN`] reissues it at startup (see `needs_san_migration`).
+///
+/// DELETE THIS, and the dual-SAN issuance below, once every system in the
+/// fleet has started at least once on a build that carries them.
+pub const LEGACY_SERVER_SAN: &str = "pod.orca.local";
 
-/// Founder bootstrap. Creates a fresh mesh CA + this host's pod server cert +
-/// this host's pod client cert. Idempotent: re-running with an existing CA is
+/// DNS names a mesh SERVER cert is issued for: the current name first, the
+/// pre-rename name alongside it so an already-upgraded peer and a not-yet-
+/// upgraded one can both validate the same cert during a fleet roll.
+pub fn mesh_server_sans() -> Vec<String> {
+    vec![MESH_SERVER_SAN.to_string(), LEGACY_SERVER_SAN.to_string()]
+}
+
+/// DNS names a BOOTSTRAP cert is issued for. Same dual-name reasoning as
+/// [`mesh_server_sans`].
+/// Per-host DNS names a mesh CLIENT cert is issued for. Dual-named for the
+/// same reason as [`mesh_server_sans`].
+pub fn mesh_client_sans(host_cn: &str) -> Vec<String> {
+    vec![
+        format!("{host_cn}.{MESH_SERVER_SAN}"),
+        format!("{host_cn}.{LEGACY_SERVER_SAN}"),
+    ]
+}
+
+pub fn mesh_bootstrap_sans() -> Vec<String> {
+    vec![
+        MESH_BOOTSTRAP_SAN.to_string(),
+        LEGACY_BOOTSTRAP_SAN.to_string(),
+    ]
+}
+
+/// Does this cert lack the current mesh SAN — i.e. was it issued before the
+/// rename, and must be reissued before an upgraded peer can reach this host?
+///
+/// A cert that cannot be parsed counts as lacking it: an unreadable cert is
+/// not evidence of a good one, and the cost of being wrong here is one
+/// needless reissue versus an unreachable host.
+pub fn cert_lacks_mesh_san(cert_pem: &str) -> bool {
+    !cert_dns_names(cert_pem).is_some_and(|n| n.iter().any(|d| d == MESH_SERVER_SAN))
+}
+
+/// DNS names in a cert's subjectAltName, or `None` if it cannot be parsed.
+fn cert_dns_names(cert_pem: &str) -> Option<Vec<String>> {
+    use rustls_pemfile::certs;
+    let mut reader = cert_pem.as_bytes();
+    let der = certs(&mut reader).next()?.ok()?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(der.as_ref()).ok()?;
+    let san = parsed.subject_alternative_name().ok()??;
+    Some(
+        san.value
+            .general_names
+            .iter()
+            .filter_map(|g| match g {
+                x509_parser::extensions::GeneralName::DNSName(d) => Some((*d).to_string()),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+// ── Mesh-CA init + issuance ────────────────────────────────────────────
+
+/// Founder bootstrap. Creates a fresh mesh CA + this host's mesh server cert +
+/// this host's mesh client cert. Idempotent: re-running with an existing CA is
 /// a no-op (returns Ok without regenerating).
 ///
 /// `host_cn` is the CN baked into both the server and client certs — typically
@@ -198,19 +269,19 @@ pub fn init_mesh_ca(pki_dir: &Path, host_cn: &str) -> Result<()> {
     Ok(())
 }
 
-/// Re-issue this host's mesh server cert from the mesh CA. Used by `pod init`
+/// Re-issue this host's mesh server cert from the mesh CA. Used by `mesh init`
 /// and by the join flow once the peer cert lands.
 fn issue_mesh_server_cert(pki_dir: &Path, issuer: &Issuer<'_, KeyPair>) -> Result<()> {
     let key = gen_keypair()?;
-    let mut params = CertificateParams::new(vec![POD_SERVER_SAN.to_string()])?;
+    let mut params = CertificateParams::new(mesh_server_sans())?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     set_validity_days(&mut params, PEER_VALIDITY_DAYS);
     {
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, "orca-pod-server");
+        dn.push(DnType::CommonName, "orca-mesh-server");
         dn.push(DnType::OrganizationName, "orca");
-        dn.push(DnType::OrganizationalUnitName, "pod-server");
+        dn.push(DnType::OrganizationalUnitName, "mesh-server");
         params.distinguished_name = dn;
     }
     let cert = params.signed_by(&key, issuer)?;
@@ -229,7 +300,7 @@ fn issue_mesh_client_cert(
     host_cn: &str,
 ) -> Result<()> {
     let key = gen_keypair()?;
-    let mut params = CertificateParams::new(vec![format!("{host_cn}.pod.orca.local")])?;
+    let mut params = CertificateParams::new(mesh_client_sans(host_cn))?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     set_validity_days(&mut params, PEER_VALIDITY_DAYS);
@@ -286,7 +357,7 @@ pub fn has_mesh_ca_key(pki_dir: &Path) -> bool {
 pub enum PeerRole {
     /// Outbound client cert — used by the peer to dial other hosts.
     Client,
-    /// Inbound server cert — bound to SNI `pod.orca.local`.
+    /// Inbound server cert — bound to SNI `mesh.orca.local`.
     Server,
 }
 
@@ -296,8 +367,8 @@ pub enum PeerRole {
 pub fn build_peer_csr(peer_cn: &str, role: PeerRole) -> Result<(String, String)> {
     let key = gen_keypair()?;
     let san = match role {
-        PeerRole::Client => format!("{peer_cn}.pod.orca.local"),
-        PeerRole::Server => POD_SERVER_SAN.to_string(),
+        PeerRole::Client => format!("{peer_cn}.{MESH_SERVER_SAN}"),
+        PeerRole::Server => MESH_SERVER_SAN.to_string(),
     };
     let mut params = CertificateParams::new(vec![san])?;
     params.is_ca = IsCa::NoCa;
@@ -310,14 +381,14 @@ pub fn build_peer_csr(peer_cn: &str, role: PeerRole) -> Result<(String, String)>
         DnType::CommonName,
         match role {
             PeerRole::Client => peer_cn.to_string(),
-            PeerRole::Server => "orca-pod-server".to_string(),
+            PeerRole::Server => "orca-mesh-server".to_string(),
         },
     );
     dn.push(DnType::OrganizationName, "orca");
     dn.push(
         DnType::OrganizationalUnitName,
         match role {
-            PeerRole::Client => "pod-client",
+            PeerRole::Client => "mesh-client",
             PeerRole::Server => "pod-server",
         },
     );
@@ -357,8 +428,8 @@ pub fn sign_peer_csr(
     // Enforce naming policy: rewrite SAN, DN, EKU regardless of what the
     // joiner asked for. Joiner-controlled fields are not trusted.
     let san = match role {
-        PeerRole::Client => format!("{peer_cn}.pod.orca.local"),
-        PeerRole::Server => POD_SERVER_SAN.to_string(),
+        PeerRole::Client => format!("{peer_cn}.{MESH_SERVER_SAN}"),
+        PeerRole::Server => MESH_SERVER_SAN.to_string(),
     };
     csr.params.subject_alt_names.clear();
     csr.params = {
@@ -374,14 +445,14 @@ pub fn sign_peer_csr(
             DnType::CommonName,
             match role {
                 PeerRole::Client => peer_cn.to_string(),
-                PeerRole::Server => "orca-pod-server".to_string(),
+                PeerRole::Server => "orca-mesh-server".to_string(),
             },
         );
         dn.push(DnType::OrganizationName, "orca");
         dn.push(
             DnType::OrganizationalUnitName,
             match role {
-                PeerRole::Client => "pod-client",
+                PeerRole::Client => "mesh-client",
                 PeerRole::Server => "pod-server",
             },
         );
@@ -434,7 +505,7 @@ pub fn import_mesh_ca_keypair(pki_dir: &Path, cert_pem: &str, key_pem: &str) -> 
 //     half-written one.
 //   * `should_rotate(cert_pem, threshold_days)` — parses the cert, returns
 //     true when `not_after - now < threshold_days`. The rotation task in
-//     server::pod::cert_rotation polls every cert and reissues when this
+//     system::mesh::cert_rotation polls every cert and reissues when this
 //     fires.
 //
 // The TLS resolver in plugin_host reads certs from disk on every handshake,
@@ -462,7 +533,7 @@ pub fn should_rotate(cert_pem: &str, threshold_days: i64) -> Result<bool> {
 
 // ── Mesh cert status ─────────────────────────────────────────────────────────
 //
-// Hoisted up from the `pod` crate (was `PodCertStatusOutput`) so cert-status
+// Hoisted up from the `pod` crate (was `MeshCertStatusOutput`) so cert-status
 // reads no longer require a pod dependency — the `system` crate exposes this
 // via `system.certs.list` without depending on `pod`. Pure filesystem read; no
 // DB, no network. The DB-backed `self_secure` policy flag is layered on by the
@@ -509,7 +580,15 @@ pub struct MeshCertStatus {
 /// Read the mesh cert material under `pki_dir` and summarize expiry + role.
 /// Pure filesystem read — `self_secure` is left `false`; the caller sets it
 /// from the DB policy.
-pub fn mesh_cert_status(pki_dir: &Path) -> MeshCertStatus {
+/// `version` is supplied by the CALLER, never read here.
+///
+/// `utils` has no `build.rs`, so its `ORCA_VERSION` is unset and this function
+/// used to fall back to `utils`' own `CARGO_PKG_VERSION`. On a release build
+/// that string happens to equal the daemon's, which is why it went unnoticed;
+/// on a DEV build the daemon is `…-dev+g<sha>` and cert status silently
+/// reported the plain version instead. A version is a property of the running
+/// daemon, so only a crate that knows the daemon's version may supply it.
+pub fn mesh_cert_status(pki_dir: &Path, version: &str) -> MeshCertStatus {
     let parse = |path: PathBuf| -> Option<CertInfo> {
         let pem = std::fs::read_to_string(&path).ok()?;
         let days = cert_days_remaining(&pem).ok()?;
@@ -521,9 +600,7 @@ pub fn mesh_cert_status(pki_dir: &Path) -> MeshCertStatus {
     MeshCertStatus {
         founder: has_mesh_ca_key(pki_dir),
         member: mesh_ca_cert_path(pki_dir).exists(),
-        version: option_env!("ORCA_VERSION")
-            .unwrap_or(env!("CARGO_PKG_VERSION"))
-            .to_string(),
+        version: version.to_string(),
         self_secure: false,
         mesh_ca: parse(mesh_ca_cert_path(pki_dir)),
         leaf_server: parse(mesh_server_cert_path(pki_dir)),
@@ -574,15 +651,15 @@ pub fn reissue_mesh_server_cert(pki_dir: &Path) -> Result<()> {
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
 
     let key = gen_keypair()?;
-    let mut params = CertificateParams::new(vec![POD_SERVER_SAN.to_string()])?;
+    let mut params = CertificateParams::new(mesh_server_sans())?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     set_validity_days(&mut params, PEER_VALIDITY_DAYS);
     {
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, "orca-pod-server");
+        dn.push(DnType::CommonName, "orca-mesh-server");
         dn.push(DnType::OrganizationName, "orca");
-        dn.push(DnType::OrganizationalUnitName, "pod-server");
+        dn.push(DnType::OrganizationalUnitName, "mesh-server");
         params.distinguished_name = dn;
     }
     let cert = params.signed_by(&key, &issuer)?;
@@ -604,7 +681,7 @@ pub fn reissue_mesh_client_cert(pki_dir: &Path, host_cn: &str) -> Result<()> {
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
 
     let key = gen_keypair()?;
-    let mut params = CertificateParams::new(vec![format!("{host_cn}.pod.orca.local")])?;
+    let mut params = CertificateParams::new(mesh_client_sans(host_cn))?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     set_validity_days(&mut params, PEER_VALIDITY_DAYS);
@@ -1138,7 +1215,7 @@ pub fn peer_common_name(cert_der: &[u8]) -> Result<String> {
 // Every orca generates a per-host Ed25519 keypair on first boot, persisted as
 // PKCS8 PEM under `<pki_dir>/bootstrap.{key,pub}.pem`. It is INDEPENDENT of
 // the mesh CA — it exists precisely so a brand-new orca with no CA can still
-// have a cryptographic identity over the pod/offer + pod/join-confirm wire.
+// have a cryptographic identity over the mesh/offer + pod/join-confirm wire.
 //
 // The same key also backs the self-signed TLS cert presented on the
 // `pod-bootstrap.orca.local` SNI, so a joiner's verification reduces to:
@@ -1206,7 +1283,12 @@ pub fn bootstrap_pubkey_fingerprint(verifying: &ed25519_dalek::VerifyingKey) -> 
 
 // ── Bootstrap TLS cert (self-signed, backed by the bootstrap key) ────────────
 
-pub const POD_BOOTSTRAP_SAN: &str = "pod-bootstrap.orca.local";
+/// SNI of the pre-pairing bootstrap surface (no client cert by design).
+pub const MESH_BOOTSTRAP_SAN: &str = "mesh-bootstrap.orca.local";
+
+/// Pre-rename name of the bootstrap surface. Same reasoning and same deletion
+/// trigger as [`LEGACY_SERVER_SAN`].
+pub const LEGACY_BOOTSTRAP_SAN: &str = "pod-bootstrap.orca.local";
 
 pub fn bootstrap_cert_path(pki_dir: &Path) -> PathBuf {
     pki_dir.join("bootstrap.cert.pem")
@@ -1233,7 +1315,7 @@ pub fn load_or_init_bootstrap_cert(pki_dir: &Path) -> Result<(String, String)> {
     }
 
     let kp = KeyPair::from_pem(&key_pem).context("load bootstrap key as rcgen KeyPair")?;
-    let mut params = CertificateParams::new(vec![POD_BOOTSTRAP_SAN.to_string()])?;
+    let mut params = CertificateParams::new(mesh_bootstrap_sans())?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     set_validity_days(&mut params, BOOTSTRAP_CERT_VALIDITY_DAYS);
@@ -2003,7 +2085,7 @@ mod tests {
         let summary_c = cert_summary(&cert_c).unwrap();
         assert_eq!(summary_c.cn, "joiner");
         let summary_s = cert_summary(&cert_s).unwrap();
-        assert_eq!(summary_s.cn, "orca-pod-server");
+        assert_eq!(summary_s.cn, "orca-mesh-server");
     }
 
     #[test]
@@ -2121,7 +2203,7 @@ mod tests {
         init_mesh_ca(dir.path(), "host-cs").unwrap();
         let pem = std::fs::read_to_string(mesh_server_cert_path(dir.path())).unwrap();
         let s = cert_summary(&pem).unwrap();
-        assert_eq!(s.cn, "orca-pod-server");
+        assert_eq!(s.cn, "orca-mesh-server");
         assert!(!s.fingerprint.is_empty());
         assert!(s.expires_at > s.issued_at);
         assert!(s.days_remaining > 0);

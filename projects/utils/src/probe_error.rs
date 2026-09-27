@@ -9,7 +9,7 @@
 //! Measured on the 2026-09-25 `v0.2.1-rc.3` roll: 7 of 7 hosts timed out their
 //! 180s gate. The controller was on rc.2 while peers moved to rc.3, which
 //! dissolved the `pod.*` verbs into `system.*`, so every probe came back
-//! `unknown tool: pod.list` — permanent, and unretryable. The gate degraded into
+//! `unknown tool: system.list` — permanent, and unretryable. The gate degraded into
 //! a fixed 180s sleep, which is the between-host safety check from
 //! [[orca-must-never-bring-down-host]] not actually checking anything.
 //!
@@ -47,7 +47,7 @@ const PERMANENT_MARKERS: &[&str] = &[
     "not allowed",
     // Authorization refusal from the mesh exec path. Measured live on bragi
     // during the rc.4 roll: the gate burned its full 180s on
-    //   pod/exec refused: tool 'system.update' requires role 'admin'
+    //   mesh/exec refused: tool 'system.update' requires role 'admin'
     //   but no signed caller token was presented
     // which no retry can fix. NOTE the collision hazard these avoid: a bare
     // "refused" would also match "Connection refused", the canonical transient
@@ -55,7 +55,7 @@ const PERMANENT_MARKERS: &[&str] = &[
     // exists to wait through. Match the authorization wording, never the verb.
     "requires role",
     "signed caller token",
-    "pod/exec refused",
+    "mesh/exec refused",
     // Identity/trust problems that need an operator action, not time.
     "no pinned bootstrap key",
     "unknown peer",
@@ -95,7 +95,7 @@ mod tests {
         assert_eq!(
             classify(
                 "peer returned error: internal error: dispatch pod-relayed tool \
-                 'pod.list': unknown tool: pod.list"
+                 'system.list': unknown tool: system.list"
             ),
             ProbeOutcome::Permanent
         );
@@ -103,7 +103,10 @@ mod tests {
 
     #[test]
     fn matching_is_case_insensitive() {
-        assert_eq!(classify("UNKNOWN TOOL: pod.list"), ProbeOutcome::Permanent);
+        assert_eq!(
+            classify("UNKNOWN TOOL: system.list"),
+            ProbeOutcome::Permanent
+        );
     }
 
     #[test]
@@ -151,7 +154,7 @@ mod tests {
     fn the_real_bragi_role_refusal_is_permanent() {
         assert_eq!(
             classify(
-                "peer returned error: internal error: pod/exec refused: tool \
+                "peer returned error: internal error: mesh/exec refused: tool \
                  'system.update' requires role 'admin' but no signed caller token \
                  was presented"
             ),
@@ -159,14 +162,14 @@ mod tests {
         );
     }
 
-    /// The collision this fix had to avoid. `pod/exec refused` is permanent,
+    /// The collision this fix had to avoid. `mesh/exec refused` is permanent,
     /// `Connection refused` is the canonical transient restart error — matching
     /// a bare "refused" would conflate them and break the restart path, which is
     /// a strictly worse bug than the one being fixed.
     #[test]
     fn refused_discriminates_authorization_from_connection() {
         assert_eq!(
-            classify("pod/exec refused: requires role 'admin'"),
+            classify("mesh/exec refused: requires role 'admin'"),
             ProbeOutcome::Permanent
         );
         assert_eq!(
@@ -177,7 +180,7 @@ mod tests {
 
     #[test]
     fn classify_err_routes_through_display() {
-        let e = std::io::Error::other("unknown tool: pod.list");
+        let e = std::io::Error::other("unknown tool: system.list");
         assert_eq!(classify_err(&e), ProbeOutcome::Permanent);
     }
 }

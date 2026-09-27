@@ -21,22 +21,22 @@ use utils::pki::PeerRole;
 use utils::state::DaemonMode;
 
 use super::{
-    AddressChannel, HostAddressingSnapshot, POD_DEV_DISABLE_METHOD, POD_DEV_ENABLE_METHOD,
-    POD_DEV_SYNC_METHOD, POD_EXEC_METHOD, POD_PING_METHOD, POD_REPLICATE_EXPORT_METHOD,
-    POD_REPLICATE_PUSH_METHOD, POD_REPLICATE_ROOTS_METHOD, PodDevDisableResult, PodDevEnableResult,
-    PodDevSyncResult, PodExecParams, PodExecResult, PodPingResult, ReplicatePushResult,
-    ReplicateRootsResult, pki_dir,
+    AddressChannel, HostAddressingSnapshot, MESH_DEV_DISABLE_METHOD, MESH_DEV_ENABLE_METHOD,
+    MESH_DEV_SYNC_METHOD, MESH_EXEC_METHOD, MESH_PING_METHOD, MESH_REPLICATE_EXPORT_METHOD,
+    MESH_REPLICATE_PUSH_METHOD, MESH_REPLICATE_ROOTS_METHOD, MeshDevDisableResult,
+    MeshDevEnableResult, MeshDevSyncResult, MeshExecParams, MeshExecResult, MeshPingResult,
+    ReplicatePushResult, ReplicateRootsResult, pki_dir,
 };
-use db::pod as pdb;
+use db::mesh as pdb;
 
-const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
-const POD_HAS_CA_KEY_METHOD: &str = "pod/has-ca-key";
-const POD_PUSH_CA_KEY_METHOD: &str = "pod/push-ca-key";
-const POD_PEER_LEAVING_METHOD: &str = "pod/peer-leaving";
-const POD_PEER_REMOVED_METHOD: &str = "pod/peer-removed";
-const POD_PEER_FORGET_METHOD: &str = "pod/peer-forget";
-const POD_REFRESH_CERT_METHOD: &str = "pod/refresh-cert";
-const POD_PUSH_CA_STATE_METHOD: &str = "pod/push-ca-state";
+const MESH_NOTIFY_TRUST_METHOD: &str = "mesh/notify-trust";
+const MESH_HAS_CA_KEY_METHOD: &str = "mesh/has-ca-key";
+const MESH_PUSH_CA_KEY_METHOD: &str = "mesh/push-ca-key";
+const MESH_PEER_LEAVING_METHOD: &str = "mesh/peer-leaving";
+const MESH_PEER_REMOVED_METHOD: &str = "mesh/peer-removed";
+const MESH_PEER_FORGET_METHOD: &str = "mesh/peer-forget";
+const MESH_REFRESH_CERT_METHOD: &str = "mesh/refresh-cert";
+const MESH_PUSH_CA_STATE_METHOD: &str = "mesh/push-ca-state";
 
 #[derive(Debug, Deserialize)]
 struct NotifyTrustParams {
@@ -78,7 +78,7 @@ struct PushCaStateParams {
     previous_expires_at: Option<i64>,
 }
 
-pub async fn handle_pod_connection(
+pub async fn handle_mesh_connection(
     mut tls: TlsStream<tokio::net::TcpStream>,
     peer_cn: String,
     peer_addr: std::net::SocketAddr,
@@ -89,7 +89,7 @@ pub async fn handle_pod_connection(
     let request = match msg {
         Message::Request(r) => r,
         Message::Response(_) | Message::Notification(_) => {
-            warn!("[pod] {peer_cn} sent non-request frame; closing");
+            warn!("[mesh] {peer_cn} sent non-request frame; closing");
             return Ok(());
         }
     };
@@ -97,9 +97,10 @@ pub async fn handle_pod_connection(
     // pod/subscribe takes over the stream for the rest of the connection:
     // one request → ack → streamed events until close. The normal one-shot
     // request/response path below is bypassed.
-    if request.method == crate::subscribe_wire::METHOD {
-        let own_peer_id = system::host_identity::machine_id().to_string();
-        return crate::subscribe_wire::serve_session_with_request(tls, request, &own_peer_id).await;
+    if request.method == crate::mesh::subscribe_wire::METHOD {
+        let own_peer_id = crate::host_identity::machine_id().to_string();
+        return crate::mesh::subscribe_wire::serve_session_with_request(tls, request, &own_peer_id)
+            .await;
     }
 
     let response = dispatch(request, &peer_cn, peer_addr).await;
@@ -118,7 +119,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
     // Departed peers are rejected at the gate — they need to re-pair before
     // we'll talk to them again. pod/peer-leaving is the one exception: a
     // peer that's already departed can re-send leaving without harm.
-    if method != POD_PEER_LEAVING_METHOD {
+    if method != MESH_PEER_LEAVING_METHOD {
         // DB unavailable (fallback open error) or a query error falls through to
         // the method handlers, which will fail with a clearer error.
         let departed = db::pool::with_pooled_or_open(|conn| {
@@ -136,78 +137,78 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
     }
 
     match method.as_str() {
-        POD_PING_METHOD => {
-            let result = PodPingResult {
+        MESH_PING_METHOD => {
+            let result = MeshPingResult {
                 peer_id: peer_cn.to_string(),
                 version: option_env!("ORCA_VERSION")
                     .unwrap_or(env!("CARGO_PKG_VERSION"))
                     .to_string(),
-                hostname: system::host_identity::hostname().to_string(),
+                hostname: crate::host_identity::hostname().to_string(),
                 addressing: build_addressing_snapshot(),
             };
             value_response(id, &result)
         }
-        POD_DEV_SYNC_METHOD => match handle_dev_sync().await {
+        MESH_DEV_SYNC_METHOD => match handle_dev_sync().await {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
-        POD_DEV_ENABLE_METHOD => match handle_dev_enable().await {
+        MESH_DEV_ENABLE_METHOD => match handle_dev_enable().await {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
-        POD_DEV_DISABLE_METHOD => match handle_dev_disable().await {
+        MESH_DEV_DISABLE_METHOD => match handle_dev_disable().await {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
-        POD_EXEC_METHOD => match handle_exec(request, peer_cn).await {
+        MESH_EXEC_METHOD => match handle_exec(request, peer_cn).await {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
-        POD_REPLICATE_EXPORT_METHOD => match handle_replicate_export() {
+        MESH_REPLICATE_EXPORT_METHOD => match handle_replicate_export() {
             Ok(env) => value_response(id, &env),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
-        POD_REPLICATE_PUSH_METHOD => match handle_replicate_push(peer_cn, request) {
+        MESH_REPLICATE_PUSH_METHOD => match handle_replicate_push(peer_cn, request) {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
-        POD_REPLICATE_ROOTS_METHOD => match handle_replicate_roots() {
+        MESH_REPLICATE_ROOTS_METHOD => match handle_replicate_roots() {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
-        POD_NOTIFY_TRUST_METHOD => match handle_notify_trust(peer_cn, peer_addr, request) {
+        MESH_NOTIFY_TRUST_METHOD => match handle_notify_trust(peer_cn, peer_addr, request) {
             Ok(()) => Response::ok(id, Value::Null),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
-        POD_HAS_CA_KEY_METHOD => {
+        MESH_HAS_CA_KEY_METHOD => {
             let has = utils::pki::has_mesh_ca_key(&pki_dir());
             value_response(id, &HasCaKeyResult { has_key: has })
         }
-        POD_PUSH_CA_KEY_METHOD => match handle_push_ca_key(peer_cn, request) {
+        MESH_PUSH_CA_KEY_METHOD => match handle_push_ca_key(peer_cn, request) {
             Ok(()) => Response::ok(id, Value::Null),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
-        POD_PEER_LEAVING_METHOD => match handle_peer_leaving(peer_cn) {
+        MESH_PEER_LEAVING_METHOD => match handle_peer_leaving(peer_cn) {
             Ok(()) => Response::ok(id, Value::Null),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
-        POD_PEER_REMOVED_METHOD => {
+        MESH_PEER_REMOVED_METHOD => {
             // Caller (peer_cn) is telling us they've kicked us from their pod.
             // Log it; do NOT mark the caller as departed — that's
             // `pod/peer-leaving`'s job. Reusing this method for kick was the
             // 2026-05-28 bug that departed mint on alpha/echo.
-            tracing::info!("[pod] peer {peer_cn} removed us from their pod");
+            tracing::info!("[mesh] peer {peer_cn} removed us from their pod");
             Response::ok(id, Value::Null)
         }
-        POD_PEER_FORGET_METHOD => match handle_peer_forget(peer_cn, request) {
+        MESH_PEER_FORGET_METHOD => match handle_peer_forget(peer_cn, request) {
             Ok(removed) => value_response(id, &serde_json::json!({ "rows_removed": removed })),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
-        POD_REFRESH_CERT_METHOD => match handle_refresh_cert(peer_cn, request) {
+        MESH_REFRESH_CERT_METHOD => match handle_refresh_cert(peer_cn, request) {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
-        POD_PUSH_CA_STATE_METHOD => match handle_push_ca_state(peer_cn, request) {
+        MESH_PUSH_CA_STATE_METHOD => match handle_push_ca_state(peer_cn, request) {
             Ok(()) => Response::ok(id, Value::Null),
             Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
         },
@@ -230,9 +231,9 @@ fn handle_notify_trust(
     // Share one pooled connection for the whole self-heal + trust sequence.
     db::pool::with_pooled_or_open(|conn| {
         // Self-heal: the mTLS layer validated this CN against the mesh CA, so we
-        // can trust it. If no pod_peers row exists yet (legacy rc.≤24 joiner that
+        // can trust it. If no mesh_peers row exists yet (legacy rc.≤24 joiner that
         // landed as peer_id="unknown", or CN/peer_id drift), materialize a stub
-        // keyed by the CN so the FK on pod_trust.peer_id is satisfied.
+        // keyed by the CN so the FK on mesh_trust.peer_id is satisfied.
         let addr_ip = peer_addr.ip().to_string();
         pdb::ensure_peer_stub(conn, peer_cn, &addr_ip, db::ports::mesh_port())?;
         // Self-heal identity drift: this CN is CA-validated ground truth for the
@@ -241,10 +242,10 @@ fn handle_notify_trust(
         // Keeps `pod list` and `--peer <hostname>` converged automatically.
         match pdb::reconcile_addr_to_canonical(conn, peer_cn, &addr_ip) {
             Ok(n) if n > 0 => {
-                tracing::info!("[pod] converged {n} stale peer row(s) into {peer_cn}")
+                tracing::info!("[mesh] converged {n} stale peer row(s) into {peer_cn}")
             }
             Ok(_) => {}
-            Err(e) => tracing::warn!("[pod] peer identity reconcile for {peer_cn}: {e:#}"),
+            Err(e) => tracing::warn!("[mesh] peer identity reconcile for {peer_cn}: {e:#}"),
         }
         pdb::set_trust(conn, peer_cn, None, Some(params.trust))?;
         Ok(())
@@ -271,7 +272,7 @@ fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
     Ok(())
 }
 
-/// Handle `pod/peer-forget`: a pod member (validated by the mTLS CN against the
+/// Handle `pod/peer-forget`: a mesh member (validated by the mTLS CN against the
 /// mesh CA) is telling us to purge a stale/orphan peer_id from our local
 /// roster. Hard-delete every trace of it so the eviction propagates mesh-wide.
 fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
@@ -284,19 +285,19 @@ fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
         None => anyhow::bail!("pod/peer-forget requires params"),
     };
     let removed = db::pool::with_pooled_or_open(|conn| pdb::forget_peer(conn, &params.peer_id))?;
-    crate::peer_info::remove(&params.peer_id);
+    crate::mesh::peer_info::remove(&params.peer_id);
     tracing::info!(
-        "[pod] peer {peer_cn} asked us to forget {} ({removed} rows removed)",
+        "[mesh] peer {peer_cn} asked us to forget {} ({removed} rows removed)",
         params.peer_id
     );
     Ok(removed)
 }
 
-/// Handle `pod/dev-sync`: if this host is in dev mode, run `cmd_dev_sync`
+/// Handle `mesh/dev-sync`: if this host is in dev mode, run `cmd_dev_sync`
 /// (git pull of the dev checkout). Cargo-watch picks up the new commits and
 /// rebuilds. Skipped silently when the host isn't running a dev binary —
 /// dev_sync is a no-op on production-only peers, not an error.
-async fn handle_dev_sync() -> Result<PodDevSyncResult> {
+async fn handle_dev_sync() -> Result<MeshDevSyncResult> {
     let in_dev_mode = utils::state::read()
         .ok()
         .flatten()
@@ -306,11 +307,11 @@ async fn handle_dev_sync() -> Result<PodDevSyncResult> {
     handle_dev_sync_with(in_dev_mode).await
 }
 
-/// Decision half of `pod/dev-sync`, with the ambient daemon-mode read lifted
+/// Decision half of `mesh/dev-sync`, with the ambient daemon-mode read lifted
 /// out. Keeps the skip path testable on a host that is itself in dev mode.
-async fn handle_dev_sync_with(in_dev_mode: bool) -> Result<PodDevSyncResult> {
+async fn handle_dev_sync_with(in_dev_mode: bool) -> Result<MeshDevSyncResult> {
     if !in_dev_mode {
-        return Ok(PodDevSyncResult {
+        return Ok(MeshDevSyncResult {
             status: "skipped".into(),
             detail: Some("peer not in dev mode".into()),
             commits_pulled: None,
@@ -318,17 +319,17 @@ async fn handle_dev_sync_with(in_dev_mode: bool) -> Result<PodDevSyncResult> {
     }
 
     match tokio::task::spawn_blocking(cmd_dev_sync).await {
-        Ok(Ok(r)) => Ok(PodDevSyncResult {
+        Ok(Ok(r)) => Ok(MeshDevSyncResult {
             status: "synced".into(),
             detail: Some(r.detail),
             commits_pulled: Some(r.commits_pulled),
         }),
-        Ok(Err(e)) => Ok(PodDevSyncResult {
+        Ok(Err(e)) => Ok(MeshDevSyncResult {
             status: "error".into(),
             detail: Some(e.to_string()),
             commits_pulled: None,
         }),
-        Err(e) => Ok(PodDevSyncResult {
+        Err(e) => Ok(MeshDevSyncResult {
             status: "error".into(),
             detail: Some(format!("join error: {e}")),
             commits_pulled: None,
@@ -338,24 +339,24 @@ async fn handle_dev_sync_with(in_dev_mode: bool) -> Result<PodDevSyncResult> {
 
 /// Handle `pod/dev-enable`: flip the peer into dev mode (clone repo if
 /// missing, park production daemon, spawn cargo-watch).
-async fn handle_dev_enable() -> Result<PodDevEnableResult> {
-    let token = system::update::resolve_github_token();
+async fn handle_dev_enable() -> Result<MeshDevEnableResult> {
+    let token = crate::update::resolve_github_token();
     match tokio::task::spawn_blocking(move || cmd_dev_enable(&token)).await {
-        Ok(Ok(r)) => Ok(PodDevEnableResult {
+        Ok(Ok(r)) => Ok(MeshDevEnableResult {
             status: "enabled".into(),
             detail: None,
             repo_path: Some(r.repo_path),
             cloned: Some(r.cloned),
             daemon_parked: Some(r.daemon_parked),
         }),
-        Ok(Err(e)) => Ok(PodDevEnableResult {
+        Ok(Err(e)) => Ok(MeshDevEnableResult {
             status: "error".into(),
             detail: Some(e.to_string()),
             repo_path: None,
             cloned: None,
             daemon_parked: None,
         }),
-        Err(e) => Ok(PodDevEnableResult {
+        Err(e) => Ok(MeshDevEnableResult {
             status: "error".into(),
             detail: Some(format!("join error: {e}")),
             repo_path: None,
@@ -367,21 +368,21 @@ async fn handle_dev_enable() -> Result<PodDevEnableResult> {
 
 /// Handle `pod/dev-disable`: stop cargo-watch and let the production daemon
 /// reclaim the port.
-async fn handle_dev_disable() -> Result<PodDevDisableResult> {
+async fn handle_dev_disable() -> Result<MeshDevDisableResult> {
     match tokio::task::spawn_blocking(cmd_dev_disable).await {
-        Ok(Ok(r)) => Ok(PodDevDisableResult {
+        Ok(Ok(r)) => Ok(MeshDevDisableResult {
             status: "disabled".into(),
             detail: None,
             dev_process_stopped: Some(r.dev_process_stopped),
             daemon_reclaimed: Some(r.daemon_reclaimed),
         }),
-        Ok(Err(e)) => Ok(PodDevDisableResult {
+        Ok(Err(e)) => Ok(MeshDevDisableResult {
             status: "error".into(),
             detail: Some(e.to_string()),
             dev_process_stopped: None,
             daemon_reclaimed: None,
         }),
-        Err(e) => Ok(PodDevDisableResult {
+        Err(e) => Ok(MeshDevDisableResult {
             status: "error".into(),
             detail: Some(format!("join error: {e}")),
             dev_process_stopped: None,
@@ -390,21 +391,21 @@ async fn handle_dev_disable() -> Result<PodDevDisableResult> {
     }
 }
 
-/// Whether `tool` is callable at all over `pod/exec` (i.e. not `local_only`)
+/// Whether `tool` is callable at all over `mesh/exec` (i.e. not `local_only`)
 /// and whether it needs an authenticated caller (role-gated). Everything is
 /// REMOTE_OK by default; only `local_only` opt-outs are refused. Pure so the
 /// gate logic is unit-testable without a DB or PKI.
 fn remote_ok_gate(tool: &str, remote_ok: bool, required_role: &str) -> Result<bool> {
     if !remote_ok {
-        anyhow::bail!("pod/exec refused: tool '{tool}' is local_only on this peer");
+        anyhow::bail!("mesh/exec refused: tool '{tool}' is local_only on this peer");
     }
-    // "any" tools are authorized by pod membership alone (the mTLS chain already
+    // "any" tools are authorized by mesh membership alone (the mTLS chain already
     // proved a paired peer). Role-gated tools additionally require a verified
     // caller token bound to a user whose replicated role satisfies the gate.
     Ok(required_role != "any")
 }
 
-/// Per-action local-only guard for `pod/exec`. `system.mesh.update` and `system.mesh.delete`
+/// Per-action local-only guard for `mesh/exec`. `system.mesh.update` and `system.mesh.delete`
 /// are remote-dispatchable as a whole, but two of their actions repair or exit
 /// THIS host's own membership (formerly the `local_only` `pod.recover` /
 /// `pod.leave` verbs) and must never be driven by a remote peer. The mTLS chain
@@ -418,13 +419,13 @@ fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
     );
     anyhow::ensure!(
         !forbidden,
-        "pod/exec refused: '{tool}' action '{}' is local-only and cannot be invoked by a remote peer",
+        "mesh/exec refused: '{tool}' action '{}' is local-only and cannot be invoked by a remote peer",
         action.unwrap_or_default()
     );
     Ok(())
 }
 
-/// Zero-trust authorization gate for a role-gated `pod/exec` call.
+/// Zero-trust authorization gate for a role-gated `mesh/exec` call.
 ///
 /// The mTLS chain proves which *peer* is on the wire; this proves which *user*
 /// the call acts for and that the executing host independently agrees they may.
@@ -432,7 +433,7 @@ fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
 ///   1. the caller token signature verifies AND covers this exact tool + args,
 ///      and has not expired (`caller_token::verify`);
 ///   2. the token's signer fingerprint equals the authenticated peer's *pinned*
-///      `pod_peers.pubkey_fp` (a valid sig from an unpinned key is rejected);
+///      `mesh_peers.pubkey_fp` (a valid sig from an unpinned key is rejected);
 ///   3. the token nonce has not been seen before (replay guard);
 ///   4. the effective role comes ONLY from this host's own (replicated) `users`
 ///      row for `caller_user_id` — never the token's asserted `role`. Unknown
@@ -450,36 +451,36 @@ fn authorize_role_gated(
 ) -> Result<()> {
     let env = caller_token.ok_or_else(|| {
         anyhow::anyhow!(
-            "pod/exec refused: tool '{tool}' requires role '{required_role}' but no signed caller \
+            "mesh/exec refused: tool '{tool}' requires role '{required_role}' but no signed caller \
              token was presented"
         )
     })?;
 
-    let verified = crate::caller_token::verify(env, tool, args, now)
-        .context("pod/exec refused: caller token verification failed")?;
+    let verified = crate::mesh::caller_token::verify(env, tool, args, now)
+        .context("mesh/exec refused: caller token verification failed")?;
 
-    let pinned = db::pod::pinned_pubkey_fp(conn, peer_cn)?.ok_or_else(|| {
+    let pinned = db::mesh::pinned_pubkey_fp(conn, peer_cn)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "pod/exec refused: peer {peer_cn} has no pinned bootstrap key to verify against"
+            "mesh/exec refused: peer {peer_cn} has no pinned bootstrap key to verify against"
         )
     })?;
     anyhow::ensure!(
         verified.signer_fp == pinned,
-        "pod/exec refused: caller token signer fp does not match peer {peer_cn}'s pinned key"
+        "mesh/exec refused: caller token signer fp does not match peer {peer_cn}'s pinned key"
     );
 
-    crate::caller_token::check_replay(&verified.token.nonce, verified.token.expires_at, now)?;
+    crate::mesh::caller_token::check_replay(&verified.token.nonce, verified.token.expires_at, now)?;
 
     let user =
         identities::users::find_by_id(conn, &verified.token.caller_user_id)?.ok_or_else(|| {
             anyhow::anyhow!(
-                "pod/exec refused: caller user {} is not in this host's replicated users",
+                "mesh/exec refused: caller user {} is not in this host's replicated users",
                 verified.token.caller_user_id
             )
         })?;
     anyhow::ensure!(
         role_satisfies(&user.role, required_role),
-        "pod/exec refused: tool '{tool}' requires role '{required_role}' but user {} has role '{}'",
+        "mesh/exec refused: tool '{tool}' requires role '{required_role}' but user {} has role '{}'",
         user.username,
         user.role
     );
@@ -500,15 +501,15 @@ fn role_satisfies(role: &str, required: &str) -> bool {
     role_rank(role) >= role_rank(required)
 }
 
-/// Handle `pod/exec`: dispatch an allowlisted local tool on this peer's behalf.
+/// Handle `mesh/exec`: dispatch an allowlisted local tool on this peer's behalf.
 /// The mesh mTLS chain proves the caller is a paired peer; the REMOTE_OK
 /// allowlist guards which tools are reachable, and role-gated tools require a
 /// verified caller token bound to a replicated user (zero-trust, no asserted
 /// role). Dispatch is direct in-process through the shared registry.
-async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
-    let params: PodExecParams = match request.params {
-        Some(v) => serde_json::from_value(v).context("parse pod/exec params")?,
-        None => anyhow::bail!("pod/exec requires params"),
+async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> {
+    let params: MeshExecParams = match request.params {
+        Some(v) => serde_json::from_value(v).context("parse mesh/exec params")?,
+        None => anyhow::bail!("mesh/exec requires params"),
     };
 
     // Reachability is default-allow: every tool — core, plugin, unit — is
@@ -538,7 +539,7 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
         })?;
     }
 
-    let result = crate::dispatcher::dispatch(
+    let result = crate::mesh::dispatcher::dispatch(
         &params.tool,
         params.args.clone(),
         params.correlation_id.clone(),
@@ -546,7 +547,7 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
     .await
     .with_context(|| format!("dispatch pod-relayed tool '{}'", params.tool))?;
 
-    Ok(PodExecResult {
+    Ok(MeshExecResult {
         tool: params.tool,
         result,
     })
@@ -568,7 +569,7 @@ fn handle_replicate_roots() -> Result<ReplicateRootsResult> {
 
 fn handle_replicate_export() -> Result<utils::pki::SignedEnvelope> {
     let entities = db::pool::with_pooled_or_open(db::replicate::export_all)?;
-    crate::transport::sign_bundle(entities)
+    crate::mesh::transport::sign_bundle(entities)
 }
 
 /// Handle `pod/replicate-push`: caller (the writer) sent us a signed bundle.
@@ -587,7 +588,7 @@ fn handle_replicate_push(peer_cn: &str, request: Request) -> Result<ReplicatePus
         .ok_or_else(|| {
             anyhow::anyhow!("pod/replicate-push refused: peer {peer_cn} has no pinned bootstrap fp")
         })?;
-    let entities = crate::transport::verify_envelope(&envelope, &pinned_fp)?;
+    let entities = crate::mesh::transport::verify_envelope(&envelope, &pinned_fp)?;
     let merged = db::replicate_engine::merge_into_local(entities)?;
     if merged > 0 {
         tracing::info!("[replicate.push.recv] merged {merged} row(s) from {peer_cn}");
@@ -624,7 +625,7 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
 
 /// Sign refreshed CSRs for a peer that doesn't hold the mesh CA key itself
 /// (non-secure joiner that needs rotation before its 30-day cert expires).
-/// Requires the requesting peer to be a known, non-departed pod member —
+/// Requires the requesting peer to be a known, non-departed mesh member —
 /// the mTLS handshake already authenticated the CN, and the departed-peer
 /// gate above blocks departed CNs from reaching this method.
 fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertResult> {
@@ -688,7 +689,7 @@ fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
         if r.kind == "display_name" {
             display_name = r.value;
         } else {
-            let kind_label = system::system_info::labels::addr_kind_label(&r.kind);
+            let kind_label = crate::system_info::labels::addr_kind_label(&r.kind);
             channels.push(AddressChannel {
                 kind: r.kind,
                 kind_label,
@@ -697,7 +698,7 @@ fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
         }
     }
     if display_name.is_empty() {
-        display_name = system::host_identity::display_hostname().to_string();
+        display_name = crate::host_identity::display_hostname().to_string();
     }
     Some(HostAddressingSnapshot {
         display_name,
@@ -720,7 +721,7 @@ mod tests {
 
     #[test]
     fn remote_ok_gate_any_role_needs_no_auth() {
-        // Reachable + "any" → pod membership is sufficient, no token needed.
+        // Reachable + "any" → mesh membership is sufficient, no token needed.
         assert!(!remote_ok_gate("fs.search", true, "any").unwrap());
     }
 
@@ -822,7 +823,7 @@ mod tests {
     #[test]
     fn notify_trust_without_params_errors() {
         let addr: std::net::SocketAddr = "127.0.0.1:9000".parse().unwrap();
-        let err = handle_notify_trust("peer-a", addr, req_no_params(POD_NOTIFY_TRUST_METHOD))
+        let err = handle_notify_trust("peer-a", addr, req_no_params(MESH_NOTIFY_TRUST_METHOD))
             .unwrap_err();
         assert!(err.to_string().contains("requires params"), "got: {err}");
     }
@@ -835,7 +836,7 @@ mod tests {
         let err = handle_notify_trust(
             "peer-a",
             addr,
-            req_with_params(POD_NOTIFY_TRUST_METHOD, serde_json::json!({})),
+            req_with_params(MESH_NOTIFY_TRUST_METHOD, serde_json::json!({})),
         )
         .unwrap_err();
         assert!(
@@ -846,13 +847,13 @@ mod tests {
 
     #[test]
     fn push_ca_key_without_params_errors() {
-        let err = handle_push_ca_key("peer-a", req_no_params(POD_PUSH_CA_KEY_METHOD)).unwrap_err();
+        let err = handle_push_ca_key("peer-a", req_no_params(MESH_PUSH_CA_KEY_METHOD)).unwrap_err();
         assert!(err.to_string().contains("requires params"), "got: {err}");
     }
 
     #[test]
     fn peer_forget_without_params_errors() {
-        let err = handle_peer_forget("peer-a", req_no_params(POD_PEER_FORGET_METHOD)).unwrap_err();
+        let err = handle_peer_forget("peer-a", req_no_params(MESH_PEER_FORGET_METHOD)).unwrap_err();
         assert!(err.to_string().contains("requires params"), "got: {err}");
     }
 
@@ -861,7 +862,7 @@ mod tests {
         // ForgetParams requires a `peer_id` string.
         let err = handle_peer_forget(
             "peer-a",
-            req_with_params(POD_PEER_FORGET_METHOD, serde_json::json!({ "wrong": 1 })),
+            req_with_params(MESH_PEER_FORGET_METHOD, serde_json::json!({ "wrong": 1 })),
         )
         .unwrap_err();
         assert!(
@@ -873,14 +874,14 @@ mod tests {
     #[test]
     fn push_ca_state_without_params_errors() {
         let err =
-            handle_push_ca_state("peer-a", req_no_params(POD_PUSH_CA_STATE_METHOD)).unwrap_err();
+            handle_push_ca_state("peer-a", req_no_params(MESH_PUSH_CA_STATE_METHOD)).unwrap_err();
         assert!(err.to_string().contains("requires params"), "got: {err}");
     }
 
     #[test]
     fn replicate_push_without_params_errors() {
         let err =
-            handle_replicate_push("peer-a", req_no_params(POD_REPLICATE_PUSH_METHOD)).unwrap_err();
+            handle_replicate_push("peer-a", req_no_params(MESH_REPLICATE_PUSH_METHOD)).unwrap_err();
         assert!(err.to_string().contains("requires params"), "got: {err}");
     }
 
@@ -891,7 +892,7 @@ mod tests {
         let err = handle_push_ca_key(
             "peer-a",
             req_with_params(
-                POD_PUSH_CA_KEY_METHOD,
+                MESH_PUSH_CA_KEY_METHOD,
                 serde_json::json!({ "cert_pem": "x" }),
             ),
         )
@@ -907,7 +908,7 @@ mod tests {
         // PushCaStateParams requires current_cert_pem + current_key_pem.
         let err = handle_push_ca_state(
             "peer-a",
-            req_with_params(POD_PUSH_CA_STATE_METHOD, serde_json::json!({})),
+            req_with_params(MESH_PUSH_CA_STATE_METHOD, serde_json::json!({})),
         )
         .unwrap_err();
         assert!(
@@ -922,7 +923,7 @@ mod tests {
         // unrelated object fails to deserialize in the Some(v) parse arm.
         let err = handle_replicate_push(
             "peer-a",
-            req_with_params(POD_REPLICATE_PUSH_METHOD, serde_json::json!({ "foo": 1 })),
+            req_with_params(MESH_REPLICATE_PUSH_METHOD, serde_json::json!({ "foo": 1 })),
         )
         .unwrap_err();
         assert!(
@@ -993,27 +994,27 @@ mod tests {
 
     #[tokio::test]
     async fn exec_without_params_errors() {
-        let err = handle_exec(req_no_params(POD_EXEC_METHOD), "peer-a")
+        let err = handle_exec(req_no_params(MESH_EXEC_METHOD), "peer-a")
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("pod/exec requires params"),
+            err.to_string().contains("mesh/exec requires params"),
             "got: {err}"
         );
     }
 
     #[tokio::test]
     async fn exec_with_malformed_params_errors() {
-        // PodExecParams requires a `tool` string; an object without it fails
+        // MeshExecParams requires a `tool` string; an object without it fails
         // deserialization in the Some(v) parse arm before any DB/PKI access.
         let err = handle_exec(
-            req_with_params(POD_EXEC_METHOD, serde_json::json!({ "args": {} })),
+            req_with_params(MESH_EXEC_METHOD, serde_json::json!({ "args": {} })),
             "peer-a",
         )
         .await
         .unwrap_err();
         assert!(
-            err.to_string().contains("parse pod/exec params"),
+            err.to_string().contains("parse mesh/exec params"),
             "got: {err}"
         );
     }
@@ -1026,7 +1027,7 @@ mod tests {
             "tool": "system.mesh.update",
             "args": { "action": "recover" }
         });
-        let err = handle_exec(req_with_params(POD_EXEC_METHOD, params), "peer-a")
+        let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -1041,7 +1042,7 @@ mod tests {
         // the params still fail to parse (no params) — either way it errors and
         // never signs a cert. This exercises the early guard path.
         let err =
-            handle_refresh_cert("peer-a", req_no_params(POD_REFRESH_CERT_METHOD)).unwrap_err();
+            handle_refresh_cert("peer-a", req_no_params(MESH_REFRESH_CERT_METHOD)).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("mesh CA key") || msg.contains("requires params"),
@@ -1099,7 +1100,7 @@ mod tests {
                 &cn,
                 addr(),
                 req_with_params(
-                    POD_NOTIFY_TRUST_METHOD,
+                    MESH_NOTIFY_TRUST_METHOD,
                     serde_json::json!({ "trust": true }),
                 ),
             )
@@ -1140,7 +1141,10 @@ mod tests {
 
             let removed = handle_peer_forget(
                 "asker",
-                req_with_params(POD_PEER_FORGET_METHOD, serde_json::json!({ "peer_id": cn })),
+                req_with_params(
+                    MESH_PEER_FORGET_METHOD,
+                    serde_json::json!({ "peer_id": cn }),
+                ),
             )
             .unwrap();
             assert!(removed > 0, "expected at least one row removed");
@@ -1157,7 +1161,7 @@ mod tests {
             let removed = handle_peer_forget(
                 "asker",
                 req_with_params(
-                    POD_PEER_FORGET_METHOD,
+                    MESH_PEER_FORGET_METHOD,
                     serde_json::json!({ "peer_id": "never-existed" }),
                 ),
             )
@@ -1174,7 +1178,7 @@ mod tests {
             let err = handle_push_ca_key(
                 "peer-untrusted",
                 req_with_params(
-                    POD_PUSH_CA_KEY_METHOD,
+                    MESH_PUSH_CA_KEY_METHOD,
                     serde_json::json!({ "cert_pem": "c", "key_pem": "k" }),
                 ),
             )
@@ -1192,7 +1196,7 @@ mod tests {
             let err = handle_push_ca_state(
                 "peer-untrusted",
                 req_with_params(
-                    POD_PUSH_CA_STATE_METHOD,
+                    MESH_PUSH_CA_STATE_METHOD,
                     serde_json::json!({ "current_cert_pem": "c", "current_key_pem": "k" }),
                 ),
             )
@@ -1217,7 +1221,7 @@ mod tests {
             let err = handle_replicate_push(
                 "peer-nopin",
                 req_with_params(
-                    POD_REPLICATE_PUSH_METHOD,
+                    MESH_REPLICATE_PUSH_METHOD,
                     serde_json::to_value(&env).unwrap(),
                 ),
             )
@@ -1270,7 +1274,7 @@ mod tests {
     #[test]
     fn build_addressing_snapshot_falls_back_when_no_display_name_row() {
         let iddir = tempfile::tempdir().unwrap();
-        system::host_identity::init(iddir.path()).unwrap();
+        crate::host_identity::init(iddir.path()).unwrap();
         with_db(async {
             let conn = db::open_default().unwrap();
             // Only a channel row, no display_name → display_name falls back to
@@ -1290,7 +1294,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("dispatch-test.db");
         db::with_db_path(db_path, async {
-            let resp = dispatch(req_no_params("pod/bogus-method"), "peer-a", addr()).await;
+            let resp = dispatch(req_no_params("mesh/bogus-method"), "peer-a", addr()).await;
             let text = serde_json::to_string(&resp).unwrap();
             assert!(text.contains("\"error\""), "expected error: {text}");
             assert!(text.contains("not supported"), "got: {text}");
@@ -1311,7 +1315,7 @@ mod tests {
 
             // A departed peer hitting any method other than pod/peer-leaving is
             // rejected at the gate with a re-pair message.
-            let resp = dispatch(req_no_params(POD_HAS_CA_KEY_METHOD), &cn, addr()).await;
+            let resp = dispatch(req_no_params(MESH_HAS_CA_KEY_METHOD), &cn, addr()).await;
             let text = serde_json::to_string(&resp).unwrap();
             assert!(text.contains("has departed this pod"), "got: {text}");
         })
@@ -1325,7 +1329,7 @@ mod tests {
         db::with_db_path(db_path, async {
             // Non-departed peer, no CA key on this host → has_key: false, and the
             // departed gate lets the call through to the handler.
-            let resp = dispatch(req_no_params(POD_HAS_CA_KEY_METHOD), "peer-ok", addr()).await;
+            let resp = dispatch(req_no_params(MESH_HAS_CA_KEY_METHOD), "peer-ok", addr()).await;
             let text = serde_json::to_string(&resp).unwrap();
             assert!(text.contains("has_key"), "got: {text}");
             assert!(!text.contains("\"error\""), "unexpected error: {text}");
@@ -1343,7 +1347,7 @@ mod tests {
             pdb::upsert_peer(&conn, &cn, "hk", "127.0.0.1", 1, Some("fp-k"), "").unwrap();
             drop(conn);
 
-            let resp = dispatch(req_no_params(POD_PEER_REMOVED_METHOD), &cn, addr()).await;
+            let resp = dispatch(req_no_params(MESH_PEER_REMOVED_METHOD), &cn, addr()).await;
             let text = serde_json::to_string(&resp).unwrap();
             assert!(!text.contains("\"error\""), "unexpected error: {text}");
             // pod/peer-removed must NOT mark the caller departed (that's the
@@ -1360,7 +1364,7 @@ mod tests {
         // the authenticated CN, the handler must refuse on the CN check rather
         // than sign anything. Uses the crate HOME lock so pki_dir points at temp.
         let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::HOME_ENV_LOCK
+        let _guard = crate::mesh::HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("HOME").ok();
@@ -1373,7 +1377,7 @@ mod tests {
             "csr_client_pem": "x",
             "csr_server_pem": "y",
         });
-        let err = handle_refresh_cert("peer-a", req_with_params(POD_REFRESH_CERT_METHOD, params))
+        let err = handle_refresh_cert("peer-a", req_with_params(MESH_REFRESH_CERT_METHOD, params))
             .unwrap_err();
         match prev {
             Some(v) => unsafe { std::env::set_var("HOME", v) },

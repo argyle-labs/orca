@@ -16,23 +16,23 @@ use async_trait::async_trait;
 use db::replicate_engine::{ReplicationTransport, TransportPeer};
 use serde_json::Value;
 
-use crate::{
+use crate::mesh::{
     ReplicateBundle, fetch_replicate_bundle, fetch_replicate_roots, pki_dir, push_replicate_bundle,
 };
-use db::pod as pdb;
+use db::mesh as pdb;
 
-pub struct PodMeshTransport;
+pub struct MeshTransport;
 
-impl PodMeshTransport {
+impl MeshTransport {
     pub fn new() -> Arc<Self> {
         Arc::new(Self)
     }
 }
 
 #[async_trait]
-impl ReplicationTransport for PodMeshTransport {
+impl ReplicationTransport for MeshTransport {
     async fn list_peers(&self) -> Result<Vec<TransportPeer>> {
-        let own_peer_id = system::host_identity::machine_id().to_string();
+        let own_peer_id = crate::host_identity::machine_id().to_string();
         let rows = db::pool::with_pooled_or_open(pdb::list_peers)?;
         Ok(rows
             .into_iter()
@@ -51,7 +51,7 @@ impl ReplicationTransport for PodMeshTransport {
     async fn push(&self, peer: &TransportPeer, bundle: &BTreeMap<String, Value>) -> Result<usize> {
         let envelope = sign_bundle(bundle.clone())?;
         let targets = dial_targets(peer);
-        crate::dialer::try_targets(&targets, |t| {
+        crate::mesh::dialer::try_targets(&targets, |t| {
             let envelope = envelope.clone();
             async move { push_replicate_bundle(&t, &envelope).await }
         })
@@ -64,21 +64,18 @@ impl ReplicationTransport for PodMeshTransport {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("peer {} has no pinned fp", peer.hostname))?;
         let targets = dial_targets(peer);
-        let envelope =
-            crate::dialer::try_targets(
-                &targets,
-                |t| async move { fetch_replicate_bundle(&t).await },
-            )
-            .await?;
+        let envelope = crate::mesh::dialer::try_targets(&targets, |t| async move {
+            fetch_replicate_bundle(&t).await
+        })
+        .await?;
         verify_envelope(&envelope, pinned_fp)
     }
 
     async fn fetch_roots(&self, peer: &TransportPeer) -> Result<BTreeMap<String, String>> {
         let targets = dial_targets(peer);
-        let r = crate::dialer::try_targets(
-            &targets,
-            |t| async move { fetch_replicate_roots(&t).await },
-        )
+        let r = crate::mesh::dialer::try_targets(&targets, |t| async move {
+            fetch_replicate_roots(&t).await
+        })
         .await?;
         Ok(r.roots)
     }
@@ -91,7 +88,7 @@ impl ReplicationTransport for PodMeshTransport {
 fn dial_targets(peer: &TransportPeer) -> Vec<String> {
     db::pool::with_pooled_or_open(|conn| {
         Ok(
-            crate::dialer::dial_targets_for_peer(conn, &peer.peer_id, &peer.addr)
+            crate::mesh::dialer::dial_targets_for_peer(conn, &peer.peer_id, &peer.addr)
                 .unwrap_or_else(|_| vec![peer.addr.clone()]),
         )
     })
@@ -102,7 +99,7 @@ fn dial_targets(peer: &TransportPeer) -> Vec<String> {
 /// push (transport) + receiver-side `pod/replicate-export` handler.
 pub fn sign_bundle(entities: BTreeMap<String, Value>) -> Result<utils::pki::SignedEnvelope> {
     let body = ReplicateBundle {
-        peer_id: system::host_identity::machine_id().to_string(),
+        peer_id: crate::host_identity::machine_id().to_string(),
         issued_at: utils::time::now().unix_seconds(),
         entities,
     };

@@ -105,8 +105,8 @@ graphql_client_codegen = "0.14"
 sha2 = "0.11"
 rand = "0.10"
 
-# Per-host bootstrap signing key for the pre-join channel (pod/offer +
-# pod/join-confirm). Independent of mesh PKI: this key is the orca's
+# Per-host bootstrap signing key for the pre-join channel (mesh/offer +
+# mesh/join-confirm). Independent of mesh PKI: this key is the orca's
 # "I am this host" anchor before any CA exists. PKCS8 PEM on disk.
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 
@@ -134,7 +134,7 @@ tower = { version = "0.5", features = ["util"] }
 glob = "0.3"
 pulldown-cmark = "0.13"
 
-# System introspection for system.runtime-spec / pod.list enrichment.
+# System introspection for system.runtime-spec / system.list enrichment.
 # Maintained cross-platform crate (macOS/Linux/Windows). Interface MACs
 # come from `if-addrs` which is already in the server crate.
 sysinfo = { version = "0.32", default-features = false, features = ["system", "disk", "network"] }
@@ -240,7 +240,6 @@ members = [
     "projects/deploy-target",
     "projects/orca-inventory",
     "projects/spec",
-    "projects/pod",
     "projects/system",
     "projects/config-source",
     "projects/secrets",
@@ -279,7 +278,6 @@ default-members = [
     "projects/deploy-target",
     "projects/orca-inventory",
     "projects/spec",
-    "projects/pod",
     "projects/system",
     "projects/config-source",
     "projects/secrets",

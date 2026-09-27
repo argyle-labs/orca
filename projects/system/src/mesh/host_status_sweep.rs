@@ -21,7 +21,7 @@ const SWEEP_INITIAL_DELAY: Duration = Duration::from_secs(30);
 
 /// Spawn the periodic sweeper. Idempotent — second call is a no-op.
 ///
-/// Runs on the shared [`system::periodic`] scaffold (shutdown handling + a
+/// Runs on the shared [`crate::periodic`] scaffold (shutdown handling + a
 /// `scheduler_runs` history row per tick) instead of a hand-rolled
 /// `loop { … sleep … }`. At a 5-minute cadence the per-tick recording is
 /// cheap and gives operators sweep visibility via `schedule status`.
@@ -30,13 +30,13 @@ pub fn spawn() {
     if SPAWNED.set(()).is_err() {
         return;
     }
-    drop(system::periodic::spawn(
-        system::periodic::PeriodicSpec {
+    drop(crate::periodic::spawn(
+        crate::periodic::PeriodicSpec {
             name: "pod.host_status.sweep",
             initial_delay: SWEEP_INITIAL_DELAY,
             interval: SWEEP_INTERVAL,
         },
-        system::periodic::boxed(sweep_once),
+        crate::periodic::boxed(sweep_once),
     ));
 }
 

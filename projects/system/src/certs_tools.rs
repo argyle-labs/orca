@@ -2,11 +2,11 @@
 //!
 //! Founder/member role, each mesh cert's days-remaining, the running orca
 //! version, and the Tier-2 `self_secure` (secrets-storage) policy flag — one
-//! read. The reframed home of the former `pod.detail view=certs`.
+//! read. The reframed home of the former `system.topology view=certs`.
 //!
 //! Lives in the `system` crate (not `pod`): the cert-status reader was hoisted
-//! into `utils::pki` (`mesh_cert_status`) and `self_secure` is a `db::pod` read,
-//! so this verb carries no pod dependency — part of dissolving `pod.detail`.
+//! into `utils::pki` (`mesh_cert_status`) and `self_secure` is a `db::mesh` read,
+//! so this verb carries no pod dependency — part of dissolving `system.topology`.
 //! Peer-dispatchable, so `system certs list --peer <host>` reads a remote host's
 //! cert status over the mesh (the handler runs on that host, reporting its own).
 
@@ -28,7 +28,7 @@ async fn system_certs_list(
 ) -> anyhow::Result<utils::pki::MeshCertStatus> {
     let pki_dir =
         contract::config::paths::pki_dir().unwrap_or_else(|_| ctx.config.app_dir.join("pki"));
-    let mut out = utils::pki::mesh_cert_status(&pki_dir);
-    out.self_secure = db::pool::with_pooled_or_open(db::pod::get_self_secure).unwrap_or(false);
+    let mut out = utils::pki::mesh_cert_status(&pki_dir, env!("ORCA_VERSION"));
+    out.self_secure = db::pool::with_pooled_or_open(db::mesh::get_self_secure).unwrap_or(false);
     Ok(out)
 }

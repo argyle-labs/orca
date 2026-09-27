@@ -187,7 +187,7 @@ pub fn reconcile_ownership(conn: &Connection, local_id: &str) -> Result<usize> {
     changed += conn.execute(
         "DELETE FROM config_rows
           WHERE is_replica = 1 AND host_owner <> ?1
-            AND host_owner NOT IN (SELECT peer_id FROM pod_peers)",
+            AND host_owner NOT IN (SELECT peer_id FROM mesh_peers)",
         params![local_id],
     )?;
 
@@ -295,7 +295,7 @@ pub fn set(
 
 // ── Mesh replication ────────────────────────────────────────────────────────
 //
-// config_rows replicates across the pod mesh so EVERY node holds a copy of
+// config_rows replicates across the mesh so EVERY node holds a copy of
 // every node's config — data resiliency: any peer can restore a machine's
 // config. Custom registration (not `#[derive(Replicated)]`) because config has
 // an ownership model the generic derive doesn't capture:
@@ -762,7 +762,7 @@ mod tests {
     fn a_replica_of_a_system_still_in_the_roster_is_kept() {
         let conn = test_conn();
         conn.execute(
-            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_port,
+            "INSERT INTO mesh_peers (peer_id, peer_hostname, peer_port,
                                     ca_cert_pem, first_seen_at, last_seen_at)
              VALUES ('peer-b', 'host-b', 12002, '', 0, 0)",
             [],

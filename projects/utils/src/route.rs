@@ -9,7 +9,7 @@
 //! enabled [`Route`] in order until one answers.
 //!
 //! This is the single shared type across the whole system — the mesh
-//! (`contract::ClaimAddress`, `db::PodPeerAddress`, `pod::PodPeerAddressDto`)
+//! (`contract::ClaimAddress`, `db::MeshPeerAddress`, `system::mesh::PeerAddressDto`)
 //! and every plugin endpoint (`#[endpoint_resource]`'s built-in `routes`
 //! column) all use `Route`, not just a shared field name. `utils` is the
 //! dependency-free leaf so this one type can be shared without a dependency
@@ -109,7 +109,7 @@ impl Route {
     /// A *learned* schemeless mesh route: dialed by `value`, tagged with where
     /// it was learned (`source`) and when it was last observed reachable
     /// (`last_seen_at`, epoch seconds). The one constructor for turning an
-    /// addressing DB row (`pod_peer_addresses`, `host_addressing`) into a
+    /// addressing DB row (`mesh_peer_addresses`, `host_addressing`) into a
     /// [`Route`] — callers never hand-assemble the `source`/`last_seen_at`
     /// `Option` wrapping. `kind_label` is left unset; it is a presentation
     /// concern stamped at the edge (the mesh label vocabulary lives in `system`).
@@ -187,7 +187,7 @@ impl Routes {
     }
 
     /// Append `route` unless an equal-identity path (same `kind` + `value`,
-    /// matching the `pod_peer_addresses` PK and the inventory union semantics)
+    /// matching the `mesh_peer_addresses` PK and the inventory union semantics)
     /// is already present. Preserves priority order — the first occurrence
     /// wins, so a higher-priority earlier entry is never displaced by a later
     /// duplicate.

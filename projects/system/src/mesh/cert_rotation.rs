@@ -29,8 +29,8 @@ use utils::framing::{read_frame, write_frame};
 use utils::jsonrpc::{Message, Request, Response};
 
 use super::pki_dir;
-use db::pod as pdb;
-use system::periodic;
+use crate::periodic;
+use db::mesh as pdb;
 
 /// Once per day. Cheap (one cert parse + a comparison), and a stale cert
 /// check on this cadence covers a 7-day refresh threshold comfortably.
@@ -39,7 +39,7 @@ const TICK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 pub fn spawn() -> tokio::task::JoinHandle<()> {
     periodic::spawn(
         periodic::PeriodicSpec {
-            name: "pod.cert_rotation.run",
+            name: "mesh.cert_rotation.run",
             // Small initial delay so we don't slam the daemon on every restart.
             initial_delay: Duration::from_secs(60),
             interval: TICK_INTERVAL,
@@ -74,13 +74,24 @@ async fn tick() -> Result<()> {
     }
 
     if !utils::pki::mesh_server_cert_path(&pki_d).exists() {
-        return Ok(()); // not a pod member yet
+        return Ok(()); // not a mesh member yet
     }
 
     let server_pem = std::fs::read_to_string(utils::pki::mesh_server_cert_path(&pki_d))?;
     let client_pem = std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki_d))?;
     let threshold = utils::pki::PEER_REFRESH_THRESHOLD_DAYS;
-    let need_server = utils::pki::should_rotate(&server_pem, threshold).unwrap_or(true);
+    // A cert issued before the mesh stopped being called a "pod" carries only
+    // the legacy SAN, so an upgraded peer dialing `mesh.orca.local` cannot
+    // validate it. Certs live 30 days and rotate lazily under 7, so waiting for
+    // expiry would leave this host unreachable for up to 23 days — a partition,
+    // not an upgrade. Treat a missing SAN as rotation-due and converge on the
+    // first tick after the upgrade instead.
+    let stale_san = utils::pki::cert_lacks_mesh_san(&server_pem);
+    if stale_san {
+        info!("[cert-rotation] mesh server cert predates the mesh SAN — reissuing");
+    }
+    let need_server =
+        stale_san || utils::pki::should_rotate(&server_pem, threshold).unwrap_or(true);
     let need_client = utils::pki::should_rotate(&client_pem, threshold).unwrap_or(true);
     if !need_server && !need_client {
         return Ok(());
@@ -88,7 +99,7 @@ async fn tick() -> Result<()> {
 
     if utils::pki::has_mesh_ca_key(&pki_d) {
         // Cert CN must be stable across hostname flaps — use machine_id.
-        let host = system::host_identity::machine_id().to_string();
+        let host = crate::host_identity::machine_id().to_string();
         if need_server {
             utils::pki::reissue_mesh_server_cert(&pki_d).context("self-sign mesh server cert")?;
             info!("[cert-rotation] self-reissued mesh server cert");
@@ -141,7 +152,7 @@ async fn refresh_via_peer_mtls() -> Result<()> {
     // Most-recently-seen first to maximize success likelihood.
     candidates.sort_by_key(|p| std::cmp::Reverse(p.last_seen_at));
 
-    let host = system::host_identity::machine_id().to_string();
+    let host = crate::host_identity::machine_id().to_string();
     let (csr_client, key_client, csr_server, key_server) = utils::pki::build_refresh_csrs(&host)?;
 
     for p in candidates {
@@ -192,8 +203,9 @@ async fn refresh_via_peer_bootstrap() -> Result<()> {
                 .filter(|p| p.departed_at.is_none() && p.pubkey_fp.is_some())
             {
                 let fp = p.pubkey_fp.clone().unwrap_or_default();
-                let targets = crate::dialer::dial_targets_for_peer(conn, &p.peer_id, &p.peer_addr)
-                    .unwrap_or_else(|_| vec![p.peer_addr.clone()]);
+                let targets =
+                    crate::mesh::dialer::dial_targets_for_peer(conn, &p.peer_id, &p.peer_addr)
+                        .unwrap_or_else(|_| vec![p.peer_addr.clone()]);
                 plans.push((p, fp, targets));
             }
             Ok(plans)
@@ -204,7 +216,7 @@ async fn refresh_via_peer_bootstrap() -> Result<()> {
     plans.sort_by_key(|(p, _, _)| (!p.local_secure, std::cmp::Reverse(p.last_seen_at)));
 
     let pki_d = pki_dir();
-    let host = system::host_identity::machine_id().to_string();
+    let host = crate::host_identity::machine_id().to_string();
     let (csr_client, key_client, csr_server, key_server) = utils::pki::build_refresh_csrs(&host)?;
     let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
 
@@ -226,11 +238,11 @@ async fn refresh_via_peer_bootstrap() -> Result<()> {
 
     for (p, fp, targets) in plans {
         for target in targets {
-            match crate::cli::dial_bootstrap_pub(
+            match crate::mesh::cli::dial_bootstrap_pub(
                 &target,
                 p.peer_port,
                 &fp,
-                "pod/refresh-cert-bootstrap",
+                "mesh/refresh-cert-bootstrap",
                 params.clone(),
             )
             .await
@@ -289,7 +301,7 @@ async fn call_refresh(
     let tcp = TcpStream::connect(&target)
         .await
         .with_context(|| format!("connect {target}"))?;
-    let sni = ServerName::try_from(utils::pki::POD_SERVER_SAN)?.to_owned();
+    let sni = ServerName::try_from(utils::pki::MESH_SERVER_SAN)?.to_owned();
     let mut tls = connector.connect(sni, tcp).await?;
 
     let params = serde_json::json!({
@@ -299,7 +311,7 @@ async fn call_refresh(
     });
     write_frame(
         &mut tls,
-        &serde_json::to_vec(&Request::new(1, "pod/refresh-cert", Some(params)))?,
+        &serde_json::to_vec(&Request::new(1, "mesh/refresh-cert", Some(params)))?,
     )
     .await?;
     let raw = tokio::time::timeout(Duration::from_secs(15), read_frame(&mut tls))
@@ -341,7 +353,7 @@ mod tests {
     /// handle so `tick()` executes while HOME (hence `pki_dir()`) points at the temp
     /// dir. The lock is crate-wide so this can't race a roster_sync or cli HOME test.
     fn with_home<T>(dir: &std::path::Path, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
-        let _guard = crate::HOME_ENV_LOCK
+        let _guard = crate::mesh::HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("HOME").ok();
@@ -396,7 +408,7 @@ mod tests {
     fn tick_reissues_corrupt_leaves_via_local_ca() {
         let dir = tempfile::tempdir().unwrap();
         with_home(dir.path(), |rt| {
-            system::host_identity::init(dir.path()).unwrap();
+            crate::host_identity::init(dir.path()).unwrap();
             let pki = pki_dir();
             utils::pki::init_mesh_ca(&pki, TEST_CN).unwrap();
             let junk = "-----BEGIN CERTIFICATE-----\nnot a cert\n-----END CERTIFICATE-----\n";
@@ -407,10 +419,10 @@ mod tests {
             let client = std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
             let server_sum = utils::pki::cert_summary(&server).unwrap();
             let client_sum = utils::pki::cert_summary(&client).unwrap();
-            assert_eq!(server_sum.cn, "orca-pod-server");
+            assert_eq!(server_sum.cn, "orca-mesh-server");
             assert_eq!(
                 client_sum.cn,
-                system::host_identity::machine_id().to_string()
+                crate::host_identity::machine_id().to_string()
             );
         });
     }
@@ -442,7 +454,7 @@ mod tests {
     fn refresh_via_peer_mtls_attempts_dial_then_bails_when_unreachable() {
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
-            system::host_identity::init(dir.path()).unwrap();
+            crate::host_identity::init(dir.path()).unwrap();
             // Seed one non-departed mutual-secure peer at an unroutable target.
             // mtls path builds CSRs, sorts candidates, dials, and exhausts the
             // loop against the dead peer.
@@ -518,7 +530,7 @@ mod tests {
     fn refresh_via_peer_bootstrap_attempts_dial_then_bails_when_unreachable() {
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
-            system::host_identity::init(dir.path()).unwrap();
+            crate::host_identity::init(dir.path()).unwrap();
             // Seed one non-departed peer carrying a pinned pubkey_fp and an
             // unroutable address, so the bootstrap path builds CSRs, signs the
             // envelope, and exhausts the dial loop against a dead target.

@@ -25,6 +25,11 @@ pub mod lxc_exec;
 pub mod managed_mounts;
 pub mod mcp_client_config;
 pub mod media_tools;
+/// The MESH: other systems, reached over mTLS — discovery, pairing, trust,
+/// cert rotation, exec, roster/status replication, and the fleet fan-out.
+/// Folded in from the former `pod` crate: a peer is not a different kind of
+/// thing from a system, and a second name for it was a second mental model.
+pub mod mesh;
 pub mod mount_converge;
 pub mod mount_exec;
 pub mod mounts;

@@ -17,7 +17,7 @@ use common::{mint_admin_token, mint_token, oneshot_json, oneshot_raw, with_isola
 // ── successful authenticated dispatch ───────────────────────────────────────
 
 #[tokio::test]
-async fn system_health_returns_report_with_admin_token() {
+async fn system_health_sweeps_every_system_with_admin_token() {
     let env = with_isolated_env();
     let token = mint_admin_token(&env);
     let (status, body) = oneshot_json(
@@ -29,22 +29,74 @@ async fn system_health_returns_report_with_admin_token() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    // HealthReport shape (camelCase): healthy/version/displayName/machineId/daemon.
+    // No id => every system in the mesh. The LOCAL one is always the first row,
+    // because it is the one report that needs no network to produce.
+    let systems = body["systems"]
+        .as_array()
+        .unwrap_or_else(|| panic!("mesh sweep must return `systems`: {body}"));
+    let local = systems
+        .first()
+        .unwrap_or_else(|| panic!("the local system is always reported: {body}"));
+    let health = &local["health"];
     assert!(
-        body["healthy"].is_boolean(),
+        health["healthy"].is_boolean(),
         "healthy must be a bool: {body}"
     );
     assert!(
-        body["version"].as_str().is_some_and(|v| !v.is_empty()),
+        health["version"].as_str().is_some_and(|v| !v.is_empty()),
         "version must be a non-empty string: {body}"
     );
     assert!(
-        body.get("daemon").is_some(),
+        health.get("daemon").is_some(),
         "daemon runtime snapshot must be present: {body}"
     );
     assert!(
-        body.get("machineId").is_some(),
+        health.get("machineId").is_some(),
         "machineId must be present: {body}"
+    );
+}
+
+/// Naming ONE system by id answers with that system's bare `HealthReport` —
+/// the shape every existing decoder of this verb already reads. The id is the
+/// resource being asked about, not a host selector (#647).
+#[tokio::test]
+async fn system_health_by_id_returns_one_bare_report() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    // Resolve this system's own id from the sweep, then ask for it by name.
+    let (_, sweep) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/v1/system.health",
+        Some(&token),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    let display_name = sweep["systems"][0]["health"]["displayName"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !display_name.is_empty(),
+        "sweep must name the system: {sweep}"
+    );
+
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/v1/system.health",
+        Some(&token),
+        Some(serde_json::json!({ "id": display_name })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(
+        body["healthy"].is_boolean(),
+        "a single-system answer is a bare HealthReport: {body}"
+    );
+    assert!(
+        body.get("systems").is_none(),
+        "a single-system answer must NOT be a mesh sweep: {body}"
     );
 }
 

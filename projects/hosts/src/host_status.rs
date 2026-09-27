@@ -2,7 +2,7 @@
 //!
 //! See `migrations/20260731000000__host_status_single_host.up.sql` for the
 //! schema. `host_status` holds only THIS host's own rows — telemetry is
-//! local-only and fetched on demand (`pod::peer_info`); it is never mirrored
+//! local-only and fetched on demand (`system::mesh::peer_info`); it is never mirrored
 //! across the mesh. The local persistence task writes one row per cadence tick.
 //!
 //! Retention: age-based by default (24 h). Configurable via the `config_store`
@@ -306,7 +306,7 @@ fn write_retention_knob(
     Ok(())
 }
 
-/// The single newest row, or `None` if the table is empty. Used by `pod.list`
+/// The single newest row, or `None` if the table is empty. Used by `system.list`
 /// to enrich this host's member row with its latest `system` snapshot.
 pub fn latest(conn: &Connection) -> Result<Option<HostStatusRow>> {
     let opt = conn

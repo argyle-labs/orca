@@ -37,7 +37,7 @@ pub struct Config {
     /// each is overridable via env var (`ORCA_HTTP_PORT`, `ORCA_HTTPS_PORT`,
     /// `ORCA_MESH_PORT`). Daemon code reads from here, never from the raw
     /// consts, so a single override flows through to bind, loopback URLs,
-    /// pod dial targets, etc.
+    /// mesh dial targets, etc.
     pub ports: Ports,
 }
 
@@ -54,7 +54,7 @@ pub struct Ports {
     pub http: u16,
     /// HTTPS REST + UI (mesh CA server cert; Caddy front later).
     pub https: u16,
-    /// Pod mesh mTLS — peer-to-peer plugin RPC.
+    /// Mesh mTLS — peer-to-peer plugin RPC.
     pub mesh: u16,
 }
 

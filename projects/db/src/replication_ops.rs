@@ -402,16 +402,16 @@ mod tests {
     #[test]
     fn is_deleted_honors_ttl_and_supersession() {
         let conn = test_conn();
-        note_delete(&conn, "pod_peers", "peer_id", "p1", 1_000).unwrap();
+        note_delete(&conn, "mesh_peers", "peer_id", "p1", 1_000).unwrap();
         // Active within the window.
-        assert!(is_deleted(&conn, "pod_peers", "p1", 1_000, 500).unwrap());
+        assert!(is_deleted(&conn, "mesh_peers", "p1", 1_000, 500).unwrap());
         // Past the TTL horizon → no longer suppressed.
-        assert!(!is_deleted(&conn, "pod_peers", "p1", 2_000, 500).unwrap());
+        assert!(!is_deleted(&conn, "mesh_peers", "p1", 2_000, 500).unwrap());
         // A superseding upsert flips the op away from `delete`.
-        note_write(&conn, "pod_peers", "peer_id", "p1", 3_000).unwrap();
-        assert!(!is_deleted(&conn, "pod_peers", "p1", 3_000, 1_000_000).unwrap());
+        note_write(&conn, "mesh_peers", "peer_id", "p1", 3_000).unwrap();
+        assert!(!is_deleted(&conn, "mesh_peers", "p1", 3_000, 1_000_000).unwrap());
         // Unknown key is never deleted.
-        assert!(!is_deleted(&conn, "pod_peers", "other", 1_000, 500).unwrap());
+        assert!(!is_deleted(&conn, "mesh_peers", "other", 1_000, 500).unwrap());
     }
 
     #[test]

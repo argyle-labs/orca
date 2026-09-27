@@ -7,7 +7,7 @@ edition.workspace = true
 name = "orca_inventory"
 path = "src/lib.rs"
 
-# Server-side pod-topology aggregator. Unifies pod members, (future)
+# Server-side topology aggregator. Unifies mesh members, (future)
 # containers, (future) vms, and (future) network edges into the typed shapes
 # the systems UI renders directly. This crate hosts `pod.detail` (the pod
 # topology tree) and the future `network.topology_view` slice.
@@ -21,7 +21,6 @@ plugin-toolkit = { path = "../plugin-toolkit" }
 contract       = { path = "../contract", default-features = false }
 derive         = { path = "../derive" }
 
-pod    = { path = "../pod" }
 system = { path = "../system" }
 
 schemars   = { workspace = true }

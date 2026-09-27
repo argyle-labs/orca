@@ -384,7 +384,7 @@ async fn service_detail(
 // An explicit, on-demand fan-out: probe every registered backend once and
 // project each into the generic `contract::health::Health` enum. This is NOT a
 // cached poll and is deliberately kept OFF the hot read paths — `service.list`,
-// `containers.list`, and `pod.list` must not trigger a live fan-out (the
+// `containers.list`, and `system.list` must not trigger a live fan-out (the
 // ≤500ms read-budget / no-live-fan-out-on-read-paths rule). Callers ask for the
 // fleet health picture only when they want it, through this dedicated verb.
 
@@ -477,7 +477,7 @@ async fn probe(
 /// provider projected into the generic `contract::health::Health` enum. With
 /// `--service`, probes just that named provider (preserving the per-instance
 /// path). This is an explicit on-demand aggregate — not a cached poll, and never
-/// wired into `service.list`/`containers.list`/`pod.list` hot reads.
+/// wired into `service.list`/`containers.list`/`system.list` hot reads.
 #[orca_tool(domain = "service", verb = "health")]
 async fn service_health(
     args: ServiceHealthArgs,

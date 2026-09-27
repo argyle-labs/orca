@@ -1,6 +1,6 @@
-//! Process-global handle for in-process tool dispatch from the pod relay.
+//! Process-global handle for in-process tool dispatch from the mesh relay.
 //!
-//! Was: pod/exec POSTed back to `https://127.0.0.1:12000/api/v1/<name>`
+//! Was: mesh/exec POSTed back to `https://127.0.0.1:12000/api/v1/<name>`
 //! using the loopback admin token. That impersonated `role=admin` for every
 //! peer-relayed call (M4 in the v1 hardening punch list). Now: the daemon
 //! installs the shared `ToolCtx` here at startup, and `handle_exec`
@@ -8,9 +8,9 @@
 //! hop, no token impersonation. The dispatchers walk the `inventory` slice
 //! directly, so there's no registry to ship through this handle.
 //!
-//! Authorization flows through `pod::listener::authorize_exec`. It enforces
+//! Authorization flows through `crate::mesh::listener::authorize_exec`. It enforces
 //! the `REMOTE_OK` allowlist and (until per-user identity is wired over
-//! pod/exec) refuses any tool with a non-`"any"` required role. The target
+//! mesh/exec) refuses any tool with a non-`"any"` required role. The target
 //! model is per-user role checks against a pod-replicated identity registry,
 //! not per-peer trust: mTLS proves who is on the wire, but admin delegation
 //! is a property of the invoking user, not the relaying peer.
@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 
 static CTX: Mutex<Option<Arc<ToolCtx>>> = Mutex::new(None);
 
-/// Wire the shared ctx into the process-global slot so the pod relay can
+/// Wire the shared ctx into the process-global slot so the mesh relay can
 /// dispatch directly. Same `Arc` the axum router uses, so all surfaces
 /// share one set of service handles. Idempotent.
 pub fn install(ctx: Arc<ToolCtx>) {

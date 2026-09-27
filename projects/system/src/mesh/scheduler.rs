@@ -3,7 +3,7 @@
 
 //! Auto-offer scheduler.
 //!
-//! Periodically (every 15s by default) scans `pod_discovery` for peers in
+//! Periodically (every 15s by default) scans `mesh_discovery` for peers in
 //! state=unclaimed and pushes a pod/offer to each — provided:
 //!
 //!   * This host has the mesh CA private key (`can_invite`).
@@ -28,8 +28,8 @@ use utils::framing::{read_frame, write_frame};
 use utils::jsonrpc::{Message, Request, Response};
 
 use super::pki_dir;
-use db::pod as pdb;
-use system::periodic;
+use crate::periodic;
+use db::mesh as pdb;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(15);
 pub const OFFER_TTL_SECS: i64 = 600;
@@ -61,20 +61,20 @@ async fn tick() -> Result<()> {
             .map(|p| p.peer_id)
             .collect())
     })?;
-    crate::peer_info::retain_only(&active_ids);
+    crate::mesh::peer_info::retain_only(&active_ids);
 
     // Gate: only secure hosts with the CA key extend offers.
     let pki_d = pki_dir();
     if !utils::pki::has_mesh_ca_key(&pki_d) {
         return Ok(());
     }
-    let Some((pod_id, unclaimed)) = db::pool::with_pooled_or_open(|conn| {
-        if !db::pod::get_self_secure(conn)? {
+    let Some((mesh_id, unclaimed)) = db::pool::with_pooled_or_open(|conn| {
+        if !db::mesh::get_self_secure(conn)? {
             return Ok(None);
         }
-        let pod_id = pdb::get_pod_id(conn)?.unwrap_or_else(|| "default".to_string());
+        let mesh_id = pdb::get_mesh_id(conn)?.unwrap_or_else(|| "default".to_string());
         let unclaimed = pdb::list_unclaimed_discovery(conn)?;
-        Ok(Some((pod_id, unclaimed)))
+        Ok(Some((mesh_id, unclaimed)))
     })?
     else {
         return Ok(());
@@ -88,7 +88,7 @@ async fn tick() -> Result<()> {
             let code = mint_pairing_code();
             let code_hash = pdb::hash_code(&code);
             let offer_id = utils::id::new();
-            let inviter_peer_id = system::host_identity::machine_id().to_string();
+            let inviter_peer_id = crate::host_identity::machine_id().to_string();
             pdb::insert_pending_offer(
                 conn,
                 &offer_id,
@@ -111,18 +111,18 @@ async fn tick() -> Result<()> {
             continue;
         };
 
-        let pod_id = pod_id.clone();
+        let mesh_id = mesh_id.clone();
         let code_for_log = code.clone();
         let hostname = d.hostname.clone();
         let addr = d.addr.clone();
         let port = d.port;
         let fp = d.pubkey_fp.clone();
         tokio::spawn(async move {
-            if let Err(e) = push_offer(&hostname, &addr, port, &fp, &code, &pod_id).await {
+            if let Err(e) = push_offer(&hostname, &addr, port, &fp, &code, &mesh_id).await {
                 warn!("[pod-scheduler] push offer to {hostname} failed: {e:#}");
             } else {
                 info!(
-                    "[pod-scheduler] offered pod-membership to {hostname} ({addr}:{port}) — pairing code: {code_for_log}"
+                    "[pod-scheduler] offered mesh-membership to {hostname} ({addr}:{port}) — pairing code: {code_for_log}"
                 );
             }
         });
@@ -143,9 +143,9 @@ pub fn mint_pairing_code() -> String {
     s
 }
 
-/// Push a pod-membership offer to a joiner over its bootstrap surface. Mints
-/// no DB state — callers (the scheduler and the `pod.offer` tool) must have
-/// already inserted the outbound `pod_pending_offers` row keyed by
+/// Push a mesh-membership offer to a joiner over its bootstrap surface. Mints
+/// no DB state — callers (the scheduler and the `system.join --action offer` tool) must have
+/// already inserted the outbound `mesh_pending_offers` row keyed by
 /// `joiner_pubkey_fp` so the joiner's confirm dial can be reconciled.
 ///
 /// `code` is the raw pairing code shown on both sides. The joiner sees it on
@@ -176,15 +176,15 @@ pub async fn push_offer(
     joiner_port: u16,
     joiner_pubkey_fp: &str,
     code: &str,
-    pod_id: &str,
+    mesh_id: &str,
 ) -> Result<()> {
     let pki_d = pki_dir();
     let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
     let mesh_ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
         .context("read mesh CA cert")?;
 
-    let inviter_hostname = system::host_identity::hostname().to_string();
-    let inviter_peer_id = system::host_identity::machine_id().to_string();
+    let inviter_hostname = crate::host_identity::hostname().to_string();
+    let inviter_peer_id = crate::host_identity::machine_id().to_string();
 
     #[derive(serde::Serialize)]
     struct OfferBody<'a> {
@@ -193,7 +193,7 @@ pub async fn push_offer(
         inviter_addr: &'a str,
         inviter_port: u16,
         mesh_ca_cert_pem: &'a str,
-        pod_id: &'a str,
+        mesh_id: &'a str,
         code_hash: String,
         expires_at: i64,
         inviter_display_name: &'a str,
@@ -213,7 +213,7 @@ pub async fn push_offer(
         inviter_addr: "", // legacy fallback; joiner prefers `inviter_addrs`, else the TLS source addr
         inviter_port: mesh_port(),
         mesh_ca_cert_pem: &mesh_ca_cert_pem,
-        pod_id,
+        mesh_id,
         code_hash: pdb::hash_code(code),
         expires_at: now_secs() + OFFER_TTL_SECS,
         inviter_display_name: &inviter_hostname,
@@ -234,7 +234,7 @@ pub async fn push_offer(
     let tcp = TcpStream::connect(&target)
         .await
         .with_context(|| format!("dial {target}"))?;
-    let sni = ServerName::try_from(utils::pki::POD_BOOTSTRAP_SAN)
+    let sni = ServerName::try_from(utils::pki::MESH_BOOTSTRAP_SAN)
         .context("bootstrap SNI")?
         .to_owned();
     let mut tls = connector
@@ -242,7 +242,7 @@ pub async fn push_offer(
         .await
         .context("bootstrap TLS handshake")?;
 
-    let req = Request::new(1, "pod/offer", Some(serde_json::to_value(&env)?));
+    let req = Request::new(1, "mesh/offer", Some(serde_json::to_value(&env)?));
     write_frame(&mut tls, &serde_json::to_vec(&req)?).await?;
 
     let raw = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut tls))
@@ -386,7 +386,7 @@ mod tests {
     // behind the crate lock and point both at temp dirs on a current-thread rt,
     // mirroring cert_rotation's harness.
     fn with_home_db<T>(dir: &std::path::Path, body: impl std::future::Future<Output = T>) -> T {
-        let _guard = crate::HOME_ENV_LOCK
+        let _guard = crate::mesh::HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("HOME").ok();
@@ -466,7 +466,7 @@ mod tests {
     fn tick_inserts_outbound_offer_for_unclaimed_peer() {
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
-            system::host_identity::init(dir.path()).unwrap();
+            crate::host_identity::init(dir.path()).unwrap();
             let pki = pki_dir();
             utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
             db::pool::with_pooled_or_open(|conn| {
@@ -503,7 +503,7 @@ mod tests {
     fn tick_skips_peer_with_existing_open_offer() {
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
-            system::host_identity::init(dir.path()).unwrap();
+            crate::host_identity::init(dir.path()).unwrap();
             let pki = pki_dir();
             utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
             db::pool::with_pooled_or_open(|conn| {
@@ -525,7 +525,7 @@ mod tests {
             tick().await.unwrap();
             let count_after_first = db::pool::with_pooled_or_open(|conn| {
                 Ok(conn.query_row(
-                    "SELECT COUNT(*) FROM pod_pending_offers WHERE peer_pubkey_fp = ?",
+                    "SELECT COUNT(*) FROM mesh_pending_offers WHERE peer_pubkey_fp = ?",
                     [&"fp-dup"],
                     |r| r.get::<_, i64>(0),
                 )?)
@@ -537,7 +537,7 @@ mod tests {
             tick().await.unwrap();
             let count_after_second = db::pool::with_pooled_or_open(|conn| {
                 Ok(conn.query_row(
-                    "SELECT COUNT(*) FROM pod_pending_offers WHERE peer_pubkey_fp = ?",
+                    "SELECT COUNT(*) FROM mesh_pending_offers WHERE peer_pubkey_fp = ?",
                     [&"fp-dup"],
                     |r| r.get::<_, i64>(0),
                 )?)

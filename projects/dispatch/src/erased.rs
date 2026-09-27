@@ -23,7 +23,7 @@ use contract::{OrcaTool, ToolCtx};
 pub trait ErasedTool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
-    /// Whether this tool may be invoked by a paired pod peer via `pod/exec`.
+    /// Whether this tool may be invoked by a paired system via `mesh/exec`.
     fn remote_ok(&self) -> bool;
     /// Minimum role required to invoke this tool via authenticated surfaces
     /// (REST). Mirrors `OrcaToolDef::REQUIRED_ROLE`. CLI / loopback / MCP-stdio
@@ -102,7 +102,7 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
             // Dry-run is the DEFAULT for every verb that applies changes. No
             // opt-in ⇒ describe and return; the tool body is never entered, so
             // this cannot half-apply. Enforced here because `run_json` is the
-            // one path all surfaces (REST, MCP, CLI, pod/exec) funnel through.
+            // one path all surfaces (REST, MCP, CLI, mesh/exec) funnel through.
             let args = if T::EXECUTE_GATED {
                 if !execute_opt_in(&args) {
                     let plan = contract::plan::ExecutionPlan::generic(

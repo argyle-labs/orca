@@ -7,7 +7,7 @@
 //!     host's own channels (`display_name`, `fqdn`, `lan_v4`, `lan_v6`,
 //!     `tailscale_v4`, `tailscale_v6`). PK = (kind, value), so a dual-homed
 //!     host stores every value of a kind as an equal row.
-//!   * `pod_peer_addresses` (peer_id, kind, value, source, last_seen_at)
+//!   * `mesh_peer_addresses` (peer_id, kind, value, source, last_seen_at)
 //!     — one peer → many rows. PK = (peer_id, kind, value).
 //!
 //! Source vocabulary: `manual` | `autodetect` | `caddy:<origin>`.
@@ -103,7 +103,7 @@ pub fn upsert_peer_address(
 ) -> Result<()> {
     let now = now_secs();
     conn.execute(
-        "INSERT INTO pod_peer_addresses (peer_id, kind, value, source, last_seen_at)
+        "INSERT INTO mesh_peer_addresses (peer_id, kind, value, source, last_seen_at)
          VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(peer_id, kind, value) DO UPDATE SET
              source       = excluded.source,
@@ -113,7 +113,7 @@ pub fn upsert_peer_address(
     Ok(())
 }
 
-/// Atomically replace the set of `pod_peer_addresses` rows for
+/// Atomically replace the set of `mesh_peer_addresses` rows for
 /// `(peer_id, source)` with `entries` (`(kind, value)` pairs).
 ///
 /// Used by the ping-driven refresh path: every successful `pod/ping` carries
@@ -128,13 +128,13 @@ pub fn replace_peer_addresses_from_source(
 ) -> Result<()> {
     let tx = conn.transaction()?;
     tx.execute(
-        "DELETE FROM pod_peer_addresses WHERE peer_id = ?1 AND source = ?2",
+        "DELETE FROM mesh_peer_addresses WHERE peer_id = ?1 AND source = ?2",
         params![peer_id, source],
     )?;
     let now = now_secs();
     for (kind, value) in entries {
         tx.execute(
-            "INSERT INTO pod_peer_addresses (peer_id, kind, value, source, last_seen_at)
+            "INSERT INTO mesh_peer_addresses (peer_id, kind, value, source, last_seen_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(peer_id, kind, value) DO UPDATE SET
                  source       = excluded.source,
@@ -147,7 +147,7 @@ pub fn replace_peer_addresses_from_source(
 }
 
 /// List a peer's addresses as a shared [`Routes`] set (schemeless mesh form).
-/// The `pod_peer_addresses` columns map onto `Route` via [`Route::learned`]:
+/// The `mesh_peer_addresses` columns map onto `Route` via [`Route::learned`]:
 /// `kind`/`value` directly, `source`→`Route::source`,
 /// `last_seen_at`→`Route::last_seen_at`; `scheme`/`port`/`enabled` have no
 /// column (a mesh route is dialed by the dialer, not by URL) so they take their
@@ -155,7 +155,7 @@ pub fn replace_peer_addresses_from_source(
 pub fn list_peer_addresses(conn: &Connection, peer_id: &str) -> Result<Routes> {
     let mut stmt = conn.prepare(
         "SELECT kind, value, source, last_seen_at
-         FROM pod_peer_addresses
+         FROM mesh_peer_addresses
          WHERE peer_id = ?1
          ORDER BY kind, value",
     )?;
@@ -207,9 +207,9 @@ mod tests {
     #[test]
     fn peer_addresses_roundtrip() {
         let conn = test_conn();
-        // pod_peer_addresses has FK to pod_peers; insert a peer row first.
+        // mesh_peer_addresses has FK to mesh_peers; insert a peer row first.
         conn.execute(
-            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_port,
+            "INSERT INTO mesh_peers (peer_id, peer_hostname, peer_port,
                                     ca_cert_pem, first_seen_at, last_seen_at)
              VALUES ('p1', 'host-g', 9100, '', 0, 0)",
             [],
@@ -230,7 +230,7 @@ mod tests {
     fn replace_peer_addresses_replaces_only_matching_source() {
         let mut conn = test_conn();
         conn.execute(
-            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_port,
+            "INSERT INTO mesh_peers (peer_id, peer_hostname, peer_port,
                                     ca_cert_pem, first_seen_at, last_seen_at)
              VALUES ('p1', 'host-g', 9100, '', 0, 0)",
             [],
@@ -273,7 +273,7 @@ mod tests {
     fn replace_peer_addresses_with_empty_entries_clears_source() {
         let mut conn = test_conn();
         conn.execute(
-            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_port,
+            "INSERT INTO mesh_peers (peer_id, peer_hostname, peer_port,
                                     ca_cert_pem, first_seen_at, last_seen_at)
              VALUES ('p2', 'host-h', 9100, '', 0, 0)",
             [],

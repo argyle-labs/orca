@@ -1,4 +1,4 @@
-//! Server-side pod topology aggregator. `pod.detail` returns a nested
+//! Server-side pod topology aggregator. `system.topology` returns a nested
 //! cluster → roots → recursive nodes structure the systems UI renders as
 //! visually-contained parent cards wrapping child cards. The topology is a
 //! POD-level concept (the mesh of systems and the services they hold); the
@@ -23,15 +23,15 @@
 
 use anyhow::Result;
 use derive::orca_tool;
-use pod::{PodInstance, collect_pod_instances, match_clusters_instances};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use system::mesh::{MeshInstance, collect_pod_instances, match_clusters_instances};
 
 // ── Output shapes ───────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct PodTopologyOutput {
+pub struct MeshTopologyOutput {
     pub clusters: Vec<InventoryCluster>,
 }
 
@@ -57,7 +57,7 @@ pub struct InventoryNode {
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(tag = "node_type", rename_all = "snake_case")]
 pub enum NodeSource {
-    Peer(Box<PodInstance>),
+    Peer(Box<MeshInstance>),
     Claim(Box<ClaimNode>),
 }
 
@@ -146,7 +146,7 @@ impl InventoryNode {
     }
 
     /// The peer, if this node is an orca peer.
-    pub fn peer(&self) -> Option<&PodInstance> {
+    pub fn peer(&self) -> Option<&MeshInstance> {
         match &self.source {
             NodeSource::Peer(p) => Some(p),
             NodeSource::Claim(_) => None,
@@ -183,7 +183,7 @@ pub struct SystemTopologyArgs {}
 // ── Tool ────────────────────────────────────────────────────────────────────
 
 /// The recursive fleet topology tree. Invoked by `system.topology`.
-async fn pod_topology_view(ctx: &contract::ToolCtx) -> Result<PodTopologyOutput> {
+async fn mesh_topology_view(ctx: &contract::ToolCtx) -> Result<MeshTopologyOutput> {
     let instances_out = collect_pod_instances().await?;
     let instances = instances_out.members;
 
@@ -204,7 +204,7 @@ async fn pod_topology_view(ctx: &contract::ToolCtx) -> Result<PodTopologyOutput>
         &cluster_by_peer,
         &summaries,
     );
-    Ok(PodTopologyOutput { clusters: bucketed })
+    Ok(MeshTopologyOutput { clusters: bucketed })
 }
 
 /// READ-ONLY. The canonical fleet topology: the deduped cluster → systems →
@@ -221,8 +221,8 @@ async fn pod_topology_view(ctx: &contract::ToolCtx) -> Result<PodTopologyOutput>
 async fn system_topology(
     _args: SystemTopologyArgs,
     ctx: &contract::ToolCtx,
-) -> Result<PodTopologyOutput> {
-    pod_topology_view(ctx).await
+) -> Result<MeshTopologyOutput> {
+    mesh_topology_view(ctx).await
 }
 
 // ── Algorithm ───────────────────────────────────────────────────────────────
@@ -232,7 +232,7 @@ async fn system_topology(
 /// fills the gaps — so a daemon with no proxmox plugin (e.g. a laptop) still
 /// groups PVE peers by the cluster name they each gossip in their snapshot.
 fn augment_clusters_from_system(
-    instances: &[PodInstance],
+    instances: &[MeshInstance],
     cluster_by_peer: &mut BTreeMap<String, String>,
 ) {
     for inst in instances {
@@ -278,8 +278,8 @@ fn build_cluster_summaries(clusters: &[contract::ClusterEntry]) -> HashMap<Strin
 /// Roots (sorted: local first, then alphabetic), a `peer_id -> sorted peer
 /// children` map, and a `peer_id -> sorted claim-node children` map.
 type Forest = (
-    Vec<PodInstance>,
-    HashMap<String, Vec<PodInstance>>,
+    Vec<MeshInstance>,
+    HashMap<String, Vec<MeshInstance>>,
     HashMap<String, Vec<ClaimNode>>,
 );
 
@@ -287,7 +287,7 @@ type Forest = (
 /// Presentation-boundary canonical peer identity: the bare uuidv7, stripped of
 /// the legacy `peer.` secure-registration prefix. Per the uuidv7 identity rule a
 /// peer has exactly ONE id; the secure/insecure registration form is a separate
-/// concern the transport/PKI layer owns (and `PodInstance::secure` already
+/// concern the transport/PKI layer owns (and `MeshInstance::secure` already
 /// carries), never part of the identity the inventory + topology views expose.
 fn canonical_peer_id(id: &str) -> &str {
     id.strip_prefix("peer.").unwrap_or(id)
@@ -296,7 +296,7 @@ fn canonical_peer_id(id: &str) -> &str {
 /// Normalize a peer-instance list for the view layer: rewrite each `peer_id`
 /// (and any `system.parent_peer_id`) to its canonical bare uuidv7, and collapse
 /// secure/insecure twins of the same peer to a single instance (keep first).
-fn canonicalize_instances(instances: &[PodInstance]) -> Vec<PodInstance> {
+fn canonicalize_instances(instances: &[MeshInstance]) -> Vec<MeshInstance> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for inst in instances {
@@ -316,12 +316,12 @@ fn canonicalize_instances(instances: &[PodInstance]) -> Vec<PodInstance> {
 }
 
 fn build_forest(
-    instances: &[PodInstance],
+    instances: &[MeshInstance],
     regs: &[contract::service_identity::ServiceRegistration],
 ) -> Forest {
     let instances = canonicalize_instances(instances);
     let instances = instances.as_slice();
-    let by_peer: HashMap<&str, &PodInstance> =
+    let by_peer: HashMap<&str, &MeshInstance> =
         instances.iter().map(|i| (i.peer_id.as_str(), i)).collect();
 
     let mut mac_index: HashMap<String, String> = HashMap::new();
@@ -338,7 +338,7 @@ fn build_forest(
         }
     }
 
-    let infer_parent = |inst: &PodInstance| -> Option<String> {
+    let infer_parent = |inst: &MeshInstance| -> Option<String> {
         if let Some(sys) = inst.system.as_ref() {
             if let Some(server_parent) = sys.parent_peer_id.as_deref()
                 && server_parent != inst.peer_id
@@ -361,8 +361,8 @@ fn build_forest(
         None
     };
 
-    let mut children_of: HashMap<String, Vec<PodInstance>> = HashMap::new();
-    let mut roots: Vec<PodInstance> = Vec::new();
+    let mut children_of: HashMap<String, Vec<MeshInstance>> = HashMap::new();
+    let mut roots: Vec<MeshInstance> = Vec::new();
     for inst in instances {
         match infer_parent(inst) {
             Some(parent) => children_of.entry(parent).or_default().push(inst.clone()),
@@ -370,7 +370,7 @@ fn build_forest(
         }
     }
 
-    let sort_key = |inst: &PodInstance| -> String {
+    let sort_key = |inst: &MeshInstance| -> String {
         inst.system
             .as_ref()
             .and_then(|s| s.hostname.as_deref())
@@ -413,7 +413,7 @@ fn build_forest(
 /// host directly) and its `port` matches one of the claim's endpoints. A match
 /// sets `service`/`service_role` (registration wins over the provider hint).
 fn synthesize_claim_nodes(
-    instances: &[PodInstance],
+    instances: &[MeshInstance],
     regs: &[contract::service_identity::ServiceRegistration],
 ) -> HashMap<String, Vec<ClaimNode>> {
     // MACs owned by real peers → skip claims that are actually peers.
@@ -822,8 +822,8 @@ fn consolidate_controllers(nodes: &mut Vec<ClaimNode>) {
 /// Recursively materialize a node and its descendants. `visited` guards
 /// against cycles (shouldn't happen with current inference rules).
 fn build_node(
-    inst: &PodInstance,
-    children_of: &HashMap<String, Vec<PodInstance>>,
+    inst: &MeshInstance,
+    children_of: &HashMap<String, Vec<MeshInstance>>,
     claim_children: &HashMap<String, Vec<ClaimNode>>,
     visited: &mut HashSet<String>,
 ) -> InventoryNode {
@@ -872,8 +872,8 @@ fn claim_to_node(c: &ClaimNode) -> InventoryNode {
 /// (None) trails. When no clusters are configured, returns a single
 /// ungrouped bucket holding every root.
 fn bucket_roots(
-    roots: Vec<PodInstance>,
-    children_of: &HashMap<String, Vec<PodInstance>>,
+    roots: Vec<MeshInstance>,
+    children_of: &HashMap<String, Vec<MeshInstance>>,
     claim_children: &HashMap<String, Vec<ClaimNode>>,
     cluster_by_peer: &BTreeMap<String, String>,
     summaries: &HashMap<String, ClusterSummary>,
@@ -934,12 +934,12 @@ fn bucket_roots(
 }
 
 // Per-node drill-down (former `inventory.detail`) is retired: the pod topology
-// tree (`pod.detail`) carries structure, and per-node richness comes from the
+// tree (`system.topology`) carries structure, and per-node richness comes from the
 // level-specific detail verbs (`system.detail`, `service.status`).
 
 /// Index a materialized tree by node id and record each node's parent id. Kept
 /// for the topology-structure test below; the parent-inference forest it walks
-/// still powers `pod.detail`.
+/// still powers `system.topology`.
 #[cfg(test)]
 fn index_tree(
     node: &InventoryNode,
@@ -988,10 +988,10 @@ mod tests {
         );
     }
 
-    fn inst(peer_id: &str, role: &str, hostname: &str) -> PodInstance {
+    fn inst(peer_id: &str, role: &str, hostname: &str) -> MeshInstance {
         let mut sys = empty_sys();
         sys.hostname = Some(hostname.to_string());
-        PodInstance {
+        MeshInstance {
             id: peer_id.to_string(),
             peer_id: peer_id.to_string(),
             label: hostname.to_string(),
@@ -1018,12 +1018,12 @@ mod tests {
         }
     }
 
-    fn with_iface_mac(mut i: PodInstance, mac: &str) -> PodInstance {
+    fn with_iface_mac(mut i: MeshInstance, mac: &str) -> MeshInstance {
         i.system.as_mut().unwrap().macs.push(mac.to_string());
         i
     }
 
-    fn with_claim_mac(mut i: PodInstance, mac: &str) -> PodInstance {
+    fn with_claim_mac(mut i: MeshInstance, mac: &str) -> MeshInstance {
         let sys = i.system.as_mut().unwrap();
         sys.claims.push(TopologyClaim {
             kind: "guest".into(),
@@ -1040,14 +1040,14 @@ mod tests {
 
     /// Push a fully-specified claim (no MAC → never matches a peer) onto a peer.
     fn with_claim(
-        mut i: PodInstance,
+        mut i: MeshInstance,
         kind: &str,
         native_id: &str,
         name: &str,
         provider: &str,
         instance: &str,
         runs_on: Option<&str>,
-    ) -> PodInstance {
+    ) -> MeshInstance {
         let sys = i.system.as_mut().unwrap();
         sys.claims.push(TopologyClaim {
             kind: kind.into(),
@@ -1063,8 +1063,8 @@ mod tests {
     }
 
     fn bucket_empty(
-        roots: Vec<PodInstance>,
-        children_of: &HashMap<String, Vec<PodInstance>>,
+        roots: Vec<MeshInstance>,
+        children_of: &HashMap<String, Vec<MeshInstance>>,
         claim_children: &HashMap<String, Vec<ClaimNode>>,
     ) -> Vec<InventoryCluster> {
         bucket_roots(
@@ -1186,12 +1186,12 @@ mod tests {
 
     /// Push a claim carrying a published endpoint (for correlation tests).
     fn with_claim_endpoint(
-        mut i: PodInstance,
+        mut i: MeshInstance,
         kind: &str,
         native_id: &str,
         name: &str,
         port: u16,
-    ) -> PodInstance {
+    ) -> MeshInstance {
         let sys = i.system.as_mut().unwrap();
         sys.claims.push(TopologyClaim {
             kind: kind.into(),
@@ -1359,14 +1359,14 @@ mod tests {
     /// groups under a stack). Every other field defaults.
     #[allow(clippy::too_many_arguments)]
     fn with_container_claim(
-        mut i: PodInstance,
+        mut i: MeshInstance,
         native_id: &str,
         name: &str,
         provider: &str,
         instance: &str,
         uuid: &str,
         service_identity: Option<&str>,
-    ) -> PodInstance {
+    ) -> MeshInstance {
         let sys = i.system.as_mut().unwrap();
         sys.claims.push(TopologyClaim {
             kind: "container".into(),
@@ -1480,14 +1480,14 @@ mod tests {
     }
 
     /// Set `routes` on the most recently pushed claim of a peer.
-    fn with_claim_routes(mut i: PodInstance, routes: contract::topology::Routes) -> PodInstance {
+    fn with_claim_routes(mut i: MeshInstance, routes: contract::topology::Routes) -> MeshInstance {
         let claims = &mut i.system.as_mut().unwrap().claims;
         claims.last_mut().unwrap().routes = routes;
         i
     }
 
     /// Set `state` on the most recently pushed claim of a peer.
-    fn with_claim_state(mut i: PodInstance, state: &str) -> PodInstance {
+    fn with_claim_state(mut i: MeshInstance, state: &str) -> MeshInstance {
         let claims = &mut i.system.as_mut().unwrap().claims;
         claims.last_mut().unwrap().state = Some(state.to_string());
         i
@@ -1658,12 +1658,12 @@ mod tests {
         assert_eq!(c.routes[0], route);
     }
 
-    fn with_system_type(mut i: PodInstance, t: &str) -> PodInstance {
+    fn with_system_type(mut i: MeshInstance, t: &str) -> MeshInstance {
         i.system.as_mut().unwrap().system_type = Some(t.to_string());
         i
     }
 
-    fn with_cluster(mut i: PodInstance, name: &str) -> PodInstance {
+    fn with_cluster(mut i: MeshInstance, name: &str) -> MeshInstance {
         i.system.as_mut().unwrap().cluster = Some(name.to_string());
         i
     }

@@ -27,6 +27,7 @@ pub mod metrics;
 pub mod models;
 // `ntfy` endpoint registry now lives in the ntfy plugin via
 // `plugin_toolkit::endpoint_resource!`.
+pub mod mesh;
 pub mod openapi_specs;
 /// Fetches vendored OpenAPI specs over HTTP. Gated by the default-on `http`
 /// feature so a thin plugin — which reaches `db` via `notifications` but never
@@ -48,7 +49,6 @@ pub mod plugin_tables;
 pub mod plugin_tools;
 pub mod plugin_types;
 pub mod plugins;
-pub mod pod;
 pub mod pool;
 pub mod replicate;
 pub mod replicate_engine;
@@ -56,7 +56,7 @@ pub mod replication_ops;
 pub mod schema_fragments;
 
 // Self-alias so in-crate code and tests can name `db::…` paths just like
-// downstream callers do (`db::open_unencrypted`, `db::pod::…`, etc.).
+// downstream callers do (`db::open_unencrypted`, `crate::mesh::…`, etc.).
 // Originally added for proc-macro emissions; the macros now target
 // `::db_types::…` directly, but the alias still earns its keep as a
 // uniform-path convenience inside the crate.
@@ -813,7 +813,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
     //
     // Why the squash: keeping 13 pre-prod migrations around makes every
     // fresh install replay them in order, and locks the column shapes for
-    // pod_peers + pod_self into a sequence of ALTER TABLEs rather than the
+    // mesh_peers + mesh_self into a sequence of ALTER TABLEs rather than the
     // intended final CREATE. Window closes the moment a non-Scott peer
     // joins the mesh (= the first time we have to honour replay history).
     conn.execute_batch(
@@ -1107,9 +1107,9 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
 
-        -- pod_discovery: mDNS / manual-probe seen peers, keyed by ed25519
+        -- mesh_discovery: mDNS / manual-probe seen peers, keyed by ed25519
         -- bootstrap pubkey fingerprint (stable across restarts and IP changes).
-        -- state = 'unclaimed' (no mesh CA) or 'pod:<pod_id>' (member of a pod).
+        -- state = 'unclaimed' (no mesh CA) or 'pod:<mesh_id>' (member of a pod).
         -- can_invite = 1 iff that peer advertises it has the mesh CA private key
         -- AND has self_secure=true. Auto-offer scheduler only targets state=unclaimed.
         CREATE TABLE IF NOT EXISTS pod_discovery (
@@ -1124,7 +1124,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             last_seen_at  INTEGER NOT NULL
         );
 
-        -- pod_pending_offers: outstanding pairing offers in either direction.
+        -- mesh_pending_offers: outstanding pairing offers in either direction.
         -- direction='out' rows are offers WE pushed (inviter side); 'in' rows
         -- are offers WE received and are waiting for the user to `pod accept`
         -- with the matching code. code_hash is sha256(code) so the raw code
@@ -1153,15 +1153,15 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_pod_pending_offers_fp
             ON pod_pending_offers (peer_pubkey_fp, direction);
 
-        -- pod_peers: paired members of the pod. `peer_port` is the peer's mesh
+        -- mesh_peers: paired members of the pod. `peer_port` is the peer's mesh
         -- listen port (one port, many addresses); departed_at marks a peer that
         -- ran `pod leave` and is no longer trusted until re-paired.
         --
         -- NOTE: `peer_addr` is the pre-cleanup scalar primary address. Migration
-        -- 20260729000000 backfills it into `pod_peer_addresses` (the multi-route
+        -- 20260729000000 backfills it into `mesh_peer_addresses` (the multi-route
         -- source of truth) and DROPs the column. The baseline keeps it so the
         -- migration's backfill+drop has a column to read on a fresh DB. Peer
-        -- reachability lives in `pod_peer_addresses`; `peer_port` stays (a single
+        -- reachability lives in `mesh_peer_addresses`; `peer_port` stays (a single
         -- listen port is a peer property, not an address smell).
         CREATE TABLE IF NOT EXISTS pod_peers (
             peer_id       TEXT PRIMARY KEY,
@@ -1263,7 +1263,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         --
         -- NOTE: `key`/`detected_at` are the pre-cleanup names; migration
         -- 20260728000000 renames them to `kind`/`last_seen_at` to match the
-        -- shared `Route` model + `pod_peer_addresses`. The baseline keeps the
+        -- shared `Route` model + `mesh_peer_addresses`. The baseline keeps the
         -- old names so migration 20260715120000 (which rebuilds this table and
         -- reads `key`/`detected_at`) still works on a fresh DB; the rename runs
         -- last and converges every DB on the clean names.
@@ -1275,8 +1275,8 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (key, value)
         );
 
-        -- pod_peer_addresses: per-peer multi-channel address records, mirrored
-        -- in via pod/ping. Augments pod_peers (which holds a single primary
+        -- mesh_peer_addresses: per-peer multi-channel address records, mirrored
+        -- in via pod/ping. Augments mesh_peers (which holds a single primary
         -- addr) with every kind we've seen.
         CREATE TABLE IF NOT EXISTS pod_peer_addresses (
             peer_id      TEXT NOT NULL,
@@ -1319,7 +1319,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             expires_at   TEXT,
             -- Issuing user. NULL for tokens minted before user binding existed
             -- (pre-2026-05-29). New tokens record the authenticated operator
-            -- so REST bearer-auth produces a CallerIdentity for pod/exec
+            -- so REST bearer-auth produces a CallerIdentity for mesh/exec
             -- caller-token minting. See [[project-remote-exec-full-fix]] S4.
             user_id      TEXT,
             -- Opt-in: a read token with can_mutate = 1 may invoke DATA_MUTATION
@@ -1365,7 +1365,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             ON sessions(user_id, expires_at) WHERE revoked_at IS NULL;
 
         -- This host's own system-snapshot timeseries. Telemetry is local-only
-        -- and fetched on demand (pod::peer_info) — it is never mirrored across
+        -- and fetched on demand (system::mesh::peer_info) — it is never mirrored across
         -- the mesh, so every row belongs to this host. snapshot_at_unix PK makes
         -- a duplicate insert a no-op (INSERT OR IGNORE). Retention cap enforced
         -- inside host_status::insert_status. See migration

@@ -14,7 +14,7 @@ use serde::de::DeserializeOwned;
 pub trait OrcaToolDef: Send + Sync + 'static {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
-    /// Whether this tool may be invoked by a paired pod peer via `pod/exec`.
+    /// Whether this tool may be invoked by a paired system via `mesh/exec`.
     /// Default is **off** — opt in per-tool. Destructive or identity-tied ops
     /// (uninstall, dev_disable, key rotation) MUST stay false.
     const REMOTE_OK: bool = false;
@@ -22,14 +22,14 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     /// (REST, MCP-over-HTTP). `"any"` (default) means any authenticated identity
     /// passes; `"admin"` requires the caller's `AuthIdentity::role == "admin"`.
     ///
-    /// Enforcement points: REST middleware on `/api/v1/*`, and `pod/exec`
+    /// Enforcement points: REST middleware on `/api/v1/*`, and `mesh/exec`
     /// (which has no human identity and therefore refuses any admin-role tool).
     /// CLI / loopback / MCP-stdio run in-process as the daemon owner and are
     /// not gated here.
     const REQUIRED_ROLE: &'static str = "any";
     /// Whether this tool is a **data mutation** — a write against an external
     /// managed system (a proxmox VM create, an unraid plugin install, …) as
-    /// opposed to a control-plane admin op (auth, secrets, system, config, pod).
+    /// opposed to a control-plane admin op (auth, secrets, system, config).
     ///
     /// Data mutations default to `REQUIRED_ROLE = "admin"`, but this flag lets a
     /// non-admin identity that has *opted in* (an API token / session granted
@@ -44,7 +44,7 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     /// (`contract::plan::ExecutionPlan`) and change nothing.
     ///
     /// Enforced centrally in `dispatch::erased::ToolWrapper::run_json`, which
-    /// every surface funnels through — so CLI, MCP, REST and pod/exec all
+    /// every surface funnels through — so CLI, MCP, REST and mesh/exec all
     /// inherit it rather than each verb re-implementing a flag. The opt-in is
     /// read from the raw args before they are deserialized, so a gated tool's
     /// `Args` need not carry the field.

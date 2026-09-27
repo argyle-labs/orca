@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::system::SystemStatusReport;
 use anyhow::{Context, Result};
-use system::system::SystemStatusReport;
 
 /// TTL for a peer's `system.detail` snapshot (runtime fields + OS SystemInfo).
 /// Medium: `system.detail` is the heavier call (storage walk, diagnostics), and
@@ -137,7 +137,7 @@ pub struct PeerUpdateFields {
 /// TTL — used after an update applies so the new version surfaces at once.
 pub async fn peer_detail(peer_id: &str, force: bool) -> Result<SystemStatusReport> {
     get_or_fetch(&DETAIL_CACHE, peer_id, DETAIL_TTL, force, || async {
-        let res = crate::exec_peer(peer_id, "system.detail", serde_json::json!({})).await?;
+        let res = crate::mesh::exec_peer(peer_id, "system.detail", serde_json::json!({})).await?;
         let report: SystemStatusReport =
             serde_json::from_value(res.result).context("decode system.detail response")?;
         Ok(report)
@@ -148,8 +148,8 @@ pub async fn peer_detail(peer_id: &str, force: bool) -> Result<SystemStatusRepor
 /// Fetch (or serve from cache) a peer's `system.update` state.
 pub async fn peer_update(peer_id: &str, force: bool) -> Result<PeerUpdateFields> {
     get_or_fetch(&UPDATE_CACHE, peer_id, UPDATE_TTL, force, || async {
-        let res = crate::exec_peer(peer_id, "system.update", serde_json::json!({})).await?;
-        let out: system::commands::SystemUpdateOutput =
+        let res = crate::mesh::exec_peer(peer_id, "system.update", serde_json::json!({})).await?;
+        let out: crate::commands::SystemUpdateOutput =
             serde_json::from_value(res.result).context("decode SystemUpdateOutput")?;
         Ok(update_fields_from_output(out))
     })
@@ -160,14 +160,14 @@ pub async fn peer_update(peer_id: &str, force: bool) -> Result<PeerUpdateFields>
 /// canonical (no `v` prefix); `latest` is kept verbatim from the release tag.
 /// Prefer the peer's own server-side `update_available` flag so list and detail
 /// views never disagree; fall back to recomputing for older peers.
-fn update_fields_from_output(out: system::commands::SystemUpdateOutput) -> PeerUpdateFields {
+fn update_fields_from_output(out: crate::commands::SystemUpdateOutput) -> PeerUpdateFields {
     let version = (!out.current_version.is_empty()).then_some(out.current_version.clone());
     let channel = (!out.channel.is_empty()).then_some(out.channel.clone());
     let latest = out.latest.clone();
     let update_available = out
         .update_available
         .unwrap_or_else(|| match (&version, &latest) {
-            (Some(v), Some(l)) => system::update_state::is_update_available(v, l),
+            (Some(v), Some(l)) => crate::update_state::is_update_available(v, l),
             _ => false,
         });
     PeerUpdateFields {

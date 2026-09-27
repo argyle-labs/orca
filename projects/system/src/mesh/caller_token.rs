@@ -1,4 +1,4 @@
-//! Signed caller token for `pod/exec` (S1 of remote-exec-full-fix).
+//! Signed caller token for `mesh/exec` (S1 of remote-exec-full-fix).
 //!
 //! The mesh mTLS chain proves which *peer* is on the wire, but not which
 //! *user* that peer is acting for. Today the calling side just asserts a role
@@ -12,7 +12,7 @@
 //! against a fully compromised peer (which already holds mesh mTLS certs).
 //! What it does provide:
 //!   - authenticated origin: the signer fp must match the authenticated peer's
-//!     pinned `pod_peers.pubkey_fp` (verified by the recipient, not here);
+//!     pinned `mesh_peers.pubkey_fp` (verified by the recipient, not here);
 //!   - anti-tamper: the signature covers `tool` + `args_hash`;
 //!   - anti-replay: a random `nonce` the recipient tracks in a short window;
 //!   - expiry: `expires_at` bounds the window a captured token is usable.
@@ -35,7 +35,7 @@ use utils::hash;
 /// dispatch, so a tight window is fine and limits replay exposure.
 pub const DEFAULT_TTL_SECS: i64 = 60;
 
-/// The signed body carried in `PodExecParams.caller_token`. Serialized to
+/// The signed body carried in `MeshExecParams.caller_token`. Serialized to
 /// canonical JSON and signed; see [`utils::pki::sign_envelope`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallerToken {
@@ -125,7 +125,7 @@ pub fn mint(
 pub struct Verified {
     pub token: CallerToken,
     /// Bootstrap-pubkey fingerprint of the signer, to be matched against the
-    /// authenticated peer's pinned `pod_peers.pubkey_fp`.
+    /// authenticated peer's pinned `mesh_peers.pubkey_fp`.
     pub signer_fp: String,
 }
 

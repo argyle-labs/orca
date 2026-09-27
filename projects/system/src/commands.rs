@@ -318,6 +318,15 @@ pub struct SystemUpdateArgs {
     #[arg(long)]
     pub prerelease: bool,
 
+    /// Fleet scope only: proceed even though another fleet roll holds the
+    /// single-flight lock. For a genuinely stuck lock — a controller killed
+    /// mid-roll whose lock has not yet aged out. It defeats the guarantee that
+    /// the fleet is never updated concurrently (#616), so it is never the
+    /// routine answer to "already in flight".
+    #[serde(default)]
+    #[arg(long)]
+    pub break_lock: bool,
+
     /// Reserved forward-compat knob for excluding known-edge/unreachable peers.
     /// There is no reliable per-peer reachability signal on the roster today, so
     /// the fan-out always attempts every joined peer and records a per-host
@@ -639,7 +648,14 @@ async fn system_update(
             })?;
         let _ = args.include_edge; // reserved — see SystemUpdateArgs docs
         let mut out = hook
-            .fleet_update(args.execute, args.prerelease, ctx)
+            .fleet_update(
+                crate::fleet::FleetUpdateRequest {
+                    execute: args.execute,
+                    prerelease: args.prerelease,
+                    break_lock: args.break_lock,
+                },
+                ctx,
+            )
             .await?;
         // OS packages stay a per-host concern: apply them here, after the
         // fan-out, so the aggregate can still carry them when asked.
@@ -1201,12 +1217,12 @@ async fn delegate_fetch_and_apply(
     let target = build_target().to_string();
 
     let conn = db::open_default().context("open orca.db for peer enumeration")?;
-    let present: Vec<db::pod::peerdb::PeerRow> = db::pod::peerdb::list_peers(&conn)
+    let present: Vec<db::mesh::peerdb::PeerRow> = db::mesh::peerdb::list_peers(&conn)
         .context("list paired peers")?
         .into_iter()
         .filter(|p| p.departed_at.is_none())
         .collect();
-    let candidates: Vec<&db::pod::peerdb::PeerRow> =
+    let candidates: Vec<&db::mesh::peerdb::PeerRow> =
         present.iter().filter(|p| p.peer_secure).collect();
     if candidates.is_empty() {
         let insecure: Vec<(String, String)> = present
@@ -2477,7 +2493,7 @@ mod tests {
         let err = db::with_db_path(dbp, async {
             {
                 let conn = db::open_default().expect("open scoped db");
-                db::pod::peerdb::upsert_peer(
+                db::mesh::peerdb::upsert_peer(
                     &conn,
                     &peer_id,
                     "gamma-host",
@@ -2609,7 +2625,7 @@ mod tests {
         let err = db::with_db_path(dbp, async {
             {
                 let conn = db::open_default().expect("open scoped db");
-                db::pod::peerdb::upsert_peer(
+                db::mesh::peerdb::upsert_peer(
                     &conn,
                     &peer_id,
                     "delta-host",
@@ -2621,7 +2637,7 @@ mod tests {
                 .expect("insert peer");
                 // Promote to a secure (trusted) peer so it survives the
                 // candidate filter and we reach the transport check.
-                db::pod::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
+                db::mesh::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
                     .expect("set trust");
             }
             delegate_fetch_and_apply(Some("0.0.9"), &Channel::Stable, &ctx).await

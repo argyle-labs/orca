@@ -1,24 +1,25 @@
-use crate::{
-    PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodExecDispatch, PodLeaveOutput,
-    PodOfferOutput, PodPeerDto, PodPendingOfferDto, PodPingOutput, PodTrustOutput, Route, Routes,
+use crate::mesh::{
+    MeshAcceptOutput, MeshCertStatusOutput, MeshDiscoveryRowDto, MeshExecDispatch, MeshLeaveOutput,
+    MeshOfferOutput, MeshPeerDto, MeshPendingOfferDto, MeshPingOutput, MeshTrustOutput, Route,
+    Routes,
 };
+use crate::update_state::read_channel_marker;
 use anyhow::{Context, Result};
 use db::ports::mesh_port;
 use std::time::Instant;
-use system::update_state::read_channel_marker;
 
-use crate::cli::dial_bootstrap_pub;
-use crate::pki_dir;
-use crate::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
-use db::pod as pdb;
+use crate::mesh::cli::dial_bootstrap_pub;
+use crate::mesh::pki_dir;
+use crate::mesh::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
+use db::mesh as pdb;
 
-pub async fn list_enriched() -> Result<Vec<PodPeerDto>> {
+pub async fn list_enriched() -> Result<Vec<MeshPeerDto>> {
     list_enriched_impl().await
 }
 
 /// Refuse to install a mesh leaf cert whose Subject CN carries the legacy
 /// `peer.<id>` prefix retired in rc.16. A lagging inviter that hasn't been
-/// upgraded would otherwise re-introduce the duplicate-pod_peers flip — fail
+/// upgraded would otherwise re-introduce the duplicate-mesh_peers flip — fail
 /// loud per feedback_no_id_prefixes so the operator notices and upgrades the
 /// inviting peer rather than silently re-pairing through a stale CN.
 fn reject_legacy_peer_cn(cert_pem: &str, role: &str) -> Result<()> {
@@ -32,7 +33,7 @@ fn reject_legacy_peer_cn(cert_pem: &str, role: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
+pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
     let offer = db::pool::with_pooled_or_open(|conn| {
         pdb::find_pending_offer_by_code(conn, code)?
             .context("no pending offer matches that code (mistyped, expired, or already used?)")
@@ -46,8 +47,8 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
         .context("offer has no mesh CA cert")?;
     std::fs::write(utils::pki::mesh_ca_cert_path(&pki_d), ca_pem.as_bytes())?;
 
-    let peer_cn = system::host_identity::machine_id().to_string();
-    let display_name = system::host_identity::display_hostname().to_string();
+    let peer_cn = crate::host_identity::machine_id().to_string();
+    let display_name = crate::host_identity::display_hostname().to_string();
     let (csr_client_pem, client_key_pem) =
         utils::pki::build_peer_csr(&peer_cn, utils::pki::PeerRole::Client)?;
     let (csr_server_pem, server_key_pem) =
@@ -91,7 +92,7 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
             addr,
             offer.peer_port,
             &offer.peer_pubkey_fp,
-            "pod/join-confirm",
+            "mesh/join-confirm",
             params.clone(),
         )
         .await
@@ -120,13 +121,13 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
         server_cert_pem: String,
         ca_cert_pem: String,
         inviter_peer_id: String,
-        pod_id: String,
+        mesh_id: String,
     }
     let r: Resp = serde_json::from_value(resp_value)?;
 
     // Defensive: a lagging peer (pre-rc.16) may still sign certs with the
     // old `peer.<id>` CN convention. Installing one re-introduces the
-    // duplicate-pod_peers flip that rc.16 fixed. Fail loud per
+    // duplicate-mesh_peers flip that rc.16 fixed. Fail loud per
     // feedback_no_id_prefixes — operator re-pairs against a current peer
     // rather than silently swallowing a legacy CN.
     reject_legacy_peer_cn(&r.server_cert_pem, "server")?;
@@ -149,7 +150,7 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
 
     db::pool::with_pooled_or_open(|conn| {
         pdb::set_self_secure(conn, false)?;
-        pdb::set_pod_id(conn, &r.pod_id)?;
+        pdb::set_mesh_id(conn, &r.mesh_id)?;
         pdb::upsert_peer(
             conn,
             &r.inviter_peer_id,
@@ -168,7 +169,7 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
         // inviter-side fix; clear is a no-op when no tombstone is present.
         if let Err(e) = pdb::clear_forget_tombstone(conn, &r.inviter_peer_id) {
             tracing::warn!(
-                "[pod] accept: clear forget-tombstone for inviter {} failed: {e:#}",
+                "[mesh] accept: clear forget-tombstone for inviter {} failed: {e:#}",
                 r.inviter_peer_id
             );
         }
@@ -176,8 +177,8 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
         Ok(())
     })?;
 
-    Ok(PodAcceptOutput {
-        pod_id: r.pod_id,
+    Ok(MeshAcceptOutput {
+        mesh_id: r.mesh_id,
         inviter_peer_id: r.inviter_peer_id,
         inviter_hostname: offer.peer_hostname,
         inviter_addr: dialed_addr,
@@ -195,7 +196,7 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
 /// must build targets *before* awaiting the dial (holding `&conn` across an
 /// `.await` would make the enclosing future non-`Send`).
 fn dial_targets(conn: &rusqlite::Connection, peer: &pdb::PeerRow) -> Vec<String> {
-    crate::dialer::dial_targets_for_peer(conn, &peer.peer_id, &peer.peer_addr)
+    crate::mesh::dialer::dial_targets_for_peer(conn, &peer.peer_id, &peer.peer_addr)
         .unwrap_or_else(|_| vec![peer.peer_addr.clone()])
 }
 
@@ -210,15 +211,15 @@ async fn notify_targets(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    crate::dialer::try_targets(targets, |t| {
+    crate::mesh::dialer::try_targets(targets, |t| {
         let method = method.to_string();
         let params = params.clone();
-        async move { crate::cli::call_pod_method_pub(&t, port, &method, params).await }
+        async move { crate::mesh::cli::call_pod_method_pub(&t, port, &method, params).await }
     })
     .await
 }
 
-pub async fn trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
+pub async fn trust(peer_id: &str, on: bool) -> Result<MeshTrustOutput> {
     let (peer, new, targets) = db::pool::with_pooled_or_open(|conn| {
         let peer = pdb::list_peers(conn)?
             .into_iter()
@@ -232,7 +233,7 @@ pub async fn trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
     let notify_result = match notify_targets(
         &targets,
         peer.peer_port,
-        "pod/notify-trust",
+        "mesh/notify-trust",
         serde_json::json!({ "trust": on }),
     )
     .await
@@ -242,12 +243,12 @@ pub async fn trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
     };
 
     if pdb::is_mutual_secure(new)
-        && let Err(e) = crate::cli::replicate_ca_key_if_needed_pub(&peer).await
+        && let Err(e) = crate::mesh::cli::replicate_ca_key_if_needed_pub(&peer).await
     {
         tracing::warn!("CA-key replication: {e}");
     }
 
-    Ok(PodTrustOutput {
+    Ok(MeshTrustOutput {
         peer_id: peer_id.to_string(),
         local_secure: new.local_secure,
         peer_secure: new.peer_secure,
@@ -260,12 +261,12 @@ pub async fn push_trust(
     peer_id: &str,
     on: bool,
     caller: Option<contract::CallerIdentity>,
-) -> Result<PodTrustOutput> {
+) -> Result<MeshTrustOutput> {
     // Our own peer_id as the remote knows us.
-    let own_id = system::host_identity::machine_id().to_string();
-    // Execute pod.trust on the remote host, making THEM set their
+    let own_id = crate::host_identity::machine_id().to_string();
+    // Execute system.mesh.update --action trust on the remote host, making THEM set their
     // local_secure for us. `push: false` prevents recursion. The caller is the
-    // local admin who invoked `pod.trust` — the recipient authorizes the
+    // local admin who invoked `system.mesh.update --action trust` — the recipient authorizes the
     // mutating handshake against that admin's replicated users row (zero-trust:
     // no synthetic/asserted identity).
     #[allow(clippy::disallowed_types)] // exec is the wire-level dispatch boundary
@@ -277,7 +278,7 @@ pub async fn push_trust(
         None,
     )
     .await?;
-    let remote: PodTrustOutput = serde_json::from_value(dispatch.result)?;
+    let remote: MeshTrustOutput = serde_json::from_value(dispatch.result)?;
     // remote.local_secure = they now trust us (= our peer_secure for this peer).
     // Our own local_secure for them is unchanged — read it from DB.
     let our_local_secure = db::pool::with_pooled_or_open(|conn| {
@@ -288,7 +289,7 @@ pub async fn push_trust(
             .unwrap_or(false))
     })?;
     let peer_secure = remote.local_secure;
-    Ok(PodTrustOutput {
+    Ok(MeshTrustOutput {
         peer_id: peer_id.to_string(),
         local_secure: our_local_secure,
         peer_secure,
@@ -297,7 +298,7 @@ pub async fn push_trust(
     })
 }
 
-pub async fn ping(peer_id: &str) -> PodPingOutput {
+pub async fn ping(peer_id: &str) -> MeshPingOutput {
     let resolved = db::pool::with_pooled_or_open(|conn| {
         let Some(peer) = pdb::list_peers(conn)
             .ok()
@@ -305,14 +306,14 @@ pub async fn ping(peer_id: &str) -> PodPingOutput {
         else {
             return Ok(None);
         };
-        let targets = crate::dialer::dial_targets_for_peer(conn, peer_id, &peer.peer_addr)
+        let targets = crate::mesh::dialer::dial_targets_for_peer(conn, peer_id, &peer.peer_addr)
             .unwrap_or_else(|_| vec![peer.peer_addr.clone()]);
         Ok(Some(targets))
     });
     let targets = match resolved {
         Ok(Some(targets)) => targets,
         Ok(None) => {
-            return PodPingOutput {
+            return MeshPingOutput {
                 ok: false,
                 latency_ms: 0,
                 error: Some(format!("no such peer: {peer_id}")),
@@ -322,7 +323,7 @@ pub async fn ping(peer_id: &str) -> PodPingOutput {
             };
         }
         Err(e) => {
-            return PodPingOutput {
+            return MeshPingOutput {
                 ok: false,
                 latency_ms: 0,
                 error: Some(e.to_string()),
@@ -333,12 +334,12 @@ pub async fn ping(peer_id: &str) -> PodPingOutput {
         }
     };
     let start = Instant::now();
-    match crate::dialer::try_targets_tracked(Some(peer_id), &targets, |t| async move {
-        crate::ping(&t).await
+    match crate::mesh::dialer::try_targets_tracked(Some(peer_id), &targets, |t| async move {
+        crate::mesh::ping(&t).await
     })
     .await
     {
-        Ok(r) => PodPingOutput {
+        Ok(r) => MeshPingOutput {
             ok: true,
             latency_ms: start.elapsed().as_millis() as u32,
             error: None,
@@ -346,7 +347,7 @@ pub async fn ping(peer_id: &str) -> PodPingOutput {
             hostname: Some(r.hostname),
             version: Some(r.version),
         },
-        Err(e) => PodPingOutput {
+        Err(e) => MeshPingOutput {
             ok: false,
             latency_ms: start.elapsed().as_millis() as u32,
             error: Some(e.to_string()),
@@ -357,11 +358,11 @@ pub async fn ping(peer_id: &str) -> PodPingOutput {
     }
 }
 
-pub fn discover() -> Result<Vec<PodDiscoveryRowDto>> {
+pub fn discover() -> Result<Vec<MeshDiscoveryRowDto>> {
     let rows = db::pool::with_pooled_or_open(pdb::list_discovery)?;
     Ok(rows
         .into_iter()
-        .map(|r| PodDiscoveryRowDto {
+        .map(|r| MeshDiscoveryRowDto {
             pubkey_fp: r.pubkey_fp,
             peer_id: r.peer_id,
             hostname: r.hostname,
@@ -375,12 +376,12 @@ pub fn discover() -> Result<Vec<PodDiscoveryRowDto>> {
         .collect())
 }
 
-pub fn pending() -> Result<Vec<PodPendingOfferDto>> {
+pub fn pending() -> Result<Vec<MeshPendingOfferDto>> {
     let rows = db::pool::with_pooled_or_open(|conn| pdb::list_pending_offers(conn, "in"))?;
     let now = utils::time::now_secs_since_epoch();
     Ok(rows
         .into_iter()
-        .map(|r| PodPendingOfferDto {
+        .map(|r| MeshPendingOfferDto {
             offer_id: r.offer_id,
             direction: r.direction,
             peer_pubkey_fp: r.peer_pubkey_fp,
@@ -388,7 +389,7 @@ pub fn pending() -> Result<Vec<PodPendingOfferDto>> {
             peer_addr: r.peer_addr,
             peer_port: r.peer_port,
             inviter_peer_id: r.inviter_peer_id,
-            pod_id: r.pod_id,
+            mesh_id: r.mesh_id,
             expires_at: r.expires_at,
             ttl_secs: (r.expires_at - now).max(0),
             created_at: r.created_at,
@@ -396,17 +397,17 @@ pub fn pending() -> Result<Vec<PodPendingOfferDto>> {
         .collect())
 }
 
-pub async fn offer(addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
+pub async fn offer(addr: &str, port: Option<u16>) -> Result<MeshOfferOutput> {
     let port = port.unwrap_or_else(mesh_port);
 
     // Look up the joiner in the discovery table by addr.
-    let (d, pod_id, code, offer_id, now) = db::pool::with_pooled_or_open(|conn| {
+    let (d, mesh_id, code, offer_id, now) = db::pool::with_pooled_or_open(|conn| {
         let discovery = pdb::list_discovery(conn)?;
         let d = discovery
             .into_iter()
             .find(|r| r.addr == addr || format!("{}:{}", r.addr, r.port) == addr)
             .with_context(|| {
-                format!("{addr} not found in pod_discovery — is the joiner visible via mDNS?")
+                format!("{addr} not found in mesh_discovery — is the joiner visible via mDNS?")
             })?;
 
         // User-driven invites are idempotent: if an outbound offer to this
@@ -419,7 +420,7 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
             tracing::info!(addr = %d.addr, replaced, "replaced stale outbound offer(s)");
         }
 
-        let pod_id = pdb::get_pod_id(conn)?.unwrap_or_else(|| "default".to_string());
+        let mesh_id = pdb::get_mesh_id(conn)?.unwrap_or_else(|| "default".to_string());
         let code = mint_pairing_code();
         let code_hash = pdb::hash_code(&code);
         let offer_id = utils::id::new();
@@ -440,12 +441,12 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
             None,
             &[], // outbound offer: the joiner dials us, not the reverse
         )?;
-        Ok((d, pod_id, code, offer_id, now))
+        Ok((d, mesh_id, code, offer_id, now))
     })?;
 
-    push_offer(&d.hostname, &d.addr, port, &d.pubkey_fp, &code, &pod_id).await?;
+    push_offer(&d.hostname, &d.addr, port, &d.pubkey_fp, &code, &mesh_id).await?;
 
-    Ok(PodOfferOutput {
+    Ok(MeshOfferOutput {
         code,
         joiner_hostname: d.hostname,
         joiner_addr: d.addr,
@@ -467,11 +468,11 @@ pub fn cancel_offer(addr: &str) -> Result<u32> {
 
 /// Joiner-initiated pairing: dial the inviter directly (no mDNS), request an
 /// offer, and auto-accept — returning the established membership. Delegates to
-/// [`crate::cli::pod_join_core`], the single implementation shared with the CLI
+/// [`crate::mesh::cli::mesh_join_core`], the single implementation shared with the CLI
 /// so every surface (CLI / MCP / REST) pairs identically. `port` overrides any
 /// port embedded in `inviter_addr`.
-pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<PodAcceptOutput> {
-    crate::cli::pod_join_core(inviter_addr, port).await
+pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<MeshAcceptOutput> {
+    crate::mesh::cli::mesh_join_core(inviter_addr, port).await
 }
 
 /// Kick a peer: drop its rows locally and send a one-way "you've been removed"
@@ -479,7 +480,7 @@ pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<PodAcceptOutp
 /// departed (that's what `pod/peer-leaving` is for — the voluntary-exit path
 /// from `leave_self`). Reusing `pod/peer-leaving` here was the 2026-05-28
 /// bug that departed mint on alpha/echo.
-pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
+pub async fn leave_peer(peer_id: &str) -> Result<MeshLeaveOutput> {
     let (peer, targets) = db::pool::with_pooled_or_open(|conn| {
         let peer = pdb::list_peers(conn)?
             .into_iter()
@@ -492,7 +493,7 @@ pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
     let notify_result = match notify_targets(
         &targets,
         peer.peer_port,
-        "pod/peer-removed",
+        "mesh/peer-removed",
         serde_json::json!({}),
     )
     .await
@@ -502,32 +503,32 @@ pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
     };
 
     db::pool::with_pooled_or_open(|conn| {
-        conn.execute("DELETE FROM pod_peers WHERE peer_id = ?", [peer_id])?;
-        conn.execute("DELETE FROM pod_trust WHERE peer_id = ?", [peer_id])?;
+        conn.execute("DELETE FROM mesh_peers WHERE peer_id = ?", [peer_id])?;
+        conn.execute("DELETE FROM mesh_trust WHERE peer_id = ?", [peer_id])?;
         // Durable, replicated forget-tombstone so a straggler that missed the
         // `pod/peer-removed` notice cannot re-gossip the kicked peer back into the
         // mesh on the next roster tick (issue #232).
         if let Err(e) = pdb::write_forget_tombstone(conn, peer_id) {
-            tracing::warn!("[pod] kick tombstone for {peer_id} failed: {e:#}");
+            tracing::warn!("[mesh] kick tombstone for {peer_id} failed: {e:#}");
         }
         Ok(())
     })?;
 
-    Ok(PodLeaveOutput {
+    Ok(MeshLeaveOutput {
         peer_id: peer_id.to_string(),
         notify_result,
         rows_removed: 2,
     })
 }
 
-#[allow(clippy::disallowed_types)] // mirrors PodService::exec — peer-mesh wire payload
+#[allow(clippy::disallowed_types)] // mirrors MeshService::exec — peer-mesh wire payload
 pub async fn exec(
     peer: &str,
     tool: &str,
     args: serde_json::Value,
     caller: Option<contract::CallerIdentity>,
     correlation_id: Option<String>,
-) -> Result<PodExecDispatch> {
+) -> Result<MeshExecDispatch> {
     // "local" / "localhost" → loopback round-trip via the same /api/v1
     // path peers use. Lets the same code path validate the allowlist
     // without leaving the host.
@@ -552,15 +553,15 @@ pub async fn exec(
 
     // Track per-address health against the resolved peer_id so the winning
     // address sorts first next time and a dead one sinks (loopback is untracked).
-    let r = crate::dialer::try_targets_tracked(peer_id.as_deref(), &targets, |addr| {
+    let r = crate::mesh::dialer::try_targets_tracked(peer_id.as_deref(), &targets, |addr| {
         let tool = tool.to_string();
         let args = args.clone();
         let caller = caller.clone();
         let correlation_id = correlation_id.clone();
-        async move { crate::exec_as(&addr, &tool, args, caller, correlation_id).await }
+        async move { crate::mesh::exec_as(&addr, &tool, args, caller, correlation_id).await }
     })
     .await?;
-    Ok(PodExecDispatch {
+    Ok(MeshExecDispatch {
         peer: peer.to_string(),
         tool: r.tool,
         result: r.result,
@@ -568,15 +569,15 @@ pub async fn exec(
 }
 
 /// Voluntary pod exit: notify every paired peer we're leaving (best-effort
-/// per peer), then drop all `pod_peers` + `pod_trust` rows. Returns a
+/// per peer), then drop all `mesh_peers` + `mesh_trust` rows. Returns a
 /// per-peer notify result so the operator can see who heard from us. PKI
 /// material is left in place — call `system bootstrap` to fully reset.
 /// Clear a stale `departed_at` flag for a peer on this host. Used to recover
 /// from the 2026-05-28 kick/peer-leaving bug (and any future false-depart).
 /// No network call — purely local row repair.
-pub fn recover(peer_id: &str) -> Result<crate::PodRecoverOutput> {
+pub fn recover(peer_id: &str) -> Result<crate::mesh::MeshRecoverOutput> {
     let cleared = db::pool::with_pooled_or_open(|conn| pdb::unmark_peer_departed(conn, peer_id))?;
-    Ok(crate::PodRecoverOutput {
+    Ok(crate::mesh::MeshRecoverOutput {
         peer_id: peer_id.to_string(),
         cleared,
     })
@@ -587,7 +588,7 @@ pub fn recover(peer_id: &str) -> Result<crate::PodRecoverOutput> {
 /// `recover` (purely local), forget fans a one-way `pod/peer-forget` notice to
 /// each reachable member so an orphaned identity (machine_id churn,
 /// decommissioned host) disappears from the whole mesh, not just here.
-pub async fn forget(peer_id: &str) -> Result<crate::PodForgetOutput> {
+pub async fn forget(peer_id: &str) -> Result<crate::mesh::MeshForgetOutput> {
     // Build dial targets for every recipient while the DB handle is live, then
     // release it before awaiting (Connection is not Sync — can't cross `.await`).
     let plans: Vec<(String, u16, Vec<String>)> = db::pool::with_pooled_or_open(|conn| {
@@ -605,7 +606,7 @@ pub async fn forget(peer_id: &str) -> Result<crate::PodForgetOutput> {
         let result = match notify_targets(
             targets,
             *port,
-            "pod/peer-forget",
+            "mesh/peer-forget",
             serde_json::json!({ "peer_id": peer_id }),
         )
         .await
@@ -613,16 +614,16 @@ pub async fn forget(peer_id: &str) -> Result<crate::PodForgetOutput> {
             Ok(_) => "notified".to_string(),
             Err(e) => format!("warn: {e:#}"),
         };
-        notified.push(crate::PodForgetNotice {
+        notified.push(crate::mesh::MeshForgetNotice {
             peer_id: member_id.clone(),
             result,
         });
     }
 
     let rows_removed = db::pool::with_pooled_or_open(|conn| pdb::forget_peer(conn, peer_id))?;
-    crate::peer_info::remove(peer_id);
+    crate::mesh::peer_info::remove(peer_id);
 
-    Ok(crate::PodForgetOutput {
+    Ok(crate::mesh::MeshForgetOutput {
         peer_id: peer_id.to_string(),
         rows_removed,
         notified,
@@ -638,37 +639,37 @@ pub async fn forget(peer_id: &str) -> Result<crate::PodForgetOutput> {
 /// The durable-tombstone hardening (suppress resurrection from an offline
 /// straggler) is tracked separately.
 pub async fn retire_superseded_identities() {
-    let old_ids = system::host_identity::superseded_machine_ids();
+    let old_ids = crate::host_identity::superseded_machine_ids();
     if old_ids.is_empty() {
         return;
     }
     tracing::info!(
-        "[pod] retiring {} superseded identity(ies) shed by this host",
+        "[mesh] retiring {} superseded identity(ies) shed by this host",
         old_ids.len()
     );
     for old in old_ids {
         match forget(&old).await {
             Ok(out) => {
                 tracing::info!(
-                    "[pod] retired superseded identity {old}: {} local row(s) removed, {} peer(s) notified",
+                    "[mesh] retired superseded identity {old}: {} local row(s) removed, {} peer(s) notified",
                     out.rows_removed,
                     out.notified.len()
                 );
-                system::host_identity::mark_identity_retired(&old);
+                crate::host_identity::mark_identity_retired(&old);
             }
             Err(e) => tracing::warn!(
-                "[pod] retire of superseded identity {old} failed (retry next boot): {e:#}"
+                "[mesh] retire of superseded identity {old} failed (retry next boot): {e:#}"
             ),
         }
     }
 }
 
-pub async fn leave_self() -> Result<crate::PodLeaveSelfOutput> {
+pub async fn leave_self() -> Result<crate::mesh::MeshLeaveSelfOutput> {
     let peers = db::pool::with_pooled_or_open(pdb::list_peers)?;
     let mut results = Vec::with_capacity(peers.len());
     for p in &peers {
         let r = leave_peer(&p.peer_id).await;
-        results.push(crate::PodLeaveSelfResult {
+        results.push(crate::mesh::MeshLeaveSelfResult {
             peer_id: p.peer_id.clone(),
             notify_result: match &r {
                 Ok(o) => o.notify_result.clone(),
@@ -676,7 +677,7 @@ pub async fn leave_self() -> Result<crate::PodLeaveSelfOutput> {
             },
         });
     }
-    Ok(crate::PodLeaveSelfOutput {
+    Ok(crate::mesh::MeshLeaveSelfOutput {
         rows_removed: results.len() as u32,
         peers: results,
     })
@@ -686,7 +687,7 @@ pub async fn leave_self() -> Result<crate::PodLeaveSelfOutput> {
 /// `self_secure` (Tier-2 secrets-storage) flag, in one read. The user-facing
 /// surface for this is `system.certs.list`; this stays as pod's in-process
 /// accessor. No separate cert/self_secure round-trip.
-pub fn status() -> Result<PodCertStatusOutput> {
+pub fn status() -> Result<MeshCertStatusOutput> {
     let mut out = cert_status()?;
     out.self_secure = get_self_secure().unwrap_or(false);
     Ok(out)
@@ -694,12 +695,15 @@ pub fn status() -> Result<PodCertStatusOutput> {
 
 /// File-only cert status (no DB). `self_secure` stays `false` — `status()`
 /// layers the DB flag on top. Delegates to the hoisted `utils::pki` reader.
-pub fn cert_status() -> Result<PodCertStatusOutput> {
-    Ok(utils::pki::mesh_cert_status(&pki_dir()))
+pub fn cert_status() -> Result<MeshCertStatusOutput> {
+    Ok(utils::pki::mesh_cert_status(
+        &pki_dir(),
+        env!("ORCA_VERSION"),
+    ))
 }
 
 pub fn get_self_secure() -> Result<bool> {
-    db::pool::with_pooled_or_open(db::pod::get_self_secure)
+    db::pool::with_pooled_or_open(db::mesh::get_self_secure)
 }
 
 pub async fn set_self_secure(on: bool) -> Result<bool> {
@@ -710,7 +714,7 @@ pub async fn set_self_secure(on: bool) -> Result<bool> {
 /// Build the local-host row for `system.list`. Uses the in-process lifecycle
 /// service so the synthetic local entry stays in lock-step with what every
 /// remote peer would self-report via `system.runtime-spec`.
-async fn local_peer_row() -> PodPeerDto {
+async fn local_peer_row() -> MeshPeerDto {
     let frontend = "embedded";
     let mode = utils::state::read().ok().flatten().map(|s| match s.mode {
         utils::state::DaemonMode::Daemon => "daemon".to_string(),
@@ -730,7 +734,7 @@ async fn local_peer_row() -> PodPeerDto {
         .unwrap_or_default()
         .iter()
         .map(Route::from)
-        .map(crate::labeled)
+        .map(crate::mesh::labeled)
         .collect();
     let addr = routes
         .iter()
@@ -743,11 +747,11 @@ async fn local_peer_row() -> PodPeerDto {
     // to fail (or hang on GitHub) when called before the daemon is fully
     // wired. Remote peers go through their own service registration so it's
     // available for them via the fanout path.
-    PodPeerDto {
+    MeshPeerDto {
         // The local row carries this host's real machine identity; `local: true`
         // (below) is what marks it as local — never mask the id to "local".
-        peer_id: system::host_identity::machine_id().to_string(),
-        hostname: system::host_identity::display_hostname().to_string(),
+        peer_id: crate::host_identity::machine_id().to_string(),
+        hostname: crate::host_identity::display_hostname().to_string(),
         addr,
         port: db::ports::mesh_port(),
         last_seen_at: utils::time::now().unix_seconds(),
@@ -776,12 +780,12 @@ async fn local_peer_row() -> PodPeerDto {
         update_latest: None,
         update_available: None,
         update_checked_secs: None,
-        system: Some(system::system::TopologyFacts::from(
-            &*system::system_info::current_or_collect(),
+        system: Some(crate::system::TopologyFacts::from(
+            &*crate::system_info::current_or_collect(),
         )),
         // The local row publishes our own bootstrap-pubkey fp so peers that
         // learn about us via roster-sync can pin it transitively (otherwise
-        // every cross-host pod/exec lands on "no pinned bootstrap key").
+        // every cross-host mesh/exec lands on "no pinned bootstrap key").
         pubkey_fp: utils::pki::load_or_init_bootstrap_key(&pki_dir())
             .ok()
             .map(|k| utils::pki::bootstrap_pubkey_fingerprint(&k.verifying_key())),
@@ -793,25 +797,25 @@ async fn local_peer_row() -> PodPeerDto {
 /// DB row matching this id is unambiguously a self-reference (e.g. mDNS
 /// discovered us at our own LAN IP and stub'd us in via `ensure_peer_stub`).
 pub fn local_peer_id() -> String {
-    system::host_identity::machine_id().to_string()
+    crate::host_identity::machine_id().to_string()
 }
 
-/// Raw pod membership from `pod_peers` with the local flag set — NO on-demand
+/// Raw mesh membership from `mesh_peers` with the local flag set — NO on-demand
 /// enrichment fan-out. Backs `system.list`, the thin membership read that mesh
 /// address-propagation (roster_sync) uses so a 60s roster tick does not trigger
 /// every peer's detail/update fan-out. `list_enriched` is the UI path; this is
 /// the discovery path. Identity + addressing only; every observed/telemetry
 /// field is left at its default (None).
-pub async fn list_raw() -> Result<Vec<PodPeerDto>> {
+pub async fn list_raw() -> Result<Vec<MeshPeerDto>> {
     let own_for_blocking = local_peer_id();
     let (mut members, saw_self) =
-        tokio::task::spawn_blocking(move || -> Result<(Vec<PodPeerDto>, bool)> {
-            let peers = db::pool::Db::process().read(db::pod::list_peer_summaries)?;
+        tokio::task::spawn_blocking(move || -> Result<(Vec<MeshPeerDto>, bool)> {
+            let peers = db::pool::Db::process().read(db::mesh::list_peer_summaries)?;
             let mut saw_self = false;
             let members = peers
                 .into_iter()
                 .map(|p| {
-                    let mut dto: PodPeerDto = p.into();
+                    let mut dto: MeshPeerDto = p.into();
                     if dto.peer_id == own_for_blocking {
                         dto.local = true;
                         saw_self = true;
@@ -830,8 +834,8 @@ pub async fn list_raw() -> Result<Vec<PodPeerDto>> {
     Ok(members)
 }
 
-/// Thin pod membership roster. Identity + addressing come from the cached
-/// `pod_peers` row (how we reach each host); reachability + version come from
+/// Thin mesh membership roster. Identity + addressing come from the cached
+/// `mesh_peers` row (how we reach each host); reachability + version come from
 /// the in-memory liveness cache the background refresher maintains
 /// ([`spawn_liveness_refresher`]).
 ///
@@ -842,9 +846,9 @@ pub async fn list_raw() -> Result<Vec<PodPeerDto>> {
 /// serve whatever is cached and fresh (younger than [`peer_info::PING_TTL`]).
 /// A peer with no fresh probe renders `reachable = None` (unknown), never a
 /// blocking dial and never a stale mirror value. Topology facts and channel/pin
-/// live on the enriched views (`pod.snapshot`/`pod.instances`), not this thin
+/// live on the enriched views (`system.list --snapshot`/`system.list --instances`), not this thin
 /// roster. The LOCAL row is built locally from local sources.
-pub async fn list_lite() -> Result<Vec<PodPeerDto>> {
+pub async fn list_lite() -> Result<Vec<MeshPeerDto>> {
     let mut rows = list_raw().await?;
     for p in rows.iter_mut() {
         if p.local {
@@ -854,7 +858,7 @@ pub async fn list_lite() -> Result<Vec<PodPeerDto>> {
             p.system = None;
             continue;
         }
-        // The cached `pod_peers` row carries NO trustworthy telemetry — wipe
+        // The cached `mesh_peers` row carries NO trustworthy telemetry — wipe
         // every telemetry field so a stale mirror value never leaks.
         p.version = None;
         p.target = None;
@@ -868,7 +872,7 @@ pub async fn list_lite() -> Result<Vec<PodPeerDto>> {
         p.update_checked_secs = None;
         // READ-ONLY, NO DIAL: serve reachability + version from the liveness
         // cache. Absent/expired => reachability unknown (`None`), sub-ms return.
-        if let Some(live) = crate::peer_info::liveness_if_fresh(&p.peer_id) {
+        if let Some(live) = crate::mesh::peer_info::liveness_if_fresh(&p.peer_id) {
             p.reachable = Some(live.reachable);
             p.version = live.version;
             p.probe_error = live.probe_error;
@@ -885,13 +889,13 @@ pub async fn list_lite() -> Result<Vec<PodPeerDto>> {
 /// probing from the `system.list` read path so those reads stay
 /// within the latency budget. Runs until the process exits.
 pub fn spawn_liveness_refresher() -> tokio::task::JoinHandle<()> {
-    system::periodic::spawn(
-        system::periodic::PeriodicSpec {
+    crate::periodic::spawn(
+        crate::periodic::PeriodicSpec {
             name: "pod.liveness.refresh",
             initial_delay: std::time::Duration::ZERO,
             interval: std::time::Duration::from_secs(10),
         },
-        system::periodic::boxed(refresh_liveness_once),
+        crate::periodic::boxed(refresh_liveness_once),
     )
 }
 
@@ -920,7 +924,7 @@ async fn refresh_liveness_once() -> Result<()> {
         // 15 min (or never, for a Wakeable peer) and collapses to every-pass on
         // recovery. Same authority replicate.pull and roster-sync honour.
         if !utils::reachability::should_dial(&p.peer_id, std::time::Instant::now()) {
-            crate::peer_info::touch_liveness(&p.peer_id);
+            crate::mesh::peer_info::touch_liveness(&p.peer_id);
             continue;
         }
         let sem = sem.clone();
@@ -931,12 +935,12 @@ async fn refresh_liveness_once() -> Result<()> {
                 Err(_) => return,
             };
             let live = match tokio::time::timeout(PROBE_TIMEOUT, ping(&peer_id)).await {
-                Ok(pong) => crate::peer_info::PeerLiveness {
+                Ok(pong) => crate::mesh::peer_info::PeerLiveness {
                     reachable: pong.ok,
                     version: pong.version,
                     probe_error: pong.error,
                 },
-                Err(_) => crate::peer_info::PeerLiveness {
+                Err(_) => crate::mesh::peer_info::PeerLiveness {
                     reachable: false,
                     version: None,
                     probe_error: Some("probe timeout".to_string()),
@@ -953,16 +957,16 @@ async fn refresh_liveness_once() -> Result<()> {
             {
                 utils::reachability::notify_reachable(&peer_id);
             }
-            crate::peer_info::put_liveness(&peer_id, live);
+            crate::mesh::peer_info::put_liveness(&peer_id, live);
             // Keep the write-through detail + update caches warm so the enriched
-            // roster + topology reads (pod.snapshot / pod.instances /
+            // roster + topology reads (system.list --snapshot / system.list --instances /
             // network.topology_view) hit cache instead of dialing on the read
             // path. Only for reachable peers; best-effort, route-aware by peer_id.
             if reachable {
                 let warm = async {
                     let (_detail, _update) = tokio::join!(
-                        crate::peer_info::peer_detail(&peer_id, false),
-                        crate::peer_info::peer_update(&peer_id, false),
+                        crate::mesh::peer_info::peer_detail(&peer_id, false),
+                        crate::mesh::peer_info::peer_update(&peer_id, false),
                     );
                 };
                 // Best-effort: a warm that times out leaves the last-good cache
@@ -981,7 +985,7 @@ async fn refresh_liveness_once() -> Result<()> {
     Ok(())
 }
 
-/// Assemble the enriched pod member set. `pod_peers` supplies identity +
+/// Assemble the enriched mesh member set. `mesh_peers` supplies identity +
 /// addressing; every cross-host observed field (version, channel, update state,
 /// OS snapshot, reachability) is fetched ON DEMAND from each active remote peer
 /// via `peer_info` (short-TTL in-memory cache), fanned out in parallel. Nothing
@@ -991,16 +995,16 @@ async fn refresh_liveness_once() -> Result<()> {
 ///
 /// A per-peer fetch failure degrades that one peer (reachable=false, cross-host
 /// fields left as-is/None) and never aborts the list.
-async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
+async fn list_enriched_impl() -> Result<Vec<MeshPeerDto>> {
     let own = local_peer_id();
     let own_for_blocking = own.clone();
-    let (active, inactive): (Vec<PodPeerDto>, Vec<PodPeerDto>) =
-        tokio::task::spawn_blocking(move || -> Result<(Vec<PodPeerDto>, Vec<PodPeerDto>)> {
-            let peers = db::pool::Db::process().read(db::pod::list_peer_summaries)?;
+    let (active, inactive): (Vec<MeshPeerDto>, Vec<MeshPeerDto>) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<MeshPeerDto>, Vec<MeshPeerDto>)> {
+            let peers = db::pool::Db::process().read(db::mesh::list_peer_summaries)?;
             Ok(peers
                 .into_iter()
                 .map(|p| {
-                    let mut dto: PodPeerDto = p.into();
+                    let mut dto: MeshPeerDto = p.into();
                     if dto.peer_id == own_for_blocking {
                         dto.local = true;
                     }
@@ -1014,7 +1018,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
 
     // Enrich active peers, preserving order. The local row is built locally; each
     // remote row fans out its on-demand fetches concurrently.
-    let mut slots: Vec<Option<PodPeerDto>> = (0..active.len()).map(|_| None).collect();
+    let mut slots: Vec<Option<MeshPeerDto>> = (0..active.len()).map(|_| None).collect();
     let mut tasks = Vec::new();
     for (i, p) in active.into_iter().enumerate() {
         if p.local {
@@ -1030,10 +1034,10 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
         }
     }
 
-    let mut out: Vec<PodPeerDto> = slots.into_iter().flatten().collect();
+    let mut out: Vec<MeshPeerDto> = slots.into_iter().flatten().collect();
     out.extend(inactive);
 
-    // First-boot fallback only — once mDNS / pairing populates pod_peers the DB
+    // First-boot fallback only — once mDNS / pairing populates mesh_peers the DB
     // row carries the canonical identity and this branch never fires again.
     if !saw_self {
         out.insert(0, local_peer_row().await);
@@ -1041,7 +1045,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
 
     // Derive `parent_peer_id` edges from TopologyClaim ↔ interface MAC matches
     // across the assembled peer set. Read-time only — no DB writes.
-    crate::topology_infer::infer(&mut out);
+    crate::mesh::topology_infer::infer(&mut out);
 
     Ok(out)
 }
@@ -1051,7 +1055,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
 /// `system.update` (version/channel/pin/update-availability) run concurrently.
 /// A `system.detail` failure marks the peer unreachable; an update failure just
 /// leaves the update fields unset — neither aborts the caller.
-async fn enrich_remote(mut p: PodPeerDto) -> PodPeerDto {
+async fn enrich_remote(mut p: MeshPeerDto) -> MeshPeerDto {
     let peer_id = p.peer_id.clone();
     // Telemetry comes SOLELY from the write-through detail/update caches
     // (`peer_detail`/`peer_update`), route-aware by peer_id and kept warm by the
@@ -1069,8 +1073,8 @@ async fn enrich_remote(mut p: PodPeerDto) -> PodPeerDto {
     p.update_available = None;
     p.update_checked_secs = None;
     let (detail, update) = tokio::join!(
-        crate::peer_info::peer_detail(&peer_id, false),
-        crate::peer_info::peer_update(&peer_id, false),
+        crate::mesh::peer_info::peer_detail(&peer_id, false),
+        crate::mesh::peer_info::peer_update(&peer_id, false),
     );
     match detail {
         Ok(rep) => {
@@ -1318,7 +1322,7 @@ mod tests {
 
     #[test]
     fn ping_output_omits_none_fields_on_failure() {
-        let out = PodPingOutput {
+        let out = MeshPingOutput {
             ok: false,
             latency_ms: 0,
             error: Some("no such peer: nope".into()),
@@ -1335,7 +1339,7 @@ mod tests {
 
     #[test]
     fn ping_output_success_carries_identity_fields() {
-        let out = PodPingOutput {
+        let out = MeshPingOutput {
             ok: true,
             latency_ms: 7,
             error: None,
@@ -1354,7 +1358,7 @@ mod tests {
 
     #[test]
     fn trust_output_reports_mutual_flag() {
-        let out = PodTrustOutput {
+        let out = MeshTrustOutput {
             peer_id: "abc".into(),
             local_secure: true,
             peer_secure: true,
@@ -1368,7 +1372,7 @@ mod tests {
 
     #[test]
     fn discovery_row_dto_uses_discovery_state_key_and_omits_none_peer_id() {
-        let dto = PodDiscoveryRowDto {
+        let dto = MeshDiscoveryRowDto {
             pubkey_fp: "fp1".into(),
             peer_id: None,
             hostname: "host-e".into(),
@@ -1381,7 +1385,7 @@ mod tests {
         };
         let s = serde_json::to_string(&dto).unwrap();
         // The field is serialized as `discovery_state`, NOT `state`, to avoid
-        // colliding with PodMember's `#[serde(tag = "state")]` discriminant.
+        // colliding with MeshMember's `#[serde(tag = "state")]` discriminant.
         assert!(s.contains(r#""discovery_state":"unclaimed""#), "{s}");
         assert!(
             !s.contains(r#""state":"#),
@@ -1392,7 +1396,7 @@ mod tests {
 
     #[test]
     fn pending_offer_dto_omits_optional_none_fields() {
-        let dto = PodPendingOfferDto {
+        let dto = MeshPendingOfferDto {
             offer_id: "o1".into(),
             direction: "in".into(),
             peer_pubkey_fp: "fp1".into(),
@@ -1400,7 +1404,7 @@ mod tests {
             peer_addr: "10.0.0.1".into(),
             peer_port: 12002,
             inviter_peer_id: None,
-            pod_id: None,
+            mesh_id: None,
             expires_at: 100,
             ttl_secs: 42,
             created_at: 10,
@@ -1408,12 +1412,12 @@ mod tests {
         let s = serde_json::to_string(&dto).unwrap();
         assert!(s.contains(r#""ttl_secs":42"#), "{s}");
         assert!(!s.contains("inviter_peer_id"), "None omitted: {s}");
-        assert!(!s.contains("pod_id"), "None omitted: {s}");
+        assert!(!s.contains("mesh_id"), "None omitted: {s}");
     }
 
     #[test]
     fn offer_output_round_trips() {
-        let out = PodOfferOutput {
+        let out = MeshOfferOutput {
             code: "ABCD-1234".into(),
             joiner_hostname: "host-e".into(),
             joiner_addr: "10.0.0.1".into(),
@@ -1423,7 +1427,7 @@ mod tests {
             expires_at: 999,
         };
         let s = serde_json::to_string(&out).unwrap();
-        let back: PodOfferOutput = serde_json::from_str(&s).unwrap();
+        let back: MeshOfferOutput = serde_json::from_str(&s).unwrap();
         assert_eq!(back.code, "ABCD-1234");
         assert_eq!(back.joiner_port, 12002);
         assert_eq!(back.expires_at, 999);
@@ -1431,7 +1435,7 @@ mod tests {
 
     #[test]
     fn recover_output_reports_cleared_flag() {
-        let out = crate::PodRecoverOutput {
+        let out = crate::mesh::MeshRecoverOutput {
             peer_id: "abc".into(),
             cleared: false,
         };
@@ -1453,7 +1457,7 @@ mod tests {
         static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         let dir = DIR.get_or_init(|| tempfile::tempdir().unwrap());
         // First caller wins; a later `AlreadyInit` error is expected and fine.
-        drop(system::host_identity::init(dir.path()));
+        drop(crate::host_identity::init(dir.path()));
     }
 
     #[tokio::test]
@@ -1543,7 +1547,7 @@ mod tests {
             assert_eq!(r.offer_id, "offer-in");
             assert_eq!(r.direction, "in");
             assert_eq!(r.inviter_peer_id.as_deref(), Some("inviter-1"));
-            assert_eq!(r.pod_id.as_deref(), Some("pod-1"));
+            assert_eq!(r.mesh_id.as_deref(), Some("pod-1"));
             assert!(r.ttl_secs > 0 && r.ttl_secs <= 3600, "ttl: {}", r.ttl_secs);
         })
         .await;
@@ -1589,7 +1593,7 @@ mod tests {
                 Err(e) => e,
             };
             assert!(
-                err.to_string().contains("not found in pod_discovery"),
+                err.to_string().contains("not found in mesh_discovery"),
                 "got: {err:#}"
             );
         })
@@ -1913,7 +1917,7 @@ mod tests {
 
     #[test]
     fn leave_output_serializes_all_fields() {
-        let out = PodLeaveOutput {
+        let out = MeshLeaveOutput {
             peer_id: "abc".into(),
             notify_result: "ok".into(),
             rows_removed: 2,
@@ -1927,10 +1931,10 @@ mod tests {
 
     #[test]
     fn forget_output_carries_per_member_notices() {
-        let out = crate::PodForgetOutput {
+        let out = crate::mesh::MeshForgetOutput {
             peer_id: "ghost".into(),
             rows_removed: 3,
-            notified: vec![crate::PodForgetNotice {
+            notified: vec![crate::mesh::MeshForgetNotice {
                 peer_id: "member-1".into(),
                 result: "notified".into(),
             }],
@@ -1939,22 +1943,22 @@ mod tests {
         assert!(s.contains(r#""peer_id":"ghost""#), "{s}");
         assert!(s.contains(r#""rows_removed":3"#), "{s}");
         assert!(s.contains(r#""result":"notified""#), "{s}");
-        let back: crate::PodForgetOutput = serde_json::from_str(&s).unwrap();
+        let back: crate::mesh::MeshForgetOutput = serde_json::from_str(&s).unwrap();
         assert_eq!(back.notified.len(), 1);
         assert_eq!(back.notified[0].peer_id, "member-1");
     }
 
     #[test]
     fn leave_self_output_round_trips() {
-        let out = crate::PodLeaveSelfOutput {
+        let out = crate::mesh::MeshLeaveSelfOutput {
             rows_removed: 1,
-            peers: vec![crate::PodLeaveSelfResult {
+            peers: vec![crate::mesh::MeshLeaveSelfResult {
                 peer_id: "abc".into(),
                 notify_result: "warn: refused".into(),
             }],
         };
         let s = serde_json::to_string(&out).unwrap();
-        let back: crate::PodLeaveSelfOutput = serde_json::from_str(&s).unwrap();
+        let back: crate::mesh::MeshLeaveSelfOutput = serde_json::from_str(&s).unwrap();
         assert_eq!(back.rows_removed, 1);
         assert_eq!(back.peers.len(), 1);
         assert_eq!(back.peers[0].notify_result, "warn: refused");
@@ -1962,8 +1966,8 @@ mod tests {
 
     #[test]
     fn accept_output_round_trips() {
-        let out = PodAcceptOutput {
-            pod_id: "pod-1".into(),
+        let out = MeshAcceptOutput {
+            mesh_id: "pod-1".into(),
             inviter_peer_id: "inv".into(),
             inviter_hostname: "host-i".into(),
             inviter_addr: "10.0.0.3".into(),
@@ -1971,8 +1975,8 @@ mod tests {
             self_secure: false,
         };
         let s = serde_json::to_string(&out).unwrap();
-        let back: PodAcceptOutput = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.pod_id, "pod-1");
+        let back: MeshAcceptOutput = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.mesh_id, "pod-1");
         assert_eq!(back.inviter_peer_id, "inv");
         assert_eq!(back.inviter_port, 12002);
         assert!(!back.self_secure);
@@ -1982,13 +1986,13 @@ mod tests {
 
     #[test]
     fn cert_status_output_omits_none_cert_infos_and_keeps_version() {
-        let out = PodCertStatusOutput {
+        let out = MeshCertStatusOutput {
             founder: false,
             member: false,
             version: "0.20.0".into(),
             self_secure: false,
             mesh_ca: None,
-            leaf_server: Some(crate::CertInfo {
+            leaf_server: Some(crate::mesh::CertInfo {
                 cn: String::new(),
                 fingerprint: String::new(),
                 issued_at: 0,
@@ -2015,7 +2019,7 @@ mod tests {
         // cert_status only reads PKI files (absent on a test host → all cert
         // infos None) and hard-codes self_secure=false; it never touches the db.
         let out = cert_status().unwrap();
-        let expected = option_env!("ORCA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+        let expected = env!("ORCA_VERSION");
         assert_eq!(out.version, expected, "version must be the compiled value");
         assert!(
             !out.self_secure,
@@ -2033,7 +2037,7 @@ mod tests {
             // flag and overrides it. Default db → false.
             let out = status().unwrap();
             assert!(!out.self_secure, "fresh db defaults self_secure=false");
-            let expected = option_env!("ORCA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+            let expected = env!("ORCA_VERSION");
             assert_eq!(out.version, expected);
             // Flip the db flag; status() must now surface true.
             set_self_secure(true).await.unwrap();
@@ -2056,7 +2060,7 @@ mod tests {
             let me = local_peer_row().await;
             assert!(me.local, "the synthetic row is flagged local");
             assert_eq!(me.peer_id, local_peer_id(), "carries the real machine id");
-            assert_eq!(me.hostname, system::host_identity::display_hostname());
+            assert_eq!(me.hostname, crate::host_identity::display_hostname());
             // A host trusts itself on both sides and reports itself active/reachable.
             assert!(me.local_secure && me.peer_secure);
             assert_eq!(me.status, "active");
@@ -2064,7 +2068,7 @@ mod tests {
             assert_eq!(me.latency_ms, Some(0));
             assert_eq!(me.port, db::ports::mesh_port());
             // Version is the compiled build version, never masked.
-            let expected = option_env!("ORCA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+            let expected = env!("ORCA_VERSION");
             assert_eq!(me.version.as_deref(), Some(expected));
             // No addressing rows on a fresh db → addr falls back to loopback,
             // but the row is still present (locality is a flag, not a mask).

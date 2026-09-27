@@ -216,7 +216,7 @@ struct ToolAttr {
     domain: LitStr,
     verb: LitStr,
     cli_mode: Option<Ident>,
-    /// Whether this tool is callable by paired pod peers via `pod/exec`.
+    /// Whether this tool is callable by paired systems via `mesh/exec`.
     /// **Default: true.** Set `local_only = true` (or `remote_ok = false`)
     /// for tools that genuinely can't run remotely — e.g. bootstrap, daemon
     /// install/uninstall, package build. The dispatcher additionally requires
@@ -490,7 +490,7 @@ fn expand_to_tokens(attr: ToolAttr, item: ItemFn) -> TokenStream2 {
 ///
 /// Generates `export`/`merge` fns over the named struct fields (each field maps
 /// 1:1 to a column of `table`, in declaration order) and submits a
-/// `#crate_path::db_types::ReplicatedRegistration` into the inventory slice the pod mesh
+/// `#crate_path::db_types::ReplicatedRegistration` into the inventory slice the mesh
 /// engine walks. Merge is last-write-wins on the `lww` column, keyed by `pk`.
 #[cfg(not(test))]
 #[proc_macro_derive(Replicated, attributes(replicate))]
@@ -914,7 +914,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             // Best-effort: force-refresh the peer's runtime snapshot so the
             // UI reflects state mutated by this tool immediately instead of
             // waiting for the next mesh poll. Default trait impl is a no-op;
-            // pod's PodRemoteExec fetches `system.detail` and updates its
+            // pod's MeshRemoteExec fetches `system.detail` and updates its
             // in-memory runtime cache. The backoff loop covers the
             // daemon-restart gap for tools that swap the peer's binary.
             let __svc_refresh = ::std::sync::Arc::clone(&__svc);

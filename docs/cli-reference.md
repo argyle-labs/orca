@@ -64,17 +64,18 @@ Core domains (always present). Verbs shown are representative — use
 ### Fleet & mesh
 | Noun | Verbs | What |
 |---|---|---|
-| `pod` | list, detail, create, update, delete | mesh peer records (as a tool noun) |
+| `system` | list, join, mesh.update, mesh.delete, topology, certs.list, telemetry.list | the systems in the mesh, and membership |
 | `namespace` | list, detail, create, use, delete | per-user shareable workspaces (`namespace.access` grants sharing) |
 
-The `orca pod` **built-in** command owns the interactive mesh lifecycle
-(`init`, `discover`, `pending`, `accept`, `join`, `offer`, `pair`, `trust`,
-`leave`, …) — see the built-in commands table below and `orca pod --help`.
+There is no `pod` noun. A peer is just another **system**, reached locally or
+over a route, and membership lives on `system join` / `system mesh update` /
+`system mesh delete` — see [`mesh.md`](mesh.md) for the full pairing and trust
+model.
 
 ### Lifecycle & ops
 | Noun | Verbs | What |
 |---|---|---|
-| `system` | detail, health, create, update, delete, build, serve_release, history, logs | host + orca lifecycle (capabilities/retention are `detail`/`update` views + actions) |
+| `system` | detail, health, install, uninstall, update, build, serve_release, history, logs | host + orca lifecycle (capabilities/retention are `detail`/`update` views + actions). `system health` reports on EVERY system in the mesh; `--id <id>` on one. |
 | `schedule` | list, detail, create | cron / periodic jobs |
 | `service` | list, detail, create, update, health | managed services |
 | `backup` | list, detail, run | service backup jobs |
@@ -104,7 +105,6 @@ Process entrypoints, not tools:
 | `orca mcp-serve` | MCP stdio server (register with Claude Code) |
 | `orca daemon` | run as the managed daemon (cooperative port handoff) |
 | `orca dev` / `orca dev-serve` | dev-mode daemon + fleet hot-reload |
-| `orca pod` | pod / mesh bootstrap + management (also the `pod` tool noun) |
 | `orca hook` | Claude Code hook handlers |
 | `orca openapi` | emit orca's own OpenAPI 3 spec to stdout |
 | `orca admin` | local-only admin commands (never exposed over REST/MCP) |

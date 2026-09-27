@@ -40,7 +40,7 @@ pub fn capability_label(c: &str) -> String {
     .to_string()
 }
 
-/// Human label for a `PodPeerAddress.kind` / `AddressChannel.kind` tag.
+/// Human label for a `MeshPeerAddress.kind` / `AddressChannel.kind` tag.
 pub fn addr_kind_label(kind: &str) -> String {
     match kind {
         "lan_v4" => "LAN IPv4",

@@ -3,8 +3,8 @@
 //! macro+runtime split (like `serde-derive`+`serde`) forced by Rust's
 //! proc-macro crate restrictions.
 //!
-//! **NOT mesh-dispatch.** Sending a command to another peer over the pod mesh
-//! lives in `pod` (caller_token, remote_exec, `RemoteExec` trait). This crate
+//! **NOT mesh-dispatch.** Sending a command to another peer over the mesh
+//! lives in `system::mesh` (caller_token, remote_exec, `RemoteExec` trait). This crate
 //! only routes tool calls within a single process.
 //!
 //! The contract (metadata traits, error, JsonAny, protocol types,

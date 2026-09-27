@@ -46,7 +46,7 @@ fn metrics_path() -> Result<PathBuf> {
 // guards a SEPARATE database (`metrics.db`), not `orca.db`, so it is outside the
 // `db::pool::Db` reader/writer seam entirely. It is deliberately left on a
 // single mutex: metrics reads are off the hot request path (history browsing
-// only, not `pod.list`/`service.list`/etc.), and the write cadence is one row
+// only, not `system.list`/`service.list`/etc.), and the write cadence is one row
 // per refresher tick. If a metrics read ever lands on the hot path, give this
 // module its own `Db`-style reader pool rather than folding metrics.db into the
 // orca.db pool (one key, two schemas, two files — keep them separate).

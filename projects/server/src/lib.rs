@@ -30,7 +30,6 @@ use namespace as _;
 use config_source as _;
 use orca_inventory as _;
 use plugins as _;
-use pod as _;
 use spec as _;
 use system as _;
 

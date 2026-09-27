@@ -1,6 +1,6 @@
-//! Auto-mesh: every paired peer periodically pulls the thin `pod.list`
+//! Auto-mesh: every paired peer periodically pulls the thin `system.list`
 //! membership from every other peer it knows about and merges joined entries
-//! into its own `pod_peers`.
+//! into its own `mesh_peers`.
 //! The result is an eventually-consistent full mesh from any starting
 //! topology — once one peer in the pod knows about a new joiner, the next
 //! tick propagates that fact to every other peer.
@@ -21,14 +21,14 @@
 //! seconds; before that fix, peers with `peer_id="unknown"` are skipped
 //! both as sources and as merge targets.
 
-use crate::{PodListOutput, PodMember, PodPeerDto};
+use crate::mesh::{MeshListOutput, MeshMember, MeshPeerDto};
 use anyhow::Result;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use super::pki_dir;
-use db::pod as pdb;
-use system::periodic;
+use crate::periodic;
+use db::mesh as pdb;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -58,7 +58,7 @@ pub async fn resync() -> Result<()> {
         return Ok(());
     }
 
-    let own_peer_id = system::host_identity::machine_id().to_string();
+    let own_peer_id = crate::host_identity::machine_id().to_string();
 
     // Build (source, ordered dial-targets) plans while the conn is alive.
     // Every source is dialed across ALL of its known addresses (LAN v4/v6,
@@ -70,8 +70,9 @@ pub async fn resync() -> Result<()> {
             .into_iter()
             .filter(|p| is_usable_source(p, &own_peer_id))
             .map(|p| {
-                let targets = crate::dialer::dial_targets_for_peer(conn, &p.peer_id, &p.peer_addr)
-                    .unwrap_or_else(|_| vec![p.peer_addr.clone()]);
+                let targets =
+                    crate::mesh::dialer::dial_targets_for_peer(conn, &p.peer_id, &p.peer_addr)
+                        .unwrap_or_else(|_| vec![p.peer_addr.clone()]);
                 (p, targets)
             })
             .collect())
@@ -83,7 +84,7 @@ pub async fn resync() -> Result<()> {
     // current usable-source set; anything else is stale.
     let active: std::collections::HashSet<String> =
         plans.iter().map(|(p, _)| p.peer_id.clone()).collect();
-    crate::route_health::retain_peers(&active);
+    crate::mesh::route_health::retain_peers(&active);
 
     for (src, targets) in plans {
         // Skip a source the shared reachability source of truth says not to dial
@@ -155,7 +156,7 @@ pub async fn resync() -> Result<()> {
 /// been unreachable from this host past the sustained threshold. Best-effort:
 /// notification-emit failures never disrupt the roster tick.
 async fn notify_stale_routes(own_peer_id: &str, src: &pdb::PeerRow) {
-    for stale in crate::route_health::take_stale_routes(&src.peer_id) {
+    for stale in crate::mesh::route_health::take_stale_routes(&src.peer_id) {
         let title = format!(
             "peer {} address {} unreachable",
             src.peer_hostname, stale.addr
@@ -208,11 +209,11 @@ fn is_usable_source(p: &pdb::PeerRow, own_peer_id: &str) -> bool {
 }
 
 /// True if a roster entry from a remote peer is something we should ingest
-/// into our local `pod_peers`. Same filters as `is_usable_source`, plus:
+/// into our local `mesh_peers`. Same filters as `is_usable_source`, plus:
 /// - the synthetic `local` row in the remote's response (that's the
 ///   remote peer itself — we already have it as the source)
 /// - inactive entries (the remote may carry departed rows for history)
-pub(crate) fn is_ingestable(entry: &PodPeerDto, own_peer_id: &str) -> bool {
+pub(crate) fn is_ingestable(entry: &MeshPeerDto, own_peer_id: &str) -> bool {
     if entry.local {
         return false;
     }
@@ -231,43 +232,41 @@ pub(crate) fn is_ingestable(entry: &PodPeerDto, own_peer_id: &str) -> bool {
 /// top-level `addr`, so fall back to the channel list: prefer a LAN IPv4, then
 /// any non-empty channel value. Empty string only if the entry carries nothing
 /// dialable (upsert then no-ops on a blank addr).
-fn entry_primary_addr(entry: &PodPeerDto) -> String {
+fn entry_primary_addr(entry: &MeshPeerDto) -> String {
     if !entry.addr.is_empty() {
         return entry.addr.clone();
     }
     entry
         .routes
         .iter()
-        .find(|a| a.kind == crate::dialer::LAN_V4)
+        .find(|a| a.kind == crate::mesh::dialer::LAN_V4)
         .or_else(|| entry.routes.iter().find(|a| !a.value.is_empty()))
         .map(|a| a.value.clone())
         .unwrap_or_default()
 }
 
-async fn fetch_roster_multi(peer_id: &str, targets: &[String]) -> Result<Vec<PodPeerDto>> {
-    crate::dialer::try_targets_tracked(
-        Some(peer_id),
-        targets,
-        |t| async move { fetch_roster(&t).await },
-    )
+async fn fetch_roster_multi(peer_id: &str, targets: &[String]) -> Result<Vec<MeshPeerDto>> {
+    crate::mesh::dialer::try_targets_tracked(Some(peer_id), targets, |t| async move {
+        fetch_roster(&t).await
+    })
     .await
 }
 
-async fn fetch_roster(addr: &str) -> Result<Vec<PodPeerDto>> {
-    // `pod.list` is now the thin raw-membership roster (no enrichment fan-out),
+async fn fetch_roster(addr: &str) -> Result<Vec<MeshPeerDto>> {
+    // `system.list` is now the thin raw-membership roster (no enrichment fan-out),
     // so roster-sync reads it directly. On peers still in the rolling-upgrade
-    // window `pod.list` returns the older enriched shape — a superset that
+    // window `system.list` returns the older enriched shape — a superset that
     // deserializes fine here, since roster ingest only reads identity/address.
     let empty = || serde_json::Value::Object(Default::default());
-    let result = super::exec(addr, "pod.list", empty()).await?;
-    let list: PodListOutput = serde_json::from_value(result.result)?;
+    let result = super::exec(addr, "system.list", empty()).await?;
+    let list: MeshListOutput = serde_json::from_value(result.result)?;
     // Auto-mesh only consumes paired members; handshaking + discovered rows
     // are surfaced for UI/operator use, not for address propagation.
     Ok(list
         .members
         .into_iter()
         .filter_map(|m| match m {
-            PodMember::Joined(p) => Some(*p),
+            MeshMember::Joined(p) => Some(*p),
             _ => None,
         })
         .collect())
@@ -276,7 +275,7 @@ async fn fetch_roster(addr: &str) -> Result<Vec<PodPeerDto>> {
 async fn ingest_roster(
     own_peer_id: &str,
     source_label: &str,
-    list: Vec<PodPeerDto>,
+    list: Vec<MeshPeerDto>,
 ) -> Result<usize> {
     let pki_d = pki_dir();
     let ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))?;
@@ -287,7 +286,7 @@ async fn ingest_roster(
             // Full-uuid identity is a hard invariant: never learn a peer under a
             // short/legacy/prefixed id form. A pre-uuidv7 CN (`019e7105-991`,
             // `c56ccc7c2039`) or a `peer.<id>` prefix would otherwise land as a
-            // SEPARATE pod_peers row that convergence can't fold back onto the
+            // SEPARATE mesh_peers row that convergence can't fold back onto the
             // canonical row — the exact split that scrambled the roster. Drop it
             // loudly rather than persist a second-class identity.
             if !utils::id::is_uuidv7(&entry.peer_id) {
@@ -315,7 +314,7 @@ async fn ingest_roster(
             let prior_fp = pdb::peer_pubkey_fp_raw(conn, &entry.peer_id)?;
             // Transitive pin: if the source peer published a `pubkey_fp` for this
             // entry (they paired directly), forward it so we can pin too — without
-            // this, every cross-host pod/exec from a roster-learned peer is
+            // this, every cross-host mesh/exec from a roster-learned peer is
             // refused with "no pinned bootstrap key to verify against". The
             // COALESCE in upsert_peer keeps a directly-pinned fp from being
             // clobbered if it was already set locally.
@@ -392,8 +391,8 @@ mod tests {
         }
     }
 
-    fn entry(peer_id: &str, status: &str, local: bool) -> PodPeerDto {
-        PodPeerDto {
+    fn entry(peer_id: &str, status: &str, local: bool) -> MeshPeerDto {
+        MeshPeerDto {
             peer_id: peer_id.into(),
             hostname: "h".into(),
             addr: "10.0.0.1".into(),
@@ -499,7 +498,7 @@ mod tests {
         // routes are not consulted.
         let mut e = entry("other", "active", false);
         e.addr = "10.0.1.9".into();
-        e.routes = routes_of(&[(crate::dialer::LAN_V4, "10.0.0.9")]);
+        e.routes = routes_of(&[(crate::mesh::dialer::LAN_V4, "10.0.0.9")]);
         assert_eq!(entry_primary_addr(&e), "10.0.1.9");
     }
 
@@ -509,7 +508,10 @@ mod tests {
         // when a different channel appears first.
         let mut e = entry("other", "active", false);
         e.addr = String::new();
-        e.routes = routes_of(&[("fqdn", "host.lan"), (crate::dialer::LAN_V4, "10.0.0.7")]);
+        e.routes = routes_of(&[
+            ("fqdn", "host.lan"),
+            (crate::mesh::dialer::LAN_V4, "10.0.0.7"),
+        ]);
         assert_eq!(entry_primary_addr(&e), "10.0.0.7");
     }
 
@@ -555,7 +557,7 @@ mod tests {
     ) -> T {
         // Serialize behind the CRATE-WIDE HOME lock so this cannot race a
         // cert_rotation or cli test that also repoints HOME. Poison-tolerant.
-        let _guard = crate::HOME_ENV_LOCK
+        let _guard = crate::mesh::HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("HOME").ok();
@@ -577,7 +579,7 @@ mod tests {
         out
     }
 
-    fn uuid_entry(peer_id: &str, hostname: &str) -> PodPeerDto {
+    fn uuid_entry(peer_id: &str, hostname: &str) -> MeshPeerDto {
         let mut e = entry(peer_id, "active", false);
         e.hostname = hostname.into();
         e

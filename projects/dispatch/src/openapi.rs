@@ -461,12 +461,12 @@ fn strip_meta(v: &mut Value) {
 /// Rewrite `{ $ref, ...other-keys }` siblings into `{ allOf: [{$ref}, {...other-keys}] }`.
 ///
 /// Schemars 1.x emits this sibling shape for internally-tagged enum variants
-/// (e.g. `PodMember` via `#[serde(tag = "state")]`): the variant gets a `$ref`
+/// (e.g. `MeshMember` via `#[serde(tag = "state")]`): the variant gets a `$ref`
 /// to the inner struct PLUS inline `properties` / `required` constraining the
 /// discriminator. JSON Schema 2020-12 permits sibling keys with `$ref`, but
 /// OpenAPI 3.1 tooling like hey-api drops them — collapsing the discriminator
 /// and breaking type-narrowing on the consumer (the `state` field disappears
-/// from `PodMember` on the TS side, forcing local casts at every callsite).
+/// from `MeshMember` on the TS side, forcing local casts at every callsite).
 ///
 /// The `allOf` rewrite is semantically equivalent and survives every consumer
 /// we've seen.
@@ -503,7 +503,7 @@ fn wrap_ref_siblings(v: &mut Value) {
 }
 
 /// Canonical MCP tool-name mangling: dots become underscores
-/// (`pod.peer.list` → `pod_peer_list`). This is **non-injective** — a name
+/// (`system.mesh.peer.list` → `system_mesh_peer_list`). This is **non-injective** — a name
 /// segment that itself contains an underscore (`containers.reconcile_dry`)
 /// mangles to the same string as a dotted sibling (`containers.reconcile.dry`),
 /// silently clobbering one in the generated MCP surface / hey-api SDK. The
@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn operation_id_camelcases_dotted_names() {
         assert_eq!(operation_id_for("engine.list"), "engineList");
-        assert_eq!(operation_id_for("pod.cert_status"), "podCertStatus");
+        assert_eq!(operation_id_for("system.cert_status"), "systemCertStatus");
         assert_eq!(operation_id_for("host.info"), "hostInfo");
     }
 
@@ -640,7 +640,7 @@ mod tests {
         let mut v = json!({
             "oneOf": [
                 {
-                    "$ref": "#/components/schemas/PodPeerDto",
+                    "$ref": "#/components/schemas/MeshPeerDto",
                     "properties": { "state": { "type": "string", "const": "joined" } },
                     "required": ["state"]
                 }
@@ -652,7 +652,7 @@ mod tests {
         assert!(variant.get("properties").is_none());
         let all_of = variant["allOf"].as_array().expect("allOf");
         assert_eq!(all_of.len(), 2);
-        assert_eq!(all_of[0]["$ref"], "#/components/schemas/PodPeerDto");
+        assert_eq!(all_of[0]["$ref"], "#/components/schemas/MeshPeerDto");
         assert_eq!(all_of[1]["properties"]["state"]["const"], "joined");
         assert_eq!(all_of[1]["required"][0], "state");
     }

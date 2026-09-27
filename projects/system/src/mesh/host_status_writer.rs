@@ -6,17 +6,17 @@
 //!
 //! This is the ONLY host_status writer. Peer status is NOT mirrored into this
 //! host's DB — under the data-classification law telemetry stays local to its
-//! origin and is fetched on demand (`pod::peer_info`). The old cross-mesh sync
+//! origin and is fetched on demand (`crate::mesh::peer_info`). The old cross-mesh sync
 //! puller and subscription replica have been removed; `host_status` is now this
 //! host's own local, retention-capped history (see `host_status_sweep`).
 //!
 //! The task is idempotent: callers can fire `spawn_local_writer` more than once
 //! and only the first invocation actually starts a task.
 
+use crate::system_info_types::SystemInfoReport;
 use anyhow::{Context, Result};
 use std::sync::OnceLock;
 use std::time::Duration;
-use system::system_info_types::SystemInfoReport;
 
 // Cadence is adaptive — see `subscribe_demand::choose_cadence`. When any UI
 // session is actively subscribed the writer runs at FAST_CADENCE (~2s) so
@@ -47,10 +47,10 @@ pub fn spawn_local_writer() {
             if let Err(e) = persist_local_snapshot().await {
                 tracing::warn!("host_status local writer: {e:#}");
             }
-            let next = crate::subscribe_demand::choose_cadence(
-                crate::subscribe_demand::is_live(),
-                crate::subscribe_demand::FAST_CADENCE,
-                crate::subscribe_demand::SLOW_CADENCE,
+            let next = crate::mesh::subscribe_demand::choose_cadence(
+                crate::mesh::subscribe_demand::is_live(),
+                crate::mesh::subscribe_demand::FAST_CADENCE,
+                crate::mesh::subscribe_demand::SLOW_CADENCE,
             );
             tokio::select! {
                 _ = tokio::time::sleep(next) => {}
@@ -63,24 +63,24 @@ pub fn spawn_local_writer() {
 /// Own-peer id used as the row key. `peer.<machine_id_short>` matches the
 /// canonical pod-mesh identity used everywhere else.
 fn own_peer_id() -> String {
-    system::host_identity::machine_id().to_string()
+    crate::host_identity::machine_id().to_string()
 }
 
 async fn persist_local_snapshot() -> Result<()> {
     // Prefer the in-memory cache so cpu_usage_percent is a real delta (not the
     // first-call zero that collect_blocking() always returns). Fall back to a
     // fresh collect only when the background refresher hasn't run yet.
-    let snap = if let Some(cached) = system::system_info::current() {
+    let snap = if let Some(cached) = crate::system_info::current() {
         (*cached).clone()
     } else {
-        tokio::task::spawn_blocking(system::system_info::collect_blocking).await?
+        tokio::task::spawn_blocking(crate::system_info::collect_blocking).await?
     };
     // Full payload for live subscribers (UI history graph keeps all 720 points).
     // Only build it when someone is actually subscribed — serialising the whole
     // SystemInfoReport (guest claims + up to 720 history points) every tick with
     // no listener was pure allocation churn, worst on guest-heavy Proxmox hosts.
     // Late subscribers backfill from the DB, so skipping it while idle is safe.
-    let payload = if crate::subscribe::host_status_subscriber_count() > 0 {
+    let payload = if crate::mesh::subscribe::host_status_subscriber_count() > 0 {
         Some(serde_json::to_string(&snap).context("serialise SystemInfoReport")?)
     } else {
         None
@@ -118,7 +118,7 @@ async fn persist_local_snapshot() -> Result<()> {
         })
     })
     .await??;
-    // Invalidate the host_status cache so the next pod.list read sees the
+    // Invalidate the host_status cache so the next system.list read sees the
     // fresh row instead of a stale entry from the previous tick.
     db::cache::invalidate_host_status(&peer_id);
 
@@ -126,7 +126,7 @@ async fn persist_local_snapshot() -> Result<()> {
     // Best-effort: failures here don't roll back the DB write. Only fires when
     // the payload was built (i.e. a subscriber was live at serialise time).
     if let Some(payload) = payload {
-        crate::subscribe::publish_host_status(crate::subscribe::HostStatusEvent {
+        crate::mesh::subscribe::publish_host_status(crate::mesh::subscribe::HostStatusEvent {
             peer_id,
             snapshot_at_unix: snapshot_at,
             payload,

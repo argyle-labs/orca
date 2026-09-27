@@ -17,9 +17,9 @@
 
 A declarative control plane for a self-hosted fleet, driven over REST, MCP, and
 CLI from a single pane of glass. orca core is one Rust binary that runs on every
-host in a pod and exposes one tool surface across all three protocols. It manages
+host in the mesh and exposes one tool surface across all three protocols. It manages
 fleet & host lifecycle (install, update, PKI, mesh), runtime & service
-orchestration (pods, services, containers, schedules), the storage data plane
+orchestration (systems, services, containers, schedules), the storage data plane
 (mounts, shares, replication, exports, backups), networking, power/UPS and DNS
 failover, secrets/auth/namespaces, and diagnostics & self-healing. The generic
 core defines *what* each domain does; out-of-process plugins define *how* —
@@ -45,7 +45,7 @@ curl -fsSL https://github.com/argyle-labs/orca/releases/latest/download/install.
 Then run it:
 
 ```sh
-orca <noun> <verb>       # the CLI surface — every capability, e.g. `orca pod list`
+orca <noun> <verb>       # the CLI surface — every capability, e.g. `orca system list`
 orca serve               # web UI + REST + MCP over HTTP on :12000 / :12443
 orca --help              # full, build-current command list
 orca                     # interactive agent chat session (one capability among the above)
@@ -107,8 +107,8 @@ CLI they appear as `orca <noun> <verb>`:
 ```sh
 # Fleet & host
 orca system detail
-orca pod list
-orca pod pair <addr>
+orca system list
+orca system join --action connect <addr>
 
 # Storage data plane
 orca storage list

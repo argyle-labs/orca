@@ -15,7 +15,7 @@ Onboarding is **two** steps:
 After step 1 the host runs orca **locally** — the orca-native store is usable
 immediately, and the daemon mints its own UUIDv7 identity on first boot. After
 step 2 it is a full pod member. Pairing itself is documented end-to-end in
-[`pod.md`](pod.md); this runbook covers getting the binary onto the host.
+[`mesh.md`](mesh.md); this runbook covers getting the binary onto the host.
 
 ---
 
@@ -102,18 +102,18 @@ ssh "orca@$HOST" '~/.local/bin/orca system detail'   # version, uptime, pending_
 
 Pairing is the mDNS **offer/accept** flow. On a shared LAN it is nearly
 automatic; the full model, security anchors, and manual fallback live in
-[`pod.md`](pod.md). The short version:
+[`mesh.md`](mesh.md). The short version:
 
 ```sh
-orca pod discover                 # see candidates + members on the segment
-orca pod pending                  # (on the joiner) shows an incoming offer + its code
-orca pod accept <6-char-code>     # (on the joiner) completes pairing
+orca system list --discovery                 # see candidates + members on the segment
+orca system list --pending                  # (on the joiner) shows an incoming offer + its code
+orca system join --action accept <6-char-code>     # (on the joiner) completes pairing
 ```
 
 If mDNS is blocked or the joiner is on a different subnet, push an offer to a
-specific address from a secure member with `orca pod offer <addr>`, or dial the
-inviter from the joiner with `orca pod join <addr>`. Secrets storage on a fresh
-joiner stays **off** until the operator opts in with `orca pod self-secure on`.
+specific address from a secure member with `orca system join --action offer <addr>`, or dial the
+inviter from the joiner with `orca system join --action connect <addr>`. Secrets storage on a fresh
+joiner stays **off** until the operator opts in with `orca system mesh update --action settings --self-secure on`.
 
 ---
 
@@ -190,7 +190,7 @@ binary handles systemd, OpenRC, and Unraid rc scripts.
 
 ## See also
 
-- [`pod.md`](pod.md) — the pairing/trust model in full.
+- [`mesh.md`](mesh.md) — the pairing/trust model in full.
 - [`force-update-runbook.md`](force-update-runbook.md) — mesh self-update + the
   force-update escalation ladder.
 - [`fleet-wipe-rejoin-runbook.md`](fleet-wipe-rejoin-runbook.md) — coordinated

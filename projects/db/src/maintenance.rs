@@ -115,10 +115,10 @@ pub fn sweep_session_events(conn: &Connection, days: u32) -> Result<u64> {
 pub fn sweep_expired_pod_offers(conn: &Connection) -> Result<u64> {
     let n = conn
         .execute(
-            "DELETE FROM pod_pending_offers WHERE expires_at < unixepoch('now')",
+            "DELETE FROM mesh_pending_offers WHERE expires_at < unixepoch('now')",
             [],
         )
-        .context("sweep pod_pending_offers")?;
+        .context("sweep mesh_pending_offers")?;
     Ok(n as u64)
 }
 
@@ -307,7 +307,7 @@ mod tests {
     fn sweep_expired_pod_offers_removes_only_expired() {
         let conn = test_conn();
         conn.execute(
-            "INSERT INTO pod_pending_offers
+            "INSERT INTO mesh_pending_offers
                (offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr,
                 peer_port, code_hash, expires_at, created_at)
              VALUES
@@ -319,7 +319,7 @@ mod tests {
         let removed = sweep_expired_pod_offers(&conn).expect("sweep ok");
         assert_eq!(removed, 1);
         let remaining: i64 = conn
-            .query_row("SELECT COUNT(*) FROM pod_pending_offers", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM mesh_pending_offers", [], |r| r.get(0))
             .unwrap();
         assert_eq!(remaining, 1);
     }

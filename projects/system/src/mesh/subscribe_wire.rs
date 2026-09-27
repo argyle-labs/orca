@@ -31,7 +31,7 @@ use utils::jsonrpc::{ErrorObject, Message, Notification, Request, Response};
 use super::subscribe::{HostStatusEvent, subscribe_host_status};
 use super::subscribe_demand;
 
-pub const METHOD: &str = "pod/subscribe";
+pub const METHOD: &str = "mesh/subscribe";
 pub const EVENT_METHOD: &str = "pod/subscribe.event";
 pub const HEARTBEAT_METHOD: &str = "pod/subscribe.heartbeat";
 
@@ -299,7 +299,7 @@ mod tests {
     // `unused_mut` is allowed because several duplex bindings need `mut` only
     // inside a `tokio::spawn`-moved closure; clippy can't see across the move.
     use super::*;
-    use crate::subscribe::publish_host_status;
+    use crate::mesh::subscribe::publish_host_status;
     use std::time::Duration;
 
     fn req(method: &str, params: Option<Value>) -> Request {
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn validate_rejects_wrong_method() {
         let r = req(
-            "pod/ping",
+            "mesh/ping",
             Some(subscribe_params_value("host:peer.x:status")),
         );
         let e = validate_subscribe(&r, "x").unwrap_err();
@@ -494,11 +494,11 @@ mod tests {
             s
         });
 
-        let before = crate::subscribe_demand::heartbeats_seen();
+        let before = crate::mesh::subscribe_demand::heartbeats_seen();
         let _client_io = driver.await.unwrap();
         // Give the server task a tick to process the heartbeat.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let after = crate::subscribe_demand::heartbeats_seen();
+        let after = crate::mesh::subscribe_demand::heartbeats_seen();
         assert!(
             after > before,
             "expected heartbeats_seen to advance; before={before} after={after}"
@@ -537,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn serve_session_rejects_non_request_first_frame() {
         let (mut client_io, mut server_io) = tokio::io::duplex(64 * 1024);
-        let notif = Notification::new("pod/ping", None);
+        let notif = Notification::new("mesh/ping", None);
         let bytes = serde_json::to_vec(&notif).unwrap();
         write_frame(&mut client_io, &bytes).await.unwrap();
         let err = serve_session(server_io, "any").await.unwrap_err();
@@ -655,7 +655,7 @@ mod tests {
         // then send a Notification back (wrong type for ack).
         let server = tokio::spawn(async move {
             let _ = read_frame(&mut server_io).await.unwrap();
-            let notif = Notification::new("pod/ping", None);
+            let notif = Notification::new("mesh/ping", None);
             let bytes = serde_json::to_vec(&notif).unwrap();
             write_frame(&mut server_io, &bytes).await.unwrap();
         });
@@ -690,7 +690,7 @@ mod tests {
                 .await
                 .unwrap();
             // Send a non-Notification frame (a Request) → client should skip.
-            let stray = Request::new(2, "pod/ping", None);
+            let stray = Request::new(2, "mesh/ping", None);
             write_frame(&mut server_io, &serde_json::to_vec(&stray).unwrap())
                 .await
                 .unwrap();

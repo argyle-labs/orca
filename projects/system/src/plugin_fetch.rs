@@ -251,12 +251,30 @@ async fn resolve_release(
                 .next()
                 .with_context(|| format!("no releases published for {name}"))
         }
-        None => Ok(get(format!("{api}/releases/latest"))
-            .send()
-            .await
-            .with_context(|| format!("fetch latest release from {api}"))?
-            .json()
-            .context("parse release json")?),
+        None => {
+            // `/releases/latest` is STABLE-ONLY: a repo whose releases are all
+            // prereleases 404s there. That is an answer ("no stable release"),
+            // not an internal error, and it must not block an update — a plugin
+            // with any published version is installable (#648). Fall back to the
+            // newest release of any kind, which is exactly what the
+            // `allow_prerelease` arm above resolves.
+            match get(format!("{api}/releases/latest")).send().await {
+                Ok(resp) => Ok(resp.json().context("parse release json")?),
+                Err(utils::http::HttpError::Status { status: 404, .. }) => {
+                    let list: Vec<Release> = get(format!("{api}/releases?per_page=30"))
+                        .send()
+                        .await
+                        .with_context(|| format!("list releases from {api}"))?
+                        .json()
+                        .context("parse releases json")?;
+                    list.into_iter().next().with_context(|| {
+                        format!("no releases published for {name} — nothing to resolve")
+                    })
+                }
+                Err(e) => Err(anyhow::Error::new(e))
+                    .with_context(|| format!("fetch latest release from {api}")),
+            }
+        }
     }
 }
 

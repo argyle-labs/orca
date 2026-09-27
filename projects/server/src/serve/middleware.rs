@@ -168,7 +168,7 @@ pub struct AuthIdentity {
 pub enum AuthKind {
     /// Bearer token from `api_tokens`. Carries the token row id and (for
     /// tokens minted post-user-binding) the issuing user_id; the middleware
-    /// builds a CallerIdentity from this so pod/exec dispatch resolves to a
+    /// builds a CallerIdentity from this so mesh/exec dispatch resolves to a
     /// real operator. Legacy rows have `user_id = None`.
     Token {
         id: String,
@@ -551,7 +551,7 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
         if let Some(ident) = try_token_auth(token) {
             let mut req = req;
             // Token rows minted post-2026-05-29 carry the issuer's user_id;
-            // resolve to a CallerIdentity so REST→pod dispatch mints a token
+            // resolve to a CallerIdentity so REST→mesh dispatch mints a token
             // bound to the actual operator. Legacy NULL → no override; the
             // shared ctx's ambient host-admin identity stays in effect.
             if let Some(uid) = identity_user_id(&ident)

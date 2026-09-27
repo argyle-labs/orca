@@ -935,7 +935,7 @@ pub struct ContainersLogsOutput {
 /// Detail for a container. `view=logs` tails the container's logs, routing to
 /// the owning runtime adapter (docker via the engine API, lxc via the CT's own
 /// journal over `pct exec`). `remote_ok` is the default, so this works across
-/// the pod mesh through `pod/exec`.
+/// the mesh through `mesh/exec`.
 #[derive::orca_tool(domain = "container", verb = "detail", crate = ::macro_runtime)]
 async fn container_detail(
     args: ContainerDetailArgs,

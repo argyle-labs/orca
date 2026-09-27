@@ -1,9 +1,9 @@
-//! Transport trait for dispatching a tool call to a paired pod peer.
+//! Transport trait for dispatching a tool call to a paired system in the mesh.
 //!
 //! Lives at the `native` layer (not `cli`) because the macro-emitted
 //! `peer_dispatch` proxy stanza needs to resolve it from any tool body — not
 //! just the CLI surface. The server registers an adapter
-//! (`PodRemoteExec` in `fleet::pod`) that delegates to its `PodService`.
+//! (`MeshRemoteExec` in `system::mesh`) that delegates to its `MeshService`.
 
 use anyhow::Result;
 
