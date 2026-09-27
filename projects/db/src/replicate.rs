@@ -15,7 +15,7 @@
 //!   - **merge** — upsert each incoming row last-write-wins on the `lww` column,
 //!     keyed by the primary key (`pk`, default `id`).
 //!
-//! The pod mesh engine walks [`registrations`] to build ONE signed bundle
+//! The the mesh engine walks [`registrations`] to build ONE signed bundle
 //! (`{ entity_name -> rows }`) per peer rather than a bespoke method per
 //! entity. `users` is the first registrant; configs/settings follow.
 //!

@@ -30,8 +30,8 @@ leave, and the security model.
 The mesh is one or more orca systems that have exchanged mesh-CA-signed client
 + server TLS certificates. Membership unlocks:
 
-* **mTLS peer-to-peer**: every mesh-internal call (e.g. `pod/ping`,
-  `pod/notify-trust`, federated tool calls) is mTLS-authenticated by the
+* **mTLS peer-to-peer**: every mesh-internal call (e.g. `mesh/ping`,
+  `mesh/notify-trust`, federated tool calls) is mTLS-authenticated by the
   shared mesh CA.
 * **Mutual-trust state**: each host tracks a per-peer `(local_secure,
   peer_secure)` pair. When both bits are true, that peer is *mutually
@@ -52,8 +52,8 @@ The fast path is fully automatic on a shared LAN.
    Ed25519 *bootstrap key* and begins advertising itself on mDNS
    (`_orca._tcp.local.`) as `unclaimed`.
 2. **Any secure mesh member on the LAN sees the advertisement** and
-   automatically pushes a `pod/offer` over the bootstrap channel (a
-   dedicated TLS SNI, `pod-bootstrap.orca.local`, that doesn't require a
+   automatically pushes a `mesh/offer` over the bootstrap channel (a
+   dedicated TLS SNI, `mesh-bootstrap.orca.local`, that doesn't require a
    client cert). The offer carries the mesh CA cert, the mesh id, and the
    hash of a 6-character pairing code. The inviter prints the code in its
    daemon log so the user can read it on screen.
@@ -104,7 +104,7 @@ orca system mesh update --action trust --peer-id peer.hotel on
 ```
 
 The moment both bits are true, the host that already has the mesh CA
-private key pushes it to the peer via `pod/push-ca-key` over the existing
+private key pushes it to the peer via `mesh/push-ca-key` over the existing
 mTLS channel. From that point, the newly-trusted host can extend its own
 offers (`can_invite=1` in its mDNS advertisement).
 
@@ -144,7 +144,7 @@ All three preserve:
 * Docs, agents, plugins (the *code*, not their stored data unless
   `--wipe-all`).
 
-Leaving sends `pod/peer-leaving` to each known peer; peers mark this
+Leaving sends `mesh/peer-leaving` to each known peer; peers mark this
 host as departed in their `mesh` peer rows row and refuse future mTLS until
 re-paired. This is the clean exit. Network-partitioned peers will pick
 it up the next time they observe the departed host failing to authenticate.
@@ -154,13 +154,22 @@ flow — the bootstrap identity is preserved, so a returning host appears
 to peers as the *same* identity (their `mesh` peer rows row will exist as
 `departed`, re-pairing clears the marker).
 
-> **A note on the `pod/*` names below.** The mesh used to be called a "pod",
-> and that concept is gone from the CLI, the crates, and this doc. What remains
-> are ON-WIRE frame names (`pod/ping`, `pod/offer`, …) and TLS SNI values
-> (`pod.orca.local`). Those are protocol identifiers: one of them travels inside
-> an Ed25519-SIGNED caller token, so renaming them is a coordinated flip that
-> requires every system to be rolled together. They are named here as they
-> actually appear on the wire.
+> **On names.** The mesh used to be called a "pod". That concept is gone —
+> from the CLI, the crates, the wire frames (`mesh/ping`, `mesh/offer`, …), the
+> TLS SNI values (`mesh.orca.local`), and the tables. Two transition
+> affordances remain, both with a deletion trigger: the listener still ANSWERS
+> to the old SNI, and every mesh cert is issued carrying both DNS names, so a
+> system still on a pre-rename build can reach one that has upgraded. A daemon
+> whose cert predates the rename reissues it on its first rotation tick, so the
+> fleet converges without operator action. Once every system has started on a
+> build carrying this change, `LEGACY_SERVER_SAN` / `LEGACY_BOOTSTRAP_SAN` and
+> the dual-SAN issuance can go.
+>
+> **Rolling this release:** the wire frame names and the signed caller token
+> changed together, so a new controller cannot drive a pre-rename system, and
+> vice versa. Roll every system in one pass. A system that is powered off
+> during the roll (hemlock) stays on the old names until it is brought up and
+> rolled.
 
 ## Security model
 
@@ -168,10 +177,10 @@ to peers as the *same* identity (their `mesh` peer rows row will exist as
 
 | Identity | Algorithm | Lifetime | Purpose |
 |---|---|---|---|
-| Bootstrap key | Ed25519 | host-lifetime | Pre-mesh identity; backs `pod-bootstrap.orca.local` TLS cert and signs offer/confirm envelopes |
+| Bootstrap key | Ed25519 | host-lifetime | Pre-mesh identity; backs `mesh-bootstrap.orca.local` TLS cert and signs offer/confirm envelopes |
 | Mesh CA | Ed25519, **1y** validity | per-rotation (manual) | Signs all mesh member certs |
 | Peer client cert | Ed25519, **30d** validity | auto-rotated daily when <7d remaining | Authenticates outbound mTLS dials |
-| Peer server cert | Ed25519, **30d** validity | auto-rotated daily when <7d remaining | Authenticates inbound `pod.orca.local` SNI |
+| Peer server cert | Ed25519, **30d** validity | auto-rotated daily when <7d remaining | Authenticates inbound `mesh.orca.local` SNI |
 
 All certs are Ed25519 — modern, fast, constant-time, side-channel-resistant
 by construction. SHA-512 is built into the signature; SHA-256 is used for
@@ -180,9 +189,9 @@ fingerprints and pairing-code hashes.
 ### TLS
 
 * All channels are TLS 1.3 only. AEAD ciphers only. No fallback.
-* mTLS on `core.orca.local` (plugin surface) and `pod.orca.local` (mesh
+* mTLS on `core.orca.local` (plugin surface) and `mesh.orca.local` (mesh
   surface, mesh-CA-anchored).
-* No client cert on `pod-bootstrap.orca.local` — application-layer
+* No client cert on `mesh-bootstrap.orca.local` — application-layer
   signed envelopes (Ed25519 signature over canonical JSON, embedded
   pubkey for fp lookup) authenticate the sender instead.
 
@@ -194,7 +203,7 @@ on:
 1. **mDNS-advertised bootstrap pubkey fingerprint.** The inviter
    publishes its bootstrap-key fingerprint as a TXT record. The joiner
    pins the inviter's bootstrap-TLS cert to that fp when dialing back
-   for `pod/join-confirm`.
+   for `mesh/join-confirm`.
 2. **Signed offer envelopes.** The offer payload itself is Ed25519-signed
    by the inviter's bootstrap key. The joiner verifies the signature
    matches the same fp before recording the offer.
@@ -212,7 +221,7 @@ Compromise of any single one of these is not enough on its own:
 
 Reaching mutual-trust with a peer:
 
-* Replicates the mesh CA private key to that peer (`pod/push-ca-key`).
+* Replicates the mesh CA private key to that peer (`mesh/push-ca-key`).
 * Lets that peer flip its mDNS advertisement to `can_invite=1` (when
   combined with `self_secure=on`), so it auto-offers to any new
   unclaimed orca on its LAN.
@@ -231,7 +240,7 @@ on disk; if any has less than **7 days** remaining, it's reissued:
 
 * **Secure peers** (`has_mesh_ca_key`): self-sign locally. No network.
 * **Non-secure peers**: dial any mutually-trusted peer with the CA key,
-  call `pod/refresh-cert` with fresh CSRs, install the returned certs.
+  call `mesh/refresh-cert` with fresh CSRs, install the returned certs.
 
 The TLS resolver reads cert+key from disk on every handshake, so rotation
 is seamless — `atomic_write_pem` does a tmp-write + `rename(2)`, which
@@ -256,14 +265,14 @@ This is a more deliberate operation. It:
 2. Generates a fresh CA and writes it to the **current** slot.
 3. Re-issues this host's own peer certs under the new CA immediately.
 4. Replicates both slots + the overlap deadline to every mutually-secure
-   peer via `pod/push-ca-state`.
+   peer via `mesh/push-ca-state`.
 
 During the overlap window, both CAs are in every peer's trust store — old
 peer certs (signed by what's now `previous`) and new peer certs (signed
 by `current`) all validate. Peer leaf certs auto-refresh under the new CA
 on their normal rotation schedule. When the deadline expires, the daemon
 drops the previous slot from disk and trust automatically (see
-`pod_self.ca_previous_expires_at`).
+`mesh_self.ca_previous_expires_at`).
 
 ### What you can verify
 
@@ -273,40 +282,40 @@ orca system certs list
 
 Shows days-remaining for the CA, mesh server, mesh client, and bootstrap
 TLS certs, with rotation status (ok / due / EXPIRED). Run on every host
-in the pod after a rotation event to confirm everyone caught up.
+in the mesh after a rotation event to confirm everyone caught up.
 
 ## Troubleshooting
 
-**`pod pending` is empty even though I started the daemon.**
-Verify the daemon log says `[pod] mDNS responder + discoverer up` and
-`[pod] auto-offer scheduler armed`. If mDNS is blocked on your LAN
+**`system list --pending` is empty even though I started the daemon.**
+Verify the daemon log says `[mesh] mDNS responder + discoverer up` and
+`[mesh] auto-offer scheduler armed`. If mDNS is blocked on your LAN
 (some "guest" VLANs do this), use `orca system join --action offer <joiner-addr>` from a
 secure peer.
 
-**`pod accept <code>` says "no pending offer matches".**
+**`system join --action accept <code>` says "no pending offer matches".**
 * Code typo? Codes are case-sensitive and use Crockford-style
   base32 (no I/L/O/U).
 * Code expired? Default TTL is 10 minutes; rerun the discovery cycle
-  by toggling state with `pod discover`. (A new offer will be pushed on
+  by toggling state with `system list --discovery`. (A new offer will be pushed on
   the next scheduler tick.)
 * Inviter restarted? A daemon restart drops in-memory offer state but
-  not DB rows; check `pod pending` is still showing the offer.
+  not DB rows; check `system list --pending` is still showing the offer.
 
-**`pod accept` succeeds but `pod ping` fails.**
+**pairing succeeds but `system health --id <id>` fails.**
 Almost always a clock skew issue — the certs have `not_before` set to
 the inviter's wall time. NTP should keep this aligned. Confirm with
 `date -u` on both hosts.
 
-**`pod trust on` reports "notify-trust dial failed".**
+**`system mesh update --action trust` reports "notify-trust dial failed".**
 The trust bit is set locally regardless. Peer will pick up the update
 the next time it succeeds in dialing this host, or when the user re-runs
-`pod trust` after the network heals.
+retry the trust call after the network heals.
 
 **Wrong port?**
 mDNS TXT carries the actual port the peer is listening on; commands
 that take `<addr>` accept `host:port` so you can override the default.
 
 **Different subnets?**
-Use `pod offer <ip[:port]>` from the inviter side. Cross-subnet
+Use `system join --action offer <ip[:port]>` from the inviter side. Cross-subnet
 auto-discovery is on the roadmap (will gossip offers between
 already-paired peers).

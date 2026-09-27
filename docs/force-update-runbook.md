@@ -66,7 +66,7 @@ This cycles the supervised daemon onto the staged binary. Re-probe to confirm.
 ## Level 4 — Targeting fallback (identity not converged)
 
 If a host won't resolve by `machine_id` ("no active paired peer matches
-'<id>'") but resolves by hostname, its `pod_peers` identity on the caller is
+'<id>'") but resolves by hostname, its `mesh_peers` identity on the caller is
 stale — usually because `converge_peer_identity` has been failing (look for
 `database is locked` in the caller's log; fixed by the busy_timeout change in
 rc.18+). **Target by hostname** to get the update through; once the caller runs

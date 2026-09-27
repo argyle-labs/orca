@@ -2,10 +2,10 @@
 //!
 //! Serves two SNIs on the same port:
 //!
-//!   * `pod.orca.local` (`POD_SERVER_SAN`) — paired-peer mTLS. Requires a
+//!   * `mesh.orca.local` (`MESH_SERVER_SAN`) — paired-peer mTLS. Requires a
 //!     client cert signed by the mesh CA; CN drives every authorization
-//!     decision in `handle_pod_connection`.
-//!   * `pod-bootstrap.orca.local` (`POD_BOOTSTRAP_SAN`) — pre-pairing
+//!     decision in `handle_mesh_connection`.
+//!   * `mesh-bootstrap.orca.local` (`MESH_BOOTSTRAP_SAN`) — pre-pairing
 //!     channel. No client cert: trust is established at the next layer via
 //!     pinned bootstrap pubkey + pairing code.
 //!
@@ -69,7 +69,7 @@ async fn serve(
             accepted = listener.accept() => match accepted {
                 Ok(pair) => pair,
                 Err(e) => {
-                    warn!("[pod] mesh accept error: {e}");
+                    warn!("[mesh] mesh accept error: {e}");
                     continue;
                 }
             },
@@ -81,7 +81,7 @@ async fn serve(
             let tls = match acceptor.accept(tcp).await {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!("[pod] mesh TLS accept failed: {e:#}");
+                    warn!("[mesh] mesh TLS accept failed: {e:#}");
                     return;
                 }
             };
@@ -94,28 +94,31 @@ async fn serve(
 
             // Bootstrap SNI: pre-pair channel, no client cert.
             // Pairing CANNOT happen without this path.
-            if sni == utils::pki::POD_BOOTSTRAP_SAN {
-                if let Err(e) = crate::mesh::handle_pod_bootstrap_connection(tls, peer).await {
-                    warn!("[pod] {peer} bootstrap connection error: {e:#}");
+            // Both names are accepted, never both offered: a peer still on a
+            // pre-rename build dials the legacy SNI, and refusing it would
+            // partition the mesh mid-roll (see `LEGACY_BOOTSTRAP_SAN`).
+            if sni == utils::pki::MESH_BOOTSTRAP_SAN || sni == utils::pki::LEGACY_BOOTSTRAP_SAN {
+                if let Err(e) = crate::mesh::handle_mesh_bootstrap_connection(tls, peer).await {
+                    warn!("[mesh] {peer} bootstrap connection error: {e:#}");
                 }
                 return;
             }
 
-            if sni == utils::pki::POD_SERVER_SAN {
+            if sni == utils::pki::MESH_SERVER_SAN || sni == utils::pki::LEGACY_SERVER_SAN {
                 let peer_cn = match extract_peer_cn(&tls) {
                     Ok(cn) => cn,
                     Err(e) => {
-                        warn!("[pod] {peer} pod connection lacks valid peer cert: {e:#}");
+                        warn!("[mesh] {peer} connection lacks valid peer cert: {e:#}");
                         return;
                     }
                 };
-                if let Err(e) = crate::mesh::handle_pod_connection(tls, peer_cn, peer).await {
-                    warn!("[pod] {peer} pod connection error: {e:#}");
+                if let Err(e) = crate::mesh::handle_mesh_connection(tls, peer_cn, peer).await {
+                    warn!("[mesh] {peer} connection error: {e:#}");
                 }
                 return;
             }
 
-            warn!("[pod] {peer} closed connection with unknown SNI: {sni:?}");
+            warn!("[mesh] {peer} closed connection with unknown SNI: {sni:?}");
         });
     }
 }
@@ -160,7 +163,7 @@ struct HotReloadResolver {
 }
 
 impl HotReloadResolver {
-    fn load_pod_server_ck(&self) -> Result<rustls::sign::CertifiedKey> {
+    fn load_mesh_server_ck(&self) -> Result<rustls::sign::CertifiedKey> {
         let cert_pem = std::fs::read_to_string(utils::pki::mesh_server_cert_path(&self.pki_dir))
             .context("read mesh server cert")?;
         let key_pem = std::fs::read_to_string(utils::pki::mesh_server_key_path(&self.pki_dir))
@@ -194,8 +197,14 @@ impl rustls::server::ResolvesServerCert for HotReloadResolver {
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
         let sni = client_hello.server_name()?;
         match sni {
-            s if s == utils::pki::POD_SERVER_SAN => self.load_pod_server_ck().ok().map(Arc::new),
-            s if s == utils::pki::POD_BOOTSTRAP_SAN => self.load_bootstrap_ck().ok().map(Arc::new),
+            // Legacy names resolve to the same certs — those certs carry both
+            // DNS names, so one cert satisfies a dialer of either vintage.
+            s if s == utils::pki::MESH_SERVER_SAN || s == utils::pki::LEGACY_SERVER_SAN => {
+                self.load_mesh_server_ck().ok().map(Arc::new)
+            }
+            s if s == utils::pki::MESH_BOOTSTRAP_SAN || s == utils::pki::LEGACY_BOOTSTRAP_SAN => {
+                self.load_bootstrap_ck().ok().map(Arc::new)
+            }
             _ => None,
         }
     }
@@ -230,7 +239,7 @@ impl HotReloadClientVerifier {
             .and_then(|m| m.modified())
             .ok();
         if mesh_mtime.is_some() {
-            info!("[pod] mesh CA detected — pod SNI surface active");
+            info!("[mesh] mesh CA detected — pod SNI surface active");
         }
         Ok(Self {
             pki_dir: pki_dir.to_path_buf(),
@@ -261,8 +270,8 @@ impl HotReloadClientVerifier {
         // Pre-pair: no mesh CA on disk yet → no trust anchors → rustls'
         // `WebPkiClientVerifier::builder().build()` rejects empty roots.
         // Use the no-client-auth verifier: bootstrap SNI is allowed
-        // (`POD_BOOTSTRAP_SAN` never presents a client cert by design),
-        // and `POD_SERVER_SAN` connections that DO present a cert are
+        // (`MESH_BOOTSTRAP_SAN` never presents a client cert by design),
+        // and `MESH_SERVER_SAN` connections that DO present a cert are
         // refused — which is correct, since this host hasn't joined a
         // pod yet. `current()` swaps to a real verifier the moment
         // `pod accept` writes the mesh CA into place.
@@ -290,9 +299,9 @@ impl HotReloadClientVerifier {
                     state.inner = v;
                     state.mesh_mtime = mesh_mtime;
                     state.prev_mtime = prev_mtime;
-                    info!("[pod] reloaded mesh client cert verifier (CA changed on disk)");
+                    info!("[mesh] reloaded mesh client cert verifier (CA changed on disk)");
                 }
-                Err(e) => warn!("[pod] mesh CA reload failed: {e:#}; using cached verifier"),
+                Err(e) => warn!("[mesh] mesh CA reload failed: {e:#}; using cached verifier"),
             }
         }
         state.inner.clone()
@@ -472,7 +481,7 @@ mod tests {
         let resolver = HotReloadResolver {
             pki_dir: pki.path().to_path_buf(),
         };
-        let server_ck = resolver.load_pod_server_ck().expect("server ck");
+        let server_ck = resolver.load_mesh_server_ck().expect("server ck");
         assert!(
             !server_ck.cert.is_empty(),
             "server certified key must carry a non-empty chain"
@@ -494,7 +503,7 @@ mod tests {
             pki_dir: pki.path().to_path_buf(),
         };
         assert!(
-            resolver.load_pod_server_ck().is_err(),
+            resolver.load_mesh_server_ck().is_err(),
             "loading a server cert with no files on disk must error"
         );
     }

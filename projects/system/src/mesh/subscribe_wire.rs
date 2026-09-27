@@ -31,7 +31,7 @@ use utils::jsonrpc::{ErrorObject, Message, Notification, Request, Response};
 use super::subscribe::{HostStatusEvent, subscribe_host_status};
 use super::subscribe_demand;
 
-pub const METHOD: &str = "pod/subscribe";
+pub const METHOD: &str = "mesh/subscribe";
 pub const EVENT_METHOD: &str = "pod/subscribe.event";
 pub const HEARTBEAT_METHOD: &str = "pod/subscribe.heartbeat";
 
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn validate_rejects_wrong_method() {
         let r = req(
-            "pod/ping",
+            "mesh/ping",
             Some(subscribe_params_value("host:peer.x:status")),
         );
         let e = validate_subscribe(&r, "x").unwrap_err();
@@ -537,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn serve_session_rejects_non_request_first_frame() {
         let (mut client_io, mut server_io) = tokio::io::duplex(64 * 1024);
-        let notif = Notification::new("pod/ping", None);
+        let notif = Notification::new("mesh/ping", None);
         let bytes = serde_json::to_vec(&notif).unwrap();
         write_frame(&mut client_io, &bytes).await.unwrap();
         let err = serve_session(server_io, "any").await.unwrap_err();
@@ -655,7 +655,7 @@ mod tests {
         // then send a Notification back (wrong type for ack).
         let server = tokio::spawn(async move {
             let _ = read_frame(&mut server_io).await.unwrap();
-            let notif = Notification::new("pod/ping", None);
+            let notif = Notification::new("mesh/ping", None);
             let bytes = serde_json::to_vec(&notif).unwrap();
             write_frame(&mut server_io, &bytes).await.unwrap();
         });
@@ -690,7 +690,7 @@ mod tests {
                 .await
                 .unwrap();
             // Send a non-Notification frame (a Request) → client should skip.
-            let stray = Request::new(2, "pod/ping", None);
+            let stray = Request::new(2, "mesh/ping", None);
             write_frame(&mut server_io, &serde_json::to_vec(&stray).unwrap())
                 .await
                 .unwrap();

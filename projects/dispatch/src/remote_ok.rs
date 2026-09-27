@@ -1,5 +1,5 @@
 //! Process-global DENYLIST of tools that paired systems may NOT invoke via
-//! `pod/exec`. Everything is REMOTE_OK by default; only `local_only` tools
+//! `mesh/exec`. Everything is REMOTE_OK by default; only `local_only` tools
 //! (`#[orca_tool(local_only = true)]`) are refused. Populated once at startup
 //! from `dispatch::local_only_names` so the mesh listener can authorize without
 //! walking the inventory on every request.
@@ -20,7 +20,7 @@ pub fn install(local_only: impl IntoIterator<Item = &'static str>) {
     _ = LOCAL_ONLY.set(set);
 }
 
-/// True if a paired peer may invoke `tool` via `pod/exec`. Default is ALLOW:
+/// True if a paired peer may invoke `tool` via `mesh/exec`. Default is ALLOW:
 /// a tool is reachable unless it is on the `local_only` denylist. Before
 /// `install` runs (startup, before the listener binds) everything reads as
 /// allowed — the denylist simply isn't known yet.

@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn operation_id_camelcases_dotted_names() {
         assert_eq!(operation_id_for("engine.list"), "engineList");
-        assert_eq!(operation_id_for("pod.cert_status"), "podCertStatus");
+        assert_eq!(operation_id_for("system.cert_status"), "systemCertStatus");
         assert_eq!(operation_id_for("host.info"), "hostInfo");
     }
 

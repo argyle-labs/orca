@@ -4,7 +4,7 @@
 //! in `viewer` or `collaborator` roles.
 //!
 //! v1 is single-machine. The data model is federation-ready (UUID ids,
-//! set-shaped ACLs, file-granular content) so the pod mesh sync layer can
+//! set-shaped ACLs, file-granular content) so the mesh sync layer can
 //! replicate without re-shaping.
 //!
 //! No service trait — tools call the free functions in `native` directly

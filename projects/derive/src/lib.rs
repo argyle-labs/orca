@@ -216,7 +216,7 @@ struct ToolAttr {
     domain: LitStr,
     verb: LitStr,
     cli_mode: Option<Ident>,
-    /// Whether this tool is callable by paired pod peers via `pod/exec`.
+    /// Whether this tool is callable by paired systems via `mesh/exec`.
     /// **Default: true.** Set `local_only = true` (or `remote_ok = false`)
     /// for tools that genuinely can't run remotely — e.g. bootstrap, daemon
     /// install/uninstall, package build. The dispatcher additionally requires
@@ -490,7 +490,7 @@ fn expand_to_tokens(attr: ToolAttr, item: ItemFn) -> TokenStream2 {
 ///
 /// Generates `export`/`merge` fns over the named struct fields (each field maps
 /// 1:1 to a column of `table`, in declaration order) and submits a
-/// `#crate_path::db_types::ReplicatedRegistration` into the inventory slice the pod mesh
+/// `#crate_path::db_types::ReplicatedRegistration` into the inventory slice the mesh
 /// engine walks. Merge is last-write-wins on the `lww` column, keyed by `pk`.
 #[cfg(not(test))]
 #[proc_macro_derive(Replicated, attributes(replicate))]

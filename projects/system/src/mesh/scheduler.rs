@@ -3,7 +3,7 @@
 
 //! Auto-offer scheduler.
 //!
-//! Periodically (every 15s by default) scans `pod_discovery` for peers in
+//! Periodically (every 15s by default) scans `mesh_discovery` for peers in
 //! state=unclaimed and pushes a pod/offer to each — provided:
 //!
 //!   * This host has the mesh CA private key (`can_invite`).
@@ -68,13 +68,13 @@ async fn tick() -> Result<()> {
     if !utils::pki::has_mesh_ca_key(&pki_d) {
         return Ok(());
     }
-    let Some((pod_id, unclaimed)) = db::pool::with_pooled_or_open(|conn| {
+    let Some((mesh_id, unclaimed)) = db::pool::with_pooled_or_open(|conn| {
         if !db::mesh::get_self_secure(conn)? {
             return Ok(None);
         }
-        let pod_id = pdb::get_pod_id(conn)?.unwrap_or_else(|| "default".to_string());
+        let mesh_id = pdb::get_mesh_id(conn)?.unwrap_or_else(|| "default".to_string());
         let unclaimed = pdb::list_unclaimed_discovery(conn)?;
-        Ok(Some((pod_id, unclaimed)))
+        Ok(Some((mesh_id, unclaimed)))
     })?
     else {
         return Ok(());
@@ -111,14 +111,14 @@ async fn tick() -> Result<()> {
             continue;
         };
 
-        let pod_id = pod_id.clone();
+        let mesh_id = mesh_id.clone();
         let code_for_log = code.clone();
         let hostname = d.hostname.clone();
         let addr = d.addr.clone();
         let port = d.port;
         let fp = d.pubkey_fp.clone();
         tokio::spawn(async move {
-            if let Err(e) = push_offer(&hostname, &addr, port, &fp, &code, &pod_id).await {
+            if let Err(e) = push_offer(&hostname, &addr, port, &fp, &code, &mesh_id).await {
                 warn!("[pod-scheduler] push offer to {hostname} failed: {e:#}");
             } else {
                 info!(
@@ -145,7 +145,7 @@ pub fn mint_pairing_code() -> String {
 
 /// Push a mesh-membership offer to a joiner over its bootstrap surface. Mints
 /// no DB state — callers (the scheduler and the `system.join --action offer` tool) must have
-/// already inserted the outbound `pod_pending_offers` row keyed by
+/// already inserted the outbound `mesh_pending_offers` row keyed by
 /// `joiner_pubkey_fp` so the joiner's confirm dial can be reconciled.
 ///
 /// `code` is the raw pairing code shown on both sides. The joiner sees it on
@@ -176,7 +176,7 @@ pub async fn push_offer(
     joiner_port: u16,
     joiner_pubkey_fp: &str,
     code: &str,
-    pod_id: &str,
+    mesh_id: &str,
 ) -> Result<()> {
     let pki_d = pki_dir();
     let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
@@ -193,7 +193,7 @@ pub async fn push_offer(
         inviter_addr: &'a str,
         inviter_port: u16,
         mesh_ca_cert_pem: &'a str,
-        pod_id: &'a str,
+        mesh_id: &'a str,
         code_hash: String,
         expires_at: i64,
         inviter_display_name: &'a str,
@@ -213,7 +213,7 @@ pub async fn push_offer(
         inviter_addr: "", // legacy fallback; joiner prefers `inviter_addrs`, else the TLS source addr
         inviter_port: mesh_port(),
         mesh_ca_cert_pem: &mesh_ca_cert_pem,
-        pod_id,
+        mesh_id,
         code_hash: pdb::hash_code(code),
         expires_at: now_secs() + OFFER_TTL_SECS,
         inviter_display_name: &inviter_hostname,
@@ -234,7 +234,7 @@ pub async fn push_offer(
     let tcp = TcpStream::connect(&target)
         .await
         .with_context(|| format!("dial {target}"))?;
-    let sni = ServerName::try_from(utils::pki::POD_BOOTSTRAP_SAN)
+    let sni = ServerName::try_from(utils::pki::MESH_BOOTSTRAP_SAN)
         .context("bootstrap SNI")?
         .to_owned();
     let mut tls = connector
@@ -242,7 +242,7 @@ pub async fn push_offer(
         .await
         .context("bootstrap TLS handshake")?;
 
-    let req = Request::new(1, "pod/offer", Some(serde_json::to_value(&env)?));
+    let req = Request::new(1, "mesh/offer", Some(serde_json::to_value(&env)?));
     write_frame(&mut tls, &serde_json::to_vec(&req)?).await?;
 
     let raw = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut tls))
@@ -525,7 +525,7 @@ mod tests {
             tick().await.unwrap();
             let count_after_first = db::pool::with_pooled_or_open(|conn| {
                 Ok(conn.query_row(
-                    "SELECT COUNT(*) FROM pod_pending_offers WHERE peer_pubkey_fp = ?",
+                    "SELECT COUNT(*) FROM mesh_pending_offers WHERE peer_pubkey_fp = ?",
                     [&"fp-dup"],
                     |r| r.get::<_, i64>(0),
                 )?)
@@ -537,7 +537,7 @@ mod tests {
             tick().await.unwrap();
             let count_after_second = db::pool::with_pooled_or_open(|conn| {
                 Ok(conn.query_row(
-                    "SELECT COUNT(*) FROM pod_pending_offers WHERE peer_pubkey_fp = ?",
+                    "SELECT COUNT(*) FROM mesh_pending_offers WHERE peer_pubkey_fp = ?",
                     [&"fp-dup"],
                     |r| r.get::<_, i64>(0),
                 )?)

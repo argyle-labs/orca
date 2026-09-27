@@ -1593,7 +1593,7 @@ mod tests {
         // is not read-shaped, so it default-denies).
         assert!(
             dispatch::remote_ok_names().contains(&"plugin.create"),
-            "plugin.create must be in the remote_ok allowlist for pod/exec"
+            "plugin.create must be in the remote_ok allowlist for mesh/exec"
         );
         assert_eq!(dispatch::required_role("plugin.create"), Some("admin"));
     }

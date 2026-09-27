@@ -23,13 +23,13 @@ coordinated fleet operation across every host at once.
 
 Two facts from the leave/join/recover paths make a rolling re-key unsafe:
 
-1. **`pod leave` preserves local identity.** It deletes `pod_peers` / `pod_trust`
+1. **`pod leave` preserves local identity.** It deletes `mesh_peers` / `pod_trust`
    / offers / discovery and clears `pod_self`, but it does **not** delete the
    on-disk `machine_id` file or the bootstrap key. So a host that merely leaves
    and rejoins comes back with the **same** id. To mint a fresh UUIDv7 you must
    delete `<app_dir>/machine_id` so `load_or_generate_machine_id` re-mints.
 2. **No auto-drop of a stale peer on rejoin.** When a host returns with a *new*
-   id, other hosts do not automatically retire its old `pod_peers` row — there
+   id, other hosts do not automatically retire its old `mesh_peers` row — there
    is no "same machine, new id" reconciliation (the old id is, by definition, a
    different key). A rolling re-key therefore leaves a **ghost row** on every
    other peer, cleaned only by an explicit `pod forget <old_id>` fan-out.
@@ -43,7 +43,7 @@ and roster together, so there are no ghost rows to chase.
   every host** (over the mesh — see [mesh self-update](force-update-runbook.md)).
   Re-keying requires the new `load_or_generate_machine_id`; do the code rollout
   first, the identity collapse second.
-- You have a way to run commands on each host (mesh `pod/exec`, or local shell).
+- You have a way to run commands on each host (mesh `mesh/exec`, or local shell).
 - Pick one host to be the **first inviter** (the seed the others re-pair to).
 
 ## Procedure
@@ -78,7 +78,7 @@ on Linux service installs; `pod_detail` / logs show the resolved path).
    - Joiner: `orca system join --action accept <code>`. (For an explicit dial by address instead,
      `orca system join --action connect <seed-addr>`.)
    The joiner's CSR CN is now its full UUIDv7; the inviter signs it and writes
-   the `pod_peers` row keyed by that UUIDv7.
+   the `mesh_peers` row keyed by that UUIDv7.
 
 ## Verification (whole fleet)
 

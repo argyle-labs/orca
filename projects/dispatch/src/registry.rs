@@ -26,7 +26,7 @@ use axum::{
 };
 
 /// Per-request header that routes a `/api/v1/<name>` call to a remote
-/// peer over the pod mesh. Mirrors the CLI `--peer <h>` flag — same
+/// peer over the mesh. Mirrors the CLI `--peer <h>` flag — same
 /// universal opt-out (local_only tools reject), same `ToolCtx::peer_target`
 /// pathway. The web UI sets this header on per-peer actions like
 /// "update this system" so the same REST surface that does local work also
@@ -200,7 +200,7 @@ fn advertise_ambient(mut schema: Value, remote_ok: bool) -> Value {
         props.entry(AMBIENT_PEER_KEY).or_insert_with(|| {
             json!({
                 "type": "string",
-                "description": "Optional. Run this tool on a remote pod peer over the mesh — universal peer-dispatch. Accepts the peer's machine_id (peer_id), hostname/display name, or LAN address (any of the three). Prefer the stable machine_id — the display name is mutable and can duplicate, in which case a name/addr selector is rejected as ambiguous and you must use the machine_id. Omit to run on the local host."
+                "description": "Optional. Run this tool on a remote system over the mesh — universal peer-dispatch. Accepts the peer's machine_id (peer_id), hostname/display name, or LAN address (any of the three). Prefer the stable machine_id — the display name is mutable and can duplicate, in which case a name/addr selector is rejected as ambiguous and you must use the machine_id. Omit to run on the local host."
             })
         });
     }
@@ -287,7 +287,7 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
                         // (a plugin loaded only on that peer, e.g. proxmox on a
                         // PVE host). Forward the raw call over the mesh instead
                         // of 404ing, so a host's surface can reach any tool
-                        // anywhere on the pod, not just its locally-loaded set.
+                        // anywhere in the mesh, not just its locally-loaded set.
                         // Same transport the macro peer-dispatch stanza uses,
                         // lifted to the router so it covers tools this host
                         // never registered. (mesh-tool-surface-must-expose-peer-tools)
@@ -368,7 +368,7 @@ async fn http_dispatch(
     // Per-request identity + peer-routing overlay. Both come off the shared
     // ctx via clone-and-mutate so the base ctx stays immutable across
     // concurrent requests. Caller swap: auth middleware → real user identity
-    // for caller-token minting on any pod/exec the tool fires. Peer swap:
+    // for caller-token minting on any mesh/exec the tool fires. Peer swap:
     // `X-Orca-Peer: <hostname>` header → universal peer-dispatch trigger,
     // same pathway as the CLI `--peer` flag.
     //
@@ -464,7 +464,7 @@ pub fn names() -> Vec<&'static str> {
 }
 
 /// Names of every registered tool whose `OrcaToolDef::REMOTE_OK` is true.
-/// Used to populate the static allowlist for `pod/exec` dispatch.
+/// Used to populate the static allowlist for `mesh/exec` dispatch.
 pub fn remote_ok_names() -> Vec<&'static str> {
     cache()
         .ordered
@@ -477,7 +477,7 @@ pub fn remote_ok_names() -> Vec<&'static str> {
 /// The `local_only` tools — those that opted OUT of cross-host dispatch
 /// (`#[orca_tool(local_only = true)]` / `remote_ok = false`). This is the
 /// DENYLIST: everything is REMOTE_OK by default, and only these names are
-/// refused at the pod-exec gate. Mirror of [`remote_ok_names`], inverted.
+/// refused at the mesh-exec gate. Mirror of [`remote_ok_names`], inverted.
 pub fn local_only_names() -> Vec<&'static str> {
     cache()
         .ordered

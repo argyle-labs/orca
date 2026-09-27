@@ -1,6 +1,6 @@
 //! Auto-mesh: every paired peer periodically pulls the thin `system.list`
 //! membership from every other peer it knows about and merges joined entries
-//! into its own `pod_peers`.
+//! into its own `mesh_peers`.
 //! The result is an eventually-consistent full mesh from any starting
 //! topology — once one peer in the pod knows about a new joiner, the next
 //! tick propagates that fact to every other peer.
@@ -209,7 +209,7 @@ fn is_usable_source(p: &pdb::PeerRow, own_peer_id: &str) -> bool {
 }
 
 /// True if a roster entry from a remote peer is something we should ingest
-/// into our local `pod_peers`. Same filters as `is_usable_source`, plus:
+/// into our local `mesh_peers`. Same filters as `is_usable_source`, plus:
 /// - the synthetic `local` row in the remote's response (that's the
 ///   remote peer itself — we already have it as the source)
 /// - inactive entries (the remote may carry departed rows for history)
@@ -286,7 +286,7 @@ async fn ingest_roster(
             // Full-uuid identity is a hard invariant: never learn a peer under a
             // short/legacy/prefixed id form. A pre-uuidv7 CN (`019e7105-991`,
             // `c56ccc7c2039`) or a `peer.<id>` prefix would otherwise land as a
-            // SEPARATE pod_peers row that convergence can't fold back onto the
+            // SEPARATE mesh_peers row that convergence can't fold back onto the
             // canonical row — the exact split that scrambled the roster. Drop it
             // loudly rather than persist a second-class identity.
             if !utils::id::is_uuidv7(&entry.peer_id) {
@@ -314,7 +314,7 @@ async fn ingest_roster(
             let prior_fp = pdb::peer_pubkey_fp_raw(conn, &entry.peer_id)?;
             // Transitive pin: if the source peer published a `pubkey_fp` for this
             // entry (they paired directly), forward it so we can pin too — without
-            // this, every cross-host pod/exec from a roster-learned peer is
+            // this, every cross-host mesh/exec from a roster-learned peer is
             // refused with "no pinned bootstrap key to verify against". The
             // COALESCE in upsert_peer keeps a directly-pinned fp from being
             // clobbered if it was already set locally.

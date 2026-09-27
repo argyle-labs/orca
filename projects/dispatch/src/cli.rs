@@ -102,9 +102,9 @@ pub fn ops() -> impl Iterator<Item = &'static CliOp> {
 
 /// Build the top-level `orca` clap command from every registered op.
 /// Domains become subcommands; verbs become sub-subcommands. A dotted domain
-/// (`"pod.peer"`) nests further: `orca pod peer list` rather than the literal
-/// `orca pod.peer list`. The dotted form remains the canonical tool NAME on
-/// REST/MCP/WASM (`pod.peer.list`); only the CLI surface splits on the dots.
+/// (`"system.mesh"`) nests further: `orca system mesh list` rather than the
+/// literal `orca system.mesh list`. The dotted form remains the canonical tool
+/// NAME on REST/MCP/WASM (`system.mesh.list`); only the CLI splits on the dots.
 /// CLI-ONLY top-level aliases: `(alias, target domain, target verb)`. An alias
 /// is pure CLI ergonomics — it mints NO tool, endpoint, or OpenAPI tag, it just
 /// re-renders an existing op's command at the root with a different default.
@@ -196,7 +196,7 @@ pub fn build_root(mut root: Command) -> Command {
             .value_name("HOSTNAME")
             .global(true)
             .help(
-                "Run this command on a remote peer over the pod mesh. Any tool \
+                "Run this command on a remote peer over the mesh. Any tool \
                  that isn't marked local-only can be peer-dispatched; the peer \
                  enforces the same role checks as a local call.",
             ),
@@ -464,7 +464,7 @@ pub async fn try_dispatch(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Res
 }
 
 /// Walk nested subcommands to the verb leaf. A node whose `.subcommand()` is
-/// `Some` is treated as a domain segment (`pod` → `peer`); the first node
+/// `Some` is treated as a domain segment (`system` → `mesh`); the first node
 /// without a further subcommand is the verb. Returns `(domain, verb,
 /// verb_matches)`, where `domain` is the dotted concat of the traversed
 /// segments. `None` when no subcommand was selected.
@@ -1073,14 +1073,14 @@ mod tests {
 
     fn nested_root() -> Command {
         Command::new("orca").subcommand(
-            Command::new("pod")
+            Command::new("system")
                 .subcommand_required(true)
                 .subcommand(
-                    Command::new("peer")
+                    Command::new("mesh")
                         .subcommand_required(true)
                         .subcommand(Command::new("list")),
                 )
-                .subcommand(Command::new("list")), // system.list lives alongside pod.peer.*
+                .subcommand(Command::new("list")), // system.list lives alongside system.mesh.*
         )
     }
 
@@ -1094,19 +1094,19 @@ mod tests {
 
     #[test]
     fn walk_to_verb_nested_domain() {
-        let m = nested_root().get_matches_from(["orca", "pod", "peer", "list"]);
+        let m = nested_root().get_matches_from(["orca", "system", "mesh", "list"]);
         let (domain, verb, _) = walk_to_verb(&m).unwrap();
-        assert_eq!(domain, "pod.peer");
+        assert_eq!(domain, "system.mesh");
         assert_eq!(verb, "list");
     }
 
     #[test]
     fn walk_to_verb_mixed_tree_resolves_shallow_verb() {
-        // `system.list` must still resolve when `pod.peer.*` exists as a sibling
-        // branch under the same `pod` segment.
-        let m = nested_root().get_matches_from(["orca", "pod", "list"]);
+        // `system.list` must still resolve when `system.mesh.*` exists as a
+        // sibling branch under the same `system` segment.
+        let m = nested_root().get_matches_from(["orca", "system", "list"]);
         let (domain, verb, _) = walk_to_verb(&m).unwrap();
-        assert_eq!(domain, "pod");
+        assert_eq!(domain, "system");
         assert_eq!(verb, "list");
     }
 

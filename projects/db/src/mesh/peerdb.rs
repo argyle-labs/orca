@@ -1,5 +1,5 @@
-//! Pod-mesh DB helpers. Schema lives in db::apply_schema (pod_discovery,
-//! pod_pending_offers, pod_peers, pod_trust, pod_self).
+//! Pod-mesh DB helpers. Schema lives in db::apply_schema (mesh_discovery,
+//! mesh_pending_offers, mesh_peers, mesh_trust, mesh_self).
 //!
 //! Code-hash storage: pairing codes are `sha256(raw_code)` only — the raw
 //! 6-char code is shown to the user on both screens but never persisted in
@@ -15,7 +15,7 @@ pub fn hash_code(raw: &str) -> String {
 
 use utils::time::now_secs_since_epoch as now_secs;
 
-// ── pod_discovery ────────────────────────────────────────────────────────────
+// ── mesh_discovery ────────────────────────────────────────────────────────────
 
 /// One row per orca seen on the wire (mDNS or manual probe), keyed by
 /// bootstrap pubkey fingerprint so IP/hostname churn doesn't fragment it.
@@ -50,22 +50,22 @@ pub fn upsert_discovery(
     // forever and the scheduler would keep dialing it and hitting
     // `pinned bootstrap pubkey mismatch`.
     conn.execute(
-        "DELETE FROM pod_discovery WHERE hostname = ? AND pubkey_fp <> ?",
+        "DELETE FROM mesh_discovery WHERE hostname = ? AND pubkey_fp <> ?",
         params![hostname, pubkey_fp],
     )?;
     // Also drop any stale outbound offers pinned to the evicted fp so the
     // scheduler stops retrying them.
     conn.execute(
-        "DELETE FROM pod_pending_offers
+        "DELETE FROM mesh_pending_offers
          WHERE direction = 'out' AND peer_hostname = ? AND peer_pubkey_fp <> ?",
         params![hostname, pubkey_fp],
     )?;
     conn.execute(
-        "INSERT INTO pod_discovery
+        "INSERT INTO mesh_discovery
              (pubkey_fp, peer_id, hostname, addr, port, state, can_invite, first_seen_at, last_seen_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(pubkey_fp) DO UPDATE SET
-             peer_id      = COALESCE(excluded.peer_id, pod_discovery.peer_id),
+             peer_id      = COALESCE(excluded.peer_id, mesh_discovery.peer_id),
              hostname     = excluded.hostname,
              addr         = excluded.addr,
              port         = excluded.port,
@@ -87,13 +87,13 @@ pub fn upsert_discovery(
     Ok(())
 }
 
-/// Delete pod_discovery rows whose hostname matches ours but whose pubkey_fp
+/// Delete mesh_discovery rows whose hostname matches ours but whose pubkey_fp
 /// differs — those are previous identities of THIS host (key rotation,
 /// daemon reinstall, factory reset) that would otherwise show up as
 /// "STALE SELF IDENTITY" in the UI on every deploy.
 pub fn evict_stale_self(conn: &Connection, hostname: &str, pubkey_fp: &str) -> Result<()> {
     conn.execute(
-        "DELETE FROM pod_discovery WHERE hostname = ? AND pubkey_fp <> ?",
+        "DELETE FROM mesh_discovery WHERE hostname = ? AND pubkey_fp <> ?",
         params![hostname, pubkey_fp],
     )?;
     Ok(())
@@ -103,7 +103,7 @@ pub fn list_discovery(conn: &Connection) -> Result<Vec<DiscoveryRow>> {
     let mut stmt = conn.prepare(
         "SELECT pubkey_fp, peer_id, hostname, addr, port, state, can_invite,
                 first_seen_at, last_seen_at
-         FROM pod_discovery
+         FROM mesh_discovery
          ORDER BY last_seen_at DESC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -130,7 +130,7 @@ pub fn list_unclaimed_discovery(conn: &Connection) -> Result<Vec<DiscoveryRow>> 
         .collect())
 }
 
-// ── pod_pending_offers ───────────────────────────────────────────────────────
+// ── mesh_pending_offers ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PendingOffer {
@@ -143,7 +143,7 @@ pub struct PendingOffer {
     pub code_hash: String,
     pub mesh_ca_cert_pem: Option<String>,
     pub inviter_peer_id: Option<String>,
-    pub pod_id: Option<String>,
+    pub mesh_id: Option<String>,
     pub expires_at: i64,
     pub created_at: i64,
     /// Plaintext pairing code — present on inbound offers when the inviter
@@ -182,16 +182,16 @@ pub fn insert_pending_offer(
     code_hash: &str,
     mesh_ca_cert_pem: Option<&str>,
     inviter_peer_id: Option<&str>,
-    pod_id: Option<&str>,
+    mesh_id: Option<&str>,
     ttl_secs: i64,
     code_plain: Option<&str>,
     candidate_addrs: &[String],
 ) -> Result<()> {
     let now = now_secs();
     conn.execute(
-        "INSERT INTO pod_pending_offers
+        "INSERT INTO mesh_pending_offers
              (offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
-              code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
+              code_hash, mesh_ca_cert_pem, inviter_peer_id, mesh_id, expires_at, created_at,
               code_plain, candidate_addrs)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
@@ -204,7 +204,7 @@ pub fn insert_pending_offer(
             code_hash,
             mesh_ca_cert_pem,
             inviter_peer_id,
-            pod_id,
+            mesh_id,
             now + ttl_secs,
             now,
             code_plain,
@@ -218,9 +218,9 @@ pub fn list_pending_offers(conn: &Connection, direction: &str) -> Result<Vec<Pen
     let now = now_secs();
     let mut stmt = conn.prepare(
         "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
-                code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
+                code_hash, mesh_ca_cert_pem, inviter_peer_id, mesh_id, expires_at, created_at,
                 code_plain, candidate_addrs
-         FROM pod_pending_offers
+         FROM mesh_pending_offers
          WHERE direction = ? AND expires_at >= ?
          ORDER BY created_at DESC",
     )?;
@@ -235,7 +235,7 @@ pub fn list_pending_offers(conn: &Connection, direction: &str) -> Result<Vec<Pen
             code_hash: r.get(6)?,
             mesh_ca_cert_pem: r.get(7)?,
             inviter_peer_id: r.get(8)?,
-            pod_id: r.get(9)?,
+            mesh_id: r.get(9)?,
             expires_at: r.get(10)?,
             created_at: r.get(11)?,
             code_plain: r.get(12)?,
@@ -261,9 +261,9 @@ pub fn find_pending_offer_by_code_any_expiry(
     let row = conn
         .query_row(
             "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
-                    code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
+                    code_hash, mesh_ca_cert_pem, inviter_peer_id, mesh_id, expires_at, created_at,
                     code_plain, candidate_addrs
-             FROM pod_pending_offers
+             FROM mesh_pending_offers
              WHERE direction = 'in' AND code_hash = ?",
             params![code_hash],
             |r| {
@@ -277,7 +277,7 @@ pub fn find_pending_offer_by_code_any_expiry(
                     code_hash: r.get(6)?,
                     mesh_ca_cert_pem: r.get(7)?,
                     inviter_peer_id: r.get(8)?,
-                    pod_id: r.get(9)?,
+                    mesh_id: r.get(9)?,
                     expires_at: r.get(10)?,
                     created_at: r.get(11)?,
                     code_plain: r.get(12)?,
@@ -295,9 +295,9 @@ pub fn find_pending_offer_by_code(conn: &Connection, code: &str) -> Result<Optio
     let row = conn
         .query_row(
             "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
-                    code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
+                    code_hash, mesh_ca_cert_pem, inviter_peer_id, mesh_id, expires_at, created_at,
                     code_plain, candidate_addrs
-             FROM pod_pending_offers
+             FROM mesh_pending_offers
              WHERE direction = 'in' AND code_hash = ? AND expires_at >= ?",
             params![code_hash, now],
             |r| {
@@ -311,7 +311,7 @@ pub fn find_pending_offer_by_code(conn: &Connection, code: &str) -> Result<Optio
                     code_hash: r.get(6)?,
                     mesh_ca_cert_pem: r.get(7)?,
                     inviter_peer_id: r.get(8)?,
-                    pod_id: r.get(9)?,
+                    mesh_id: r.get(9)?,
                     expires_at: r.get(10)?,
                     created_at: r.get(11)?,
                     code_plain: r.get(12).unwrap_or(None),
@@ -338,9 +338,9 @@ pub fn find_outbound_offer_by_code_and_fp(
     let row = conn
         .query_row(
             "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
-                    code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
+                    code_hash, mesh_ca_cert_pem, inviter_peer_id, mesh_id, expires_at, created_at,
                     code_plain, candidate_addrs
-             FROM pod_pending_offers
+             FROM mesh_pending_offers
              WHERE direction = 'out'
                AND code_hash = ?
                AND peer_pubkey_fp = ?
@@ -357,7 +357,7 @@ pub fn find_outbound_offer_by_code_and_fp(
                     code_hash: r.get(6)?,
                     mesh_ca_cert_pem: r.get(7)?,
                     inviter_peer_id: r.get(8)?,
-                    pod_id: r.get(9)?,
+                    mesh_id: r.get(9)?,
                     expires_at: r.get(10)?,
                     created_at: r.get(11)?,
                     code_plain: r.get(12).unwrap_or(None),
@@ -374,7 +374,7 @@ pub fn find_outbound_offer_by_code_and_fp(
 
 pub fn delete_pending_offer(conn: &Connection, offer_id: &str) -> Result<()> {
     conn.execute(
-        "DELETE FROM pod_pending_offers WHERE offer_id = ?",
+        "DELETE FROM mesh_pending_offers WHERE offer_id = ?",
         params![offer_id],
     )?;
     Ok(())
@@ -386,7 +386,7 @@ pub fn delete_pending_offer(conn: &Connection, offer_id: &str) -> Result<()> {
 /// `pod.cancel_offer` tool.
 pub fn delete_outbound_offers_by_addr(conn: &Connection, addr: &str) -> Result<u32> {
     let n = conn.execute(
-        "DELETE FROM pod_pending_offers WHERE direction = 'out' AND peer_addr = ?",
+        "DELETE FROM mesh_pending_offers WHERE direction = 'out' AND peer_addr = ?",
         params![addr],
     )?;
     Ok(n as u32)
@@ -397,7 +397,7 @@ pub fn delete_outbound_offers_by_addr(conn: &Connection, addr: &str) -> Result<u
 pub fn has_open_outbound_offer(conn: &Connection, peer_pubkey_fp: &str) -> Result<bool> {
     let now = now_secs();
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pod_pending_offers
+        "SELECT COUNT(*) FROM mesh_pending_offers
          WHERE direction = 'out' AND peer_pubkey_fp = ? AND expires_at >= ?",
         params![peer_pubkey_fp, now],
         |r| r.get(0),
@@ -405,12 +405,12 @@ pub fn has_open_outbound_offer(conn: &Connection, peer_pubkey_fp: &str) -> Resul
     Ok(count > 0)
 }
 
-// ── pod_peers ────────────────────────────────────────────────────────────────
+// ── mesh_peers ────────────────────────────────────────────────────────────────
 
 /// Correlated subquery yielding one `(peer_id, value)` row per peer: the
-/// primary reachability route from `pod_peer_addresses`, chosen by channel
+/// primary reachability route from `mesh_peer_addresses`, chosen by channel
 /// priority (lan_v4 > lan_v6 > tailscale_v4 > tailscale_v6 > other) then value.
-/// This replaces the dropped `pod_peers.peer_addr` scalar — every reader that
+/// This replaces the dropped `mesh_peers.peer_addr` scalar — every reader that
 /// used to select `p.peer_addr` LEFT JOINs this as `pa` and reads `pa.value`.
 pub(crate) const PRIMARY_ROUTE: &str = "\
     SELECT peer_id, value FROM (\
@@ -420,15 +420,15 @@ pub(crate) const PRIMARY_ROUTE: &str = "\
                 WHEN 'lan_v4' THEN 0 WHEN 'lan_v6' THEN 1 \
                 WHEN 'tailscale_v4' THEN 2 WHEN 'tailscale_v6' THEN 3 ELSE 4 END, \
             value\
-        ) AS rn FROM pod_peer_addresses\
+        ) AS rn FROM mesh_peer_addresses\
     ) WHERE rn = 1";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PeerRow {
     pub peer_id: String,
     pub peer_hostname: String,
-    /// Primary reachability address, DERIVED from the peer's `pod_peer_addresses`
-    /// routes (see [`PRIMARY_ROUTE`]) — no longer a stored `pod_peers` column.
+    /// Primary reachability address, DERIVED from the peer's `mesh_peer_addresses`
+    /// routes (see [`PRIMARY_ROUTE`]) — no longer a stored `mesh_peers` column.
     /// Empty when the peer has no routes yet.
     pub peer_addr: String,
     pub peer_port: u16,
@@ -460,14 +460,14 @@ pub fn upsert_peer(
     }
     let now = now_secs();
     conn.execute(
-        "INSERT INTO pod_peers
+        "INSERT INTO mesh_peers
              (peer_id, peer_hostname, peer_port, pubkey_fp, ca_cert_pem,
               first_seen_at, last_seen_at, departed_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(peer_id) DO UPDATE SET
              peer_hostname = excluded.peer_hostname,
              peer_port     = excluded.peer_port,
-             pubkey_fp     = COALESCE(excluded.pubkey_fp, pod_peers.pubkey_fp),
+             pubkey_fp     = COALESCE(excluded.pubkey_fp, mesh_peers.pubkey_fp),
              last_seen_at  = excluded.last_seen_at,
              departed_at   = NULL",
         params![
@@ -480,9 +480,9 @@ pub fn upsert_peer(
             now
         ],
     )?;
-    // Seed the primary address as a `pod_peer_addresses` route so a freshly
+    // Seed the primary address as a `mesh_peer_addresses` route so a freshly
     // paired peer is dialable immediately (routes are the source of truth for
-    // reachability now that `pod_peers.peer_addr` is gone). Ping later augments
+    // reachability now that `mesh_peers.peer_addr` is gone). Ping later augments
     // it with the peer's full multi-channel set. No-op when empty or already
     // present (the (peer_id, kind, value) PK dedups).
     if !peer_addr.is_empty() {
@@ -497,7 +497,7 @@ pub fn upsert_peer(
     Ok(())
 }
 
-/// Classify a bare address into a `pod_peer_addresses` route `kind`: `lan_v6`
+/// Classify a bare address into a `mesh_peer_addresses` route `kind`: `lan_v6`
 /// when it carries a colon (an IPv6 literal), else `lan_v4`. An FQDN falls into
 /// `lan_v4` — still dialable; ping refines the peer's channels afterward.
 pub(crate) fn addr_route_kind(addr: &str) -> &'static str {
@@ -508,33 +508,33 @@ pub(crate) fn addr_route_kind(addr: &str) -> &'static str {
     }
 }
 
-/// Delete any legacy `pod_peers` row keyed by `"unknown"` that points at the
+/// Delete any legacy `mesh_peers` row keyed by `"unknown"` that points at the
 /// same `peer_addr` as a freshly-paired real peer. Pre-rc.25 mTLS clients
 /// landed CN=`"unknown"` rows via `ensure_peer_stub`, and the
 /// `host_status` puller still polls them forever even though they have no
 /// usable identity. Call right after a successful pairing so the legacy row
 /// doesn't linger as a parallel sibling next to the real one.
 ///
-/// Best-effort: no error if nothing matched. Also cascades to `pod_trust`
+/// Best-effort: no error if nothing matched. Also cascades to `mesh_trust`
 /// via FK so we don't leave dangling trust rows.
 pub fn cleanup_unknown_stub_at(conn: &Connection, peer_addr: &str) -> Result<()> {
     // The "unknown" stub is matched by its reachability route (peer_addr is now
-    // a `pod_peer_addresses` value, not a `pod_peers` column).
+    // a `mesh_peer_addresses` value, not a `mesh_peers` column).
     let matches_addr =
-        "EXISTS (SELECT 1 FROM pod_peer_addresses a WHERE a.peer_id = 'unknown' AND a.value = ?)";
+        "EXISTS (SELECT 1 FROM mesh_peer_addresses a WHERE a.peer_id = 'unknown' AND a.value = ?)";
     conn.execute(
-        &format!("DELETE FROM pod_trust WHERE peer_id = 'unknown' AND {matches_addr}"),
+        &format!("DELETE FROM mesh_trust WHERE peer_id = 'unknown' AND {matches_addr}"),
         params![peer_addr],
     )?;
     conn.execute(
-        &format!("DELETE FROM pod_peers WHERE peer_id = 'unknown' AND {matches_addr}"),
+        &format!("DELETE FROM mesh_peers WHERE peer_id = 'unknown' AND {matches_addr}"),
         params![peer_addr],
     )?;
     Ok(())
 }
 
-/// Self-heal upsert: ensure a `pod_peers` row exists for `peer_cn` so trust
-/// inserts don't trip the FK on `pod_trust.peer_id`. Only inserts when no row
+/// Self-heal upsert: ensure a `mesh_peers` row exists for `peer_cn` so trust
+/// inserts don't trip the FK on `mesh_trust.peer_id`. Only inserts when no row
 /// is present — existing rows are left untouched so an admin-set hostname or
 /// pubkey_fp isn't overwritten by a notify dial.
 ///
@@ -560,7 +560,7 @@ pub fn ensure_peer_stub(
     }
     let exists: bool = conn
         .query_row(
-            "SELECT 1 FROM pod_peers WHERE peer_id = ?",
+            "SELECT 1 FROM mesh_peers WHERE peer_id = ?",
             params![peer_cn],
             |_| Ok(true),
         )
@@ -571,7 +571,7 @@ pub fn ensure_peer_stub(
     }
     let now = now_secs();
     conn.execute(
-        "INSERT INTO pod_peers
+        "INSERT INTO mesh_peers
              (peer_id, peer_hostname, peer_port, pubkey_fp, ca_cert_pem,
               first_seen_at, last_seen_at, departed_at)
          VALUES (?, ?, ?, NULL, '', ?, ?, NULL)
@@ -591,9 +591,9 @@ pub fn ensure_peer_stub(
     Ok(())
 }
 
-/// Fold a set of stale sibling `pod_peers` rows into `canonical_id`, carrying
+/// Fold a set of stale sibling `mesh_peers` rows into `canonical_id`, carrying
 /// forward everything that must not be lost, then hard-delete the siblings
-/// (their `pod_trust` + `pod_peer_addresses` cascade). Trust bits are OR'd in
+/// (their `mesh_trust` + `mesh_peer_addresses` cascade). Trust bits are OR'd in
 /// (if any sibling trusted the peer, or was trusted, the canonical row
 /// inherits it) and every address record is copied over — no reference or
 /// controller path is dropped. `pubkey_fp` is deliberately NOT taken from a
@@ -613,7 +613,7 @@ fn merge_peer_rows(conn: &Connection, canonical_id: &str, stale_ids: &[String]) 
         }
         let (sl, sp): (i64, i64) = tx
             .query_row(
-                "SELECT local_secure, peer_secure FROM pod_trust WHERE peer_id = ?",
+                "SELECT local_secure, peer_secure FROM mesh_trust WHERE peer_id = ?",
                 params![sib],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -621,25 +621,25 @@ fn merge_peer_rows(conn: &Connection, canonical_id: &str, stale_ids: &[String]) 
             .unwrap_or((0, 0));
         if sl != 0 || sp != 0 {
             tx.execute(
-                "INSERT INTO pod_trust (peer_id, local_secure, peer_secure, set_at)
+                "INSERT INTO mesh_trust (peer_id, local_secure, peer_secure, set_at)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(peer_id) DO UPDATE SET
-                     local_secure = MAX(pod_trust.local_secure, excluded.local_secure),
-                     peer_secure  = MAX(pod_trust.peer_secure, excluded.peer_secure),
+                     local_secure = MAX(mesh_trust.local_secure, excluded.local_secure),
+                     peer_secure  = MAX(mesh_trust.peer_secure, excluded.peer_secure),
                      set_at       = excluded.set_at",
                 params![canonical_id, sl, sp, now],
             )?;
         }
         tx.execute(
-            "INSERT OR IGNORE INTO pod_peer_addresses (peer_id, kind, value, source, last_seen_at)
+            "INSERT OR IGNORE INTO mesh_peer_addresses (peer_id, kind, value, source, last_seen_at)
              SELECT ?1, kind, value, source, last_seen_at
-             FROM pod_peer_addresses WHERE peer_id = ?2",
+             FROM mesh_peer_addresses WHERE peer_id = ?2",
             params![canonical_id, sib],
         )?;
-        tx.execute("DELETE FROM pod_peers WHERE peer_id = ?", params![sib])?;
+        tx.execute("DELETE FROM mesh_peers WHERE peer_id = ?", params![sib])?;
     }
     tx.execute(
-        "UPDATE pod_peers SET last_seen_at = ? WHERE peer_id = ?",
+        "UPDATE mesh_peers SET last_seen_at = ? WHERE peer_id = ?",
         params![now, canonical_id],
     )?;
     tx.commit()?;
@@ -649,7 +649,7 @@ fn merge_peer_rows(conn: &Connection, canonical_id: &str, stale_ids: &[String]) 
 /// Self-healing identity convergence for one address. Given `canonical_id` —
 /// the identity a host at `peer_addr` authoritatively presents right now (its
 /// mTLS cert CN, already validated against the mesh CA by the caller) — fold
-/// every OTHER non-departed `pod_peers` row at that address **that shares the
+/// every OTHER non-departed `mesh_peers` row at that address **that shares the
 /// canonical row's pinned pubkey_fp** into it and retire the siblings. A
 /// physical host accumulates parallel rows over its lifetime (e.g. a legacy
 /// `peer.<id>` CN beside the bare id) that share one dial address AND one key;
@@ -670,7 +670,7 @@ pub fn reconcile_addr_to_canonical(
     }
     let canon_exists: bool = conn
         .query_row(
-            "SELECT 1 FROM pod_peers WHERE peer_id = ?",
+            "SELECT 1 FROM mesh_peers WHERE peer_id = ?",
             params![canonical_id],
             |_| Ok(true),
         )
@@ -688,7 +688,7 @@ pub fn reconcile_addr_to_canonical(
     // handshake will pin the key and a later pass converges safely.
     let canon_fp: Option<String> = conn
         .query_row(
-            "SELECT pubkey_fp FROM pod_peers WHERE peer_id = ?",
+            "SELECT pubkey_fp FROM mesh_peers WHERE peer_id = ?",
             params![canonical_id],
             |r| r.get::<_, Option<String>>(0),
         )
@@ -699,12 +699,12 @@ pub fn reconcile_addr_to_canonical(
     };
     let siblings: Vec<String> = {
         // Match by reachability route: a sibling shares the address when it has
-        // a `pod_peer_addresses` row with this value (peer_addr is no longer a
-        // `pod_peers` column).
+        // a `mesh_peer_addresses` row with this value (peer_addr is no longer a
+        // `mesh_peers` column).
         let mut stmt = conn.prepare(
-            "SELECT p.peer_id FROM pod_peers p
+            "SELECT p.peer_id FROM mesh_peers p
              WHERE p.peer_id != ?2 AND p.departed_at IS NULL AND p.pubkey_fp = ?3
-               AND EXISTS (SELECT 1 FROM pod_peer_addresses a
+               AND EXISTS (SELECT 1 FROM mesh_peer_addresses a
                            WHERE a.peer_id = p.peer_id AND a.value = ?1)",
         )?;
         let rows = stmt.query_map(params![peer_addr, canonical_id, canon_fp], |r| {
@@ -742,7 +742,7 @@ pub fn converge_peer_identity(conn: &Connection, peer_id: &str, peer_addr: &str)
     // flag, never an identity: same address ≠ same host, but same key does.
     let self_fp: Option<String> = conn
         .query_row(
-            "SELECT pubkey_fp FROM pod_peers WHERE peer_id = ?",
+            "SELECT pubkey_fp FROM mesh_peers WHERE peer_id = ?",
             params![peer_id],
             |r| r.get::<_, Option<String>>(0),
         )
@@ -756,16 +756,16 @@ pub fn converge_peer_identity(conn: &Connection, peer_id: &str, peer_addr: &str)
     let mut cands: Vec<R> = Vec::new();
     {
         // `has_addr` = the peer carries `peer_addr` as one of its
-        // `pod_peer_addresses` routes (peer_addr is no longer a `pod_peers`
+        // `mesh_peer_addresses` routes (peer_addr is no longer a `mesh_peers`
         // column). Bound as ?1; an empty `peer_addr` matches nothing.
         let mut stmt = conn.prepare(
             "SELECT p.peer_id,
-                    EXISTS(SELECT 1 FROM pod_peer_addresses a
+                    EXISTS(SELECT 1 FROM mesh_peer_addresses a
                            WHERE a.peer_id = p.peer_id AND a.value = ?1) AS has_addr,
                     p.pubkey_fp, p.last_seen_at,
                     COALESCE(t.local_secure,0)+COALESCE(t.peer_secure,0)
-             FROM pod_peers p
-             LEFT JOIN pod_trust t ON t.peer_id = p.peer_id
+             FROM mesh_peers p
+             LEFT JOIN mesh_trust t ON t.peer_id = p.peer_id
              WHERE p.departed_at IS NULL",
         )?;
         let rows = stmt.query_map(params![peer_addr], |r| {
@@ -816,7 +816,7 @@ pub fn converge_peer_identity(conn: &Connection, peer_id: &str, peer_addr: &str)
     Ok(n)
 }
 
-/// Boot / upgrade reconcile pass: collapse `pod_peers` rows that are provably
+/// Boot / upgrade reconcile pass: collapse `mesh_peers` rows that are provably
 /// the SAME identity — same dial address AND same pinned bootstrap `pubkey_fp`
 /// — into one canonical row. This is the automatic cleanup that runs when a
 /// host restarts onto a new build (the rollout migration path): it clears the
@@ -835,13 +835,13 @@ pub fn dedup_same_identity_rows(conn: &Connection) -> Result<u32> {
     let mut groups: std::collections::BTreeMap<(String, String), Vec<R>> = Default::default();
     {
         // Group by (primary route, pinned key). The primary address is derived
-        // from `pod_peer_addresses` (see PRIMARY_ROUTE) — peers with no route
+        // from `mesh_peer_addresses` (see PRIMARY_ROUTE) — peers with no route
         // are excluded (INNER-equivalent via the `pa.value != ''` filter).
         let mut stmt = conn.prepare(&format!(
             "SELECT p.peer_id, pa.value, p.pubkey_fp, p.last_seen_at,
                     COALESCE(t.local_secure,0), COALESCE(t.peer_secure,0)
-             FROM pod_peers p
-             LEFT JOIN pod_trust t ON t.peer_id = p.peer_id
+             FROM mesh_peers p
+             LEFT JOIN mesh_trust t ON t.peer_id = p.peer_id
              LEFT JOIN ({PRIMARY_ROUTE}) pa ON pa.peer_id = p.peer_id
              WHERE p.departed_at IS NULL AND p.pubkey_fp IS NOT NULL
                AND pa.value IS NOT NULL AND pa.value != ''"
@@ -886,13 +886,13 @@ pub fn dedup_same_identity_rows(conn: &Connection) -> Result<u32> {
 }
 
 /// The pinned bootstrap-pubkey fingerprint for a non-departed paired peer, if
-/// recorded. Used by `pod/exec` authorization to bind a caller token's signer
+/// recorded. Used by `mesh/exec` authorization to bind a caller token's signer
 /// to the peer authenticated on the mTLS wire. Returns `None` when the peer is
 /// unknown, departed, or has no pinned fp (→ caller is unverifiable, refuse).
 pub fn pinned_pubkey_fp(conn: &Connection, peer_id: &str) -> Result<Option<String>> {
     let fp = conn
         .query_row(
-            "SELECT pubkey_fp FROM pod_peers WHERE peer_id = ? AND departed_at IS NULL",
+            "SELECT pubkey_fp FROM mesh_peers WHERE peer_id = ? AND departed_at IS NULL",
             params![peer_id],
             |r| r.get::<_, Option<String>>(0),
         )
@@ -901,13 +901,13 @@ pub fn pinned_pubkey_fp(conn: &Connection, peer_id: &str) -> Result<Option<Strin
     Ok(fp)
 }
 
-/// True if a `pod_peers` row with this `peer_id` exists. Used by the
+/// True if a `mesh_peers` row with this `peer_id` exists. Used by the
 /// roster-sync loop to avoid double-counting newly-learned peers when an
 /// upsert would otherwise be a silent no-op vs an actual insert.
 pub fn peer_exists(conn: &Connection, peer_id: &str) -> Result<bool> {
     let exists: bool = conn
         .query_row(
-            "SELECT 1 FROM pod_peers WHERE peer_id = ?",
+            "SELECT 1 FROM mesh_peers WHERE peer_id = ?",
             params![peer_id],
             |_| Ok(true),
         )
@@ -916,7 +916,7 @@ pub fn peer_exists(conn: &Connection, peer_id: &str) -> Result<bool> {
     Ok(exists)
 }
 
-/// Existence + raw `pubkey_fp` for a `pod_peers` row, regardless of
+/// Existence + raw `pubkey_fp` for a `mesh_peers` row, regardless of
 /// `departed_at`. Returns `None` when no row exists; `Some(None)` when the row
 /// exists but has no pinned fp; `Some(Some(fp))` when pinned. Used by
 /// roster-sync to distinguish "learn", "backfill", and "no-op" transitions
@@ -924,7 +924,7 @@ pub fn peer_exists(conn: &Connection, peer_id: &str) -> Result<bool> {
 pub fn peer_pubkey_fp_raw(conn: &Connection, peer_id: &str) -> Result<Option<Option<String>>> {
     let row = conn
         .query_row(
-            "SELECT pubkey_fp FROM pod_peers WHERE peer_id = ?",
+            "SELECT pubkey_fp FROM mesh_peers WHERE peer_id = ?",
             params![peer_id],
             |r| r.get::<_, Option<String>>(0),
         )
@@ -939,10 +939,10 @@ pub fn list_peers(conn: &Connection) -> Result<Vec<PeerRow>> {
                 COALESCE(pa.value, '') AS peer_addr, p.peer_port, p.pubkey_fp,
                 p.first_seen_at, p.last_seen_at, p.departed_at,
                 COALESCE(t.local_secure, 0), COALESCE(t.peer_secure, 0)
-         FROM pod_peers p
-         LEFT JOIN pod_trust t ON t.peer_id = p.peer_id
+         FROM mesh_peers p
+         LEFT JOIN mesh_trust t ON t.peer_id = p.peer_id
          LEFT JOIN ({PRIMARY_ROUTE}) pa ON pa.peer_id = p.peer_id
-         LEFT JOIN pod_discovery d ON d.addr = pa.value
+         LEFT JOIN mesh_discovery d ON d.addr = pa.value
          ORDER BY p.last_seen_at DESC"
     ))?;
     let rows = stmt.query_map([], |r| {
@@ -969,11 +969,11 @@ pub fn mark_peer_departed(conn: &Connection, peer_id: &str) -> Result<()> {
     let now = now_secs();
     let tx = conn.unchecked_transaction()?;
     tx.execute(
-        "UPDATE pod_peers SET departed_at = ?, last_seen_at = ? WHERE peer_id = ?",
+        "UPDATE mesh_peers SET departed_at = ?, last_seen_at = ? WHERE peer_id = ?",
         params![now, now, peer_id],
     )?;
     tx.execute(
-        "UPDATE pod_trust SET local_secure = 0, peer_secure = 0, set_at = ? WHERE peer_id = ?",
+        "UPDATE mesh_trust SET local_secure = 0, peer_secure = 0, set_at = ? WHERE peer_id = ?",
         params![now, peer_id],
     )?;
     tx.commit()?;
@@ -988,14 +988,14 @@ pub fn mark_peer_departed(conn: &Connection, peer_id: &str) -> Result<()> {
 pub fn unmark_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
     let now = now_secs();
     let updated = conn.execute(
-        "UPDATE pod_peers SET departed_at = NULL, last_seen_at = ? WHERE peer_id = ? AND departed_at IS NOT NULL",
+        "UPDATE mesh_peers SET departed_at = NULL, last_seen_at = ? WHERE peer_id = ? AND departed_at IS NOT NULL",
         params![now, peer_id],
     )?;
     Ok(updated > 0)
 }
 
-/// Hard-delete every local trace of a peer_id: pod_peers, pod_trust,
-/// pod_discovery, and any outbound offers tied to it. Unlike
+/// Hard-delete every local trace of a peer_id: mesh_peers, mesh_trust,
+/// mesh_discovery, and any outbound offers tied to it. Unlike
 /// [`mark_peer_departed`] this leaves no audit row — it's the purge path for
 /// `pod forget`, used to evict stale/orphan identities (machine_id churn,
 /// decommissioned hosts) so they stop showing up in the roster. Returns the
@@ -1003,14 +1003,14 @@ pub fn unmark_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
 pub fn forget_peer(conn: &Connection, peer_id: &str) -> Result<u32> {
     let tx = conn.unchecked_transaction()?;
     let mut removed = 0u32;
-    removed += tx.execute("DELETE FROM pod_trust WHERE peer_id = ?", params![peer_id])? as u32;
-    removed += tx.execute("DELETE FROM pod_peers WHERE peer_id = ?", params![peer_id])? as u32;
+    removed += tx.execute("DELETE FROM mesh_trust WHERE peer_id = ?", params![peer_id])? as u32;
+    removed += tx.execute("DELETE FROM mesh_peers WHERE peer_id = ?", params![peer_id])? as u32;
     removed += tx.execute(
-        "DELETE FROM pod_discovery WHERE peer_id = ?",
+        "DELETE FROM mesh_discovery WHERE peer_id = ?",
         params![peer_id],
     )? as u32;
     removed += tx.execute(
-        "DELETE FROM pod_pending_offers WHERE inviter_peer_id = ?",
+        "DELETE FROM mesh_pending_offers WHERE inviter_peer_id = ?",
         params![peer_id],
     )? as u32;
     // Durable, replicated forget-tombstone. Without this a hard DELETE is silent:
@@ -1028,9 +1028,9 @@ pub fn forget_peer(conn: &Connection, peer_id: &str) -> Result<u32> {
 
 /// Replicated entity/key-column under which a forgotten `peer_id` is tombstoned
 /// in the command-log (see [`crate::replication_ops`]). The entity is the real
-/// `pod_peers` table so a merged tombstone's `apply_pending_deletes` also
+/// `mesh_peers` table so a merged tombstone's `apply_pending_deletes` also
 /// physically evicts a resurrected row on any peer.
-const PEER_TOMBSTONE_ENTITY: &str = "pod_peers";
+const PEER_TOMBSTONE_ENTITY: &str = "mesh_peers";
 const PEER_TOMBSTONE_KEY_COL: &str = "peer_id";
 
 /// Write the durable forget-tombstone for `peer_id`. Idempotent: LWW keyed by
@@ -1084,7 +1084,7 @@ pub fn is_peer_forgotten(conn: &Connection, peer_id: &str) -> Result<bool> {
 pub fn is_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
     let v: Option<i64> = conn
         .query_row(
-            "SELECT departed_at FROM pod_peers WHERE peer_id = ?",
+            "SELECT departed_at FROM mesh_peers WHERE peer_id = ?",
             params![peer_id],
             |r| r.get(0),
         )
@@ -1094,24 +1094,24 @@ pub fn is_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
 }
 
 /// Wipe all mesh-membership state. Used by `pod leave`. Trust + peer rows are
-/// dropped; pod_self is reset; the secrets table is NOT touched here (caller
+/// dropped; mesh_self is reset; the secrets table is NOT touched here (caller
 /// decides via --wipe-secrets / --wipe-all flags).
 pub fn wipe_pod_membership(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM pod_trust", [])?;
-    tx.execute("DELETE FROM pod_peers", [])?;
-    tx.execute("DELETE FROM pod_pending_offers", [])?;
-    tx.execute("DELETE FROM pod_discovery", [])?;
+    tx.execute("DELETE FROM mesh_trust", [])?;
+    tx.execute("DELETE FROM mesh_peers", [])?;
+    tx.execute("DELETE FROM mesh_pending_offers", [])?;
+    tx.execute("DELETE FROM mesh_discovery", [])?;
     tx.execute(
-        "INSERT INTO pod_self (id, self_secure, pod_id, set_at) VALUES (1, 0, NULL, ?)
-         ON CONFLICT(id) DO UPDATE SET self_secure = 0, pod_id = NULL, set_at = excluded.set_at",
+        "INSERT INTO mesh_self (id, self_secure, mesh_id, set_at) VALUES (1, 0, NULL, ?)
+         ON CONFLICT(id) DO UPDATE SET self_secure = 0, mesh_id = NULL, set_at = excluded.set_at",
         params![now_secs()],
     )?;
     tx.commit()?;
     Ok(())
 }
 
-// ── pod_trust ────────────────────────────────────────────────────────────────
+// ── mesh_trust ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 pub struct TrustState {
@@ -1122,7 +1122,7 @@ pub struct TrustState {
 pub fn get_trust(conn: &Connection, peer_id: &str) -> Result<TrustState> {
     let row = conn
         .query_row(
-            "SELECT local_secure, peer_secure FROM pod_trust WHERE peer_id = ?",
+            "SELECT local_secure, peer_secure FROM mesh_trust WHERE peer_id = ?",
             params![peer_id],
             |r| {
                 Ok(TrustState {
@@ -1151,7 +1151,7 @@ pub fn set_trust(
     };
     let now = now_secs();
     conn.execute(
-        "INSERT INTO pod_trust (peer_id, local_secure, peer_secure, set_at)
+        "INSERT INTO mesh_trust (peer_id, local_secure, peer_secure, set_at)
          VALUES (?, ?, ?, ?)
          ON CONFLICT(peer_id) DO UPDATE SET
              local_secure = excluded.local_secure,
@@ -1171,21 +1171,21 @@ pub fn is_mutual_secure(t: TrustState) -> bool {
     t.local_secure && t.peer_secure
 }
 
-// ── pod_self ─────────────────────────────────────────────────────────────────
+// ── mesh_self ─────────────────────────────────────────────────────────────────
 
 pub fn set_self_secure(conn: &Connection, secure: bool) -> Result<()> {
     let now = now_secs();
     conn.execute(
-        "INSERT INTO pod_self (id, self_secure, set_at) VALUES (1, ?, ?)
+        "INSERT INTO mesh_self (id, self_secure, set_at) VALUES (1, ?, ?)
          ON CONFLICT(id) DO UPDATE SET self_secure = excluded.self_secure, set_at = excluded.set_at",
         params![secure as i64, now],
     )?;
     Ok(())
 }
 
-pub fn get_pod_id(conn: &Connection) -> Result<Option<String>> {
+pub fn get_mesh_id(conn: &Connection) -> Result<Option<String>> {
     let row = conn
-        .query_row("SELECT pod_id FROM pod_self WHERE id = 1", [], |r| {
+        .query_row("SELECT mesh_id FROM mesh_self WHERE id = 1", [], |r| {
             r.get::<_, Option<String>>(0)
         })
         .optional()?;
@@ -1195,7 +1195,7 @@ pub fn get_pod_id(conn: &Connection) -> Result<Option<String>> {
 pub fn get_ca_previous_expires_at(conn: &Connection) -> Result<Option<i64>> {
     let row: Option<Option<i64>> = conn
         .query_row(
-            "SELECT ca_previous_expires_at FROM pod_self WHERE id = 1",
+            "SELECT ca_previous_expires_at FROM mesh_self WHERE id = 1",
             [],
             |r| r.get(0),
         )
@@ -1206,7 +1206,7 @@ pub fn get_ca_previous_expires_at(conn: &Connection) -> Result<Option<i64>> {
 pub fn set_ca_previous_expires_at(conn: &Connection, expires_at: Option<i64>) -> Result<()> {
     let now = now_secs();
     conn.execute(
-        "INSERT INTO pod_self (id, self_secure, ca_previous_expires_at, set_at)
+        "INSERT INTO mesh_self (id, self_secure, ca_previous_expires_at, set_at)
          VALUES (1, 0, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
              ca_previous_expires_at = excluded.ca_previous_expires_at,
@@ -1216,12 +1216,12 @@ pub fn set_ca_previous_expires_at(conn: &Connection, expires_at: Option<i64>) ->
     Ok(())
 }
 
-pub fn set_pod_id(conn: &Connection, pod_id: &str) -> Result<()> {
+pub fn set_mesh_id(conn: &Connection, mesh_id: &str) -> Result<()> {
     let now = now_secs();
     conn.execute(
-        "INSERT INTO pod_self (id, self_secure, pod_id, set_at) VALUES (1, 0, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET pod_id = excluded.pod_id, set_at = excluded.set_at",
-        params![pod_id, now],
+        "INSERT INTO mesh_self (id, self_secure, mesh_id, set_at) VALUES (1, 0, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET mesh_id = excluded.mesh_id, set_at = excluded.set_at",
+        params![mesh_id, now],
     )?;
     Ok(())
 }
@@ -1257,7 +1257,7 @@ mod tests {
     /// address-based cleanup can find it.
     fn insert_legacy_unknown_stub(c: &Connection, addr: &str) {
         c.execute(
-            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_port, ca_cert_pem,
+            "INSERT INTO mesh_peers (peer_id, peer_hostname, peer_port, ca_cert_pem,
                                     first_seen_at, last_seen_at)
              VALUES ('unknown', 'host-i', 12002, '', 0, 0)",
             [],
@@ -1296,11 +1296,11 @@ mod tests {
     fn forget_writes_durable_replicated_tombstone() {
         let (_d, c) = test_conn();
         forget_peer(&c, MAPLE).unwrap();
-        // A `delete` op for (pod_peers, peer_id) now exists in the command-log so
+        // A `delete` op for (mesh_peers, peer_id) now exists in the command-log so
         // the eviction replicates and cannot be resurrected.
         let op: String = c
             .query_row(
-                "SELECT op FROM replication_ops WHERE entity = 'pod_peers' AND key_val = ?1",
+                "SELECT op FROM replication_ops WHERE entity = 'mesh_peers' AND key_val = ?1",
                 params![MAPLE],
                 |r| r.get(0),
             )
@@ -1321,7 +1321,7 @@ mod tests {
         assert!(
             crate::replication_ops::is_deleted(
                 &c,
-                "pod_peers",
+                "mesh_peers",
                 MAPLE,
                 now,
                 crate::replication_ops::DEFAULT_TTL_MS
@@ -1334,7 +1334,7 @@ mod tests {
         assert!(
             !crate::replication_ops::is_deleted(
                 &c,
-                "pod_peers",
+                "mesh_peers",
                 MAPLE,
                 future,
                 crate::replication_ops::DEFAULT_TTL_MS
@@ -1356,7 +1356,7 @@ mod tests {
         assert!(!is_peer_forgotten(&c, MAPLE).unwrap());
         let op: String = c
             .query_row(
-                "SELECT op FROM replication_ops WHERE entity = 'pod_peers' AND key_val = ?1",
+                "SELECT op FROM replication_ops WHERE entity = 'mesh_peers' AND key_val = ?1",
                 params![MAPLE],
                 |r| r.get(0),
             )
@@ -1526,7 +1526,7 @@ mod tests {
         assert!(t.local_secure && t.peer_secure, "trust OR'd onto canonical");
         let addr_cnt: i64 = c
             .query_row(
-                "SELECT COUNT(*) FROM pod_peer_addresses WHERE peer_id=?1",
+                "SELECT COUNT(*) FROM mesh_peer_addresses WHERE peer_id=?1",
                 params![FREYR],
                 |r| r.get(0),
             )
@@ -1756,7 +1756,7 @@ mod tests {
         // Trust row for the stub must be gone too — no dangling FK ghost.
         let trust_count: i64 = c
             .query_row(
-                "SELECT COUNT(*) FROM pod_trust WHERE peer_id = 'unknown'",
+                "SELECT COUNT(*) FROM mesh_trust WHERE peer_id = 'unknown'",
                 [],
                 |r| r.get(0),
             )
@@ -1792,9 +1792,9 @@ mod tests {
         assert!(!crate::mesh::get_self_secure(&c).unwrap());
         set_self_secure(&c, true).unwrap();
         assert!(crate::mesh::get_self_secure(&c).unwrap());
-        assert!(get_pod_id(&c).unwrap().is_none());
-        set_pod_id(&c, "pod-xyz").unwrap();
-        assert_eq!(get_pod_id(&c).unwrap().as_deref(), Some("pod-xyz"));
+        assert!(get_mesh_id(&c).unwrap().is_none());
+        set_mesh_id(&c, "pod-xyz").unwrap();
+        assert_eq!(get_mesh_id(&c).unwrap().as_deref(), Some("pod-xyz"));
     }
 
     #[test]
@@ -2418,14 +2418,14 @@ mod tests {
             &[],
         )
         .unwrap();
-        // pod_trust + pod_peers + pod_discovery + pod_pending_offers = 4 rows.
+        // mesh_trust + mesh_peers + mesh_discovery + mesh_pending_offers = 4 rows.
         let removed = forget_peer(&c, MAPLE).unwrap();
         assert_eq!(removed, 4);
         assert!(!peer_exists(&c, MAPLE).unwrap());
         assert!(is_peer_forgotten(&c, MAPLE).unwrap());
     }
 
-    // ── pod_self: ca_previous_expires_at ─────────────────────────────────────
+    // ── mesh_self: ca_previous_expires_at ─────────────────────────────────────
 
     #[test]
     fn ca_previous_expires_at_roundtrip() {

@@ -39,7 +39,7 @@ const TICK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 pub fn spawn() -> tokio::task::JoinHandle<()> {
     periodic::spawn(
         periodic::PeriodicSpec {
-            name: "pod.cert_rotation.run",
+            name: "mesh.cert_rotation.run",
             // Small initial delay so we don't slam the daemon on every restart.
             initial_delay: Duration::from_secs(60),
             interval: TICK_INTERVAL,
@@ -80,7 +80,18 @@ async fn tick() -> Result<()> {
     let server_pem = std::fs::read_to_string(utils::pki::mesh_server_cert_path(&pki_d))?;
     let client_pem = std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki_d))?;
     let threshold = utils::pki::PEER_REFRESH_THRESHOLD_DAYS;
-    let need_server = utils::pki::should_rotate(&server_pem, threshold).unwrap_or(true);
+    // A cert issued before the mesh stopped being called a "pod" carries only
+    // the legacy SAN, so an upgraded peer dialing `mesh.orca.local` cannot
+    // validate it. Certs live 30 days and rotate lazily under 7, so waiting for
+    // expiry would leave this host unreachable for up to 23 days — a partition,
+    // not an upgrade. Treat a missing SAN as rotation-due and converge on the
+    // first tick after the upgrade instead.
+    let stale_san = utils::pki::cert_lacks_mesh_san(&server_pem);
+    if stale_san {
+        info!("[cert-rotation] mesh server cert predates the mesh SAN — reissuing");
+    }
+    let need_server =
+        stale_san || utils::pki::should_rotate(&server_pem, threshold).unwrap_or(true);
     let need_client = utils::pki::should_rotate(&client_pem, threshold).unwrap_or(true);
     if !need_server && !need_client {
         return Ok(());
@@ -231,7 +242,7 @@ async fn refresh_via_peer_bootstrap() -> Result<()> {
                 &target,
                 p.peer_port,
                 &fp,
-                "pod/refresh-cert-bootstrap",
+                "mesh/refresh-cert-bootstrap",
                 params.clone(),
             )
             .await
@@ -290,7 +301,7 @@ async fn call_refresh(
     let tcp = TcpStream::connect(&target)
         .await
         .with_context(|| format!("connect {target}"))?;
-    let sni = ServerName::try_from(utils::pki::POD_SERVER_SAN)?.to_owned();
+    let sni = ServerName::try_from(utils::pki::MESH_SERVER_SAN)?.to_owned();
     let mut tls = connector.connect(sni, tcp).await?;
 
     let params = serde_json::json!({
@@ -300,7 +311,7 @@ async fn call_refresh(
     });
     write_frame(
         &mut tls,
-        &serde_json::to_vec(&Request::new(1, "pod/refresh-cert", Some(params)))?,
+        &serde_json::to_vec(&Request::new(1, "mesh/refresh-cert", Some(params)))?,
     )
     .await?;
     let raw = tokio::time::timeout(Duration::from_secs(15), read_frame(&mut tls))
@@ -408,7 +419,7 @@ mod tests {
             let client = std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
             let server_sum = utils::pki::cert_summary(&server).unwrap();
             let client_sum = utils::pki::cert_summary(&client).unwrap();
-            assert_eq!(server_sum.cn, "orca-pod-server");
+            assert_eq!(server_sum.cn, "orca-mesh-server");
             assert_eq!(
                 client_sum.cn,
                 crate::host_identity::machine_id().to_string()

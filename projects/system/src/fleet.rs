@@ -19,7 +19,7 @@ pub struct FleetSystemResult {
     ///
     /// Systems are addressed by this id, and orca resolves routes to reach them.
     /// It is the same value `system.health` reports as `machineId`, and it is
-    /// stored in `pod_peers.peer_id` pending that table's rename to `systems`.
+    /// stored in `mesh_peers.peer_id` pending that table's rename to `systems`.
     pub id: String,
     /// Current daemon version probed on the host.
     pub current: Option<String>,

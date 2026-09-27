@@ -54,7 +54,7 @@ pub struct Ports {
     pub http: u16,
     /// HTTPS REST + UI (mesh CA server cert; Caddy front later).
     pub https: u16,
-    /// Pod mesh mTLS — peer-to-peer plugin RPC.
+    /// Mesh mTLS — peer-to-peer plugin RPC.
     pub mesh: u16,
 }
 

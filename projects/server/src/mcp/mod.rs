@@ -25,8 +25,7 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
         Arc::new(system::host_identity::ServerHostRefreshHook);
     ctx.register_service(host_refresh);
     // Fleet fan-out hook: `system.update --scope fleet` (and its CLI alias
-    // `orca update`) calls into pod's pod-wide update fan-out through this seam,
-    // so `system` never has to depend on `pod`.
+    // `orca update`) calls into the mesh-wide update fan-out through this seam.
     let fleet_update: Arc<dyn system::fleet::FleetUpdateHook + Send + Sync> =
         Arc::new(system::mesh::fleet_update::MeshFleetUpdateHook);
     ctx.register_service(fleet_update);
@@ -34,7 +33,7 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     // remote_ok tools through whatever RemoteExec the host registers).
     let remote: Arc<dyn contract::RemoteExec> = Arc::new(system::mesh::MeshRemoteExec);
     ctx.register_service(remote);
-    // Pod-host cluster roster — plugin-agnostic discovery used by
+    // Mesh cluster roster — plugin-agnostic discovery used by
     // `system.list --snapshot` so the systems UI can group peers by cluster without
     // depending on a specific virtualization plugin. The installed service is
     // an aggregator that fans out across every roster provider registered in

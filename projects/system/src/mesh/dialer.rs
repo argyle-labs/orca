@@ -11,12 +11,12 @@
 //!   3. `fqdn`          if peer has one (DNS does its own routing)
 //!   4. `lan_v6`        if peer has one and we have any v6
 //!   5. `tailscale_v6`  if both sides have Tailscale v6
-//!   6. legacy single `peer_addr` from `pod_peers` (rc.≤24 fallback)
+//!   6. legacy single `peer_addr` from `mesh_peers` (rc.≤24 fallback)
 //!
 //! Returning `Vec<String>` rather than a single pick keeps the policy simple
 //! while letting callers retry the rest of the list on connect failure.
 
-/// Channel-kind constants — match the `host_addressing.kind` / `pod_peer_addresses.kind`
+/// Channel-kind constants — match the `host_addressing.kind` / `mesh_peer_addresses.kind`
 /// vocabulary used in the DB.
 pub const LAN_V4: &str = "lan_v4";
 pub const LAN_V6: &str = "lan_v6";
@@ -43,7 +43,7 @@ impl Channel {
 
 /// Produce an ordered list of dial targets for the peer, given the local
 /// host's channels and the peer's channels. `legacy_peer_addr` is the
-/// single-address fallback from `pod_peers.peer_addr` (used for rc.≤24 peers
+/// single-address fallback from `mesh_peers.peer_addr` (used for rc.≤24 peers
 /// that don't propagate a snapshot yet); if non-empty it's appended last.
 ///
 /// Duplicates are filtered: if the legacy address already appears as a
@@ -184,9 +184,9 @@ where
 }
 
 /// DB-backed convenience wrapper: load this host's `host_addressing` rows
-/// and the named peer's `pod_peer_addresses` rows, then return the dial-target
+/// and the named peer's `mesh_peer_addresses` rows, then return the dial-target
 /// list. `legacy_peer_addr` is the single-address fallback from
-/// `pod_peers.peer_addr` for rc.≤24 compat.
+/// `mesh_peers.peer_addr` for rc.≤24 compat.
 pub fn dial_targets_for_peer(
     conn: &rusqlite::Connection,
     peer_id: &str,

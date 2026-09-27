@@ -124,8 +124,8 @@ enum Command {
         port: u16,
     },
 
-    /// Pod / mesh networking — bootstrap, ping, peer management.
-    Pod {
+    /// Mesh networking — bootstrap, pairing, trust, peer management.
+    Mesh {
         #[command(subcommand)]
         action: MeshAction,
     },
@@ -193,27 +193,27 @@ enum DevAction {
 
 #[derive(Subcommand)]
 enum MeshAction {
-    /// Founder bootstrap. Creates the mesh CA + this host's pod cert. Idempotent.
+    /// Founder bootstrap. Creates the mesh CA + this host's mesh cert. Idempotent.
     Init,
     /// Show orcas seen on the network (mDNS-discovered).
     Discover,
-    /// Show pending mesh-membership offers awaiting `pod accept`.
+    /// Show pending mesh-membership offers awaiting `orca mesh accept`.
     Pending,
     /// Accept an inbound offer by pairing code (printed on the inviter's CLI).
     Accept { code: String },
     /// Manual fallback when mDNS doesn't see the inviter — point at a
-    /// specific addr `host[:port]`. Alias for `pod join`.
+    /// specific addr `host[:port]`. Alias for `orca mesh join`.
     Connect { addr: String },
     /// Joiner-initiated handshake. Dials the inviter over the bootstrap
     /// channel (TOFU first contact, then signed-echo fp check) and lands a
-    /// pending inbound offer ready for `pod accept`.
+    /// pending inbound offer ready for `orca mesh accept`.
     Join { addr: String },
     /// Manually push an offer to a known address (inviter side, when
     /// mDNS doesn't see the joiner).
     Offer { addr: String },
     /// One-shot inviter flow: push an offer to `addr`, print the pairing code,
     /// and block until the joiner accepts (or the offer expires). Wraps
-    /// `pod offer` + the wait the operator would otherwise do manually.
+    /// `orca mesh offer` + the wait the operator would otherwise do manually.
     Pair { addr: String },
     /// List known peers and their trust state.
     List,
@@ -226,7 +226,7 @@ enum MeshAction {
         state: String,
     },
     /// Toggle whether THIS host stores secrets locally. Default off on
-    /// fresh joiners; `pod init` flips it on automatically.
+    /// fresh joiners; `orca mesh init` flips it on automatically.
     SelfSecure {
         #[arg(value_parser = ["on", "off", "show"], default_value = "show")]
         state: String,
@@ -240,7 +240,7 @@ enum MeshAction {
         #[arg(long, default_value_t = 14)]
         overlap_days: i64,
     },
-    /// Leave the pod. Notifies peers, wipes mesh PKI + pod tables.
+    /// Leave the mesh. Notifies peers, wipes mesh PKI + mesh tables.
     /// Use `--wipe-secrets` to also truncate the secrets table; `--wipe-all`
     /// for a near-fresh-install state (also wipes plugin_data, oauth tokens,
     /// profile credentials). Bootstrap identity (host pubkey) is preserved.
@@ -398,7 +398,7 @@ async fn main() -> Result<()> {
             || dispatch::cli::alias_target(&rest_args[0]).is_some();
             // Also route live dynamic domains — loaded-plugin verbs (`orca agents
             // install`) and managed-unit kinds (`orca vm list`) — that aren't in
-            // the static inventory. Built-in commands (`serve`, `daemon`, `pod`,
+            // the static inventory. Built-in commands (`serve`, `daemon`, `mesh`,
             // …) have bespoke derive handling and must NOT be shadowed, so they're
             // excluded before the (daemon-backed) dynamic lookup runs.
             const BUILTIN_COMMANDS: &[&str] = &[
@@ -411,7 +411,7 @@ async fn main() -> Result<()> {
                 "daemon",
                 "dev",
                 "dev-serve",
-                "pod",
+                "mesh",
                 "openapi",
                 "admin",
                 "hook",
@@ -446,7 +446,7 @@ async fn main() -> Result<()> {
 
     let mut config = Config::load()?;
     // Capture hostname + load/generate machine_id once at startup so all
-    // downstream code (mDNS, pod scheduler, cert rotation) sees a stable
+    // downstream code (mDNS, mesh scheduler, cert rotation) sees a stable
     // identity regardless of OS hostname churn.
     system::host_identity::init(&config.app_dir)?;
     // Run TOML → DB migrations and auto-registration of detected runtimes.
@@ -500,23 +500,23 @@ async fn main() -> Result<()> {
         Some(Command::DevServe { binary, port }) => {
             dev_serve_cmd::cmd_dev_serve(binary.as_deref(), port).await
         }
-        Some(Command::Pod { action }) => match action {
+        Some(Command::Mesh { action }) => match action {
             MeshAction::Init => {
                 let pki = system::mesh::pki_dir();
                 // CN = stable machine_id (display hostname is held separately).
                 let host = system::host_identity::machine_id().to_string();
                 utils::pki::init_mesh_ca(&pki, &host)?;
                 // Ensure the bootstrap identity (Ed25519 key + self-signed
-                // cert) is present from the moment this host is poddable.
+                // cert) is present from the moment this host can join a mesh.
                 utils::pki::load_or_init_bootstrap_cert(&pki)?;
                 let conn = db::open_default()?;
                 db::mesh::set_self_secure(&conn, true)?;
-                // Pod id is a persisted identity → full uuidv7, never a short
+                // Mesh id is a persisted identity → full uuidv7, never a short
                 // handle (every orca identity is a full uuidv7; no truncation).
-                let pod_id = utils::id::new();
-                db::mesh::set_pod_id(&conn, &pod_id)?;
+                let mesh_id = utils::id::new();
+                db::mesh::set_mesh_id(&conn, &mesh_id)?;
                 println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
-                println!("  pod id: {pod_id}");
+                println!("  mesh id: {mesh_id}");
                 println!(
                     "  founder peer id: {host}  (machine_id; display: {})",
                     system::host_identity::hostname()
@@ -525,20 +525,20 @@ async fn main() -> Result<()> {
                 println!(
                     "  next: start the daemon. Auto-offers will flow to any \
                      unclaimed orca on the LAN; user accepts on the joiner with \
-                     `orca pod accept <code>` (the code is printed in the daemon log here)."
+                     `orca mesh accept <code>` (the code is printed in the daemon log here)."
                 );
                 Ok(())
             }
-            MeshAction::Discover => system::mesh::cli::cmd_pod_discover(),
-            MeshAction::Pending => system::mesh::cli::cmd_pod_pending(),
-            MeshAction::Accept { code } => system::mesh::cli::cmd_pod_accept(&code).await,
-            MeshAction::Connect { addr } => system::mesh::cli::cmd_pod_connect(&addr).await,
-            MeshAction::Join { addr } => system::mesh::cli::cmd_pod_join(&addr).await,
-            MeshAction::Offer { addr } => system::mesh::cli::cmd_pod_offer(&addr).await,
-            MeshAction::Pair { addr } => system::mesh::cli::cmd_pod_pair(&addr).await,
-            MeshAction::List => system::mesh::cli::cmd_pod_list(),
+            MeshAction::Discover => system::mesh::cli::cmd_mesh_discover(),
+            MeshAction::Pending => system::mesh::cli::cmd_mesh_pending(),
+            MeshAction::Accept { code } => system::mesh::cli::cmd_mesh_accept(&code).await,
+            MeshAction::Connect { addr } => system::mesh::cli::cmd_mesh_connect(&addr).await,
+            MeshAction::Join { addr } => system::mesh::cli::cmd_mesh_join(&addr).await,
+            MeshAction::Offer { addr } => system::mesh::cli::cmd_mesh_offer(&addr).await,
+            MeshAction::Pair { addr } => system::mesh::cli::cmd_mesh_pair(&addr).await,
+            MeshAction::List => system::mesh::cli::cmd_mesh_list(),
             MeshAction::Trust { peer_id, state } => {
-                system::mesh::cli::cmd_pod_trust(&peer_id, state == "on").await
+                system::mesh::cli::cmd_mesh_trust(&peer_id, state == "on").await
             }
             MeshAction::SelfSecure { state } => {
                 use system::mesh::cli::SelfSecureAction;
@@ -547,16 +547,16 @@ async fn main() -> Result<()> {
                     "off" => SelfSecureAction::Off,
                     _ => SelfSecureAction::Show,
                 };
-                system::mesh::cli::cmd_pod_self_secure(action)
+                system::mesh::cli::cmd_mesh_self_secure(action)
             }
-            MeshAction::CertStatus => system::mesh::cli::cmd_pod_cert_status(),
+            MeshAction::CertStatus => system::mesh::cli::cmd_mesh_cert_status(),
             MeshAction::CaRotate { overlap_days } => {
-                system::mesh::cli::cmd_pod_ca_rotate(overlap_days).await
+                system::mesh::cli::cmd_mesh_ca_rotate(overlap_days).await
             }
             MeshAction::Leave {
                 wipe_secrets,
                 wipe_all,
-            } => system::mesh::cli::cmd_pod_leave(wipe_secrets, wipe_all).await,
+            } => system::mesh::cli::cmd_mesh_leave(wipe_secrets, wipe_all).await,
         },
         Some(Command::Openapi { action }) => match action {
             OpenapiAction::Emit => {

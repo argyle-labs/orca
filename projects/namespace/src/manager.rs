@@ -5,7 +5,7 @@
 //! shared with other users in `viewer` or `collaborator` roles.
 //!
 //! v1 is single-machine. The data model is federation-ready (UUID ids,
-//! set-shaped ACLs, file-granular content) so the pod mesh sync layer can
+//! set-shaped ACLs, file-granular content) so the mesh sync layer can
 //! replicate without re-shaping.
 //!
 //! See `project_profile_path.md` for the design.

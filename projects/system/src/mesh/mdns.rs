@@ -1,4 +1,4 @@
-//! mDNS responder + discoverer for the pod mesh.
+//! mDNS responder + discoverer for the mesh.
 //!
 //! Service type: `_orca._tcp.local.`
 //!
@@ -7,12 +7,12 @@
 //!                   per-host UUIDv7 — NOT the OS hostname, which is mutable on
 //!                   macOS mDNS conflicts and DHCP renames). Never a short or
 //!                   prefixed form; join state travels in `state`, not the id.
-//!   state         — `unclaimed` | `pod:<pod_id>`
+//!   state         — `unclaimed` | `pod:<mesh_id>`
 //!   can_invite    — `1` iff we have mesh CA key AND self_secure=true
 //!   pubkey_fp     — first-16-byte SHA-256 hex of our bootstrap ed25519 pubkey
 //!   port          — TCP port for the pod surface (default 12002)
 //!
-//! Discovery loop upserts pod_discovery rows; the auto-offer scheduler
+//! Discovery loop upserts mesh_discovery rows; the auto-offer scheduler
 //! (crate::mesh::scheduler) reads from that table — it does NOT consume mDNS events
 //! directly. This decoupling keeps the auto-offer logic testable against a
 //! seeded DB instead of a live LAN.
@@ -29,7 +29,7 @@ const SERVICE_TYPE: &str = "_orca._tcp.local.";
 #[derive(Debug, Clone)]
 pub struct Advertisement {
     pub peer_id: String,
-    pub state: String, // "unclaimed" | "pod:<pod_id>"
+    pub state: String, // "unclaimed" | "pod:<mesh_id>"
     pub can_invite: bool,
     pub pubkey_fp: String,
     pub hostname: String, // bare hostname, no .local
@@ -37,14 +37,14 @@ pub struct Advertisement {
 }
 
 impl Advertisement {
-    /// Build from the current host state. `pod_id` is None when this orca
+    /// Build from the current host state. `mesh_id` is None when this orca
     /// hasn't joined any pod yet. `machine_id` is the stable opaque per-host
     /// identity used for `peer_id`; `hostname` is a display label only.
     pub fn from_local(
         machine_id: &str,
         hostname: &str,
         pubkey_fp: &str,
-        pod_id: Option<&str>,
+        mesh_id: Option<&str>,
         can_invite: bool,
         port: u16,
     ) -> Self {
@@ -53,7 +53,7 @@ impl Advertisement {
             // form); join state lives in `state` alongside it. No synthetic
             // prefixes per feedback-no-id-prefixes.
             peer_id: machine_id.to_string(),
-            state: match pod_id {
+            state: match mesh_id {
                 Some(id) => format!("pod:{id}"),
                 None => "unclaimed".to_string(),
             },
@@ -102,7 +102,7 @@ pub struct Mdns {
 
 impl Mdns {
     /// Start the mDNS daemon, register our advertisement, and spawn the
-    /// browser task that upserts pod_discovery rows for every peer seen.
+    /// browser task that upserts mesh_discovery rows for every peer seen.
     pub fn start(ad: Advertisement) -> Result<Self> {
         let daemon = ServiceDaemon::new().context("create mDNS daemon")?;
         // Accept gratuitous announces from peer register() calls. Without
@@ -263,10 +263,10 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
 
     let hostname = crate::host_identity::hostname().to_string();
     let can_invite = utils::pki::has_mesh_ca_key(&pki_dir);
-    // pod_id + self_secure from DB; failures non-fatal (we just advertise unclaimed).
-    let (pod_id, self_secure) = db::pool::with_pooled_or_open(|conn| {
+    // mesh_id + self_secure from DB; failures non-fatal (we just advertise unclaimed).
+    let (mesh_id, self_secure) = db::pool::with_pooled_or_open(|conn| {
         Ok((
-            db::mesh::get_pod_id(conn).unwrap_or(None),
+            db::mesh::get_mesh_id(conn).unwrap_or(None),
             db::mesh::get_self_secure(conn).unwrap_or(false),
         ))
     })
@@ -276,7 +276,7 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
         crate::host_identity::machine_id(),
         &hostname,
         &pubkey_fp,
-        pod_id.as_deref(),
+        mesh_id.as_deref(),
         can_invite,
         port,
     ))

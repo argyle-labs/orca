@@ -252,7 +252,7 @@ fn norm(v: &str) -> &str {
 
 /// Dispatch a tool at one target. The LOCAL host runs it IN-PROCESS via the
 /// tool's own `OrcaTool::run` (ctx carries no `--peer`, so no mesh round-trip):
-/// a host updating itself must never go through `pod/exec` peer verification and
+/// a host updating itself must never go through `mesh/exec` peer verification and
 /// fail on "no pinned bootstrap key" for its own identity (#451). Remote peers
 /// dispatch over the mesh as before.
 pub(crate) async fn dispatch_at<T: contract::OrcaTool>(
@@ -277,7 +277,7 @@ pub(crate) async fn dispatch_at<T: contract::OrcaTool>(
 /// `system.update` refused it:
 ///
 /// ```text
-/// pod/exec refused: tool 'system.update' requires role 'admin'
+/// mesh/exec refused: tool 'system.update' requires role 'admin'
 /// but no signed caller token was presented
 /// ```
 ///

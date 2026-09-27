@@ -18,7 +18,7 @@ pub struct ApiToken {
     pub expires_at: Option<String>,
     /// Issuing user. `None` on legacy rows minted before user-binding
     /// (pre-2026-05-29) — those tokens can't produce a CallerIdentity for
-    /// remote pod/exec dispatch.
+    /// remote mesh/exec dispatch.
     pub user_id: Option<String>,
     /// Data-mutation opt-in. When true, this (typically `read`-role) token may
     /// invoke `DATA_MUTATION` tools that would otherwise require admin. Never

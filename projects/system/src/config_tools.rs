@@ -165,7 +165,7 @@ async fn config_get(
 }
 
 /// Upsert a config row. Refuses to write rows owned by a different host
-/// — cross-host writes route via the pod mesh once peer-tool dispatch
+/// — cross-host writes route via the mesh once peer-tool dispatch
 /// lands (§3.3).
 #[orca_tool(domain = "config", verb = "upsert")]
 async fn config_set(

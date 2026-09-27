@@ -19,7 +19,7 @@ pub async fn list_enriched() -> Result<Vec<MeshPeerDto>> {
 
 /// Refuse to install a mesh leaf cert whose Subject CN carries the legacy
 /// `peer.<id>` prefix retired in rc.16. A lagging inviter that hasn't been
-/// upgraded would otherwise re-introduce the duplicate-pod_peers flip — fail
+/// upgraded would otherwise re-introduce the duplicate-mesh_peers flip — fail
 /// loud per feedback_no_id_prefixes so the operator notices and upgrades the
 /// inviting peer rather than silently re-pairing through a stale CN.
 fn reject_legacy_peer_cn(cert_pem: &str, role: &str) -> Result<()> {
@@ -92,7 +92,7 @@ pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
             addr,
             offer.peer_port,
             &offer.peer_pubkey_fp,
-            "pod/join-confirm",
+            "mesh/join-confirm",
             params.clone(),
         )
         .await
@@ -121,13 +121,13 @@ pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
         server_cert_pem: String,
         ca_cert_pem: String,
         inviter_peer_id: String,
-        pod_id: String,
+        mesh_id: String,
     }
     let r: Resp = serde_json::from_value(resp_value)?;
 
     // Defensive: a lagging peer (pre-rc.16) may still sign certs with the
     // old `peer.<id>` CN convention. Installing one re-introduces the
-    // duplicate-pod_peers flip that rc.16 fixed. Fail loud per
+    // duplicate-mesh_peers flip that rc.16 fixed. Fail loud per
     // feedback_no_id_prefixes — operator re-pairs against a current peer
     // rather than silently swallowing a legacy CN.
     reject_legacy_peer_cn(&r.server_cert_pem, "server")?;
@@ -150,7 +150,7 @@ pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
 
     db::pool::with_pooled_or_open(|conn| {
         pdb::set_self_secure(conn, false)?;
-        pdb::set_pod_id(conn, &r.pod_id)?;
+        pdb::set_mesh_id(conn, &r.mesh_id)?;
         pdb::upsert_peer(
             conn,
             &r.inviter_peer_id,
@@ -169,7 +169,7 @@ pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
         // inviter-side fix; clear is a no-op when no tombstone is present.
         if let Err(e) = pdb::clear_forget_tombstone(conn, &r.inviter_peer_id) {
             tracing::warn!(
-                "[pod] accept: clear forget-tombstone for inviter {} failed: {e:#}",
+                "[mesh] accept: clear forget-tombstone for inviter {} failed: {e:#}",
                 r.inviter_peer_id
             );
         }
@@ -178,7 +178,7 @@ pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
     })?;
 
     Ok(MeshAcceptOutput {
-        pod_id: r.pod_id,
+        mesh_id: r.mesh_id,
         inviter_peer_id: r.inviter_peer_id,
         inviter_hostname: offer.peer_hostname,
         inviter_addr: dialed_addr,
@@ -233,7 +233,7 @@ pub async fn trust(peer_id: &str, on: bool) -> Result<MeshTrustOutput> {
     let notify_result = match notify_targets(
         &targets,
         peer.peer_port,
-        "pod/notify-trust",
+        "mesh/notify-trust",
         serde_json::json!({ "trust": on }),
     )
     .await
@@ -389,7 +389,7 @@ pub fn pending() -> Result<Vec<MeshPendingOfferDto>> {
             peer_addr: r.peer_addr,
             peer_port: r.peer_port,
             inviter_peer_id: r.inviter_peer_id,
-            pod_id: r.pod_id,
+            mesh_id: r.mesh_id,
             expires_at: r.expires_at,
             ttl_secs: (r.expires_at - now).max(0),
             created_at: r.created_at,
@@ -401,13 +401,13 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<MeshOfferOutput> {
     let port = port.unwrap_or_else(mesh_port);
 
     // Look up the joiner in the discovery table by addr.
-    let (d, pod_id, code, offer_id, now) = db::pool::with_pooled_or_open(|conn| {
+    let (d, mesh_id, code, offer_id, now) = db::pool::with_pooled_or_open(|conn| {
         let discovery = pdb::list_discovery(conn)?;
         let d = discovery
             .into_iter()
             .find(|r| r.addr == addr || format!("{}:{}", r.addr, r.port) == addr)
             .with_context(|| {
-                format!("{addr} not found in pod_discovery — is the joiner visible via mDNS?")
+                format!("{addr} not found in mesh_discovery — is the joiner visible via mDNS?")
             })?;
 
         // User-driven invites are idempotent: if an outbound offer to this
@@ -420,7 +420,7 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<MeshOfferOutput> {
             tracing::info!(addr = %d.addr, replaced, "replaced stale outbound offer(s)");
         }
 
-        let pod_id = pdb::get_pod_id(conn)?.unwrap_or_else(|| "default".to_string());
+        let mesh_id = pdb::get_mesh_id(conn)?.unwrap_or_else(|| "default".to_string());
         let code = mint_pairing_code();
         let code_hash = pdb::hash_code(&code);
         let offer_id = utils::id::new();
@@ -441,10 +441,10 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<MeshOfferOutput> {
             None,
             &[], // outbound offer: the joiner dials us, not the reverse
         )?;
-        Ok((d, pod_id, code, offer_id, now))
+        Ok((d, mesh_id, code, offer_id, now))
     })?;
 
-    push_offer(&d.hostname, &d.addr, port, &d.pubkey_fp, &code, &pod_id).await?;
+    push_offer(&d.hostname, &d.addr, port, &d.pubkey_fp, &code, &mesh_id).await?;
 
     Ok(MeshOfferOutput {
         code,
@@ -493,7 +493,7 @@ pub async fn leave_peer(peer_id: &str) -> Result<MeshLeaveOutput> {
     let notify_result = match notify_targets(
         &targets,
         peer.peer_port,
-        "pod/peer-removed",
+        "mesh/peer-removed",
         serde_json::json!({}),
     )
     .await
@@ -503,13 +503,13 @@ pub async fn leave_peer(peer_id: &str) -> Result<MeshLeaveOutput> {
     };
 
     db::pool::with_pooled_or_open(|conn| {
-        conn.execute("DELETE FROM pod_peers WHERE peer_id = ?", [peer_id])?;
-        conn.execute("DELETE FROM pod_trust WHERE peer_id = ?", [peer_id])?;
+        conn.execute("DELETE FROM mesh_peers WHERE peer_id = ?", [peer_id])?;
+        conn.execute("DELETE FROM mesh_trust WHERE peer_id = ?", [peer_id])?;
         // Durable, replicated forget-tombstone so a straggler that missed the
         // `pod/peer-removed` notice cannot re-gossip the kicked peer back into the
         // mesh on the next roster tick (issue #232).
         if let Err(e) = pdb::write_forget_tombstone(conn, peer_id) {
-            tracing::warn!("[pod] kick tombstone for {peer_id} failed: {e:#}");
+            tracing::warn!("[mesh] kick tombstone for {peer_id} failed: {e:#}");
         }
         Ok(())
     })?;
@@ -569,7 +569,7 @@ pub async fn exec(
 }
 
 /// Voluntary pod exit: notify every paired peer we're leaving (best-effort
-/// per peer), then drop all `pod_peers` + `pod_trust` rows. Returns a
+/// per peer), then drop all `mesh_peers` + `mesh_trust` rows. Returns a
 /// per-peer notify result so the operator can see who heard from us. PKI
 /// material is left in place — call `system bootstrap` to fully reset.
 /// Clear a stale `departed_at` flag for a peer on this host. Used to recover
@@ -606,7 +606,7 @@ pub async fn forget(peer_id: &str) -> Result<crate::mesh::MeshForgetOutput> {
         let result = match notify_targets(
             targets,
             *port,
-            "pod/peer-forget",
+            "mesh/peer-forget",
             serde_json::json!({ "peer_id": peer_id }),
         )
         .await
@@ -644,21 +644,21 @@ pub async fn retire_superseded_identities() {
         return;
     }
     tracing::info!(
-        "[pod] retiring {} superseded identity(ies) shed by this host",
+        "[mesh] retiring {} superseded identity(ies) shed by this host",
         old_ids.len()
     );
     for old in old_ids {
         match forget(&old).await {
             Ok(out) => {
                 tracing::info!(
-                    "[pod] retired superseded identity {old}: {} local row(s) removed, {} peer(s) notified",
+                    "[mesh] retired superseded identity {old}: {} local row(s) removed, {} peer(s) notified",
                     out.rows_removed,
                     out.notified.len()
                 );
                 crate::host_identity::mark_identity_retired(&old);
             }
             Err(e) => tracing::warn!(
-                "[pod] retire of superseded identity {old} failed (retry next boot): {e:#}"
+                "[mesh] retire of superseded identity {old} failed (retry next boot): {e:#}"
             ),
         }
     }
@@ -785,7 +785,7 @@ async fn local_peer_row() -> MeshPeerDto {
         )),
         // The local row publishes our own bootstrap-pubkey fp so peers that
         // learn about us via roster-sync can pin it transitively (otherwise
-        // every cross-host pod/exec lands on "no pinned bootstrap key").
+        // every cross-host mesh/exec lands on "no pinned bootstrap key").
         pubkey_fp: utils::pki::load_or_init_bootstrap_key(&pki_dir())
             .ok()
             .map(|k| utils::pki::bootstrap_pubkey_fingerprint(&k.verifying_key())),
@@ -800,7 +800,7 @@ pub fn local_peer_id() -> String {
     crate::host_identity::machine_id().to_string()
 }
 
-/// Raw mesh membership from `pod_peers` with the local flag set — NO on-demand
+/// Raw mesh membership from `mesh_peers` with the local flag set — NO on-demand
 /// enrichment fan-out. Backs `system.list`, the thin membership read that mesh
 /// address-propagation (roster_sync) uses so a 60s roster tick does not trigger
 /// every peer's detail/update fan-out. `list_enriched` is the UI path; this is
@@ -835,7 +835,7 @@ pub async fn list_raw() -> Result<Vec<MeshPeerDto>> {
 }
 
 /// Thin mesh membership roster. Identity + addressing come from the cached
-/// `pod_peers` row (how we reach each host); reachability + version come from
+/// `mesh_peers` row (how we reach each host); reachability + version come from
 /// the in-memory liveness cache the background refresher maintains
 /// ([`spawn_liveness_refresher`]).
 ///
@@ -858,7 +858,7 @@ pub async fn list_lite() -> Result<Vec<MeshPeerDto>> {
             p.system = None;
             continue;
         }
-        // The cached `pod_peers` row carries NO trustworthy telemetry — wipe
+        // The cached `mesh_peers` row carries NO trustworthy telemetry — wipe
         // every telemetry field so a stale mirror value never leaks.
         p.version = None;
         p.target = None;
@@ -985,7 +985,7 @@ async fn refresh_liveness_once() -> Result<()> {
     Ok(())
 }
 
-/// Assemble the enriched mesh member set. `pod_peers` supplies identity +
+/// Assemble the enriched mesh member set. `mesh_peers` supplies identity +
 /// addressing; every cross-host observed field (version, channel, update state,
 /// OS snapshot, reachability) is fetched ON DEMAND from each active remote peer
 /// via `peer_info` (short-TTL in-memory cache), fanned out in parallel. Nothing
@@ -1037,7 +1037,7 @@ async fn list_enriched_impl() -> Result<Vec<MeshPeerDto>> {
     let mut out: Vec<MeshPeerDto> = slots.into_iter().flatten().collect();
     out.extend(inactive);
 
-    // First-boot fallback only — once mDNS / pairing populates pod_peers the DB
+    // First-boot fallback only — once mDNS / pairing populates mesh_peers the DB
     // row carries the canonical identity and this branch never fires again.
     if !saw_self {
         out.insert(0, local_peer_row().await);
@@ -1404,7 +1404,7 @@ mod tests {
             peer_addr: "10.0.0.1".into(),
             peer_port: 12002,
             inviter_peer_id: None,
-            pod_id: None,
+            mesh_id: None,
             expires_at: 100,
             ttl_secs: 42,
             created_at: 10,
@@ -1412,7 +1412,7 @@ mod tests {
         let s = serde_json::to_string(&dto).unwrap();
         assert!(s.contains(r#""ttl_secs":42"#), "{s}");
         assert!(!s.contains("inviter_peer_id"), "None omitted: {s}");
-        assert!(!s.contains("pod_id"), "None omitted: {s}");
+        assert!(!s.contains("mesh_id"), "None omitted: {s}");
     }
 
     #[test]
@@ -1547,7 +1547,7 @@ mod tests {
             assert_eq!(r.offer_id, "offer-in");
             assert_eq!(r.direction, "in");
             assert_eq!(r.inviter_peer_id.as_deref(), Some("inviter-1"));
-            assert_eq!(r.pod_id.as_deref(), Some("pod-1"));
+            assert_eq!(r.mesh_id.as_deref(), Some("pod-1"));
             assert!(r.ttl_secs > 0 && r.ttl_secs <= 3600, "ttl: {}", r.ttl_secs);
         })
         .await;
@@ -1593,7 +1593,7 @@ mod tests {
                 Err(e) => e,
             };
             assert!(
-                err.to_string().contains("not found in pod_discovery"),
+                err.to_string().contains("not found in mesh_discovery"),
                 "got: {err:#}"
             );
         })
@@ -1967,7 +1967,7 @@ mod tests {
     #[test]
     fn accept_output_round_trips() {
         let out = MeshAcceptOutput {
-            pod_id: "pod-1".into(),
+            mesh_id: "pod-1".into(),
             inviter_peer_id: "inv".into(),
             inviter_hostname: "host-i".into(),
             inviter_addr: "10.0.0.3".into(),
@@ -1976,7 +1976,7 @@ mod tests {
         };
         let s = serde_json::to_string(&out).unwrap();
         let back: MeshAcceptOutput = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.pod_id, "pod-1");
+        assert_eq!(back.mesh_id, "pod-1");
         assert_eq!(back.inviter_peer_id, "inv");
         assert_eq!(back.inviter_port, 12002);
         assert!(!back.self_secure);
