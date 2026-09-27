@@ -1440,22 +1440,44 @@ mod tests {
         assert_eq!(prod_http_base(), 12345);
     }
 
+    // These two allocate REAL ports, and nextest runs each test in its own
+    // process concurrently. Scanning from a shared base made them race: one
+    // process bound the triple the other had just validated, so whichever lost
+    // failed — a flake that hit roughly 1 run in 5, on a different test each
+    // time. Distinct bases keep their scans from ever meeting.
+    const BASE_FREE_TRIPLE: u16 = 12000;
+    const BASE_SKIP_OCCUPIED: u16 = 13500;
+
     #[test]
     fn allocate_dev_ports_returns_free_contiguous_triple() {
         // Base+1000 offset, contiguous (http, http+1, http+2), all bindable.
-        let (http, https, mesh) = allocate_dev_ports(12000).unwrap();
-        assert!(http >= 13000, "dev port is one 1000-block above prod");
+        let (http, https, mesh) = allocate_dev_ports(BASE_FREE_TRIPLE).unwrap();
+        assert!(
+            http >= BASE_FREE_TRIPLE + 1000,
+            "dev port is one 1000-block above prod"
+        );
         assert_eq!(https, http + 1);
         assert_eq!(mesh, http + 2);
-        assert!(port_is_free(http) && port_is_free(https) && port_is_free(mesh));
+        // Prove bindability by BINDING, not by asking again: re-probing with
+        // `port_is_free` re-opens the very window the allocator just closed, so
+        // the assertion could fail without the allocator being wrong. Holding
+        // the listeners is the actual guarantee callers depend on.
+        let held: Vec<_> = [http, https, mesh]
+            .into_iter()
+            .map(|p| {
+                std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, p))
+                    .unwrap_or_else(|e| panic!("allocator returned unbindable port {p}: {e}"))
+            })
+            .collect();
+        assert_eq!(held.len(), 3);
     }
 
     #[test]
     fn allocate_dev_ports_skips_occupied_triple() {
         // Occupy the primary http slot so allocation advances to a later block.
-        let (http, _, _) = allocate_dev_ports(12000).unwrap();
+        let (http, _, _) = allocate_dev_ports(BASE_SKIP_OCCUPIED).unwrap();
         let _held = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, http)).unwrap();
-        let (http2, _, _) = allocate_dev_ports(12000).unwrap();
+        let (http2, _, _) = allocate_dev_ports(BASE_SKIP_OCCUPIED).unwrap();
         assert_ne!(http2, http, "must not reuse the bound port");
     }
 

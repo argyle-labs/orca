@@ -75,9 +75,10 @@ async fn service_list(
 }
 
 // ── shared endpoint args ─────────────────────────────────────────────
-// The instance an op targets. Carried inline for now; `service.connect` will
-// persist these (reusing the replicated endpoint registry) in a follow-up so
-// the creds need not be repeated per call.
+// The instance an op targets, carried inline on every call. There is NO verb
+// that registers an instance, so these cannot yet be stored and the creds are
+// repeated per call. Naming an unbuilt verb here as though it existed is how
+// `service.connect` ended up in shipped operator-facing error text (#615).
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default, Clone)]
 #[serde(rename_all = "camelCase", default)]
@@ -514,13 +515,25 @@ async fn service_health(
         });
     }
 
-    // Fleet-wide: probe every backend concurrently, each bounded by `timeout`.
+    // Fleet-wide. Every provider here is probed with an ADDRESS-LESS endpoint:
+    // there is no verb that registers "this syncthing lives at these routes", so
+    // the fan-out iterates providers, not instances, and a backend has nothing
+    // to reach (#615). Report that as Unknown with the reason, rather than
+    // handing each backend a default `Endpoint` and rendering whatever comes
+    // back as a health verdict — a provider with no registered instance is not
+    // a provider that is down, and must never read as one.
     let handles: Vec<_> = service::backends()
         .into_iter()
         .map(|backend| {
             let provider = backend.provider().to_string();
             tokio::spawn(async move {
                 let (health, detail, error) = probe(backend, Endpoint::default(), timeout).await;
+                let error = error.map(|e| {
+                    format!(
+                        "{e} (no instance is registered for `{provider}`, so there is no route to \
+                         probe — orca has no verb to register one yet)"
+                    )
+                });
                 (provider, health, detail, error)
             })
         })
