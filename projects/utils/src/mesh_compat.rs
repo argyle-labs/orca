@@ -55,11 +55,16 @@ pub const LEGACY_SUBSCRIBE_HEARTBEAT: &str = "pod/subscribe.heartbeat";
 ///
 /// True for the current name and for the pre-rename one, so a peer that has
 /// not been upgraded yet can still reach this host.
+///
+/// Gated with `pki`, which owns the CURRENT names: a consumer thin enough to
+/// build `utils` without PKI has no listener to answer with.
+#[cfg(feature = "pki")]
 pub fn accepts_server_sni(sni: &str) -> bool {
     sni == crate::pki::MESH_SERVER_SAN || sni == LEGACY_SERVER_SNI
 }
 
-/// Should the bootstrap listener answer this SNI?
+/// Should the bootstrap listener answer this SNI? See [`accepts_server_sni`].
+#[cfg(feature = "pki")]
 pub fn accepts_bootstrap_sni(sni: &str) -> bool {
     sni == crate::pki::MESH_BOOTSTRAP_SAN || sni == LEGACY_BOOTSTRAP_SNI
 }
@@ -112,7 +117,7 @@ pub fn is_sni_refusal(err: &str) -> bool {
         || e.contains("handshake failure")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "pki"))]
 mod tests {
     use super::*;
 
