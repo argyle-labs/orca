@@ -26,6 +26,47 @@ use anyhow::{Context, Result, anyhow};
 use contract::backup::{BackupRecord, BackupSelector, Retention};
 use utils::time::Timestamp;
 
+/// One backup a prune selected for removal but could not remove.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneFailure {
+    pub id: String,
+    pub path: String,
+    pub error: String,
+}
+
+/// What a prune INTENDED versus what it achieved.
+///
+/// A prune that selects 107 snapshots and removes none is a total failure, but
+/// reported as a count of warnings it is indistinguishable from partial success
+/// — that is exactly how a fleet-wide retention policy looked applied for weeks
+/// while every snapshot stayed on disk (#610). Carrying both numbers makes the
+/// difference impossible to lose: `selected` is the intent, `removed` is the
+/// outcome, and anything short of equality is a failure, never a warning.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneReport {
+    /// How many backups the retention policy chose to remove.
+    pub selected: usize,
+    /// The backups actually gone from the store.
+    pub removed: Vec<BackupRecord>,
+    /// Per-backup reasons for every removal that did not happen.
+    pub failures: Vec<PruneFailure>,
+}
+
+impl PruneReport {
+    /// True only when every selected backup was actually removed.
+    pub fn is_complete(&self) -> bool {
+        self.failures.is_empty() && self.removed.len() == self.selected
+    }
+
+    /// `selected N, removed M` — the reconciliation the issue asks for, in the
+    /// one line an operator reads.
+    pub fn summary(&self) -> String {
+        format!("selected {}, removed {}", self.selected, self.removed.len())
+    }
+}
+
 const MANIFEST: &str = "manifest.json";
 const PAYLOAD: &str = "payload";
 
@@ -181,14 +222,28 @@ impl BackupStore {
         let Some(dir) = Path::new(&rec.path).parent() else {
             return Ok(());
         };
-        if dir.exists() {
-            fs::remove_dir_all(dir).with_context(|| format!("remove backup {}", dir.display()))?;
+        if !dir.exists() {
+            return Ok(());
         }
+        // Take the slot out of the store with a RENAME first, then delete it.
+        //
+        // `remove_dir_all` walks top-down: on a store whose parent directory
+        // refuses the unlink it happily deletes the manifest and payload and
+        // only then fails to remove the slot itself. The backup is destroyed,
+        // yet the prune reports it as not removed — the inverse of #610's lie,
+        // and the one that loses data. A rename needs exactly the same
+        // parent-directory write permission as the final unlink, so a store we
+        // cannot prune fails here having changed nothing at all.
+        let staged = dir.with_file_name(format!(".orca-removing-{}", rec.id));
+        fs::rename(dir, &staged)
+            .with_context(|| format!("stage backup {} for removal", dir.display()))?;
+        fs::remove_dir_all(&staged)
+            .with_context(|| format!("remove staged backup {}", staged.display()))?;
         Ok(())
     }
 
     /// Apply `retention` to `(domain, instance)`, deleting the backups that fall
-    /// outside the policy. Returns the records that were removed (newest first).
+    /// outside the policy. Returns intent AND outcome — see [`PruneReport`].
     ///
     /// The full PBS/vzdump `prune-backups` model: every set axis independently
     /// selects survivors, and a backup kept by ANY axis survives (union) —
@@ -201,21 +256,32 @@ impl BackupStore {
         domain: &str,
         instance: &str,
         retention: &Retention,
-    ) -> Result<Vec<BackupRecord>> {
+    ) -> Result<PruneReport> {
         if retention.is_unbounded() {
-            return Ok(Vec::new());
+            return Ok(PruneReport::default());
         }
         let records = self.list(Some(domain), Some(instance))?; // newest first
         let keep_ids = retained_ids(&records, retention);
 
-        let mut removed = Vec::new();
+        let mut report = PruneReport::default();
         for rec in records {
-            if !keep_ids.contains(&rec.id) {
-                self.remove(&rec)?;
-                removed.push(rec);
+            if keep_ids.contains(&rec.id) {
+                continue;
+            }
+            report.selected += 1;
+            // Attempt EVERY selected record. Bailing on the first failure used
+            // to leave the rest untried, so one unwritable snapshot hid however
+            // many would have succeeded (#610).
+            match self.remove(&rec) {
+                Ok(()) => report.removed.push(rec),
+                Err(e) => report.failures.push(PruneFailure {
+                    id: rec.id.clone(),
+                    path: rec.path.clone(),
+                    error: format!("{e:#}"),
+                }),
             }
         }
-        Ok(removed)
+        Ok(report)
     }
 }
 
@@ -500,7 +566,8 @@ mod tests {
         let removed = store
             .prune("host", "thor", &Retention::keep_last(0))
             .unwrap();
-        assert_eq!(removed.len(), 1);
+        assert_eq!(removed.removed.len(), 1);
+        assert!(removed.is_complete(), "every selected backup was removed");
         assert!(store.list(Some("host"), Some("thor")).unwrap().is_empty());
     }
 
@@ -678,11 +745,70 @@ mod tests {
         let removed = store
             .prune("host", "default", &Retention::keep_last(2))
             .unwrap();
-        assert_eq!(removed.len(), 3);
+        assert_eq!(removed.removed.len(), 3);
+        assert!(removed.is_complete());
         let kept = store.list(Some("host"), Some("default")).unwrap();
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].id, "20260104-000000");
         assert_eq!(kept[1].id, "20260103-000000");
+    }
+
+    // #610: a prune that selects work and removes nothing must be a failure, not
+    // a warning. The live shape was 107 snapshots selected, 0 removed, reported
+    // as "WARNINGS: 9" — indistinguishable from partial success.
+    #[test]
+    fn a_prune_that_cannot_remove_reports_failure_not_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(dir.path());
+        for _ in 0..3 {
+            let slot = store.new_slot(&["host".into()], "host", "default").unwrap();
+            std::fs::write(slot.payload_dir().join("f"), b"x").unwrap();
+            slot.commit(None, None).unwrap();
+            // Ids are second-granular; keep them distinct.
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+
+        // Make the collection undeletable the way the real fault did: the
+        // snapshot dirs are selected, but the unlink is refused.
+        let coll = dir.path().join("host");
+        let mut perms = std::fs::metadata(&coll).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o500); // r-x: entries readable, none removable
+        }
+        std::fs::set_permissions(&coll, perms.clone()).unwrap();
+
+        let report = store
+            .prune("host", "default", &Retention::keep_last(1))
+            .unwrap();
+
+        // Restore permissions before asserting so a failure still cleans up.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = perms;
+            p.set_mode(0o700);
+            std::fs::set_permissions(&coll, p).unwrap();
+        }
+
+        assert_eq!(report.selected, 2, "two backups fall outside keep_last(1)");
+        assert!(
+            report.removed.is_empty(),
+            "nothing could actually be removed"
+        );
+        assert!(!report.is_complete(), "this must not read as success");
+        assert_eq!(
+            report.failures.len(),
+            2,
+            "EVERY selected backup is attempted and reported, not just the first"
+        );
+        assert_eq!(report.summary(), "selected 2, removed 0");
+        assert_eq!(
+            store.list(Some("host"), Some("default")).unwrap().len(),
+            3,
+            "a prune that could not remove must not have destroyed them either"
+        );
     }
 
     #[test]
@@ -698,6 +824,7 @@ mod tests {
             store
                 .prune("host", "default", &unbounded)
                 .unwrap()
+                .removed
                 .is_empty()
         );
     }
@@ -768,8 +895,8 @@ mod tests {
             max_total_bytes: None,
         };
         let removed = store.prune("host", "default", &retention).unwrap();
-        let removed_ids: HashSet<&String> = removed.iter().map(|r| &r.id).collect();
-        assert_eq!(removed.len(), 2, "both day-A backups pruned");
+        let removed_ids: HashSet<&String> = removed.removed.iter().map(|r| &r.id).collect();
+        assert_eq!(removed.removed.len(), 2, "both day-A backups pruned");
         assert!(removed_ids.contains(&a1));
         assert!(removed_ids.contains(&a2));
 
@@ -802,7 +929,7 @@ mod tests {
             max_total_bytes: None,
         };
         let removed = store.prune("host", "default", &retention).unwrap();
-        let removed_ids: HashSet<&String> = removed.iter().map(|r| &r.id).collect();
+        let removed_ids: HashSet<&String> = removed.removed.iter().map(|r| &r.id).collect();
         // hour 01 entirely dropped (older than the 2 kept hours).
         assert!(removed_ids.contains(&h1a));
         assert!(removed_ids.contains(&h1b));
@@ -834,9 +961,9 @@ mod tests {
             max_total_bytes: Some(25),
         };
         let removed = store.prune("host", "default", &retention).unwrap();
-        let removed_ids: HashSet<&String> = removed.iter().map(|r| &r.id).collect();
+        let removed_ids: HashSet<&String> = removed.removed.iter().map(|r| &r.id).collect();
         assert_eq!(
-            removed.len(),
+            removed.removed.len(),
             2,
             "two oldest dropped to fit the 25-byte cap"
         );

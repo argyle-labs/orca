@@ -596,8 +596,38 @@ async fn run_one(
     // `default_retention`, else the built-in default), NOT an unconditional
     // built-in default — otherwise a target asking to keep more than 25 / 1 GiB
     // silently loses backups it meant to keep.
-    if let Err(e) = store.prune(kind, instance, retention) {
-        tracing::warn!("[backup] {kind}/{instance}: prune failed: {e:#}");
+    // Retention that cannot enforce itself is worse than none, because the
+    // surface claims the policy is applied. A prune that selected work and did
+    // not complete it is an ERROR on the run, not a log line nobody reads (#610).
+    match store.prune(kind, instance, retention) {
+        Ok(report) if report.is_complete() => {}
+        Ok(report) => {
+            let detail = report
+                .failures
+                .iter()
+                .map(|f| format!("{}: {}", f.id, f.error))
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!(
+                "[backup] {kind}/{instance}: prune incomplete ({}): {detail}",
+                report.summary()
+            );
+            out.errors.push(BackupError {
+                kind: kind.to_string(),
+                instance: instance.to_string(),
+                target: None,
+                error: format!("prune incomplete ({}): {detail}", report.summary()),
+            });
+        }
+        Err(e) => {
+            tracing::error!("[backup] {kind}/{instance}: prune failed: {e:#}");
+            out.errors.push(BackupError {
+                kind: kind.to_string(),
+                instance: instance.to_string(),
+                target: None,
+                error: format!("prune failed: {e:#}"),
+            });
+        }
     }
 }
 
