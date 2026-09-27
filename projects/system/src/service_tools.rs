@@ -423,6 +423,11 @@ pub struct ServiceHealthArgs {
 #[serde(rename_all = "camelCase")]
 pub struct ServiceHealthRow {
     pub provider: String,
+    /// Which registered instance this row reports on. `None` when the provider
+    /// has no registered instance — the row is then a statement about the
+    /// REGISTRY, not about the software's health (#615).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     pub health: contract::health::Health,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -473,12 +478,16 @@ async fn probe(
     }
 }
 
-/// Fleet-wide service health. With no `--service`, probes every registered
-/// backend concurrently (each under a short timeout) and returns a typed row per
-/// provider projected into the generic `contract::health::Health` enum. With
-/// `--service`, probes just that named provider (preserving the per-instance
-/// path). This is an explicit on-demand aggregate — not a cached poll, and never
-/// wired into `service.list`/`containers.list`/`system.list` hot reads.
+/// Fleet-wide service health. With no `--service`, probes every REGISTERED
+/// INSTANCE concurrently (each under a short timeout) and returns a typed row
+/// per instance, projected into the generic `contract::health::Health` enum. A
+/// provider with no registered instance reports `unknown` and says so — it is
+/// not probed, because there is no address to probe, and a provider nobody
+/// registered is not a provider that is down. Register one with
+/// `service.instance.create --route`. With `--service`, probes just that named
+/// provider using the endpoint given on the call. This is an explicit on-demand
+/// aggregate — not a cached poll, and never wired into
+/// `service.list`/`containers.list`/`system.list` hot reads.
 #[orca_tool(domain = "service", verb = "health")]
 async fn service_health(
     args: ServiceHealthArgs,
@@ -508,6 +517,7 @@ async fn service_health(
         return Ok(ServiceHealthOutput {
             services: vec![ServiceHealthRow {
                 provider: name.to_string(),
+                instance: (!args.instance.is_empty()).then(|| args.instance.clone()),
                 health,
                 detail,
             }],
@@ -515,40 +525,77 @@ async fn service_health(
         });
     }
 
-    // Fleet-wide. Every provider here is probed with an ADDRESS-LESS endpoint:
-    // there is no verb that registers "this syncthing lives at these routes", so
-    // the fan-out iterates providers, not instances, and a backend has nothing
-    // to reach (#615). Report that as Unknown with the reason, rather than
-    // handing each backend a default `Endpoint` and rendering whatever comes
-    // back as a health verdict — a provider with no registered instance is not
-    // a provider that is down, and must never read as one.
-    let handles: Vec<_> = service::backends()
-        .into_iter()
-        .map(|backend| {
-            let provider = backend.provider().to_string();
-            tokio::spawn(async move {
-                let (health, detail, error) = probe(backend, Endpoint::default(), timeout).await;
-                let error = error.map(|e| {
-                    format!(
-                        "{e} (no instance is registered for `{provider}`, so there is no route to \
-                         probe — orca has no verb to register one yet)"
-                    )
-                });
-                (provider, health, detail, error)
-            })
-        })
-        .collect();
+    // Fleet-wide: probe every REGISTERED INSTANCE, each bounded by `timeout`.
+    //
+    // This used to iterate providers and hand each an address-less `Endpoint`,
+    // then render whatever came back as a health verdict — so it could not work
+    // for any provider, however well its backend was written (#615). Instances
+    // are now registered on the replicated `endpoints` table, so there is
+    // something addressable to probe.
+    //
+    // A provider with NO registered instance still gets a row, because silence
+    // is the failure this issue is about: it reports `Unknown` and says the
+    // registry is empty. That is a statement about the registry, not about the
+    // software — a provider nobody registered is not a provider that is down.
+    let mut handles = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut services: Vec<ServiceHealthRow> = Vec::new();
 
-    let mut services = Vec::new();
-    let mut errors = Vec::new();
+    for backend in service::backends() {
+        let provider = backend.provider().to_string();
+        let registered = match crate::service_instance::instances_of(&provider) {
+            Ok(rows) => rows,
+            Err(e) => {
+                errors.push(format!("{provider}: read instance registry: {e:#}"));
+                Vec::new()
+            }
+        };
+        if registered.is_empty() {
+            services.push(ServiceHealthRow {
+                provider: provider.clone(),
+                instance: None,
+                health: contract::health::Health::Unknown,
+                detail: Some(format!(
+                    "no instance registered for `{provider}` — register one with \
+                     `service.instance.create` so there is a route to probe"
+                )),
+            });
+            continue;
+        }
+        for row in registered {
+            let instance = crate::service_instance::split_key(&row.name)
+                .map(|(_, i)| i.to_string())
+                .unwrap_or_else(|| row.name.clone());
+            let backend = std::sync::Arc::clone(&backend);
+            let provider = provider.clone();
+            let ep = Endpoint {
+                name: instance.clone(),
+                routes: row.routes.clone(),
+                target_host: row.host.clone(),
+                runtime: (!row.runtime.is_empty())
+                    .then(|| parse_runtime(&row.runtime).ok())
+                    .flatten(),
+                backup_method: (!row.method.is_empty()).then(|| row.method.clone()),
+                // A token is a SECRET and is never persisted in `endpoints`;
+                // a backend needing one resolves it from the secret store.
+                token: String::new(),
+            };
+            handles.push(tokio::spawn(async move {
+                let (health, detail, error) = probe(backend, ep, timeout).await;
+                (provider, instance, health, detail, error)
+            }));
+        }
+    }
+
     for handle in handles {
         match handle.await {
-            Ok((provider, health, detail, error)) => {
+            Ok((provider, instance, health, detail, error)) => {
                 if let Some(e) = error {
-                    errors.push(format!("{provider}: {e}"));
+                    errors.push(format!("{provider}/{instance}: {e}"));
                 }
                 services.push(ServiceHealthRow {
                     provider,
+                    instance: Some(instance),
                     health,
                     detail,
                 });
@@ -556,7 +603,7 @@ async fn service_health(
             Err(join_err) => errors.push(format!("probe task failed to join: {join_err}")),
         }
     }
-    services.sort_by(|a, b| a.provider.cmp(&b.provider));
+    services.sort_by(|a, b| (&a.provider, &a.instance).cmp(&(&b.provider, &b.instance)));
 
     Ok(ServiceHealthOutput { services, errors })
 }
@@ -704,6 +751,7 @@ mod tests {
         let out = ServiceHealthOutput {
             services: vec![ServiceHealthRow {
                 provider: "abs".into(),
+                instance: Some("main".into()),
                 health: contract::health::Health::Healthy,
                 detail: None,
             }],
@@ -1237,9 +1285,13 @@ mod tests {
         assert!(out.errors.is_empty());
     }
 
+    // #615: a backend with NO registered instance used to be probed with a
+    // default, address-less endpoint and the result rendered as a verdict —
+    // this test asserted `Healthy` for a provider nothing had ever addressed.
+    // That was the bug: the aggregate reported health it had not measured.
     #[serial_test::serial(service_registry)]
     #[test]
-    fn service_health_fleet_wide_includes_registered_backend() {
+    fn a_provider_with_no_registered_instance_reports_unknown_not_healthy() {
         let _g = register_lifecycle("lc-fleet");
         let out = rt()
             .block_on(service_health(ServiceHealthArgs::default(), &test_ctx()))
@@ -1248,9 +1300,27 @@ mod tests {
             .services
             .iter()
             .find(|r| r.provider == "lc-fleet")
-            .expect("registered backend should appear in fleet aggregate");
-        assert_eq!(row.health, contract::health::Health::Healthy);
-        assert_eq!(row.detail.as_deref(), Some("running"));
+            .expect("a registered backend still appears in the fleet aggregate");
+
+        assert_eq!(
+            row.health,
+            contract::health::Health::Unknown,
+            "nothing was probed, so nothing is known"
+        );
+        assert!(
+            row.instance.is_none(),
+            "there is no instance to name: {:?}",
+            row.instance
+        );
+        let detail = row.detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("no instance registered"),
+            "the row explains the registry is empty: {detail}"
+        );
+        assert!(
+            detail.contains("service.instance.create"),
+            "and names the verb that fixes it: {detail}"
+        );
     }
 
     #[test]
