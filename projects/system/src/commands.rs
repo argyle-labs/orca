@@ -493,7 +493,7 @@ pub struct SystemUpdateArgs {
 
 /// Scope of a `system.update` call. `Host` (the default when `scope` is
 /// omitted) is this host only — the historical behavior. `Fleet` fans out
-/// across the pod through the registered [`crate::fleet::FleetUpdateHook`].
+/// across the mesh through the registered [`crate::fleet::FleetUpdateHook`].
 #[derive(
     clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq,
 )]
@@ -545,7 +545,7 @@ pub enum SystemUpdateAction {
 }
 
 /// Untagged so the default (`action` omitted) `Update` variant serializes as a
-/// bare `SystemUpdateOutput` — preserving every existing wire decoder (the pod
+/// bare `SystemUpdateOutput` — preserving every existing wire decoder (the mesh
 /// `peer_update_state` cache decodes `SystemUpdateOutput` straight from a `{}`
 /// call).
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -610,6 +610,20 @@ pub struct SystemUpdateOutput {
     /// web UI all agree without re-implementing the comparator. `None`
     /// when either side is missing or unparseable.
     pub update_available: Option<bool>,
+    /// True when this host structurally cannot obtain a release asset: it holds
+    /// no local `github_token` and has no trusted peer to delegate the fetch to
+    /// (#652). Reported on a DRY RUN so an operator sees "this host cannot
+    /// update" before committing to `--execute`, instead of discovering it
+    /// per-host mid-fan-out.
+    ///
+    /// `None` from a peer too old to compute it — absence is "unknown", never
+    /// "not blocked".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_blocked: Option<bool>,
+    /// Why [`Self::fetch_blocked`] is true, naming the same two remedies the
+    /// runtime delegate failure names. `None` when not blocked or unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_blocked_reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default, Clone)]
@@ -627,7 +641,7 @@ async fn system_update(
     args: SystemUpdateArgs,
     ctx: &contract::ToolCtx,
 ) -> Result<SystemUpdateResult> {
-    // Fleet scope short-circuits into pod's fan-out via the registered hook.
+    // Fleet scope short-circuits into mesh's fan-out via the registered hook.
     if args.scope.unwrap_or_default() == SystemUpdateScope::Fleet {
         if let Some(bad) = fleet_incompatible_arg(&args) {
             anyhow::bail!(
@@ -642,7 +656,7 @@ async fn system_update(
             .map_err(|_| {
                 anyhow::anyhow!(
                     "no fleet-update hook registered on this context — `--scope fleet` needs \
-                     the daemon's pod wiring; run it against a running orca daemon (or use \
+                     the daemon's mesh wiring; run it against a running orca daemon (or use \
                      `--scope host` for this host only)"
                 )
             })?;
@@ -1139,6 +1153,10 @@ async fn run_system_update(
             .filter(|v| !v.trim().is_empty())
     });
 
+    // Structural fetch capability, reported on every probe so the dry run can
+    // say "this host cannot update, and here is why" (#652).
+    let (fetch_blocked, fetch_blocked_reason) = fetch_capability();
+
     Ok(SystemUpdateOutput {
         current_version: CURRENT_VERSION.to_string(),
         channel: ch_marker.as_marker().to_string(),
@@ -1163,6 +1181,8 @@ async fn run_system_update(
         errors,
         pending_restart,
         update_available,
+        fetch_blocked: Some(fetch_blocked),
+        fetch_blocked_reason,
     })
 }
 
@@ -1177,7 +1197,7 @@ pub(crate) fn no_secure_peer_message(insecure_present: &[(String, String)]) -> S
     if insecure_present.is_empty() {
         return "no paired secure peer available to delegate the private-asset fetch, and this \
                 host has no paired peers at all. Pair a peer that holds a `github_token` and \
-                trust it with `pod trust <peer_id> --on true --push`, or set a local \
+                trust it with `orca mesh trust <peer_id> on`, or set a local \
                 `github_token` secret to fetch the asset directly."
             .to_string();
     }
@@ -1188,9 +1208,49 @@ pub(crate) fn no_secure_peer_message(insecure_present: &[(String, String)]) -> S
         .join(", ");
     format!(
         "no paired secure peer available to delegate the private-asset fetch. Trust a candidate \
-         peer with `pod trust <peer_id> --on true --push` (candidates: {candidates}), or set a \
+         peer with `orca mesh trust <peer_id> on` (candidates: {candidates}), or set a \
          local `github_token` secret to fetch the asset directly."
     )
+}
+
+/// Can this host obtain a release asset at all? Returns `(blocked, reason)`.
+///
+/// Mirrors the runtime fallback chain exactly, so a dry run cannot promise an
+/// update the apply will refuse (#652): a direct fetch needs a local
+/// `github_token`, and the only fallback is delegating to a paired peer that is
+/// BOTH present and `peer_secure`. With neither, the apply reaches
+/// [`no_secure_peer_message`] every time.
+///
+/// Scoped to GitHub sources. A Gitea origin serves the asset without a token —
+/// delegation cannot help it and is not attempted (#489) — so a tokenless host
+/// on Gitea is not blocked.
+///
+/// A peer-enumeration failure yields `(false, None)`: "unknown" must never be
+/// rendered as "blocked", because a false block would tell an operator to skip a
+/// host that can in fact update itself.
+pub(crate) fn fetch_capability() -> (bool, Option<String>) {
+    if !crate::update::source_is_github() || !resolve_github_token().is_empty() {
+        return (false, None);
+    }
+    let Ok(conn) = db::open_default() else {
+        return (false, None);
+    };
+    let Ok(peers) = db::mesh::peerdb::list_peers(&conn) else {
+        return (false, None);
+    };
+    let present: Vec<_> = peers
+        .into_iter()
+        .filter(|p| p.departed_at.is_none())
+        .collect();
+    if present.iter().any(|p| p.peer_secure) {
+        return (false, None);
+    }
+    let insecure: Vec<(String, String)> = present
+        .iter()
+        .filter(|p| !p.peer_secure)
+        .map(|p| (p.peer_id.clone(), p.peer_hostname.clone()))
+        .collect();
+    (true, Some(no_secure_peer_message(&insecure)))
 }
 
 /// Delegate-on-miss: when this peer has no `github_token` secret, ask a
@@ -1640,7 +1700,7 @@ mod tests {
             ("id-1".to_string(), "alpha".to_string()),
             ("id-2".to_string(), "beta".to_string()),
         ]);
-        assert!(msg.contains("pod trust <peer_id> --on true --push"));
+        assert!(msg.contains("orca mesh trust <peer_id> on"));
         assert!(msg.contains("alpha (id-1)"));
         assert!(msg.contains("beta (id-2)"));
         assert!(msg.contains("github_token"));
@@ -1650,7 +1710,7 @@ mod tests {
     fn no_secure_peer_message_calls_out_zero_peers() {
         let msg = no_secure_peer_message(&[]);
         assert!(msg.contains("no paired peers at all"));
-        assert!(msg.contains("pod trust <peer_id> --on true --push"));
+        assert!(msg.contains("orca mesh trust <peer_id> on"));
         assert!(msg.contains("github_token"));
     }
 
@@ -1852,10 +1912,7 @@ mod tests {
         assert!(msg.contains("gamma (id-9)"), "{msg}");
         // With at least one candidate it does NOT claim there are no peers.
         assert!(!msg.contains("no paired peers at all"), "{msg}");
-        assert!(
-            msg.contains("pod trust <peer_id> --on true --push"),
-            "{msg}"
-        );
+        assert!(msg.contains("orca mesh trust <peer_id> on"), "{msg}");
     }
 
     // ── require_cap_name: reason present but name absent still errors ─────────
@@ -2195,7 +2252,7 @@ mod tests {
 
     #[test]
     fn update_result_decodes_bare_empty_object_as_update() {
-        // The pod `peer_update_state` cache decodes a `{}` call straight into
+        // The mesh `peer_update_state` cache decodes a `{}` call straight into
         // the untagged Update variant. Because Update is tried first and all
         // its fields default, an empty object must land there — never as a
         // Capability or Retention row.
@@ -2476,10 +2533,7 @@ mod tests {
         .expect_err("empty peer set must bail before any network call");
         let msg = err.to_string();
         assert!(msg.contains("no paired peers at all"), "{msg}");
-        assert!(
-            msg.contains("pod trust <peer_id> --on true --push"),
-            "{msg}"
-        );
+        assert!(msg.contains("orca mesh trust <peer_id> on"), "{msg}");
     }
 
     #[tokio::test]
@@ -2513,10 +2567,7 @@ mod tests {
         assert!(!msg.contains("no paired peers at all"), "{msg}");
         assert!(msg.contains("gamma-host"), "{msg}");
         assert!(msg.contains(&peer_id), "{msg}");
-        assert!(
-            msg.contains("pod trust <peer_id> --on true --push"),
-            "{msg}"
-        );
+        assert!(msg.contains("orca mesh trust <peer_id> on"), "{msg}");
     }
 
     // ── system_update dispatch (the tool wrapper) — offline error arms ───────
@@ -2758,7 +2809,7 @@ mod tests {
     #[tokio::test]
     async fn fleet_scope_without_registered_hook_errors_cleanly() {
         use contract::OrcaTool;
-        // No FleetUpdateHook registered (pod isn't wired into this ctx) — the
+        // No FleetUpdateHook registered (mesh isn't wired into this ctx) — the
         // call must return an actionable error, not panic.
         let ctx = contract::ToolCtx::new(std::sync::Arc::new(
             contract::config::Config::load().unwrap(),

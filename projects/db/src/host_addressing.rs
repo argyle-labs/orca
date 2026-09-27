@@ -116,7 +116,7 @@ pub fn upsert_peer_address(
 /// Atomically replace the set of `mesh_peer_addresses` rows for
 /// `(peer_id, source)` with `entries` (`(kind, value)` pairs).
 ///
-/// Used by the ping-driven refresh path: every successful `pod/ping` carries
+/// Used by the ping-driven refresh path: every successful `mesh/ping` carries
 /// the peer's full addressing snapshot from one source (`autodetect`), and we
 /// want stale rows (addresses the peer no longer reports) to disappear. Other
 /// sources (e.g. `manual`, `caddy:*`) are untouched.

@@ -1,6 +1,13 @@
+-- NOTE: this migration was written when the mesh tables were named `pod_*`.
+-- It now spells them `mesh_*`, which is safe because it can only ever run on a
+-- FRESH database: any database old enough to hold `pod_*` tables recorded this
+-- migration as applied long before the rename, so it is never replayed there.
+-- On a fresh database `apply_schema` creates `mesh_*` directly. The single
+-- migration that must handle BOTH shapes is 20260927000000, which guards itself.
+--
 -- candidate_addrs: CSV of the inviter's self-advertised reachable addresses,
 -- carried on the offer so the joiner can try each (pinned to the bootstrap fp)
 -- for join-confirm instead of relying solely on the TLS source IP — which is
 -- unreliable when the inviter reaches the joiner over a tunnel/VPN (the source
 -- IP is then the tunnel address, not the inviter's bootstrap listener).
-ALTER TABLE pod_pending_offers ADD COLUMN candidate_addrs TEXT NOT NULL DEFAULT '';
+ALTER TABLE mesh_pending_offers ADD COLUMN candidate_addrs TEXT NOT NULL DEFAULT '';

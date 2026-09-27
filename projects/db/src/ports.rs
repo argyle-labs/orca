@@ -148,7 +148,7 @@ pub fn https_port() -> u16 {
     current().https
 }
 
-/// Current pod-mesh mTLS port (env > DB > const).
+/// Current mesh-mesh mTLS port (env > DB > const).
 pub fn mesh_port() -> u16 {
     current().mesh
 }

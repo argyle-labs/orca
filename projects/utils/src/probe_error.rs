@@ -8,7 +8,7 @@
 //!
 //! Measured on the 2026-09-25 `v0.2.1-rc.3` roll: 7 of 7 hosts timed out their
 //! 180s gate. The controller was on rc.2 while peers moved to rc.3, which
-//! dissolved the `pod.*` verbs into `system.*`, so every probe came back
+//! dissolved the `mesh.*` verbs into `system.*`, so every probe came back
 //! `unknown tool: system.list` — permanent, and unretryable. The gate degraded into
 //! a fixed 180s sleep, which is the between-host safety check from
 //! [[orca-must-never-bring-down-host]] not actually checking anything.
@@ -94,7 +94,7 @@ mod tests {
     fn the_real_rc2_to_rc3_verb_mismatch_is_permanent() {
         assert_eq!(
             classify(
-                "peer returned error: internal error: dispatch pod-relayed tool \
+                "peer returned error: internal error: dispatch mesh-relayed tool \
                  'system.list': unknown tool: system.list"
             ),
             ProbeOutcome::Permanent

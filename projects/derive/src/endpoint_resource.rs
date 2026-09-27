@@ -86,7 +86,7 @@ pub(crate) struct EndpointResource {
     pub(crate) crate_path: syn::Path,
     /// Opt-in mesh replication: the name of the last-write-wins column (e.g.
     /// `"updated_at"`). When set, the macro adds that column, registers the
-    /// table for pod-wide eventually-consistent sync (a `ReplicatedRegistration`
+    /// table for mesh-wide eventually-consistent sync (a `ReplicatedRegistration`
     /// backed by `macro_runtime::replicate_table`), so the row converges
     /// fleet-wide instead of drifting per-host. `None` = local table (today's
     /// behaviour). Only core domain crates set this; thin plugins never do.
@@ -469,7 +469,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     let crate_path = &input.crate_path;
 
     // ── Opt-in mesh replication ──────────────────────────────────────────────
-    // When `lww` is set, register the table for pod-wide eventually-consistent
+    // When `lww` is set, register the table for mesh-wide eventually-consistent
     // sync: two free fns delegating to the generic column-list replicator plus a
     // `ReplicatedRegistration` the running engine walks. The column list mirrors
     // the CREATE TABLE order exactly (PK, declared fields, built-ins, lww). When

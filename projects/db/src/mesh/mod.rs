@@ -1,8 +1,8 @@
 //! Read-only mesh_peers helpers exposed to the `fleet` domain crate's
-//! pod-related `#[orca_tool]`s.
+//! mesh-related `#[orca_tool]`s.
 //!
-//! The mutating side of the pod registry (offers, trust handshakes, wipes)
-//! lives in `projects/server/src/pod/db.rs` because it's wired into the
+//! The mutating side of the mesh registry (offers, trust handshakes, wipes)
+//! lives in `projects/server/src/mesh/db.rs` because it's wired into the
 //! mTLS/bootstrap state machine. This module exists so non-server crates
 //! can read the list of paired peers without taking a server dep.
 
@@ -100,7 +100,7 @@ pub fn list_peer_summaries(conn: &Connection) -> Result<Vec<PeerSummary>> {
 }
 
 /// Refresh `mesh_peers.peer_hostname` for a peer when we learn its real OS
-/// hostname (e.g. from a `pod/ping` reply or a `host_status` snapshot).
+/// hostname (e.g. from a `mesh/ping` reply or a `host_status` snapshot).
 /// No-op when `hostname` is empty so callers don't have to guard.
 pub fn update_hostname(conn: &Connection, peer_id: &str, hostname: &str) -> Result<()> {
     if hostname.is_empty() {

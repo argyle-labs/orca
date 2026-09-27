@@ -1,20 +1,20 @@
 # Orca Install Runbook
 
 The operator-facing how-to for putting orca on a fresh host and joining it to a
-pod. Status: Living doc.
+mesh. Status: Living doc.
 
 Onboarding is **two** steps:
 
 ```
-   1. install                     2. join the pod
+   1. install                     2. join the mesh
    ──────────                     ───────────────
    one command on the new host    mDNS offer/accept pairing
-                                  from an existing pod member
+                                  from an existing mesh member
 ```
 
 After step 1 the host runs orca **locally** — the orca-native store is usable
 immediately, and the daemon mints its own UUIDv7 identity on first boot. After
-step 2 it is a full pod member. Pairing itself is documented end-to-end in
+step 2 it is a full mesh member. Pairing itself is documented end-to-end in
 [`mesh.md`](mesh.md); this runbook covers getting the binary onto the host.
 
 ---
@@ -98,7 +98,7 @@ ssh "orca@$HOST" '~/.local/bin/orca system detail'   # version, uptime, pending_
 
 ---
 
-## Step 2 — Join the pod
+## Step 2 — Join the mesh
 
 Pairing is the mDNS **offer/accept** flow. On a shared LAN it is nearly
 automatic; the full model, security anchors, and manual fallback live in
@@ -132,7 +132,7 @@ The daemon listens on HTTP `:12000`, HTTPS `:12443`, and mesh mTLS `:12002`
 
 ## Upgrades
 
-The normal path is a mesh self-update, which runs entirely over the pod mesh:
+The normal path is a mesh self-update, which runs entirely over the mesh mesh:
 
 ```sh
 system_update(peer=<id>, channel=beta)   # apply the channel's latest release

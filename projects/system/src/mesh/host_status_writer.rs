@@ -61,7 +61,7 @@ pub fn spawn_local_writer() {
 }
 
 /// Own-peer id used as the row key. `peer.<machine_id_short>` matches the
-/// canonical pod-mesh identity used everywhere else.
+/// canonical mesh-mesh identity used everywhere else.
 fn own_peer_id() -> String {
     crate::host_identity::machine_id().to_string()
 }

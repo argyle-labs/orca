@@ -112,7 +112,7 @@ pub fn sweep_session_events(conn: &Connection, days: u32) -> Result<u64> {
 /// Delete pairing offers whose `expires_at` (unix seconds) has passed.
 /// Returns rows removed. Expired offers are dead state — nothing purged them
 /// before, so they accreted (1200+ rows observed on a long-lived daemon).
-pub fn sweep_expired_pod_offers(conn: &Connection) -> Result<u64> {
+pub fn sweep_expired_mesh_offers(conn: &Connection) -> Result<u64> {
     let n = conn
         .execute(
             "DELETE FROM mesh_pending_offers WHERE expires_at < unixepoch('now')",
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn sweep_expired_pod_offers_removes_only_expired() {
+    fn sweep_expired_mesh_offers_removes_only_expired() {
         let conn = test_conn();
         conn.execute(
             "INSERT INTO mesh_pending_offers
@@ -316,7 +316,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let removed = sweep_expired_pod_offers(&conn).expect("sweep ok");
+        let removed = sweep_expired_mesh_offers(&conn).expect("sweep ok");
         assert_eq!(removed, 1);
         let remaining: i64 = conn
             .query_row("SELECT COUNT(*) FROM mesh_pending_offers", [], |r| r.get(0))

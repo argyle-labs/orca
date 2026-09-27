@@ -6,7 +6,7 @@
 //! `db` (host_status schema in db::metrics).
 //!
 //! NOTE: host *addressing* (db::host_addressing) is still in `db` for now — it
-//! is entangled with the pod peer-address storage (db::mesh) and moves here with
-//! the pod->systems dissolution.
+//! is entangled with the mesh peer-address storage (db::mesh) and moves here with
+//! the mesh->systems dissolution.
 pub mod host_capabilities;
 pub mod host_status;

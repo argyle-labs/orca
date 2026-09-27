@@ -4,7 +4,7 @@ Status: **Migration runbook** — a one-time, coordinated fleet operation.
 
 This is the one-time collapse that re-keys every host onto a genuine minted
 UUIDv7 identity (the [id hard rules](#the-id-hard-rules)). It is destructive to
-mesh trust by design — you tear the pod down and rebuild it — so run it as a
+mesh trust by design — you tear the mesh down and rebuild it — so run it as a
 coordinated fleet operation across every host at once.
 
 ## The id hard rules
@@ -23,8 +23,8 @@ coordinated fleet operation across every host at once.
 
 Two facts from the leave/join/recover paths make a rolling re-key unsafe:
 
-1. **`pod leave` preserves local identity.** It deletes `mesh_peers` / `pod_trust`
-   / offers / discovery and clears `pod_self`, but it does **not** delete the
+1. **`orca mesh leave` preserves local identity.** It deletes `mesh_peers` / `mesh_trust`
+   / offers / discovery and clears `mesh_self`, but it does **not** delete the
    on-disk `machine_id` file or the bootstrap key. So a host that merely leaves
    and rejoins comes back with the **same** id. To mint a fresh UUIDv7 you must
    delete `<app_dir>/machine_id` so `load_or_generate_machine_id` re-mints.
@@ -32,9 +32,9 @@ Two facts from the leave/join/recover paths make a rolling re-key unsafe:
    id, other hosts do not automatically retire its old `mesh_peers` row — there
    is no "same machine, new id" reconciliation (the old id is, by definition, a
    different key). A rolling re-key therefore leaves a **ghost row** on every
-   other peer, cleaned only by an explicit `pod forget <old_id>` fan-out.
+   other peer, cleaned only by an explicit `orca system mesh delete --action forget --peer-id <old_id>` fan-out.
 
-Collapsing the whole pod at once sidesteps both: every host wipes its identity
+Collapsing the whole mesh at once sidesteps both: every host wipes its identity
 and roster together, so there are no ghost rows to chase.
 
 ## Preconditions
@@ -49,9 +49,9 @@ and roster together, so there are no ghost rows to chase.
 ## Procedure
 
 For each host, `<app_dir>` is the orca data dir (`/var/lib/orca/.local/share/orca`
-on Linux service installs; `pod_detail` / logs show the resolved path).
+on Linux service installs; `system.certs.list` / logs show the resolved path).
 
-1. **Leave the pod** (best-effort broadcast; ignore failures — the pod is coming
+1. **Leave the mesh** (best-effort broadcast; ignore failures — the mesh is coming
    down anyway):
    ```
    orca system mesh delete --action leave
@@ -82,20 +82,20 @@ on Linux service installs; `pod_detail` / logs show the resolved path).
 
 ## Verification (whole fleet)
 
-- `pod_list` / `pod_instances` on any host: every `peer_id` and every `id` is a
+- `system.list` on any host: every `peer_id` and every `id` is a
   bare dashed UUIDv7 — no `system:` / `local:` / `peer.` prefixes, no bare-hex.
-- `pod.detail` / `network_topology_view`: every node id (peers **and** claim
+- `system.topology` / `network_topology_view`: every node id (peers **and** claim
   children) is a bare UUIDv7; parent↔child is walkable purely by id.
 - Pick a claim node id from the tree and resolve it via the level-specific
   detail verb (`system.detail` / `service.status`) — round-trippable selector.
 - Targeting works by id: `system_update(peer=<uuidv7>)` resolves on every host.
-- No ghost rows: `pod_instances` shows no `departed`/stale duplicates.
+- No ghost rows: `system.list` shows no `departed`/stale duplicates.
 
 ## Restore / resiliency notes
 
 - **Single-host loss (not a collapse):** if one host is rebuilt and rejoins with
-  a fresh id, the others keep its old row. Run `pod forget <old_id>` (fan-out) to
-  purge it, or `pod recover <id>` if a live peer was wrongly marked departed.
+  a fresh id, the others keep its old row. Run `orca system mesh delete --action forget --peer-id <old_id>` (fan-out) to
+  purge it, or `orca system mesh update --action recover --peer-id <id>` if a live peer was wrongly marked departed.
 - **Identity is the source of truth on disk:** `<app_dir>/machine_id` is the only
   thing that pins a host's id across restarts. Back it up if you want a host to
   keep its UUIDv7 across an OS reinstall; delete it to intentionally re-key.

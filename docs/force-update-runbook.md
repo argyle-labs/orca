@@ -3,7 +3,7 @@
 When a host is stuck on the wrong version, wedged mid-update, or otherwise
 misbehaving, escalate through these levels **in order**. Each level is more
 invasive than the last; stop as soon as the host reports the target version and
-`pending_restart == null`. The default path is always the **encrypted pod
+`pending_restart == null`. The default path is always the **encrypted mesh
 mesh** — SSH is the last resort (see [Mesh-first policy](#mesh-first-policy)).
 
 Throughout, target the host by its **`machine_id` (peer_id)** when it resolves;
@@ -16,10 +16,10 @@ Read-only probes (all peer-dispatchable):
 - `system_update(peer=<id>)` — omit all other args. Reports `current_version`,
   `channel`, `pinned_to`, `update_available`, `pending_restart`. A
   `-dev+<hash>.dirty` version means a hand-built binary, not a release.
-- `pod_detail(peer=<id>)` — leaf/CA cert days-remaining + `self_secure`. A leaf
+- `system.certs.list` (`--peer <id>`) — leaf/CA cert days-remaining + `self_secure`. A leaf
   at `0` days is the cert-expiry deadlock (mesh handshakes fail; see
   [self-heal](#appendix-cert-expiry-deadlock)).
-- `pod_list` / `system.health` (target with `--peer <id>`) — reachability,
+- `system.list` / `system.health` (target with `--peer <id>`) — reachability,
   `local_secure`/`peer_secure`.
 - Log scan on the host: `database is locked` (identity convergence failing),
   `certificate expired`, `TLS accept failed`.
@@ -101,8 +101,8 @@ can't reach hosts your key isn't on, and is easy to get wrong (wrong libc).
 ## Verification (run after every level)
 
 - `system_update(peer=<id>)` → `current_version == target`, `pending_restart == null`.
-- `pod_detail(peer=<id>)` → leaf certs healthy.
-- `system.health` (via `--peer <id>`) / `pod_list` → reachable, mutual-secure.
+- `system.certs.list` (`--peer <id>`) → leaf certs healthy.
+- `system.health` (via `--peer <id>`) / `system.list` → reachable, mutual-secure.
 - Host log tail is clean (no lock / cert / handshake errors).
 
 ## Appendix: cert-expiry deadlock

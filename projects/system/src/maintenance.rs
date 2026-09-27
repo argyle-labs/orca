@@ -4,7 +4,7 @@
 //!
 //!   * **sweep** (hourly) — TTL/retention on slow-growing accretions:
 //!     `update::prune_check_cache` (14-day `--check` blob TTL),
-//!     `sweep_session_events` (audit log), and `sweep_expired_pod_offers`
+//!     `sweep_session_events` (audit log), and `sweep_expired_mesh_offers`
 //!     (dead pairing offers). These bound *live row* growth.
 //!
 //!   * **db-size** (every 10 min) — keeps the database FILE small and loud
@@ -247,12 +247,12 @@ async fn sweep_tick() -> anyhow::Result<()> {
             if let Err(e) = db::maintenance::sweep_session_events(conn, days) {
                 tracing::debug!("[maintenance] sweep_session_events: {e:#}");
             }
-            match db::maintenance::sweep_expired_pod_offers(conn) {
+            match db::maintenance::sweep_expired_mesh_offers(conn) {
                 Ok(n) if n > 0 => {
                     tracing::info!("[maintenance] swept {n} expired pairing offer(s)")
                 }
                 Ok(_) => {}
-                Err(e) => tracing::debug!("[maintenance] sweep_expired_pod_offers: {e:#}"),
+                Err(e) => tracing::debug!("[maintenance] sweep_expired_mesh_offers: {e:#}"),
             }
             // Compact the delete command-log: ops past the anti-entropy horizon
             // have propagated to every online peer (a longer-offline host
@@ -1747,7 +1747,7 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_tick_completes_on_migrated_db() {
-        // Drives the full retention sweep (session events, pod offers,
+        // Drives the full retention sweep (session events, mesh offers,
         // replication-op reap) against a real migrated db; every table exists,
         // so the pass must complete without error.
         let res = with_temp_db_async(sweep_tick).await;

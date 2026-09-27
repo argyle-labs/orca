@@ -1,4 +1,4 @@
-//! Pod-mesh DB helpers. Schema lives in db::apply_schema (mesh_discovery,
+//! Mesh-mesh DB helpers. Schema lives in db::apply_schema (mesh_discovery,
 //! mesh_pending_offers, mesh_peers, mesh_trust, mesh_self).
 //!
 //! Code-hash storage: pairing codes are `sha256(raw_code)` only — the raw
@@ -327,7 +327,7 @@ pub fn find_pending_offer_by_code(conn: &Connection, code: &str) -> Result<Optio
 }
 
 /// Outbound side (inviter): verify code+pubkey match a pending outbound offer
-/// and return the offer. Used by pod/join-confirm before signing CSRs.
+/// and return the offer. Used by mesh/join-confirm before signing CSRs.
 pub fn find_outbound_offer_by_code_and_fp(
     conn: &Connection,
     code: &str,
@@ -383,7 +383,7 @@ pub fn delete_pending_offer(conn: &Connection, offer_id: &str) -> Result<()> {
 /// Delete every outbound pending offer pinned to `addr`, regardless of
 /// expiry. Returns the number of rows removed. Used by the user-driven
 /// re-invite path (idempotent +Add in the UI) and the explicit
-/// `pod.cancel_offer` tool.
+/// `mesh.cancel_offer` tool.
 pub fn delete_outbound_offers_by_addr(conn: &Connection, addr: &str) -> Result<u32> {
     let n = conn.execute(
         "DELETE FROM mesh_pending_offers WHERE direction = 'out' AND peer_addr = ?",
@@ -963,7 +963,7 @@ pub fn list_peers(conn: &Connection) -> Result<Vec<PeerRow>> {
         .map_err(Into::into)
 }
 
-/// Mark a peer as departed (received pod/peer-leaving). Trust bits go to 0
+/// Mark a peer as departed (received mesh/peer-leaving). Trust bits go to 0
 /// in the same transaction. Row is kept for audit; re-pairing clears departed_at.
 pub fn mark_peer_departed(conn: &Connection, peer_id: &str) -> Result<()> {
     let now = now_secs();
@@ -981,9 +981,9 @@ pub fn mark_peer_departed(conn: &Connection, peer_id: &str) -> Result<()> {
 }
 
 /// Clear a stale `departed_at` flag for a peer that's actually still reachable.
-/// Used by `pod recover` after a misfired kick or a remote-driven false depart
+/// Used by `orca system mesh update --action recover` after a misfired kick or a remote-driven false depart
 /// (the 2026-05-28 kick/peer-leaving bug). Trust bits are NOT touched — the
-/// operator must call `pod trust` separately if they want to re-establish
+/// operator must call `orca mesh trust` separately if they want to re-establish
 /// mutual trust.
 pub fn unmark_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
     let now = now_secs();
@@ -997,7 +997,7 @@ pub fn unmark_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
 /// Hard-delete every local trace of a peer_id: mesh_peers, mesh_trust,
 /// mesh_discovery, and any outbound offers tied to it. Unlike
 /// [`mark_peer_departed`] this leaves no audit row — it's the purge path for
-/// `pod forget`, used to evict stale/orphan identities (machine_id churn,
+/// `orca system mesh delete --action forget`, used to evict stale/orphan identities (machine_id churn,
 /// decommissioned hosts) so they stop showing up in the roster. Returns the
 /// total number of rows removed across all four tables.
 pub fn forget_peer(conn: &Connection, peer_id: &str) -> Result<u32> {
@@ -1014,7 +1014,7 @@ pub fn forget_peer(conn: &Connection, peer_id: &str) -> Result<u32> {
         params![peer_id],
     )? as u32;
     // Durable, replicated forget-tombstone. Without this a hard DELETE is silent:
-    // an OFFLINE straggler that missed the `pod/peer-forget` fan-out still holds a
+    // an OFFLINE straggler that missed the `mesh/peer-forget` fan-out still holds a
     // live peer row and re-gossips it on the next roster tick, resurrecting the
     // forgotten peer fleet-wide (issue #232). The tombstone rides the same
     // command-log transport as config deletes (see replication_ops), so a
@@ -1047,7 +1047,7 @@ pub fn write_forget_tombstone(conn: &Connection, peer_id: &str) -> Result<()> {
 
 /// Supersede any active forget-tombstone for `peer_id` with a fresh `upsert`
 /// op (LWW). Called on BOTH sides of an explicit, mTLS-authenticated join: the
-/// inviter clears the joiner in `pod/join-confirm` (it just signed the joiner's
+/// inviter clears the joiner in `mesh/join-confirm` (it just signed the joiner's
 /// CSR), and the joiner clears the inviter in `accept` (it just authenticated
 /// and re-admitted the inviter). Either is a strictly stronger, operator-driven
 /// signal than a stale forget. Because it rides the replicated command-log, the clear propagates so
@@ -1093,10 +1093,10 @@ pub fn is_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
     Ok(v.is_some())
 }
 
-/// Wipe all mesh-membership state. Used by `pod leave`. Trust + peer rows are
+/// Wipe all mesh-membership state. Used by `orca mesh leave`. Trust + peer rows are
 /// dropped; mesh_self is reset; the secrets table is NOT touched here (caller
 /// decides via --wipe-secrets / --wipe-all flags).
-pub fn wipe_pod_membership(conn: &Connection) -> Result<()> {
+pub fn wipe_mesh_membership(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM mesh_trust", [])?;
     tx.execute("DELETE FROM mesh_peers", [])?;
@@ -1388,14 +1388,14 @@ mod tests {
             "host-g",
             "10.0.0.6",
             12002,
-            "pod:abc",
+            "mesh:abc",
             true,
         )
         .unwrap();
         let rows = list_discovery(&c).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].addr, "10.0.0.6");
-        assert_eq!(rows[0].state, "pod:abc");
+        assert_eq!(rows[0].state, "mesh:abc");
         assert!(rows[0].can_invite);
     }
 
@@ -1653,7 +1653,7 @@ mod tests {
             &hash_code(code),
             Some("CA-PEM"),
             Some("host-i"),
-            Some("pod-1"),
+            Some("mesh-1"),
             300,
             None,
             &["10.0.0.1".to_string(), "100.64.0.1".to_string()],
@@ -1787,14 +1787,14 @@ mod tests {
     }
 
     #[test]
-    fn self_secure_and_pod_id() {
+    fn self_secure_and_mesh_id() {
         let (_d, c) = test_conn();
         assert!(!crate::mesh::get_self_secure(&c).unwrap());
         set_self_secure(&c, true).unwrap();
         assert!(crate::mesh::get_self_secure(&c).unwrap());
         assert!(get_mesh_id(&c).unwrap().is_none());
-        set_mesh_id(&c, "pod-xyz").unwrap();
-        assert_eq!(get_mesh_id(&c).unwrap().as_deref(), Some("pod-xyz"));
+        set_mesh_id(&c, "mesh-xyz").unwrap();
+        assert_eq!(get_mesh_id(&c).unwrap().as_deref(), Some("mesh-xyz"));
     }
 
     #[test]
@@ -1814,7 +1814,7 @@ mod tests {
         )
         .unwrap();
         set_self_secure(&c, true).unwrap();
-        wipe_pod_membership(&c).unwrap();
+        wipe_mesh_membership(&c).unwrap();
         assert!(list_peers(&c).unwrap().is_empty());
         assert!(list_discovery(&c).unwrap().is_empty());
         assert!(!crate::mesh::get_self_secure(&c).unwrap());
@@ -1994,7 +1994,7 @@ mod tests {
     fn list_unclaimed_discovery_filters_by_state() {
         let (_d, c) = test_conn();
         upsert_discovery(&c, "fp-u", None, "a", "10.0.0.1", 12002, "unclaimed", false).unwrap();
-        upsert_discovery(&c, "fp-c", None, "b", "10.0.0.2", 12002, "pod:abc", true).unwrap();
+        upsert_discovery(&c, "fp-c", None, "b", "10.0.0.2", 12002, "mesh:abc", true).unwrap();
         let unclaimed = list_unclaimed_discovery(&c).unwrap();
         assert_eq!(unclaimed.len(), 1);
         assert_eq!(unclaimed[0].pubkey_fp, "fp-u");

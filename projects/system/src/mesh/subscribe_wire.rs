@@ -1,12 +1,12 @@
 // JSON-RPC envelopes are opaque Value at the wire — mirroring the sibling allows.
 #![allow(clippy::disallowed_types)]
 
-//! Wire protocol for `pod/subscribe` (slice B).
+//! Wire protocol for `mesh/subscribe` (slice B).
 //!
 //! Pure framing/serialization layer. Works over any
 //! `AsyncRead + AsyncWrite + Unpin` stream so it's exercisable via
 //! `tokio::io::duplex` in unit tests — no TLS pair required. The TLS shim
-//! that wraps this for real pod connections is slice C.
+//! that wraps this for real mesh connections is slice C.
 //!
 //! Wire shape:
 //! ```text
@@ -32,8 +32,47 @@ use super::subscribe::{HostStatusEvent, subscribe_host_status};
 use super::subscribe_demand;
 
 pub const METHOD: &str = "mesh/subscribe";
-pub const EVENT_METHOD: &str = "pod/subscribe.event";
-pub const HEARTBEAT_METHOD: &str = "pod/subscribe.heartbeat";
+
+// ── subscribe frame names, and why the flip is staged ──────────────────────
+//
+// The pod dissolution renamed the parent method to `mesh/subscribe` but left
+// the two frames it carries spelling `pod/*` — they are the last pod names on
+// the wire.
+//
+// They are NOT flipped in one step, because doing exactly that to the TLS SNI
+// is what broke cross-version mesh traffic. Measured against thor on
+// 2026-09-27: a listener carrying both names answered the legacy SNI and
+// REFUSED the new one, because the compat was one-directional — the new dialer
+// sent the new name immediately, and every not-yet-upgraded listener rejected
+// it. rc.6 could not talk to rc.7 in either direction, and the roll that was
+// supposed to fix it had to travel over the very thing that was broken.
+//
+// So the order here is: ACCEPT both names now, keep SENDING the legacy name.
+// Once every host runs a build that accepts both, `*_WIRE` flips to the
+// canonical name in a later release and the legacy constants can go. A
+// receiver is always upgraded before a sender that depends on it.
+
+/// Canonical frame names. Accepted now; sent once the fleet accepts both.
+pub const EVENT_METHOD: &str = "mesh/subscribe.event";
+pub const HEARTBEAT_METHOD: &str = "mesh/subscribe.heartbeat";
+/// Pre-rename names. Still what this build SENDS, and still accepted.
+pub const LEGACY_EVENT_METHOD: &str = "pod/subscribe.event";
+pub const LEGACY_HEARTBEAT_METHOD: &str = "pod/subscribe.heartbeat";
+
+/// What this build puts ON the wire. Legacy for now — see above.
+const EVENT_METHOD_WIRE: &str = LEGACY_EVENT_METHOD;
+/// What this build puts ON the wire. Legacy for now — see above.
+const HEARTBEAT_METHOD_WIRE: &str = LEGACY_HEARTBEAT_METHOD;
+
+/// Is `m` an event frame under either spelling?
+pub fn is_event_method(m: &str) -> bool {
+    m == EVENT_METHOD || m == LEGACY_EVENT_METHOD
+}
+
+/// Is `m` a heartbeat frame under either spelling?
+pub fn is_heartbeat_method(m: &str) -> bool {
+    m == HEARTBEAT_METHOD || m == LEGACY_HEARTBEAT_METHOD
+}
 
 /// Client-side cadence for heartbeat frames. Sized to land well inside
 /// the server's [`subscribe_demand::DEMAND_WINDOW`] so a single dropped
@@ -98,7 +137,7 @@ where
 }
 
 /// Variant of [`serve_session`] for callers that already parsed the first
-/// frame as a `Request` (e.g. the pod listener dispatcher, which peeks the
+/// frame as a `Request` (e.g. the mesh listener dispatcher, which peeks the
 /// method to decide whether to take the streaming path).
 pub async fn serve_session_with_request<S>(
     mut stream: S,
@@ -147,14 +186,14 @@ where
                     };
                     let params_value =
                         serde_json::to_value(&frame).context("serialize EventFrame")?;
-                    let notif = Notification::new(EVENT_METHOD, Some(params_value));
+                    let notif = Notification::new(EVENT_METHOD_WIRE, Some(params_value));
                     let nbytes = serde_json::to_vec(&notif).context("serialize event notif")?;
                     if write_frame(&mut write_half, &nbytes).await.is_err() {
                         return Ok(());
                     }
                 }
                 Err(RecvError::Lagged(n)) => {
-                    tracing::warn!("pod/subscribe session lagged by {n} events; continuing");
+                    tracing::warn!("mesh/subscribe session lagged by {n} events; continuing");
                 }
                 Err(RecvError::Closed) => return Ok(()),
             },
@@ -177,7 +216,7 @@ where
 pub fn is_heartbeat_frame(bytes: &[u8]) -> bool {
     matches!(
         serde_json::from_slice::<Message>(bytes),
-        Ok(Message::Notification(n)) if n.method == HEARTBEAT_METHOD
+        Ok(Message::Notification(n)) if is_heartbeat_method(&n.method)
     )
 }
 
@@ -250,7 +289,7 @@ async fn send_heartbeats<W>(mut write_half: W, interval: Duration)
 where
     W: AsyncWrite + Unpin,
 {
-    let notif = Notification::new(HEARTBEAT_METHOD, None);
+    let notif = Notification::new(HEARTBEAT_METHOD_WIRE, None);
     let bytes = match serde_json::to_vec(&notif) {
         Ok(b) => b,
         Err(_) => return,
@@ -277,7 +316,7 @@ where
             Message::Notification(n) => n,
             _ => continue,
         };
-        if notif.method != EVENT_METHOD {
+        if !is_event_method(&notif.method) {
             continue;
         }
         let params = notif.params.unwrap_or(Value::Null);
@@ -384,7 +423,7 @@ mod tests {
 
     #[test]
     fn is_heartbeat_frame_rejects_other_notifications() {
-        let bytes = serde_json::to_vec(&Notification::new("pod/something.else", None)).unwrap();
+        let bytes = serde_json::to_vec(&Notification::new("mesh/something.else", None)).unwrap();
         assert!(!is_heartbeat_frame(&bytes));
     }
 
@@ -695,7 +734,7 @@ mod tests {
                 .await
                 .unwrap();
             // Send a Notification with the wrong method → client should skip.
-            let wrong = Notification::new("pod/other.event", None);
+            let wrong = Notification::new("mesh/other.event", None);
             write_frame(&mut server_io, &serde_json::to_vec(&wrong).unwrap())
                 .await
                 .unwrap();
@@ -727,5 +766,39 @@ mod tests {
 
         _ = tokio::time::timeout(Duration::from_secs(2), server).await;
         _ = tokio::time::timeout(Duration::from_secs(2), client).await;
+    }
+
+    // ── frame-name compat direction (see the constants' rationale) ─────────
+
+    #[test]
+    fn both_spellings_of_each_frame_are_accepted() {
+        assert!(is_event_method("mesh/subscribe.event"));
+        assert!(is_event_method("pod/subscribe.event"));
+        assert!(is_heartbeat_method("mesh/subscribe.heartbeat"));
+        assert!(is_heartbeat_method("pod/subscribe.heartbeat"));
+        // An unrelated method is still not a subscribe frame.
+        assert!(!is_event_method("mesh/subscribe.heartbeat"));
+        assert!(!is_heartbeat_method("mesh/subscribe.event"));
+    }
+
+    #[test]
+    fn this_build_still_sends_the_legacy_frame_names() {
+        // The guard against repeating the SNI mistake: a receiver must be
+        // upgraded before a sender that depends on it. Flipping these to the
+        // canonical names is a DELIBERATE later step, taken only once every
+        // host runs a build that accepts both — so if this assertion is
+        // changed, that precondition must actually hold across the fleet.
+        assert_eq!(EVENT_METHOD_WIRE, LEGACY_EVENT_METHOD);
+        assert_eq!(HEARTBEAT_METHOD_WIRE, LEGACY_HEARTBEAT_METHOD);
+    }
+
+    #[test]
+    fn a_peer_sending_canonical_names_is_understood_today() {
+        // The forward half: a future build that has flipped its sender is
+        // readable by THIS build. Without this, the flip breaks the fleet the
+        // same way the SNI flip did.
+        let hb = Notification::new(HEARTBEAT_METHOD, None);
+        let bytes = serde_json::to_vec(&hb).unwrap();
+        assert!(is_heartbeat_frame(&bytes));
     }
 }

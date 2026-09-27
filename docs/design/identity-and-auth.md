@@ -35,7 +35,7 @@ The `auth` domain already provides primitives the subsystem builds on:
 - `projects/db/src/replication_ops.rs` — monotonic `(stamp_ms, op_id)` delete
   op-log; generic `apply_pending_deletes` (no protected-key guard yet).
 - `projects/db/src/config_store.rs` — `host_owner` single-writer pattern.
-- `projects/pod/src/cert_rotation.rs` — overlap-window rotation (template for
+- `projects/system/src/mesh/cert_rotation.rs` — overlap-window rotation (template for
   JWT signing-key rotation).
 - `projects/contract/src/secrets_backend.rs` — backend registry pattern (cloned
   for `AccountBackend`).
@@ -111,7 +111,7 @@ guard).
   fail-closed, load-balanced across orca nodes. Silent refresh keeps short TTLs
   from interrupting in-flight streams.
 - JWT signing keys rotate on an overlap window (verify with both current and
-  previous key during the window) mirroring `pod/src/cert_rotation.rs`.
+  previous key during the window) mirroring `system/src/mesh/cert_rotation.rs`.
 
 ### Downstream credential brokerage
 

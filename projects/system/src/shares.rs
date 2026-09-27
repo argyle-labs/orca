@@ -1,4 +1,4 @@
-//! Pod-wide NFS/SMB **share** definitions — the canonical, defined-once source
+//! Mesh-wide NFS/SMB **share** definitions — the canonical, defined-once source
 //! of truth for a network share, replicated across the fleet.
 //!
 //! A share is authored once and converges everywhere ([[mesh-data-is-eventually-consistent]]):
@@ -22,7 +22,7 @@
 
 use plugin_toolkit::endpoint_resource;
 
-/// A network share, defined once and replicated pod-wide. `name` (the endpoint
+/// A network share, defined once and replicated mesh-wide. `name` (the endpoint
 /// PK) is the fleet-unique canonical role — `data` / `backups` / `downloads`.
 // `list` is hand-written as `storage.share.list` (see `storage_tools.rs`): it
 // dispatches on a `live` flag — default reads the replicated table, `live=true`

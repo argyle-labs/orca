@@ -702,6 +702,26 @@ fn run_pending_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Marker a migration puts on its first line to declare that a missing source
+/// table means "already in the target state", not a failure.
+const TOLERATE_MISSING_TABLE: &str = "orca:tolerate-missing-table";
+
+/// Does this migration opt into tolerating `no such table`?
+///
+/// Needed by rename migrations once the BASELINE creates the target name: on a
+/// fresh database `apply_schema` has already produced the final schema, so
+/// there is nothing to rename and the rename must be a no-op — while on an
+/// existing database the same statements do the real work.
+///
+/// Opt-in, never global: `no such table` is a genuine error in every other
+/// migration, and silently swallowing it fleet-wide would turn a broken
+/// migration into a silently skipped one.
+fn tolerates_missing_table(sql: &str) -> bool {
+    sql.lines()
+        .take_while(|l| l.trim_start().starts_with("--") || l.trim().is_empty())
+        .any(|l| l.contains(TOLERATE_MISSING_TABLE))
+}
+
 /// Apply or revert migrations.
 ///
 /// - `Up` with `steps = usize::MAX` runs all pending migrations (startup default).
@@ -741,6 +761,11 @@ pub fn migrate(conn: &Connection, direction: MigrateDirection, steps: usize) -> 
                     let msg = e.to_string().to_lowercase();
                     if msg.contains("duplicate column") || msg.contains("already exists") {
                         // Column/table already present — idempotent, mark as done.
+                    } else if tolerates_missing_table(&m.up) && msg.contains("no such table") {
+                        // A rename-style migration whose source table is absent
+                        // because the baseline already creates the target name.
+                        // Opt-in per migration (see `tolerates_missing_table`):
+                        // "no such table" is a real failure everywhere else.
                     } else {
                         return Err(anyhow::anyhow!(
                             "migration {} ({}) failed: {e}",
@@ -1109,10 +1134,10 @@ fn apply_schema(conn: &Connection) -> Result<()> {
 
         -- mesh_discovery: mDNS / manual-probe seen peers, keyed by ed25519
         -- bootstrap pubkey fingerprint (stable across restarts and IP changes).
-        -- state = 'unclaimed' (no mesh CA) or 'pod:<mesh_id>' (member of a pod).
+        -- state = 'unclaimed' (no mesh CA) or 'mesh:<mesh_id>' (member of a mesh).
         -- can_invite = 1 iff that peer advertises it has the mesh CA private key
         -- AND has self_secure=true. Auto-offer scheduler only targets state=unclaimed.
-        CREATE TABLE IF NOT EXISTS pod_discovery (
+        CREATE TABLE IF NOT EXISTS mesh_discovery (
             pubkey_fp     TEXT PRIMARY KEY,
             peer_id       TEXT,
             hostname      TEXT NOT NULL,
@@ -1126,10 +1151,10 @@ fn apply_schema(conn: &Connection) -> Result<()> {
 
         -- mesh_pending_offers: outstanding pairing offers in either direction.
         -- direction='out' rows are offers WE pushed (inviter side); 'in' rows
-        -- are offers WE received and are waiting for the user to `pod accept`
+        -- are offers WE received and are waiting for the user to `orca mesh accept`
         -- with the matching code. code_hash is sha256(code) so the raw code
         -- only lives in human memory + the wire blob.
-        CREATE TABLE IF NOT EXISTS pod_pending_offers (
+        CREATE TABLE IF NOT EXISTS mesh_pending_offers (
             offer_id        TEXT PRIMARY KEY,
             direction       TEXT NOT NULL CHECK (direction IN ('in','out')),
             peer_pubkey_fp  TEXT NOT NULL,
@@ -1139,7 +1164,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             code_hash       TEXT NOT NULL,
             mesh_ca_cert_pem TEXT,
             inviter_peer_id TEXT,
-            pod_id          TEXT,
+            mesh_id          TEXT,
             expires_at      INTEGER NOT NULL,
             created_at      INTEGER NOT NULL,
             code_plain      TEXT,
@@ -1150,12 +1175,12 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             -- 20260716120000.
             candidate_addrs TEXT NOT NULL DEFAULT ''
         );
-        CREATE INDEX IF NOT EXISTS idx_pod_pending_offers_fp
-            ON pod_pending_offers (peer_pubkey_fp, direction);
+        CREATE INDEX IF NOT EXISTS idx_mesh_pending_offers_fp
+            ON mesh_pending_offers (peer_pubkey_fp, direction);
 
-        -- mesh_peers: paired members of the pod. `peer_port` is the peer's mesh
+        -- mesh_peers: paired members of the mesh. `peer_port` is the peer's mesh
         -- listen port (one port, many addresses); departed_at marks a peer that
-        -- ran `pod leave` and is no longer trusted until re-paired.
+        -- ran `orca mesh leave` and is no longer trusted until re-paired.
         --
         -- NOTE: `peer_addr` is the pre-cleanup scalar primary address. Migration
         -- 20260729000000 backfills it into `mesh_peer_addresses` (the multi-route
@@ -1163,7 +1188,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         -- migration's backfill+drop has a column to read on a fresh DB. Peer
         -- reachability lives in `mesh_peer_addresses`; `peer_port` stays (a single
         -- listen port is a peer property, not an address smell).
-        CREATE TABLE IF NOT EXISTS pod_peers (
+        CREATE TABLE IF NOT EXISTS mesh_peers (
             peer_id       TEXT PRIMARY KEY,
             peer_hostname TEXT NOT NULL,
             peer_addr     TEXT NOT NULL DEFAULT '',
@@ -1175,17 +1200,17 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             departed_at   INTEGER
         );
 
-        CREATE TABLE IF NOT EXISTS pod_trust (
-            peer_id      TEXT PRIMARY KEY REFERENCES pod_peers(peer_id) ON DELETE CASCADE,
+        CREATE TABLE IF NOT EXISTS mesh_trust (
+            peer_id      TEXT PRIMARY KEY REFERENCES mesh_peers(peer_id) ON DELETE CASCADE,
             local_secure INTEGER NOT NULL DEFAULT 0,
             peer_secure  INTEGER NOT NULL DEFAULT 0,
             set_at       INTEGER NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS pod_self (
+        CREATE TABLE IF NOT EXISTS mesh_self (
             id                       INTEGER PRIMARY KEY CHECK (id = 1),
             self_secure              INTEGER NOT NULL DEFAULT 0,
-            pod_id                   TEXT,
+            mesh_id                   TEXT,
             ca_previous_expires_at   INTEGER,
             set_at                   INTEGER NOT NULL
         );
@@ -1258,7 +1283,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         -- LAN v4/v6, Tailscale, FQDN, …). PK = (key, value) so a dual-homed
         -- host can store every valid address of a kind as an equal row (e.g.
         -- both a wired and a wireless LAN IPv4). Rebuilt by the host_identity
-        -- refresh job. Mirrors the dial-target snapshot pod/ping shares with
+        -- refresh job. Mirrors the dial-target snapshot mesh/ping shares with
         -- peers.
         --
         -- NOTE: `key`/`detected_at` are the pre-cleanup names; migration
@@ -1276,19 +1301,19 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         );
 
         -- mesh_peer_addresses: per-peer multi-channel address records, mirrored
-        -- in via pod/ping. Augments mesh_peers (which holds a single primary
+        -- in via mesh/ping. Augments mesh_peers (which holds a single primary
         -- addr) with every kind we've seen.
-        CREATE TABLE IF NOT EXISTS pod_peer_addresses (
+        CREATE TABLE IF NOT EXISTS mesh_peer_addresses (
             peer_id      TEXT NOT NULL,
             kind         TEXT NOT NULL,
             value        TEXT NOT NULL,
             source       TEXT NOT NULL,
             last_seen_at INTEGER NOT NULL,
             PRIMARY KEY (peer_id, kind, value),
-            FOREIGN KEY (peer_id) REFERENCES pod_peers(peer_id) ON DELETE CASCADE
+            FOREIGN KEY (peer_id) REFERENCES mesh_peers(peer_id) ON DELETE CASCADE
         );
-        CREATE INDEX IF NOT EXISTS idx_pod_peer_addresses_peer
-            ON pod_peer_addresses(peer_id);
+        CREATE INDEX IF NOT EXISTS idx_mesh_peer_addresses_peer
+            ON mesh_peer_addresses(peer_id);
 
         -- claim_identity: stable orca UUIDv7 per non-peer child a host runs
         -- (docker container, proxmox vm/lxc). Natural-key columns
@@ -2394,5 +2419,132 @@ mod registry_tests {
             )
             .unwrap();
         assert!(still_there, "the ledger keeps saying what the tables are");
+    }
+
+    // ── the pod→mesh rename, from BOTH database shapes ─────────────────────
+
+    /// Build a database shaped like a pre-rename fleet host: `pod_*` tables
+    /// with rows in them, and `schema_migrations` already recording every
+    /// migration that predates the rename (which is why those migrations may
+    /// safely spell `mesh_*` today — they never replay here).
+    #[cfg(test)]
+    fn legacy_pod_database() -> Connection {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE pod_peers (
+                 peer_id       TEXT PRIMARY KEY,
+                 peer_hostname TEXT NOT NULL,
+                 peer_port     INTEGER NOT NULL DEFAULT 12002,
+                 peer_secure   INTEGER NOT NULL DEFAULT 0,
+                 departed_at   TEXT
+             );
+             CREATE TABLE pod_peer_addresses (
+                 peer_id TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL
+             );
+             CREATE TABLE pod_trust (
+                 peer_id TEXT PRIMARY KEY REFERENCES pod_peers(peer_id) ON DELETE CASCADE
+             );
+             CREATE TABLE pod_self (pod_id TEXT);
+             CREATE TABLE pod_discovery (pubkey_fp TEXT PRIMARY KEY);
+             CREATE TABLE pod_pending_offers (
+                 offer_id       TEXT PRIMARY KEY,
+                 pod_id         TEXT,
+                 peer_pubkey_fp TEXT,
+                 direction      TEXT
+             );
+             CREATE TABLE schema_migrations (
+                 version INTEGER PRIMARY KEY, slug TEXT NOT NULL, applied_at INTEGER NOT NULL
+             );
+             INSERT INTO pod_peers (peer_id, peer_hostname) VALUES ('id-thor', 'thor');
+             INSERT INTO pod_peers (peer_id, peer_hostname) VALUES ('id-loki', 'loki');
+             INSERT INTO pod_self (pod_id) VALUES ('mesh-1');",
+        )
+        .expect("legacy schema");
+        // Everything before the rename is already applied on such a host.
+        for m in discover_migrations() {
+            if m.version < 20260927000000 {
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, slug, applied_at) VALUES (?1, ?2, 0)",
+                    rusqlite::params![m.version, m.slug],
+                )
+                .expect("stamp");
+            }
+        }
+        conn
+    }
+
+    fn table_exists(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [name],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
+    }
+
+    #[test]
+    fn an_existing_fleet_database_keeps_its_rows_through_the_rename() {
+        let conn = legacy_pod_database();
+        register_sql_functions(&conn).expect("fns");
+        // apply_schema now creates EMPTY mesh_* shells alongside the real
+        // pod_* data — the exact situation the migration has to survive.
+        apply_schema(&conn).expect("apply_schema");
+        migrate(&conn, MigrateDirection::Up, usize::MAX).expect("migrate");
+
+        assert!(table_exists(&conn, "mesh_peers"));
+        assert!(
+            !table_exists(&conn, "pod_peers"),
+            "the pod-named table must be gone after the rename"
+        );
+
+        // The rows are the point: an empty shell winning the name would be
+        // silent data loss for every host on the fleet.
+        let hosts: Vec<String> = {
+            let mut st = conn
+                .prepare("SELECT peer_hostname FROM mesh_peers ORDER BY peer_hostname")
+                .unwrap();
+            let r = st.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            r.filter_map(|x| x.ok()).collect()
+        };
+        assert_eq!(hosts, vec!["loki".to_string(), "thor".to_string()]);
+
+        let mesh_id: String = conn
+            .query_row("SELECT mesh_id FROM mesh_self", [], |r| r.get(0))
+            .expect("pod_id became mesh_id, carrying its value");
+        assert_eq!(mesh_id, "mesh-1");
+    }
+
+    #[test]
+    fn a_fresh_database_needs_no_rename_and_says_so() {
+        // apply_schema already produces mesh_*, so the rename has nothing to do
+        // and must record itself as applied rather than failing startup.
+        let conn = Connection::open_in_memory().expect("open");
+        register_sql_functions(&conn).expect("fns");
+        apply_schema(&conn).expect("apply_schema");
+        migrate(&conn, MigrateDirection::Up, usize::MAX).expect("migrate must not fail");
+
+        assert!(table_exists(&conn, "mesh_peers"));
+        assert!(!table_exists(&conn, "pod_peers"));
+        let applied: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 20260927000000)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(applied, "a no-op rename must still be recorded as applied");
+    }
+
+    #[test]
+    fn only_a_marked_migration_tolerates_a_missing_table() {
+        assert!(tolerates_missing_table(
+            "-- orca:tolerate-missing-table\nALTER TABLE x RENAME TO y;"
+        ));
+        assert!(!tolerates_missing_table("ALTER TABLE x RENAME TO y;"));
+        // The marker is only honoured in the leading comment block, so a
+        // migration cannot acquire it by mentioning the string in its body.
+        assert!(!tolerates_missing_table(
+            "ALTER TABLE x RENAME TO y; -- orca:tolerate-missing-table"
+        ));
     }
 }

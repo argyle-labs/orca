@@ -2,7 +2,7 @@
 //! (macro+runtime split forced by Rust's proc-macro crate restrictions, like
 //! `serde-derive`+`serde`). Emits inventory entries at compile time that
 //! `dispatch` walks at startup. Hosts `#[orca_tool]` and `#[derive(Replicated)]`.
-//! NOT mesh-dispatch — peer calls live in `pod`.
+//! NOT mesh-dispatch — peer calls live in `mesh`.
 //!
 //! `#[orca_tool]` proc-macro — proof-of-shape entry point.
 //!
@@ -914,7 +914,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             // Best-effort: force-refresh the peer's runtime snapshot so the
             // UI reflects state mutated by this tool immediately instead of
             // waiting for the next mesh poll. Default trait impl is a no-op;
-            // pod's MeshRemoteExec fetches `system.detail` and updates its
+            // mesh's MeshRemoteExec fetches `system.detail` and updates its
             // in-memory runtime cache. The backoff loop covers the
             // daemon-restart gap for tools that swap the peer's binary.
             let __svc_refresh = ::std::sync::Arc::clone(&__svc);

@@ -1,7 +1,14 @@
--- Heal corrupted pod_peers.peer_port values.
+-- NOTE: this migration was written when the mesh tables were named `pod_*`.
+-- It now spells them `mesh_*`, which is safe because it can only ever run on a
+-- FRESH database: any database old enough to hold `pod_*` tables recorded this
+-- migration as applied long before the rename, so it is never replayed there.
+-- On a fresh database `apply_schema` creates `mesh_*` directly. The single
+-- migration that must handle BOTH shapes is 20260927000000, which guards itself.
+--
+-- Heal corrupted mesh_peers.peer_port values.
 --
 -- Symptom: pod peer-notify (pod.delete forget, pod.trust, cert-rotation) dials
--- each peer at pod_peers.peer_port. On several nodes that column held an
+-- each peer at mesh_peers.peer_port. On several nodes that column held an
 -- ephemeral high port captured at an old join (e.g. 54354, 51918, 40008)
 -- instead of the peer's advertised pod listener, so every notify got
 -- "connection refused" and mesh removals never propagated — a forgotten peer
@@ -14,4 +21,4 @@
 -- that re-handshaked on current code all hold 12002). Reset any row that drifted
 -- off it back to the canonical port so notify/dial reaches the real listener.
 -- Idempotent; safe to run on hosts already correct.
-UPDATE pod_peers SET peer_port = 12002 WHERE peer_port <> 12002;
+UPDATE mesh_peers SET peer_port = 12002 WHERE peer_port <> 12002;

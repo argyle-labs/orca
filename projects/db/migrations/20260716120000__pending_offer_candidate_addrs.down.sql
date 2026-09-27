@@ -1,1 +1,1 @@
-ALTER TABLE pod_pending_offers DROP COLUMN candidate_addrs;
+ALTER TABLE mesh_pending_offers DROP COLUMN candidate_addrs;

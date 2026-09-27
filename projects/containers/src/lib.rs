@@ -954,7 +954,7 @@ async fn container_detail(
 
 /// The `container.create` action. `exec` is the only one — it keeps the
 /// six-verb `create{action=…}` shape and the exec-specific deny-by-default
-/// gating unchanged (this tool is admin-gated and pod-exec dispatchable exactly
+/// gating unchanged (this tool is admin-gated and mesh-exec dispatchable exactly
 /// as `containers.exec` was; renaming the verb does not weaken either axis).
 #[derive(
     clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq,

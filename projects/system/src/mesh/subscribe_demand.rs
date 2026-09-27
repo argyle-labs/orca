@@ -1,4 +1,4 @@
-//! Adaptive-cadence demand signal for the `pod/subscribe` bus (slice D).
+//! Adaptive-cadence demand signal for the `mesh/subscribe` bus (slice D).
 //!
 //! Each daemon tracks a single "last heartbeat seen" timestamp. Any
 //! subscriber session that has sent a heartbeat within the demand window

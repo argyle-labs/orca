@@ -25,11 +25,11 @@ pub mod jsonrpc;
 pub mod mesh_status;
 pub mod path;
 /// Unified per-peer reachability source of truth (class + backoff/dormant state
-/// machine) shared by the pod liveness refresher, `db` replicate.pull, and
+/// machine) shared by the mesh liveness refresher, `db` replicate.pull, and
 /// roster-sync so all three agree on which peers to dial. Std-only.
 pub mod reachability;
 /// Ordered endpoint reachability paths — the ONE shared `Route` type used by
-/// mesh (contract/db/pod) and plugins alike. No scalar URL/host fields anywhere.
+/// mesh (contract/db/mesh) and plugins alike. No scalar URL/host fields anywhere.
 pub mod route;
 pub mod time;
 /// URL percent-encoding + base/path join. orca-owned; the urlencoding lib is

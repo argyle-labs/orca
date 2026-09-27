@@ -21,7 +21,7 @@
 //!
 //! This crate is deliberately tiny and DB-flavoured (it speaks
 //! `rusqlite::Connection`) but transport-agnostic — signing, the mTLS dial,
-//! and the periodic schedule all live in the pod crate.
+//! and the periodic schedule all live in the mesh crate.
 
 // This crate is a registry of *heterogeneous* entity rows — each entity has a
 // different typed row, so the common bundle boundary is genuinely free-form
@@ -138,10 +138,10 @@ pub fn merge_bundle(conn: &Connection, bundle: BTreeMap<String, Value>) -> Resul
     Ok(total)
 }
 
-// ── Write-notify channel — feeds push-on-write fanout in the pod crate ──
+// ── Write-notify channel — feeds push-on-write fanout in the mesh crate ──
 //
 // Every origin write (insert/update/delete) on a `#[derive(Replicated)]`
-// entity calls [`notify_write`]. The pod crate subscribes via [`subscribe`]
+// entity calls [`notify_write`]. The mesh crate subscribes via [`subscribe`]
 // and pushes a freshly-built bundle to all paired peers immediately. The
 // 60s pull tick is the backstop, not the primary path.
 //
@@ -170,7 +170,7 @@ pub fn notify_write(entity: &'static str) {
 }
 
 /// Subscribe to origin write notifications. Returns a broadcast receiver
-/// that yields the entity name of each origin write. Used by pod's
+/// that yields the entity name of each origin write. Used by mesh's
 /// push-on-write task.
 pub fn subscribe() -> broadcast::Receiver<&'static str> {
     write_notify_sender().subscribe()

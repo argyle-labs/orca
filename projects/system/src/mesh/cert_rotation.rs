@@ -9,8 +9,8 @@
 //!     locally and atomic-rename them over the old ones. Zero network.
 //!
 //!   * **Non-secure path** (no CA key): pick any active mutual-secure peer
-//!     that does have the CA key, dial it on the mTLS pod surface, call
-//!     `pod/refresh-cert` with fresh CSRs, install the returned certs.
+//!     that does have the CA key, dial it on the mTLS mesh surface, call
+//!     `mesh/refresh-cert` with fresh CSRs, install the returned certs.
 //!     If every candidate peer is unreachable, log and retry next tick.
 //!
 //! The TLS resolver in plugin_host reads from disk on every handshake, so
@@ -80,7 +80,7 @@ async fn tick() -> Result<()> {
     let server_pem = std::fs::read_to_string(utils::pki::mesh_server_cert_path(&pki_d))?;
     let client_pem = std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki_d))?;
     let threshold = utils::pki::PEER_REFRESH_THRESHOLD_DAYS;
-    // A cert issued before the mesh stopped being called a "pod" carries only
+    // A cert issued before the mesh stopped being called a "mesh" carries only
     // the legacy SAN, so an upgraded peer dialing `mesh.orca.local` cannot
     // validate it. Certs live 30 days and rotate lazily under 7, so waiting for
     // expiry would leave this host unreachable for up to 23 days — a partition,
@@ -316,7 +316,7 @@ async fn call_refresh(
     .await?;
     let raw = tokio::time::timeout(Duration::from_secs(15), read_frame(&mut tls))
         .await
-        .context("pod/refresh-cert timed out")??;
+        .context("mesh/refresh-cert timed out")??;
     let msg: Message = serde_json::from_slice(&raw)?;
     let resp: Response = match msg {
         Message::Response(r) => r,

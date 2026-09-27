@@ -340,6 +340,10 @@ pub async fn exec_local_daemon<T: contract::OrcaToolDef>(
     })?;
     let cid = ctx.correlation_id().map(str::to_string);
     let started = std::time::SystemTime::now();
+    // Narrate the roll while it runs (#608). Aborted the moment the call
+    // returns, so it can never outlive the request or interleave with the
+    // result printed to stdout.
+    let _tail = spawn_progress_tail(T::NAME, started);
     let out_value = match client.post_tool(T::NAME, body, cid).await {
         Ok(v) => v,
         // A severing verb's own last act kills the daemon answering us, so the
@@ -393,6 +397,37 @@ fn recover_severed_output(
     if !is_transport_error(&err.to_string()) {
         return None;
     }
+    let path = newest_run_record(prefix, started)?;
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    eprintln!(
+        "[orca] the local daemon restarted as the last step of this operation, as designed — \
+         recovered the result from {}",
+        path.display()
+    );
+    Some(value)
+}
+
+/// Stops the progress tail on scope exit, including the early `return Err(e)`
+/// path. Without this a severed roll would leave the tailer narrating into a
+/// process that is already printing its result.
+///
+/// A plain OS thread, not a task: `dispatch` deliberately carries no tokio, and
+/// a one-off 2-second poll is not worth handing a runtime to every crate that
+/// depends on the dispatcher.
+struct StopOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Newest run record with `prefix` written at or after `started`.
+///
+/// Shared by the severed-output recovery and the live progress tail, so both
+/// agree on which file is "this run" — the tail must never narrate a previous
+/// roll, for the same reason recovery must never report one as its result.
+fn newest_run_record(prefix: &str, started: std::time::SystemTime) -> Option<std::path::PathBuf> {
     let dir = contract::config::paths::orca_home()?.join(contract::config::APP_LOGS_SUBDIR);
     let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
@@ -416,14 +451,96 @@ fn recover_severed_output(
             newest = Some((modified, path));
         }
     }
-    let (_, path) = newest?;
-    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
-    eprintln!(
-        "[orca] the local daemon restarted as the last step of this operation, as designed — \
-         recovered the result from {}",
-        path.display()
-    );
-    Some(value)
+    newest.map(|(_, p)| p)
+}
+
+/// How often the progress tail re-reads the run record.
+const PROGRESS_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Rows already narrated, so each host is reported exactly once.
+#[derive(Default)]
+struct ProgressSeen {
+    systems: usize,
+    notes: usize,
+}
+
+/// Print whatever is new in `value` since the last call. Pure w.r.t. the
+/// filesystem so the incremental logic is testable without a running roll.
+#[allow(clippy::disallowed_types)]
+fn emit_new_progress(value: &serde_json::Value, seen: &mut ProgressSeen) {
+    // Notes carry the narration the fan-out already writes ("applied X,
+    // health-gating…", "healthy on X"); systems carry the per-host outcome.
+    if let Some(notes) = value.get("notes").and_then(|n| n.as_array()) {
+        for n in notes.iter().skip(seen.notes).filter_map(|n| n.as_str()) {
+            eprintln!("[orca] {n}");
+        }
+        seen.notes = seen.notes.max(notes.len());
+    }
+    if let Some(systems) = value.get("systems").and_then(|s| s.as_array()) {
+        for row in systems.iter().skip(seen.systems) {
+            let host = row.get("host").and_then(|h| h.as_str()).unwrap_or("?");
+            let line = match (
+                row.get("error").and_then(|e| e.as_str()),
+                row.get("applied").and_then(|a| a.as_str()),
+            ) {
+                (Some(e), _) => format!("{host}: FAILED {e}"),
+                (None, Some(v)) => format!("{host}: applied {v}"),
+                (None, None) => {
+                    let cur = row.get("current").and_then(|c| c.as_str()).unwrap_or("?");
+                    format!("{host}: on {cur}")
+                }
+            };
+            eprintln!("[orca] {line}");
+        }
+        seen.systems = seen.systems.max(systems.len());
+    }
+}
+
+/// Narrate a long fan-out to stderr WHILE it runs.
+///
+/// The whole roll buffers its result until the end, so a ~21-minute fleet update
+/// wrote one line of output for its entire duration and there was no way to tell
+/// work from a hang (#608). The fan-out already flushes its run record after
+/// every host (it must, for #625), so the progress signal exists on disk — this
+/// reads it and reports each host as it lands, which is what operators were
+/// otherwise reduced to grepping `daemon.jsonl` for.
+///
+/// stderr, never stdout: stdout carries the machine-readable result and must
+/// stay parseable. Best-effort throughout — a tail that cannot read a record
+/// prints nothing and never fails the call.
+fn spawn_progress_tail(name: &str, started: std::time::SystemTime) -> Option<StopOnDrop> {
+    let (_, prefix) = SEVERING_RUN_RECORDS.iter().find(|(n, _)| *n == name)?;
+    // Only narrate for a human watching. Piped or redirected stderr belongs to a
+    // script or a log, where a running commentary is noise.
+    if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        return None;
+    }
+    let prefix = prefix.to_string();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    std::thread::spawn(move || {
+        let mut seen = ProgressSeen::default();
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(PROGRESS_POLL);
+            if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let Some(path) = newest_run_record(&prefix, started) else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            #[allow(clippy::disallowed_types)]
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                // A half-written record is normal: the writer is not atomic and
+                // we are reading it mid-roll. Try again on the next tick.
+                continue;
+            };
+            emit_new_progress(&value, &mut seen);
+        }
+    });
+    Some(StopOnDrop(stop))
 }
 
 /// Did the request fail because the connection died, rather than because the
@@ -2172,5 +2289,64 @@ mod tests {
             err.to_string().contains("unknown unit op: zzzplugin.go"),
             "{err}"
         );
+    }
+
+    // ── #608 live progress ─────────────────────────────────────────────────
+
+    #[test]
+    fn progress_reports_each_host_exactly_once_as_the_record_grows() {
+        // The record is rewritten in full after every host, so the tail must
+        // emit only the delta — otherwise a 10-host roll reprints host 1 ten
+        // times and the narration is unreadable.
+        let mut seen = ProgressSeen::default();
+        let first = serde_json::json!({
+            "notes": ["run record: /tmp/x.json"],
+            "systems": [{"host": "a", "applied": "0.2.1"}],
+        });
+        emit_new_progress(&first, &mut seen);
+        assert_eq!(seen.systems, 1);
+        assert_eq!(seen.notes, 1);
+
+        let grown = serde_json::json!({
+            "notes": ["run record: /tmp/x.json", "a: healthy on 0.2.1"],
+            "systems": [
+                {"host": "a", "applied": "0.2.1"},
+                {"host": "b", "error": "No route to host"},
+            ],
+        });
+        emit_new_progress(&grown, &mut seen);
+        assert_eq!(seen.systems, 2);
+        assert_eq!(seen.notes, 2);
+
+        // Re-reading an unchanged record emits nothing new.
+        emit_new_progress(&grown, &mut seen);
+        assert_eq!(seen.systems, 2);
+        assert_eq!(seen.notes, 2);
+    }
+
+    #[test]
+    fn progress_tolerates_a_record_missing_the_arrays_entirely() {
+        // The first flush happens before any host has run, and a half-written
+        // record can parse with fields absent. Neither may panic.
+        let mut seen = ProgressSeen::default();
+        emit_new_progress(&serde_json::json!({}), &mut seen);
+        assert_eq!(seen.systems, 0);
+        assert_eq!(seen.notes, 0);
+    }
+
+    #[test]
+    fn a_shrinking_record_never_rewinds_the_cursor() {
+        // Defensive: if the newest-record scan ever crossed to a different
+        // file mid-roll, a smaller array must not replay rows as "new".
+        let mut seen = ProgressSeen {
+            systems: 5,
+            notes: 5,
+        };
+        emit_new_progress(
+            &serde_json::json!({"systems": [{"host": "a"}], "notes": ["x"]}),
+            &mut seen,
+        );
+        assert_eq!(seen.systems, 5);
+        assert_eq!(seen.notes, 5);
     }
 }

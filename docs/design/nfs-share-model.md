@@ -37,11 +37,11 @@ probing, election, and stale recovery ourselves.
    `mount(2)` is fstype-agnostic, so core mounts *anything* given
    `(source, target, fstype, options_string)`.
 2. **Mesh data is eventually consistent.** Fleet-scoped state replicates
-   pod-wide (reuse the `host_status_replica` subscription/watermark pattern);
+   mesh-wide (reuse the `host_status_replica` subscription/watermark pattern);
    each node converges its own slice. No per-host islands (the drift bug), no
    central SPOF.
 3. **Two entities, not one flat row.**
-   - **Share** (pod-wide, replicated): the NFS share itself, defined once.
+   - **Share** (mesh-wide, replicated): the NFS share itself, defined once.
    - **Mount** (per-host desired placement, replicated): "host X mounts share
      Y at target Z." Each host materializes only its own rows.
 4. **Options are a typed, self-documenting object** owned by the plugin;
@@ -54,7 +54,7 @@ probing, election, and stale recovery ourselves.
 
 ## Data model (core, generic)
 
-Both tables replicate pod-wide, LWW-converged on `updated_at`.
+Both tables replicate mesh-wide, LWW-converged on `updated_at`.
 
 ### `shares`
 | col | type | note |
@@ -117,7 +117,7 @@ Replace autofs entirely.
 
 ## Migration (gated, not auto-applied)
 
-Collapse the live per-host regs into pod-wide shares + per-host mounts (concrete
+Collapse the live per-host regs into mesh-wide shares + per-host mounts (concrete
 values are the operator's own; the shapes below use neutral placeholders):
 - `data` — sources `[<nas-a>:/export/data, <nas-b>:/export/data]`
   (primary → replicated failover). Mounts on the consuming hosts at `/mnt/data`.

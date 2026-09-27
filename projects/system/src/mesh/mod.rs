@@ -1,4 +1,4 @@
-//! Pod / mesh tools surfaced to every tool surface (CLI + REST + MCP).
+//! Mesh / mesh tools surfaced to every tool surface (CLI + REST + MCP).
 //!
 //! `system.list` mirrors the CLI's `orca system list` so the web overview can
 //! render paired peers without a bespoke REST endpoint. The mesh ops need
@@ -79,11 +79,11 @@ pub struct MeshPeerDto {
     /// matching the hostname.
     #[serde(default)]
     pub local: bool,
-    /// `pod/ping` succeeded inside the fanout budget. `None` when probing was
+    /// `mesh/ping` succeeded inside the fanout budget. `None` when probing was
     /// skipped (e.g. departed peers); `Some(false)` when the dial errored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachable: Option<bool>,
-    /// Round-trip latency of the `pod/ping` probe, milliseconds.
+    /// Round-trip latency of the `mesh/ping` probe, milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u32>,
     /// Error string from the probe path (ping / runtime-spec / update-check).
@@ -803,7 +803,7 @@ pub struct MeshDiscoveryRowDto {
     pub hostname: String,
     pub addr: String,
     pub port: u16,
-    /// mDNS-advertised membership: `"unclaimed"` or `"pod:<mesh_id>"`. Named
+    /// mDNS-advertised membership: `"unclaimed"` or `"mesh:<mesh_id>"`. Named
     /// `discovery_state` (not `state`) so it doesn't collide with the
     /// `#[serde(tag = "state")]` discriminant on [`MeshMember`], which would
     /// otherwise clobber the `"discovered"` tag and break state filtering.
@@ -899,7 +899,7 @@ pub struct MeshLeaveOutput {
     pub rows_removed: u32,
 }
 
-// ── pod.leave (voluntary self exit) ──────────────────────────────────────────
+// ── mesh.leave (voluntary self exit) ──────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MeshLeaveSelfResult {
@@ -914,7 +914,7 @@ pub struct MeshLeaveSelfOutput {
     pub peers: Vec<MeshLeaveSelfResult>,
 }
 
-// ── pod.recover ──────────────────────────────────────────────────────────────
+// ── mesh.recover ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MeshRecoverOutput {
@@ -924,7 +924,7 @@ pub struct MeshRecoverOutput {
     pub cleared: bool,
 }
 
-// ── pod.forget ───────────────────────────────────────────────────────────────
+// ── mesh.forget ───────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MeshForgetNotice {
@@ -943,7 +943,7 @@ pub struct MeshForgetOutput {
     pub notified: Vec<MeshForgetNotice>,
 }
 
-// ── pod.cancel_offer ─────────────────────────────────────────────────────────
+// ── mesh.cancel_offer ─────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -953,11 +953,11 @@ pub struct MeshCancelOfferOutput {
     pub rows_removed: u32,
 }
 
-// ── pod.cert-status ──────────────────────────────────────────────────────────
+// ── mesh.cert-status ──────────────────────────────────────────────────────────
 
 // Hoisted into `utils::pki` so the cert-status read (and the `system.certs.list`
-// verb) no longer requires a pod dependency. Re-exported here under the historic
-// names so pod's internal callers (mesh reconcile, tests) stay unchanged.
+// verb) no longer requires a mesh dependency. Re-exported here under the historic
+// names so mesh's internal callers (mesh reconcile, tests) stay unchanged.
 pub use utils::pki::{CertInfo, MeshCertStatus as MeshCertStatusOutput};
 
 // ── system.mesh.update (settings / trust / sync / recover / cancel_offer) ────────────
@@ -982,7 +982,7 @@ pub enum MeshUpdateAction {
     CancelOffer,
 }
 
-/// Union of args across the pod-update operations; required fields are
+/// Union of args across the mesh-update operations; required fields are
 /// validated per `action` at dispatch.
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -1093,7 +1093,7 @@ pub struct MeshExecDispatch {
 /// Transport that lets the generic `contract::RemoteExec` trait dispatch
 /// through `exec::exec`. Registered in the daemon's `build_tool_ctx` so
 /// `cli::exec_remote::<T>(...)` (in orca-dispatch, which knows nothing about
-/// pod) finds a peer transport. Unit struct — no service indirection.
+/// mesh) finds a peer transport. Unit struct — no service indirection.
 pub struct MeshRemoteExec;
 
 #[async_trait::async_trait]
@@ -1124,7 +1124,7 @@ impl contract::RemoteExec for MeshRemoteExec {
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 /// Canonical assembly of the mesh member set — the ONE place that answers
-/// "who is in the pod". Every read surface (`system.list`, `system.list --snapshot`,
+/// "who is in the mesh". Every read surface (`system.list`, `system.list --snapshot`,
 /// `system.list --instances`) builds on this so their member views can never diverge.
 ///
 /// Joins the three source layers (joined membership + in-flight handshakes +
@@ -1183,12 +1183,12 @@ async fn mesh_list(args: MeshListArgs, ctx: &contract::ToolCtx) -> anyhow::Resul
     // as query flags — one roster verb, richer shapes on demand.
     if args.instances {
         return Ok(MeshListResult::Instances(Box::new(
-            collect_pod_instances().await?,
+            collect_mesh_instances().await?,
         )));
     }
     if args.snapshot {
         return Ok(MeshListResult::Snapshot(Box::new(
-            collect_pod_snapshot(ctx).await?,
+            collect_mesh_snapshot(ctx).await?,
         )));
     }
     // `system.list` is THE thin systems roster: identity + addressing from the
@@ -1227,12 +1227,12 @@ fn member_sort_key(m: &MeshMember) -> (u8, String) {
     }
 }
 
-/// Pre-classified rollup of pod state for the systems UI. Same `members`
+/// Pre-classified rollup of mesh state for the systems UI. Same `members`
 /// payload as `system.list`, plus candidate / stale / inbound-offer
 /// classification and cluster-membership matching computed server-side
 /// so every surface gets one shaped response instead of re-implementing
 /// the rules per client.
-pub async fn collect_pod_snapshot(ctx: &contract::ToolCtx) -> anyhow::Result<MeshSnapshotOutput> {
+pub async fn collect_mesh_snapshot(ctx: &contract::ToolCtx) -> anyhow::Result<MeshSnapshotOutput> {
     // Canonical member set shared with `system.list` / `system.list --instances` so no
     // surface can get a diverging view.
     let members = assemble_members().await?;
@@ -1266,7 +1266,7 @@ pub async fn collect_pod_snapshot(ctx: &contract::ToolCtx) -> anyhow::Result<Mes
 /// the same `MeshInstance` projection without duplicating the active-peer +
 /// synthetic-local logic. The `system.list --instances` tool is a thin wrapper over
 /// this fn.
-pub async fn collect_pod_instances() -> anyhow::Result<MeshInstancesOutput> {
+pub async fn collect_mesh_instances() -> anyhow::Result<MeshInstancesOutput> {
     // Canonical member set shared with `system.list` / `system.list --snapshot`.
     let members_raw = assemble_members().await?;
 
@@ -1606,7 +1606,7 @@ mod tests {
         assert_eq!(outcome, LeafReconcileOutcome::NotEnrolled);
     }
 
-    /// The mint-controller incident (2026-08): a host that WAS enrolled (pod
+    /// The mint-controller incident (2026-08): a host that WAS enrolled (mesh
     /// membership + self_secure in the DB) whose entire `pki/mesh/` subtree is
     /// gone — CA and leaves both absent, e.g. a reinstall displaced it into
     /// `.orca-trash`. This must NOT be misread as `NotEnrolled` (which left the
@@ -1721,7 +1721,7 @@ mod tests {
     }
 }
 
-// ── mesh networking: mTLS dials, PKI, bootstrap signing, pod-wire methods ──
+// ── mesh networking: mTLS dials, PKI, bootstrap signing, mesh-wire methods ──
 mod bootstrap;
 pub mod caller_token;
 pub mod cert_rotation;
@@ -1764,7 +1764,7 @@ pub const MESH_REPLICATE_EXPORT_METHOD: &str = "mesh/replicate-export";
 pub const MESH_REPLICATE_PUSH_METHOD: &str = "mesh/replicate-push";
 pub const MESH_REPLICATE_ROOTS_METHOD: &str = "mesh/replicate-roots";
 
-/// Body of `pod/replicate-export`: this host's full view of every shared-state
+/// Body of `mesh/replicate-export`: this host's full view of every shared-state
 /// entity registered via `#[derive(Replicated)]` — `{ entity_name -> rows }`.
 /// Signed with the host's bootstrap key so the puller can verify the payload
 /// against the source peer's pinned `mesh_peers.pubkey_fp` before merging.
@@ -1800,7 +1800,7 @@ pub struct MeshPingResult {
     pub addressing: Option<HostAddressingSnapshot>,
 }
 
-/// Peer-to-peer addressing snapshot carried on `pod/ping`. `display_name` is
+/// Peer-to-peer addressing snapshot carried on `mesh/ping`. `display_name` is
 /// the human label; `channels` is the per-channel address list (`lan_v4`,
 /// `lan_v6`, `tailscale_v4`, `tailscale_v6`, `fqdn`). Source + last_seen_at
 /// stay local to the responding peer and are not propagated.
@@ -1888,7 +1888,7 @@ pub enum LeafReconcileOutcome {
 ///   existing CA and **preserve mesh membership + trust**
 ///   → [`LeafReconcileOutcome::Migrated`]. This is the path every current
 ///   node hits on a format bump; no pairing is ever lost.
-/// - No leaf and no CA **and no mesh membership** → genuinely pre-pod host
+/// - No leaf and no CA **and no mesh membership** → genuinely pre-mesh host
 ///   → [`LeafReconcileOutcome::NotEnrolled`].
 /// - No leaf and no CA **but mesh membership rows exist** → the host was
 ///   enrolled and lost its mesh material entirely (e.g. a reinstall displaced
@@ -2012,10 +2012,10 @@ pub fn reconcile_mesh_leaf_identity(
              a reinstall displaced pki/mesh/ into .orca-trash). The CA key is \
              gone, so a trusted leaf cannot be re-minted here; resetting stale \
              membership so the daemon comes up unpaired and can re-pair via \
-             `orca pod join <inviter>` or an mDNS auto-offer. This should never \
+             `orca mesh join <inviter>` or an mDNS auto-offer. This should never \
              happen while pki/mesh/ is intact."
         );
-        db::mesh::wipe_pod_membership(conn)?;
+        db::mesh::wipe_mesh_membership(conn)?;
         return Ok(LeafReconcileOutcome::ResetUnpaired);
     }
 
@@ -2027,7 +2027,7 @@ pub fn reconcile_mesh_leaf_identity(
         "[mesh] mesh leaf drifted from expected format but the mesh CA key is \
          ABSENT on this host — cannot migrate in place. Resetting mesh cert \
          material and mesh membership; daemon will come up unpaired and must \
-         re-pair via `orca pod join <inviter>` or an mDNS auto-offer. This is \
+         re-pair via `orca mesh join <inviter>` or an mDNS auto-offer. This is \
          a last-resort path and indicates the CA was not present when it \
          should have been."
     );
@@ -2038,7 +2038,7 @@ pub fn reconcile_mesh_leaf_identity(
             _ = std::fs::remove_dir_all(&d);
         }
     }
-    db::mesh::wipe_pod_membership(conn)?;
+    db::mesh::wipe_mesh_membership(conn)?;
     Ok(LeafReconcileOutcome::ResetUnpaired)
 }
 
@@ -2060,7 +2060,7 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     ))
 }
 
-/// Dial `host` over mTLS with SNI=pod.orca.local, send a `pod/ping`, and
+/// Dial `host` over mTLS with SNI=mesh.orca.local, send a `mesh/ping`, and
 /// return the peer's report. `host` is a bare hostname or IP; the connector
 /// always uses the canonical SNI so the server's resolver returns the
 /// mesh-CA-signed cert.
@@ -2068,7 +2068,7 @@ pub async fn ping(host: &str) -> Result<MeshPingResult> {
     call_typed(host, MESH_PING_METHOD, None::<()>, Duration::from_secs(5)).await
 }
 
-/// Result of `pod/dev-enable`. `status` is `"enabled"` on success, `"error"`
+/// Result of `mesh/dev-enable`. `status` is `"enabled"` on success, `"error"`
 /// on failure (`detail` carries the message).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeshDevEnableResult {
@@ -2083,7 +2083,7 @@ pub struct MeshDevEnableResult {
     pub daemon_parked: Option<bool>,
 }
 
-/// Result of `pod/dev-disable`. `status` is `"disabled"` on success,
+/// Result of `mesh/dev-disable`. `status` is `"disabled"` on success,
 /// `"error"` on failure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeshDevDisableResult {
@@ -2096,13 +2096,13 @@ pub struct MeshDevDisableResult {
     pub daemon_reclaimed: Option<bool>,
 }
 
-/// Dial `host` over the existing pod mTLS channel and ask it to git-pull its
+/// Dial `host` over the existing mesh mTLS channel and ask it to git-pull its
 /// dev checkout. `host` is a bare hostname or IP; SNI is fixed to
 /// `pod.orca.local`. Identity is proven by the mesh-CA-signed client cert —
 /// no bearer tokens involved, so this is the canonical peer↔peer auth path.
 pub async fn dev_sync(host: &str) -> Result<MeshDevSyncResult> {
     // git pull + cargo-watch detect can run long on a slow LAN; allow more
-    // headroom than `pod/ping`.
+    // headroom than `mesh/ping`.
     call_typed(
         host,
         MESH_DEV_SYNC_METHOD,
@@ -2307,15 +2307,15 @@ pub async fn dev_disable(host: &str) -> Result<MeshDevDisableResult> {
     .await
 }
 
-/// Open a fresh mTLS client connection to a peer's pod channel. Used by
+/// Open a fresh mTLS client connection to a peer's mesh channel. Used by
 /// both one-shot `call_typed` and long-lived streaming dials
 /// (`subscribe_client`). The caller owns the returned stream.
-pub(crate) async fn connect_pod_tls(
+pub(crate) async fn connect_mesh_tls(
     host: &str,
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
     let pki = pki_dir();
     let bundle = utils::pki::load_mesh_client(&pki)
-        .context("load mesh client bundle (run `orca pod init`)")?;
+        .context("load mesh client bundle (run `orca mesh init`)")?;
     let (chain, key) = utils::pki::parse_cert_and_key(&bundle.cert_pem, &bundle.key_pem)?;
     let roots = Arc::new(utils::pki::ca_root_store(&bundle.ca_cert_pem)?);
 
@@ -2341,7 +2341,7 @@ pub(crate) async fn connect_pod_tls(
 /// Generic mTLS JSON-RPC roundtrip to a peer over the mesh channel. One-shot:
 /// connect → write one request → read one response → return. No pooling yet;
 /// adopters call this directly per peer. Keeping the connection short-lived
-/// matches how `pod/ping` worked previously and avoids leaking sockets.
+/// matches how `mesh/ping` worked previously and avoids leaking sockets.
 async fn call_typed<P, R>(
     host: &str,
     method: &str,
@@ -2352,7 +2352,7 @@ where
     P: Serialize,
     R: for<'de> Deserialize<'de>,
 {
-    let mut tls = connect_pod_tls(host).await?;
+    let mut tls = connect_mesh_tls(host).await?;
 
     let params_value = match params {
         Some(p) => Some(serde_json::to_value(p).context("serialize request params")?),
@@ -2569,7 +2569,7 @@ mod mesh_snapshot_tests {
     #[test]
     fn stale_includes_orphan_discovered_with_peer_id() {
         // Non-unclaimed discovery row with a peer_id but no matching joined.
-        let members = vec![discovered("fp", Some("orph"), "host", "pod:other")];
+        let members = vec![discovered("fp", Some("orph"), "host", "mesh:other")];
         let (_m, candidates, stale, _o) = classify_snapshot(members, 0);
         assert!(candidates.is_empty());
         assert_eq!(stale.len(), 1);
@@ -2896,7 +2896,7 @@ mod added_coverage {
 
     #[test]
     fn classify_non_unclaimed_discovery_without_peer_id_is_skipped() {
-        // Claimed (pod:*) discovery row with NO peer_id is neither a candidate
+        // Claimed (mesh:*) discovery row with NO peer_id is neither a candidate
         // nor a stale row — it silently drops.
         let members = vec![MeshMember::Discovered(MeshDiscoveryRowDto {
             pubkey_fp: "fp".into(),
@@ -2904,7 +2904,7 @@ mod added_coverage {
             hostname: "host".into(),
             addr: "10.0.0.2".into(),
             port: 7777,
-            discovery_state: "pod:other".into(),
+            discovery_state: "mesh:other".into(),
             can_invite: false,
             first_seen_at: 0,
             last_seen_at: 0,
@@ -3578,7 +3578,7 @@ mod added_coverage {
 mod handler_dispatch_tests {
     //! Coverage for the `system.join` (fn `mesh_create`) / `system.mesh.update` /
     //! `system.mesh.delete` dispatch
-    //! bodies plus the `collect_pod_instances` / `collect_pod_snapshot` roll-up
+    //! bodies plus the `collect_mesh_instances` / `collect_mesh_snapshot` roll-up
     //! projections. The per-action missing-argument guards short-circuit before
     //! any DB or network access, so they run deterministically without a ctx
     //! that touches state. The DB-backed arms (`settings`, `recover`,
@@ -3603,7 +3603,7 @@ mod handler_dispatch_tests {
             },
             app_dir: PathBuf::from("/tmp"),
             memory_root: PathBuf::from("/tmp"),
-            db_path: PathBuf::from("/tmp/orca-pod-handler-test.db"),
+            db_path: PathBuf::from("/tmp/orca-mesh-handler-test.db"),
             ports: Default::default(),
         }))
     }
@@ -4052,7 +4052,7 @@ mod handler_dispatch_tests {
 
     #[tokio::test]
     async fn reset_if_stale_returns_false_for_unenrolled_host() {
-        // A pki dir with neither leaf nor CA is a pre-pod host: the reconcile
+        // A pki dir with neither leaf nor CA is a pre-mesh host: the reconcile
         // returns NotEnrolled, and the wrapper reports "nothing changed".
         let app = tempfile::tempdir().unwrap();
         crate::host_identity::init(app.path()).unwrap();
@@ -4304,7 +4304,7 @@ mod handler_dispatch_tests {
         with_home(dir.path(), |rt| {
             let err =
                 expect_err(rt.block_on(exec("10.0.255.1", "system.list", serde_json::json!({}))));
-            // connect_pod_tls loads the mesh client bundle first, so an
+            // connect_mesh_tls loads the mesh client bundle first, so an
             // un-initialised host fails there — never reaching a socket.
             assert!(
                 format!("{err:#}").contains("load mesh client bundle"),
@@ -4325,7 +4325,7 @@ mod handler_dispatch_tests {
         });
     }
 
-    // NOTE: `collect_pod_instances` / `collect_pod_snapshot` are intentionally
+    // NOTE: `collect_mesh_instances` / `collect_mesh_snapshot` are intentionally
     // NOT exercised here. Their shared `assemble_members` → `list_enriched`
     // path performs a live self-probe over the loopback runtime socket (and
     // remote-peer enrichment), so on an ephemeral DB it blocks on real network

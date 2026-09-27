@@ -1,11 +1,11 @@
 //! Fleet-update seam: result types + the hook `system.update --scope fleet`
 //! drives.
 //!
-//! The fan-out itself lives in the `pod` crate (it needs the peer roster and
+//! The fan-out itself lives in the `mesh` crate (it needs the peer roster and
 //! the mesh transport). This crate owns only the TYPES and the trait, so
-//! `system.update` can expose the fleet scope without depending on `pod` —
+//! `system.update` can expose the fleet scope without depending on `mesh` —
 //! the same seam shape as [`crate::host::HostRefreshHook`]. The server wires
-//! pod's implementation in at startup.
+//! mesh's implementation in at startup.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,13 @@ pub struct FleetSystemResult {
     pub applied: Option<String>,
     /// Per-host error (probe/apply/health-gate). The fan-out continues past it.
     pub error: Option<String>,
+    /// True when the host structurally cannot fetch a release asset — no local
+    /// `github_token` and no trusted peer to delegate through (#652). A row can
+    /// be both `update_available` and `blocked`: a newer version exists, and
+    /// THIS host cannot obtain it. Read them together before `--execute`.
+    pub blocked: bool,
+    /// Why [`Self::blocked`] is set, naming the remedies. `None` when not blocked.
+    pub blocked_reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
@@ -93,7 +100,7 @@ pub struct FleetUpdateRequest {
 }
 
 /// Hook the server registers at startup so `system.update --scope fleet` can
-/// drive pod's fleet fan-out without this domain crate depending on `pod`.
+/// drive mesh's fleet fan-out without this domain crate depending on `mesh`.
 #[async_trait::async_trait]
 pub trait FleetUpdateHook: Send + Sync {
     async fn fleet_update(

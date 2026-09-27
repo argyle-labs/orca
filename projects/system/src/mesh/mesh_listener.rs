@@ -10,7 +10,7 @@
 //!     pinned bootstrap pubkey + pairing code.
 //!
 //! The TLS cert resolver and client-cert verifier both read from disk on
-//! every handshake so leaf rotation and `pod accept` (writes a fresh mesh
+//! every handshake so leaf rotation and `orca mesh accept` (writes a fresh mesh
 //! CA into place) take effect without a daemon restart — `atomic_write_pem`
 //! does a tmp-write + rename so reads only ever see the old or new file.
 
@@ -211,7 +211,7 @@ impl rustls::server::ResolvesServerCert for HotReloadResolver {
 }
 
 /// Client-cert verifier whose trust roots track the mesh CA file's mtime.
-/// `pod accept` writes a fresh `mesh/ca.cert.pem`; without a hot reload, the
+/// `orca mesh accept` writes a fresh `mesh/ca.cert.pem`; without a hot reload, the
 /// daemon's startup snapshot stays stale and rejects the inviter's client
 /// cert with `UnknownCA` until restart. `allow_unauthenticated()` lets the
 /// bootstrap SNI through (it has no client cert by design) — SNI dispatch
@@ -239,7 +239,7 @@ impl HotReloadClientVerifier {
             .and_then(|m| m.modified())
             .ok();
         if mesh_mtime.is_some() {
-            info!("[mesh] mesh CA detected — pod SNI surface active");
+            info!("[mesh] mesh CA detected — mesh SNI surface active");
         }
         Ok(Self {
             pki_dir: pki_dir.to_path_buf(),
@@ -273,8 +273,8 @@ impl HotReloadClientVerifier {
         // (`MESH_BOOTSTRAP_SAN` never presents a client cert by design),
         // and `MESH_SERVER_SAN` connections that DO present a cert are
         // refused — which is correct, since this host hasn't joined a
-        // pod yet. `current()` swaps to a real verifier the moment
-        // `pod accept` writes the mesh CA into place.
+        // mesh yet. `current()` swaps to a real verifier the moment
+        // `orca mesh accept` writes the mesh CA into place.
         if roots.is_empty() {
             return Ok(WebPkiClientVerifier::no_client_auth());
         }
@@ -467,7 +467,7 @@ mod tests {
         }
     }
 
-    /// After `init_mesh_ca` the resolver can load the pod-server CertifiedKey
+    /// After `init_mesh_ca` the resolver can load the mesh-server CertifiedKey
     /// from disk (cert chain non-empty), and `build_acceptor` materializes a
     /// bootstrap cert the resolver can also load. Both paths feed `build_ck`.
     #[test]

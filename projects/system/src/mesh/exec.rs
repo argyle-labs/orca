@@ -109,7 +109,7 @@ pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
         last_err
             .unwrap_or_else(|| anyhow::anyhow!("no candidate addresses to dial"))
             .context(format!(
-                "pod/join-confirm over bootstrap channel failed (tried {} address(es): {})",
+                "mesh/join-confirm over bootstrap channel failed (tried {} address(es): {})",
                 candidates.len(),
                 candidates.join(", ")
             ))
@@ -200,7 +200,7 @@ fn dial_targets(conn: &rusqlite::Connection, peer: &pdb::PeerRow) -> Vec<String>
         .unwrap_or_else(|_| vec![peer.peer_addr.clone()])
 }
 
-/// Send a one-shot pod method to the first reachable target, retrying the rest
+/// Send a one-shot mesh method to the first reachable target, retrying the rest
 /// on connect failure. Holds no DB handle, so it's safe to `.await`.
 // JSON-RPC params/result are opaque at the wire boundary — same rationale as
 // the file-level allow in listener.rs / bootstrap.rs.
@@ -214,7 +214,7 @@ async fn notify_targets(
     crate::mesh::dialer::try_targets(targets, |t| {
         let method = method.to_string();
         let params = params.clone();
-        async move { crate::mesh::cli::call_pod_method_pub(&t, port, &method, params).await }
+        async move { crate::mesh::cli::call_mesh_method_pub(&t, port, &method, params).await }
     })
     .await
 }
@@ -458,7 +458,7 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<MeshOfferOutput> {
 }
 
 /// Cancel every outbound pending offer pinned to `addr`. Used by the
-/// `pod.cancel_offer` tool when an operator wants to clear a stuck
+/// `mesh.cancel_offer` tool when an operator wants to clear a stuck
 /// pairing handshake without waiting for the TTL. Returns the number of
 /// rows removed (0 if none matched).
 pub fn cancel_offer(addr: &str) -> Result<u32> {
@@ -477,8 +477,8 @@ pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<MeshAcceptOut
 
 /// Kick a peer: drop its rows locally and send a one-way "you've been removed"
 /// notice. The recipient logs the removal but does NOT mark the caller as
-/// departed (that's what `pod/peer-leaving` is for — the voluntary-exit path
-/// from `leave_self`). Reusing `pod/peer-leaving` here was the 2026-05-28
+/// departed (that's what `mesh/peer-leaving` is for — the voluntary-exit path
+/// from `leave_self`). Reusing `mesh/peer-leaving` here was the 2026-05-28
 /// bug that departed mint on alpha/echo.
 pub async fn leave_peer(peer_id: &str) -> Result<MeshLeaveOutput> {
     let (peer, targets) = db::pool::with_pooled_or_open(|conn| {
@@ -506,7 +506,7 @@ pub async fn leave_peer(peer_id: &str) -> Result<MeshLeaveOutput> {
         conn.execute("DELETE FROM mesh_peers WHERE peer_id = ?", [peer_id])?;
         conn.execute("DELETE FROM mesh_trust WHERE peer_id = ?", [peer_id])?;
         // Durable, replicated forget-tombstone so a straggler that missed the
-        // `pod/peer-removed` notice cannot re-gossip the kicked peer back into the
+        // `mesh/peer-removed` notice cannot re-gossip the kicked peer back into the
         // mesh on the next roster tick (issue #232).
         if let Err(e) = pdb::write_forget_tombstone(conn, peer_id) {
             tracing::warn!("[mesh] kick tombstone for {peer_id} failed: {e:#}");
@@ -568,7 +568,7 @@ pub async fn exec(
     })
 }
 
-/// Voluntary pod exit: notify every paired peer we're leaving (best-effort
+/// Voluntary mesh exit: notify every paired peer we're leaving (best-effort
 /// per peer), then drop all `mesh_peers` + `mesh_trust` rows. Returns a
 /// per-peer notify result so the operator can see who heard from us. PKI
 /// material is left in place — call `system bootstrap` to fully reset.
@@ -583,9 +583,9 @@ pub fn recover(peer_id: &str) -> Result<crate::mesh::MeshRecoverOutput> {
     })
 }
 
-/// Pod-wide forget: hard-delete a stale/orphan peer_id locally AND tell every
+/// Mesh-wide forget: hard-delete a stale/orphan peer_id locally AND tell every
 /// live member to drop it too. Unlike `kick` (targets one live peer) or
-/// `recover` (purely local), forget fans a one-way `pod/peer-forget` notice to
+/// `recover` (purely local), forget fans a one-way `mesh/peer-forget` notice to
 /// each reachable member so an orphaned identity (machine_id churn,
 /// decommissioned host) disappears from the whole mesh, not just here.
 pub async fn forget(peer_id: &str) -> Result<crate::mesh::MeshForgetOutput> {
@@ -630,7 +630,7 @@ pub async fn forget(peer_id: &str) -> Result<crate::mesh::MeshForgetOutput> {
     })
 }
 
-/// One-shot boot pass: fan a best-effort mesh-wide `pod forget` for every
+/// One-shot boot pass: fan a best-effort mesh-wide `system.mesh.delete` for every
 /// identity THIS host has shed (a non-UUIDv7 → UUIDv7 migration, or a
 /// wipe/nuke). Without it a re-minted host's old id lingers as an orphan row
 /// in every peer's roster — the identity-churn residue that scrambled the
@@ -685,7 +685,7 @@ pub async fn leave_self() -> Result<crate::mesh::MeshLeaveSelfOutput> {
 
 /// Full host cert status: every mesh cert's rotation state plus the current
 /// `self_secure` (Tier-2 secrets-storage) flag, in one read. The user-facing
-/// surface for this is `system.certs.list`; this stays as pod's in-process
+/// surface for this is `system.certs.list`; this stays as mesh's in-process
 /// accessor. No separate cert/self_secure round-trip.
 pub fn status() -> Result<MeshCertStatusOutput> {
     let mut out = cert_status()?;
@@ -840,7 +840,7 @@ pub async fn list_raw() -> Result<Vec<MeshPeerDto>> {
 /// ([`spawn_liveness_refresher`]).
 ///
 /// This read NEVER dials. The previous implementation fanned out one live
-/// `pod/ping` per remote peer INLINE, with a 5s per-dial timeout and no
+/// `mesh/ping` per remote peer INLINE, with a 5s per-dial timeout and no
 /// concurrency bound, so the whole read blocked on the slowest/unreachable peer
 /// — the 3+s `system.list`. Probing is now decoupled into the refresher; here we
 /// serve whatever is cached and fresh (younger than [`peer_info::PING_TTL`]).
@@ -891,7 +891,7 @@ pub async fn list_lite() -> Result<Vec<MeshPeerDto>> {
 pub fn spawn_liveness_refresher() -> tokio::task::JoinHandle<()> {
     crate::periodic::spawn(
         crate::periodic::PeriodicSpec {
-            name: "pod.liveness.refresh",
+            name: "mesh.liveness.refresh",
             initial_delay: std::time::Duration::ZERO,
             interval: std::time::Duration::from_secs(10),
         },
@@ -902,10 +902,10 @@ pub fn spawn_liveness_refresher() -> tokio::task::JoinHandle<()> {
 /// One liveness-refresh pass: probe every remote peer with bounded concurrency
 /// and a tight per-dial timeout, writing results into the liveness cache.
 async fn refresh_liveness_once() -> Result<()> {
-    /// Cap on simultaneous mesh dials so a large pod can't fan out unbounded.
+    /// Cap on simultaneous mesh dials so a large mesh can't fan out unbounded.
     const MAX_CONCURRENCY: usize = 8;
     /// Per-peer probe deadline — well under the roster budget and far below the
-    /// 5s `pod/ping` default, so one slow peer can't stall the pass.
+    /// 5s `mesh/ping` default, so one slow peer can't stall the pass.
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
     /// Deadline for the heavier `system.detail` + `system.update` cache warm.
     /// Larger than the ping budget (these carry the host snapshot) but still
@@ -972,14 +972,14 @@ async fn refresh_liveness_once() -> Result<()> {
                 // Best-effort: a warm that times out leaves the last-good cache
                 // entry in place for the next pass.
                 if tokio::time::timeout(WARM_TIMEOUT, warm).await.is_err() {
-                    tracing::debug!("pod.liveness detail/update warm timed out for {peer_id}");
+                    tracing::debug!("mesh.liveness detail/update warm timed out for {peer_id}");
                 }
             }
         }));
     }
     for t in tasks {
         if let Err(e) = t.await {
-            tracing::debug!("pod.liveness refresh probe join error: {e:#}");
+            tracing::debug!("mesh.liveness refresh probe join error: {e:#}");
         }
     }
     Ok(())
@@ -1516,7 +1516,7 @@ mod tests {
                 "hash-in",
                 None,
                 Some("inviter-1"),
-                Some("pod-1"),
+                Some("mesh-1"),
                 3600,
                 None,
                 &[],
@@ -1547,7 +1547,7 @@ mod tests {
             assert_eq!(r.offer_id, "offer-in");
             assert_eq!(r.direction, "in");
             assert_eq!(r.inviter_peer_id.as_deref(), Some("inviter-1"));
-            assert_eq!(r.mesh_id.as_deref(), Some("pod-1"));
+            assert_eq!(r.mesh_id.as_deref(), Some("mesh-1"));
             assert!(r.ttl_secs > 0 && r.ttl_secs <= 3600, "ttl: {}", r.ttl_secs);
         })
         .await;
@@ -1967,7 +1967,7 @@ mod tests {
     #[test]
     fn accept_output_round_trips() {
         let out = MeshAcceptOutput {
-            mesh_id: "pod-1".into(),
+            mesh_id: "mesh-1".into(),
             inviter_peer_id: "inv".into(),
             inviter_hostname: "host-i".into(),
             inviter_addr: "10.0.0.3".into(),
@@ -1976,7 +1976,7 @@ mod tests {
         };
         let s = serde_json::to_string(&out).unwrap();
         let back: MeshAcceptOutput = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.mesh_id, "pod-1");
+        assert_eq!(back.mesh_id, "mesh-1");
         assert_eq!(back.inviter_peer_id, "inv");
         assert_eq!(back.inviter_port, 12002);
         assert!(!back.self_secure);
@@ -2152,7 +2152,7 @@ mod tests {
                 &pdb::hash_code(code),
                 None, // mesh_ca_cert_pem missing
                 Some("inviter-1"),
-                Some("pod-1"),
+                Some("mesh-1"),
                 3600,
                 None,
                 &[],
