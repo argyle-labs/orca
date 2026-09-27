@@ -249,14 +249,122 @@ pub struct EnvVar {
     pub value: String,
 }
 
+/// What kind of thing is being mounted.
+///
+/// A tmpfs is not a bind with a special source — it has no source at all, which
+/// is why this is a kind rather than a flag on [`Mount::source`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MountKind {
+    /// Bind a host path, named volume, or NAS export into the workload.
+    #[default]
+    Bind,
+    /// Mount a fresh in-memory filesystem. No source.
+    ///
+    /// Some software requires one and degrades *silently* without it rather
+    /// than failing: PBS keeps its config-version cache in shared memory and
+    /// needs `/run/proxmox-backup` on tmpfs, and without it serves normally
+    /// while traffic control never loads (#603). A spec that cannot say
+    /// "tmpfs here" deploys that service subtly broken.
+    Tmpfs,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Mount {
-    /// Host source path (or named volume / NAS export).
+    /// Bind or tmpfs. Defaults to [`MountKind::Bind`], so a spec written before
+    /// tmpfs existed deserializes unchanged.
+    #[serde(default)]
+    pub kind: MountKind,
+    /// Host source path (or named volume / NAS export). Empty for a tmpfs,
+    /// which has nothing to bind from.
+    #[serde(default)]
     pub source: String,
     /// In-workload target path.
     pub target: String,
     #[serde(default)]
     pub read_only: bool,
+    /// Size limit, adapter-native spelling (`64m`, `1g`). Tmpfs only.
+    ///
+    /// `None` leaves the runtime default, which for Docker is half of host RAM
+    /// — fine for a small cache, not something to apply by accident.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+}
+
+impl Mount {
+    /// Bind `source` into the workload at `target`.
+    pub fn bind(source: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            kind: MountKind::Bind,
+            source: source.into(),
+            target: target.into(),
+            read_only: false,
+            size: None,
+        }
+    }
+
+    /// Mount a tmpfs at `target`.
+    pub fn tmpfs(target: impl Into<String>) -> Self {
+        Self {
+            kind: MountKind::Tmpfs,
+            source: String::new(),
+            target: target.into(),
+            read_only: false,
+            size: None,
+        }
+    }
+
+    /// Cap this tmpfs at `size` (adapter-native spelling).
+    pub fn with_size(mut self, size: impl Into<String>) -> Self {
+        self.size = Some(size.into());
+        self
+    }
+
+    /// Why this mount cannot be applied, if it cannot.
+    ///
+    /// Checked by the caller before handing a spec to an adapter, so a
+    /// contradiction is a clear error at the seam rather than each adapter
+    /// improvising — the failure this exists to prevent is the SILENT one,
+    /// so it must not be swapped for a silently ignored field.
+    pub fn validation_error(&self) -> Option<String> {
+        if self.target.trim().is_empty() {
+            return Some("mount target is required".into());
+        }
+        match self.kind {
+            MountKind::Bind => {
+                if self.source.trim().is_empty() {
+                    return Some(format!("bind mount at {} has no source", self.target));
+                }
+                if self.size.is_some() {
+                    return Some(format!(
+                        "bind mount at {} sets `size`, which applies only to tmpfs",
+                        self.target
+                    ));
+                }
+                None
+            }
+            MountKind::Tmpfs => {
+                if !self.source.trim().is_empty() {
+                    return Some(format!(
+                        "tmpfs at {} sets a source ({}); a tmpfs has none",
+                        self.target, self.source
+                    ));
+                }
+                None
+            }
+        }
+    }
+}
+
+impl WorkloadSpec {
+    /// Every problem with this spec's mounts, in declaration order. Empty when
+    /// the spec is applyable.
+    pub fn mount_errors(&self) -> Vec<String> {
+        self.mounts
+            .iter()
+            .filter_map(|m| m.validation_error())
+            .collect()
+    }
 }
 
 /// Outcome of a [`DeployTarget::launch`] / `stop` / `restart` operation.
@@ -1189,5 +1297,110 @@ mod tests {
                 return v;
             }
         }
+    }
+
+    // ── tmpfs mounts (#603) ────────────────────────────────────────────────
+
+    #[test]
+    fn a_spec_written_before_tmpfs_existed_still_deserializes() {
+        // The whole point of defaulting `kind`: every WorkloadSpec already in a
+        // plugin repo predates this field and must keep working untouched.
+        let m: Mount =
+            serde_json::from_str(r#"{"source":"/srv/data","target":"/data","read_only":true}"#)
+                .expect("legacy mount json");
+        assert_eq!(m.kind, MountKind::Bind);
+        assert_eq!(m.source, "/srv/data");
+        assert!(m.read_only);
+        assert_eq!(m.size, None);
+        assert_eq!(m.validation_error(), None);
+    }
+
+    #[test]
+    fn a_tmpfs_round_trips_without_a_source() {
+        let m = Mount::tmpfs("/run/proxmox-backup").with_size("64m");
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Mount = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, MountKind::Tmpfs);
+        assert!(back.source.is_empty());
+        assert_eq!(back.size.as_deref(), Some("64m"));
+        assert_eq!(back.validation_error(), None);
+    }
+
+    #[test]
+    fn a_tmpfs_serializes_as_a_named_kind_not_a_bare_flag() {
+        // Adapters key off this string; `"tmpfs"` is the wire contract.
+        let json = serde_json::to_string(&Mount::tmpfs("/run")).unwrap();
+        assert!(json.contains(r#""kind":"tmpfs""#), "{json}");
+        // An unsized tmpfs must not emit a null the adapter has to special-case.
+        assert!(!json.contains("size"), "{json}");
+    }
+
+    #[test]
+    fn a_contradictory_mount_is_rejected_rather_than_half_applied() {
+        // Each of these would otherwise be silently ignored by some adapter and
+        // honoured by another — the exact silent-degradation class in #603.
+        let sourced_tmpfs = Mount {
+            kind: MountKind::Tmpfs,
+            source: "/srv/x".into(),
+            target: "/run".into(),
+            read_only: false,
+            size: None,
+        };
+        assert!(
+            sourced_tmpfs
+                .validation_error()
+                .is_some_and(|e| e.contains("a tmpfs has none")),
+            "a tmpfs with a source must be refused"
+        );
+
+        let sourceless_bind = Mount::bind("", "/data");
+        assert!(
+            sourceless_bind
+                .validation_error()
+                .is_some_and(|e| e.contains("no source"))
+        );
+
+        let sized_bind = Mount {
+            size: Some("64m".into()),
+            ..Mount::bind("/srv/x", "/data")
+        };
+        assert!(
+            sized_bind
+                .validation_error()
+                .is_some_and(|e| e.contains("only to tmpfs"))
+        );
+
+        assert!(Mount::tmpfs("  ").validation_error().is_some());
+    }
+
+    #[test]
+    fn a_spec_reports_every_bad_mount_not_just_the_first() {
+        let spec = WorkloadSpec {
+            name: "pbs".into(),
+            mounts: vec![
+                Mount::bind("/srv/pbs", "/srv"),
+                Mount::bind("", "/bad-one"),
+                Mount::tmpfs("/run/proxmox-backup"),
+                Mount::bind("", "/bad-two"),
+            ],
+            ..Default::default()
+        };
+        let errs = spec.mount_errors();
+        assert_eq!(errs.len(), 2, "{errs:?}");
+        assert!(errs[0].contains("/bad-one"));
+        assert!(errs[1].contains("/bad-two"));
+    }
+
+    #[test]
+    fn a_healthy_spec_reports_nothing() {
+        let spec = WorkloadSpec {
+            name: "pbs".into(),
+            mounts: vec![
+                Mount::bind("/srv/pbs", "/srv"),
+                Mount::tmpfs("/run/proxmox-backup").with_size("64m"),
+            ],
+            ..Default::default()
+        };
+        assert!(spec.mount_errors().is_empty());
     }
 }

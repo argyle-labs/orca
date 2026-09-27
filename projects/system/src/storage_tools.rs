@@ -885,6 +885,16 @@ pub struct StorageShareRepairPermsArgs {
     /// tree-wide).
     #[arg(long, default_value_t = true)]
     pub recursive: bool,
+    /// Owning uid to apply. Like `mode`, never inferred — chosen from a dry
+    /// run's `owner_candidates`. Requires `gid`.
+    ///
+    /// Ownership is repairable independently of mode because it DRIFTS
+    /// independently, and drifting alone is enough to break writes (#620).
+    #[arg(long)]
+    pub uid: Option<u32>,
+    /// Owning gid to apply. Requires `uid`.
+    #[arg(long)]
+    pub gid: Option<u32>,
 }
 
 /// Result of `storage.share.repair-permissions`. In dry-run it carries the
@@ -908,9 +918,17 @@ pub struct StorageShareRepairPermsOutput {
     /// in dry-run; a caller picks one and re-invokes with `apply` + that `mode`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<contract::permissions::PermCandidate>,
+    /// Candidate OWNERS inferred from sibling shares, ranked by evidence.
+    /// Reported alongside `candidates` because a share can have correct modes
+    /// and wrong ownership — the shape of the failure in #620.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_candidates: Vec<contract::permissions::OwnerCandidate>,
     /// The octal mode applied (apply mode only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_mode: Option<String>,
+    /// The `uid:gid` applied (apply mode only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_owner: Option<String>,
     /// Human-readable notes / errors.
     pub steps: Vec<String>,
 }
@@ -940,49 +958,124 @@ async fn storage_share_repair_permissions(
         // DETECT: observe what sibling shares use and present candidates. Nothing
         // is changed; the caller confirms a mode and re-invokes with `apply`.
         let candidates = contract::permissions::detect_candidates(&args.path).await;
-        let steps = if candidates.is_empty() {
-            vec![format!(
-                "no candidate found for {} — no sibling-share evidence; set the mode explicitly with --apply --mode <octal>",
+        let owner_candidates = contract::permissions::detect_owner_candidates(&args.path).await;
+        let mut steps: Vec<String> = Vec::new();
+        if candidates.is_empty() {
+            steps.push(format!(
+                "no mode candidate for {} — no sibling-share evidence; set it explicitly with --apply --mode <octal>",
                 args.path
-            )]
+            ));
         } else {
-            vec![format!(
+            steps.push(format!(
                 "detected {} candidate mode(s) from sibling shares; re-run with --apply --mode <octal> to confirm",
                 candidates.len()
-            )]
-        };
+            ));
+        }
+        // Reported even when the mode is fine: a correct mode is NOT evidence
+        // that the path is writable. On 2026-09-25 every mode was right and one
+        // directory's owner was not, so prune silently removed 0 of 107
+        // snapshots (#620) — a mode-only answer would have said "nothing wrong".
+        if owner_candidates.is_empty() {
+            steps.push(format!(
+                "ownership matches every comparable sibling ({})",
+                current
+                    .as_ref()
+                    .map(|c| format!("{}:{}", c.uid, c.gid))
+                    .unwrap_or_else(|| "unreadable".into())
+            ));
+        } else {
+            let top = &owner_candidates[0];
+            steps.push(format!(
+                "OWNERSHIP DRIFT: {} sibling(s) are owned by {}:{} but this path is {}; \
+                 re-run with --apply --uid {} --gid {} to confirm",
+                top.count,
+                top.uid,
+                top.gid,
+                current
+                    .as_ref()
+                    .map(|c| format!("{}:{}", c.uid, c.gid))
+                    .unwrap_or_else(|| "unreadable".into()),
+                top.uid,
+                top.gid,
+            ));
+        }
         return Ok(StorageShareRepairPermsOutput {
             path: args.path,
             applied: false,
             current,
             candidates,
+            owner_candidates,
             applied_mode: None,
+            applied_owner: None,
             steps,
         });
     }
 
-    // APPLY: require an explicit, confirmed mode — never inferred.
-    let mode_str = args.mode.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "`mode` is required with --apply (choose one from a dry-run's candidates); the repair never guesses"
-        )
-    })?;
-    let mode = parse_octal_mode(mode_str)?;
-
-    let res = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::SetShareMode {
-        path: args.path.clone(),
-        mode,
-        recursive: args.recursive,
-    })
-    .await;
+    // APPLY: every value is explicit and confirmed — never inferred. Mode and
+    // ownership are independent repairs; either, or both, may be requested.
+    let owner = match (args.uid, args.gid) {
+        (Some(uid), Some(gid)) => Some((uid, gid)),
+        (None, None) => None,
+        // Half an owner is not an owner. Applying uid while leaving gid would
+        // half-fix the drift and read as success — the failure mode this whole
+        // verb exists to stop.
+        _ => anyhow::bail!("`uid` and `gid` must be given together (an owner is both)"),
+    };
+    if args.mode.is_none() && owner.is_none() {
+        anyhow::bail!(
+            "--apply needs something to apply: `--mode <octal>` and/or `--uid <n> --gid <n>`, \
+             chosen from a dry run's candidates; the repair never guesses"
+        );
+    }
 
     let mut steps: Vec<String> = Vec::new();
-    for c in &res.changed {
-        steps.push(format!("set mode {mode:#o} on {c}"));
+    let mut errors = false;
+    let mut applied_mode = None;
+    let mut applied_owner = None;
+
+    if let Some(mode_str) = args.mode.as_deref() {
+        let mode = parse_octal_mode(mode_str)?;
+        let res = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::SetShareMode {
+            path: args.path.clone(),
+            mode,
+            recursive: args.recursive,
+        })
+        .await;
+        for c in &res.changed {
+            steps.push(format!("set mode {mode:#o} on {c}"));
+        }
+        steps.extend(res.errors.iter().cloned());
+        if res.errors.is_empty() && !res.changed.is_empty() {
+            applied_mode = Some(format!("{mode:#o}"));
+        } else {
+            errors = true;
+        }
     }
-    steps.extend(res.errors.iter().cloned());
-    let applied = res.errors.is_empty() && !res.changed.is_empty();
-    if !applied && res.errors.is_empty() {
+
+    if let Some((uid, gid)) = owner {
+        let res = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::SetShareOwner {
+            path: args.path.clone(),
+            uid,
+            gid,
+            recursive: args.recursive,
+        })
+        .await;
+        for c in &res.changed {
+            steps.push(format!("set owner {uid}:{gid} on {c}"));
+        }
+        steps.extend(res.errors.iter().cloned());
+        if res.errors.is_empty() && !res.changed.is_empty() {
+            applied_owner = Some(format!("{uid}:{gid}"));
+        } else {
+            errors = true;
+        }
+    }
+
+    // `applied` means EVERY requested repair landed. A partial repair reports
+    // false: half-fixed permissions that read as success are how a broken prune
+    // looked healthy for eleven days (#610, #620).
+    let applied = !errors && (applied_mode.is_some() || applied_owner.is_some());
+    if !applied && steps.is_empty() {
         steps.push("no change applied".to_string());
     }
 
@@ -991,7 +1084,9 @@ async fn storage_share_repair_permissions(
         applied,
         current,
         candidates: Vec::new(),
-        applied_mode: applied.then(|| format!("{mode:#o}")),
+        owner_candidates: Vec::new(),
+        applied_mode,
+        applied_owner,
         steps,
     })
 }
@@ -4607,7 +4702,9 @@ mod tests {
             applied: false,
             current: None,
             candidates: Vec::new(),
+            owner_candidates: Vec::new(),
             applied_mode: None,
+            applied_owner: None,
             steps: vec!["no candidate found".to_string()],
         };
 
@@ -4616,6 +4713,10 @@ mod tests {
         assert!(!wire.contains("candidates"), "wire: {wire}");
         assert!(!wire.contains("current"), "wire: {wire}");
         assert!(!wire.contains("applied_mode"), "wire: {wire}");
+        // The ownership fields added for #620 must obey the same rule — an
+        // empty one absent from the wire, not serialized as null.
+        assert!(!wire.contains("ownerCandidates"), "wire: {wire}");
+        assert!(!wire.contains("appliedOwner"), "wire: {wire}");
 
         let back: StorageShareRepairPermsOutput =
             serde_json::from_str(&wire).expect("decode must not require absent fields");

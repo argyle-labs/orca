@@ -166,6 +166,76 @@ pub fn rank_candidates(
     candidates
 }
 
+/// A candidate OWNER inferred from reference peers — "N comparable shares are
+/// owned by this uid:gid". Presented the same way as [`PermCandidate`] and, like
+/// it, never applied automatically.
+///
+/// Ownership needs its own candidate type because it drifts INDEPENDENTLY of
+/// mode, and drifting alone is enough to break writes: on 2026-09-25 a PBS
+/// datastore had correct modes throughout and one directory owned by 99:100
+/// instead of 34:34, so every prune unlink failed with `Permission denied` while
+/// mode-only detection reported nothing wrong (#620).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OwnerCandidate {
+    /// Owning uid the reference peers carry.
+    pub uid: u32,
+    /// Owning gid the reference peers carry.
+    pub gid: u32,
+    /// How many reference peers use it (the evidence weight).
+    pub count: usize,
+    /// A few example peer paths, so the choice is auditable.
+    pub sample_paths: Vec<String>,
+}
+
+/// Owner candidates for `path`, ranked by evidence. Empty when the path cannot
+/// be read or every peer already agrees with it.
+pub async fn detect_owner_candidates(path: &str) -> Vec<OwnerCandidate> {
+    let Some((provider, current)) = resolve(path).await else {
+        return Vec::new();
+    };
+    let peers = provider.reference_peers(path).await;
+    rank_owner_candidates(peers, Some((current.uid, current.gid)))
+}
+
+/// Pure ranking core for owners — the [`rank_candidates`] shape, keyed on
+/// `(uid, gid)`. Split out so it is unit-testable without a filesystem.
+pub fn rank_owner_candidates(
+    peers: Vec<(String, PermInfo)>,
+    current_owner: Option<(u32, u32)>,
+) -> Vec<OwnerCandidate> {
+    use std::collections::BTreeMap;
+    let mut by_owner: BTreeMap<(u32, u32), Vec<String>> = BTreeMap::new();
+    for (peer_path, info) in peers {
+        if Some((info.uid, info.gid)) == current_owner {
+            continue; // a peer that already matches the target is not a suggestion
+        }
+        by_owner
+            .entry((info.uid, info.gid))
+            .or_default()
+            .push(peer_path);
+    }
+    let mut candidates: Vec<OwnerCandidate> = by_owner
+        .into_iter()
+        .map(|((uid, gid), mut paths)| {
+            paths.sort();
+            let count = paths.len();
+            paths.truncate(3);
+            OwnerCandidate {
+                uid,
+                gid,
+                count,
+                sample_paths: paths,
+            }
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then((a.uid, a.gid).cmp(&(b.uid, b.gid)))
+    });
+    candidates
+}
+
 // ── plugin proxy boundary (mirrors `diagnostics`) ─────────────────────────────
 
 /// Operation names the [`PermissionsProxy`] invokes across the FFI boundary. The
@@ -318,5 +388,80 @@ mod tests {
         let got = rank_candidates(peers, None);
         assert_eq!(got[0].count, 4);
         assert_eq!(got[0].sample_paths, vec!["/a", "/b", "/c"]);
+    }
+
+    // ── owner candidates (#620) ────────────────────────────────────────────
+
+    fn pi(mode: u32, uid: u32, gid: u32) -> PermInfo {
+        PermInfo { mode, uid, gid }
+    }
+
+    #[test]
+    fn owner_drift_is_detected_even_when_every_mode_is_correct() {
+        // The measured shape of #620: modes agree everywhere, one path's owner
+        // does not, and that alone made prune fail on all 107 snapshots.
+        let peers = vec![
+            ("/mnt/user/pbs/ct/101".to_string(), pi(0o755, 34, 34)),
+            ("/mnt/user/pbs/ct/102".to_string(), pi(0o755, 34, 34)),
+            ("/mnt/user/pbs/vm/103".to_string(), pi(0o755, 34, 34)),
+        ];
+        // Target: same mode, wrong owner.
+        let out = rank_owner_candidates(peers.clone(), Some((99, 100)));
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].uid, out[0].gid), (34, 34));
+        assert_eq!(out[0].count, 3);
+
+        // Mode-based detection sees nothing wrong here — which is precisely why
+        // ownership needs its own signal.
+        assert!(rank_candidates(peers, Some(0o755)).is_empty());
+    }
+
+    #[test]
+    fn a_path_already_matching_its_peers_yields_no_owner_candidate() {
+        let peers = vec![
+            ("/a".to_string(), pi(0o755, 34, 34)),
+            ("/b".to_string(), pi(0o755, 34, 34)),
+        ];
+        assert!(rank_owner_candidates(peers, Some((34, 34))).is_empty());
+    }
+
+    #[test]
+    fn owner_candidates_rank_by_evidence_then_deterministically() {
+        let peers = vec![
+            ("/a".to_string(), pi(0o755, 34, 34)),
+            ("/b".to_string(), pi(0o755, 34, 34)),
+            ("/c".to_string(), pi(0o755, 99, 100)),
+        ];
+        let out = rank_owner_candidates(peers, Some((0, 0)));
+        assert_eq!((out[0].uid, out[0].gid), (34, 34), "most evidence first");
+        assert_eq!(out[0].count, 2);
+        assert_eq!((out[1].uid, out[1].gid), (99, 100));
+    }
+
+    #[test]
+    fn uid_and_gid_are_ranked_as_one_owner_not_two_axes() {
+        // 34:34 and 34:100 are different owners; collapsing on uid alone would
+        // suggest a gid the peers never actually use.
+        let peers = vec![
+            ("/a".to_string(), pi(0o755, 34, 34)),
+            ("/b".to_string(), pi(0o755, 34, 100)),
+        ];
+        let out = rank_owner_candidates(peers, None);
+        assert_eq!(out.len(), 2, "{out:?}");
+    }
+
+    #[test]
+    fn owner_sample_paths_are_capped_and_sorted_for_auditability() {
+        let peers: Vec<(String, PermInfo)> = (0..10)
+            .map(|i| (format!("/p{i:02}"), pi(0o755, 34, 34)))
+            .collect();
+        let out = rank_owner_candidates(peers, None);
+        assert_eq!(out[0].count, 10, "count reports ALL the evidence");
+        assert_eq!(
+            out[0].sample_paths.len(),
+            3,
+            "only a few examples are shown"
+        );
+        assert_eq!(out[0].sample_paths[0], "/p00");
     }
 }

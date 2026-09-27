@@ -74,10 +74,20 @@ pub struct CatalogEntry {
     pub repo_url: String,
     /// Where to read about the plugin.
     pub docs_url: String,
-    /// `"available"` (has releases) / `"unreleased"` (none published). Not
-    /// consulted for `plugin.install` (release-derived), but `plugin.update`
-    /// gates on it: a non-`"available"` entry is skipped rather than 404'd on a
-    /// release that does not exist.
+    /// Descriptive hint only — **nothing gates on it**, not `plugin.install`
+    /// and not `plugin.update`. Installability is release-derived: the catalog
+    /// contract says publish a release, not hand-tune this field.
+    ///
+    /// It is hand-maintained and therefore drifts. Measured 2026-09-27:
+    /// `agents` and `syncthing` each publish five releases while this field
+    /// still reads `"unreleased"`, so reading it as "has releases" is wrong in
+    /// practice as well as in principle.
+    ///
+    /// This doc previously claimed `plugin.update` gated on it while the code
+    /// ~1000 lines below said the opposite in as many words. That contradiction
+    /// was load-bearing: it is the premise that produced two withdrawn claims on
+    /// #648 (see #650). Keep this aligned with `plugin_update`, which is the
+    /// authority.
     pub status: String,
 }
 

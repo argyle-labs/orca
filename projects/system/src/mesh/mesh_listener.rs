@@ -96,15 +96,14 @@ async fn serve(
             // Pairing CANNOT happen without this path.
             // Both names are accepted, never both offered: a peer still on a
             // pre-rename build dials the legacy SNI, and refusing it would
-            // partition the mesh mid-roll (see `LEGACY_BOOTSTRAP_SAN`).
-            if sni == utils::pki::MESH_BOOTSTRAP_SAN || sni == utils::pki::LEGACY_BOOTSTRAP_SAN {
+            if utils::mesh_compat::accepts_bootstrap_sni(&sni) {
                 if let Err(e) = crate::mesh::handle_mesh_bootstrap_connection(tls, peer).await {
                     warn!("[mesh] {peer} bootstrap connection error: {e:#}");
                 }
                 return;
             }
 
-            if sni == utils::pki::MESH_SERVER_SAN || sni == utils::pki::LEGACY_SERVER_SAN {
+            if utils::mesh_compat::accepts_server_sni(&sni) {
                 let peer_cn = match extract_peer_cn(&tls) {
                     Ok(cn) => cn,
                     Err(e) => {
@@ -199,10 +198,10 @@ impl rustls::server::ResolvesServerCert for HotReloadResolver {
         match sni {
             // Legacy names resolve to the same certs — those certs carry both
             // DNS names, so one cert satisfies a dialer of either vintage.
-            s if s == utils::pki::MESH_SERVER_SAN || s == utils::pki::LEGACY_SERVER_SAN => {
+            s if utils::mesh_compat::accepts_server_sni(s) => {
                 self.load_mesh_server_ck().ok().map(Arc::new)
             }
-            s if s == utils::pki::MESH_BOOTSTRAP_SAN || s == utils::pki::LEGACY_BOOTSTRAP_SAN => {
+            s if utils::mesh_compat::accepts_bootstrap_sni(s) => {
                 self.load_bootstrap_ck().ok().map(Arc::new)
             }
             _ => None,

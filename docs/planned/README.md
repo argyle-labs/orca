@@ -29,7 +29,7 @@ top-level so that tree stays current-state only):
   (metadata-surface exposure, repo social images, Unraid template wiring).
 - [`storage-serving-followups.md`](storage-serving-followups.md) — fix-forward
   items from the 2026-08-27 SMB cutover incident (unRAID SMB-user reboot
-  durability, daemon-side mount privilege, convergence gaps, pod-pairing bug).
+  durability, daemon-side mount privilege, convergence gaps, mesh-pairing bug).
 
 ---
 
@@ -44,7 +44,7 @@ file disagree, the code wins — fix this file.
 
 A composable tool for unified communication over REST, MCP, and CLI to
 manage a fleet of machines from a single pane of glass: **one orca-core
-binary** on every host in a pod (augmented by composable, out-of-process
+binary** on every host in a mesh (augmented by composable, out-of-process
 plugins), **one config repo** as source of truth, and **one tool surface**
 exposed across three surfaces — CLI, REST, and MCP. Every operation is an `#[orca_tool]`
 (`projects/derive` + `projects/dispatch` + `projects/contract`) that
@@ -102,7 +102,7 @@ target, not the vestige:
 
 Grounded end-to-end in tree. The live tool surface spans domains
 (`agent auth config db files host inventory model namespace network notify
-pki plugin pod schedule schema secrets service spec storage system web`);
+pki plugin schedule schema secrets service spec storage system web`);
 run `orca --help` for the build-current list.
 
 | Capability | Location |
@@ -114,7 +114,7 @@ run `orca --help` for the build-current list.
 | Host identity / status / system_info collectors (`host.info`, `system.detail`) | `projects/system/src/{host.rs,host_identity.rs,host_status.rs}` |
 | Daemon (HTTP 12000 / HTTPS 12443 / mesh 12002, dual-bind, runtime log levels) | `projects/system/src/daemon.rs` |
 | Config store (SQLite, history, schemas, owner-routing; `config.*`, `schema.*`) | `projects/db/src/config_store.rs` + `projects/db/migrations/` |
-| Pod mesh: mTLS, mDNS discovery, peer pairing, dispatch, cert rotation (`pod.*`, 18 verbs) | `projects/pod` |
+| Mesh: mTLS, mDNS discovery, peer pairing, dispatch, cert rotation (`system.mesh.*`) | `projects/system/src/mesh` |
 | Secrets store (encrypted SQLite; `secrets.*`) + auth (`auth.*`) + PKI (`pki.*`) | `projects/auth/src/{secrets.rs,pki.rs}` |
 | Namespaces — per-user shareable workspaces (`namespace.*`) | `projects/namespace` |
 | Files surface (`files.{list,read,update,delete,stat,search,tree}`) | `projects/files` |
@@ -211,8 +211,8 @@ gate wired into the reconcile (1.1) and reboot (1.2) paths.
 ### 1.5 Storage — server side
 
 **Have** — client side is shipped (§Phase 0 `storage.*`, nfs/smb plugins). The
-pod-wide **share/mount desired-state model landed** (rc.47, orca #187): two
-replicated entities — Share (defined once, pod-wide) and Mount (per-host desired
+mesh-wide **share/mount desired-state model landed** (rc.47, orca #187): two
+replicated entities — Share (defined once, mesh-wide) and Mount (per-host desired
 placement) — plus a convergence loop that materializes each host's own mounts.
 Surface is `storage.share.*` / `storage.mount.*`, wired via
 `#[endpoint_resource]` in `projects/system/src/{shares,mounts}.rs` (the mount
@@ -246,7 +246,7 @@ diff+apply. Greenfield.
 ### 1.8 Host lifecycle tools — doctor / uninstall / decommission
 
 **Have** — `uninstall` is an in-process helper (`cmd_uninstall_report`),
-`pair` is a CLI helper (`cmd_pod_pair`) — neither is a tool surface yet.
+`pair` is a CLI helper (`cmd_mesh_pair`) — neither is a tool surface yet.
 
 **Missing** — `system.doctor`, `system.uninstall` as first-class tools,
 and a host-decommission flow (drain → deregister → wipe secrets/certs).

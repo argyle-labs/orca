@@ -33,45 +33,31 @@ use super::subscribe_demand;
 
 pub const METHOD: &str = "mesh/subscribe";
 
-// ── subscribe frame names, and why the flip is staged ──────────────────────
+// Subscribe frame names.
 //
-// The pod dissolution renamed the parent method to `mesh/subscribe` but left
-// the two frames it carries spelling `pod/*` — they are the last pod names on
-// the wire.
-//
-// They are NOT flipped in one step, because doing exactly that to the TLS SNI
-// is what broke cross-version mesh traffic. Measured against thor on
-// 2026-09-27: a listener carrying both names answered the legacy SNI and
-// REFUSED the new one, because the compat was one-directional — the new dialer
-// sent the new name immediately, and every not-yet-upgraded listener rejected
-// it. rc.6 could not talk to rc.7 in either direction, and the roll that was
-// supposed to fix it had to travel over the very thing that was broken.
-//
-// So the order here is: ACCEPT both names now, keep SENDING the legacy name.
-// Once every host runs a build that accepts both, `*_WIRE` flips to the
-// canonical name in a later release and the legacy constants can go. A
-// receiver is always upgraded before a sender that depends on it.
+// The current names are emitted only once nothing pre-rename remains; until
+// then this sends what every peer already understands and accepts both. The
+// old spellings live in `utils::mesh_compat`, which owns every remaining
+// pre-rename name and carries the deletion trigger.
 
-/// Canonical frame names. Accepted now; sent once the fleet accepts both.
+/// Canonical frame names. Accepted now; emitted once the shim is deleted.
 pub const EVENT_METHOD: &str = "mesh/subscribe.event";
 pub const HEARTBEAT_METHOD: &str = "mesh/subscribe.heartbeat";
-/// Pre-rename names. Still what this build SENDS, and still accepted.
-pub const LEGACY_EVENT_METHOD: &str = "pod/subscribe.event";
-pub const LEGACY_HEARTBEAT_METHOD: &str = "pod/subscribe.heartbeat";
 
-/// What this build puts ON the wire. Legacy for now — see above.
-const EVENT_METHOD_WIRE: &str = LEGACY_EVENT_METHOD;
-/// What this build puts ON the wire. Legacy for now — see above.
-const HEARTBEAT_METHOD_WIRE: &str = LEGACY_HEARTBEAT_METHOD;
+/// What this build puts ON the wire: the name a pre-rename peer understands.
+/// A receiver is always upgraded before a sender that depends on it.
+const EVENT_METHOD_WIRE: &str = utils::mesh_compat::LEGACY_SUBSCRIBE_EVENT;
+/// See [`EVENT_METHOD_WIRE`].
+const HEARTBEAT_METHOD_WIRE: &str = utils::mesh_compat::LEGACY_SUBSCRIBE_HEARTBEAT;
 
 /// Is `m` an event frame under either spelling?
 pub fn is_event_method(m: &str) -> bool {
-    m == EVENT_METHOD || m == LEGACY_EVENT_METHOD
+    m == EVENT_METHOD || m == utils::mesh_compat::LEGACY_SUBSCRIBE_EVENT
 }
 
 /// Is `m` a heartbeat frame under either spelling?
 pub fn is_heartbeat_method(m: &str) -> bool {
-    m == HEARTBEAT_METHOD || m == LEGACY_HEARTBEAT_METHOD
+    m == HEARTBEAT_METHOD || m == utils::mesh_compat::LEGACY_SUBSCRIBE_HEARTBEAT
 }
 
 /// Client-side cadence for heartbeat frames. Sized to land well inside
@@ -773,9 +759,11 @@ mod tests {
     #[test]
     fn both_spellings_of_each_frame_are_accepted() {
         assert!(is_event_method("mesh/subscribe.event"));
-        assert!(is_event_method("pod/subscribe.event"));
+        assert!(is_event_method(utils::mesh_compat::LEGACY_SUBSCRIBE_EVENT));
         assert!(is_heartbeat_method("mesh/subscribe.heartbeat"));
-        assert!(is_heartbeat_method("pod/subscribe.heartbeat"));
+        assert!(is_heartbeat_method(
+            utils::mesh_compat::LEGACY_SUBSCRIBE_HEARTBEAT
+        ));
         // An unrelated method is still not a subscribe frame.
         assert!(!is_event_method("mesh/subscribe.heartbeat"));
         assert!(!is_heartbeat_method("mesh/subscribe.event"));
@@ -788,8 +776,14 @@ mod tests {
         // canonical names is a DELIBERATE later step, taken only once every
         // host runs a build that accepts both — so if this assertion is
         // changed, that precondition must actually hold across the fleet.
-        assert_eq!(EVENT_METHOD_WIRE, LEGACY_EVENT_METHOD);
-        assert_eq!(HEARTBEAT_METHOD_WIRE, LEGACY_HEARTBEAT_METHOD);
+        assert_eq!(
+            EVENT_METHOD_WIRE,
+            utils::mesh_compat::LEGACY_SUBSCRIBE_EVENT
+        );
+        assert_eq!(
+            HEARTBEAT_METHOD_WIRE,
+            utils::mesh_compat::LEGACY_SUBSCRIBE_HEARTBEAT
+        );
     }
 
     #[test]

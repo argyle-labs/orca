@@ -28,7 +28,7 @@ Rust enums are sum types: a value of type `Command` is exactly one variant, and 
 
 **Why read this second:** The entire CLI is built on `Command` enum + `match`. You cannot read `main.rs` without understanding this.
 
-**Key orca examples:** The `Command` enum in [`projects/server/src/main.rs`](../../../projects/server/src/main.rs), `Option<T>`, `Result<T, E>`, the `PodAction` sub-enum.
+**Key orca examples:** The `Command` enum in [`projects/server/src/main.rs`](../../../projects/server/src/main.rs), `Option<T>`, `Result<T, E>`, the `MeshAction` sub-enum.
 
 ---
 

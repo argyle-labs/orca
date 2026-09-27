@@ -57,10 +57,10 @@ old daemon process running (exe showed `(deleted)`); a manual
 `/etc/rc.d/rc.orca restart` was needed to pick up the new version. The unRAID
 update path should restart the daemon as part of the plugin install.
 
-### 5. Inviter-side `pod offer` / `pod accept` join-confirm bug  ·  pod
+### 5. Inviter-side `orca mesh offer` / `orca mesh accept` join-confirm bug  ·  mesh
 
-The inviter-initiated pairing (`pod offer <addr>` / `pod accept <code>`) fails
-with "no matching pending outbound offer"; the joiner-initiated `pod join
+The inviter-initiated pairing (`orca mesh offer <addr>` / `orca mesh accept <code>`) fails
+with "no matching pending outbound offer"; the joiner-initiated `orca mesh join
 <inviter-addr>` works. Fix the inviter-side offer persistence so both directions
 work.
 

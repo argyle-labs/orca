@@ -668,9 +668,16 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
 }
 
 /// Detach a 2s delayed restart of whichever supervisor owns this daemon
-/// (launchd on macOS, systemd-user / systemd-system on Linux). The delay
-/// lets the in-flight update RPC return its response before SIGTERM lands;
-/// the supervisor then respawns with the freshly-written binary.
+/// (launchd on macOS, systemd-user / systemd-system on Linux). The supervisor
+/// then respawns with the freshly-written binary.
+///
+/// **The 2s window is sized for a HOST-scope update**, where the RPC returns
+/// immediately and the delay is comfortably enough for the response to land
+/// before SIGTERM. It is NOT a general guarantee: under a fleet roll the caller
+/// is still mid-fan-out when the window expires, which is why the fan-out
+/// applies locally only after every other phase and flushes a durable run
+/// record first (#649, #625). Read this as "enough for the local RPC", never as
+/// "enough for whatever the caller is doing".
 ///
 /// Falls back to a plain SIGTERM-to-self for daemons not under a supervisor
 /// (e.g. nohup'd dev runs) — they have to be restarted manually, but at

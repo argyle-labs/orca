@@ -140,7 +140,7 @@ pub struct MeshPeerDto {
 /// callers see joined members, in-flight handshakes, and mDNS-discovered
 /// candidates in one shape. Replaces the previous trio of `system.peer.list`,
 /// `system.peer.discovery.list`, and `system.peer.handshake.list` (2026-05-28
-/// consolidation — see project_pod_peer_system_consolidation.md).
+/// consolidation).
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum MeshMember {
@@ -204,7 +204,7 @@ pub enum MeshListResult {
 // candidate/stale/inbound-offer classification + cluster grouping in JS. That
 // logic moves here so every surface gets the same shaped view and the systems
 // page collapses from ~2000 lines to a thin renderer. The original JS
-// source-of-truth (`refreshPodPeers` + `refreshProxmoxClusters`) lived in the
+// source-of-truth (`refreshMeshPeers` + `refreshProxmoxClusters`) lived in the
 // in-repo frontend, since extracted to the peacock plugin (argyle-labs/peacock).
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -2098,7 +2098,7 @@ pub struct MeshDevDisableResult {
 
 /// Dial `host` over the existing mesh mTLS channel and ask it to git-pull its
 /// dev checkout. `host` is a bare hostname or IP; SNI is fixed to
-/// `pod.orca.local`. Identity is proven by the mesh-CA-signed client cert —
+/// `mesh.orca.local`. Identity is proven by the mesh-CA-signed client cert —
 /// no bearer tokens involved, so this is the canonical peer↔peer auth path.
 pub async fn dev_sync(host: &str) -> Result<MeshDevSyncResult> {
     // git pull + cargo-watch detect can run long on a slow LAN; allow more
@@ -2326,16 +2326,41 @@ pub(crate) async fn connect_mesh_tls(
 
     let connector = TlsConnector::from(Arc::new(client_config));
     let addr = format!("{host}:{}", mesh_port());
-    let tcp = TcpStream::connect(&addr)
-        .await
-        .with_context(|| format!("connect {addr}"))?;
-    let sni = ServerName::try_from(utils::pki::MESH_SERVER_SAN)
-        .context("build SNI ServerName")?
-        .to_owned();
-    connector
-        .connect(sni, tcp)
-        .await
-        .context("TLS handshake (is the peer's mesh CA the same as ours?)")
+
+    let dial = |name: &'static str| {
+        let connector = connector.clone();
+        let addr = addr.clone();
+        async move {
+            let tcp = TcpStream::connect(&addr)
+                .await
+                .with_context(|| format!("connect {addr}"))?;
+            let sni = ServerName::try_from(name)
+                .context("build SNI ServerName")?
+                .to_owned();
+            connector
+                .connect(sni, tcp)
+                .await
+                .context("TLS handshake (is the peer's mesh CA the same as ours?)")
+        }
+    };
+
+    match dial(utils::pki::MESH_SERVER_SAN).await {
+        Ok(tls) => Ok(tls),
+        // A peer that has not been upgraded yet answers only the pre-rename
+        // SNI and refuses this one at the TLS layer. Retry under the old name
+        // rather than reporting an unreachable host: without this an upgraded
+        // controller cannot reach a pre-rename peer AT ALL, which is how the
+        // fleet ended up split (see `utils::mesh_compat`). Only a name refusal
+        // is retried — a host that is down must not be dialed twice.
+        Err(e) if utils::mesh_compat::is_sni_refusal(&format!("{e:#}")) => {
+            tracing::debug!(
+                host,
+                "current mesh SNI refused; retrying as a pre-rename peer"
+            );
+            dial(utils::mesh_compat::server_sni_fallback()).await
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Generic mTLS JSON-RPC roundtrip to a peer over the mesh channel. One-shot:

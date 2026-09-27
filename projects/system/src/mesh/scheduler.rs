@@ -10,7 +10,7 @@
 //!   * This host's `self_secure` is true.
 //!   * There isn't already an open outbound offer to that peer fp.
 //!
-//! The dial is over SNI=pod-bootstrap.orca.local with the joiner's
+//! The dial is over SNI=mesh-bootstrap.orca.local with the joiner's
 //! mDNS-advertised pubkey pinned. If the dial fails (peer offline, blocked,
 //! restarted with a new key), the row stays unclaimed and we retry next tick.
 

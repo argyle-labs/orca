@@ -126,11 +126,11 @@ identity. The status *type* is generic (`contracts`); `hosts` owns the status
 *data*. **This is the node.** **Seam:** a plugin contributes
 addressing/capability/status for the endpoints it fronts.
 
-### `systems`  *(absorbs `pod`; hardware ⟵ `system_info`)*
+### `systems`  *(absorbs the mesh; hardware ⟵ `system_info`)*
 A managed orca node: the hardware snapshot, local lifecycle (install / update /
 daemon / remediation / diagnostics), **and the mesh** — peers are just other
 systems: discovery, pairing, trust, mTLS, cert-rotation, exec, and roster +
-status replication (the dissolved `pod`). Internal. **`systems` must stand
+status replication (the dissolved mesh crate). Internal. **`systems` must stand
 alone** — peer-consuming logic that used to reach into a mesh-store is elevated
 here rather than depended on downward. Home of the deferred anti-entropy /
 gossip backstop idea (see Messaging).
@@ -269,7 +269,7 @@ systems, configs, storage, deployments, models, agents, files, specs,
 notifications, mcp, media.
 
 ### Dissolutions / merges / renames
-- **Dissolved:** `pod` → `systems` (a peer is another system); `namespace` →
+- **Dissolved:** the mesh crate → `systems` (a peer is another system); `namespace` →
   generic seam in `contracts` (sharing → `authorization`, membership per-crate);
   `dispatch` routing → `utils`, its role table → `identities`; `macros`
   (`derive` + `macro-runtime`) → `sdk`; `app-kit` → `sdk`; `dev` → `sdk`.
@@ -282,7 +282,7 @@ notifications, mcp, media.
 - **Renames:** `db` → `database`; `contract` → `contracts`; `inventory` →
   `topology`; `model` → `models`.
 - **Data moves:** `SystemInfoReport` mesh fields
-  (`pod_peer_count`/`pod_paired_count`/`self_secure`) are write-only → delete;
+  (`mesh_peer_count`/`mesh_paired_count`/`self_secure`) are write-only → delete;
   the `system_info` hardware snapshot → `systems`.
 
 ---
@@ -295,7 +295,7 @@ notifications, mcp, media.
    → `sdk`.
 3. **IAM triad** — split `auth` → `identities` / `authentication` /
    `authorization`; re-home `claim_identity` to `identities`.
-4. **hosts + systems** — carve `hosts`; ✅ `pod` folded into the systems domain
+4. **hosts + systems** — carve `hosts`; ✅ the mesh crate folded into the systems domain
    (2026-09-27: crate deleted, modules live at `system/src/mesh/`); move the
    `system_info` hardware snapshot in; delete the write-only mesh-count fields.
 5. **configs** — merge `config_store` + `config-source`; route call sites onto

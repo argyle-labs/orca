@@ -164,6 +164,16 @@ pub enum PrivilegedOp {
         #[serde(default)]
         recursive: bool,
     },
+    /// Repair OWNERSHIP on a share subtree. Separate from [`Self::SetShareMode`]
+    /// because ownership drifts independently of mode and, alone, is enough to
+    /// break writes (#620).
+    SetShareOwner {
+        path: String,
+        uid: u32,
+        gid: u32,
+        #[serde(default)]
+        recursive: bool,
+    },
 }
 
 /// Result the helper prints back to the daemon as JSON.
@@ -791,7 +801,73 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             }
             res
         }
+        PrivilegedOp::SetShareOwner {
+            path,
+            uid,
+            gid,
+            recursive,
+        } => {
+            let mut res = PrivilegedResult::default();
+            if !is_allowed_share_owner(uid, gid) {
+                res.errors.push(format!(
+                    "refused unsafe owner {uid}:{gid}: a repair never chowns a share to root"
+                ));
+            } else if !is_allowed_share_path(&path) {
+                res.errors.push(format!(
+                    "refused path outside a managed share subtree (/mnt/user/<share>/…): {path}"
+                ));
+            } else {
+                match set_owner_tree(&path, uid, gid, recursive) {
+                    Ok(n) => {
+                        res.changed.push(path.clone());
+                        tracing::info!(path = %path, uid, gid, entries = n, "share ownership repaired");
+                    }
+                    Err(e) => res.errors.push(format!("chown {path}: {e}")),
+                }
+            }
+            res
+        }
     }
+}
+
+/// The owner a share-permission repair may set.
+///
+/// Never root. Chowning a share tree to uid/gid 0 is the escalation direction —
+/// it would hand root ownership of operator data and can lock the real service
+/// account out of its own tree. Every legitimate repair target is a service
+/// account (PBS runs as 34; Unraid shares are 99:100).
+fn is_allowed_share_owner(uid: u32, gid: u32) -> bool {
+    uid != 0 && gid != 0
+}
+
+/// Set owner on `path`, and — when `recursive` — everything beneath it,
+/// returning the number of entries changed.
+///
+/// Symlinks are changed with `lchown` semantics (never followed), so a symlink
+/// planted in the tree cannot redirect ownership onto a file outside it — the
+/// same containment [`set_mode_tree`] gets by refusing to chmod symlinks.
+/// Callers must have already validated `path` with [`is_allowed_share_path`].
+fn set_owner_tree(path: &str, uid: u32, gid: u32, recursive: bool) -> std::io::Result<usize> {
+    let mut changed = 0usize;
+    // `lchown`, not `chown`: acts on the link itself.
+    std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+    changed += 1;
+    let meta = std::fs::symlink_metadata(path)?;
+    if recursive && meta.file_type().is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let child = entry.path();
+            let child_str = child.to_string_lossy().to_string();
+            let child_meta = std::fs::symlink_metadata(&child)?;
+            if child_meta.file_type().is_dir() {
+                changed += set_owner_tree(&child_str, uid, gid, true)?;
+            } else {
+                std::os::unix::fs::lchown(&child, Some(uid), Some(gid))?;
+                changed += 1;
+            }
+        }
+    }
+    Ok(changed)
 }
 
 /// The mode a share-permission repair may set. Additive, non-escalating: at most
@@ -2823,5 +2899,33 @@ mod tests {
             errors.is_empty(),
             "EmptyTarget performs no remount, so no errors: {errors:?}"
         );
+    }
+
+    // ── SetShareOwner guards (#620) ────────────────────────────────────────
+
+    #[test]
+    fn a_repair_never_chowns_a_share_to_root() {
+        // Chowning operator data to root is the escalation direction, and it can
+        // lock the real service account out of its own tree. Refused even from
+        // the trusted caller, same posture as the mode guard.
+        assert!(!is_allowed_share_owner(0, 0));
+        assert!(!is_allowed_share_owner(0, 100));
+        assert!(!is_allowed_share_owner(34, 0));
+    }
+
+    #[test]
+    fn real_service_owners_are_allowed() {
+        // The two that actually appear on this fleet: PBS runs as 34, Unraid
+        // shares are 99:100.
+        assert!(is_allowed_share_owner(34, 34));
+        assert!(is_allowed_share_owner(99, 100));
+    }
+
+    #[test]
+    fn owner_repair_refuses_a_path_outside_a_managed_share() {
+        // Reuses the same path guard as the mode repair; assert the pairing
+        // holds so ownership can never become the weaker of the two surfaces.
+        assert!(!is_allowed_share_path("/etc"));
+        assert!(!is_allowed_share_path("/mnt/user"));
     }
 }

@@ -24,7 +24,8 @@ and must be re-verified against the tree before you rely on it — code wins.
 | Shared contract across every tool surface | `projects/contract/` (the `contract` crate) |
 | Coding-agent config docs (this dir) | [`projects/contract/config-docs/`](.) |
 | Tool dispatch macro (`#[orca_tool]` / `#[endpoint_tool]`) | `projects/derive/` (proc-macro) + `projects/dispatch/` (runtime) |
-| Core shared types (`Message`, `ToolCall`, `ToolResult`) | `projects/utils/src/types.rs` |
+| Core shared types (`ToolCall`, `ToolResult`) | `projects/contract/src/types.rs` |
+| Chat `Message` | `projects/model/src/types.rs` |
 | Agent domain (tools, prompt resolution; roster is external) | `projects/agents/src/` |
 | MCP serving core | `projects/mcp/` |
 | OpenAPI / GraphQL / spec integration | `projects/openapi/`, `projects/graphql/`, `projects/spec/` |

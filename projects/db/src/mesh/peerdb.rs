@@ -251,7 +251,7 @@ pub fn list_pending_offers(conn: &Connection, direction: &str) -> Result<Vec<Pen
 /// Look up an inbound pending offer by raw pairing code, regardless of
 /// expiry. Returns `None` only when the code doesn't match any offer at all,
 /// so callers can distinguish "wrong code" from "expired offer" and surface
-/// the right CLI message (per `project_pod_join_ux.md`: silent-on-failure is
+/// the right CLI message (silent-on-failure is
 /// the symptom we're fixing).
 pub fn find_pending_offer_by_code_any_expiry(
     conn: &Connection,
