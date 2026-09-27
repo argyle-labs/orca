@@ -33,7 +33,7 @@ When you type `orca` with no arguments, you get the TUI chat session. When you t
 Every command is a `clap` subcommand. The command surface is the `Command` enum
 in [`projects/server/src/main.rs`](../../projects/server/src/main.rs) — one
 variant per subcommand. A handful of hard-coded variants cover the
-lifecycle/built-in commands (`Serve`, `McpServe`, `Daemon`, `Dev`, `Pod`,
+lifecycle/built-in commands (`Serve`, `McpServe`, `Daemon`, `Dev`, `Mesh`,
 `Run`, `Escalate`, `Audit`, `Log`, `Hook`, `Admin`, `Openapi`, `DevServe`),
 and a final `#[command(external_subcommand)]` variant (`Op`) captures anything
 else.

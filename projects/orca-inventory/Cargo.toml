@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 # Server-side topology aggregator. Unifies mesh members, (future)
 # containers, (future) vms, and (future) network edges into the typed shapes
-# the systems UI renders directly. This crate hosts `pod.detail` (the pod
+# the systems UI renders directly. This crate hosts `system.topology` (the mesh
 # topology tree) and the future `network.topology_view` slice.
 #
 # Crate is named `orca-inventory` because the `inventory` package name on

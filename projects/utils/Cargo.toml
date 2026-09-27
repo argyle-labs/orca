@@ -48,7 +48,7 @@ pki = ["dep:rcgen", "dep:ed25519-dalek", "dep:x509-parser", "dep:rustls", "dep:r
 [dependencies]
 # `utils` links NO intra-repo crate — it is the dependency-free leaf. The light
 # core (id/url/encoding/hash/time/path/route/…) is what `plugin_toolkit` re-exports
-# to plugins, and what `contract`/`db`/`pod` depend on for the shared `Route` type,
+# to plugins, and what `contract`/`db`/`system` depend on for the shared `Route` type,
 # without any cycle. See [[plugins-stay-thin]].
 
 # Standard

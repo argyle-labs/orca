@@ -80,7 +80,7 @@ pub fn cmd_mesh_pending() -> Result<()> {
 /// Result of looking up an inbound pending offer by pairing code. Lets the
 /// CLI tell the user *why* an accept failed instead of dumping the same
 /// "no offer matches that code" line for every failure mode (the symptom
-/// flagged in `project_pod_join_ux.md`).
+/// flagged during the join-UX review).
 #[derive(Debug)]
 pub enum AcceptLookup {
     /// Live offer, ready to dial. Boxed to keep the enum lean — `PendingOffer`

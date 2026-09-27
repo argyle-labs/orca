@@ -23,7 +23,7 @@ path = "src/lib.rs"
 # export/merge fns take a `rusqlite::Connection`) plus the `rusqlite`
 # re-export the derive emits paths into. Replication runs IN CORE (the daemon
 # holds the single connection + drives mesh sync), so only core crates that
-# use `#[derive(Replicated)]` (pod, db) enable it. Plugins reach the DB over
+# use `#[derive(Replicated)]` (system, db) enable it. Plugins reach the DB over
 # the capability channel and never link rusqlite. See [[plugins-stay-thin]].
 default = []
 replication = ["dep:rusqlite", "dep:tracing"]

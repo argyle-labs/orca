@@ -1,5 +1,5 @@
 -- Per-peer update probe results. Populated by the background `peer_update_probe`
--- periodic in pod; read by `pod.list` so each peer's drawer/card shows that
+-- periodic in mesh; read by `system.list` so each peer's drawer/card shows that
 -- peer's version/channel/pin/update — not the local daemon's.
 --
 -- The probe sends `system.update {}` (read-only, no args). Failures keep the

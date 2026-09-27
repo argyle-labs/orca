@@ -2,12 +2,12 @@
 // the allow in projects/sdk/rust/src/jsonrpc.rs.
 #![allow(clippy::disallowed_types)]
 
-//! Server-side handler for SNI=pod.orca.local connections.
+//! Server-side handler for SNI=mesh.orca.local connections.
 //!
 //! Every method on this surface requires a verified mesh-CA-signed client
 //! cert (the plugin host's TLS layer rejects connections without one). The
 //! pre-join methods (mesh/offer, mesh/join-confirm) live on a separate SNI
-//! (pod-bootstrap.orca.local) — see super::bootstrap.
+//! (mesh-bootstrap.orca.local) — see super::bootstrap.
 
 use anyhow::{Context, Result};
 use dev::mode::{cmd_dev_disable, cmd_dev_enable, cmd_dev_sync};

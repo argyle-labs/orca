@@ -22,6 +22,7 @@ pub mod hash;
 pub mod id;
 pub mod json_schema;
 pub mod jsonrpc;
+pub mod mesh_compat;
 pub mod mesh_status;
 pub mod path;
 /// Unified per-peer reachability source of truth (class + backoff/dormant state

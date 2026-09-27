@@ -164,44 +164,37 @@ pub fn has_mesh_ca_previous(pki_dir: &Path) -> bool {
 /// server cert is issued for.
 pub const MESH_SERVER_SAN: &str = "mesh.orca.local";
 
-/// The name this surface answered on before the mesh stopped being called a
-/// "mesh". Every mesh server cert is issued carrying BOTH names, and the
-/// listener still answers to this one, for exactly one reason: a cert is valid
-/// for 30 days and only rotates lazily under 7 days remaining, so a hard
-/// cutover would leave a host holding a legacy-only cert unreachable — by up
-/// to 23 days — from any already-upgraded peer. That is a mesh partition, not
-/// an upgrade ([[orca-must-never-bring-down-host]]).
+/// DNS names a mesh SERVER cert is issued for.
 ///
-/// The convergence is automatic: a daemon whose mesh server cert lacks
-/// [`MESH_SERVER_SAN`] reissues it at startup (see `needs_san_migration`).
+/// Single-named. The pre-rename name is gone: a listener that still answered
+/// to it, while the dialer had already moved on, is not compat — it is a
+/// one-directional bridge that lets an upgraded host be reached but never
+/// reach back. Measured 2026-09-27: rc.6 could dial rc.7, rc.7 could not dial
+/// rc.6, and the roll meant to converge them had to travel over the broken
+/// direction. Keeping the old name only made that asymmetry quiet.
 ///
-/// DELETE THIS, and the dual-SAN issuance below, once every system in the
-/// fleet has started at least once on a build that carries them.
-pub const LEGACY_SERVER_SAN: &str = "pod.orca.local";
-
-/// DNS names a mesh SERVER cert is issued for: the current name first, the
-/// pre-rename name alongside it so an already-upgraded peer and a not-yet-
-/// upgraded one can both validate the same cert during a fleet roll.
+/// A mesh server cert lasts 30 days and rotates lazily under 7, so a host
+/// upgraded from a pre-rename build starts holding a cert without
+/// [`MESH_SERVER_SAN`]. `cert_lacks_mesh_san` catches exactly that and the
+/// daemon reissues at startup, so convergence is one restart, not 23 days.
 pub fn mesh_server_sans() -> Vec<String> {
-    vec![MESH_SERVER_SAN.to_string(), LEGACY_SERVER_SAN.to_string()]
+    let mut sans = vec![MESH_SERVER_SAN.to_string()];
+    sans.extend(crate::mesh_compat::legacy_server_sans());
+    sans
 }
 
-/// DNS names a BOOTSTRAP cert is issued for. Same dual-name reasoning as
-/// [`mesh_server_sans`].
-/// Per-host DNS names a mesh CLIENT cert is issued for. Dual-named for the
-/// same reason as [`mesh_server_sans`].
+/// Per-host DNS names a mesh CLIENT cert is issued for.
 pub fn mesh_client_sans(host_cn: &str) -> Vec<String> {
-    vec![
-        format!("{host_cn}.{MESH_SERVER_SAN}"),
-        format!("{host_cn}.{LEGACY_SERVER_SAN}"),
-    ]
+    let mut sans = vec![format!("{host_cn}.{MESH_SERVER_SAN}")];
+    sans.extend(crate::mesh_compat::legacy_client_sans(host_cn));
+    sans
 }
 
+/// DNS names a BOOTSTRAP cert is issued for.
 pub fn mesh_bootstrap_sans() -> Vec<String> {
-    vec![
-        MESH_BOOTSTRAP_SAN.to_string(),
-        LEGACY_BOOTSTRAP_SAN.to_string(),
-    ]
+    let mut sans = vec![MESH_BOOTSTRAP_SAN.to_string()];
+    sans.extend(crate::mesh_compat::legacy_bootstrap_sans());
+    sans
 }
 
 /// Does this cert lack the current mesh SAN — i.e. was it issued before the
@@ -1218,7 +1211,7 @@ pub fn peer_common_name(cert_der: &[u8]) -> Result<String> {
 // have a cryptographic identity over the mesh/offer + mesh/join-confirm wire.
 //
 // The same key also backs the self-signed TLS cert presented on the
-// `pod-bootstrap.orca.local` SNI, so a joiner's verification reduces to:
+// `mesh-bootstrap.orca.local` SNI, so a joiner's verification reduces to:
 // "mDNS-advertised fingerprint == bootstrap-TLS cert fingerprint == frame
 // signer pubkey." One identity, one fingerprint to verify, no separate trust
 // anchors.
@@ -1286,16 +1279,12 @@ pub fn bootstrap_pubkey_fingerprint(verifying: &ed25519_dalek::VerifyingKey) -> 
 /// SNI of the pre-pairing bootstrap surface (no client cert by design).
 pub const MESH_BOOTSTRAP_SAN: &str = "mesh-bootstrap.orca.local";
 
-/// Pre-rename name of the bootstrap surface. Same reasoning and same deletion
-/// trigger as [`LEGACY_SERVER_SAN`].
-pub const LEGACY_BOOTSTRAP_SAN: &str = "pod-bootstrap.orca.local";
-
 pub fn bootstrap_cert_path(pki_dir: &Path) -> PathBuf {
     pki_dir.join("bootstrap.cert.pem")
 }
 
 /// Generate (or load) a self-signed TLS cert whose subject pubkey IS the
-/// host's bootstrap Ed25519 pubkey. The cert SAN is `pod-bootstrap.orca.local`
+/// host's bootstrap Ed25519 pubkey. The cert SAN is `mesh-bootstrap.orca.local`
 /// so the plugin host can route this SNI to the pre-join handler.
 ///
 /// Because the cert key == the bootstrap key, verifying the cert at TLS
@@ -1335,7 +1324,7 @@ pub fn load_or_init_bootstrap_cert(pki_dir: &Path) -> Result<(String, String)> {
 
 /// rustls client-side verifier that pins a single expected bootstrap pubkey
 /// fingerprint (the first-16-byte SHA-256 hex of the SPKI). Use this when
-/// dialing `pod-bootstrap.orca.local` with a pubkey known out-of-band (mDNS TXT
+/// dialing `mesh-bootstrap.orca.local` with a pubkey known out-of-band (mDNS TXT
 /// or an explicit --fingerprint flag).
 pub fn pinned_bootstrap_verifier(
     expected_fp: String,
@@ -2286,7 +2275,7 @@ mod tests {
         let actual_fp = spki_fingerprint_der(chain[0].as_ref()).unwrap();
 
         let v = pinned_bootstrap_verifier(actual_fp.clone());
-        let sn = rustls::pki_types::ServerName::try_from("pod-bootstrap.orca.local").unwrap();
+        let sn = rustls::pki_types::ServerName::try_from("mesh-bootstrap.orca.local").unwrap();
         let now = rustls::pki_types::UnixTime::now();
         assert!(v.verify_server_cert(&chain[0], &[], &sn, &[], now).is_ok());
 
@@ -2315,7 +2304,7 @@ mod tests {
         let expected = spki_fingerprint_der(chain[0].as_ref()).unwrap();
         let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
         let v = capturing_bootstrap_verifier(slot.clone());
-        let sn = rustls::pki_types::ServerName::try_from("pod-bootstrap.orca.local").unwrap();
+        let sn = rustls::pki_types::ServerName::try_from("mesh-bootstrap.orca.local").unwrap();
         let now = rustls::pki_types::UnixTime::now();
         v.verify_server_cert(&chain[0], &[], &sn, &[], now).unwrap();
         assert_eq!(slot.lock().unwrap().as_deref(), Some(expected.as_str()));

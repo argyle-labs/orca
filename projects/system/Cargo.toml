@@ -35,7 +35,7 @@ notifications = { path = "../notifications" }
 containers = { path = "../containers" }
 auth = { path = "../auth" }
 dev = { path = "../dev" }
-# Mesh transport (folded in from the former `pod` crate): mTLS over
+# Mesh transport (folded in from the former mesh crate): mTLS over
 # SNI=mesh.orca.local, mDNS discovery, and the concurrent fleet fan-out.
 futures = { workspace = true }
 rustls = { workspace = true }
