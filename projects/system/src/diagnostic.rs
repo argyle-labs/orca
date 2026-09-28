@@ -161,6 +161,70 @@ pub(crate) fn collect(cfg: &Config) -> Result<Vec<DoctorEntry>> {
         ),
     }
 
+    // A runner can be UP and still broken: the outage behind #631 was a missing
+    // cache dir that made every build's cache request 500 while the daemon
+    // reported healthy. Liveness alone would have said "fine".
+    // The RUNNER's home, not orca's: on the fleet act_runner is root while the
+    // orca daemon is the `orca` user, and using ours would resolve the default
+    // cache path to a directory that never existed and call a healthy runner
+    // broken.
+    let runner_home = crate::ci_runner::runner_home();
+    {
+        let cfg_dir = std::path::Path::new(crate::ci_runner::DEFAULT_CONFIG_DIR);
+        match crate::ci_runner::local_runner(cfg_dir, runner_home.as_deref()) {
+            // No runner on this host is the normal case, not a finding.
+            Ok(None) => {}
+            Ok(Some(h)) => {
+                let labels = if h.registration.labels.is_empty() {
+                    "no labels".to_string()
+                } else {
+                    h.registration.labels.join(", ")
+                };
+                push(
+                    &mut entries,
+                    "ci-runner",
+                    "ok",
+                    format!("{} serves [{labels}]", h.registration.name),
+                );
+                let (status, msg) = match h.cache {
+                    crate::ci_runner::CacheHealth::Ok => {
+                        ("ok", "cache directory is present and writable".to_string())
+                    }
+                    crate::ci_runner::CacheHealth::Disabled => {
+                        ("ok", "cache is disabled".to_string())
+                    }
+                    crate::ci_runner::CacheHealth::Missing => (
+                        "error",
+                        format!(
+                            "cache directory {} is MISSING — every cache request will fail \
+                             and cancel the build, while the runner reports healthy",
+                            h.cache_dir.clone().unwrap_or_default()
+                        ),
+                    ),
+                    crate::ci_runner::CacheHealth::NotWritable => (
+                        "error",
+                        format!(
+                            "cache directory {} is not writable",
+                            h.cache_dir.clone().unwrap_or_default()
+                        ),
+                    ),
+                    // Not a finding: orca could not look, which is not the same
+                    // as knowing something is wrong.
+                    crate::ci_runner::CacheHealth::Unknown(ref why) => {
+                        ("warn", format!("cache state unknown: {why}"))
+                    }
+                };
+                push(&mut entries, "ci-runner", status, msg);
+            }
+            Err(e) => push(
+                &mut entries,
+                "ci-runner",
+                "warn",
+                format!("could not read the runner configuration: {e}"),
+            ),
+        }
+    }
+
     Ok(entries)
 }
 
