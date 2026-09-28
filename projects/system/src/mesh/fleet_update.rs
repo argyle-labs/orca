@@ -1,4 +1,4 @@
-//! Fleet-wide update fan-out — the engine behind `system.update --scope fleet`.
+//! Fleet-wide update fan-out — the engine behind `system.update` with no `--id`.
 //!
 //! A single operator action that updates the whole mesh: every joined peer's
 //! daemon first (PHASE 1), then every installed plugin on every host (PHASE 2).
@@ -19,14 +19,14 @@
 //! `system.update` — and this fan-out reaches it through
 //! [`crate::fleet::FleetUpdateHook`], registered by the server (which is the
 //! only crate that depends on both `mesh` and `system`). The ergonomic bare
-//! `orca update` is a CLI-ONLY alias for `system update --scope fleet`; it
+//! `orca update` is a CLI-ONLY alias for `system update`; it
 //! mints no tool, endpoint, or OpenAPI tag of its own.
 
 use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::commands::{SystemUpdateArgs, SystemUpdateResult, SystemUpdateScope};
+use crate::commands::{SystemUpdateArgs, SystemUpdateResult};
 // Fleet result types live in `system` so the hook signature is expressible
 // there without `system` depending on `mesh`.
 pub use crate::fleet::{FleetPluginResult, FleetSystemResult, FleetUpdateOutput};
@@ -310,11 +310,11 @@ async fn health_gate(
     loop {
         // Give the peer a moment to restart before the first probe.
         tokio::time::sleep(HEALTH_GATE_POLL).await;
-        // Dry run: probe only, never apply. Host scope for the same reason the
-        // apply pins it — a per-host leg must not re-enter the fleet fan-out.
+        // Dry run: probe only, never apply. `self_only` for the same reason the
+        // apply pins it — a per-host leg must not re-enter the fan-out.
         let probe = SystemUpdateArgs {
             execute: false,
-            scope: Some(SystemUpdateScope::Host),
+            self_only: true,
             ..Default::default()
         };
         match dispatch_at::<crate::commands::SystemUpdate>(t, probe, ctx).await {
@@ -371,11 +371,12 @@ async fn run_system(t: &Target, execute: bool, ctx: &contract::ToolCtx) -> Fleet
         id: t.peer_id.clone(),
         ..Default::default()
     };
-    // Pin HOST scope explicitly: the per-host leg of the fan-out must never
-    // re-enter the fleet fan-out, whatever the default scope becomes.
+    // Pin `self_only` explicitly: the per-host leg of the fan-out must never
+    // re-enter it. Now that no id means EVERY system, this pin is what keeps a
+    // leg from fanning out again.
     let args = SystemUpdateArgs {
         execute,
-        scope: Some(SystemUpdateScope::Host),
+        self_only: true,
         ..Default::default()
     };
     match dispatch_at::<crate::commands::SystemUpdate>(t, args, ctx).await {
@@ -557,7 +558,7 @@ pub async fn fleet_update(
     );
 
     // A dry run applies nothing, so it has no ordering requirement and no reason
-    // to be slow. Probing every host concurrently is what makes `--scope fleet`
+    // to be slow. Probing every host concurrently is what makes a fleet-wide
     // without `--execute` — the natural way to ask "what version is everything
     // on" — usable at all: serially it ran long enough for MCP clients to abort
     // it at their 300s idle timeout (#626).
@@ -1086,18 +1087,24 @@ mod tests {
     }
 
     #[test]
-    fn bare_orca_update_is_a_cli_alias_defaulting_to_fleet_scope() {
+    fn bare_orca_update_is_a_cli_alias_for_system_update() {
         let root = dispatch::cli::build_root(clap::Command::new("orca"));
-        // `orca update` still parses, and defaults `--scope fleet`.
+        // `orca update` still parses. It no longer overrides any default:
+        // updating every system IS the default when no `--id` is given, so the
+        // alias and `orca system update` now mean exactly the same thing.
         let m = root
             .clone()
             .try_get_matches_from(["orca", "update"])
             .expect("`orca update` must parse");
         let (name, sub) = m.subcommand().expect("update subcommand present");
         assert_eq!(name, "update");
-        assert_eq!(
-            sub.get_one::<crate::commands::SystemUpdateScope>("scope"),
-            Some(&crate::commands::SystemUpdateScope::Fleet)
+        assert_eq!(sub.get_one::<String>("id"), None);
+        // `--scope` is gone from the CLI entirely.
+        assert!(
+            root.clone()
+                .try_get_matches_from(["orca", "update", "--scope", "fleet"])
+                .is_err(),
+            "`--scope` must no longer parse"
         );
         // `--execute` (and the other fleet args) still parse on the alias.
         let m = root

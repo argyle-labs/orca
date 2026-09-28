@@ -1,4 +1,4 @@
-//! Fleet-update seam: result types + the hook `system.update --scope fleet`
+//! Fleet-update seam: result types + the hook `system.update` with no `--id`
 //! drives.
 //!
 //! The fan-out itself lives in the `mesh` crate (it needs the peer roster and
@@ -99,7 +99,7 @@ pub struct FleetUpdateRequest {
     pub break_lock: bool,
 }
 
-/// Hook the server registers at startup so `system.update --scope fleet` can
+/// Hook the server registers at startup so a fleet-wide `system.update` can
 /// drive mesh's fleet fan-out without this domain crate depending on `mesh`.
 #[async_trait::async_trait]
 pub trait FleetUpdateHook: Send + Sync {

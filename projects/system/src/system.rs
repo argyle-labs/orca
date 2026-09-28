@@ -436,6 +436,14 @@ fn is_self(id: &str, local: &HealthReport) -> bool {
     id.eq_ignore_ascii_case(&local.machine_id) || id.eq_ignore_ascii_case(&local.display_name)
 }
 
+/// Does `id` address THIS system? The termination case every id-addressed verb
+/// needs: the system is the resource, and when the resource is us there is no
+/// further hop to make (#647). Wraps the local health read so callers in other
+/// modules need neither it nor [`is_self`].
+pub(crate) fn addresses_this_system(id: &str, ctx: &contract::ToolCtx) -> anyhow::Result<bool> {
+    Ok(is_self(id, &collect_health(ctx)?))
+}
+
 /// Ask one remote system for its own health, as a row that can never fail the
 /// surrounding sweep.
 async fn probe_system(id: &str, host: &str, ctx: &contract::ToolCtx) -> MeshHealthRow {
