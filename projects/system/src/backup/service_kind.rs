@@ -10,12 +10,10 @@
 //! sidecar records the artifact so `restore` can reconstruct it and hand it back
 //! to `ServiceBackend::restore`.
 //!
-//! LIMITATION (documented, not a bug): a service backup needs a resolved
-//! [`Endpoint`] (runtime, host, token). Those aren't persisted — orca has no verb
-//! that registers a service instance (#615) — so this bridge constructs a minimal endpoint
-//! (`name` = instance, everything else default). That is sufficient for backends
-//! whose backup runs against the local host with no credential (the common
-//! docker-on-this-host case) and for PBS/remote once endpoint persistence lands.
+//! A backup acts on the instance HANDLE and never dials the service, so it
+//! needs only the handle plus the runtime and backup method registered for that
+//! instance — both resolved from the instance registry, falling back to the
+//! backend's own defaults when the instance was never registered.
 //! Non-file artifacts (e.g. a PBS snapshot reference) are recorded in the sidecar
 //! but not copied; restore replays them via the backend against the same manager.
 
@@ -23,7 +21,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use contract::{BoxFuture, ToolCtx};
-use plugin_toolkit::service::{self, BackupArtifact, Endpoint};
+use plugin_toolkit::service::{self, BackupArtifact};
 
 use super::provider::{BackupOutcome, BackupProvider};
 
@@ -78,9 +76,9 @@ impl BackupProvider for ServiceKindProvider {
         Box::pin(async move {
             let backend = service::backend(instance)
                 .ok_or_else(|| anyhow!("no service backend `{instance}`"))?;
-            let ep = endpoint_for(instance);
+            let (runtime, method) = backup_inputs(instance);
             let artifact = backend
-                .backup(&ep)
+                .backup(instance, runtime, method.as_deref())
                 .await
                 .map_err(|e| anyhow!("service backup `{instance}`: {e}"))?;
 
@@ -101,9 +99,9 @@ impl BackupProvider for ServiceKindProvider {
             let backend = service::backend(instance)
                 .ok_or_else(|| anyhow!("no service backend `{instance}`"))?;
             let artifact = load_artifact(payload_dir)?;
-            let ep = endpoint_for(instance);
+            let (runtime, method) = backup_inputs(instance);
             backend
-                .restore(&ep, &artifact)
+                .restore(instance, runtime, method.as_deref(), &artifact)
                 .await
                 .map_err(|e| anyhow!("service restore `{instance}`: {e}"))?;
             Ok(())
@@ -111,13 +109,35 @@ impl BackupProvider for ServiceKindProvider {
     }
 }
 
-/// A minimal endpoint for `instance`. See the module LIMITATION note: this
-/// resolves a stored descriptor once a verb exists that registers one (#615).
-fn endpoint_for(instance: &str) -> Endpoint {
-    Endpoint {
-        name: instance.to_string(),
-        ..Default::default()
-    }
+/// The runtime and backup method registered for `instance`, if it is registered.
+///
+/// `(None, None)` means "not registered", and the backend then falls back to its
+/// own first declared runtime and the auto-selected method — the same behaviour
+/// this bridge had when nothing could be registered at all, so an unregistered
+/// instance is no worse off than before.
+fn backup_inputs(
+    instance: &str,
+) -> (
+    Option<plugin_toolkit::deploy_target::Runtime>,
+    Option<String>,
+) {
+    let Some(provider) = service::backend(instance).map(|b| b.provider().to_string()) else {
+        return (None, None);
+    };
+    let Ok(rows) = crate::service_instance::instances_of(&provider) else {
+        return (None, None);
+    };
+    let Some(row) = rows
+        .into_iter()
+        .find(|r| crate::service_instance::split_key(&r.name).is_some_and(|(_, i)| i == instance))
+    else {
+        return (None, None);
+    };
+    let runtime = (!row.runtime.is_empty())
+        .then(|| plugin_toolkit::service::parse_runtime(&row.runtime).ok())
+        .flatten();
+    let method = (!row.method.is_empty()).then_some(row.method);
+    (runtime, method)
 }
 
 /// Copy the artifact's file into `payload_dir` (when it is a readable local file)

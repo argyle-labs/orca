@@ -23,7 +23,7 @@
 use derive::orca_tool;
 use plugin_toolkit::deploy_target::{self, DeployCapability, DeployOutcome};
 use plugin_toolkit::service::{
-    self, BackupArtifact, Endpoint, Route, Routes, ServiceProvider, ServiceStatus, parse_runtime,
+    self, BackupArtifact, Route, Routes, ServiceProvider, ServiceStatus, parse_runtime,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -114,15 +114,15 @@ pub struct EndpointArgs {
 }
 
 impl EndpointArgs {
-    fn endpoint(&self) -> anyhow::Result<Endpoint> {
-        Ok(Endpoint {
-            name: self.instance.clone(),
-            routes: build_routes(&self.routes)?,
-            target_host: self.host.clone(),
-            runtime: self.runtime.as_deref().and_then(|s| parse_runtime(s).ok()),
-            backup_method: self.method.clone(),
-            token: self.token.clone(),
-        })
+    /// Where this instance is reachable. Addressing is the ordered route set and
+    /// nothing else — there is no descriptor object wrapping it (#615).
+    fn reach(&self) -> anyhow::Result<Routes> {
+        build_routes(&self.routes)
+    }
+
+    /// The runtime this instance runs as, when the caller named one.
+    fn runtime(&self) -> Option<plugin_toolkit::deploy_target::Runtime> {
+        self.runtime.as_deref().and_then(|s| parse_runtime(s).ok())
     }
 }
 
@@ -245,7 +245,9 @@ async fn service_create(
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("--runtime is required for action=deploy"))?;
             let runtime = parse_runtime(&runtime_str)?;
-            let spec = backend.workload_spec(runtime, &ep.endpoint()?).await?;
+            let spec = backend
+                .workload_spec(runtime, &ep.instance, &ep.reach()?)
+                .await?;
 
             // Resolve a deploy target on this host + runtime that can launch.
             let target = deploy_target::targets()
@@ -265,7 +267,13 @@ async fn service_create(
             Ok(ServiceCreateOutput::Deploy(target.launch(&spec).await?))
         }
         ServiceCreateAction::Backup => Ok(ServiceCreateOutput::Backup(BackupOutput {
-            artifact: backend.backup(&args.endpoint.endpoint()?).await?,
+            artifact: backend
+                .backup(
+                    &args.endpoint.instance,
+                    args.endpoint.runtime(),
+                    args.endpoint.method.as_deref(),
+                )
+                .await?,
         })),
     }
 }
@@ -323,7 +331,11 @@ async fn service_update(
     match action {
         ServiceUpdateAction::Configure => {
             backend
-                .configure(&args.endpoint.endpoint()?, &args.config)
+                .configure(
+                    &args.endpoint.instance,
+                    &args.endpoint.reach()?,
+                    &args.config,
+                )
                 .await?;
         }
         ServiceUpdateAction::Restore => {
@@ -339,7 +351,12 @@ async fn service_update(
                 ..Default::default()
             };
             backend
-                .restore(&args.endpoint.endpoint()?, &artifact)
+                .restore(
+                    &args.endpoint.instance,
+                    args.endpoint.runtime(),
+                    args.endpoint.method.as_deref(),
+                    &artifact,
+                )
                 .await?;
         }
     }
@@ -378,7 +395,9 @@ async fn service_detail(
 ) -> anyhow::Result<ServiceStatus> {
     let ServiceDetailView::Status = args.view;
     let backend = backend_for(&args.endpoint.service)?;
-    Ok(backend.status(&args.endpoint.endpoint()?).await?)
+    Ok(backend
+        .status(&args.endpoint.instance, &args.endpoint.reach()?)
+        .await?)
 }
 
 // ── health (fleet-wide aggregate) ────────────────────────────────────
@@ -452,11 +471,12 @@ pub struct ServiceHealthOutput {
 /// `Unhealthy`; richer per-backend `Health` is a follow-up.
 async fn probe(
     backend: std::sync::Arc<dyn service::ServiceBackend>,
-    ep: Endpoint,
+    instance: String,
+    routes: Routes,
     timeout: std::time::Duration,
 ) -> (contract::health::Health, Option<String>, Option<String>) {
     use contract::health::Health;
-    match tokio::time::timeout(timeout, backend.status(&ep)).await {
+    match tokio::time::timeout(timeout, backend.status(&instance, &routes)).await {
         Ok(Ok(status)) => {
             let health = if status.healthy {
                 Health::Healthy
@@ -502,14 +522,13 @@ async fn service_health(
     // Single named provider: probe just that backend, with the caller's endpoint.
     if let Some(name) = args.service.as_deref().filter(|s| !s.is_empty()) {
         let backend = backend_for(name)?;
-        let ep = Endpoint {
-            name: args.instance.clone(),
-            routes: build_routes(&args.routes)?,
-            target_host: args.host.clone(),
-            token: args.token.clone(),
-            ..Default::default()
-        };
-        let (health, detail, error) = probe(backend, ep, timeout).await;
+        let (health, detail, error) = probe(
+            backend,
+            args.instance.clone(),
+            build_routes(&args.routes)?,
+            timeout,
+        )
+        .await;
         let mut errors = Vec::new();
         if let Some(e) = error {
             errors.push(format!("{name}: {e}"));
@@ -568,20 +587,13 @@ async fn service_health(
                 .unwrap_or_else(|| row.name.clone());
             let backend = std::sync::Arc::clone(&backend);
             let provider = provider.clone();
-            let ep = Endpoint {
-                name: instance.clone(),
-                routes: row.routes.clone(),
-                target_host: row.host.clone(),
-                runtime: (!row.runtime.is_empty())
-                    .then(|| parse_runtime(&row.runtime).ok())
-                    .flatten(),
-                backup_method: (!row.method.is_empty()).then(|| row.method.clone()),
-                // A token is a SECRET and is never persisted in `endpoints`;
-                // a backend needing one resolves it from the secret store.
-                token: String::new(),
-            };
+            // A status probe DIALS the instance, so it needs the address and
+            // nothing else. Runtime/method are backup inputs and a token is a
+            // secret — neither belongs on a reachability call.
+            let routes = row.routes.clone();
+            let probed = instance.clone();
             handles.push(tokio::spawn(async move {
-                let (health, detail, error) = probe(backend, ep, timeout).await;
+                let (health, detail, error) = probe(backend, probed, routes, timeout).await;
                 (provider, instance, health, detail, error)
             }));
         }
@@ -625,36 +637,34 @@ mod tests {
         }
     }
 
+    // #615: the args carry an ADDRESS (routes) and a handle, not a descriptor
+    // object. `target_host`/`token` are gone from the call path entirely — no
+    // backend ever read them, and a token is a secret that does not belong in a
+    // reachability argument.
     #[test]
-    fn endpoint_maps_fields_and_parses_runtime() {
-        let ep = sample_args().endpoint().expect("endpoint builds");
-        assert_eq!(ep.name, "main");
-        // Legacy --base-url folds into a single lan_v4 route, driving both reads.
-        assert_eq!(ep.primary_url(), "http://host:13378");
-        assert_eq!(ep.publish_port(0), 13378);
-        assert_eq!(ep.target_host, "node-a");
-        assert_eq!(ep.runtime, Some(Runtime::Docker));
-        assert_eq!(ep.backup_method.as_deref(), Some("tar"));
-        assert_eq!(ep.token, "secret");
+    fn args_yield_routes_and_the_two_reads_derived_from_them() {
+        let args = sample_args();
+        let routes = args.reach().expect("routes build");
+        assert_eq!(args.instance, "main");
+        assert_eq!(routes.primary_url(), "http://host:13378");
+        assert_eq!(routes.publish_port(0), 13378);
+        assert_eq!(args.runtime(), Some(Runtime::Docker));
+        assert_eq!(args.method.as_deref(), Some("tar"));
     }
 
     #[test]
-    fn endpoint_runtime_none_when_absent() {
+    fn runtime_is_none_when_absent_or_unparseable() {
         let mut args = sample_args();
         args.runtime = None;
-        assert!(args.endpoint().unwrap().runtime.is_none());
-    }
+        assert!(args.runtime().is_none());
 
-    #[test]
-    fn endpoint_runtime_none_when_unparseable() {
-        // An unknown runtime string is silently dropped to None by `endpoint()`.
-        let mut args = sample_args();
+        // An unknown runtime string drops to None rather than failing the call.
         args.runtime = Some("bogus".into());
-        assert!(args.endpoint().unwrap().runtime.is_none());
+        assert!(args.runtime().is_none());
     }
 
     #[test]
-    fn endpoint_runtime_variants_parse() {
+    fn runtime_variants_parse() {
         for (s, want) in [
             ("docker", Runtime::Docker),
             ("podman", Runtime::Podman),
@@ -663,7 +673,7 @@ mod tests {
         ] {
             let mut args = sample_args();
             args.runtime = Some(s.into());
-            assert_eq!(args.endpoint().unwrap().runtime, Some(want), "runtime {s}");
+            assert_eq!(args.runtime(), Some(want), "runtime {s}");
         }
     }
 
@@ -810,7 +820,8 @@ mod tests {
         }
         fn status<'a>(
             &'a self,
-            _ep: &'a service::Endpoint,
+            _instance: &'a str,
+            _routes: &'a Routes,
         ) -> service::BoxFuture<'a, Result<ServiceStatus, service::ServiceError>> {
             Box::pin(async move {
                 match self.outcome {
@@ -840,7 +851,8 @@ mod tests {
         });
         tokio::runtime::Runtime::new().unwrap().block_on(probe(
             backend,
-            service::Endpoint::default(),
+            "main".to_string(),
+            Routes::new(),
             std::time::Duration::from_millis(200),
         ))
     }
@@ -1065,7 +1077,8 @@ mod tests {
         fn workload_spec<'a>(
             &'a self,
             _runtime: Runtime,
-            _ep: &'a service::Endpoint,
+            _instance: &'a str,
+            _routes: &'a Routes,
         ) -> service::BoxFuture<'a, Result<deploy_target::WorkloadSpec, service::ServiceError>>
         {
             Box::pin(async move {
@@ -1077,9 +1090,11 @@ mod tests {
         }
         fn backup<'a>(
             &'a self,
-            ep: &'a service::Endpoint,
+            instance: &'a str,
+            _runtime: Option<plugin_toolkit::deploy_target::Runtime>,
+            _method: Option<&'a str>,
         ) -> service::BoxFuture<'a, Result<BackupArtifact, service::ServiceError>> {
-            let instance = ep.name.clone();
+            let instance = instance.to_string();
             let provider = self.name.clone();
             Box::pin(async move {
                 Ok(BackupArtifact {
@@ -1092,14 +1107,17 @@ mod tests {
         }
         fn restore<'a>(
             &'a self,
-            _ep: &'a service::Endpoint,
+            _instance: &'a str,
+            _runtime: Option<plugin_toolkit::deploy_target::Runtime>,
+            _method: Option<&'a str>,
             _from: &'a BackupArtifact,
         ) -> service::BoxFuture<'a, Result<(), service::ServiceError>> {
             Box::pin(async move { Ok(()) })
         }
         fn configure<'a>(
             &'a self,
-            _ep: &'a service::Endpoint,
+            _instance: &'a str,
+            _routes: &'a Routes,
             config: &'a str,
         ) -> service::BoxFuture<'a, Result<(), service::ServiceError>> {
             let slot = self.got_config.clone();
@@ -1111,7 +1129,8 @@ mod tests {
         }
         fn status<'a>(
             &'a self,
-            _ep: &'a service::Endpoint,
+            _instance: &'a str,
+            _routes: &'a Routes,
         ) -> service::BoxFuture<'a, Result<ServiceStatus, service::ServiceError>> {
             Box::pin(async move {
                 Ok(ServiceStatus {
