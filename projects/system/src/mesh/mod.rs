@@ -29,6 +29,61 @@ pub use db::replicate_engine::PeerSyncReport;
 #[cfg(test)]
 pub(crate) static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Pin BOTH state-dir env vars at `dir` for the caller's lifetime.
+///
+/// `$ORCA_HOME` is checked BEFORE `$HOME`, so a test that isolates by `$HOME`
+/// alone is not isolated at all: any concurrent test that sets `$ORCA_HOME`
+/// (the `update` suite does, under `#[serial(env)]` — a DIFFERENT lock) silently
+/// repoints it at that test's directory. Two mutual-exclusion schemes over one
+/// global exclude nothing, and the mesh suite flaked accordingly: a different
+/// "not a member" test failed on roughly one run in three, each time because
+/// the membership guard resolved to someone else's populated state dir.
+///
+/// Holding the lock inside the guard is what makes this honest — the pin and
+/// the exclusion have the same lifetime, so they cannot come apart.
+#[cfg(test)]
+pub(crate) fn pin_home(dir: &std::path::Path) -> HomeEnvGuard {
+    let lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev_home = std::env::var("HOME").ok();
+    let prev_orca = std::env::var(contract::config::paths::ENV_ORCA_HOME).ok();
+    // SAFETY: serialized behind HOME_ENV_LOCK, which the returned guard holds;
+    // both vars are restored when it drops.
+    unsafe {
+        std::env::set_var("HOME", dir);
+        std::env::set_var(contract::config::paths::ENV_ORCA_HOME, dir.join(".orca"));
+    }
+    HomeEnvGuard {
+        _lock: lock,
+        prev_home,
+        prev_orca,
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct HomeEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev_home: Option<String>,
+    prev_orca: Option<String>,
+}
+
+#[cfg(test)]
+impl Drop for HomeEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: the lock is still held (dropped after this) so no other test
+        // is reading these vars.
+        unsafe {
+            match &self.prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.prev_orca {
+                Some(v) => std::env::set_var(contract::config::paths::ENV_ORCA_HOME, v),
+                None => std::env::remove_var(contract::config::paths::ENV_ORCA_HOME),
+            }
+        }
+    }
+}
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -4304,25 +4359,15 @@ mod handler_dispatch_tests {
     // the guard is never carried across an `.await`, mirroring cert_rotation's
     // `with_home`.
     fn with_home<T>(dir: &std::path::Path, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
-        let _guard = crate::mesh::HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("HOME").ok();
-        // SAFETY: HOME is set for the closure's duration and restored right
-        // after; serialized behind HOME_ENV_LOCK.
-        unsafe { std::env::set_var("HOME", dir) };
+        let _guard = crate::mesh::pin_home(dir);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let out = body(&rt);
-        match prev {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        out
+        body(&rt)
     }
 
+    #[serial_test::serial(env)]
     #[test]
     fn exec_without_mesh_client_bundle_errors_on_load() {
         let dir = tempfile::tempdir().unwrap();
@@ -4338,6 +4383,7 @@ mod handler_dispatch_tests {
         });
     }
 
+    #[serial_test::serial(env)]
     #[test]
     fn ping_without_mesh_client_bundle_errors_on_load() {
         let dir = tempfile::tempdir().unwrap();

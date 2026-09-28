@@ -1084,7 +1084,14 @@ fn plugin_update_available(installed: Option<&str>, target: &str) -> bool {
 /// whether an update is available without touching disk; pass `--execute` to
 /// install. Peer-dispatchable: call with `peer: <host>` to update the plugin on
 /// that host. The install path is the same catalog-fetch `plugin.install` uses.
-#[orca_tool(domain = "plugin", verb = "update")]
+// Not intercepted by the GENERIC gate: this verb already implements dry-run by
+// default and its plan is richer than `ExecutionPlan::generic` could be — the
+// generic one carries `detailed: false` and no changes, so gating here would
+// REPLACE a real plan with an empty one. It still spells the opt-in `execute`,
+// which is the single fleet-wide name (#636). Migrating it to return a typed
+// `ExecutionPlan` is the follow-up; that needs the body to run in plan mode,
+// which the intercept-before-body gate cannot express.
+#[orca_tool(domain = "plugin", verb = "update", execute_gated = false)]
 async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUpdateOutput> {
     let entry = catalog_resolved()
         .await

@@ -115,6 +115,7 @@ fn resolve_host_operator() -> Option<contract::CallerIdentity> {
         user_id: row.user_id,
         username: row.username,
         role: row.role,
+        can_mutate: row.can_mutate,
     })
 }
 

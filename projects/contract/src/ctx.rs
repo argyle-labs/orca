@@ -153,6 +153,7 @@ mod tests {
             user_id: format!("u_{user}"),
             username: user.into(),
             role: "admin".into(),
+            can_mutate: false,
         }
     }
 
