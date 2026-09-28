@@ -386,24 +386,13 @@ mod tests {
     // behind the crate lock and point both at temp dirs on a current-thread rt,
     // mirroring cert_rotation's harness.
     fn with_home_db<T>(dir: &std::path::Path, body: impl std::future::Future<Output = T>) -> T {
-        let _guard = crate::mesh::HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("HOME").ok();
-        // SAFETY: HOME is set for the closure and restored after; serialized
-        // behind HOME_ENV_LOCK.
-        unsafe { std::env::set_var("HOME", dir) };
+        let _guard = crate::mesh::pin_home(dir);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let db_path = dir.join("orca-test.db");
-        let out = rt.block_on(db::with_db_path(db_path, body));
-        match prev {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        out
+        rt.block_on(db::with_db_path(db_path, body))
     }
 
     #[test]

@@ -353,25 +353,15 @@ mod tests {
     /// handle so `tick()` executes while HOME (hence `pki_dir()`) points at the temp
     /// dir. The lock is crate-wide so this can't race a roster_sync or cli HOME test.
     fn with_home<T>(dir: &std::path::Path, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
-        let _guard = crate::mesh::HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("HOME").ok();
-        // SAFETY: HOME is set for the duration of the closure and restored
-        // immediately after; access is serialized behind ENV_LOCK.
-        unsafe { std::env::set_var("HOME", dir) };
+        let _guard = crate::mesh::pin_home(dir);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let out = body(&rt);
-        match prev {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        out
+        body(&rt)
     }
 
+    #[serial_test::serial(env)]
     #[test]
     fn tick_is_noop_for_non_member_host() {
         let dir = tempfile::tempdir().unwrap();
@@ -384,6 +374,7 @@ mod tests {
         });
     }
 
+    #[serial_test::serial(env)]
     #[test]
     fn tick_leaves_fresh_certs_untouched() {
         let dir = tempfile::tempdir().unwrap();
@@ -404,6 +395,7 @@ mod tests {
         });
     }
 
+    #[serial_test::serial(env)]
     #[test]
     fn tick_reissues_corrupt_leaves_via_local_ca() {
         let dir = tempfile::tempdir().unwrap();

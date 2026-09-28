@@ -557,13 +557,7 @@ mod tests {
     ) -> T {
         // Serialize behind the CRATE-WIDE HOME lock so this cannot race a
         // cert_rotation or cli test that also repoints HOME. Poison-tolerant.
-        let _guard = crate::mesh::HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("HOME").ok();
-        // SAFETY: HOME is set for the closure's duration and restored right after;
-        // access is serialized behind ENV_LOCK.
-        unsafe { std::env::set_var("HOME", home) };
+        let _guard = crate::mesh::pin_home(home);
         let pki = pki_dir();
         std::fs::create_dir_all(utils::pki::mesh_dir(&pki)).unwrap();
         std::fs::write(utils::pki::mesh_ca_cert_path(&pki), FAKE_CA_PEM).unwrap();
@@ -571,12 +565,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let out = body(&rt);
-        match prev {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        out
+        body(&rt)
     }
 
     fn uuid_entry(peer_id: &str, hostname: &str) -> MeshPeerDto {
