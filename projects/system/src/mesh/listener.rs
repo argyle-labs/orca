@@ -1360,18 +1360,14 @@ mod tests {
         .await;
     }
 
+    #[serial_test::serial(env)]
     #[test]
     fn refresh_cert_cn_mismatch_rejected_with_ca_key_present() {
         // With the mesh CA key present but the joiner_hostname param not matching
         // the authenticated CN, the handler must refuse on the CN check rather
         // than sign anything. Uses the crate HOME lock so pki_dir points at temp.
         let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::mesh::HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("HOME").ok();
-        // SAFETY: HOME restored below; serialized behind HOME_ENV_LOCK.
-        unsafe { std::env::set_var("HOME", dir.path()) };
+        let _guard = crate::mesh::pin_home(dir.path());
         let pki = pki_dir();
         utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
         let params = serde_json::json!({
@@ -1381,10 +1377,6 @@ mod tests {
         });
         let err = handle_refresh_cert("peer-a", req_with_params(MESH_REFRESH_CERT_METHOD, params))
             .unwrap_err();
-        match prev {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
         assert!(
             err.to_string().contains("does not match joiner_hostname"),
             "got: {err}"

@@ -1696,30 +1696,11 @@ mod tests {
     // race a cert_rotation / roster_sync test that also repoints HOME. Bind it for
     // the whole test body: `let _home = set_home(dir);`.
     #[must_use]
-    fn set_home(dir: &std::path::Path) -> HomeGuard {
-        let guard = crate::mesh::HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("HOME").ok();
-        // SAFETY: access is serialized behind HOME_ENV_LOCK, held by the returned
-        // guard; HOME is restored when that guard drops at end of test.
-        unsafe { std::env::set_var("HOME", dir) };
-        HomeGuard { _lock: guard, prev }
+    fn set_home(dir: &std::path::Path) -> crate::mesh::HomeEnvGuard {
+        crate::mesh::pin_home(dir)
     }
 
-    struct HomeGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        prev: Option<String>,
-    }
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => unsafe { std::env::set_var("HOME", v) },
-                None => unsafe { std::env::remove_var("HOME") },
-            }
-        }
-    }
-
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_leave_no_flags_wipes_membership_only() {
         let home = tempfile::tempdir().unwrap();
@@ -1754,6 +1735,7 @@ mod tests {
         .await;
     }
 
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_leave_wipe_all_clears_secrets_and_plugin_tables() {
         let home = tempfile::tempdir().unwrap();
@@ -1782,6 +1764,7 @@ mod tests {
 
     // ── cmd_mesh_cert_status ───────────────────────────────────────────────────
 
+    #[serial_test::serial(env)]
     #[test]
     fn cmd_mesh_cert_status_not_a_member_returns_ok() {
         // HOME points at an empty tempdir → no mesh CA cert on disk → the
@@ -1794,6 +1777,7 @@ mod tests {
 
     // ── cmd_mesh_ca_rotate — missing-CA-key guard (post-range, pre-rotate) ──────
 
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn ca_rotate_bails_without_mesh_ca_key() {
         // Valid overlap passes the range check, then the `has_mesh_ca_key` guard
@@ -1842,6 +1826,7 @@ mod tests {
     // accept fail with a specific message *after* the mesh dir is created but
     // *before* any network dial. HOME points at a tempdir so the mesh dir is
     // created there, never in the developer's real `~/.orca`.
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_accept_active_offer_without_ca_cert_errors() {
         let home = tempfile::tempdir().unwrap();
@@ -1882,6 +1867,7 @@ mod tests {
     // With HOME at an empty tempdir there is no mesh client bundle, so the
     // inviter-side flows bail with the "not a mesh member yet" guidance before
     // touching discovery or the network.
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn push_pairing_offer_bails_when_not_a_member() {
         let home = tempfile::tempdir().unwrap();
@@ -1897,6 +1883,7 @@ mod tests {
         .await;
     }
 
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_offer_bails_when_not_a_member() {
         let home = tempfile::tempdir().unwrap();
@@ -1913,6 +1900,7 @@ mod tests {
     }
 
     // ── cmd_mesh_leave — wipe_secrets only (plugin tables preserved) ───────────
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_leave_wipe_secrets_only_clears_secrets_keeps_plugin_data() {
         let home = tempfile::tempdir().unwrap();
@@ -1959,6 +1947,7 @@ mod tests {
     // plus the warning arm without any live network. Contrast with
     // `cmd_mesh_trust_found_peer_…`, which keeps peer_secure=false so replication
     // is short-circuited and never reached.
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_trust_mutual_secure_attempts_replication_and_soft_warns() {
         let home = tempfile::tempdir().unwrap();
@@ -2020,6 +2009,7 @@ mod tests {
     // `~/.orca`), then fails at `TcpStream::connect`. 127.0.0.1:1 is refused
     // instantly, so no real timeout elapses.
 
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn mesh_join_core_dead_port_fails_at_connect() {
         let home = tempfile::tempdir().unwrap();
@@ -2033,6 +2023,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_connect_dead_port_fails_at_connect() {
         let home = tempfile::tempdir().unwrap();
@@ -2046,6 +2037,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_join_dead_port_fails_at_connect() {
         let home = tempfile::tempdir().unwrap();
@@ -2063,6 +2055,7 @@ mod tests {
     // With HOME at an empty tempdir there is no mesh client bundle, so the mTLS
     // dialer bails at bundle load with the "not a mesh member" context before any
     // TCP connect.
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn call_mesh_method_pub_bails_without_mesh_client_bundle() {
         let home = tempfile::tempdir().unwrap();
@@ -2081,6 +2074,7 @@ mod tests {
     // The first thing this does is a `mesh/has-ca-key` mTLS dial, which loads the
     // (absent) mesh client bundle and bails "not a mesh member" before touching
     // the network.
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn replicate_ca_key_if_needed_pub_bails_without_bundle() {
         let home = tempfile::tempdir().unwrap();
@@ -2129,6 +2123,7 @@ mod tests {
     //
     // Mirrors `cmd_mesh_offer` / `push_pairing_offer`: with no mesh client bundle
     // the inviter-side pair flow bails before discovery or network access.
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_pair_bails_when_not_a_member() {
         let home = tempfile::tempdir().unwrap();

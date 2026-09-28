@@ -636,7 +636,19 @@ pub struct PendingRestart {
 /// [MUTATES STATE] The single system-update tool. Covers orca binary updates,
 /// host identity (hostname/fqdn/addressing), and OS package upgrades. Omit
 /// every arg for a read-only state probe.
-#[orca_tool(domain = "system", verb = "update", refresh_runtime = true)]
+// Not intercepted by the GENERIC gate: this verb already implements dry-run by
+// default and its plan is richer than `ExecutionPlan::generic` could be — the
+// generic one carries `detailed: false` and no changes, so gating here would
+// REPLACE a real plan with an empty one. It still spells the opt-in `execute`,
+// which is the single fleet-wide name (#636). Migrating it to return a typed
+// `ExecutionPlan` is the follow-up; that needs the body to run in plan mode,
+// which the intercept-before-body gate cannot express.
+#[orca_tool(
+    domain = "system",
+    verb = "update",
+    refresh_runtime = true,
+    execute_gated = false
+)]
 async fn system_update(
     args: SystemUpdateArgs,
     ctx: &contract::ToolCtx,

@@ -68,10 +68,13 @@ fn every_gated_verb_is_also_an_admin_data_mutation() {
 /// it before typed deserialization. A verb declaring its OWN `execute` field
 /// would have it silently swallowed, so fail loudly at test time instead.
 ///
-/// The four legacy ad-hoc gates are deliberately not yet `execute_gated`:
-/// `system.update` and `plugin.update` (`execute`),
-/// `storage.share.repair-permissions` (`apply`), `storage.mount.create`
-/// (`force`). They migrate onto the shared field separately.
+/// `system.update`, `plugin.update` and `storage.share.repair-permissions` are
+/// deliberately NOT `execute_gated`: each already implements dry-run by default
+/// and returns a richer answer than `ExecutionPlan::generic` could, so gating
+/// them would replace a real plan with an empty one. They still spell the
+/// opt-in `execute`. `storage.mount.create`'s `force` is NOT a dry-run gate at
+/// all — it overrides the multi-mount collision guard, a different concept that
+/// must not be folded into this one.
 #[test]
 fn no_gated_verb_declares_its_own_execute_field() {
     let gated = dispatch::execute_gated_names();
@@ -109,4 +112,47 @@ fn every_gated_verb_advertises_the_opt_in() {
             entry.name
         );
     }
+}
+
+/// The invariant the whole phase exists for: a gated verb invoked WITHOUT the
+/// opt-in must change nothing and say what it would have done.
+///
+/// The schema assertions above prove the gate is advertised; only this proves
+/// it is enforced. They are different claims, and the first passing while the
+/// second failed is precisely how a gate becomes decorative.
+#[tokio::test]
+async fn a_gated_verb_called_without_the_opt_in_returns_a_plan_and_applies_nothing() {
+    let cfg = std::sync::Arc::new(contract::config::Config::load().expect("config"));
+    let ctx = contract::ToolCtx::new(cfg);
+
+    // `config.delete` is representative: write-shaped, no bespoke dry-run, and
+    // harmless to plan against a row that does not exist.
+    let out = dispatch::dispatch(
+        "config.delete",
+        serde_json::json!({ "noun": "orca-gate-probe", "name": "no-such-row" }),
+        &ctx,
+    )
+    .await
+    .expect("dispatch succeeds");
+
+    assert_eq!(
+        out["dryRun"],
+        serde_json::json!(true),
+        "a gated verb with no opt-in must report a dry run: {out}"
+    );
+    assert_eq!(out["tool"], serde_json::json!("config.delete"));
+    assert!(
+        out.get("removed").is_none(),
+        "the verb body must not have run: {out}"
+    );
+    // Honest about what it does NOT know: an empty change list is not a claim
+    // that nothing would change.
+    assert_eq!(out["detailed"], serde_json::json!(false));
+    assert!(
+        out["howToExecute"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("execute"),
+        "the plan says how to apply it: {out}"
+    );
 }

@@ -17,6 +17,12 @@ pub struct CallerIdentity {
     pub user_id: String,
     pub username: String,
     pub role: String,
+    /// The `can_mutate` capability, carried WITH the identity rather than
+    /// alongside it. The execute gate authorizes at dispatch, where the HTTP
+    /// request extensions that used to hold this are long gone; an identity
+    /// that cannot answer "may this caller mutate?" forces the gate to guess,
+    /// and a guessing authorization check is not one.
+    pub can_mutate: bool,
 }
 
 #[async_trait::async_trait]
@@ -85,6 +91,7 @@ mod tests {
             user_id: "u1".into(),
             username: "scott".into(),
             role: "admin".into(),
+            can_mutate: false,
         };
         let d = c.clone();
         assert_eq!(d.user_id, "u1");
@@ -106,6 +113,7 @@ mod tests {
                     user_id: "u1".into(),
                     username: "scott".into(),
                     role: "admin".into(),
+                    can_mutate: false,
                 }),
                 None,
             )
