@@ -144,12 +144,27 @@ pub(crate) fn collect(cfg: &Config) -> Result<Vec<DoctorEntry>> {
         ),
         Ok(broken) => {
             for svc in broken {
-                push(
-                    &mut entries,
-                    "services",
-                    "error",
-                    format!("{} is {}", svc.name, svc.detail),
-                );
+                // Residue from a deleted unit is not a live defect; saying
+                // "error" forever trains an operator to ignore the category.
+                if svc.stale {
+                    push(
+                        &mut entries,
+                        "services",
+                        "warn",
+                        format!(
+                            "{} no longer exists but its failure record remains — \
+                             clear it with `systemctl reset-failed {}`",
+                            svc.name, svc.name
+                        ),
+                    );
+                } else {
+                    push(
+                        &mut entries,
+                        "services",
+                        "error",
+                        format!("{} is {}", svc.name, svc.detail),
+                    );
+                }
             }
         }
         // Say we could not look, rather than letting silence read as health.

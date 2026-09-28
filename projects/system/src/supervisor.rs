@@ -36,6 +36,13 @@ pub struct BrokenService {
     pub name: String,
     /// What the init system said, verbatim enough to act on.
     pub detail: String,
+    /// The unit no longer exists and this is only a retained failure record.
+    /// systemd keeps a `failed` result after the unit file is deleted, so the
+    /// entry outlives the thing it describes — loki still lists a unit that
+    /// failed in August and was removed. Reporting that as a live defect would
+    /// cry wolf on every run, forever.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// Detect the service manager. Ordered most-specific first: Unraid is
@@ -72,6 +79,7 @@ pub fn parse_openrc_crashed(out: &str) -> Vec<BrokenService> {
         .map(|name| BrokenService {
             name: name.to_string(),
             detail: "crashed (started, then the process died)".to_string(),
+            stale: false,
         })
         .collect()
 }
@@ -92,6 +100,9 @@ pub fn parse_systemd_failed(out: &str) -> Vec<BrokenService> {
                 return None;
             }
             let rest: Vec<&str> = cols.collect();
+            // Columns are UNIT LOAD ACTIVE SUB DESCRIPTION; LOAD of `not-found`
+            // means the unit file is gone and only the failure record remains.
+            let stale = rest.first().is_some_and(|load| *load == "not-found");
             Some(BrokenService {
                 name: name.to_string(),
                 detail: if rest.is_empty() {
@@ -99,6 +110,7 @@ pub fn parse_systemd_failed(out: &str) -> Vec<BrokenService> {
                 } else {
                     rest.join(" ")
                 },
+                stale,
             })
         })
         .collect()
@@ -131,6 +143,7 @@ pub fn parse_launchd_failed(out: &str, label_prefixes: &[&str]) -> Vec<BrokenSer
             Some(BrokenService {
                 name: label.to_string(),
                 detail: format!("not running; last exit status {status}"),
+                stale: false,
             })
         })
         .collect()
@@ -315,6 +328,8 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].name, "orca-smb-mounts.service");
         assert!(got[0].detail.contains("failed"));
+        // The unit file is gone; this is a retained record, not a live defect.
+        assert!(got[0].stale, "not-found must classify as stale: {got:?}");
     }
 
     #[test]
@@ -322,6 +337,14 @@ mod tests {
         // `--no-legend` usually suppresses this, but a systemd that prints it
         // anyway must not yield a service literally named "0".
         assert!(parse_systemd_failed("0 loaded units listed.\n").is_empty());
+    }
+
+    #[test]
+    fn a_unit_that_still_exists_is_a_live_defect_not_residue() {
+        // Control for the stale case above: same parser, loaded unit, not stale.
+        let got = parse_systemd_failed("● nginx.service loaded failed failed nginx\n");
+        assert_eq!(got.len(), 1);
+        assert!(!got[0].stale, "a loaded unit is a real failure: {got:?}");
     }
 
     #[test]
