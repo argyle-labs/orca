@@ -241,7 +241,7 @@ struct ToolAttr {
     /// `ExecutionPlan` and changes nothing. Enforced centrally in
     /// `dispatch::erased`, so the verb body needs no flag of its own. Set on
     /// every verb that applies changes. Default off.
-    execute_gated: bool,
+    execute_gated: Option<bool>,
     /// Minimum role required to invoke this tool via authenticated surfaces.
     /// `"any"` (default) means any authenticated identity passes; `"admin"`
     /// requires `AuthIdentity::role == "admin"`. Set via
@@ -270,7 +270,7 @@ impl Parse for ToolAttr {
         let mut remote_ok = true;
         let mut refresh_runtime = false;
         let mut data_mutation = false;
-        let mut execute_gated = false;
+        let mut execute_gated: Option<bool> = None;
         let mut role: Option<LitStr> = None;
         let mut title: Option<LitStr> = None;
         let mut crate_path: Option<syn::Path> = None;
@@ -361,7 +361,7 @@ impl Parse for ToolAttr {
                     };
                 }
                 "execute_gated" => {
-                    execute_gated = match &nv.value {
+                    execute_gated = Some(match &nv.value {
                         Expr::Lit(ExprLit {
                             lit: Lit::Bool(b), ..
                         }) => b.value,
@@ -371,7 +371,7 @@ impl Parse for ToolAttr {
                                 "execute_gated expects a bool literal",
                             ));
                         }
-                    };
+                    });
                 }
                 "role" => {
                     let s = lit_str(&nv.value)?;
@@ -852,8 +852,17 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     // bare-name case to fall back to and no way to build a leading-dot name.
     let tool_name = format!("{}.{}", domain.value(), verb.value());
     let remote_ok_lit = attr.remote_ok;
-    let data_mutation_lit = attr.data_mutation;
-    let execute_gated_lit = attr.execute_gated;
+    let read_shaped = is_read_shaped(verb.value().as_str());
+    // A verb that changes something is a data mutation, whether or not anyone
+    // remembered to say so.
+    let data_mutation_lit = attr.data_mutation || !read_shaped;
+    // Dry-run is the DEFAULT for every verb that changes something (#636). The
+    // gate is DERIVED from the verb's own shape rather than opted into: an
+    // opt-in flag is how 61 mutating endpoints ended up ungated while two were
+    // gated. Read-shaped verbs plan nothing because they change nothing;
+    // everything else gates. `execute_gated = false` remains available for a
+    // verb whose write-shaped name is misleading.
+    let execute_gated_lit = attr.execute_gated.unwrap_or(!read_shaped);
     // REQUIRED_ROLE: explicit `role = "..."` wins; otherwise default-deny
     // derives from the verb — read-shaped verbs (`list`/`detail`/`search`) get
     // "any", anything else gets "admin". This closes C2 (default-deny on
@@ -861,10 +870,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let role_const = match attr.role.as_ref() {
         Some(s) => quote! { const REQUIRED_ROLE: &'static str = #s; },
         None => {
-            let derived = match verb.value().as_str() {
-                "list" | "detail" | "search" => "any",
-                _ => "admin",
-            };
+            let derived = if read_shaped { "any" } else { "admin" };
             quote! { const REQUIRED_ROLE: &'static str = #derived; }
         }
     };
@@ -1153,6 +1159,44 @@ fn snake_to_pascal(s: &str) -> String {
     out
 }
 
+/// Does this verb only READ?
+///
+/// One predicate drives three things that must agree: `REQUIRED_ROLE`,
+/// `DATA_MUTATION`, and the dry-run gate. They were three independent opt-ins,
+/// which is how 61 mutating endpoints ended up ungated while two were gated
+/// (#636) — a flag nobody remembers to set is not a policy.
+///
+/// The list is explicit rather than a heuristic, and deliberately conservative:
+/// a verb wrongly treated as a WRITE merely asks for `execute`, which is
+/// visible the first time anyone calls it. A verb wrongly treated as a READ
+/// applies changes with no consent and no audit, which is not. So anything not
+/// named here gates.
+fn is_read_shaped(verb: &str) -> bool {
+    matches!(
+        verb,
+        "list"
+            | "detail"
+            | "search"
+            | "info"
+            | "health"
+            | "status"
+            | "tree"
+            | "topology"
+            | "stat"
+            | "read"
+            | "logs"
+            | "history"
+            | "profile"
+            | "exports"
+            | "entities"
+            | "server_info"
+            | "diff"
+            | "serve_asset"
+            | "serve_release"
+            | "render"
+            | "get"
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1512,12 +1556,58 @@ mod tests {
 
     #[test]
     fn expand_without_role_derives_required_role_from_verb() {
-        // attr_ok = (verb="info") → not a read verb → defaults to "admin".
-        let out = expand(attr_ok(), ok_fn()).unwrap().to_string();
+        // A write-shaped verb defaults to "admin". (`info` used to be the
+        // example here and derived "admin" only because the read-shaped set was
+        // `list|detail|search`; reading info changes nothing — #636.)
+        let attr = parse_attr(quote!(domain = "h", verb = "create")).unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
         assert!(
             out.contains("REQUIRED_ROLE : & 'static str = \"admin\""),
             "got: {out}"
         );
+    }
+
+    // #636: one predicate drives role, data_mutation and the dry-run gate, so
+    // they cannot disagree. Three independent opt-ins is how 61 mutating
+    // endpoints ended up ungated while two were gated.
+    #[test]
+    fn a_write_shaped_verb_is_gated_a_mutation_and_admin_together() {
+        let attr = parse_attr(quote!(domain = "h", verb = "delete")).unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
+        assert!(out.contains("EXECUTE_GATED : bool = true"), "got: {out}");
+        assert!(out.contains("DATA_MUTATION : bool = true"), "got: {out}");
+        assert!(
+            out.contains("REQUIRED_ROLE : & 'static str = \"admin\""),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn a_read_shaped_verb_is_none_of_those() {
+        for verb in ["health", "status", "logs", "history", "info", "exports"] {
+            let attr = parse_attr(quote!(domain = "h", verb = #verb)).unwrap();
+            let out = expand(attr, ok_fn()).unwrap().to_string();
+            assert!(
+                out.contains("EXECUTE_GATED : bool = false"),
+                "verb={verb} must not gate a read: {out}"
+            );
+            assert!(
+                out.contains("DATA_MUTATION : bool = false"),
+                "verb={verb} reads, so it mutates nothing: {out}"
+            );
+            assert!(
+                out.contains("REQUIRED_ROLE : & 'static str = \"any\""),
+                "verb={verb} got: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_opt_out_still_wins_over_the_derivation() {
+        // `auth.login` needs this: a login cannot be planned.
+        let attr = parse_attr(quote!(domain = "h", verb = "login", execute_gated = false)).unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
+        assert!(out.contains("EXECUTE_GATED : bool = false"), "got: {out}");
     }
 
     #[test]

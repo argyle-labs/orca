@@ -188,14 +188,20 @@ async fn bad_token_is_unauthorized() {
 #[tokio::test]
 async fn read_role_token_forbidden_on_admin_tool() {
     let env = with_isolated_env();
-    // `system.health` derives REQUIRED_ROLE = "admin" (non read-shaped verb).
-    // A read-role token authenticates (require_auth passes) but fails the
-    // per-tool role gate (require_tool_role) → 403.
+    // `config.upsert` derives REQUIRED_ROLE = "admin" — it WRITES. A read-role
+    // token authenticates (require_auth passes) but fails the per-tool role
+    // gate (require_tool_role) → 403.
+    //
+    // This used to probe `system.health`, which derived "admin" only because
+    // the classifier's read-shaped set was `list|detail|search` and nothing
+    // else. A health probe changes nothing and requiring admin for it was the
+    // gap, not the rule (#636) — so the test now names a verb that genuinely
+    // mutates.
     let token = mint_token(&env, "read");
     let (status, bytes) = oneshot_raw(
         env.router(),
         "POST",
-        "/api/v1/system.health",
+        "/api/v1/config.upsert",
         Some(&token),
         Some(serde_json::json!({})),
     )
@@ -203,7 +209,7 @@ async fn read_role_token_forbidden_on_admin_tool() {
     assert_eq!(status, StatusCode::FORBIDDEN, "expected 403 for read role");
     let text = String::from_utf8_lossy(&bytes);
     assert!(
-        text.contains("system.health") && text.contains("admin"),
+        text.contains("config.upsert") && text.contains("admin"),
         "403 body should name the tool + required role: {text}"
     );
 }
@@ -294,7 +300,7 @@ async fn mcp_endpoint_tools_call_enforces_role() {
         Some(&token),
         Some(serde_json::json!({
             "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-            "params": { "name": "system.health", "arguments": {} }
+            "params": { "name": "config.upsert", "arguments": {} }
         })),
     )
     .await;
