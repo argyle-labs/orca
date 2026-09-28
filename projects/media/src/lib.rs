@@ -948,7 +948,11 @@ fn parse_capability(s: &str) -> Result<Capability, MediaError> {
         "units" => Ok(Capability::Units),
         "rescan" => Ok(Capability::Rescan),
         other => Err(MediaError::Other(format!(
-            "unknown media capability `{other}`"
+            "unknown media capability `{other}` — this plugin declares a capability \
+             orca {orca} does not implement, which normally means it was built \
+             against a newer orca than this host runs. Install a plugin release built \
+             for this orca, or update orca first (#605).",
+            orca = env!("CARGO_PKG_VERSION")
         ))),
     }
 }

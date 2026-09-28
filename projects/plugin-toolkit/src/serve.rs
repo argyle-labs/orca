@@ -75,12 +75,45 @@ pub const SOCKET_ENV: &str = "ORCA_PLUGIN_SOCKET";
 /// lib via `use <crate> as _;`).
 pub const DUMP_MANIFEST_ENV: &str = "ORCA_PLUGIN_DUMP_MANIFEST";
 
+/// When set, [`serve`] prints the plugin's FULL declared surface as JSON and
+/// exits 0 — name, version, tools, and the `backends` array carrying each
+/// backend's declared `capabilities`.
+///
+/// [`DUMP_MANIFEST_ENV`] emits only the tool list, so nothing off-orca could see
+/// which capabilities a build declares. That is the gap that let unraid rc.9
+/// publish declaring `export_write` — a capability that existed only on orca
+/// main — and be unloadable on every host in the fleet (#605). A release gate
+/// reads this, compares the declared capabilities against those the target orca
+/// release implements, and fails before publishing rather than at handshake
+/// time on a real host.
+///
+/// Separate from `DUMP_MANIFEST_ENV` rather than a change to it: plugin CI
+/// already parses that output as a bare tool array, and widening it in place
+/// would break every existing gate.
+pub const DUMP_SURFACE_ENV: &str = "ORCA_PLUGIN_DUMP_SURFACE";
+
 /// The plugin's derived tool manifest, filtered to `prefixes` from the linked
 /// `#[orca_tool]` inventory. Shared by the handshake and the [`DUMP_MANIFEST_ENV`]
 /// introspection path so both see exactly the same surface.
 fn derive_manifest(prefixes: &[String]) -> Result<Vec<ToolDef>> {
     let prefixes: Vec<&str> = prefixes.iter().map(String::as_str).collect();
     serde_json::from_str(&manifest_for_prefixes(&prefixes)).context("parse tool manifest")
+}
+
+/// The plugin's declared surface, as a release gate needs to see it: identity,
+/// tools, and the backends whose `capabilities` the daemon must implement.
+///
+/// Built from exactly the same `spec` the handshake sends, so what CI inspects
+/// is what a host will be asked to accept — the check is worthless otherwise.
+fn declared_surface(spec: &PluginSpec) -> Result<Value> {
+    let backends: Vec<Value> =
+        serde_json::from_str(&spec.backends_json).context("parse backends json")?;
+    Ok(serde_json::json!({
+        "name": spec.name,
+        "version": spec.version,
+        "tools": derive_manifest(&spec.prefixes)?,
+        "backends": backends,
+    }))
 }
 
 /// Connect the orca-provided socket and serve until shutdown. A plugin's
@@ -94,6 +127,10 @@ pub fn serve(spec: PluginSpec) -> Result<()> {
             "{}",
             serde_json::to_string(&manifest).context("serialize manifest")?
         );
+        return Ok(());
+    }
+    if std::env::var_os(DUMP_SURFACE_ENV).is_some() {
+        println!("{}", serde_json::to_string(&declared_surface(&spec)?)?);
         return Ok(());
     }
     let path = std::env::var(SOCKET_ENV)
@@ -498,5 +535,40 @@ mod tests {
         )
         .unwrap();
         assert!(plugin.join().unwrap().is_err());
+    }
+
+    // #605: a plugin release could declare a capability no released daemon
+    // implements, and nothing off-orca could see that before publishing —
+    // unraid rc.9 declared `export_write` and was unloadable fleet-wide.
+    #[test]
+    fn the_declared_surface_exposes_capabilities_for_a_release_gate() {
+        let spec = PluginSpec {
+            name: "unraid".into(),
+            version: "0.1.1-rc.9".into(),
+            prefixes: vec!["unraid.".into()],
+            backends_json: r#"[{"kind":"storage","name":"unraid",
+                                "capabilities":["list","exports","export_write"]}]"#
+                .into(),
+            schema_json: String::new(),
+            backend_dispatch: None,
+        };
+
+        let surface = declared_surface(&spec).expect("surface builds");
+        assert_eq!(surface["name"], "unraid");
+        assert_eq!(surface["version"], "0.1.1-rc.9");
+
+        // The capabilities are the whole point: a gate must be able to read
+        // them without running a daemon.
+        let caps = surface["backends"][0]["capabilities"]
+            .as_array()
+            .expect("capabilities are readable")
+            .iter()
+            .filter_map(|c| c.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            caps.contains(&"export_write"),
+            "the capability that stranded the fleet is visible: {caps:?}"
+        );
+        assert!(surface.get("tools").is_some(), "tools still included");
     }
 }

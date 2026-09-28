@@ -230,6 +230,32 @@ impl Routes {
     }
 
     /// Consume into the underlying `Vec<Route>`.
+    /// The primary reachable URL (`scheme://value[:port]`) — the first enabled,
+    /// URL-addressable route. Empty when nothing here is URL-addressable.
+    ///
+    /// This is the single-URL convenience for a caller that probes one path; a
+    /// caller that wants failover walks [`Routes::enabled`] in priority order
+    /// itself. There is no scalar `base_url` anywhere — reachability IS the
+    /// ordered set, and this only reconstructs a URL from it.
+    pub fn primary_url(&self) -> String {
+        self.enabled()
+            .find_map(|r| r.base_url())
+            .unwrap_or_default()
+    }
+
+    /// The host port a workload should publish on. Taken from the dedicated
+    /// `lan_v4` route — the LOCAL bind, distinct from the reach paths
+    /// (fqdn/tailscale/wireguard) — falling back to `default`, the software's
+    /// own in-container port, when no `lan_v4` route pins one.
+    ///
+    /// This is what lets N instances of one provider coexist on a host: each
+    /// binds its own port.
+    pub fn publish_port(&self, default: u16) -> u16 {
+        self.find_kind("lan_v4")
+            .and_then(|r| r.port)
+            .unwrap_or(default)
+    }
+
     pub fn into_vec(self) -> Vec<Route> {
         self.0
     }

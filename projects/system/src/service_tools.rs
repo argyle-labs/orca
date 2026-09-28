@@ -23,7 +23,7 @@
 use derive::orca_tool;
 use plugin_toolkit::deploy_target::{self, DeployCapability, DeployOutcome};
 use plugin_toolkit::service::{
-    self, BackupArtifact, Endpoint, Route, Routes, ServiceProvider, ServiceStatus, parse_runtime,
+    self, BackupArtifact, Route, Routes, ServiceProvider, ServiceStatus, parse_runtime,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -114,15 +114,15 @@ pub struct EndpointArgs {
 }
 
 impl EndpointArgs {
-    fn endpoint(&self) -> anyhow::Result<Endpoint> {
-        Ok(Endpoint {
-            name: self.instance.clone(),
-            routes: build_routes(&self.routes)?,
-            target_host: self.host.clone(),
-            runtime: self.runtime.as_deref().and_then(|s| parse_runtime(s).ok()),
-            backup_method: self.method.clone(),
-            token: self.token.clone(),
-        })
+    /// Where this instance is reachable. Addressing is the ordered route set and
+    /// nothing else — there is no descriptor object wrapping it (#615).
+    fn reach(&self) -> anyhow::Result<Routes> {
+        build_routes(&self.routes)
+    }
+
+    /// The runtime this instance runs as, when the caller named one.
+    fn runtime(&self) -> Option<plugin_toolkit::deploy_target::Runtime> {
+        self.runtime.as_deref().and_then(|s| parse_runtime(s).ok())
     }
 }
 
@@ -245,7 +245,9 @@ async fn service_create(
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("--runtime is required for action=deploy"))?;
             let runtime = parse_runtime(&runtime_str)?;
-            let spec = backend.workload_spec(runtime, &ep.endpoint()?).await?;
+            let spec = backend
+                .workload_spec(runtime, &ep.instance, &ep.reach()?)
+                .await?;
 
             // Resolve a deploy target on this host + runtime that can launch.
             let target = deploy_target::targets()
@@ -265,7 +267,13 @@ async fn service_create(
             Ok(ServiceCreateOutput::Deploy(target.launch(&spec).await?))
         }
         ServiceCreateAction::Backup => Ok(ServiceCreateOutput::Backup(BackupOutput {
-            artifact: backend.backup(&args.endpoint.endpoint()?).await?,
+            artifact: backend
+                .backup(
+                    &args.endpoint.instance,
+                    args.endpoint.runtime(),
+                    args.endpoint.method.as_deref(),
+                )
+                .await?,
         })),
     }
 }
@@ -323,7 +331,11 @@ async fn service_update(
     match action {
         ServiceUpdateAction::Configure => {
             backend
-                .configure(&args.endpoint.endpoint()?, &args.config)
+                .configure(
+                    &args.endpoint.instance,
+                    &args.endpoint.reach()?,
+                    &args.config,
+                )
                 .await?;
         }
         ServiceUpdateAction::Restore => {
@@ -339,7 +351,12 @@ async fn service_update(
                 ..Default::default()
             };
             backend
-                .restore(&args.endpoint.endpoint()?, &artifact)
+                .restore(
+                    &args.endpoint.instance,
+                    args.endpoint.runtime(),
+                    args.endpoint.method.as_deref(),
+                    &artifact,
+                )
                 .await?;
         }
     }
@@ -378,7 +395,9 @@ async fn service_detail(
 ) -> anyhow::Result<ServiceStatus> {
     let ServiceDetailView::Status = args.view;
     let backend = backend_for(&args.endpoint.service)?;
-    Ok(backend.status(&args.endpoint.endpoint()?).await?)
+    Ok(backend
+        .status(&args.endpoint.instance, &args.endpoint.reach()?)
+        .await?)
 }
 
 // ── health (fleet-wide aggregate) ────────────────────────────────────
@@ -423,6 +442,11 @@ pub struct ServiceHealthArgs {
 #[serde(rename_all = "camelCase")]
 pub struct ServiceHealthRow {
     pub provider: String,
+    /// Which registered instance this row reports on. `None` when the provider
+    /// has no registered instance — the row is then a statement about the
+    /// REGISTRY, not about the software's health (#615).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     pub health: contract::health::Health,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -447,11 +471,12 @@ pub struct ServiceHealthOutput {
 /// `Unhealthy`; richer per-backend `Health` is a follow-up.
 async fn probe(
     backend: std::sync::Arc<dyn service::ServiceBackend>,
-    ep: Endpoint,
+    instance: String,
+    routes: Routes,
     timeout: std::time::Duration,
 ) -> (contract::health::Health, Option<String>, Option<String>) {
     use contract::health::Health;
-    match tokio::time::timeout(timeout, backend.status(&ep)).await {
+    match tokio::time::timeout(timeout, backend.status(&instance, &routes)).await {
         Ok(Ok(status)) => {
             let health = if status.healthy {
                 Health::Healthy
@@ -473,12 +498,16 @@ async fn probe(
     }
 }
 
-/// Fleet-wide service health. With no `--service`, probes every registered
-/// backend concurrently (each under a short timeout) and returns a typed row per
-/// provider projected into the generic `contract::health::Health` enum. With
-/// `--service`, probes just that named provider (preserving the per-instance
-/// path). This is an explicit on-demand aggregate — not a cached poll, and never
-/// wired into `service.list`/`containers.list`/`system.list` hot reads.
+/// Fleet-wide service health. With no `--service`, probes every REGISTERED
+/// INSTANCE concurrently (each under a short timeout) and returns a typed row
+/// per instance, projected into the generic `contract::health::Health` enum. A
+/// provider with no registered instance reports `unknown` and says so — it is
+/// not probed, because there is no address to probe, and a provider nobody
+/// registered is not a provider that is down. Register one with
+/// `service.instance.create --route`. With `--service`, probes just that named
+/// provider using the endpoint given on the call. This is an explicit on-demand
+/// aggregate — not a cached poll, and never wired into
+/// `service.list`/`containers.list`/`system.list` hot reads.
 #[orca_tool(domain = "service", verb = "health")]
 async fn service_health(
     args: ServiceHealthArgs,
@@ -493,14 +522,13 @@ async fn service_health(
     // Single named provider: probe just that backend, with the caller's endpoint.
     if let Some(name) = args.service.as_deref().filter(|s| !s.is_empty()) {
         let backend = backend_for(name)?;
-        let ep = Endpoint {
-            name: args.instance.clone(),
-            routes: build_routes(&args.routes)?,
-            target_host: args.host.clone(),
-            token: args.token.clone(),
-            ..Default::default()
-        };
-        let (health, detail, error) = probe(backend, ep, timeout).await;
+        let (health, detail, error) = probe(
+            backend,
+            args.instance.clone(),
+            build_routes(&args.routes)?,
+            timeout,
+        )
+        .await;
         let mut errors = Vec::new();
         if let Some(e) = error {
             errors.push(format!("{name}: {e}"));
@@ -508,6 +536,7 @@ async fn service_health(
         return Ok(ServiceHealthOutput {
             services: vec![ServiceHealthRow {
                 provider: name.to_string(),
+                instance: (!args.instance.is_empty()).then(|| args.instance.clone()),
                 health,
                 detail,
             }],
@@ -515,40 +544,70 @@ async fn service_health(
         });
     }
 
-    // Fleet-wide. Every provider here is probed with an ADDRESS-LESS endpoint:
-    // there is no verb that registers "this syncthing lives at these routes", so
-    // the fan-out iterates providers, not instances, and a backend has nothing
-    // to reach (#615). Report that as Unknown with the reason, rather than
-    // handing each backend a default `Endpoint` and rendering whatever comes
-    // back as a health verdict — a provider with no registered instance is not
-    // a provider that is down, and must never read as one.
-    let handles: Vec<_> = service::backends()
-        .into_iter()
-        .map(|backend| {
-            let provider = backend.provider().to_string();
-            tokio::spawn(async move {
-                let (health, detail, error) = probe(backend, Endpoint::default(), timeout).await;
-                let error = error.map(|e| {
-                    format!(
-                        "{e} (no instance is registered for `{provider}`, so there is no route to \
-                         probe — orca has no verb to register one yet)"
-                    )
-                });
-                (provider, health, detail, error)
-            })
-        })
-        .collect();
+    // Fleet-wide: probe every REGISTERED INSTANCE, each bounded by `timeout`.
+    //
+    // This used to iterate providers and hand each an address-less `Endpoint`,
+    // then render whatever came back as a health verdict — so it could not work
+    // for any provider, however well its backend was written (#615). Instances
+    // are now registered on the replicated `endpoints` table, so there is
+    // something addressable to probe.
+    //
+    // A provider with NO registered instance still gets a row, because silence
+    // is the failure this issue is about: it reports `Unknown` and says the
+    // registry is empty. That is a statement about the registry, not about the
+    // software — a provider nobody registered is not a provider that is down.
+    let mut handles = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut services: Vec<ServiceHealthRow> = Vec::new();
 
-    let mut services = Vec::new();
-    let mut errors = Vec::new();
+    for backend in service::backends() {
+        let provider = backend.provider().to_string();
+        let registered = match crate::service_instance::instances_of(&provider) {
+            Ok(rows) => rows,
+            Err(e) => {
+                errors.push(format!("{provider}: read instance registry: {e:#}"));
+                Vec::new()
+            }
+        };
+        if registered.is_empty() {
+            services.push(ServiceHealthRow {
+                provider: provider.clone(),
+                instance: None,
+                health: contract::health::Health::Unknown,
+                detail: Some(format!(
+                    "no instance registered for `{provider}` — register one with \
+                     `service.instance.create` so there is a route to probe"
+                )),
+            });
+            continue;
+        }
+        for row in registered {
+            let instance = crate::service_instance::split_key(&row.name)
+                .map(|(_, i)| i.to_string())
+                .unwrap_or_else(|| row.name.clone());
+            let backend = std::sync::Arc::clone(&backend);
+            let provider = provider.clone();
+            // A status probe DIALS the instance, so it needs the address and
+            // nothing else. Runtime/method are backup inputs and a token is a
+            // secret — neither belongs on a reachability call.
+            let routes = row.routes.clone();
+            let probed = instance.clone();
+            handles.push(tokio::spawn(async move {
+                let (health, detail, error) = probe(backend, probed, routes, timeout).await;
+                (provider, instance, health, detail, error)
+            }));
+        }
+    }
+
     for handle in handles {
         match handle.await {
-            Ok((provider, health, detail, error)) => {
+            Ok((provider, instance, health, detail, error)) => {
                 if let Some(e) = error {
-                    errors.push(format!("{provider}: {e}"));
+                    errors.push(format!("{provider}/{instance}: {e}"));
                 }
                 services.push(ServiceHealthRow {
                     provider,
+                    instance: Some(instance),
                     health,
                     detail,
                 });
@@ -556,7 +615,7 @@ async fn service_health(
             Err(join_err) => errors.push(format!("probe task failed to join: {join_err}")),
         }
     }
-    services.sort_by(|a, b| a.provider.cmp(&b.provider));
+    services.sort_by(|a, b| (&a.provider, &a.instance).cmp(&(&b.provider, &b.instance)));
 
     Ok(ServiceHealthOutput { services, errors })
 }
@@ -578,36 +637,34 @@ mod tests {
         }
     }
 
+    // #615: the args carry an ADDRESS (routes) and a handle, not a descriptor
+    // object. `target_host`/`token` are gone from the call path entirely — no
+    // backend ever read them, and a token is a secret that does not belong in a
+    // reachability argument.
     #[test]
-    fn endpoint_maps_fields_and_parses_runtime() {
-        let ep = sample_args().endpoint().expect("endpoint builds");
-        assert_eq!(ep.name, "main");
-        // Legacy --base-url folds into a single lan_v4 route, driving both reads.
-        assert_eq!(ep.primary_url(), "http://host:13378");
-        assert_eq!(ep.publish_port(0), 13378);
-        assert_eq!(ep.target_host, "node-a");
-        assert_eq!(ep.runtime, Some(Runtime::Docker));
-        assert_eq!(ep.backup_method.as_deref(), Some("tar"));
-        assert_eq!(ep.token, "secret");
+    fn args_yield_routes_and_the_two_reads_derived_from_them() {
+        let args = sample_args();
+        let routes = args.reach().expect("routes build");
+        assert_eq!(args.instance, "main");
+        assert_eq!(routes.primary_url(), "http://host:13378");
+        assert_eq!(routes.publish_port(0), 13378);
+        assert_eq!(args.runtime(), Some(Runtime::Docker));
+        assert_eq!(args.method.as_deref(), Some("tar"));
     }
 
     #[test]
-    fn endpoint_runtime_none_when_absent() {
+    fn runtime_is_none_when_absent_or_unparseable() {
         let mut args = sample_args();
         args.runtime = None;
-        assert!(args.endpoint().unwrap().runtime.is_none());
-    }
+        assert!(args.runtime().is_none());
 
-    #[test]
-    fn endpoint_runtime_none_when_unparseable() {
-        // An unknown runtime string is silently dropped to None by `endpoint()`.
-        let mut args = sample_args();
+        // An unknown runtime string drops to None rather than failing the call.
         args.runtime = Some("bogus".into());
-        assert!(args.endpoint().unwrap().runtime.is_none());
+        assert!(args.runtime().is_none());
     }
 
     #[test]
-    fn endpoint_runtime_variants_parse() {
+    fn runtime_variants_parse() {
         for (s, want) in [
             ("docker", Runtime::Docker),
             ("podman", Runtime::Podman),
@@ -616,7 +673,7 @@ mod tests {
         ] {
             let mut args = sample_args();
             args.runtime = Some(s.into());
-            assert_eq!(args.endpoint().unwrap().runtime, Some(want), "runtime {s}");
+            assert_eq!(args.runtime(), Some(want), "runtime {s}");
         }
     }
 
@@ -704,6 +761,7 @@ mod tests {
         let out = ServiceHealthOutput {
             services: vec![ServiceHealthRow {
                 provider: "abs".into(),
+                instance: Some("main".into()),
                 health: contract::health::Health::Healthy,
                 detail: None,
             }],
@@ -762,7 +820,8 @@ mod tests {
         }
         fn status<'a>(
             &'a self,
-            _ep: &'a service::Endpoint,
+            _instance: &'a str,
+            _routes: &'a Routes,
         ) -> service::BoxFuture<'a, Result<ServiceStatus, service::ServiceError>> {
             Box::pin(async move {
                 match self.outcome {
@@ -792,7 +851,8 @@ mod tests {
         });
         tokio::runtime::Runtime::new().unwrap().block_on(probe(
             backend,
-            service::Endpoint::default(),
+            "main".to_string(),
+            Routes::new(),
             std::time::Duration::from_millis(200),
         ))
     }
@@ -1017,7 +1077,8 @@ mod tests {
         fn workload_spec<'a>(
             &'a self,
             _runtime: Runtime,
-            _ep: &'a service::Endpoint,
+            _instance: &'a str,
+            _routes: &'a Routes,
         ) -> service::BoxFuture<'a, Result<deploy_target::WorkloadSpec, service::ServiceError>>
         {
             Box::pin(async move {
@@ -1029,9 +1090,11 @@ mod tests {
         }
         fn backup<'a>(
             &'a self,
-            ep: &'a service::Endpoint,
+            instance: &'a str,
+            _runtime: Option<plugin_toolkit::deploy_target::Runtime>,
+            _method: Option<&'a str>,
         ) -> service::BoxFuture<'a, Result<BackupArtifact, service::ServiceError>> {
-            let instance = ep.name.clone();
+            let instance = instance.to_string();
             let provider = self.name.clone();
             Box::pin(async move {
                 Ok(BackupArtifact {
@@ -1044,14 +1107,17 @@ mod tests {
         }
         fn restore<'a>(
             &'a self,
-            _ep: &'a service::Endpoint,
+            _instance: &'a str,
+            _runtime: Option<plugin_toolkit::deploy_target::Runtime>,
+            _method: Option<&'a str>,
             _from: &'a BackupArtifact,
         ) -> service::BoxFuture<'a, Result<(), service::ServiceError>> {
             Box::pin(async move { Ok(()) })
         }
         fn configure<'a>(
             &'a self,
-            _ep: &'a service::Endpoint,
+            _instance: &'a str,
+            _routes: &'a Routes,
             config: &'a str,
         ) -> service::BoxFuture<'a, Result<(), service::ServiceError>> {
             let slot = self.got_config.clone();
@@ -1063,7 +1129,8 @@ mod tests {
         }
         fn status<'a>(
             &'a self,
-            _ep: &'a service::Endpoint,
+            _instance: &'a str,
+            _routes: &'a Routes,
         ) -> service::BoxFuture<'a, Result<ServiceStatus, service::ServiceError>> {
             Box::pin(async move {
                 Ok(ServiceStatus {
@@ -1237,9 +1304,13 @@ mod tests {
         assert!(out.errors.is_empty());
     }
 
+    // #615: a backend with NO registered instance used to be probed with a
+    // default, address-less endpoint and the result rendered as a verdict —
+    // this test asserted `Healthy` for a provider nothing had ever addressed.
+    // That was the bug: the aggregate reported health it had not measured.
     #[serial_test::serial(service_registry)]
     #[test]
-    fn service_health_fleet_wide_includes_registered_backend() {
+    fn a_provider_with_no_registered_instance_reports_unknown_not_healthy() {
         let _g = register_lifecycle("lc-fleet");
         let out = rt()
             .block_on(service_health(ServiceHealthArgs::default(), &test_ctx()))
@@ -1248,9 +1319,27 @@ mod tests {
             .services
             .iter()
             .find(|r| r.provider == "lc-fleet")
-            .expect("registered backend should appear in fleet aggregate");
-        assert_eq!(row.health, contract::health::Health::Healthy);
-        assert_eq!(row.detail.as_deref(), Some("running"));
+            .expect("a registered backend still appears in the fleet aggregate");
+
+        assert_eq!(
+            row.health,
+            contract::health::Health::Unknown,
+            "nothing was probed, so nothing is known"
+        );
+        assert!(
+            row.instance.is_none(),
+            "there is no instance to name: {:?}",
+            row.instance
+        );
+        let detail = row.detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("no instance registered"),
+            "the row explains the registry is empty: {detail}"
+        );
+        assert!(
+            detail.contains("service.instance.create"),
+            "and names the verb that fixes it: {detail}"
+        );
     }
 
     #[test]

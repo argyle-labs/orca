@@ -86,7 +86,11 @@ impl ServiceCapability {
             "configure" => Ok(ServiceCapability::Configure),
             "status" => Ok(ServiceCapability::Status),
             other => Err(ServiceError::Other(format!(
-                "unknown service capability `{other}`"
+                "unknown service capability `{other}` — this plugin declares a capability \
+             orca {orca} does not implement, which normally means it was built \
+             against a newer orca than this host runs. Install a plugin release built \
+             for this orca, or update orca first (#605).",
+                orca = env!("CARGO_PKG_VERSION")
             ))),
         }
     }
@@ -108,84 +112,14 @@ pub fn runtime_str(r: Runtime) -> String {
         .unwrap_or_default()
 }
 
-/// A non-secret connection descriptor for one service instance.
-///
-/// NOT persisted: no verb registers an instance, so every caller passes one
-/// inline and `service.health`'s fan-out has only a default to hand each
-/// backend (#615).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct Endpoint {
-    /// Instance name (`"audiobookshelf-main"`), unique within a provider. Also
-    /// the runtime handle for generic backup/restore: the container name for
-    /// docker/podman, or the LXC `vmid` for lxc.
-    pub name: String,
-    /// Reachability paths for this instance — the first-class ordered [`Routes`]
-    /// set (LAN v4/v6, Tailscale v4/v6, WireGuard v4/v6, FQDN, …), index 0 the
-    /// primary. Replaces a scalar `base_url` per orca's "no scalar URL — one
-    /// ordered `routes[]`" rule: every kind is uniform data and nothing
-    /// whitelists kinds, so a new transport (a connectivity plugin's WireGuard
-    /// address) is added as data, not code. Read a single URL via
-    /// [`Endpoint::base_url`] and the host bind port via [`Endpoint::publish_port`].
-    #[serde(default, skip_serializing_if = "Routes::is_empty")]
-    pub routes: Routes,
-    /// Deploy target host (Proxmox node / docker host). Empty for already-running.
-    #[serde(default)]
-    pub target_host: String,
-    /// Runtime this instance runs as. Drives the generic backup/restore path;
-    /// when absent, the backend's first declared runtime is used.
-    #[serde(default)]
-    pub runtime: Option<Runtime>,
-    /// Backup method to use for this instance (`"tar"`, `"pbs"`, …). Resolved
-    /// against the pluggable [`BackupMethod`] registry; absent = `"tar"`.
-    #[serde(default)]
-    pub backup_method: Option<String>,
-    /// API token / credential, carried for the in-process call. It is never
-    /// persisted here; a secret belongs in the secret store, not in `endpoints`.
-    #[serde(default)]
-    pub token: String,
-}
-
-impl Endpoint {
-    /// The primary reachable URL (`scheme://value[:port]`) — the first enabled,
-    /// URL-addressable route. Empty when the instance has no such route. This is
-    /// the single-URL convenience over [`Endpoint::routes`] for a backend that
-    /// probes one path; a backend that wants failover walks `self.routes.enabled()`
-    /// in priority order itself. There is no scalar `base_url` — reachability is
-    /// the ordered `routes[]` and this only reconstructs a URL from it.
-    pub fn primary_url(&self) -> String {
-        self.routes
-            .enabled()
-            .find_map(|r| r.base_url())
-            .unwrap_or_default()
-    }
-
-    /// The host port this instance publishes on, for [`ServiceBackend::workload_spec`].
-    /// Taken from the dedicated `lan_v4` route — the LOCAL bind, distinct from the
-    /// reach paths (fqdn/tailscale/wireguard) — falling back to `default` (the
-    /// software's in-container port) when no `lan_v4` route pins one. This is what
-    /// lets N instances of one provider coexist on a host: each binds its own port.
-    pub fn publish_port(&self, default: u16) -> u16 {
-        self.routes
-            .find_kind("lan_v4")
-            .and_then(|r| r.port)
-            .unwrap_or(default)
-    }
-
-    /// Test/CLI convenience: an instance reachable at a single `lan_v4` route.
-    /// `scheme` is `http`/`https`; `port` is both the host bind and the reach port.
-    pub fn with_lan_route(
-        name: impl Into<String>,
-        scheme: impl Into<String>,
-        host: impl Into<String>,
-        port: Option<u16>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            routes: Routes::from(vec![Route::new("lan_v4", scheme, host, port)]),
-            ..Default::default()
-        }
-    }
-}
+// There is deliberately NO `Endpoint` type here. What used to be one conflated
+// three unrelated things: an instance HANDLE (`name`), its ADDRESS (`routes`),
+// and backup selection inputs (`runtime`, `backup_method`) — plus a `token` and
+// `target_host` that no backend ever read. Every `ServiceBackend` method now
+// takes exactly what it uses, so a signature states its own requirements and
+// reachability is the ordered `Routes` set and nothing else (#615).
+// `Routes::primary_url` / `Routes::publish_port` carry the two conveniences the
+// old type provided.
 
 /// A backup artifact produced by [`ServiceBackend::backup`], restorable via
 /// [`ServiceBackend::restore`]. The path is on the deploy target's filesystem.
@@ -345,7 +279,8 @@ pub trait ServiceBackend: Send + Sync {
     fn workload_spec<'a>(
         &'a self,
         _runtime: Runtime,
-        _ep: &'a Endpoint,
+        _instance: &'a str,
+        _routes: &'a Routes,
     ) -> BoxFuture<'a, Result<WorkloadSpec, ServiceError>> {
         Box::pin(async move { Err(ServiceError::unimplemented("workload_spec")) })
     }
@@ -363,20 +298,22 @@ pub trait ServiceBackend: Send + Sync {
     #[cfg(feature = "in-process")]
     fn backup<'a>(
         &'a self,
-        ep: &'a Endpoint,
+        instance: &'a str,
+        runtime: Option<Runtime>,
+        method_name: Option<&'a str>,
     ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
         let provider = self.provider().to_string();
         let paths = self.data_paths();
-        let runtime = ep.runtime.or_else(|| self.runtimes().first().copied());
+        let runtime = runtime.or_else(|| self.runtimes().first().copied());
         Box::pin(async move {
             let rt = runtime.ok_or_else(|| {
                 ServiceError::Other(format!("{provider}: no runtime to back up against"))
             })?;
-            let method = select_method(ep, rt);
+            let method = select_method(method_name, rt);
             method
                 .backup(BackupContext {
                     runtime: rt,
-                    endpoint: ep,
+                    instance,
                     provider: &provider,
                     data_paths: &paths,
                 })
@@ -389,7 +326,9 @@ pub trait ServiceBackend: Send + Sync {
     #[cfg(not(feature = "in-process"))]
     fn backup<'a>(
         &'a self,
-        _ep: &'a Endpoint,
+        _instance: &'a str,
+        _runtime: Option<Runtime>,
+        _method_name: Option<&'a str>,
     ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
         Box::pin(async move { Err(ServiceError::unimplemented("backup")) })
     }
@@ -399,22 +338,24 @@ pub trait ServiceBackend: Send + Sync {
     #[cfg(feature = "in-process")]
     fn restore<'a>(
         &'a self,
-        ep: &'a Endpoint,
+        instance: &'a str,
+        runtime: Option<Runtime>,
+        method_name: Option<&'a str>,
         from: &'a BackupArtifact,
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
         let provider = self.provider().to_string();
         let paths = self.data_paths();
-        let runtime = ep.runtime.or_else(|| self.runtimes().first().copied());
+        let runtime = runtime.or_else(|| self.runtimes().first().copied());
         Box::pin(async move {
             let rt = runtime.ok_or_else(|| {
                 ServiceError::Other(format!("{provider}: no runtime to restore against"))
             })?;
-            let method = select_method(ep, rt);
+            let method = select_method(method_name, rt);
             method
                 .restore(
                     BackupContext {
                         runtime: rt,
-                        endpoint: ep,
+                        instance,
                         provider: &provider,
                         data_paths: &paths,
                     },
@@ -428,7 +369,9 @@ pub trait ServiceBackend: Send + Sync {
     #[cfg(not(feature = "in-process"))]
     fn restore<'a>(
         &'a self,
-        _ep: &'a Endpoint,
+        _instance: &'a str,
+        _runtime: Option<Runtime>,
+        _method_name: Option<&'a str>,
         _from: &'a BackupArtifact,
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
         Box::pin(async move { Err(ServiceError::unimplemented("restore")) })
@@ -436,7 +379,8 @@ pub trait ServiceBackend: Send + Sync {
 
     fn configure<'a>(
         &'a self,
-        _ep: &'a Endpoint,
+        _instance: &'a str,
+        _routes: &'a Routes,
         _config: &'a str,
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
         Box::pin(async move { Err(ServiceError::unimplemented("configure")) })
@@ -444,7 +388,8 @@ pub trait ServiceBackend: Send + Sync {
 
     fn status<'a>(
         &'a self,
-        _ep: &'a Endpoint,
+        _instance: &'a str,
+        _routes: &'a Routes,
     ) -> BoxFuture<'a, Result<ServiceStatus, ServiceError>> {
         Box::pin(async move { Err(ServiceError::unimplemented("status")) })
     }
@@ -588,38 +533,48 @@ impl ServiceBackend for ServiceProxy {
     fn workload_spec<'a>(
         &'a self,
         runtime: Runtime,
-        ep: &'a Endpoint,
+        instance: &'a str,
+        routes: &'a Routes,
     ) -> BoxFuture<'a, Result<WorkloadSpec, ServiceError>> {
         Box::pin(self.call(
             "workload_spec",
             RuntimeArgs {
                 runtime,
-                endpoint: ep.clone(),
+                instance: instance.to_string(),
+                routes: routes.clone(),
             },
         ))
     }
 
     fn backup<'a>(
         &'a self,
-        ep: &'a Endpoint,
+        instance: &'a str,
+        runtime: Option<Runtime>,
+        method_name: Option<&'a str>,
     ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
         Box::pin(self.call(
             "backup",
-            EndpointArg {
-                endpoint: ep.clone(),
+            BackupArgs {
+                instance: instance.to_string(),
+                runtime,
+                method: method_name.map(str::to_string),
             },
         ))
     }
 
     fn restore<'a>(
         &'a self,
-        ep: &'a Endpoint,
+        instance: &'a str,
+        runtime: Option<Runtime>,
+        method_name: Option<&'a str>,
         from: &'a BackupArtifact,
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
         Box::pin(self.call(
             "restore",
             RestoreArgs {
-                endpoint: ep.clone(),
+                instance: instance.to_string(),
+                runtime,
+                method: method_name.map(str::to_string),
                 from: from.clone(),
             },
         ))
@@ -627,13 +582,15 @@ impl ServiceBackend for ServiceProxy {
 
     fn configure<'a>(
         &'a self,
-        ep: &'a Endpoint,
+        instance: &'a str,
+        routes: &'a Routes,
         config: &'a str,
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
         Box::pin(self.call(
             "configure",
             ConfigureArgs {
-                endpoint: ep.clone(),
+                instance: instance.to_string(),
+                routes: routes.clone(),
                 config: config.to_string(),
             },
         ))
@@ -641,12 +598,14 @@ impl ServiceBackend for ServiceProxy {
 
     fn status<'a>(
         &'a self,
-        ep: &'a Endpoint,
+        instance: &'a str,
+        routes: &'a Routes,
     ) -> BoxFuture<'a, Result<ServiceStatus, ServiceError>> {
         Box::pin(self.call(
             "status",
-            EndpointArg {
-                endpoint: ep.clone(),
+            ReachArgs {
+                instance: instance.to_string(),
+                routes: routes.clone(),
             },
         ))
     }
@@ -659,23 +618,38 @@ impl ServiceBackend for ServiceProxy {
 #[derive(Serialize, Deserialize)]
 struct RuntimeArgs {
     runtime: Runtime,
-    endpoint: Endpoint,
+    instance: String,
+    routes: Routes,
 }
 
+/// Ops that REACH the instance carry its handle and its address, nothing else.
 #[derive(Serialize, Deserialize)]
-struct EndpointArg {
-    endpoint: Endpoint,
+struct ReachArgs {
+    instance: String,
+    routes: Routes,
+}
+
+/// Ops that act on the instance's STORAGE carry no routes — a backup does not
+/// dial the service, it operates on the runtime handle.
+#[derive(Serialize, Deserialize)]
+struct BackupArgs {
+    instance: String,
+    runtime: Option<Runtime>,
+    method: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct RestoreArgs {
-    endpoint: Endpoint,
+    instance: String,
+    runtime: Option<Runtime>,
+    method: Option<String>,
     from: BackupArtifact,
 }
 
 #[derive(Serialize, Deserialize)]
 struct ConfigureArgs {
-    endpoint: Endpoint,
+    instance: String,
+    routes: Routes,
     config: String,
 }
 
@@ -707,28 +681,34 @@ pub async fn dispatch_op(
         "workload_spec" => {
             let a: RuntimeArgs = dec(op, args)?;
             enc(&backend
-                .workload_spec(a.runtime, &a.endpoint)
+                .workload_spec(a.runtime, &a.instance, &a.routes)
                 .await
                 .map_err(err)?)
         }
         "backup" => {
-            let a: EndpointArg = dec(op, args)?;
-            enc(&backend.backup(&a.endpoint).await.map_err(err)?)
+            let a: BackupArgs = dec(op, args)?;
+            enc(&backend
+                .backup(&a.instance, a.runtime, a.method.as_deref())
+                .await
+                .map_err(err)?)
         }
         "restore" => {
             let a: RestoreArgs = dec(op, args)?;
-            enc(&backend.restore(&a.endpoint, &a.from).await.map_err(err)?)
+            enc(&backend
+                .restore(&a.instance, a.runtime, a.method.as_deref(), &a.from)
+                .await
+                .map_err(err)?)
         }
         "configure" => {
             let a: ConfigureArgs = dec(op, args)?;
             enc(&backend
-                .configure(&a.endpoint, &a.config)
+                .configure(&a.instance, &a.routes, &a.config)
                 .await
                 .map_err(err)?)
         }
         "status" => {
-            let a: EndpointArg = dec(op, args)?;
-            enc(&backend.status(&a.endpoint).await.map_err(err)?)
+            let a: ReachArgs = dec(op, args)?;
+            enc(&backend.status(&a.instance, &a.routes).await.map_err(err)?)
         }
         other => Err(serde_json::Value::String(format!(
             "backend has no operation '{other}'"
@@ -756,7 +736,10 @@ const IN_GUEST_TARBALL: &str = "/tmp/orca-backup.tar.gz";
 #[cfg(feature = "in-process")]
 pub struct BackupContext<'a> {
     pub runtime: Runtime,
-    pub endpoint: &'a Endpoint,
+    /// The instance HANDLE: the container name for docker/podman, the `vmid`
+    /// for lxc. This is the only thing a backup method ever read off the old
+    /// `Endpoint`.
+    pub instance: &'a str,
     pub provider: &'a str,
     pub data_paths: &'a [String],
 }
@@ -836,8 +819,8 @@ pub fn pbs_available() -> bool {
 /// wins; otherwise a Proxmox LXC/VM with PBS available routes to `pbs`; else
 /// `tar`. Falls back to `tar` if the chosen method isn't registered.
 #[cfg(feature = "in-process")]
-pub fn select_method(ep: &Endpoint, runtime: Runtime) -> Arc<dyn BackupMethod> {
-    if let Some(name) = ep.backup_method.as_deref()
+pub fn select_method(method_name: Option<&str>, runtime: Runtime) -> Arc<dyn BackupMethod> {
+    if let Some(name) = method_name
         && let Some(m) = backup_method(name)
     {
         return m;
@@ -931,11 +914,8 @@ impl BackupMethod for TarMethod {
             let out_dir = "/var/tmp/orca-backups";
             std::fs::create_dir_all(out_dir)
                 .map_err(|e| ServiceError::Other(format!("mkdir {out_dir}: {e}")))?;
-            let out_path = format!(
-                "{out_dir}/{}-{}-{stamp}.tar.gz",
-                ctx.provider, ctx.endpoint.name
-            );
-            let handle = &ctx.endpoint.name;
+            let out_path = format!("{out_dir}/{}-{}-{stamp}.tar.gz", ctx.provider, ctx.instance);
+            let handle = &ctx.instance;
             let tar_cmd = format!("tar czf {IN_GUEST_TARBALL} {}", ctx.data_paths.join(" "));
 
             if ctx.runtime == Runtime::Lxc {
@@ -943,7 +923,7 @@ impl BackupMethod for TarMethod {
                     bin,
                     &[
                         "exec".into(),
-                        handle.clone(),
+                        handle.to_string(),
                         "--".into(),
                         "sh".into(),
                         "-c".into(),
@@ -955,7 +935,7 @@ impl BackupMethod for TarMethod {
                     bin,
                     &[
                         "pull".into(),
-                        handle.clone(),
+                        handle.to_string(),
                         IN_GUEST_TARBALL.into(),
                         out_path.clone(),
                     ],
@@ -966,7 +946,7 @@ impl BackupMethod for TarMethod {
                     bin,
                     &[
                         "exec".into(),
-                        handle.clone(),
+                        handle.to_string(),
                         "sh".into(),
                         "-c".into(),
                         tar_cmd,
@@ -986,7 +966,7 @@ impl BackupMethod for TarMethod {
 
             Ok(BackupArtifact {
                 service: ctx.provider.to_string(),
-                instance: ctx.endpoint.name.clone(),
+                instance: ctx.instance.to_string(),
                 path: out_path,
                 timestamp: stamp,
                 ..Default::default()
@@ -1003,14 +983,14 @@ impl BackupMethod for TarMethod {
             let bin = TarMethod::cli(ctx.runtime).ok_or_else(|| {
                 ServiceError::Unsupported("restore".into(), format!("tar on {:?}", ctx.runtime))
             })?;
-            let handle = &ctx.endpoint.name;
+            let handle = &ctx.instance;
             let extract = format!("tar xzf {IN_GUEST_TARBALL} -C /");
             if ctx.runtime == Runtime::Lxc {
                 run(
                     bin,
                     &[
                         "push".into(),
-                        handle.clone(),
+                        handle.to_string(),
                         from.path.clone(),
                         IN_GUEST_TARBALL.into(),
                     ],
@@ -1020,7 +1000,7 @@ impl BackupMethod for TarMethod {
                     bin,
                     &[
                         "exec".into(),
-                        handle.clone(),
+                        handle.to_string(),
                         "--".into(),
                         "sh".into(),
                         "-c".into(),
@@ -1042,7 +1022,7 @@ impl BackupMethod for TarMethod {
                     bin,
                     &[
                         "exec".into(),
-                        handle.clone(),
+                        handle.to_string(),
                         "sh".into(),
                         "-c".into(),
                         extract,
@@ -1092,7 +1072,7 @@ impl BackupMethod for PbsMethod {
                     run(
                         "vzdump",
                         &[
-                            ctx.endpoint.name.clone(), // vmid
+                            ctx.instance.to_string(), // vmid
                             "--storage".into(),
                             storage.clone(),
                             "--mode".into(),
@@ -1102,8 +1082,8 @@ impl BackupMethod for PbsMethod {
                     .await?;
                     Ok(BackupArtifact {
                         service: ctx.provider.to_string(),
-                        instance: ctx.endpoint.name.clone(),
-                        path: format!("pbs:{storage}/{}", ctx.endpoint.name),
+                        instance: ctx.instance.to_string(),
+                        path: format!("pbs:{storage}/{}", ctx.instance),
                         timestamp: stamp,
                         ..Default::default()
                     })
@@ -1124,8 +1104,8 @@ impl BackupMethod for PbsMethod {
                     run("proxmox-backup-client", &args).await?;
                     Ok(BackupArtifact {
                         service: ctx.provider.to_string(),
-                        instance: ctx.endpoint.name.clone(),
-                        path: format!("pbs:{}", ctx.endpoint.name),
+                        instance: ctx.instance.to_string(),
+                        path: format!("pbs:{}", ctx.instance),
                         timestamp: stamp,
                         ..Default::default()
                     })
@@ -1171,7 +1151,8 @@ mod tests {
         }
         fn status<'a>(
             &'a self,
-            _ep: &'a Endpoint,
+            _instance: &'a str,
+            _routes: &'a Routes,
         ) -> BoxFuture<'a, Result<ServiceStatus, ServiceError>> {
             Box::pin(async move {
                 Ok(ServiceStatus {
@@ -1224,7 +1205,7 @@ mod tests {
         let out = dispatch_op(
             &f,
             "status",
-            serde_json::json!({"endpoint":{"name":"x","base_url":"http://h"}}),
+            serde_json::json!({"instance":"x","routes":[]}),
         )
         .await
         .expect("status ok");
@@ -1234,7 +1215,7 @@ mod tests {
         let err = dispatch_op(
             &f,
             "workload_spec",
-            serde_json::json!({"runtime":"docker","endpoint":{"name":"x","base_url":""}}),
+            serde_json::json!({"runtime":"docker","instance":"x","routes":[]}),
         )
         .await
         .expect_err("workload_spec unimplemented");
@@ -1355,33 +1336,29 @@ mod tests {
 
     // ── Model serde ──────────────────────────────────────────────────────
 
+    // #615: reachability is the ordered route set and nothing else. The two
+    // derived reads the old `Endpoint` provided now live on `Routes`, where they
+    // were always pure functions of the routes anyway.
     #[test]
-    fn endpoint_round_trips_and_defaults_optional_fields() {
-        let ep: Endpoint =
-            serde_json::from_value(serde_json::json!({"name":"x","base_url":"http://h"}))
-                .expect("minimal endpoint decodes");
-        assert_eq!(ep.name, "x");
-        assert_eq!(ep.target_host, "");
-        assert_eq!(ep.runtime, None);
-        assert_eq!(ep.backup_method, None);
-        assert_eq!(ep.token, "");
+    fn routes_carry_the_address_and_the_two_reads_derived_from_it() {
+        let routes = Routes::from(vec![Route::new("lan_v4", "http", "h", Some(4533))]);
+        let s = serde_json::to_string(&routes).unwrap();
+        let back: Routes = serde_json::from_str(&s).unwrap();
 
-        let full = Endpoint {
-            name: "n".into(),
-            routes: Routes::from(vec![Route::new("lan_v4", "http", "h", Some(4533))]),
-            target_host: "host".into(),
-            runtime: Some(Runtime::Lxc),
-            backup_method: Some("tar".into()),
-            token: "t".into(),
-        };
-        let s = serde_json::to_string(&full).unwrap();
-        let back: Endpoint = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.runtime, Some(Runtime::Lxc));
-        assert_eq!(back.backup_method.as_deref(), Some("tar"));
-        assert_eq!(back.token, "t");
-        // Routes survive the round-trip and drive the two derived reads.
         assert_eq!(back.primary_url(), "http://h:4533");
         assert_eq!(back.publish_port(0), 4533);
+
+        // No route at all is addressable-as-nothing, not a panic, and the
+        // caller's own default port stands.
+        let none = Routes::new();
+        assert_eq!(none.primary_url(), "");
+        assert_eq!(none.publish_port(8080), 8080);
+
+        // `publish_port` reads the LOCAL bind specifically: a reach-only route
+        // must not be mistaken for the host bind.
+        let reach_only = Routes::from(vec![Route::new("fqdn", "https", "x.example", Some(443))]);
+        assert_eq!(reach_only.publish_port(8080), 8080);
+        assert_eq!(reach_only.primary_url(), "https://x.example:443");
     }
 
     #[test]
@@ -1437,9 +1414,10 @@ mod tests {
         fn workload_spec<'a>(
             &'a self,
             runtime: Runtime,
-            ep: &'a Endpoint,
+            instance: &'a str,
+            _routes: &'a Routes,
         ) -> BoxFuture<'a, Result<WorkloadSpec, ServiceError>> {
-            let name = format!("{}-{}", ep.name, runtime_str(runtime));
+            let name = format!("{}-{}", instance, runtime_str(runtime));
             Box::pin(async move {
                 Ok(WorkloadSpec {
                     name,
@@ -1449,7 +1427,8 @@ mod tests {
         }
         fn configure<'a>(
             &'a self,
-            _ep: &'a Endpoint,
+            _instance: &'a str,
+            _routes: &'a Routes,
             config: &'a str,
         ) -> BoxFuture<'a, Result<(), ServiceError>> {
             Box::pin(async move {
@@ -1469,7 +1448,7 @@ mod tests {
         let out = dispatch_op(
             &b,
             "workload_spec",
-            serde_json::json!({"runtime":"docker","endpoint":{"name":"x","base_url":""}}),
+            serde_json::json!({"runtime":"docker","instance":"x","routes":[]}),
         )
         .await
         .expect("workload_spec ok");
@@ -1484,7 +1463,7 @@ mod tests {
         dispatch_op(
             &b,
             "configure",
-            serde_json::json!({"endpoint":{"name":"x","base_url":""},"config":"yaml"}),
+            serde_json::json!({"instance":"x","routes":[],"config":"yaml"}),
         )
         .await
         .expect("configure ok");
@@ -1493,7 +1472,7 @@ mod tests {
         let e = dispatch_op(
             &b,
             "configure",
-            serde_json::json!({"endpoint":{"name":"x","base_url":""},"config":""}),
+            serde_json::json!({"instance":"x","routes":[],"config":""}),
         )
         .await
         .expect_err("empty config errors")
@@ -1507,13 +1486,9 @@ mod tests {
         let f = Fake {
             name: "fake".into(),
         };
-        let e = dispatch_op(
-            &f,
-            "backup",
-            serde_json::json!({"endpoint":{"name":"x","base_url":""}}),
-        )
-        .await
-        .expect_err("backup needs runtime or unimpl");
+        let e = dispatch_op(&f, "backup", serde_json::json!({"instance":"x"}))
+            .await
+            .expect_err("backup needs runtime or unimpl");
         // Fake declares runtimes, so the generic backup proceeds to method
         // selection; either way the op errored deterministically (no panic).
         assert!(!e.to_string().is_empty());
@@ -1521,7 +1496,7 @@ mod tests {
         let e = dispatch_op(
             &f,
             "restore",
-            serde_json::json!({"endpoint":{"name":"x","base_url":""},"from":{"service":"s","instance":"i","path":"/p","timestamp":"t"}}),
+            serde_json::json!({"instance":"x","from":{"service":"s","instance":"i","path":"/p","timestamp":"t"}}),
         )
         .await
         .expect_err("restore errors without a real instance");
@@ -1548,7 +1523,7 @@ mod tests {
     async fn register_from_def_wires_proxy_ops_and_deregisters() {
         let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String| match op {
             "status" => {
-                let _a: EndpointArg = serde_json::from_str(&args_json).unwrap();
+                let _a: ReachArgs = serde_json::from_str(&args_json).unwrap();
                 let st = ServiceStatus {
                     healthy: true,
                     detail: "proxied".into(),
@@ -1583,11 +1558,13 @@ mod tests {
             vec![ServiceCapability::Status, ServiceCapability::Configure]
         );
 
-        let ep = Endpoint::with_lan_route("main", "http", "abs", None);
-        let st = b.status(&ep).await.expect("proxied status");
+        let routes = Routes::from(vec![Route::new("lan_v4", "http", "abs", None)]);
+        let st = b.status("main", &routes).await.expect("proxied status");
         assert!(st.healthy);
         assert_eq!(st.detail, "proxied");
-        b.configure(&ep, "cfg").await.expect("proxied configure");
+        b.configure("main", &routes, "cfg")
+            .await
+            .expect("proxied configure");
 
         assert!(deregister_backend("proxy-abs"));
         assert!(backend("proxy-abs").is_none());
@@ -1697,16 +1674,13 @@ mod tests {
     #[tokio::test]
     async fn pbs_restore_is_intentionally_unsupported() {
         let pbs = PbsMethod;
-        let ep = Endpoint {
-            name: "100".into(),
-            ..Default::default()
-        };
+        let instance = "100";
         let art = BackupArtifact::default();
         let e = pbs
             .restore(
                 BackupContext {
                     runtime: Runtime::Lxc,
-                    endpoint: &ep,
+                    instance,
                     provider: "abs",
                     data_paths: &[],
                 },
@@ -1724,15 +1698,12 @@ mod tests {
     #[tokio::test]
     async fn tar_backup_rejects_empty_data_paths_and_bare_vm() {
         let tar = TarMethod;
-        let ep = Endpoint {
-            name: "inst".into(),
-            ..Default::default()
-        };
+        let instance = "inst";
         // Empty data_paths → clear guidance error, before any subprocess.
         let e = tar
             .backup(BackupContext {
                 runtime: Runtime::Docker,
-                endpoint: &ep,
+                instance,
                 provider: "abs",
                 data_paths: &[],
             })
@@ -1745,7 +1716,7 @@ mod tests {
         let e = tar
             .backup(BackupContext {
                 runtime: Runtime::Vm,
-                endpoint: &ep,
+                instance,
                 provider: "abs",
                 data_paths: &paths,
             })
@@ -1758,16 +1729,13 @@ mod tests {
     #[tokio::test]
     async fn tar_restore_on_bare_vm_is_unsupported() {
         let tar = TarMethod;
-        let ep = Endpoint {
-            name: "inst".into(),
-            ..Default::default()
-        };
+        let instance = "inst";
         let art = BackupArtifact::default();
         let e = tar
             .restore(
                 BackupContext {
                     runtime: Runtime::Vm,
-                    endpoint: &ep,
+                    instance,
                     provider: "abs",
                     data_paths: &[],
                 },
@@ -1804,20 +1772,16 @@ mod tests {
             }
         }
         register_method(Arc::new(Restic));
-        let ep = Endpoint {
-            backup_method: Some("restic-test".into()),
-            ..Default::default()
-        };
-        assert_eq!(select_method(&ep, Runtime::Docker).name(), "restic-test");
+        let method = Some("restic-test");
+        assert_eq!(select_method(method, Runtime::Docker).name(), "restic-test");
     }
 
     #[cfg(feature = "in-process")]
     #[test]
     fn select_method_defaults_to_tar_for_containers() {
         // Docker/Podman are never PBS-native, so they always route to tar.
-        let ep = Endpoint::default();
-        assert_eq!(select_method(&ep, Runtime::Docker).name(), "tar");
-        assert_eq!(select_method(&ep, Runtime::Podman).name(), "tar");
+        assert_eq!(select_method(None, Runtime::Docker).name(), "tar");
+        assert_eq!(select_method(None, Runtime::Podman).name(), "tar");
     }
 
     #[cfg(feature = "in-process")]
@@ -1825,11 +1789,8 @@ mod tests {
     fn select_method_falls_back_to_tar_when_choice_unregistered() {
         // An explicit but unknown method name doesn't match; falls to the auto
         // choice (tar for a container).
-        let ep = Endpoint {
-            backup_method: Some("ghost".into()),
-            ..Default::default()
-        };
-        assert_eq!(select_method(&ep, Runtime::Docker).name(), "tar");
+        let method = Some("ghost");
+        assert_eq!(select_method(method, Runtime::Docker).name(), "tar");
     }
 
     #[cfg(feature = "in-process")]
@@ -1872,16 +1833,16 @@ mod tests {
                 let a: RuntimeArgs = serde_json::from_str(&args_json).unwrap();
                 // Echo the runtime + instance name back through the WorkloadSpec.
                 let spec = WorkloadSpec {
-                    name: format!("{}-{}", a.endpoint.name, runtime_str(a.runtime)),
+                    name: format!("{}-{}", a.instance, runtime_str(a.runtime)),
                     ..Default::default()
                 };
                 Ok(serde_json::to_string(&spec).unwrap())
             }
             "backup" => {
-                let a: EndpointArg = serde_json::from_str(&args_json).unwrap();
+                let a: BackupArgs = serde_json::from_str(&args_json).unwrap();
                 let art = BackupArtifact {
                     service: "proxied".into(),
-                    instance: a.endpoint.name.clone(),
+                    instance: a.instance.to_string(),
                     path: "/backups/x.tar.gz".into(),
                     timestamp: "20250101-000000".into(),
                     ..Default::default()
@@ -1907,18 +1868,17 @@ mod tests {
         .expect("def registers");
 
         let b = backend("proxy-full").expect("registered");
-        let ep = Endpoint {
-            name: "main".into(),
-            ..Default::default()
-        };
-
+        let instance = "main";
         let spec = b
-            .workload_spec(Runtime::Docker, &ep)
+            .workload_spec(Runtime::Docker, instance, &Routes::new())
             .await
             .expect("proxied workload_spec");
         assert_eq!(spec.name, "main-docker");
 
-        let art = b.backup(&ep).await.expect("proxied backup");
+        let art = b
+            .backup(instance, None, None)
+            .await
+            .expect("proxied backup");
         assert_eq!(art.service, "proxied");
         assert_eq!(art.instance, "main");
         assert_eq!(art.path, "/backups/x.tar.gz");
@@ -1927,7 +1887,9 @@ mod tests {
             path: "/backups/x.tar.gz".into(),
             ..Default::default()
         };
-        b.restore(&ep, &from).await.expect("proxied restore");
+        b.restore(instance, None, None, &from)
+            .await
+            .expect("proxied restore");
 
         assert!(deregister_backend("proxy-full"));
     }
@@ -1949,7 +1911,7 @@ mod tests {
         .expect("def registers");
         let b = backend("proxy-baddec").expect("registered");
         let e = b
-            .status(&Endpoint::default())
+            .status("main", &Routes::new())
             .await
             .expect_err("bad thunk output");
         assert!(e.to_string().contains("decode `status` result"), "{e}");
@@ -1974,7 +1936,7 @@ mod tests {
         .expect("def registers");
         let b = backend("proxy-err").expect("registered");
         let e = b
-            .status(&Endpoint::default())
+            .status("main", &Routes::new())
             .await
             .expect_err("thunk error");
         assert!(e.to_string().contains("upstream boom"), "{e}");
@@ -1989,15 +1951,12 @@ mod tests {
     #[tokio::test]
     async fn pbs_file_backup_rejects_empty_data_paths() {
         let pbs = PbsMethod;
-        let ep = Endpoint {
-            name: "cont".into(),
-            ..Default::default()
-        };
+        let instance = "cont";
         for rt in [Runtime::Docker, Runtime::Podman] {
             let e = pbs
                 .backup(BackupContext {
                     runtime: rt,
-                    endpoint: &ep,
+                    instance,
                     provider: "abs",
                     data_paths: &[],
                 })
@@ -2091,16 +2050,13 @@ mod tests {
     #[tokio::test]
     async fn tar_backup_builds_and_runs_both_runtime_branches() {
         let tar = TarMethod;
-        let ep = Endpoint {
-            name: "orca-cov-absent-instance".into(),
-            ..Default::default()
-        };
+        let instance = "orca-cov-absent-instance";
         let paths = ["/config".to_string()];
         for rt in [Runtime::Docker, Runtime::Lxc] {
             let e = tar
                 .backup(BackupContext {
                     runtime: rt,
-                    endpoint: &ep,
+                    instance,
                     provider: "abs",
                     data_paths: &paths,
                 })
@@ -2114,10 +2070,7 @@ mod tests {
     #[tokio::test]
     async fn tar_restore_builds_and_runs_both_runtime_branches() {
         let tar = TarMethod;
-        let ep = Endpoint {
-            name: "orca-cov-absent-instance".into(),
-            ..Default::default()
-        };
+        let instance = "orca-cov-absent-instance";
         let from = BackupArtifact {
             path: "/var/tmp/orca-nope.tar.gz".into(),
             ..Default::default()
@@ -2127,7 +2080,7 @@ mod tests {
                 .restore(
                     BackupContext {
                         runtime: rt,
-                        endpoint: &ep,
+                        instance,
                         provider: "abs",
                         data_paths: &[],
                     },
@@ -2144,15 +2097,12 @@ mod tests {
     #[tokio::test]
     async fn pbs_backup_guest_branch_runs_vzdump() {
         let pbs = PbsMethod;
-        let ep = Endpoint {
-            name: "100".into(),
-            ..Default::default()
-        };
+        let instance = "100";
         for rt in [Runtime::Lxc, Runtime::Vm] {
             let e = pbs
                 .backup(BackupContext {
                     runtime: rt,
-                    endpoint: &ep,
+                    instance,
                     provider: "abs",
                     data_paths: &[],
                 })
@@ -2166,15 +2116,12 @@ mod tests {
     #[tokio::test]
     async fn pbs_file_backup_branch_runs_backup_client() {
         let pbs = PbsMethod;
-        let ep = Endpoint {
-            name: "cont".into(),
-            ..Default::default()
-        };
+        let instance = "cont";
         let paths = ["/config".to_string(), "/data".to_string()];
         let e = pbs
             .backup(BackupContext {
                 runtime: Runtime::Docker,
-                endpoint: &ep,
+                instance,
                 provider: "abs",
                 data_paths: &paths,
             })
@@ -2206,7 +2153,7 @@ mod tests {
         // No declared runtimes and no endpoint.runtime → the generic backup
         // has nothing to back up against.
         let e = Minimal
-            .backup(&Endpoint::default())
+            .backup("main", None, None)
             .await
             .expect_err("no runtime to select");
         assert!(
@@ -2219,7 +2166,7 @@ mod tests {
     #[tokio::test]
     async fn generic_restore_errors_without_a_runtime() {
         let e = Minimal
-            .restore(&Endpoint::default(), &BackupArtifact::default())
+            .restore("main", None, None, &BackupArtifact::default())
             .await
             .expect_err("no runtime to select");
         assert!(
@@ -2231,13 +2178,16 @@ mod tests {
     #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn trait_default_configure_status_workload_spec_are_unimplemented() {
-        let ep = Endpoint::default();
-        let e = Minimal.configure(&ep, "cfg").await.expect_err("default");
+        let routes = Routes::new();
+        let e = Minimal
+            .configure("main", &routes, "cfg")
+            .await
+            .expect_err("default");
         assert_eq!(e.to_string(), "`configure` not yet implemented");
-        let e = Minimal.status(&ep).await.expect_err("default");
+        let e = Minimal.status("main", &routes).await.expect_err("default");
         assert_eq!(e.to_string(), "`status` not yet implemented");
         let e = Minimal
-            .workload_spec(Runtime::Docker, &ep)
+            .workload_spec(Runtime::Docker, "main", &routes)
             .await
             .expect_err("default");
         assert_eq!(e.to_string(), "`workload_spec` not yet implemented");
@@ -2247,15 +2197,13 @@ mod tests {
     // generic backup proceeds to method selection even for a Minimal backend.
     #[cfg(feature = "in-process")]
     #[tokio::test]
-    async fn generic_backup_uses_endpoint_runtime_override() {
-        let ep = Endpoint {
-            name: "orca-cov-absent".into(),
-            runtime: Some(Runtime::Docker),
-            ..Default::default()
-        };
+    async fn generic_backup_uses_the_runtime_override_it_is_given() {
         // Minimal declares no data_paths → tar method rejects with a clear error
         // before any subprocess.
-        let e = Minimal.backup(&ep).await.expect_err("no data_paths");
+        let e = Minimal
+            .backup("orca-cov-absent", Some(Runtime::Docker), None)
+            .await
+            .expect_err("no data_paths");
         assert!(e.to_string().contains("no data_paths"), "{e}");
     }
 

@@ -913,7 +913,11 @@ fn parse_capability(s: &str) -> Result<Capability, StorageError> {
         "remove" => Ok(Capability::Remove),
         "recover_stale" => Ok(Capability::RecoverStale),
         other => Err(StorageError::Other(format!(
-            "unknown storage capability `{other}`"
+            "unknown storage capability `{other}` — this plugin declares a capability \
+             orca {orca} does not implement, which normally means it was built \
+             against a newer orca than this host runs. Install a plugin release built \
+             for this orca, or update orca first (#605).",
+            orca = env!("CARGO_PKG_VERSION")
         ))),
     }
 }
@@ -1659,5 +1663,36 @@ mod tests {
         );
 
         deregister_backend("port-nfs");
+    }
+
+    // #605: unraid rc.9 declared `export_write`, a capability that existed only
+    // on orca main. Every fleet host refused it with "unknown storage capability
+    // `export_write`" — true, and useless: it never said the plugin was built
+    // against a newer orca, so the fix was not discoverable from the error.
+    #[test]
+    fn an_unknown_capability_says_it_is_a_version_problem() {
+        let err = parse_capability("export_write_from_the_future").unwrap_err();
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("export_write_from_the_future"),
+            "names the capability: {msg}"
+        );
+        assert!(
+            msg.contains(env!("CARGO_PKG_VERSION")),
+            "names the orca this host runs, so the mismatch is visible: {msg}"
+        );
+        assert!(
+            msg.contains("newer orca"),
+            "says what the cause normally is: {msg}"
+        );
+        assert!(
+            msg.contains("update orca"),
+            "and what to do about it: {msg}"
+        );
+
+        // A capability this orca DOES implement still parses — the message is
+        // the only thing that changed.
+        assert!(parse_capability("export_write").is_ok());
     }
 }

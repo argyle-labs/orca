@@ -1499,7 +1499,8 @@ mod loader_tests {
     /// result string back into a typed `ServiceStatus`.
     #[tokio::test]
     async fn service_backend_thunk_routes_success() {
-        use plugin_toolkit::service::{self, Endpoint};
+        use plugin_toolkit::service::Routes;
+        use plugin_toolkit::service::{self};
         let name = "loader-service-ok";
         let invoke: BackendInvoke = Arc::new(|op: &str, _args: sj::Value| {
             assert_eq!(op, "status");
@@ -1519,7 +1520,7 @@ mod loader_tests {
 
         let backend = service::backend(name).expect("backend is registered");
         let status = backend
-            .status(&Endpoint::default())
+            .status("main", &Routes::new())
             .await
             .expect("status succeeds through the thunk");
         assert!(
@@ -1536,7 +1537,8 @@ mod loader_tests {
     /// `BackendInvoke` becomes a `ServiceError` carrying the rendered message.
     #[tokio::test]
     async fn service_backend_thunk_surfaces_error() {
-        use plugin_toolkit::service::{self, Endpoint};
+        use plugin_toolkit::service::Routes;
+        use plugin_toolkit::service::{self};
         let name = "loader-service-err";
         let invoke: BackendInvoke =
             Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("svc-down".into())));
@@ -1552,7 +1554,7 @@ mod loader_tests {
 
         let backend = service::backend(name).expect("backend is registered");
         let err = backend
-            .status(&Endpoint::default())
+            .status("main", &Routes::new())
             .await
             .expect_err("status fails through the thunk");
         assert!(

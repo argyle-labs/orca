@@ -1874,10 +1874,15 @@ async fn storage_mount_detail(
     } else {
         anyhow::bail!("pass `--id`, or both `--host` and `--name`");
     };
-    let this_host = crate::host_identity::machine_id();
-    if row.host != this_host {
-        let mut got =
-            authoritative_foreign_views(std::iter::once(row.host.clone()).collect(), ctx).await;
+    // The caller addressed a PLACEMENT, not a host. Where it is answered is
+    // orca's problem: this host if it owns the row, otherwise the system that
+    // does (#647). An owner that cannot be reached falls through to the local
+    // projection below, which reports foreign liveness as `Unknown` rather than
+    // as this host's stale copy.
+    if let crate::owner::Answers::Owner(owner) =
+        crate::owner::answers_for(&row.host, crate::host_identity::machine_id())
+    {
+        let mut got = authoritative_foreign_views(std::iter::once(owner).collect(), ctx).await;
         if let Some(v) = got.remove(&row.id) {
             return Ok(v);
         }
@@ -1886,7 +1891,11 @@ async fn storage_mount_detail(
         .unwrap_or_default()
         .into_iter()
         .find(|s| s.id == row.share_id);
-    Ok(mount_view(&row, share.as_ref(), row.host == this_host))
+    let is_local = matches!(
+        crate::owner::answers_for(&row.host, crate::host_identity::machine_id()),
+        crate::owner::Answers::Locally
+    );
+    Ok(mount_view(&row, share.as_ref(), is_local))
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
