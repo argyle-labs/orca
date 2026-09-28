@@ -398,7 +398,16 @@ pub struct LoginOutput {
 // only working path. The handler self-validates credentials and throttles, and
 // the REST middleware only lets this verb through unauthenticated from loopback
 // (remote login uses `/api/auth/web/signin`, which throttles per real IP).
-#[orca_tool(domain = "auth", verb = "login", role = "any", cli = manual)]
+// Not execute-gated: a login cannot be planned. There is no "what would
+// change" to show an operator — the act of authenticating IS the call, and a
+// dry-run that returns a plan instead of a session just breaks sign-in (#636).
+#[orca_tool(
+    domain = "auth",
+    verb = "login",
+    role = "any",
+    cli = manual,
+    execute_gated = false
+)]
 async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<LoginOutput> {
     let username = args.username.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
@@ -632,7 +641,9 @@ pub struct LogoutOutput {
 /// [MUTATES STATE] Revoke the on-disk CLI session and remove
 /// `$ORCA_HOME/session`. Idempotent — `revoked=false` means there was no
 /// active session to clear.
-#[orca_tool(domain = "auth", verb = "logout")]
+// Not execute-gated, for the same reason as `login`, and because refusing to
+// revoke a session until a second opt-in arrives is a security footgun.
+#[orca_tool(domain = "auth", verb = "logout", execute_gated = false)]
 async fn auth_logout(_args: LogoutArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<LogoutOutput> {
     let session_path = files::ops::orca_home().map(|d| d.join("session"));
     let mut revoked = false;

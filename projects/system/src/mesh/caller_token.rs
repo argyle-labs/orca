@@ -227,6 +227,7 @@ mod tests {
             user_id: "u-1".into(),
             username: "scott".into(),
             role: "admin".into(),
+            can_mutate: false,
         }
     }
 
