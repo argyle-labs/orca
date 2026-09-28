@@ -1551,7 +1551,8 @@ async fn mount_unmount(provider: &str, target: &str) -> anyhow::Result<MountOutc
 pub enum StorageMountAction {
     /// Render the declared `managed_mounts` into the autofs map and reload.
     Apply,
-    /// Unmount `target` on the named `provider` backend.
+    /// Release a mount: `--id <placement>` (backend and path come from the row,
+    /// run on its owner), or a raw `--provider` + `--target` on this host.
     Unmount,
     /// Self-heal stale autofs mounts across the declared network shares.
     Recover,
@@ -1566,9 +1567,9 @@ pub struct StorageMountUpdateArgs {
 
     // ── The `mounts` placement, keyed by `id` ──
     /// Placement uuidv7 `id` (the row PK). With `action` omitted, the row to
-    /// edit. With `action=apply`, the placement being ADDRESSED: orca converges
-    /// the host that row declares as its owner, not whichever daemon took the
-    /// call (#647).
+    /// edit. With `action=apply` or `action=unmount`, the placement being
+    /// ADDRESSED: orca acts on the host that row declares as its owner, not on
+    /// whichever daemon took the call (#647).
     #[arg(long)]
     pub id: Option<String>,
     /// New per-host `name` label for this placement (unique per `host`).
@@ -1581,6 +1582,8 @@ pub struct StorageMountUpdateArgs {
     #[arg(long)]
     pub host: Option<String>,
     /// New absolute mountpoint on `host`; also the `action=unmount` target.
+    /// With `action=unmount --id`, optional — it defaults to the addressed
+    /// placement's own target, and overrides it when given.
     #[arg(long)]
     pub target: Option<String>,
     /// New serialized remount policy for this placement.
@@ -1751,6 +1754,81 @@ async fn mount_apply_addressed(
     }
 }
 
+/// Release the mount a placement declares, on the host that declares it.
+///
+/// `mount_unmount` takes a raw `(provider, target)` and releases it on whatever
+/// daemon runs it, so naming another host's target either unmounted a
+/// same-named path here or failed — the caller chose the host, which is exactly
+/// what #647 forbids. Addressing the PLACEMENT resolves its owner and routes
+/// there; the backend and path come from the row rather than from the operator.
+///
+/// The provider is a single deterministic value: `mounts.share_id` → the
+/// share's `backend`. A share's several routes are failover SOURCES, not
+/// alternative backends, so there is no ambiguity to resolve here.
+///
+/// Passing `--provider`/`--target` without `--id` keeps the old raw behaviour.
+async fn mount_unmount_addressed(
+    args: &StorageMountUpdateArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageMountUpdateOutput> {
+    let Some(id) = args.id.as_deref() else {
+        let provider = args.provider.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("pass `--id`, or both `--provider` and `--target`, for action=unmount")
+        })?;
+        let target = args.target.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("pass `--id`, or both `--provider` and `--target`, for action=unmount")
+        })?;
+        return Ok(StorageMountUpdateOutput::Unmount(
+            mount_unmount(provider, target).await?,
+        ));
+    };
+    let row = crate::mounts::endpoint_db::get_by_id(id)?
+        .ok_or_else(|| plugin_toolkit::runtime::missing_row_error("storage.mount", id))?;
+    if let crate::owner::Answers::Owner(owner) =
+        crate::owner::answers_for(&row.host, crate::host_identity::machine_id())
+    {
+        // Forward as-is; the owner sees itself and unmounts, so this terminates
+        // in one hop. An owner we cannot reach is an error, never a fallback to
+        // releasing something here.
+        return crate::owner::tell_owner::<StorageMountUpdate>(&owner, args.clone(), ctx)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("mount placement `{id}` is owned by `{owner}`; unmount {e}")
+            });
+    }
+    // Owned here. A guest placement is materialized INSIDE the guest by a
+    // `GuestMountApplier`, so a host-level backend unmount would release the
+    // wrong thing (or nothing) while reporting success. Refuse instead.
+    if let Some(guest) = row
+        .guest
+        .as_deref()
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+    {
+        anyhow::bail!(
+            "mount placement `{id}` is applied inside guest `{guest}`; a host-level unmount would not release it"
+        );
+    }
+    let provider = match args.provider.as_deref() {
+        Some(p) => p.to_string(),
+        None => crate::shares::endpoint_db::list()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|s| s.id == row.share_id)
+            .map(|s| s.backend)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "mount placement `{id}` references share `{}`, which no longer exists; pass `--provider` to unmount it anyway",
+                    row.share_id
+                )
+            })?,
+    };
+    let target = args.target.as_deref().unwrap_or(row.target.as_str());
+    Ok(StorageMountUpdateOutput::Unmount(
+        mount_unmount(&provider, target).await?,
+    ))
+}
+
 /// Edit a mount placement or drive one of the mount imperatives. `action`
 /// omitted → PATCH the `mounts` placement row (CRUD); `apply` / `unmount` /
 /// `recover` → the autofs-backed imperatives, byte-for-byte unchanged.
@@ -1762,19 +1840,7 @@ async fn storage_mount_update(
     match args.action {
         None => Ok(StorageMountUpdateOutput::Edit(mount_row_edit(&args)?)),
         Some(StorageMountAction::Apply) => mount_apply_addressed(&args, ctx).await,
-        Some(StorageMountAction::Unmount) => {
-            let provider = args
-                .provider
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("`provider` is required for action=unmount"))?;
-            let target = args
-                .target
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("`target` is required for action=unmount"))?;
-            Ok(StorageMountUpdateOutput::Unmount(
-                mount_unmount(provider, target).await?,
-            ))
-        }
+        Some(StorageMountAction::Unmount) => mount_unmount_addressed(&args, ctx).await,
         Some(StorageMountAction::Recover) => Ok(StorageMountUpdateOutput::Recover(
             mount_recover(args.health_timeout_secs).await?,
         )),
@@ -3697,6 +3763,113 @@ mod tests {
             .expect("build current-thread runtime")
     }
 
+    /// Insert a placement owned by THIS host, so the owner check resolves
+    /// `Locally` and the local branch is what gets exercised.
+    fn seed_local_mount(id: &str, share_id: &str, guest: Option<&str>) {
+        let row = crate::mounts::EndpointRow {
+            guest: guest.map(str::to_string),
+            id: id.into(),
+            name: format!("m-{id}"),
+            share_id: share_id.into(),
+            host: crate::host_identity::machine_id().to_string(),
+            target: "/mnt/data".into(),
+            remount_policy: None,
+            health: plugin_toolkit::storage::Health::Ok,
+            active_route: None,
+            active_options: None,
+            drift: false,
+            multi_mounted: false,
+            enabled: true,
+        };
+        crate::mounts::endpoint_db::insert(&row).expect("insert mount");
+    }
+
+    #[test]
+    fn unmount_addressed_at_a_foreign_placement_never_releases_anything_here() {
+        with_db("mount_unmount_foreign.db", || {
+            seed_share();
+            seed_mount("m-1", "h-other", "/mnt/data");
+            let ctx = test_ctx();
+            let args: StorageMountUpdateArgs =
+                serde_json::from_str(r#"{"action":"unmount","id":"m-1"}"#).unwrap();
+            let err = rt()
+                .block_on(mount_unmount_addressed(&args, &ctx))
+                .unwrap_err();
+            let msg = err.to_string();
+            // It routed at the owner rather than unmounting a same-named path
+            // here, and said plainly that nothing ran — the test ctx has no
+            // mesh transport, so this is the NotAttempted case.
+            assert!(msg.contains("owned by `h-other`"), "{msg}");
+            assert!(msg.contains("nothing ran"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn unmount_refuses_a_guest_placement_rather_than_unmounting_the_host() {
+        with_db("mount_unmount_guest.db", || {
+            seed_share();
+            seed_local_mount("m-guest", "sh-1", Some("101"));
+            let ctx = test_ctx();
+            let args: StorageMountUpdateArgs =
+                serde_json::from_str(r#"{"action":"unmount","id":"m-guest"}"#).unwrap();
+            let err = rt()
+                .block_on(mount_unmount_addressed(&args, &ctx))
+                .unwrap_err();
+            let msg = err.to_string();
+            // A guest placement is mounted inside the guest; releasing the host
+            // path would report success having freed the wrong thing.
+            assert!(msg.contains("inside guest `101`"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn unmount_derives_the_backend_from_the_addressed_placements_share() {
+        with_db("mount_unmount_backend.db", || {
+            // A backend name that is deliberately not registered: reaching the
+            // "no such backend" error proves the provider was derived from the
+            // share, and guarantees no real unmount is attempted in a test.
+            let share = crate::shares::EndpointRow {
+                id: "sh-odd".into(),
+                name: "odd".into(),
+                backend: "not-a-real-backend".into(),
+                fstype: "nfs4".into(),
+                options: "{}".into(),
+                options_rendered: String::new(),
+                credential: None,
+                replication: None,
+                routes: Default::default(),
+                enabled: true,
+            };
+            crate::shares::endpoint_db::insert(&share).expect("insert share");
+            seed_local_mount("m-local", "sh-odd", None);
+            let ctx = test_ctx();
+            let args: StorageMountUpdateArgs =
+                serde_json::from_str(r#"{"action":"unmount","id":"m-local"}"#).unwrap();
+            let err = rt()
+                .block_on(mount_unmount_addressed(&args, &ctx))
+                .unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("not-a-real-backend"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn unmount_without_an_id_still_requires_the_raw_provider_and_target() {
+        with_db("mount_unmount_raw.db", || {
+            let ctx = test_ctx();
+            let args: StorageMountUpdateArgs =
+                serde_json::from_str(r#"{"action":"unmount"}"#).unwrap();
+            let err = rt()
+                .block_on(mount_unmount_addressed(&args, &ctx))
+                .unwrap_err();
+            // The message names both ways of addressing it, so an operator who
+            // omitted everything learns the id form exists.
+            let msg = err.to_string();
+            assert!(msg.contains("--id"), "{msg}");
+            assert!(msg.contains("--provider"), "{msg}");
+        });
+    }
+
     #[test]
     fn storage_mount_create_inserts_and_returns_view() {
         with_db("mount_create_ok.db", || {
@@ -3814,7 +3987,7 @@ mod tests {
             let err = rt().block_on(storage_mount_update(args, &ctx)).unwrap_err();
             assert!(
                 err.to_string()
-                    .contains("`provider` is required for action=unmount"),
+                    .contains("pass `--id`, or both `--provider` and `--target`"),
                 "{err}"
             );
         });
@@ -3829,7 +4002,7 @@ mod tests {
             let err = rt().block_on(storage_mount_update(args, &ctx)).unwrap_err();
             assert!(
                 err.to_string()
-                    .contains("`target` is required for action=unmount"),
+                    .contains("pass `--id`, or both `--provider` and `--target`"),
                 "{err}"
             );
         });
