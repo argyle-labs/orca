@@ -1549,15 +1549,18 @@ pub enum StorageMountAction {
     Recover,
 }
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default, Clone)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StorageMountUpdateArgs {
     /// Imperative action. Omit to edit the `mounts` placement row (CRUD update).
     #[arg(long, value_enum)]
     pub action: Option<StorageMountAction>,
 
-    // ── CRUD row edit (action omitted) — the `mounts` placement, keyed by `id` ──
-    /// Placement uuidv7 `id` (the row PK) to edit.
+    // ── The `mounts` placement, keyed by `id` ──
+    /// Placement uuidv7 `id` (the row PK). With `action` omitted, the row to
+    /// edit. With `action=apply`, the placement being ADDRESSED: orca converges
+    /// the host that row declares as its owner, not whichever daemon took the
+    /// call (#647).
     #[arg(long)]
     pub id: Option<String>,
     /// New per-host `name` label for this placement (unique per `host`).
@@ -1698,19 +1701,59 @@ fn mount_row_edit(args: &StorageMountUpdateArgs) -> anyhow::Result<StorageMountE
     })
 }
 
+/// Converge the host an `apply` is addressed at — which is the host the named
+/// placement declares, never whichever daemon happened to take the call.
+///
+/// `mount_apply` is a whole-HOST convergence keyed on `machine_id()`. Before
+/// #647 the `--id` on an apply was parsed and then dropped, so
+/// `storage mount update --id <willow placement> --action apply` converged the
+/// operator's laptop instead — observed writing willow's autofs config to
+/// `/etc/auto.master` on macOS and reporting `changed: [...]` while doing it.
+/// Addressing a placement now resolves its owner and routes there.
+///
+/// With no `--id` this is still a local "converge me", which is the legitimate
+/// use the convergence loop itself makes of it.
+async fn mount_apply_addressed(
+    args: &StorageMountUpdateArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageMountUpdateOutput> {
+    let Some(id) = args.id.as_deref() else {
+        return Ok(StorageMountUpdateOutput::Apply(
+            mount_apply(args.trigger).await?,
+        ));
+    };
+    let row = crate::mounts::endpoint_db::get_by_id(id)?
+        .ok_or_else(|| plugin_toolkit::runtime::missing_row_error("storage.mount", id))?;
+    match crate::owner::answers_for(&row.host, crate::host_identity::machine_id()) {
+        crate::owner::Answers::Locally => Ok(StorageMountUpdateOutput::Apply(
+            mount_apply(args.trigger).await?,
+        )),
+        crate::owner::Answers::Owner(owner) => {
+            // Forward the call as-is. At the owner `answers_for` sees itself,
+            // so this terminates in exactly one hop. An owner we cannot reach
+            // is an error, never a fallback to applying here — applying here
+            // is the bug.
+            let forwarded = args.clone();
+            crate::owner::tell_owner::<StorageMountUpdate>(&owner, forwarded, ctx)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("mount placement `{id}` is owned by `{owner}`; apply {e}")
+                })
+        }
+    }
+}
+
 /// Edit a mount placement or drive one of the mount imperatives. `action`
 /// omitted → PATCH the `mounts` placement row (CRUD); `apply` / `unmount` /
 /// `recover` → the autofs-backed imperatives, byte-for-byte unchanged.
 #[orca_tool(domain = "storage.mount", verb = "update")]
 async fn storage_mount_update(
     args: StorageMountUpdateArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<StorageMountUpdateOutput> {
     match args.action {
         None => Ok(StorageMountUpdateOutput::Edit(mount_row_edit(&args)?)),
-        Some(StorageMountAction::Apply) => Ok(StorageMountUpdateOutput::Apply(
-            mount_apply(args.trigger).await?,
-        )),
+        Some(StorageMountAction::Apply) => mount_apply_addressed(&args, ctx).await,
         Some(StorageMountAction::Unmount) => {
             let provider = args
                 .provider
