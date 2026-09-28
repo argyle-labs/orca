@@ -148,7 +148,16 @@ pub async fn peer_detail(peer_id: &str, force: bool) -> Result<SystemStatusRepor
 /// Fetch (or serve from cache) a peer's `system.update` state.
 pub async fn peer_update(peer_id: &str, force: bool) -> Result<PeerUpdateFields> {
     get_or_fetch(&UPDATE_CACHE, peer_id, UPDATE_TTL, force, || async {
-        let res = crate::mesh::exec_peer(peer_id, "system.update", serde_json::json!({})).await?;
+        // `self_only`: ask this peer about ITSELF. Since no id means every
+        // system, a bare `{}` here would make each liveness pass ask every peer
+        // to fan out across the whole fleet — an O(n^2) storm on a timer, whose
+        // reply would not decode as `SystemUpdateOutput` either.
+        let res = crate::mesh::exec_peer(
+            peer_id,
+            "system.update",
+            serde_json::json!({ "self_only": true }),
+        )
+        .await?;
         let out: crate::commands::SystemUpdateOutput =
             serde_json::from_value(res.result).context("decode SystemUpdateOutput")?;
         Ok(update_fields_from_output(out))

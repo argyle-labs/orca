@@ -110,13 +110,15 @@ pub fn ops() -> impl Iterator<Item = &'static CliOp> {
 /// re-renders an existing op's command at the root with a different default.
 ///
 /// `orca update` is the aggregate "update all the things": the same
-/// `system.update` tool, defaulted to `--scope fleet` (every joined peer's
-/// daemon, then every installed plugin on every host). DRY RUN unless
-/// `--execute`, exactly like `system update`.
+/// `system.update` tool. It needs no overridden default any more — updating
+/// every system IS the default when no `--id` is given (#647) — so the alias is
+/// now pure spelling. DRY RUN unless `--execute`, exactly like `system update`.
 const CLI_ALIASES: &[(&str, &str, &str)] = &[("update", "system", "update")];
 
 /// Clap arg defaults an alias overrides, as `(alias, arg id, default value)`.
-const ALIAS_ARG_DEFAULTS: &[(&str, &str, &str)] = &[("update", "scope", "fleet")];
+/// Empty: `orca update` and `orca system update` now mean exactly the same
+/// thing. Kept because the mechanism is generic and the next alias may need it.
+const ALIAS_ARG_DEFAULTS: &[(&str, &str, &str)] = &[];
 
 /// Resolve a top-level command name to the aliased `(domain, verb)`.
 pub fn alias_target(name: &str) -> Option<(&'static str, &'static str)> {
@@ -363,7 +365,7 @@ pub async fn exec_local_daemon<T: contract::OrcaToolDef>(
 /// Verbs whose LAST act restarts the local daemon, mapped to the filename
 /// prefix of the run record they flush immediately before doing it.
 ///
-/// `system.update --scope fleet --execute` updates the local host last, on
+/// `system.update --execute` (every system) updates the local host last, on
 /// purpose ([[orca-must-never-bring-down-host]]) — but the local host is the
 /// controller, so the final apply restarts the very daemon this request is
 /// addressed to. The socket dies, and the CLI reported that transport error as

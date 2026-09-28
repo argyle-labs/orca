@@ -300,15 +300,35 @@ fn page_slice<T: Clone>(full: &[T], page: usize, per_page: usize) -> Vec<T> {
 ///   - OS package upgrade: `os_packages`
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct SystemUpdateArgs {
-    /// What to update: `host` (default when omitted — THIS host only) or
-    /// `fleet` (fan out across every joined peer's daemon, then every
-    /// installed plugin on every host). The bare `orca update` is a CLI alias
-    /// for `--scope fleet`. Host-only args (hostname/fqdn/addressing/daemon/
-    /// action/channel/dev-source/release-source/…) are rejected with
-    /// `--scope fleet` rather than silently ignored.
+    /// The system to update. Omit to update them ALL — every joined system's
+    /// daemon, then every installed plugin on every one. Pass a system id to
+    /// update exactly that one; orca resolves it and routes there itself, so
+    /// this names the RESOURCE and is never a host selector (#647).
+    ///
+    /// Host-only args (hostname/fqdn/addressing/daemon/action/channel/
+    /// dev-source/release-source/…) configure THIS system and are rejected on a
+    /// fleet-wide update rather than silently ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[arg(long, value_enum)]
-    pub scope: Option<SystemUpdateScope>,
+    #[arg(long)]
+    pub id: Option<String>,
+
+    /// Act on THIS system only: never fan out, never forward. Internal — it is
+    /// how the fan-out drives each of its legs, how the mesh liveness probe
+    /// asks one system about itself, and the terminal spelling an id-addressed
+    /// call is forwarded as. Because the hop carries it, a forwarded update
+    /// cannot bounce onward, so no resolution loop is possible.
+    #[serde(default)]
+    #[arg(long, hide = true)]
+    pub self_only: bool,
+
+    /// Transitional: `--scope` is gone. It was a caller-chosen mode standing in
+    /// for addressing — omit `--id` for every system, pass one for a single
+    /// system (#647). Rejected rather than ignored, because these args carry no
+    /// `deny_unknown_fields`: a stale client sending `{"scope":"host"}` would
+    /// otherwise be silently promoted from "just me" to "the whole fleet".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[arg(skip)]
+    pub scope: Option<String>,
 
     /// Fleet scope only: resolve plugins to their newest PRERELEASE (`-rc`)
     /// rather than newest stable. Unset defaults to the daemon's update
@@ -446,7 +466,7 @@ pub struct SystemUpdateArgs {
     pub tailscale_v6: Option<String>,
 
     /// Run the OS package upgrade (apt / apk / brew / unraid plugin). Stays a
-    /// THIS-HOST action even under `--scope fleet` (the fan-out updates orca
+    /// THIS-SYSTEM action even on a fleet-wide update (the fan-out updates orca
     /// daemons and plugins, not every peer's distro).
     #[serde(default)]
     #[arg(long)]
@@ -491,21 +511,9 @@ pub struct SystemUpdateArgs {
     pub retention: RetentionSetArgs,
 }
 
-/// Scope of a `system.update` call. `Host` (the default when `scope` is
-/// omitted) is this host only — the historical behavior. `Fleet` fans out
-/// across the mesh through the registered [`crate::fleet::FleetUpdateHook`].
-#[derive(
-    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum SystemUpdateScope {
-    #[default]
-    Host,
-    Fleet,
-}
-
-/// Host-only args that have no meaning with `--scope fleet`. Rejected by name
-/// instead of silently ignored.
+/// Args that configure THIS system and cannot mean anything fleet-wide.
+/// Their presence makes a call a this-system call rather than a fan-out, which
+/// is what keeps `orca system update --hostname x` working without an address.
 fn fleet_incompatible_arg(args: &SystemUpdateArgs) -> Option<&'static str> {
     [
         ("hostname", args.hostname.is_some()),
@@ -551,10 +559,10 @@ pub enum SystemUpdateAction {
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum SystemUpdateResult {
-    /// `--scope fleet`. Ordered BEFORE `Update`: every `FleetUpdateOutput`
-    /// field is required, so a host-scope payload can never decode as `Fleet`,
-    /// whereas `SystemUpdateOutput` is all-`default` and would swallow a fleet
-    /// payload if it came first.
+    /// Every system (no `--id`). Ordered BEFORE `Update`: every
+    /// `FleetUpdateOutput` field is required, so a single-system payload can
+    /// never decode as `Fleet`, whereas `SystemUpdateOutput` is all-`default`
+    /// and would swallow a fleet payload if it came first.
     Fleet(Box<crate::fleet::FleetUpdateOutput>),
     Update(Box<SystemUpdateOutput>),
     Capability(CapabilityRow),
@@ -653,23 +661,53 @@ async fn system_update(
     args: SystemUpdateArgs,
     ctx: &contract::ToolCtx,
 ) -> Result<SystemUpdateResult> {
-    // Fleet scope short-circuits into mesh's fan-out via the registered hook.
-    if args.scope.unwrap_or_default() == SystemUpdateScope::Fleet {
-        if let Some(bad) = fleet_incompatible_arg(&args) {
-            anyhow::bail!(
-                "`--{}` is a host-only arg and has no meaning with `--scope fleet`; \
-                 drop it, or run it under the default host scope \
-                 (`orca system update …`)",
-                bad.replace('_', "-")
-            );
+    if args.scope.is_some() {
+        anyhow::bail!(
+            "`scope` is gone: it chose a mode where an address belongs. Omit `--id` to \
+             update every system, or pass `--id <system>` to update one (#647)."
+        );
+    }
+
+    // An id addresses ONE system. Resolve it here and route; a caller never
+    // picks a host. `self_only` is the terminal spelling — the fan-out's legs,
+    // the mesh liveness probe, and the far side of the hop below all carry it,
+    // so a forwarded update can never bounce onward.
+    let addressed = args
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let this_system = match (&addressed, args.self_only) {
+        // Already the terminal leg — never resolve, never forward again.
+        (_, true) => true,
+        (Some(id), false) => {
+            if !crate::system::addresses_this_system(id, ctx)? {
+                let mut leg = args;
+                // Preserve the id and pin `self_only`: forwarding `id: None`
+                // would read as "every system" on the far side, turning one
+                // addressed update into a second fan-out.
+                leg.self_only = true;
+                return dispatch::cli::exec_remote::<SystemUpdate>(id, leg, ctx).await;
+            }
+            // The id names us: this system is the termination point.
+            true
         }
+        (None, false) => false,
+    };
+
+    // No id and not a single-system leg ⇒ every system. This-system args
+    // configure THIS system and cannot mean anything fleet-wide, so a call
+    // carrying one is a this-system call rather than a fan-out — that keeps
+    // `orca system update --hostname x` working without an address.
+    if !this_system && fleet_incompatible_arg(&args).is_none() {
         let hook = ctx
             .service::<std::sync::Arc<dyn crate::fleet::FleetUpdateHook + Send + Sync>>()
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "no fleet-update hook registered on this context — `--scope fleet` needs \
-                     the daemon's mesh wiring; run it against a running orca daemon (or use \
-                     `--scope host` for this host only)"
+                    "no fleet-update hook registered on this context — updating every system \
+                     needs the daemon's mesh wiring; run it against a running orca daemon \
+                     (or pass `--id <system>` for a single system)"
                 )
             })?;
         let _ = args.include_edge; // reserved — see SystemUpdateArgs docs
@@ -2893,64 +2931,117 @@ mod tests {
         assert_eq!(empty.age_secs, 0);
     }
 
-    // ── scope selector (host | fleet) ───────────────────────────────────────
+    // ── addressing: no id = every system, an id = one ───────────────────────
 
     #[test]
-    fn scope_defaults_to_host_when_omitted() {
-        // Omitted on the wire and omitted on the CLI both resolve to HOST —
-        // today's exact behavior is preserved for every existing caller.
-        let from_empty: SystemUpdateArgs = serde_json::from_str("{}").unwrap();
-        assert_eq!(from_empty.scope, None);
-        assert_eq!(
-            from_empty.scope.unwrap_or_default(),
-            SystemUpdateScope::Host
+    fn the_wire_names_are_snake_case() {
+        // `self_only` is sent as a literal JSON key by the mesh liveness probe
+        // (peer_info) — these args carry no `rename_all`, so a camelCase key
+        // would be silently dropped and the probe would fan out fleet-wide.
+        let a: SystemUpdateArgs =
+            serde_json::from_str(r#"{"self_only":true,"id":"thor"}"#).unwrap();
+        assert!(a.self_only);
+        assert_eq!(a.id.as_deref(), Some("thor"));
+        let camel: SystemUpdateArgs = serde_json::from_str(r#"{"selfOnly":true}"#).unwrap();
+        assert!(
+            !camel.self_only,
+            "camelCase must NOT bind — peer_info sends snake_case"
         );
-        assert_eq!(
-            SystemUpdateArgs::default().scope.unwrap_or_default(),
-            SystemUpdateScope::Host
-        );
-        // And an explicit fleet scope round-trips as snake_case.
-        let fleet: SystemUpdateArgs = serde_json::from_str(r#"{"scope":"fleet"}"#).unwrap();
-        assert_eq!(fleet.scope, Some(SystemUpdateScope::Fleet));
     }
 
     #[test]
-    fn fleet_scope_rejects_host_only_args_by_name() {
-        // hostname
-        let args = SystemUpdateArgs {
-            scope: Some(SystemUpdateScope::Fleet),
-            hostname: Some("thor".into()),
-            ..Default::default()
-        };
-        assert_eq!(fleet_incompatible_arg(&args), Some("hostname"));
+    fn omitting_the_id_addresses_every_system() {
+        let from_empty: SystemUpdateArgs = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_empty.id, None);
+        assert!(!from_empty.self_only);
+        assert!(!SystemUpdateArgs::default().self_only);
+    }
 
-        // daemon action
-        let args = SystemUpdateArgs {
-            scope: Some(SystemUpdateScope::Fleet),
-            daemon: Some("stop".into()),
-            ..Default::default()
-        };
-        assert_eq!(fleet_incompatible_arg(&args), Some("daemon"));
+    #[tokio::test]
+    async fn a_bare_call_takes_the_fleet_path_not_this_host_only() {
+        use contract::OrcaTool;
+        // The default flip, asserted behaviourally: with no id and no hook
+        // registered, a bare call must fail asking for the mesh wiring. Before
+        // #647 it silently meant "just me" and would have succeeded.
+        let ctx = contract::ToolCtx::new(std::sync::Arc::new(
+            contract::config::Config::load().unwrap(),
+        ));
+        let err = SystemUpdate::run(SystemUpdateArgs::default(), &ctx)
+            .await
+            .map(|_| ())
+            .expect_err("a bare update addresses every system and needs the hook");
+        let msg = err.to_string();
+        assert!(msg.contains("no fleet-update hook registered"), "{msg}");
+        assert!(msg.contains("--id <system>"), "{msg}");
+    }
 
-        // channel switch
-        let args = SystemUpdateArgs {
-            scope: Some(SystemUpdateScope::Fleet),
-            channel: Some("beta".into()),
-            ..Default::default()
-        };
-        assert_eq!(fleet_incompatible_arg(&args), Some("channel"));
+    #[tokio::test]
+    async fn a_stale_scope_key_is_rejected_rather_than_silently_widened() {
+        use contract::OrcaTool;
+        // These args have no `deny_unknown_fields`, so an old client sending
+        // `{"scope":"host"}` would otherwise be accepted and promoted from
+        // "just me" to "every system" — the one migration that must not be
+        // silent.
+        let ctx = contract::ToolCtx::new(std::sync::Arc::new(
+            contract::config::Config::load().unwrap(),
+        ));
+        let args: SystemUpdateArgs = serde_json::from_str(r#"{"scope":"host"}"#).unwrap();
+        assert_eq!(args.scope.as_deref(), Some("host"));
+        let err = SystemUpdate::run(args, &ctx)
+            .await
+            .map(|_| ())
+            .expect_err("a stale scope key must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("`scope` is gone"), "{msg}");
+        assert!(msg.contains("--id"), "{msg}");
+    }
 
-        // refresh_host (bool form)
-        let args = SystemUpdateArgs {
-            scope: Some(SystemUpdateScope::Fleet),
-            refresh_host: true,
-            ..Default::default()
-        };
-        assert_eq!(fleet_incompatible_arg(&args), Some("refresh_host"));
+    #[test]
+    fn this_system_args_are_recognised_by_name() {
+        // Their presence is what keeps `orca system update --hostname x`
+        // working with no address, rather than being rejected as fleet-wide.
+        for (args, want) in [
+            (
+                SystemUpdateArgs {
+                    hostname: Some("thor".into()),
+                    ..Default::default()
+                },
+                Some("hostname"),
+            ),
+            (
+                SystemUpdateArgs {
+                    daemon: Some("stop".into()),
+                    ..Default::default()
+                },
+                Some("daemon"),
+            ),
+            (
+                SystemUpdateArgs {
+                    channel: Some("beta".into()),
+                    ..Default::default()
+                },
+                Some("channel"),
+            ),
+            (
+                SystemUpdateArgs {
+                    refresh_host: true,
+                    ..Default::default()
+                },
+                Some("refresh_host"),
+            ),
+            (
+                SystemUpdateArgs {
+                    fqdn: Some("thor.lan".into()),
+                    ..Default::default()
+                },
+                Some("fqdn"),
+            ),
+        ] {
+            assert_eq!(fleet_incompatible_arg(&args), want);
+        }
 
-        // The fleet-valid args are NOT rejected.
+        // The fleet-valid args do not mark a call as this-system.
         let args = SystemUpdateArgs {
-            scope: Some(SystemUpdateScope::Fleet),
             execute: true,
             prerelease: true,
             include_edge: true,
@@ -2958,51 +3049,5 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(fleet_incompatible_arg(&args), None);
-    }
-
-    #[tokio::test]
-    async fn fleet_scope_rejection_surfaces_the_arg_name() {
-        use contract::OrcaTool;
-        let ctx = contract::ToolCtx::new(std::sync::Arc::new(
-            contract::config::Config::load().unwrap(),
-        ));
-        let err = SystemUpdate::run(
-            SystemUpdateArgs {
-                scope: Some(SystemUpdateScope::Fleet),
-                fqdn: Some("thor.lan".into()),
-                ..Default::default()
-            },
-            &ctx,
-        )
-        .await
-        // `SystemUpdateResult` isn't Debug — discard the Ok payload so
-        // `expect_err` only needs the error.
-        .map(|_| ())
-        .expect_err("a host-only arg must be rejected, never silently ignored");
-        let msg = err.to_string();
-        assert!(msg.contains("--fqdn"), "{msg}");
-        assert!(msg.contains("--scope fleet"), "{msg}");
-    }
-
-    #[tokio::test]
-    async fn fleet_scope_without_registered_hook_errors_cleanly() {
-        use contract::OrcaTool;
-        // No FleetUpdateHook registered (mesh isn't wired into this ctx) — the
-        // call must return an actionable error, not panic.
-        let ctx = contract::ToolCtx::new(std::sync::Arc::new(
-            contract::config::Config::load().unwrap(),
-        ));
-        let err = SystemUpdate::run(
-            SystemUpdateArgs {
-                scope: Some(SystemUpdateScope::Fleet),
-                ..Default::default()
-            },
-            &ctx,
-        )
-        .await
-        .map(|_| ())
-        .expect_err("missing hook must be a clean error");
-        let msg = err.to_string();
-        assert!(msg.contains("no fleet-update hook registered"), "{msg}");
     }
 }

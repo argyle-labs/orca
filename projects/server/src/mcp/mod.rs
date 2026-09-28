@@ -24,7 +24,7 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let host_refresh: Arc<dyn system::host::HostRefreshHook + Send + Sync> =
         Arc::new(system::host_identity::ServerHostRefreshHook);
     ctx.register_service(host_refresh);
-    // Fleet fan-out hook: `system.update --scope fleet` (and its CLI alias
+    // Fleet fan-out hook: `system.update` with no `--id` (and its CLI alias
     // `orca update`) calls into the mesh-wide update fan-out through this seam.
     let fleet_update: Arc<dyn system::fleet::FleetUpdateHook + Send + Sync> =
         Arc::new(system::mesh::fleet_update::MeshFleetUpdateHook);
