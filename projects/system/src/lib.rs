@@ -33,6 +33,7 @@ pub mod mesh;
 pub mod mount_converge;
 pub mod mount_exec;
 pub mod mounts;
+pub mod owner;
 pub mod remediation;
 pub mod replication;
 pub mod service_instance;
