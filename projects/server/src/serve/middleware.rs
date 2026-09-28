@@ -374,6 +374,10 @@ fn caller_from_token_with(
         user_id: u.id,
         username: u.username,
         role: u.role,
+        // The capability comes from the TOKEN, not the user row: the token is
+        // what this call presented, and it may be scoped narrower than its
+        // issuing user.
+        can_mutate: ident.can_mutate,
     })
 }
 
@@ -387,6 +391,11 @@ fn caller_from_user_id(user_id: &str) -> Option<contract::CallerIdentity> {
         user_id: u.id,
         username: u.username,
         role: u.role,
+        // A `can_mutate` capability is carried by a TOKEN or SESSION row, and
+        // this path has neither — only a user id lifted off a caller token.
+        // Unknown means no, so a missing capability cannot read as a granted
+        // one; an admin passes on role alone regardless.
+        can_mutate: false,
     })
 }
 
@@ -500,6 +509,7 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
                         user_id: user_id.clone(),
                         username: username.clone(),
                         role: ident.role.clone(),
+                        can_mutate: ident.can_mutate,
                     });
                 }
                 req.extensions_mut().insert(ident);

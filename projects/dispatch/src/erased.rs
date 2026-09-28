@@ -113,6 +113,32 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
                         anyhow::anyhow!("failed to serialize plan for {}: {e}", T::NAME)
                     });
                 }
+                // Opting in is not the same as being allowed. A caller who
+                // asks to APPLY must hold the verb's permission, checked here
+                // and not only at the surface: the REST middleware enforced
+                // this, MCP re-implemented it, and the CLI and mesh/exec paths
+                // enforced nothing at all. Three copies and two gaps is how a
+                // permission model becomes decorative.
+                //
+                // Refused loudly, never downgraded to a dry run — a surface
+                // that returns a plan where the caller asked to apply reports
+                // success for work it did not do.
+                if let Some(caller) = ctx.caller()
+                    && !crate::tool_roles::authorize(
+                        &caller.role,
+                        caller.can_mutate,
+                        T::REQUIRED_ROLE,
+                        T::DATA_MUTATION,
+                    )
+                {
+                    anyhow::bail!(
+                        "{} requires role '{}' to execute; caller '{}' has '{}'",
+                        T::NAME,
+                        T::REQUIRED_ROLE,
+                        caller.username,
+                        caller.role
+                    );
+                }
                 // Strip the opt-in before typed deserialization: it is the
                 // gate's field, not the verb's, and `deny_unknown_fields` args
                 // would otherwise reject it.
@@ -647,6 +673,112 @@ mod tests {
 
     fn gated() -> ToolWrapper<GatedTool> {
         ToolWrapper(PhantomData)
+    }
+
+    // ── execute authorization (opting in is not being allowed) ───────────────
+
+    /// An admin-only data mutation — the shape nearly every gated verb has.
+    struct AdminGatedTool;
+
+    impl OrcaToolDef for AdminGatedTool {
+        const NAME: &'static str = "test.admin_gated";
+        const DESCRIPTION: &'static str = "applies an admin-only change";
+        const EXECUTE_GATED: bool = true;
+        const REQUIRED_ROLE: &'static str = "admin";
+        const DATA_MUTATION: bool = true;
+        type Args = GatedArgs;
+        type Output = GatedOut;
+    }
+
+    #[async_trait]
+    impl OrcaTool for AdminGatedTool {
+        async fn run(args: GatedArgs, _ctx: &ToolCtx) -> Result<GatedOut> {
+            RAN_TARGETS.lock().unwrap().push(args.target.clone());
+            Ok(GatedOut {
+                applied: args.target,
+            })
+        }
+    }
+
+    fn admin_gated() -> ToolWrapper<AdminGatedTool> {
+        ToolWrapper(PhantomData)
+    }
+
+    fn ctx_as(role: &str, can_mutate: bool) -> ToolCtx {
+        let mut c = ctx();
+        c.set_caller(Some(contract::CallerIdentity {
+            user_id: "u-test".into(),
+            username: "tester".into(),
+            role: role.into(),
+            can_mutate,
+        }));
+        c
+    }
+
+    #[tokio::test]
+    async fn an_unauthorized_caller_that_opts_in_is_refused_not_quietly_planned() {
+        let target = "unauthorized-execute-target";
+        let err = admin_gated()
+            .run_json(
+                serde_json::json!({ "target": target, "execute": true }),
+                &ctx_as("member", false),
+            )
+            .await
+            .expect_err("an unauthorized execute must be an error");
+
+        // The distinction the whole check exists for: refusing is not the same
+        // as returning a plan. A plan here would report a successful dry run
+        // for a call that asked to apply and was denied.
+        let msg = err.to_string();
+        assert!(msg.contains("requires role 'admin'"), "got: {msg}");
+        assert!(msg.contains("tester"), "names the caller: {msg}");
+        assert!(!ran(target), "the body must not have run");
+    }
+
+    #[tokio::test]
+    async fn an_authorized_caller_that_opts_in_applies() {
+        let target = "authorized-execute-target";
+        let out = admin_gated()
+            .run_json(
+                serde_json::json!({ "target": target, "execute": true }),
+                &ctx_as("admin", false),
+            )
+            .await
+            .expect("an admin may execute");
+        assert_eq!(out["applied"], serde_json::json!(target));
+        assert!(ran(target));
+    }
+
+    #[tokio::test]
+    async fn the_can_mutate_capability_authorizes_a_non_admin_data_mutation() {
+        // Same escape hatch the REST middleware already honoured; moving the
+        // check to dispatch must not narrow it, or every capability-scoped
+        // token in the fleet stops working.
+        let target = "can-mutate-execute-target";
+        admin_gated()
+            .run_json(
+                serde_json::json!({ "target": target, "execute": true }),
+                &ctx_as("member", true),
+            )
+            .await
+            .expect("can_mutate authorizes a data mutation");
+        assert!(ran(target));
+    }
+
+    #[tokio::test]
+    async fn an_unauthorized_caller_can_still_ask_what_would_happen() {
+        // Planning is a read. Denying it would push operators toward executing
+        // blind, which is the opposite of what the gate is for.
+        let target = "unauthorized-plan-target";
+        let out = gated()
+            .run_json(
+                serde_json::json!({ "target": target }),
+                &ctx_as("member", false),
+            )
+            .await
+            .expect("a plan needs no execute permission");
+        assert_eq!(out["dryRun"], serde_json::json!(true));
+        assert!(!ran(target));
     }
 
     #[tokio::test]
