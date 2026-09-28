@@ -16,6 +16,7 @@ pub mod autofs;
 pub mod backup;
 pub mod capability;
 pub mod capability_tools;
+pub mod ci_runner;
 pub mod container_reconcile;
 pub mod fleet;
 pub mod guest_exec_provider;
