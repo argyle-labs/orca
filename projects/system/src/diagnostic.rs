@@ -131,6 +131,36 @@ pub(crate) fn collect(cfg: &Config) -> Result<Vec<DoctorEntry>> {
         );
     }
 
+    // The init system already knows what died; nothing was asking. A crashed
+    // service is always a defect, so this needs no list of "services that
+    // matter" to maintain.
+    let init = crate::supervisor::detect_init();
+    match crate::supervisor::broken_services(init, &["com.argyle.", "actions.runner."]) {
+        Ok(broken) if broken.is_empty() => push(
+            &mut entries,
+            "services",
+            "ok",
+            "no crashed or failed services reported".to_string(),
+        ),
+        Ok(broken) => {
+            for svc in broken {
+                push(
+                    &mut entries,
+                    "services",
+                    "error",
+                    format!("{} is {}", svc.name, svc.detail),
+                );
+            }
+        }
+        // Say we could not look, rather than letting silence read as health.
+        Err(e) => push(
+            &mut entries,
+            "services",
+            "warn",
+            format!("could not query the service manager: {e}"),
+        ),
+    }
+
     Ok(entries)
 }
 
@@ -262,6 +292,26 @@ mod tests {
         let auth = find(&entries, "auth");
         assert_eq!(auth[0].status, "ok");
         assert_eq!(auth[0].message, "anthropic key configured");
+    }
+
+    #[test]
+    fn the_service_check_always_reports_something() {
+        // The point of the category is that silence is never the answer: on any
+        // host it says ok, names what is broken, or says it could not look.
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("vault");
+        std::fs::create_dir_all(&app).unwrap();
+        let entries = collect(&cfg(app, tmp.path().join("m"), None)).unwrap();
+        let services = find(&entries, "services");
+        assert!(!services.is_empty(), "no services entry emitted");
+        for e in &services {
+            assert!(
+                matches!(e.status.as_str(), "ok" | "warn" | "error"),
+                "unexpected status: {}",
+                e.status
+            );
+            assert!(!e.message.is_empty());
+        }
     }
 
     #[test]
