@@ -58,11 +58,44 @@ fn provider_for_kind(kind: Option<&str>) -> &'static str {
 /// unit it is. Best-effort: with no unit provider loaded (or an unknown id) this
 /// yields `None` and the caller falls back to the in-tree LXC backend.
 async fn kind_of(id: &str) -> Option<String> {
+    unit_id_of(id).await.map(|u| u.kind)
+}
+
+/// The registry's `UnitId` for a guest id, if it knows one.
+async fn unit_id_of(id: &str) -> Option<contract::unit::UnitId> {
     contract::unit::all_units()
         .await
         .into_iter()
         .find(|u| u.id.id == id)
-        .map(|u| u.id.kind)
+        .map(|u| u.id)
+}
+
+/// Fill in the PVE `scope` the VM backend needs when the caller did not give one.
+///
+/// The caller addresses a guest by id and orca resolves where it lives — that is
+/// the whole addressing rule ([[no-peer-concept-in-cli-address-by-id-route-internally]]).
+/// Requiring the operator to also know the PVE endpoint broke it: `guest.exec`
+/// answered `scope (PVE endpoint) is required for the proxmox backend`, and
+/// diagnosing a guest meant `ssh` + `pct exec` by hand (#563).
+///
+/// The registry already knows — it stores the manager as `proxmox@<scope>`, and
+/// the same lookup that picks the backend can read the scope off it. An explicit
+/// `scope` still wins, so an operator can override a stale registry.
+async fn resolve_scope(id: &str, given: Option<String>) -> Option<String> {
+    if given.is_some() {
+        return given;
+    }
+    scope_from_unit(unit_id_of(id).await.as_ref(), None)
+}
+
+/// Pure half of [`resolve_scope`], so the precedence is testable without a
+/// registry: an explicit scope wins, otherwise the unit's `manager@scope`
+/// supplies it, otherwise there is none to give.
+fn scope_from_unit(unit: Option<&contract::unit::UnitId>, given: Option<&str>) -> Option<String> {
+    if let Some(g) = given {
+        return Some(g.to_string());
+    }
+    unit.and_then(|u| u.manager_scope().1.map(str::to_string))
 }
 
 /// Route a guest id to the guest-exec provider that can actually reach it.
@@ -184,8 +217,9 @@ pub struct GuestExecArgs {
 #[orca_tool(domain = "guest", verb = "exec", data_mutation = true, role = "admin")]
 async fn guest_exec_run(args: GuestExecArgs, _ctx: &ToolCtx) -> Result<ExecOutput> {
     let provider = provider_for(&args.id).await;
+    let scope = resolve_scope(&args.id, args.scope).await;
     let guest = GuestRef {
-        scope: args.scope,
+        scope,
         node: args.node,
         id: args.id,
     };
@@ -261,8 +295,11 @@ fn check_contents_parse(path: &str, contents: &[u8], allow_unparseable: bool) ->
 async fn guest_write_file(args: GuestWriteFileArgs, _ctx: &ToolCtx) -> Result<()> {
     check_contents_parse(&args.path, args.contents.as_bytes(), args.allow_unparseable)?;
     let provider = provider_for(&args.id).await;
+    // Same addressing rule as `guest.exec`: the id is the address, orca finds
+    // the endpoint.
+    let scope = resolve_scope(&args.id, args.scope).await;
     let guest = GuestRef {
-        scope: args.scope,
+        scope,
         node: args.node,
         id: args.id,
     };
@@ -426,5 +463,42 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn unit(manager: &str) -> contract::unit::UnitId {
+        contract::unit::UnitId {
+            manager: manager.to_string(),
+            kind: "vm".into(),
+            id: "113".into(),
+            name: "jellyfin".into(),
+        }
+    }
+
+    #[test]
+    fn the_pve_scope_comes_off_the_unit_so_a_caller_need_not_know_it() {
+        // The bug: `guest.exec` refused with "scope (PVE endpoint) is required"
+        // and the caller had no way to know the endpoint, so diagnosing a guest
+        // meant ssh + pct exec by hand (#563).
+        assert_eq!(
+            scope_from_unit(Some(&unit("proxmox@cluster-a")), None),
+            Some("cluster-a".to_string())
+        );
+    }
+
+    #[test]
+    fn an_explicit_scope_still_wins_over_the_registry() {
+        // A stale registry must not be unoverridable.
+        assert_eq!(
+            scope_from_unit(Some(&unit("proxmox@cluster-a")), Some("cluster-b")),
+            Some("cluster-b".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unscoped_manager_yields_nothing_rather_than_a_guess() {
+        // A bare `proxmox` manager carries no endpoint; inventing one would send
+        // the call somewhere the operator never named.
+        assert_eq!(scope_from_unit(Some(&unit("proxmox")), None), None);
+        assert_eq!(scope_from_unit(None, None), None);
     }
 }
