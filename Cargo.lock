@@ -3195,6 +3195,7 @@ version = "0.2.1-rc.8"
 dependencies = [
  "agents",
  "auth",
+ "clap",
  "contract",
  "dispatch",
  "files",

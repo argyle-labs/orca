@@ -156,3 +156,44 @@ async fn a_gated_verb_called_without_the_opt_in_returns_a_plan_and_applies_nothi
         "the plan says how to apply it: {out}"
     );
 }
+
+/// The gate is only real if an operator can satisfy it. rc.8 shipped with the
+/// opt-in advertised in the JSON schema and NO way to pass it from the CLI, so
+/// every gated verb planned, returned an `ExecutionPlan`, and the CLI failed to
+/// decode it as the verb's own `Output`:
+///
+/// ```text
+/// Error: decode storage.mount.update output: data did not match any variant
+/// of untagged enum StorageMountUpdateOutput
+/// ```
+///
+/// A completed-looking command that changed nothing, on every mutating verb,
+/// across the whole fleet (#665).
+#[test]
+fn every_gated_verb_can_actually_be_executed_from_the_cli() {
+    let root = dispatch::cli::build_root(clap::Command::new("orca"));
+
+    let mut checked = 0usize;
+    for name in dispatch::execute_gated_names() {
+        let Some(cmd) = find_leaf(&root, name) else {
+            // Not every tool is on the CLI tree (plugin verbs, aliases).
+            continue;
+        };
+        assert!(
+            cmd.get_arguments()
+                .any(|a| a.get_long() == Some(contract::plan::EXECUTE_FIELD)),
+            "gated verb `{name}` has no --execute flag, so its gate cannot be satisfied"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no gated verbs were reachable on the CLI tree");
+}
+
+/// Walk `domain.sub.verb` down the command tree.
+fn find_leaf<'a>(root: &'a clap::Command, tool: &str) -> Option<&'a clap::Command> {
+    let mut cur = root;
+    for seg in tool.split('.') {
+        cur = cur.get_subcommands().find(|c| c.get_name() == seg)?;
+    }
+    Some(cur)
+}
