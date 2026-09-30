@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dev-dependencies]
 dispatch = { path = "../dispatch" }
 contract  = { path = "../contract" }
+clap      = { workspace = true }
 tokio     = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 serde_json    = { workspace = true }
 inventory     = { workspace = true }
