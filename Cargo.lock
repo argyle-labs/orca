@@ -4851,6 +4851,7 @@ dependencies = [
  "serde_json",
  "service",
  "storage",
+ "tempfile",
  "thiserror 2.0.20",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",

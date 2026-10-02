@@ -279,6 +279,76 @@ pub struct LogInit<'a> {
     /// Optional path for a tee'd append-mode log file. `None` =
     /// stderr-only.
     pub tee_path: Option<&'a str>,
+    /// Rotate the tee once it passes this many bytes. `None` = the default
+    /// [`DEFAULT_TEE_MAX_BYTES`].
+    ///
+    /// Unrotated, this file grew to 36 MB on mint and its launchd-captured
+    /// twin to 123 MB, neither ever pruned (#563). A daemon that fills a disk
+    /// with its own logs is an outage it caused itself.
+    pub tee_max_bytes: Option<u64>,
+    /// How many rotated generations to keep (`daemon.jsonl.1` ..). `None` =
+    /// the default [`DEFAULT_TEE_KEEP`].
+    pub tee_keep: Option<u8>,
+}
+
+/// Rotate the tee at 32 MiB. Large enough to hold a long incident in one
+/// file, small enough that `keep` generations stay bounded well under a GB.
+pub const DEFAULT_TEE_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Keep 5 rotated generations — matching the fleet's "keep last N" habit and
+/// capping the tee's worst case at roughly 6 x 32 MiB.
+pub const DEFAULT_TEE_KEEP: u8 = 5;
+
+/// The rename sequence a rotation performs, oldest first, as
+/// `(from, to)` pairs. `<path>.<keep>` is dropped rather than renamed.
+///
+/// Pure so the ordering is testable: performed newest-first would clobber,
+/// so the pairs MUST be applied in the order returned (oldest first).
+pub fn rotation_plan(
+    path: &std::path::Path,
+    keep: u8,
+) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+    let mut plan = Vec::new();
+    if keep == 0 {
+        return plan;
+    }
+    let nth = |n: u8| -> std::path::PathBuf {
+        let mut s = path.as_os_str().to_os_string();
+        s.push(format!(".{n}"));
+        std::path::PathBuf::from(s)
+    };
+    // .4 -> .5, .3 -> .4, ... .1 -> .2, then the live file -> .1
+    for n in (1..keep).rev() {
+        plan.push((nth(n), nth(n + 1)));
+    }
+    plan.push((path.to_path_buf(), nth(1)));
+    plan
+}
+
+/// Oldest generation, removed before the shuffle so `keep` is a hard cap.
+pub fn oldest_generation(path: &std::path::Path, keep: u8) -> Option<std::path::PathBuf> {
+    if keep == 0 {
+        return None;
+    }
+    let mut s = path.as_os_str().to_os_string();
+    s.push(format!(".{keep}"));
+    Some(std::path::PathBuf::from(s))
+}
+
+/// Perform the rotation: drop the oldest, shuffle the rest up, and return a
+/// freshly created live file. Best-effort on each rename — a rotation that
+/// cannot complete must not take logging down with it.
+fn rotate(path: &std::path::Path, keep: u8) -> io::Result<std::fs::File> {
+    if let Some(oldest) = oldest_generation(path, keep) {
+        _ = std::fs::remove_file(&oldest);
+    }
+    for (from, to) in rotation_plan(path, keep) {
+        _ = std::fs::rename(&from, &to);
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
 }
 
 /// Install the global tracing subscriber: JSON-line output, EnvFilter,
@@ -297,11 +367,10 @@ pub fn init(opts: LogInit<'_>) -> Result<()> {
     // watch flagged) for every log line. Open here and share an append-mode
     // handle — O_APPEND keeps concurrent writes atomically positioned, and the
     // Mutex serialises the interleave.
-    let tee_file: Option<Arc<Mutex<std::fs::File>>> = opts.tee_path.and_then(|path| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
+    let tee_max = opts.tee_max_bytes.unwrap_or(DEFAULT_TEE_MAX_BYTES);
+    let tee_keep = opts.tee_keep.unwrap_or(DEFAULT_TEE_KEEP);
+    let tee_file: Option<Arc<Mutex<RotatingFile>>> = opts.tee_path.and_then(|path| {
+        RotatingFile::open(std::path::PathBuf::from(path), tee_max, tee_keep)
             .ok()
             .map(|f| Arc::new(Mutex::new(f)))
     });
@@ -330,10 +399,66 @@ pub fn init(opts: LogInit<'_>) -> Result<()> {
     Ok(())
 }
 
+/// An append-mode log file that rotates once it passes `max_bytes`.
+///
+/// Size is tracked in-process and seeded from the file's length at open, so
+/// the steady state costs no syscall per line — only the write itself. A
+/// `stat` per event is what made the previous open-per-line implementation
+/// expensive, and this must not reintroduce it.
+struct RotatingFile {
+    path: std::path::PathBuf,
+    file: std::fs::File,
+    written: u64,
+    max_bytes: u64,
+    keep: u8,
+}
+
+impl RotatingFile {
+    fn open(path: std::path::PathBuf, max_bytes: u64, keep: u8) -> io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        // Seed from the existing length: a daemon restarting onto an already
+        // oversized file must rotate on its first write, not append forever.
+        let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Ok(RotatingFile {
+            path,
+            file,
+            written,
+            max_bytes,
+            keep,
+        })
+    }
+
+    /// True once the live file has passed the cap. `max_bytes == 0` disables
+    /// rotation entirely, for callers that manage the file themselves.
+    fn should_rotate(&self) -> bool {
+        self.max_bytes > 0 && self.written >= self.max_bytes
+    }
+}
+
+impl Write for RotatingFile {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        if self.should_rotate()
+            && let Ok(fresh) = rotate(&self.path, self.keep)
+        {
+            self.file = fresh;
+            self.written = 0;
+        }
+        let n = self.file.write(b)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
 /// A shared append-mode file handle for the tee side. Cloned per
 /// `make_writer` call but backed by a single open file — the write lock
 /// serialises interleaved log lines from concurrent tasks.
-struct SharedFile(Arc<Mutex<std::fs::File>>);
+struct SharedFile(Arc<Mutex<RotatingFile>>);
 
 impl Write for SharedFile {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
@@ -378,6 +503,155 @@ pub fn env_filter(env_var: &str, default_filter: &str) -> Result<tracing_subscri
 
 #[cfg(test)]
 mod tests {
+    // ── #563: the daemon must not fill the disk with its own logs ───────
+
+    #[test]
+    fn the_plan_shuffles_oldest_first_so_nothing_is_clobbered() {
+        let p = std::path::Path::new("/l/daemon.jsonl");
+        let plan = super::rotation_plan(p, 3);
+        let as_str: Vec<(String, String)> = plan
+            .iter()
+            .map(|(a, b)| (a.display().to_string(), b.display().to_string()))
+            .collect();
+        // Applied in THIS order: .2->.3 before .1->.2 before live->.1.
+        // Reversed, each rename would overwrite the generation not yet moved.
+        assert_eq!(
+            as_str,
+            vec![
+                ("/l/daemon.jsonl.2".into(), "/l/daemon.jsonl.3".into()),
+                ("/l/daemon.jsonl.1".into(), "/l/daemon.jsonl.2".into()),
+                ("/l/daemon.jsonl".into(), "/l/daemon.jsonl.1".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn keep_zero_rotates_nothing() {
+        let p = std::path::Path::new("/l/d.jsonl");
+        assert!(super::rotation_plan(p, 0).is_empty());
+        assert_eq!(super::oldest_generation(p, 0), None);
+    }
+
+    #[test]
+    fn the_oldest_generation_is_the_one_dropped() {
+        let p = std::path::Path::new("/l/d.jsonl");
+        assert_eq!(
+            super::oldest_generation(p, 5)
+                .unwrap()
+                .display()
+                .to_string(),
+            "/l/d.jsonl.5"
+        );
+    }
+
+    #[test]
+    fn nothing_is_lost_across_a_rotation_boundary() {
+        // The contract is NOT "no line is ever lost" — `keep` exists precisely
+        // to discard old data (see the next test). What must hold is that a
+        // rotation itself loses nothing: everything written stays readable
+        // across the boundary while it is still within the retained window.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.jsonl");
+        // Cap sized so 20 lines span ~2 rotations, well inside keep=5.
+        let mut f = super::RotatingFile::open(path.clone(), 400, 5).unwrap();
+        for i in 0..20 {
+            writeln!(f, "line {i:03} padded out to make this line long enough").unwrap();
+        }
+        f.flush().unwrap();
+        assert!(
+            path.exists(),
+            "a live file must always exist after rotation"
+        );
+        let rotated: Vec<_> = (1..=5)
+            .map(|n| dir.path().join(format!("daemon.jsonl.{n}")))
+            .filter(|p| p.exists())
+            .collect();
+        assert!(!rotated.is_empty(), "nothing rotated; the cap did not fire");
+
+        let mut all = std::fs::read_to_string(&path).unwrap();
+        for r in &rotated {
+            all.push_str(&std::fs::read_to_string(r).unwrap());
+        }
+        for i in 0..20 {
+            assert!(all.contains(&format!("line {i:03}")), "lost line {i}");
+        }
+    }
+
+    #[test]
+    fn keep_discards_the_oldest_data_on_purpose() {
+        // The complement of the test above, and the reason the cap works at
+        // all: once `keep` generations are full, the oldest lines GO. A
+        // rotation scheme that kept everything would not bound anything.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.jsonl");
+        let mut f = super::RotatingFile::open(path.clone(), 50, 2).unwrap();
+        writeln!(f, "FIRST-LINE-MARKER padded out so it fills a generation").unwrap();
+        for i in 0..40 {
+            writeln!(f, "subsequent line {i} also padded out to force rotation").unwrap();
+        }
+        f.flush().unwrap();
+        let mut all = std::fs::read_to_string(&path).unwrap();
+        for n in 1..=2 {
+            let g = dir.path().join(format!("d.jsonl.{n}"));
+            if g.exists() {
+                all.push_str(&std::fs::read_to_string(g).unwrap());
+            }
+        }
+        assert!(
+            !all.contains("FIRST-LINE-MARKER"),
+            "the oldest line must age out, or the cap bounds nothing"
+        );
+    }
+
+    #[test]
+    fn generations_are_capped_at_keep() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.jsonl");
+        let mut f = super::RotatingFile::open(path.clone(), 32, 2).unwrap();
+        for i in 0..60 {
+            writeln!(f, "a fairly long line number {i} to force many rotations").unwrap();
+        }
+        f.flush().unwrap();
+        // .3 must never exist with keep=2 — otherwise "keep" is advisory and
+        // the disk still fills, just more slowly.
+        assert!(!dir.path().join("d.jsonl.3").exists());
+        assert!(!dir.path().join("d.jsonl.4").exists());
+    }
+
+    #[test]
+    fn an_already_oversized_file_rotates_on_the_first_write() {
+        // A daemon restarting onto the 36 MB file we actually have must not
+        // append to it forever; size is seeded from the file at open.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.jsonl");
+        std::fs::write(&path, "x".repeat(5000)).unwrap();
+        let mut f = super::RotatingFile::open(path.clone(), 1000, 2).unwrap();
+        assert!(f.should_rotate(), "seeded size must trip the cap");
+        writeln!(f, "fresh").unwrap();
+        f.flush().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "fresh");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("d.jsonl.1"))
+                .unwrap()
+                .len(),
+            5000,
+            "the old content must survive as generation 1"
+        );
+    }
+
+    #[test]
+    fn a_zero_cap_disables_rotation() {
+        // Escape hatch for a caller managing the file itself (logrotate, etc).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.jsonl");
+        let mut f = super::RotatingFile::open(path.clone(), 0, 3).unwrap();
+        for _ in 0..200 {
+            writeln!(f, "never rotated").unwrap();
+        }
+        f.flush().unwrap();
+        assert!(!dir.path().join("d.jsonl.1").exists());
+    }
+
     use super::*;
 
     #[test]
