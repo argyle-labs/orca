@@ -347,6 +347,21 @@ pub struct SystemUpdateArgs {
     #[arg(long)]
     pub break_lock: bool,
 
+    /// Skip the plugin phase entirely: report daemon versions only.
+    ///
+    /// "What version is every host on" is the commonest question asked of this
+    /// verb, and answering it does not require enumerating plugins. The full
+    /// probe costs one `plugin list` plus one dry-run `plugin update` PER
+    /// PLUGIN per host — around 40 release-source lookups across this fleet —
+    /// which is what pushes the cheapest, safest form of the call past an MCP
+    /// client's idle timeout (#626).
+    ///
+    /// Read-only by nature, but accepted with `--execute` too, where it means
+    /// "roll the daemons, leave plugins alone".
+    #[serde(default)]
+    #[arg(long)]
+    pub daemons_only: bool,
+
     /// Reserved forward-compat knob for excluding known-edge/unreachable peers.
     /// There is no reliable per-peer reachability signal on the roster today, so
     /// the fan-out always attempts every joined peer and records a per-host
@@ -717,6 +732,7 @@ async fn system_update(
                     execute: args.execute,
                     prerelease: args.prerelease,
                     break_lock: args.break_lock,
+                    daemons_only: args.daemons_only,
                 },
                 ctx,
             )
