@@ -347,26 +347,27 @@ fn draw_detail(f: &mut Frame, app: &App) {
 }
 
 fn draw_help(f: &mut Frame) {
-    let area = centered(60, 70, f.area());
+    // 90% tall, and the text is kept to 14 lines: at 70% on a standard 24-row
+    // terminal the overlay clipped before the OSC 52 note — the one caveat a
+    // user actually needs. A help pane that hides the caveat is worse than none.
+    let area = centered(64, 90, f.area());
     f.render_widget(Clear, area);
     let text = "\
-  Movement      j/k ↑/↓   line        PgUp/PgDn  page
-                g         oldest      G          newest (resumes follow)
+  j/k ↑/↓  line          g  oldest        f  follow on/off
+  PgUp/Dn  page          G  newest        r  reset filters
+                                          q  quit
 
-  Filtering     1-5       toggle ERROR/WARN/INFO/DEBUG/TRACE
-                t         target menu (space toggles, a=all, n=none)
-                /         incremental search, enter accepts, esc cancels
-                r         reset every filter
+  1-5  toggle ERROR/WARN/INFO/DEBUG/TRACE
+  t    target menu — space toggles, a all, n none
+  /    search (enter accepts, esc cancels)
 
-  Copying       y         copy the focused line, exactly as written
-                Y         copy every line currently visible
-                enter     open the record pretty-printed, then y
+  y      copy the focused line, exactly as written
+  Y      copy every line currently visible
+  enter  open the record pretty-printed, then y
 
-  Copy uses OSC 52, so it reaches YOUR clipboard over SSH. A terminal that
-  does not implement it will silently ignore the request — in iTerm2 enable
-  \"Applications in terminal may access clipboard\".
-
-  Other         f         follow on/off     q / esc   quit";
+  Copy uses OSC 52, so it reaches YOUR clipboard over SSH. A terminal
+  that ignores it copies nothing silently — in iTerm2 enable
+  \"Applications in terminal may access clipboard\".";
     f.render_widget(
         Paragraph::new(text).block(
             Block::default()
@@ -643,6 +644,167 @@ mod tests {
 
     fn press(app: &mut App, c: char) {
         handle_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).unwrap();
+    }
+
+    // ── What the viewer actually draws ───────────────────────────────────
+    //
+    // ratatui's TestBackend renders into an in-memory buffer, so the layout
+    // is asserted without a tty. This is the only way these paths get
+    // exercised at all: the real backend needs a terminal, and CI has none.
+
+    use ratatui::backend::TestBackend;
+
+    /// Render one frame of `app` into an 80x20 buffer and return it as text.
+    fn render(app: &mut App) -> String {
+        let mut term = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn sample_app() -> App {
+        app_with(&[
+            r#"{"timestamp":"2026-10-02T03:08:35.4Z","level":"WARN","target":"orca::serve::middleware","message":"cookie session stale"}"#,
+            r#"{"timestamp":"2026-10-02T03:08:36.1Z","level":"ERROR","target":"system::mesh::mesh_listener","message":"tls handshake eof"}"#,
+            "thread 'main' panicked at wherever",
+        ])
+    }
+
+    #[test]
+    fn the_frame_shows_every_level_toggle_with_its_key() {
+        let out = render(&mut sample_app());
+        for (i, lvl) in LEVELS.iter().enumerate() {
+            assert!(
+                out.contains(&format!("{}:{}", i + 1, lvl)),
+                "missing {lvl} in:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_log_row_renders_time_level_target_and_message() {
+        let out = render(&mut sample_app());
+        assert!(out.contains("03:08:35"), "time column:\n{out}");
+        assert!(out.contains("WARN"), "level column:\n{out}");
+        // Shortened to the last two segments, which is what fits the column.
+        assert!(out.contains("serve::middleware"), "target column:\n{out}");
+        assert!(out.contains("cookie session stale"), "message:\n{out}");
+    }
+
+    #[test]
+    fn an_unparseable_line_is_rendered_not_swallowed() {
+        let out = render(&mut sample_app());
+        assert!(
+            out.contains("panicked at wherever"),
+            "a panic must be visible:\n{out}"
+        );
+    }
+
+    #[test]
+    fn the_filtered_marker_appears_only_once_something_is_hidden() {
+        let mut app = sample_app();
+        assert!(!render(&mut app).contains("FILTERED"));
+        press(&mut app, '1'); // mute ERROR
+        assert!(
+            render(&mut app).contains("FILTERED"),
+            "a narrowed view must say so, or it reads as a quiet system"
+        );
+    }
+
+    #[test]
+    fn follow_state_is_on_screen() {
+        let mut app = sample_app();
+        assert!(render(&mut app).contains("FOLLOW"));
+        press(&mut app, 'f');
+        assert!(render(&mut app).contains("PAUSED"));
+    }
+
+    #[test]
+    fn the_target_panel_lists_targets_with_counts_and_checkboxes() {
+        let mut app = sample_app();
+        press(&mut app, 't');
+        let out = render(&mut app);
+        assert!(out.contains("orca::serve::middleware"), "{out}");
+        assert!(out.contains("[x]"), "enabled targets are checked:\n{out}");
+        press(&mut app, ' '); // mute the focused (noisiest) target
+        let out = render(&mut app);
+        assert!(out.contains("[ ]"), "muting must show:\n{out}");
+    }
+
+    #[test]
+    fn the_detail_overlay_pretty_prints_the_focused_record() {
+        let mut app = sample_app();
+        app.selected = 0;
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
+        let out = render(&mut app);
+        // Pretty-printed means one field per line, not the compact source.
+        assert!(out.contains("\"level\""), "{out}");
+        assert!(out.contains("record"), "the overlay is titled:\n{out}");
+    }
+
+    #[test]
+    fn help_lists_the_copy_keys_on_a_standard_terminal() {
+        let mut app = sample_app();
+        press(&mut app, '?');
+        // 80x24 is the floor worth supporting; the caveat must survive it.
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let out: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            out.contains("OSC 52"),
+            "the SSH caveat must be stated:\n{out}"
+        );
+        assert!(out.contains("copy"), "{out}");
+    }
+
+    #[test]
+    fn searching_shows_the_query_in_the_status_bar() {
+        let mut app = sample_app();
+        press(&mut app, '/');
+        for c in "mesh".chars() {
+            press(&mut app, c);
+        }
+        assert!(
+            render(&mut app).contains("/mesh"),
+            "the query must be visible"
+        );
+    }
+
+    #[test]
+    fn an_empty_view_renders_without_panicking() {
+        // Filter everything out: the list, the selection and the detail pane
+        // all have to cope with nothing to show.
+        let mut app = sample_app();
+        app.filters.search = "no-line-contains-this".into();
+        app.filters.show_unlevelled = false;
+        let out = render(&mut app);
+        assert!(out.contains("0/3"), "the count must still render:\n{out}");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
+        assert!(render(&mut app).contains("no line selected"));
+    }
+
+    #[test]
+    fn copying_from_an_empty_view_is_a_noop_not_a_crash() {
+        let mut app = sample_app();
+        app.filters.search = "nothing".into();
+        press(&mut app, 'y');
+        press(&mut app, 'Y');
+        assert!(!app.should_quit);
     }
 
     #[test]
