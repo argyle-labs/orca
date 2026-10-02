@@ -39,6 +39,18 @@ const MAX_RECORDS: usize = 100_000;
 /// viewer is not a busy loop.
 const TICK: Duration = Duration::from_millis(120);
 
+/// Below this the viewer cannot lay out its columns, and a terminal
+/// reporting 0x0 (no winsize) would otherwise render a blank screen and exit
+/// 0 — a silent no-op the operator cannot diagnose.
+const MIN_COLS: u16 = 40;
+const MIN_ROWS: u16 = 8;
+
+/// Can the viewer lay itself out at this size? Pure so the rule is tested
+/// rather than restated.
+fn usable_size(cols: u16, rows: u16) -> bool {
+    cols >= MIN_COLS && rows >= MIN_ROWS
+}
+
 /// Which overlay, if any, is up.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Overlay {
@@ -559,6 +571,20 @@ pub fn run(path: Option<std::path::PathBuf>, tail_bytes: Option<u64>) -> Result<
         should_quit: false,
     };
 
+    // A terminal that reports no usable size renders an EMPTY alternate
+    // screen and then exits 0 — the operator sees a blank flash and no
+    // explanation, which is indistinguishable from the command doing nothing.
+    // Refuse up front with a reason instead. Measured: a pty with no winsize
+    // produced exactly that silent blank.
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((0, 0));
+    if !usable_size(cols, rows) {
+        anyhow::bail!(
+            "terminal is {cols}x{rows}; `orca logs` needs at least {MIN_COLS}x{MIN_ROWS}. \
+             If this is a real terminal, its size was not reported — try resizing the \
+             window, or run outside a pipe/multiplexer."
+        );
+    }
+
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
@@ -675,6 +701,22 @@ mod tests {
             r#"{"timestamp":"2026-10-02T03:08:36.1Z","level":"ERROR","target":"system::mesh::mesh_listener","message":"tls handshake eof"}"#,
             "thread 'main' panicked at wherever",
         ])
+    }
+
+    #[test]
+    fn a_terminal_too_small_to_draw_is_refused_with_a_reason() {
+        // The failure this prevents: a terminal reporting 0x0 entered the
+        // alternate screen, drew nothing, and exited 0 — a blank flash the
+        // operator cannot tell from the command doing nothing at all.
+        // Measured under a pty with no winsize before the guard existed.
+        for (c, r) in [(0, 0), (20, 20), (120, 2), (39, 50)] {
+            assert!(!usable_size(c, r), "{c}x{r} must be refused");
+        }
+        // And an ordinary terminal is not refused — a guard that rejects a
+        // real window would be a worse bug than the blank screen.
+        for (c, r) in [(80, 24), (120, 30), (40, 8)] {
+            assert!(usable_size(c, r), "{c}x{r} must be allowed");
+        }
     }
 
     #[test]
