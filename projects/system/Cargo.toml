@@ -66,6 +66,13 @@ regex        = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
 
+# `orca logs` TUI. ratatui/crossterm are already workspace deps (the
+# conversation TUI uses them); base64 is for the OSC 52 clipboard escape, which
+# is how a copy reaches the OPERATOR's clipboard when the log is read over SSH.
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+base64 = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

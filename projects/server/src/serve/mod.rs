@@ -570,6 +570,38 @@ async fn mcp_catalog_handler() -> impl axum::response::IntoResponse {
     }))
 }
 
+/// What a `tools/call` frame says about client-side progress support.
+///
+/// #626: a fleet `system.update` buffers until the whole fan-out finishes and
+/// MCP clients abort it at 300s. The fix shape depends on a fact we cannot read
+/// from the code — whether the CLIENT asks for progress. Per the MCP spec a
+/// caller opts in with `params._meta.progressToken`; without one, a server has
+/// nowhere to send interim frames and streaming the response would buy nothing.
+/// The daemon logs no request bodies, so this is the only way to measure it.
+///
+/// Returns the token's JSON type, never its value — the probe answers "did they
+/// ask?", and a request body is not a thing to copy into a log wholesale.
+// A JSON-RPC frame is free-form by spec (arbitrary method + tool args); the
+// handler it serves already takes it untyped for the same reason.
+#[allow(clippy::disallowed_types)]
+fn progress_token_probe(req: &serde_json::Value) -> Option<&'static str> {
+    if req.get("method")?.as_str()? != "tools/call" {
+        return None;
+    }
+    let kind = match req
+        .get("params")
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get("progressToken"))
+    {
+        None => "absent",
+        Some(serde_json::Value::String(_)) => "string",
+        Some(serde_json::Value::Number(_)) => "number",
+        Some(serde_json::Value::Null) => "null",
+        Some(_) => "other",
+    };
+    Some(kind)
+}
+
 /// HTTP JSON-RPC MCP endpoint (#538 P2 Phase 1): lets Claude Code connect over
 /// HTTP instead of the fragile stdio `orca mcp-serve` child. Plain
 /// application/json request/response (no SSE — that's Phase 2). Runs behind
@@ -586,6 +618,20 @@ async fn mcp_jsonrpc_handler(
     auth: Option<axum::Extension<middleware::AuthIdentity>>,
     axum::Json(req): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
+    // #626 instrumentation: one line per tools/call saying whether the client
+    // opted into progress. Temporary — it exists to size the fix, not to ship
+    // forever; remove once the question is settled.
+    if let Some(progress_token) = progress_token_probe(&req) {
+        tracing::info!(
+            progress_token,
+            tool = req
+                .get("params")
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("?"),
+            "progress_probe"
+        );
+    }
     let cfg = match contract::config::Config::load() {
         Ok(c) => Arc::new(c),
         Err(e) => {
@@ -1689,6 +1735,43 @@ fn write_orca_spec_to_disk() {
 
 #[cfg(test)]
 mod tests {
+    // ── #626: does the MCP client actually ask for progress? ────────────
+
+    #[test]
+    fn a_tools_call_without_a_meta_reads_as_absent() {
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "system.update", "arguments": {"scope": "fleet"}}
+        });
+        assert_eq!(super::progress_token_probe(&req), Some("absent"));
+    }
+
+    #[test]
+    fn a_progress_token_is_reported_by_type_not_value() {
+        for (tok, want) in [
+            (serde_json::json!("abc123"), "string"),
+            (serde_json::json!(7), "number"),
+            (serde_json::json!(null), "null"),
+        ] {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "system.update", "_meta": {"progressToken": tok}}
+            });
+            assert_eq!(super::progress_token_probe(&req), Some(want));
+        }
+    }
+
+    #[test]
+    fn the_probe_says_nothing_about_frames_that_are_not_tool_calls() {
+        // Every handshake and listing frame would otherwise log a line each,
+        // which buries the one answer the probe exists to collect.
+        for method in ["initialize", "tools/list", "notifications/initialized"] {
+            let req = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method});
+            assert_eq!(super::progress_token_probe(&req), None, "{method}");
+        }
+        assert_eq!(super::progress_token_probe(&serde_json::json!({})), None);
+    }
+
     use super::*;
 
     // ── M1 guard ──────────────────────────────────────────────────────────────
