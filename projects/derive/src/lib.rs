@@ -1172,6 +1172,12 @@ fn snake_to_pascal(s: &str) -> String {
 /// applies changes with no consent and no audit, which is not. So anything not
 /// named here gates.
 fn is_read_shaped(verb: &str) -> bool {
+    // A dotted verb is classified by its LAST segment: `remediation.get` is a
+    // `get`, `update.status` is a `status`. Matching the whole string made both
+    // read as write-shaped, so #658 turned two pure reads into admin-only,
+    // execute-gated data mutations — reading the remediation policy started
+    // demanding `--execute`.
+    let verb = verb.rsplit('.').next().unwrap_or(verb);
     matches!(
         verb,
         "list"
@@ -1580,6 +1586,18 @@ mod tests {
             out.contains("REQUIRED_ROLE : & 'static str = \"admin\""),
             "got: {out}"
         );
+    }
+
+    #[test]
+    fn a_dotted_verb_is_classified_by_its_last_segment() {
+        // `remediation.get` is a get and `update.status` is a status. Matching
+        // the whole string made both write-shaped, which gated two pure reads.
+        assert!(is_read_shaped("remediation.get"));
+        assert!(is_read_shaped("update.status"));
+        // The write-shaped ones stay write-shaped.
+        assert!(!is_read_shaped("remediation.set"));
+        assert!(!is_read_shaped("share.repair-permissions"));
+        assert!(!is_read_shaped("mount.create"));
     }
 
     #[test]

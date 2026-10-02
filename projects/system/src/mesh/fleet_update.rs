@@ -24,7 +24,8 @@
 
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use derive::orca_tool;
 
 use crate::commands::{SystemUpdateArgs, SystemUpdateResult};
 // Fleet result types live in `system` so the hook signature is expressible
@@ -785,6 +786,99 @@ impl crate::fleet::FleetUpdateHook for MeshFleetUpdateHook {
     }
 }
 
+/// Newest fleet-update run record on this host, if any.
+///
+/// Pure over a directory listing so the "newest" rule is testable without
+/// running a roll.
+fn newest_record_in(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("fleet-update-") && n.ends_with(".json"))
+        .collect();
+    // The filename encodes an RFC3339 instant, so lexicographic order IS
+    // chronological order — already pinned by
+    // `run_record_filename_is_shell_safe_and_sorts_chronologically`.
+    names.sort();
+    names.pop().map(|n| dir.join(n))
+}
+
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FleetUpdateStatusOutput {
+    /// The roll itself, exactly as the run record has it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<crate::fleet::FleetUpdateOutput>,
+    /// Absolute path of the record this came from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_record: Option<String>,
+    /// Seconds since the record was last written. A roll updates it after every
+    /// host, so a small age means one is probably still running and a large one
+    /// means this is the last completed roll. Stated as an age rather than
+    /// "running: true/false" because a controller killed mid-roll leaves a
+    /// record that nothing will ever finish, and claiming it is live would be a
+    /// guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_age_secs: Option<u64>,
+    /// Why there is nothing to report, when there is nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(clap::Args, serde::Serialize, serde::Deserialize, schemars::JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FleetUpdateStatusArgs {}
+
+/// Report the outcome of the most recent fleet roll on this host.
+///
+/// A fleet roll takes longer than an MCP client's idle timeout, so the client
+/// aborts and the operator is left genuinely unsure what applied — the call
+/// reported failure while having done real, partial work (#626). The roll
+/// already writes a run record after EVERY host; nothing could read it back, so
+/// recovering the outcome meant SSH and a JSON file by hand.
+///
+/// Read-only: it reports what a roll recorded, and never starts or resumes one.
+#[orca_tool(domain = "system", verb = "update.status")]
+async fn fleet_update_status(
+    _args: FleetUpdateStatusArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<FleetUpdateStatusOutput> {
+    let Some(dir) =
+        contract::config::paths::orca_home().map(|h| h.join(contract::config::APP_LOGS_SUBDIR))
+    else {
+        return Ok(FleetUpdateStatusOutput {
+            note: Some("no orca home on this host, so no run records are kept".into()),
+            ..Default::default()
+        });
+    };
+    let Some(path) = newest_record_in(&dir) else {
+        return Ok(FleetUpdateStatusOutput {
+            note: Some(format!(
+                "no fleet-update run record under {}",
+                dir.display()
+            )),
+            ..Default::default()
+        });
+    };
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("read run record {}", path.display()))?;
+    #[allow(clippy::disallowed_types)]
+    let run: crate::fleet::FleetUpdateOutput = serde_json::from_str(&raw)
+        .with_context(|| format!("parse run record {}", path.display()))?;
+    let record_age_secs = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs());
+    Ok(FleetUpdateStatusOutput {
+        run: Some(run),
+        run_record: Some(path.display().to_string()),
+        record_age_secs,
+        note: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1225,5 +1319,59 @@ mod tests {
     #[test]
     fn no_gate_skew_when_nothing_was_applied() {
         assert!(gate_skew_note("0.2.1-rc.7", &[]).is_none());
+    }
+
+    #[test]
+    fn the_newest_record_is_the_one_reported() {
+        // An operator whose client aborted wants THIS roll, not last week's.
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "fleet-update-2026-09-26T04-05-54Z.json",
+            "fleet-update-2026-09-29T02-53-40Z.json",
+            "fleet-update-2026-09-27T19-43-21Z.json",
+        ] {
+            std::fs::write(dir.path().join(name), "{}").unwrap();
+        }
+        let got = newest_record_in(dir.path()).unwrap();
+        assert!(
+            got.ends_with("fleet-update-2026-09-29T02-53-40Z.json"),
+            "got: {}",
+            got.display()
+        );
+    }
+
+    #[test]
+    fn unrelated_files_in_the_log_dir_are_not_run_records() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("daemon.log"), "x").unwrap();
+        std::fs::write(dir.path().join("fleet-update-notes.txt"), "x").unwrap();
+        assert!(newest_record_in(dir.path()).is_none());
+    }
+
+    #[test]
+    fn an_empty_log_dir_reports_nothing_rather_than_failing() {
+        // "No roll has run here" is an answer, not an error.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(newest_record_in(dir.path()).is_none());
+    }
+
+    /// The whole point is recovering a roll the caller lost, so the record a
+    /// real roll writes must read back through the status path.
+    #[test]
+    fn a_persisted_roll_reads_back_as_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-update-2026-09-29T02-53-40Z.json");
+        let out = crate::fleet::FleetUpdateOutput {
+            dry_run: false,
+            notes: vec!["thor: applied 0.2.1-rc.8".into()],
+            ..Default::default()
+        };
+        persist(&out, Some(&path));
+
+        let found = newest_record_in(dir.path()).expect("record found");
+        let raw = std::fs::read_to_string(&found).unwrap();
+        let back: crate::fleet::FleetUpdateOutput = serde_json::from_str(&raw).unwrap();
+        assert!(!back.dry_run);
+        assert_eq!(back.notes, vec!["thor: applied 0.2.1-rc.8".to_string()]);
     }
 }
