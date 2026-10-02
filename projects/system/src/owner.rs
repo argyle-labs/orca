@@ -25,29 +25,10 @@ use std::sync::Arc;
 /// not to a hang.
 pub const OWNER_READ_TIMEOUT_SECS: u64 = 5;
 
-/// Where a resource's answer must come from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Answers {
-    /// This system owns it — answer locally. It is the termination point.
-    Locally,
-    /// Another system owns it; ask that one.
-    Owner(String),
-}
-
-/// Decide who answers for a resource owned by `owner`, given `this_host`.
-///
-/// Pure, so the decision is testable without a mesh. An empty or unknown owner
-/// answers locally rather than dialing nowhere — a row with no recorded owner
-/// is this host's to speak for, and dialing `""` would fail with a transport
-/// error that says nothing useful.
-pub fn answers_for(owner: &str, this_host: &str) -> Answers {
-    let owner = owner.trim();
-    if owner.is_empty() || owner.eq_ignore_ascii_case(this_host.trim()) {
-        Answers::Locally
-    } else {
-        Answers::Owner(owner.to_string())
-    }
-}
+/// The decision itself is generic and lives in [`contract::owner`] — every
+/// domain crate makes it, and `system` is not reachable from most of them.
+/// Re-exported here so this module stays the one place a `system` tool looks.
+pub use contract::owner::{Answers, answers_for};
 
 /// Ask the system that owns a resource to answer for it.
 ///
