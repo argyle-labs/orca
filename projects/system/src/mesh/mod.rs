@@ -1167,6 +1167,23 @@ impl contract::RemoteExec for MeshRemoteExec {
             .result)
     }
 
+    async fn peers(&self) -> anyhow::Result<Vec<contract::PeerRef>> {
+        // Trait method (RemoteExec): the roster, projected to the minimum a
+        // domain crate needs to find a resource's owner. Built on
+        // `fleet_targets` so there is ONE answer to "who is in the mesh" —
+        // a second enumeration here could disagree with the one a fleet roll
+        // uses, and a domain searching a different set than the roller walks
+        // is how a container goes missing on a host that is plainly joined.
+        Ok(crate::mesh::fleet_update::fleet_targets()?
+            .into_iter()
+            .map(|t| contract::PeerRef {
+                id: t.peer_id,
+                name: t.host,
+                is_local: t.is_local,
+            })
+            .collect())
+    }
+
     async fn refresh_peer_runtime(&self, peer: &str) -> anyhow::Result<()> {
         // Trait method (RemoteExec): force-refresh the peer's write-through
         // system.detail cache so the next system.list reflects a just-applied

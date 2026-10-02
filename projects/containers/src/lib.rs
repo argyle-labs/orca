@@ -51,6 +51,7 @@ use crate::breaker::HostObservation;
 pub mod ffi;
 pub use ffi::{CAP_WEDGE_RECOVER, InvokeThunk, dispatch_op, register_from_def};
 pub mod breaker;
+pub mod owner;
 pub mod reconciler;
 pub mod wedge;
 
@@ -762,9 +763,25 @@ pub struct ContainersListArgs {
     /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
     #[arg(long)]
     pub cursor: Option<String>,
+    /// Report the containers belonging to ONE system, by its id (the stable
+    /// machine id) or its display name. Omit for this system.
+    ///
+    /// The system is the RESOURCE this names — "baldur's containers" — never a
+    /// host selector. orca resolves the id to a route internally; the caller
+    /// never says where to run (#647).
+    #[arg(long)]
+    pub system: Option<String>,
+    /// Report containers across EVERY system in the mesh. Each row already
+    /// carries the system it lives on.
+    ///
+    /// Opt-in, not the default: this fans out live to every system, which is
+    /// exactly what the hot read paths are barred from doing. A caller that
+    /// wants the fleet picture asks for it.
+    #[arg(long)]
+    pub all_systems: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Serialize, Deserialize, JsonSchema, Default, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainersListOutput {
     /// Runtimes the local host successfully detected via the probe.
@@ -783,6 +800,12 @@ pub struct ContainersListOutput {
     /// Total containers across all pages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
+    /// Systems that could not be asked during an `--all-systems` fan-out, one
+    /// entry each. Recorded, never fatal: a fleet view missing one host is
+    /// still worth having, but only if it says which host is missing. An empty
+    /// list on a fan-out means every system answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_errors: Vec<String>,
 }
 
 /// One adapter's `list()` failure, recorded alongside the successful rows
@@ -808,8 +831,123 @@ pub struct AdapterListError {
 #[derive::orca_tool(domain = "container", verb = "list", crate = ::macro_runtime)]
 async fn containers_list(
     args: ContainersListArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ContainersListOutput> {
+    // `--system` and `--all-systems` are two ways of naming the same thing
+    // twice; one answer would have to win silently, and the caller would not
+    // know which.
+    if args.system.is_some() && args.all_systems.unwrap_or(false) {
+        anyhow::bail!("pass `--system <id>` or `--all-systems`, not both");
+    }
+    if args.all_systems.unwrap_or(false) {
+        return list_every_system(args, ctx).await;
+    }
+    if let Some(sel) = args
+        .system
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        && let owner::Answers::Owner(peer) = owner::resolve_system(sel, ctx).await?
+    {
+        // Ask that system about ITSELF. The selector is cleared so a name it
+        // does not recognise cannot bounce onward: a resolution loop is a
+        // worse failure than a clear miss.
+        let remote = ContainersListArgs {
+            system: None,
+            ..args
+        };
+        return exec_list_at(&peer, remote, ctx).await;
+    }
+    list_locally(args).await
+}
+
+/// Run `container.list` on one system over the mesh, preserving the caller's
+/// filters. Separate from the owner search's bare probe because this forwards
+/// the real arguments — a `--runtime` filter the caller asked for must survive
+/// the hop, or the answer is about a different question.
+async fn exec_list_at(
+    peer: &str,
+    args: ContainersListArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<ContainersListOutput> {
+    let svc = ctx.service::<Arc<dyn contract::RemoteExec>>()?;
+    #[allow(clippy::disallowed_types)]
+    let payload = serde_json::to_value(&args)?;
+    let value = svc
+        .exec(
+            peer,
+            <ContainersList as contract::OrcaToolDef>::NAME,
+            payload,
+            ctx.caller(),
+            ctx.correlation_id().map(str::to_string),
+        )
+        .await?;
+    #[allow(clippy::disallowed_types)]
+    Ok(serde_json::from_value(value)?)
+}
+
+/// Every container in the mesh, gathered concurrently.
+///
+/// Paging is applied ONCE, over the merged set, so a page is a page of the
+/// fleet rather than of whichever system answered first. A system that cannot
+/// be asked lands in `system_errors` and the rest of the picture still
+/// returns — one unreachable host must not hide the containers on the others.
+async fn list_every_system(
+    args: ContainersListArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<ContainersListOutput> {
+    let systems = owner::all_systems(ctx).await;
+    let local_args = ContainersListArgs {
+        system: None,
+        all_systems: None,
+        // Page the merged set, not each system's slice.
+        limit: None,
+        cursor: None,
+        ..args
+    };
+    let mut local = list_locally(ContainersListArgs { ..local_args }).await?;
+
+    let mut set = tokio::task::JoinSet::new();
+    for (id, name) in systems.into_iter().filter(|(id, _)| !id.is_empty()) {
+        let ctx = ctx.clone();
+        set.spawn(async move {
+            match owner::list_on(&id, &ctx).await {
+                Ok(rows) => Ok(rows),
+                Err(e) => Err(format!("{name}: {e:#}")),
+            }
+        });
+    }
+    let mut rows = std::mem::take(&mut local.containers);
+    let mut system_errors = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(Ok(mut got)) => rows.append(&mut got),
+            Ok(Err(why)) => system_errors.push(why),
+            Err(e) => system_errors.push(format!("fan-out task failed: {e}")),
+        }
+    }
+    system_errors.sort();
+    rows.sort_by(|a, b| a.host.cmp(&b.host).then_with(|| a.name.cmp(&b.name)));
+
+    let page = contract::paging::Page::from_slice(
+        rows,
+        &contract::paging::PageParams {
+            limit: args.limit,
+            cursor: args.cursor,
+        },
+    );
+    Ok(ContainersListOutput {
+        containers: page.items,
+        next_cursor: page.next_cursor,
+        total: page.total,
+        system_errors,
+        ..local
+    })
+}
+
+/// This system's own containers — the termination point every routed path
+/// lands on.
+async fn list_locally(args: ContainersListArgs) -> anyhow::Result<ContainersListOutput> {
     let detected = detect_available_runtimes()?;
 
     // Resolve the adapter set. Tests / bootstraps that called
@@ -860,6 +998,7 @@ async fn containers_list(
         adapter_errors: errors,
         next_cursor: page.next_cursor,
         total: page.total,
+        system_errors: Vec::new(),
     })
 }
 
@@ -921,6 +1060,14 @@ pub struct ContainerDetailArgs {
     /// Maximum number of recent log lines to return (default 200).
     #[arg(long)]
     pub tail: Option<u32>,
+    /// The system this container lives on, by id or display name. Optional:
+    /// orca finds the owner itself when this is omitted. Pass it to skip the
+    /// search, or to disambiguate an id that exists on more than one system.
+    ///
+    /// Naming the system is addressing the container precisely, not choosing
+    /// where to run (#647).
+    #[arg(long)]
+    pub system: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Default)]
@@ -939,9 +1086,64 @@ pub struct ContainersLogsOutput {
 #[derive::orca_tool(domain = "container", verb = "detail", crate = ::macro_runtime)]
 async fn container_detail(
     args: ContainerDetailArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ContainersLogsOutput> {
     let ContainerDetailView::Logs = args.view;
+    // An explicit `--system` is an instruction, not a hint: honor it without
+    // looking locally, so naming a system can never be overridden by a local
+    // container that happens to share the id.
+    if let Some(sel) = args
+        .system
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let owner::Answers::Owner(peer) = owner::resolve_system(sel, ctx).await? {
+            // `system` is resolved away rather than forwarded, so the hop
+            // terminates at the owner instead of bouncing onward.
+            let remote = ContainerDetailArgs {
+                system: None,
+                ..args
+            };
+            return exec_detail_at(&peer, remote, ctx).await;
+        }
+        return detail_locally(args).await;
+    }
+    // Try HERE first. A local container costs no mesh traffic at all, and the
+    // local attempt is the authoritative test of whether this system has it —
+    // stronger than consulting a listing, which an adapter can under-report.
+    // Searching the mesh is what a local MISS costs, never what a hit costs.
+    let id = args.id.clone();
+    let probe = ContainerDetailArgs {
+        id: id.clone(),
+        runtime: args.runtime.clone(),
+        system: None,
+        ..args
+    };
+    let local_err = match detail_locally(probe).await {
+        Ok(out) => return Ok(out),
+        Err(e) => e,
+    };
+    let args = ContainerDetailArgs {
+        view: ContainerDetailView::Logs,
+        id: id.clone(),
+        runtime: args.runtime,
+        tail: args.tail,
+        system: None,
+    };
+    match owner::find(&id, &[], ctx).await {
+        owner::Found::On(peer) => exec_detail_at(&peer, args, ctx).await,
+        // Nobody else has it either. The LOCAL failure is the real answer —
+        // it says what actually went wrong here, where a generic "not found"
+        // would bury an adapter error behind a search result.
+        owner::Found::Locally | owner::Found::Missing { .. } => Err(local_err),
+        other => Err(owner::unresolved(&id, &other)),
+    }
+}
+
+/// Tail a container's logs on THIS system — the termination point every routed
+/// path lands on.
+async fn detail_locally(args: ContainerDetailArgs) -> anyhow::Result<ContainersLogsOutput> {
     let adapter = adapter_for(args.runtime.as_deref())?;
     let tail = args.tail.map(LogTail).unwrap_or_default();
     let logs = adapter.logs(&args.id, tail).await?;
@@ -950,6 +1152,28 @@ async fn container_detail(
         runtime: adapter.kind().as_str().to_string(),
         logs,
     })
+}
+
+/// Run `container.detail` on one system over the mesh.
+async fn exec_detail_at(
+    peer: &str,
+    args: ContainerDetailArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<ContainersLogsOutput> {
+    let svc = ctx.service::<Arc<dyn contract::RemoteExec>>()?;
+    #[allow(clippy::disallowed_types)]
+    let payload = serde_json::to_value(&args)?;
+    let value = svc
+        .exec(
+            peer,
+            <ContainerDetail as contract::OrcaToolDef>::NAME,
+            payload,
+            ctx.caller(),
+            ctx.correlation_id().map(str::to_string),
+        )
+        .await?;
+    #[allow(clippy::disallowed_types)]
+    Ok(serde_json::from_value(value)?)
 }
 
 /// The `container.create` action. `exec` is the only one — it keeps the
@@ -1402,6 +1626,74 @@ mod tests {
         }))
     }
 
+    /// A mesh transport that records what it was asked and answers from a
+    /// fixed script. Lets these tests assert WHERE a call went — the whole
+    /// claim of #647 is about routing, and a test that only checks the
+    /// returned value cannot tell a routed call from a local one.
+    #[derive(Default)]
+    struct SpyMesh {
+        peers: Vec<contract::PeerRef>,
+        /// Containers each peer reports, keyed by peer id. A peer absent from
+        /// this map is UNREACHABLE — its `exec` fails.
+        holdings: std::collections::BTreeMap<String, Vec<Container>>,
+        /// `(peer, tool)` for every dispatched call, in order.
+        calls: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl SpyMesh {
+        fn ctx(self) -> contract::ToolCtx {
+            let mut ctx = tool_ctx();
+            ctx.register_service(Arc::new(self) as Arc<dyn contract::RemoteExec>);
+            ctx
+        }
+    }
+
+    #[macro_runtime::async_trait::async_trait]
+    impl contract::RemoteExec for SpyMesh {
+        async fn peers(&self) -> anyhow::Result<Vec<contract::PeerRef>> {
+            Ok(self.peers.clone())
+        }
+
+        #[allow(clippy::disallowed_types)]
+        async fn exec(
+            &self,
+            peer: &str,
+            tool: &str,
+            _args: serde_json::Value,
+            _caller: Option<contract::CallerIdentity>,
+            _correlation_id: Option<String>,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.calls
+                .lock()
+                .expect("spy calls poisoned")
+                .push((peer.to_string(), tool.to_string()));
+            let Some(rows) = self.holdings.get(peer) else {
+                anyhow::bail!("unreachable");
+            };
+            match tool {
+                "container.list" => Ok(serde_json::to_value(ContainersListOutput {
+                    runtimes: vec!["docker".into()],
+                    containers: rows.clone(),
+                    ..Default::default()
+                })?),
+                "container.detail" => Ok(serde_json::to_value(ContainersLogsOutput {
+                    id: "routed".into(),
+                    runtime: "docker".into(),
+                    logs: format!("logs-from-{peer}"),
+                })?),
+                other => anyhow::bail!("spy has no script for `{other}`"),
+            }
+        }
+    }
+
+    fn peer(id: &str, name: &str, is_local: bool) -> contract::PeerRef {
+        contract::PeerRef {
+            id: id.to_string(),
+            name: name.to_string(),
+            is_local,
+        }
+    }
+
     /// Adapter returning a fixed set of rows, or an error, to drive the
     /// aggregation tool.
     struct RowsAdapter {
@@ -1521,6 +1813,8 @@ mod tests {
                 all: Some(true),
                 limit: None,
                 cursor: None,
+                system: None,
+                all_systems: None,
             },
             &tool_ctx(),
         )
@@ -1541,6 +1835,8 @@ mod tests {
                 all: Some(true),
                 limit: Some(1),
                 cursor: None,
+                system: None,
+                all_systems: None,
             },
             &tool_ctx(),
         )
@@ -1548,6 +1844,297 @@ mod tests {
         .unwrap();
         assert_eq!(paged.containers.len(), 1);
         assert!(paged.next_cursor.is_some());
+        reset_registry();
+    }
+
+    // ── #647: a caller addresses the resource, never a host ───────────────
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn naming_another_system_routes_the_list_to_it() {
+        reset_registry();
+        register_adapter(Arc::new(RowsAdapter {
+            kind: RuntimeKind::Docker,
+            rows: vec![row("local-only", "thor", RuntimeKind::Docker)],
+            fail: false,
+        }));
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = SpyMesh {
+            peers: vec![peer("", "thor", true), peer("mid-baldur", "baldur", false)],
+            holdings: [(
+                "mid-baldur".to_string(),
+                vec![row("sonarr", "baldur", RuntimeKind::Docker)],
+            )]
+            .into_iter()
+            .collect(),
+            calls: Arc::clone(&calls),
+        }
+        .ctx();
+
+        let out = containers_list(
+            ContainersListArgs {
+                system: Some("baldur".into()),
+                all: Some(true),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .await
+        .expect("routed list");
+
+        // baldur's containers, not thor's — and the id is what got dialed,
+        // even though the caller typed the display name.
+        assert_eq!(out.containers.len(), 1);
+        assert_eq!(out.containers[0].name, "sonarr");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![("mid-baldur".to_string(), "container.list".to_string())]
+        );
+        reset_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn naming_this_system_answers_here_without_dialing_anyone() {
+        reset_registry();
+        register_adapter(Arc::new(RowsAdapter {
+            kind: RuntimeKind::Docker,
+            rows: vec![row("local-only", "thor", RuntimeKind::Docker)],
+            fail: false,
+        }));
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = SpyMesh {
+            peers: vec![peer("", "thor", true), peer("mid-baldur", "baldur", false)],
+            holdings: Default::default(),
+            calls: Arc::clone(&calls),
+        }
+        .ctx();
+
+        let out = containers_list(
+            ContainersListArgs {
+                system: Some("thor".into()),
+                all: Some(true),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .await
+        .expect("local list");
+
+        assert_eq!(out.containers.len(), 1);
+        // The termination case: a host must never dial itself over the mesh.
+        assert!(calls.lock().unwrap().is_empty(), "dialed itself");
+        reset_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_unknown_system_is_refused_not_answered_locally() {
+        reset_registry();
+        register_adapter(Arc::new(RowsAdapter {
+            kind: RuntimeKind::Docker,
+            rows: vec![row("local-only", "thor", RuntimeKind::Docker)],
+            fail: false,
+        }));
+        let ctx = SpyMesh {
+            peers: vec![peer("", "thor", true)],
+            ..Default::default()
+        }
+        .ctx();
+
+        // Answering locally would report THIS host's containers as if they
+        // were the named system's — the misapplication the whole module is
+        // built to prevent.
+        let err = containers_list(
+            ContainersListArgs {
+                system: Some("nowhere".into()),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .await
+        .expect_err("unknown system must not answer locally");
+        assert!(err.to_string().contains("no system `nowhere`"), "{err}");
+        reset_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_fleet_view_names_the_systems_it_could_not_ask() {
+        reset_registry();
+        register_adapter(Arc::new(RowsAdapter {
+            kind: RuntimeKind::Docker,
+            rows: vec![row("here", "thor", RuntimeKind::Docker)],
+            fail: false,
+        }));
+        let ctx = SpyMesh {
+            peers: vec![
+                peer("", "thor", true),
+                peer("mid-baldur", "baldur", false),
+                // No holdings entry: unreachable.
+                peer("mid-freyr", "freyr", false),
+            ],
+            holdings: [(
+                "mid-baldur".to_string(),
+                vec![row("sonarr", "baldur", RuntimeKind::Docker)],
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }
+        .ctx();
+
+        let out = containers_list(
+            ContainersListArgs {
+                all_systems: Some(true),
+                all: Some(true),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .await
+        .expect("fan-out");
+
+        // The reachable systems' rows still come back...
+        let names: Vec<&str> = out.containers.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["sonarr", "here"], "sorted by (host, name)");
+        // ...and the gap is stated, not swallowed. A fleet view that silently
+        // omits a host reads as "freyr has no containers".
+        assert_eq!(out.system_errors.len(), 1, "{:?}", out.system_errors);
+        assert!(
+            out.system_errors[0].contains("freyr"),
+            "{:?}",
+            out.system_errors
+        );
+        reset_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn one_system_or_all_of_them_but_not_both() {
+        reset_registry();
+        let err = containers_list(
+            ContainersListArgs {
+                system: Some("baldur".into()),
+                all_systems: Some(true),
+                ..Default::default()
+            },
+            &tool_ctx(),
+        )
+        .await
+        .expect_err("contradictory scope must be refused");
+        assert!(err.to_string().contains("not both"), "{err}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_container_only_another_system_has_is_found_without_naming_one() {
+        reset_registry();
+        // This host's adapter knows nothing about `sonarr`.
+        register_adapter(Arc::new(EchoAdapter {
+            kind: RuntimeKind::Docker,
+        }));
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = SpyMesh {
+            peers: vec![peer("", "thor", true), peer("mid-baldur", "baldur", false)],
+            holdings: [(
+                "mid-baldur".to_string(),
+                vec![row("sonarr", "baldur", RuntimeKind::Docker)],
+            )]
+            .into_iter()
+            .collect(),
+            calls: Arc::clone(&calls),
+        }
+        .ctx();
+
+        // EchoAdapter answers any id, so this exercises the ordering: a local
+        // hit terminates and nothing is dialed.
+        let out = container_detail(
+            ContainerDetailArgs {
+                view: ContainerDetailView::Logs,
+                id: "id-sonarr".into(),
+                runtime: None,
+                tail: Some(3),
+                system: None,
+            },
+            &ctx,
+        )
+        .await
+        .expect("detail");
+        assert_eq!(out.logs, "docker:id-sonarr:3");
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "a local hit must cost no mesh traffic"
+        );
+        reset_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_local_miss_searches_the_mesh_and_routes_to_the_holder() {
+        reset_registry();
+        // No adapters at all: every local attempt fails, so the search runs.
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = SpyMesh {
+            peers: vec![peer("", "thor", true), peer("mid-baldur", "baldur", false)],
+            holdings: [(
+                "mid-baldur".to_string(),
+                vec![row("sonarr", "baldur", RuntimeKind::Docker)],
+            )]
+            .into_iter()
+            .collect(),
+            calls: Arc::clone(&calls),
+        }
+        .ctx();
+
+        let out = container_detail(
+            ContainerDetailArgs {
+                view: ContainerDetailView::Logs,
+                id: "id-sonarr".into(),
+                runtime: None,
+                tail: None,
+                system: None,
+            },
+            &ctx,
+        )
+        .await
+        .expect("routed detail");
+        assert_eq!(out.logs, "logs-from-mid-baldur");
+        // Searched, then fetched — both at the holder, neither named by the
+        // caller.
+        let seen = calls.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                ("mid-baldur".to_string(), "container.list".to_string()),
+                ("mid-baldur".to_string(), "container.detail".to_string()),
+            ]
+        );
+        reset_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_standalone_system_with_no_mesh_still_answers_for_itself() {
+        reset_registry();
+        register_adapter(Arc::new(RowsAdapter {
+            kind: RuntimeKind::Docker,
+            rows: vec![row("here", "thor", RuntimeKind::Docker)],
+            fail: false,
+        }));
+        // No transport registered at all — the shape of a non-meshed install.
+        // It must keep working, not fail trying to resolve a roster.
+        let out = containers_list(
+            ContainersListArgs {
+                system: Some("thor".into()),
+                all: Some(true),
+                ..Default::default()
+            },
+            &tool_ctx(),
+        )
+        .await
+        .expect("standalone list");
+        assert_eq!(out.containers.len(), 1);
         reset_registry();
     }
 
@@ -1564,6 +2151,7 @@ mod tests {
                 id: "abc".into(),
                 runtime: None,
                 tail: Some(7),
+                system: None,
             },
             &tool_ctx(),
         )

@@ -25,8 +25,44 @@ pub struct CallerIdentity {
     pub can_mutate: bool,
 }
 
+/// One system in the mesh, as the transport knows it.
+///
+/// The minimum a domain crate needs to address a resource it does not own:
+/// who is out there, and which one is us. Deliberately NOT the rich peer row —
+/// a domain asking "who could own this container?" has no business reading
+/// mesh membership state, and coupling it to that shape would make every
+/// domain a mesh consumer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerRef {
+    /// Stable machine id. The thing a caller addresses by (#647) — never the
+    /// display name, which is mutable and can duplicate.
+    pub id: String,
+    /// Operator-facing display name. For rendering only: resolving BY name is
+    /// what #647 removes.
+    pub name: String,
+    /// True for the system this call is running on. It has no roster row of
+    /// its own, and dialing it over the mesh would be a host calling itself.
+    pub is_local: bool,
+}
+
 #[async_trait::async_trait]
 pub trait RemoteExec: Send + Sync {
+    /// Every system in the mesh, including this one.
+    ///
+    /// Exists so a domain crate can resolve "which system owns this resource?"
+    /// without depending on `system` for the roster. That dependency is not
+    /// available to it in any case — `system` depends on the domain crates,
+    /// not the reverse — so without this a domain's only way to reach another
+    /// host is for the CALLER to name one, which is exactly the host selection
+    /// #647 removes.
+    ///
+    /// Default empty: a transport with no mesh (a plugin subprocess, a test
+    /// double) reports no peers, and an owner search over no peers finds
+    /// nothing rather than inventing somewhere to look.
+    async fn peers(&self) -> Result<Vec<PeerRef>> {
+        Ok(Vec::new())
+    }
+
     /// Dispatch one tool call to `peer` over the host's mesh transport.
     /// Args/output are JSON-RPC wire payloads; callers deserialize the typed
     /// `OrcaToolDef::Output` immediately on receipt so opaque values never

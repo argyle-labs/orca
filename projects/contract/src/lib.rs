@@ -51,12 +51,13 @@ pub use types::{ToolCall, ToolDef, ToolResult};
 
 pub mod cluster_roster;
 mod ctx;
+pub mod owner;
 mod remote;
 mod tool;
 
 pub use cluster_roster::{AggregateClusterRoster, ClusterEntry, ClusterNode, ClusterRoster};
 pub use ctx::ToolCtx;
-pub use remote::{CallerIdentity, RemoteExec};
+pub use remote::{CallerIdentity, PeerRef, RemoteExec};
 pub use tool::OrcaTool;
 
 pub mod topology;

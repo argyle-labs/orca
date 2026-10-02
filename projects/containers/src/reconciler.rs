@@ -1452,7 +1452,7 @@ pub enum ContainerUpdateOutput {
 #[derive::orca_tool(domain = "container", verb = "update", crate = ::macro_runtime)]
 async fn container_update(
     args: ContainerUpdateArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ContainerUpdateOutput> {
     let action = args.action.ok_or_else(|| {
         anyhow::anyhow!(
@@ -1492,6 +1492,16 @@ async fn container_update(
         }
         ContainerUpdateAction::Unwedge => {
             let (host, runtime_s, container_id) = require_record_keys(&args, "unwedge")?;
+            // `--host` names the system the wedged container is ON. Recovery
+            // drives that host's runtime adapter, so it has to RUN there.
+            // Running it here against local adapters would recover some other
+            // machine's container, or nothing at all, and report the named
+            // host either way — a claim about a host we never touched.
+            if let crate::owner::Answers::Owner(peer) =
+                crate::owner::resolve_system(host, ctx).await?
+            {
+                return tell_owner_update(&peer, &args, ctx).await;
+            }
             let runtime = parse_runtime_kind(runtime_s)?;
             let adapters = registered_adapters();
             let adapter = adapters
@@ -1519,6 +1529,42 @@ async fn container_update(
             }))
         }
     }
+}
+
+/// Run `container.update` at the system that owns the record.
+///
+/// A MUTATION, so a transport failure is never softened into a local attempt:
+/// that is precisely how an action aimed at one host lands on another. The
+/// error says the call did not complete; it does NOT say nothing happened,
+/// because a lost reply and an undelivered call look identical from here.
+async fn tell_owner_update(
+    peer: &str,
+    args: &ContainerUpdateArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<ContainerUpdateOutput> {
+    let svc = ctx
+        .service::<Arc<dyn contract::RemoteExec>>()
+        .map_err(|e| {
+            anyhow::anyhow!("cannot reach system `{peer}`: no mesh transport on this call: {e}")
+        })?;
+    #[allow(clippy::disallowed_types)]
+    let payload = serde_json::to_value(args)?;
+    let value = svc
+        .exec(
+            peer,
+            <ContainerUpdate as contract::OrcaToolDef>::NAME,
+            payload,
+            ctx.caller(),
+            ctx.correlation_id().map(str::to_string),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "container.update on `{peer}` did not complete: {e}.                  Whether it ran there is UNKNOWN — re-read the container before retrying."
+            )
+        })?;
+    #[allow(clippy::disallowed_types)]
+    Ok(serde_json::from_value(value)?)
 }
 
 /// The breaker keys on `(host, runtime, container_id)`; unhold/unwedge require
@@ -4361,6 +4407,82 @@ mod tests {
             err.to_string().contains("host"),
             "missing host must be reported: {err}"
         );
+    }
+
+    /// A mesh transport that records dispatches and never answers, so a test
+    /// can prove a call LEFT this host without scripting a reply.
+    struct RoutingSpy {
+        peers: Vec<contract::PeerRef>,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[macro_runtime::async_trait::async_trait]
+    impl contract::RemoteExec for RoutingSpy {
+        async fn peers(&self) -> anyhow::Result<Vec<contract::PeerRef>> {
+            Ok(self.peers.clone())
+        }
+
+        #[allow(clippy::disallowed_types)]
+        async fn exec(
+            &self,
+            peer: &str,
+            tool: &str,
+            _args: serde_json::Value,
+            _caller: Option<contract::CallerIdentity>,
+            _correlation_id: Option<String>,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.calls
+                .lock()
+                .expect("spy calls poisoned")
+                .push(format!("{peer}:{tool}"));
+            anyhow::bail!("peer refused")
+        }
+    }
+
+    #[tokio::test]
+    async fn unwedging_another_systems_container_runs_at_that_system() {
+        // The bug this closes: `--host` named the record, but recovery drove
+        // whatever adapters happened to be registered HERE, then reported the
+        // named host — a claim about a machine we never touched.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut ctx = test_ctx();
+        ctx.register_service(Arc::new(RoutingSpy {
+            peers: vec![
+                contract::PeerRef {
+                    id: String::new(),
+                    name: "thor".into(),
+                    is_local: true,
+                },
+                contract::PeerRef {
+                    id: "mid-freyr".into(),
+                    name: "freyr".into(),
+                    is_local: false,
+                },
+            ],
+            calls: Arc::clone(&calls),
+        }) as Arc<dyn contract::RemoteExec>);
+
+        let err = container_update(
+            ContainerUpdateArgs {
+                action: Some(ContainerUpdateAction::Unwedge),
+                runtime: Some("docker".into()),
+                host: Some("freyr".into()),
+                container_id: Some("id1".into()),
+            },
+            &ctx,
+        )
+        .await
+        .err()
+        .expect("peer refused");
+
+        assert_eq!(
+            *calls.lock().expect("mutex"),
+            vec!["mid-freyr:container.update".to_string()],
+            "unwedge must be dispatched to the owning system"
+        );
+        // A failed mutation must never read as "nothing happened" — a lost
+        // reply and an undelivered call are indistinguishable from here.
+        assert!(err.to_string().contains("UNKNOWN"), "{err}");
     }
 
     #[tokio::test]
