@@ -58,6 +58,13 @@ md-5 = { workspace = true }
 colored      = { workspace = true }
 regex        = { workspace = true }
 
+# `orca logs` TUI. ratatui/crossterm are already workspace deps (the
+# conversation TUI uses them); base64 is for the OSC 52 clipboard escape, which
+# is how a copy reaches the OPERATOR's clipboard when the log is read over SSH.
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+base64 = { workspace = true }
+
 # macOS self-restart detaches the launchctl-kickstart helper into its own
 # session via `setsid(2)` so the supervisor killing THIS daemon's job (which
 # SIGKILLs the whole job process tree) can't take the helper down mid-restart.

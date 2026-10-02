@@ -65,6 +65,20 @@ enum Command {
         action: LogAction,
     },
 
+    /// Interactive viewer for the DAEMON log (`~/.orca/logs/daemon.jsonl`).
+    ///
+    /// Distinct from `orca log`, which searches conversation SESSION logs.
+    /// Toggle levels and targets live, search, and copy a line exactly.
+    Logs {
+        /// Log file to open. Default: `$ORCA_HOME/logs/daemon.jsonl`.
+        #[arg(long, value_name = "FILE")]
+        path: Option<std::path::PathBuf>,
+        /// How much of the tail to load, in bytes. The file is unrotated and
+        /// can reach hundreds of MB, so the viewer reads a window, not all.
+        #[arg(long = "tail-bytes", value_name = "N")]
+        tail_bytes: Option<u64>,
+    },
+
     /// One-shot: send prompt to an agent and print response
     Run {
         #[arg(short = 'a', long, default_value = "wolf")]
@@ -469,6 +483,7 @@ async fn main() -> Result<()> {
             escalate(&config, &question, project.as_deref()).await
         }
         Some(Command::Log { action }) => cmd_log(&config, action),
+        Some(Command::Logs { path, tail_bytes }) => system::logs_tui::run(path, tail_bytes),
         Some(Command::Audit { path }) => {
             let abs = std::fs::canonicalize(&path).unwrap_or_else(|_| path.into());
             let prompt = format!(

@@ -107,6 +107,10 @@ pub mod certs_tools;
 pub mod db_admin;
 pub mod history_tools;
 pub mod logs_tools;
+/// Interactive viewer for the daemon log (`orca logs`). Sits on the same file
+/// `logs_tools` reads; the toggles and copy are the parts `tail -f | jq` has no
+/// answer for.
+pub mod logs_tui;
 pub mod plugin_fetch;
 pub mod plugin_manager;
 pub mod profile_tool;
