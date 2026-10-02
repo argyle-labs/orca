@@ -1,3 +1,5 @@
+use std::path::Path;
+
 /// Expand a leading `~/` to the user's `$HOME` directory. If `$HOME` is
 /// unset, the tilde is replaced with an empty string (matching prior
 /// per-crate copies — callers already handle the unusual no-HOME case).
@@ -10,19 +12,49 @@ pub fn expand_tilde(path: &str) -> String {
     }
 }
 
-/// Locate an executable on `$PATH` via the system `which` command.
-/// Returns the resolved absolute path, or `None` if not found.
-/// Callers needing only an existence check can use `which(name).is_some()`.
+/// Locate an executable on `$PATH`. Returns the resolved absolute path, or
+/// `None` if not found. For an existence check, `which(name).is_some()`.
+///
+/// Resolved IN-PROCESS. This used to shell out to the system `which`, which
+/// made the lookup depend on `which(1)` itself being on `$PATH`: where it was
+/// not — a minimal container, or any caller that narrowed `$PATH` — the spawn
+/// failed and EVERY binary was reported missing, including ones plainly
+/// present. A probe that answers "absent" when it means "I could not look" is
+/// the failure mode worth removing, and it also drops a subprocess per lookup.
+///
+/// A name containing a separator is treated as a path and checked directly,
+/// matching POSIX `command -v`.
 pub fn which(name: &str) -> Option<String> {
-    let out = std::process::Command::new("which")
-        .arg(name)
-        .output()
-        .ok()?;
-    if !out.status.success() {
+    let name = name.trim();
+    if name.is_empty() {
         return None;
     }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if path.is_empty() { None } else { Some(path) }
+    if name.contains(std::path::MAIN_SEPARATOR) {
+        let p = Path::new(name);
+        return is_executable(p).then(|| p.to_string_lossy().into_owned());
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(|d| d.join(name))
+        .find(|c| is_executable(c))
+        .map(|c| c.to_string_lossy().into_owned())
+}
+
+/// Is `p` a file this process could execute?
+///
+/// The mode check matters: a non-executable file with the right name is not a
+/// command, and treating it as one turns a clear "not found" into a confusing
+/// spawn failure further along.
+#[cfg(unix)]
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(p: &Path) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| m.is_file())
 }
 
 #[cfg(test)]
@@ -75,5 +107,62 @@ mod tests {
     #[test]
     fn which_returns_none_for_missing_binary() {
         assert!(which("this-binary-should-not-exist-orca-test-xyz").is_none());
+    }
+
+    #[test]
+    fn a_narrowed_path_still_resolves_what_is_on_it() {
+        // The bug this replaced: `which` shelled out to the system `which`, so
+        // a PATH not containing `which(1)` made the spawn fail and EVERY
+        // lookup report "not found" — including binaries plainly present.
+        // A probe that answers "absent" when it means "I could not look" is
+        // the failure worth removing.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe = dir.path().join("orca-fake-tool");
+        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let prior = std::env::var_os("PATH");
+        // SAFETY: serialized behind ENV_LOCK with the other env-mutating tests.
+        unsafe { std::env::set_var("PATH", dir.path()) };
+        let found = which("orca-fake-tool");
+        let missing = which("orca-definitely-absent");
+        match prior {
+            // SAFETY: as above.
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        assert_eq!(
+            found.as_deref(),
+            exe.to_str(),
+            "must resolve on a bare PATH"
+        );
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn a_non_executable_file_is_not_a_command() {
+        // Right name, no execute bit. Treating it as a command turns a clear
+        // "not found" into a confusing spawn failure further along.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let f = dir.path().join("orca-not-exec");
+        std::fs::write(&f, "data").expect("write");
+        let prior = std::env::var_os("PATH");
+        // SAFETY: serialized behind ENV_LOCK.
+        unsafe { std::env::set_var("PATH", dir.path()) };
+        let got = which("orca-not-exec");
+        match prior {
+            // SAFETY: as above.
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        #[cfg(unix)]
+        assert!(got.is_none(), "{got:?}");
+        #[cfg(not(unix))]
+        let _ = got;
     }
 }

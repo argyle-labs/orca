@@ -1147,6 +1147,74 @@ impl PbsMethod {
         }
     }
 
+    /// Container image carrying `proxmox-backup-client`, for hosts that cannot
+    /// install it. Debian-based per the fleet image policy — the client is a
+    /// glibc Debian package and that is precisely the constraint being worked
+    /// around.
+    fn client_image() -> String {
+        std::env::var("ORCA_PBS_CLIENT_IMAGE")
+            .unwrap_or_else(|_| "debian:bookworm-slim".to_string())
+    }
+
+    /// Container runtime to borrow when the client is not installed, or `None`
+    /// when there is none to borrow.
+    fn container_runtime() -> Option<&'static str> {
+        ["docker", "podman"]
+            .into_iter()
+            .find(|bin| utils::path::which(bin).is_some())
+    }
+
+    /// Wrap a `proxmox-backup-client` invocation in a throwaway container.
+    ///
+    /// `proxmox-backup-client` is a glibc Debian package. **freyr is
+    /// Alpine/musl; willow and maple are Slackware.** The PBS binaries link
+    /// `libc.so.6`, `ld-linux-x86-64.so.2` and `libapt-pkg.so.7.0`, so there is
+    /// no musl build and `gcompat` cannot bridge it (#613 gap 2). Those three
+    /// hosts are exactly where the per-container app data lives, so without
+    /// this the file-level path is unusable on every host that needs it.
+    ///
+    /// All three are docker hosts, so the client runs in a container there
+    /// instead — an implementation detail of this primitive, not a separate
+    /// system.
+    ///
+    /// Two choices worth stating:
+    ///
+    /// - Each source is mounted at **the same path inside the container**, so
+    ///   the archive specs (`config.pxar:/config`) and every `--exclude` are
+    ///   byte-identical whether or not the client is containerized. A path that
+    ///   meant one thing installed and another containerized would make the
+    ///   excludes silently stop matching.
+    /// - Mounts are **read-only**, and the secrets ride as `-e NAME` with no
+    ///   value — docker inherits them from this process's environment, so
+    ///   `PBS_PASSWORD` never appears in argv where `ps` can read it.
+    ///
+    /// The runtime binary is NOT a parameter: docker and podman take the same
+    /// `run` arguments, so the vector depends only on what is being run.
+    fn containerize(image: &str, paths: &[String], client_args: &[String]) -> Vec<String> {
+        let mut args = vec![
+            "run".to_string(),
+            "--rm".to_string(),
+            // No TTY, no stdin: this is a batch job, and an interactive client
+            // waiting on a prompt would hang the backup rather than fail it.
+            "-i".to_string(),
+        ];
+        for p in paths.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+            args.push("-v".to_string());
+            args.push(format!("{p}:{p}:ro"));
+        }
+        for key in ["PBS_REPOSITORY", "PBS_PASSWORD", "PBS_FINGERPRINT"] {
+            if std::env::var_os(key).is_some() {
+                // Name only — the VALUE is inherited, never written to argv.
+                args.push("-e".to_string());
+                args.push(key.to_string());
+            }
+        }
+        args.push(image.to_string());
+        args.push("proxmox-backup-client".to_string());
+        args.extend(client_args.iter().cloned());
+        args
+    }
+
     /// Argument vector for a file-level `proxmox-backup-client backup`.
     ///
     /// Pure, so the arguments are ASSERTABLE. They were inline before, which
@@ -1247,7 +1315,33 @@ impl BackupMethod for PbsMethod {
                         ctx.data_paths,
                         ctx.exclude,
                     );
-                    run("proxmox-backup-client", &args).await?;
+                    // Installed client wins. Otherwise borrow a container
+                    // runtime — on freyr/willow/maple the client CANNOT be
+                    // installed, and those are the hosts holding the app data.
+                    match utils::path::which("proxmox-backup-client") {
+                        Some(_) => run("proxmox-backup-client", &args).await?,
+                        None => {
+                            // `Unsupported`, not `Other`: this host CANNOT
+                            // perform the operation, which is a different fact
+                            // from an attempt that was made and failed.
+                            let bin = PbsMethod::container_runtime().ok_or_else(|| {
+                                ServiceError::Unsupported(
+                                    "backup".to_string(),
+                                    format!(
+                                        "{}: `proxmox-backup-client` is not installed and no \
+                                         container runtime is available to run it in. The \
+                                         client is a glibc Debian package with no musl build, \
+                                         so on Alpine/Slackware hosts a container runtime is \
+                                         the only way to run it.",
+                                        ctx.provider
+                                    ),
+                                )
+                            })?;
+                            let image = PbsMethod::client_image();
+                            let wrapped = PbsMethod::containerize(&image, ctx.data_paths, &args);
+                            run(bin, &wrapped).await?;
+                        }
+                    }
                     // The artifact records the GROUP, not the bare instance:
                     // that is the handle a restore has to address, and
                     // reporting something a restore cannot use makes the
@@ -2285,6 +2379,171 @@ mod tests {
     // they do whether or not the excludes and the backup id are passed at
     // all — they passed throughout the period the excludes were dropped.
 
+    // ── #613 gap 2: the client cannot exist on the hosts that need it ────
+
+    /// Set env vars for the duration of a test and restore them after, even on
+    /// panic. The PBS variables are read from the process environment by
+    /// design (that is how the secret stays out of argv), so testing that
+    /// behaviour means touching the real environment.
+    #[cfg(feature = "in-process")]
+    struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    #[cfg(feature = "in-process")]
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let prior = vars
+                .iter()
+                .map(|(k, _)| (*k, std::env::var_os(k)))
+                .collect();
+            for (k, v) in vars {
+                // SAFETY: these tests are `serial(env)`, so no other test
+                // thread is reading or writing the environment concurrently.
+                unsafe {
+                    match v {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+            Self(prior)
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.0 {
+                // SAFETY: as above.
+                unsafe {
+                    match v {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn the_containerized_client_runs_the_identical_client_argv() {
+        // The point of the wrapper is that it changes WHERE the client runs
+        // and nothing about WHAT it runs. If the two argvs ever diverge, the
+        // excludes and the backup id silently apply on one host and not
+        // another, which is worse than the client being missing.
+        let client = PbsMethod::backup_args(
+            "radarr",
+            "freyr",
+            &["/config".to_string()],
+            &["/config/MediaCover".to_string()],
+        );
+        let wrapped = PbsMethod::containerize("img", &["/config".to_string()], &client);
+        let at = wrapped
+            .iter()
+            .position(|a| a == "proxmox-backup-client")
+            .expect("client invoked");
+        assert_eq!(&wrapped[at + 1..], &client[..]);
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn sources_mount_at_the_same_path_read_only() {
+        let wrapped = PbsMethod::containerize(
+            "img",
+            &["/config".to_string(), "/opt/halvor".to_string()],
+            &["backup".to_string()],
+        );
+        let mounts: Vec<&String> = wrapped
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i > 0 && wrapped[i - 1] == "-v")
+            .map(|(_, v)| v)
+            .collect();
+        // Same path inside as out: an archive spec of `config.pxar:/config`
+        // has to resolve to the same bytes either way.
+        assert_eq!(
+            mounts,
+            vec!["/config:/config:ro", "/opt/halvor:/opt/halvor:ro"]
+        );
+        // A backup has no business being able to write to its sources.
+        assert!(mounts.iter().all(|m| m.ends_with(":ro")), "{mounts:?}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    #[serial_test::serial(env)]
+    fn the_pbs_password_never_appears_in_argv() {
+        // argv is world-readable through `ps`. The secret must be INHERITED by
+        // name, never written as `-e NAME=value`.
+        let _g = EnvGuard::set(&[
+            ("PBS_REPOSITORY", Some("pbs@host:store")),
+            ("PBS_PASSWORD", Some("hunter2-should-never-appear")),
+        ]);
+        let wrapped = PbsMethod::containerize("img", &[], &["backup".to_string()]);
+        assert!(
+            !wrapped.iter().any(|a| a.contains("hunter2")),
+            "secret leaked into argv: {wrapped:?}"
+        );
+        // Passed by name so the value is inherited from this process.
+        assert!(
+            wrapped
+                .windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "PBS_PASSWORD"),
+            "{wrapped:?}"
+        );
+        assert!(
+            wrapped
+                .windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "PBS_REPOSITORY"),
+            "{wrapped:?}"
+        );
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    #[serial_test::serial(env)]
+    fn an_absent_pbs_variable_is_not_forwarded_as_an_empty_one() {
+        // `-e PBS_FINGERPRINT` with nothing behind it hands the client an
+        // empty value, which is not the same as not setting it.
+        let _g = EnvGuard::set(&[
+            ("PBS_REPOSITORY", Some("pbs@host:store")),
+            ("PBS_PASSWORD", None),
+            ("PBS_FINGERPRINT", None),
+        ]);
+        let wrapped = PbsMethod::containerize("img", &[], &["backup".to_string()]);
+        assert!(
+            !wrapped.iter().any(|a| a == "PBS_FINGERPRINT"),
+            "{wrapped:?}"
+        );
+        assert!(!wrapped.iter().any(|a| a == "PBS_PASSWORD"), "{wrapped:?}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn the_container_is_throwaway_and_non_interactive() {
+        let wrapped = PbsMethod::containerize("img", &[], &["backup".to_string()]);
+        assert_eq!(wrapped[0], "run");
+        // Without --rm a nightly backup leaves 365 dead containers a year.
+        assert!(wrapped.contains(&"--rm".to_string()), "{wrapped:?}");
+        // No TTY: a client that stops to prompt must fail the backup, not hang it.
+        assert!(wrapped.contains(&"-i".to_string()), "{wrapped:?}");
+        assert!(!wrapped.contains(&"-t".to_string()), "{wrapped:?}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    #[serial_test::serial(env)]
+    fn the_image_is_overridable_and_defaults_to_debian() {
+        // The client is a glibc Debian package — that constraint is the whole
+        // reason this path exists, so the default base cannot be Alpine.
+        {
+            let _g = EnvGuard::set(&[("ORCA_PBS_CLIENT_IMAGE", None)]);
+            assert!(PbsMethod::client_image().starts_with("debian:"));
+        }
+        let _g = EnvGuard::set(&[("ORCA_PBS_CLIENT_IMAGE", Some("my/pbs:1"))]);
+        assert_eq!(PbsMethod::client_image(), "my/pbs:1");
+    }
+
     #[cfg(feature = "in-process")]
     #[test]
     fn pbs_file_backup_passes_every_exclude_as_its_own_flag() {
@@ -2475,21 +2734,72 @@ mod tests {
 
     #[cfg(feature = "in-process")]
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn pbs_file_backup_branch_runs_backup_client() {
+        // PATH is emptied so the outcome does not depend on what happens to be
+        // installed on the machine running the suite. Previously this asserted
+        // `Transport` and passed for DIFFERENT reasons in different places: on
+        // a dev box with docker it exercised the containerized path, in CI it
+        // exercised the missing-binary path. That divergence is what let a
+        // behaviour change land green locally and red in CI.
+        let empty = tempfile::tempdir().expect("tempdir");
+        let _g = EnvGuard::set(&[("PATH", empty.path().to_str())]);
+
         let pbs = PbsMethod;
-        let instance = "cont";
         let paths = ["/config".to_string(), "/data".to_string()];
         let e = pbs
             .backup(BackupContext {
                 runtime: Runtime::Docker,
-                instance,
+                instance: "cont",
                 provider: "abs",
                 data_paths: &paths,
                 exclude: &[],
             })
             .await
-            .expect_err("proxmox-backup-client absent in CI");
-        assert!(matches!(e, ServiceError::Transport(_)), "{e}");
+            .expect_err("neither client nor container runtime on PATH");
+        // Cannot be done here at all — not an attempt that failed.
+        assert!(matches!(e, ServiceError::Unsupported(..)), "{e}");
+        // And it must say WHY, since "not supported" alone sends an operator
+        // looking at the wrong thing.
+        let msg = e.to_string();
+        assert!(msg.contains("proxmox-backup-client"), "{msg}");
+        assert!(msg.contains("musl"), "{msg}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn the_container_runtime_is_used_when_the_client_is_absent() {
+        // A PATH holding a container runtime and NO client: the exact shape of
+        // freyr/willow/maple. The fake `docker` exits non-zero, so reaching it
+        // surfaces as a Transport error — which is the evidence that the
+        // containerized path was taken rather than refused.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake = dir.path().join("docker");
+        std::fs::write(&fake, "#!/bin/sh\nexit 7\n").expect("write fake docker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake docker");
+        }
+        let _g = EnvGuard::set(&[("PATH", dir.path().to_str())]);
+
+        let paths = ["/config".to_string()];
+        let e = PbsMethod
+            .backup(BackupContext {
+                runtime: Runtime::Docker,
+                instance: "cont",
+                provider: "abs",
+                data_paths: &paths,
+                exclude: &[],
+            })
+            .await
+            .expect_err("fake docker exits 7");
+        assert!(
+            matches!(e, ServiceError::Transport(_)),
+            "a reachable container runtime must be ATTEMPTED, not refused: {e}"
+        );
     }
 
     // ── Trait-default lifecycle ops on a minimal backend ─────────────────
