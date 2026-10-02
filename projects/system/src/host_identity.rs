@@ -24,31 +24,50 @@ use anyhow::{Context, Result};
 use db::host_addressing::{self, HostAddressingRow};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
-static HOSTNAME: OnceLock<String> = OnceLock::new();
-static MACHINE_ID: OnceLock<String> = OnceLock::new();
+/// Identity caches. `RwLock`, not `OnceLock`, for a specific reason: the
+/// accessors below self-heal on a miss, and with a `OnceLock` a lazy fill would
+/// permanently win over a later `init()` (whose `set()` silently no-ops). That
+/// made `init()` non-authoritative and let one caller's lazily-derived value
+/// leak into everything that ran afterwards. Values are leaked once so the
+/// accessors can keep returning `&'static str`.
+static HOSTNAME: RwLock<Option<&'static str>> = RwLock::new(None);
+static MACHINE_ID: RwLock<Option<&'static str>> = RwLock::new(None);
 static APP_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
 
 /// Capture the hostname once and load (or generate) the persistent
 /// machine_id. Safe to call more than once; subsequent calls are no-ops.
 pub fn init(app_dir: &Path) -> Result<()> {
     APP_DIR.set(app_dir.to_path_buf()).ok();
-    let hostname = capture_hostname();
-    HOSTNAME.set(hostname).ok();
+    // init() is AUTHORITATIVE: it overwrites whatever an earlier self-healing
+    // read may have derived, so an explicit init always wins.
+    *HOSTNAME.write().expect("HOSTNAME lock") = Some(leak(capture_hostname()));
 
     let machine_id = load_or_generate_machine_id(app_dir).context("load or generate machine_id")?;
-    MACHINE_ID.set(machine_id).ok();
+    *MACHINE_ID.write().expect("MACHINE_ID lock") = Some(leak(machine_id));
     Ok(())
 }
 
-/// Cached display hostname. Panics if `init` has not run — call init at
-/// daemon startup.
+/// Cached display hostname. **Self-healing**: on a cache miss it captures the
+/// hostname from the OS rather than panicking.
+///
+/// This used to `expect()` that `init()` had run, which shipped a crash to
+/// production for a value the process can always re-derive — and a parallel
+/// "safe" accessor (`cli_hostname_or_fallback`) had to be added to work around
+/// it. `capture_hostname()` reads the authoritative source, so recovering here
+/// is correct, not a guess.
 pub fn hostname() -> &'static str {
-    HOSTNAME
-        .get()
-        .expect("host_identity::init() must run before hostname()")
-        .as_str()
+    if let Some(h) = *HOSTNAME.read().expect("HOSTNAME lock") {
+        return h;
+    }
+    let derived = leak(capture_hostname());
+    let mut w = HOSTNAME.write().expect("HOSTNAME lock");
+    *w.get_or_insert(derived)
 }
 
 /// Alias of [`hostname`] using the slice-7 vocabulary (`display_hostname`
@@ -57,22 +76,47 @@ pub fn display_hostname() -> &'static str {
     hostname()
 }
 
-/// Stable per-machine UUID. Panics if `init` has not run.
+/// Stable per-machine UUID. **Self-healing**, with one deliberate limit.
+///
+/// On a cache miss this loads (or mints and PERSISTS) the id from the state dir,
+/// the same path `init()` takes. Persisting is what makes recovery legitimate:
+/// the id stays stable across restarts, so this is re-establishing identity, not
+/// inventing it.
+///
+/// It still panics if the id can neither be read nor persisted (e.g. a read-only
+/// state dir). That is the one case where self-healing is the WRONG answer: an
+/// in-memory-only id would differ on every restart and split this host's mesh
+/// identity across reboots — strictly worse than refusing. Recover what can be
+/// made authoritative; never substitute a wrong identity.
 pub fn machine_id() -> &'static str {
-    MACHINE_ID
+    if let Some(id) = *MACHINE_ID.read().expect("MACHINE_ID lock") {
+        return id;
+    }
+    let app_dir = APP_DIR
         .get()
-        .expect("host_identity::init() must run before machine_id()")
-        .as_str()
+        .cloned()
+        .or_else(|| contract::config::paths::state_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let derived = leak(load_or_generate_machine_id(&app_dir).unwrap_or_else(|e| {
+        panic!(
+            "host_identity: cannot establish a persistent machine_id under {}: {e:#}. \
+             Refusing to invent one -- an unpersisted id would change on every restart and \
+             split this host's mesh identity.",
+            app_dir.display()
+        )
+    }));
+    let mut w = MACHINE_ID.write().expect("MACHINE_ID lock");
+    *w.get_or_insert(derived)
 }
 
-/// Hostname for use in standalone CLI flows (e.g. `orca install`) where
-/// `init()` may not have run. Mirrors `capture_hostname()` but is safe to
-/// call without the OnceLock being populated.
+/// Hostname for standalone CLI flows (e.g. `orca install`) where `init()` may
+/// not have run.
+///
+/// Retained for its existing call sites, but no longer a separate safe path:
+/// `hostname()` is now self-healing, so this just delegates. Prefer
+/// `hostname()` in new code.
 pub fn cli_hostname_or_fallback() -> String {
-    if let Some(h) = HOSTNAME.get() {
-        return h.clone();
-    }
-    capture_hostname()
+    hostname().to_string()
 }
 
 fn capture_hostname() -> String {
@@ -155,7 +199,7 @@ pub fn superseded_machine_ids() -> Vec<String> {
     let Some(dir) = APP_DIR.get() else {
         return Vec::new();
     };
-    let current = MACHINE_ID.get().map(String::as_str).unwrap_or("");
+    let current = (*MACHINE_ID.read().expect("MACHINE_ID lock")).unwrap_or("");
     let retired: std::collections::HashSet<String> =
         read_id_lines(&retired_path(dir)).into_iter().collect();
 
