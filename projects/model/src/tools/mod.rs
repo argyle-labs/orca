@@ -154,7 +154,10 @@ impl ToolRegistry {
             "write_file" => {
                 let path = str_field(input, "path")?;
                 let content = str_field(input, "content")?;
-                ops::write_file(&path, &content)
+                // No force: a model writing config gets the guard with no way
+                // to talk its way past it. A human repairing a broken file can
+                // pass `--allow-unparseable` on `files.update`.
+                ops::write_file(&path, &content, false)
             }
             "edit_file" => {
                 let path = str_field(input, "path")?;

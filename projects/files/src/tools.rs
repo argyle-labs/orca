@@ -199,6 +199,14 @@ pub struct FsUpdateArgs {
     /// Add a global ignore pattern.
     #[arg(long)]
     pub add_ignore_pattern: Option<String>,
+
+    /// Write the file even if the content does not parse as the format its
+    /// extension declares. The escape hatch for repairing an already-broken
+    /// file through an intermediate state; the forced write is logged at WARN
+    /// and said so in the result.
+    #[arg(long)]
+    #[serde(default)]
+    pub allow_unparseable: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Default)]
@@ -310,7 +318,7 @@ async fn fs_update(args: FsUpdateArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
 
     match (args.path.as_deref(), args.content.as_deref()) {
         (Some(p), Some(c)) => {
-            let written = crate::ops::write_file(p, c)?;
+            let written = crate::ops::write_file(p, c, args.allow_unparseable)?;
             out.applied.push(format!("wrote:{written}"));
         }
         (Some(_), None) | (None, Some(_)) => {
