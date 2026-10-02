@@ -97,6 +97,9 @@ pub struct FleetUpdateRequest {
     /// Take the fleet lock even though another roll holds it. For a genuinely
     /// stuck lock only — it defeats the single-flight guarantee (#616).
     pub break_lock: bool,
+    /// Skip the plugin phase: daemon versions only. Makes the commonest
+    /// question of this verb cheap (#626).
+    pub daemons_only: bool,
 }
 
 /// Hook the server registers at startup so a fleet-wide `system.update` can

@@ -434,38 +434,85 @@ async fn run_plugins(
         })
         .collect();
 
-    for p in installed {
-        let args = PluginUpdateArgs {
-            name: p.name.clone(),
-            execute,
-            version: None,
-            prerelease,
-        };
-        let mut row = FleetPluginResult {
-            host: t.host.clone(),
-            name: p.name.clone(),
-            installed: p.installed_version.clone(),
-            ..Default::default()
-        };
-        match dispatch_at::<crate::plugin_manager::PluginUpdate>(t, args, ctx).await {
-            Ok(PluginUpdateOutput {
-                installed_version,
-                target_version,
-                update_available,
-                executed,
-                note,
-                ..
-            }) => {
-                row.installed = installed_version;
-                row.target = Some(target_version);
-                row.update_available = update_available;
-                row.updated = executed && update_available;
-                row.note = Some(note);
-            }
-            Err(e) => row.error = Some(format!("{e:#}")),
+    // A probe APPLIES NOTHING, so the per-plugin lookups have no ordering
+    // requirement and run concurrently. This was the inner loop of the cost in
+    // #626: one release-source lookup per plugin per host, in series, is what
+    // made a read-only fleet probe outlast an MCP client's idle timeout.
+    //
+    // An APPLY stays strictly sequential. Concurrent plugin installs on one
+    // host race the plugin manager, and a fast wrong answer is not the trade
+    // being made here.
+    if execute {
+        for p in installed {
+            let row = probe_or_apply(
+                t,
+                &p.name,
+                p.installed_version.clone(),
+                true,
+                prerelease,
+                ctx,
+            )
+            .await;
+            out.plugins.push(row);
         }
-        out.plugins.push(row);
+        return;
     }
+    let probes = installed.iter().map(|p| {
+        probe_or_apply(
+            t,
+            &p.name,
+            p.installed_version.clone(),
+            false,
+            prerelease,
+            ctx,
+        )
+    });
+    out.plugins.extend(futures::future::join_all(probes).await);
+}
+
+/// Probe (or apply) one plugin on one host, yielding its result row.
+///
+/// Extracted so the concurrent probe path and the sequential apply path run
+/// IDENTICAL per-plugin logic — two copies would be two chances for a dry run
+/// and an apply to disagree about what they observed.
+async fn probe_or_apply(
+    t: &Target,
+    name: &str,
+    installed: Option<String>,
+    execute: bool,
+    prerelease: bool,
+    ctx: &contract::ToolCtx,
+) -> FleetPluginResult {
+    let args = PluginUpdateArgs {
+        name: name.to_string(),
+        execute,
+        version: None,
+        prerelease,
+    };
+    let mut row = FleetPluginResult {
+        host: t.host.clone(),
+        name: name.to_string(),
+        installed,
+        ..Default::default()
+    };
+    match dispatch_at::<crate::plugin_manager::PluginUpdate>(t, args, ctx).await {
+        Ok(PluginUpdateOutput {
+            installed_version,
+            target_version,
+            update_available,
+            executed,
+            note,
+            ..
+        }) => {
+            row.installed = installed_version;
+            row.target = Some(target_version);
+            row.update_available = update_available;
+            row.updated = executed && update_available;
+            row.note = Some(note);
+        }
+        Err(e) => row.error = Some(format!("{e:#}")),
+    }
+    row
 }
 
 /// [MUTATES STATE] Update the WHOLE fleet. DRY RUN by default: reports the plan
@@ -502,6 +549,7 @@ pub async fn fleet_update(
         execute,
         prerelease,
         break_lock,
+        daemons_only,
     } = req;
     let started = utils::time::now();
     let mut out = FleetUpdateOutput {
@@ -567,7 +615,12 @@ pub async fn fleet_update(
         let probes = targets.iter().map(|t| async move {
             let row = run_system(t, false, ctx).await;
             let mut plugins = FleetUpdateOutput::default();
-            run_plugins(t, false, prerelease, ctx, &mut plugins).await;
+            // `--daemons-only` answers "what version is every host on" without
+            // the plugin phase at all — the dominant cost, and unrelated to
+            // the question (#626).
+            if !daemons_only {
+                run_plugins(t, false, prerelease, ctx, &mut plugins).await;
+            }
             (row, plugins)
         });
         for (row, plugins) in futures::future::join_all(probes).await {
@@ -624,9 +677,20 @@ pub async fn fleet_update(
     }
 
     // ── PHASE 2: plugins — every installed plugin on every host. ─────────────
-    for t in &targets {
-        run_plugins(t, true, prerelease, ctx, &mut out).await;
-        persist(&out, record.as_deref());
+    // Skipped entirely under `--daemons-only`, which then means "roll the
+    // daemons, leave plugins alone". Said in the output rather than inferred
+    // from an empty list, which is indistinguishable from "no plugins".
+    if daemons_only {
+        out.notes.push(
+            "plugin phase SKIPPED (--daemons-only): no plugin was probed or \
+                   updated on any host"
+                .to_string(),
+        );
+    } else {
+        for t in &targets {
+            run_plugins(t, true, prerelease, ctx, &mut out).await;
+            persist(&out, record.as_deref());
+        }
     }
 
     // ── PHASE 3: the LOCAL daemon — genuinely last. ──────────────────────────
@@ -883,6 +947,52 @@ async fn fleet_update_status(
 mod tests {
     use super::*;
 
+    /// Pins the plugin APPLY path to sequential dispatch.
+    ///
+    /// Structural for the same reason as the gate test below: the failure is a
+    /// race inside a remote plugin manager, which cannot be reproduced
+    /// in-process where a local target never crosses the wire.
+    ///
+    /// The probe path is deliberately concurrent (#626 — serial per-plugin
+    /// release lookups are what made a read-only fleet probe outlast an MCP
+    /// client's 300s idle timeout). The apply path must NOT follow it: two
+    /// concurrent installs on one host race each other, and the speed is not
+    /// worth it. The two paths sit next to each other in `run_plugins`, so the
+    /// tempting edit is to "finish the job" and parallelise both.
+    #[test]
+    fn the_plugin_apply_path_stays_sequential() {
+        let src = include_str!("fleet_update.rs");
+        let body = src
+            .split_once("async fn run_plugins(")
+            .expect("run_plugins present")
+            .1;
+        let body = body.split_once("\nasync fn ").expect("next fn").0;
+        let (apply, probe) = body
+            .split_once("let probes = installed.iter()")
+            .expect("probe path present");
+        assert!(
+            !apply.contains("join_all"),
+            "the plugin APPLY path must stay sequential — concurrent installs \
+             on one host race the plugin manager"
+        );
+        assert!(
+            probe.contains("join_all"),
+            "the plugin PROBE path must stay concurrent (#626)"
+        );
+    }
+
+    #[test]
+    fn skipping_plugins_is_stated_not_left_to_inference() {
+        // An empty plugin list is indistinguishable from "this fleet has no
+        // plugins". A skipped phase has to say so, or the output quietly
+        // misreports what was examined.
+        let src = include_str!("fleet_update.rs");
+        assert!(
+            src.contains("plugin phase SKIPPED"),
+            "`--daemons-only` must record that it skipped the phase"
+        );
+    }
+
     /// Pins the gate's probe to the AUTHENTICATED dispatch path.
     ///
     /// A structural test rather than a behavioural one, deliberately: the bug it
@@ -983,6 +1093,14 @@ mod tests {
             .split("pub async fn fleet_update(")
             .nth(1)
             .expect("fleet_update present");
+        // Bound the scan to THIS function. It used to run to end-of-file, so
+        // any later code — a sibling fn, or a test merely naming `run_plugins`
+        // in a string — counted as "after the local apply" and failed this for
+        // a reason that had nothing to do with the ordering it pins.
+        let body = body
+            .split_once("\nasync fn ")
+            .map(|(f, _)| f)
+            .unwrap_or(body);
         let phase2 = body
             .find("// ── PHASE 2")
             .expect("plugin phase marker present");
