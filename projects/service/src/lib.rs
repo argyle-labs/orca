@@ -1321,15 +1321,21 @@ impl BackupMethod for PbsMethod {
                     match utils::path::which("proxmox-backup-client") {
                         Some(_) => run("proxmox-backup-client", &args).await?,
                         None => {
+                            // `Unsupported`, not `Other`: this host CANNOT
+                            // perform the operation, which is a different fact
+                            // from an attempt that was made and failed.
                             let bin = PbsMethod::container_runtime().ok_or_else(|| {
-                                ServiceError::Other(format!(
-                                    "{}: `proxmox-backup-client` is not installed and no \
-                                     container runtime is available to run it in. The client \
-                                     is a glibc Debian package with no musl build, so on \
-                                     Alpine/Slackware hosts a container runtime is the only \
-                                     way to run it.",
-                                    ctx.provider
-                                ))
+                                ServiceError::Unsupported(
+                                    "backup".to_string(),
+                                    format!(
+                                        "{}: `proxmox-backup-client` is not installed and no \
+                                         container runtime is available to run it in. The \
+                                         client is a glibc Debian package with no musl build, \
+                                         so on Alpine/Slackware hosts a container runtime is \
+                                         the only way to run it.",
+                                        ctx.provider
+                                    ),
+                                )
                             })?;
                             let image = PbsMethod::client_image();
                             let wrapped = PbsMethod::containerize(&image, ctx.data_paths, &args);
@@ -2728,21 +2734,72 @@ mod tests {
 
     #[cfg(feature = "in-process")]
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn pbs_file_backup_branch_runs_backup_client() {
+        // PATH is emptied so the outcome does not depend on what happens to be
+        // installed on the machine running the suite. Previously this asserted
+        // `Transport` and passed for DIFFERENT reasons in different places: on
+        // a dev box with docker it exercised the containerized path, in CI it
+        // exercised the missing-binary path. That divergence is what let a
+        // behaviour change land green locally and red in CI.
+        let empty = tempfile::tempdir().expect("tempdir");
+        let _g = EnvGuard::set(&[("PATH", empty.path().to_str())]);
+
         let pbs = PbsMethod;
-        let instance = "cont";
         let paths = ["/config".to_string(), "/data".to_string()];
         let e = pbs
             .backup(BackupContext {
                 runtime: Runtime::Docker,
-                instance,
+                instance: "cont",
                 provider: "abs",
                 data_paths: &paths,
                 exclude: &[],
             })
             .await
-            .expect_err("proxmox-backup-client absent in CI");
-        assert!(matches!(e, ServiceError::Transport(_)), "{e}");
+            .expect_err("neither client nor container runtime on PATH");
+        // Cannot be done here at all — not an attempt that failed.
+        assert!(matches!(e, ServiceError::Unsupported(..)), "{e}");
+        // And it must say WHY, since "not supported" alone sends an operator
+        // looking at the wrong thing.
+        let msg = e.to_string();
+        assert!(msg.contains("proxmox-backup-client"), "{msg}");
+        assert!(msg.contains("musl"), "{msg}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn the_container_runtime_is_used_when_the_client_is_absent() {
+        // A PATH holding a container runtime and NO client: the exact shape of
+        // freyr/willow/maple. The fake `docker` exits non-zero, so reaching it
+        // surfaces as a Transport error — which is the evidence that the
+        // containerized path was taken rather than refused.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake = dir.path().join("docker");
+        std::fs::write(&fake, "#!/bin/sh\nexit 7\n").expect("write fake docker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake docker");
+        }
+        let _g = EnvGuard::set(&[("PATH", dir.path().to_str())]);
+
+        let paths = ["/config".to_string()];
+        let e = PbsMethod
+            .backup(BackupContext {
+                runtime: Runtime::Docker,
+                instance: "cont",
+                provider: "abs",
+                data_paths: &paths,
+                exclude: &[],
+            })
+            .await
+            .expect_err("fake docker exits 7");
+        assert!(
+            matches!(e, ServiceError::Transport(_)),
+            "a reachable container runtime must be ATTEMPTED, not refused: {e}"
+        );
     }
 
     // ── Trait-default lifecycle ops on a minimal backend ─────────────────
