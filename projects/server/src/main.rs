@@ -360,6 +360,10 @@ async fn main() -> Result<()> {
         env_var: "ORCA_LOG",
         default_filter: "warn,orca=info,tower_http=warn,axum=warn,mdns_sd=warn,mdns=warn",
         tee_path: tee.as_deref(),
+        // Defaults: rotate at 32 MiB, keep 5. #563 — this file reached 36 MB
+        // here and its launchd-captured twin 123 MB, neither ever pruned.
+        tee_max_bytes: None,
+        tee_keep: None,
     })?;
 
     // Install the CLI→daemon HTTP transport. `dispatch` routes the local-daemon

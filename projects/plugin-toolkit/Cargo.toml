@@ -209,6 +209,8 @@ rust_socketio = { workspace = true, optional = true }
 native-tls = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Rotation tests write real files and must not touch the operator's state dir.
+tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock = { workspace = true }
 rustls   = { workspace = true }
