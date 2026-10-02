@@ -303,7 +303,15 @@ pub trait ServiceBackend: Send + Sync {
         method_name: Option<&'a str>,
     ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
         let provider = self.provider().to_string();
-        let paths = self.data_paths();
+        // From the SPEC, not `data_paths()` directly: the spec is where
+        // `exclude` lives, and building the context from the bare path list
+        // is what silently discarded it (#613).
+        let spec = self.backup_spec();
+        let paths = if spec.include.is_empty() {
+            self.data_paths()
+        } else {
+            spec.include.clone()
+        };
         let runtime = runtime.or_else(|| self.runtimes().first().copied());
         Box::pin(async move {
             let rt = runtime.ok_or_else(|| {
@@ -316,6 +324,7 @@ pub trait ServiceBackend: Send + Sync {
                     instance,
                     provider: &provider,
                     data_paths: &paths,
+                    exclude: &spec.exclude,
                 })
                 .await
         })
@@ -344,7 +353,12 @@ pub trait ServiceBackend: Send + Sync {
         from: &'a BackupArtifact,
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
         let provider = self.provider().to_string();
-        let paths = self.data_paths();
+        let spec = self.backup_spec();
+        let paths = if spec.include.is_empty() {
+            self.data_paths()
+        } else {
+            spec.include.clone()
+        };
         let runtime = runtime.or_else(|| self.runtimes().first().copied());
         Box::pin(async move {
             let rt = runtime.ok_or_else(|| {
@@ -358,6 +372,7 @@ pub trait ServiceBackend: Send + Sync {
                         instance,
                         provider: &provider,
                         data_paths: &paths,
+                        exclude: &spec.exclude,
                     },
                     from,
                 )
@@ -742,6 +757,16 @@ pub struct BackupContext<'a> {
     pub instance: &'a str,
     pub provider: &'a str,
     pub data_paths: &'a [String],
+    /// Sub-paths under `data_paths` that are NOT state: caches, thumbnails,
+    /// regenerable models, logs, `.git` trees that duplicate a remote.
+    ///
+    /// Carried here because the contract has always had it
+    /// (`BackupSpec::exclude`) and the methods never saw it — `BackupContext`
+    /// was built from `data_paths()` alone, so the exclusions were dropped one
+    /// layer above every method that could have honored them. That omission is
+    /// most of the size problem in #613: radarr 1.9G→145M, calibre-web
+    /// 2.2G→10M, willow appdata 18G→1G are all exclusions, not compression.
+    pub exclude: &'a [String],
 }
 
 /// A pluggable backup implementation. `tar` and `pbs` ship built-in; a plugin
@@ -885,6 +910,34 @@ impl TarMethod {
             Runtime::Vm => None,
         }
     }
+
+    /// Single-quote a path for the `sh -c` the tar runs inside.
+    ///
+    /// These paths come from a backend's declared spec and are interpolated
+    /// into a shell string. A path containing a space silently split into two
+    /// arguments before this — tarring the wrong things and skipping the right
+    /// ones, with a zero exit code either way.
+    fn shell_quote(p: &str) -> String {
+        format!("'{}'", p.replace('\'', r#"'\''"#))
+    }
+
+    /// The in-guest `tar` command line.
+    ///
+    /// Pure, so the exclusions and the quoting are assertable. `--exclude`
+    /// precedes the path operands because GNU tar applies it to operands that
+    /// FOLLOW it; trailing excludes parse fine and match nothing.
+    fn tar_cmd(paths: &[String], exclude: &[String]) -> String {
+        let mut cmd = format!("tar czf {IN_GUEST_TARBALL}");
+        for e in exclude.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
+            cmd.push_str(" --exclude=");
+            cmd.push_str(&Self::shell_quote(e));
+        }
+        for p in paths.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+            cmd.push(' ');
+            cmd.push_str(&Self::shell_quote(p));
+        }
+        cmd
+    }
 }
 
 #[cfg(feature = "in-process")]
@@ -916,7 +969,7 @@ impl BackupMethod for TarMethod {
                 .map_err(|e| ServiceError::Other(format!("mkdir {out_dir}: {e}")))?;
             let out_path = format!("{out_dir}/{}-{}-{stamp}.tar.gz", ctx.provider, ctx.instance);
             let handle = &ctx.instance;
-            let tar_cmd = format!("tar czf {IN_GUEST_TARBALL} {}", ctx.data_paths.join(" "));
+            let tar_cmd = TarMethod::tar_cmd(ctx.data_paths, ctx.exclude);
 
             if ctx.runtime == Runtime::Lxc {
                 run(
@@ -1048,6 +1101,104 @@ impl PbsMethod {
     fn pbs_storage() -> String {
         std::env::var("ORCA_PBS_STORAGE").unwrap_or_else(|_| "pbs".to_string())
     }
+
+    /// The PBS backup group this unit's snapshots belong in.
+    ///
+    /// One group per unit — `freyr-radarr`, `baldur-immich-db` — so a single
+    /// app can be restored without touching its neighbours. Without
+    /// `--backup-id` every snapshot on a host lands in that host's default
+    /// group, which is how a dozen containers end up sharing one undivided
+    /// history that cannot be pruned or restored per-app (#613 gap 3).
+    ///
+    /// Sanitized to PBS's id charset (alphanumerics, `-`, `_`, `.`): a
+    /// provider or instance carrying a `/` or a space would otherwise be
+    /// rejected by the server after the backup has already been read.
+    fn backup_id(provider: &str, instance: &str) -> String {
+        let raw = if instance.trim().is_empty() {
+            provider.to_string()
+        } else {
+            format!("{provider}-{instance}")
+        };
+        let cleaned: String = raw
+            .trim()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        // Collapse runs introduced by the mapping, and never lead or trail
+        // with a separator — `--backup-id -foo-` is refused by the server.
+        let mut out = String::with_capacity(cleaned.len());
+        for c in cleaned.chars() {
+            if c == '-' && out.ends_with('-') {
+                continue;
+            }
+            out.push(c);
+        }
+        let out = out.trim_matches('-').to_string();
+        if out.is_empty() {
+            "orca".to_string()
+        } else {
+            out
+        }
+    }
+
+    /// Argument vector for a file-level `proxmox-backup-client backup`.
+    ///
+    /// Pure, so the arguments are ASSERTABLE. They were inline before, which
+    /// meant the only thing a test could observe was that the binary is absent
+    /// in CI — a test that passes identically whether or not the excludes and
+    /// the backup id are there at all.
+    fn backup_args(
+        provider: &str,
+        instance: &str,
+        paths: &[String],
+        exclude: &[String],
+    ) -> Vec<String> {
+        let mut args = vec!["backup".to_string()];
+        for p in paths {
+            let archive = p.trim_matches('/').replace('/', "_");
+            args.push(format!("{archive}.pxar:{p}"));
+        }
+        // Excludes BEFORE the group flags, each as its own `--exclude`: the
+        // client takes the flag repeatedly, and joining them into one value
+        // silently matches nothing.
+        for e in exclude.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
+            args.push("--exclude".to_string());
+            args.push(e.to_string());
+        }
+        // `host` is the type for a filesystem backup that is not a PVE guest.
+        args.push("--backup-type".to_string());
+        args.push("host".to_string());
+        args.push("--backup-id".to_string());
+        args.push(Self::backup_id(provider, instance));
+        args
+    }
+
+    /// Argument vector for a whole-guest `vzdump`.
+    ///
+    /// Excludes are honored here too. vzdump spells them `--exclude-path`, and
+    /// a path the caller wrote for the file-level client is the same path an
+    /// operator means for a guest — translating rather than ignoring keeps one
+    /// spec meaningful across both branches.
+    fn vzdump_args(vmid: &str, storage: &str, exclude: &[String]) -> Vec<String> {
+        let mut args = vec![
+            vmid.to_string(),
+            "--storage".into(),
+            storage.to_string(),
+            "--mode".into(),
+            "snapshot".into(),
+        ];
+        for e in exclude.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
+            args.push("--exclude-path".to_string());
+            args.push(e.to_string());
+        }
+        args
+    }
 }
 
 #[cfg(feature = "in-process")]
@@ -1071,13 +1222,7 @@ impl BackupMethod for PbsMethod {
                     let storage = PbsMethod::pbs_storage();
                     run(
                         "vzdump",
-                        &[
-                            ctx.instance.to_string(), // vmid
-                            "--storage".into(),
-                            storage.clone(),
-                            "--mode".into(),
-                            "snapshot".into(),
-                        ],
+                        &PbsMethod::vzdump_args(ctx.instance, &storage, ctx.exclude),
                     )
                     .await?;
                     Ok(BackupArtifact {
@@ -1096,16 +1241,24 @@ impl BackupMethod for PbsMethod {
                             ctx.provider
                         )));
                     }
-                    let mut args = vec!["backup".to_string()];
-                    for p in ctx.data_paths {
-                        let archive = p.trim_matches('/').replace('/', "_");
-                        args.push(format!("{archive}.pxar:{p}"));
-                    }
+                    let args = PbsMethod::backup_args(
+                        ctx.provider,
+                        ctx.instance,
+                        ctx.data_paths,
+                        ctx.exclude,
+                    );
                     run("proxmox-backup-client", &args).await?;
+                    // The artifact records the GROUP, not the bare instance:
+                    // that is the handle a restore has to address, and
+                    // reporting something a restore cannot use makes the
+                    // artifact unusable for the thing it exists for.
                     Ok(BackupArtifact {
                         service: ctx.provider.to_string(),
                         instance: ctx.instance.to_string(),
-                        path: format!("pbs:{}", ctx.instance),
+                        path: format!(
+                            "pbs:host/{}",
+                            PbsMethod::backup_id(ctx.provider, ctx.instance)
+                        ),
                         timestamp: stamp,
                         ..Default::default()
                     })
@@ -1683,6 +1836,7 @@ mod tests {
                     instance,
                     provider: "abs",
                     data_paths: &[],
+                    exclude: &[],
                 },
                 &art,
             )
@@ -1706,6 +1860,7 @@ mod tests {
                 instance,
                 provider: "abs",
                 data_paths: &[],
+                exclude: &[],
             })
             .await
             .expect_err("no data_paths");
@@ -1719,6 +1874,7 @@ mod tests {
                 instance,
                 provider: "abs",
                 data_paths: &paths,
+                exclude: &[],
             })
             .await
             .expect_err("no tar path on bare vm");
@@ -1738,6 +1894,7 @@ mod tests {
                     instance,
                     provider: "abs",
                     data_paths: &[],
+                    exclude: &[],
                 },
                 &art,
             )
@@ -1959,6 +2116,7 @@ mod tests {
                     instance,
                     provider: "abs",
                     data_paths: &[],
+                    exclude: &[],
                 })
                 .await
                 .expect_err("no data_paths for pbs file backup");
@@ -2059,6 +2217,7 @@ mod tests {
                     instance,
                     provider: "abs",
                     data_paths: &paths,
+                    exclude: &[],
                 })
                 .await
                 .expect_err("no such instance / no runtime binary");
@@ -2083,6 +2242,7 @@ mod tests {
                         instance,
                         provider: "abs",
                         data_paths: &[],
+                        exclude: &[],
                     },
                     &from,
                 )
@@ -2090,6 +2250,206 @@ mod tests {
                 .expect_err("no such instance / no runtime binary");
             assert!(matches!(e, ServiceError::Transport(_)), "{rt:?}: {e}");
         }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn tar_excludes_precede_the_paths_they_apply_to() {
+        let cmd = TarMethod::tar_cmd(
+            &["/config".to_string(), "/data".to_string()],
+            &["/config/cache".to_string()],
+        );
+        let ex = cmd.find("--exclude=").expect("exclude present");
+        let first_path = cmd.find("'/config'").expect("path present");
+        // GNU tar applies --exclude to operands that FOLLOW it. Trailing
+        // excludes parse without complaint and match nothing.
+        assert!(ex < first_path, "{cmd}");
+        assert!(cmd.contains("--exclude='/config/cache'"), "{cmd}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn tar_quotes_paths_so_a_space_cannot_split_one_in_two() {
+        let cmd = TarMethod::tar_cmd(&["/mnt/My Data".to_string()], &[]);
+        assert!(cmd.contains("'/mnt/My Data'"), "{cmd}");
+        // An embedded quote must not end the quoting and let the rest of the
+        // path be read as shell.
+        let nasty = TarMethod::tar_cmd(&["/a'b".to_string()], &[]);
+        assert!(nasty.contains(r#"'/a'\''b'"#), "{nasty}");
+    }
+
+    // ── #613: the arguments themselves, not just "the binary is absent" ───
+    //
+    // These assert the argv. The pre-existing branch tests below can only
+    // observe that `vzdump`/`proxmox-backup-client` are missing in CI, which
+    // they do whether or not the excludes and the backup id are passed at
+    // all — they passed throughout the period the excludes were dropped.
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn pbs_file_backup_passes_every_exclude_as_its_own_flag() {
+        let args = PbsMethod::backup_args(
+            "radarr",
+            "freyr",
+            &["/config".to_string()],
+            &[
+                "/config/MediaCover".to_string(),
+                "/config/Backups".to_string(),
+                "/config/logs".to_string(),
+            ],
+        );
+        // One `--exclude` per path. Joining them into a single value matches
+        // nothing and silently backs up the lot — the 1.9G-vs-145M case.
+        let flags: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i > &0 && args[i - 1] == "--exclude")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(
+            flags,
+            vec!["/config/MediaCover", "/config/Backups", "/config/logs"]
+        );
+        assert_eq!(args.iter().filter(|a| *a == "--exclude").count(), 3);
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn pbs_file_backup_lands_in_a_per_unit_group() {
+        let args = PbsMethod::backup_args("radarr", "freyr", &["/config".to_string()], &[]);
+        let at = |flag: &str| {
+            args.iter()
+                .position(|a| a == flag)
+                .map(|i| args[i + 1].clone())
+        };
+        // Without these every container on a host shares one undivided
+        // history that cannot be pruned or restored per-app.
+        assert_eq!(at("--backup-type").as_deref(), Some("host"));
+        assert_eq!(at("--backup-id").as_deref(), Some("radarr-freyr"));
+        // The archive spec is still first and still correct.
+        assert_eq!(args[0], "backup");
+        assert_eq!(args[1], "config.pxar:/config");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn a_backup_id_is_always_something_pbs_will_accept() {
+        // A provider or instance with a slash or a space would be rejected by
+        // the server AFTER the data has been read — an expensive way to fail.
+        assert_eq!(
+            PbsMethod::backup_id("immich/db", "baldur stack"),
+            "immich-db-baldur-stack"
+        );
+        // No leading, trailing, or doubled separators.
+        assert_eq!(PbsMethod::backup_id("/weird/", "//x//"), "weird-x");
+        // An empty instance is the provider alone, not a dangling separator.
+        assert_eq!(PbsMethod::backup_id("radarr", ""), "radarr");
+        assert_eq!(PbsMethod::backup_id("radarr", "   "), "radarr");
+        // Never empty: an empty `--backup-id` is refused.
+        assert_eq!(PbsMethod::backup_id("///", ""), "orca");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn vzdump_honors_the_same_excludes_under_its_own_spelling() {
+        let args = PbsMethod::vzdump_args("102", "pbs", &["/var/lib/docker".to_string()]);
+        assert_eq!(args[0], "102");
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--storage" && w[1] == "pbs")
+        );
+        // vzdump spells it `--exclude-path`; one spec must mean the same thing
+        // on both branches or an operator's exclusions apply only sometimes.
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--exclude-path" && w[1] == "/var/lib/docker"),
+            "{args:?}"
+        );
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn empty_and_blank_excludes_are_dropped_not_passed_through() {
+        // A blank `--exclude ""` is not a no-op to the client; it is an
+        // argument it has to interpret.
+        let args = PbsMethod::backup_args(
+            "p",
+            "i",
+            &["/data".to_string()],
+            &[String::new(), "  ".to_string(), " /data/cache ".to_string()],
+        );
+        assert_eq!(args.iter().filter(|a| *a == "--exclude").count(), 1);
+        assert!(args.contains(&"/data/cache".to_string()), "{args:?}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn a_backends_declared_excludes_reach_the_method() {
+        // The regression this closes: the generic path built its context from
+        // `data_paths()`, so a backend could declare excludes in its spec and
+        // watch them vanish one layer above every method.
+        use contract::backup::{BackupSpec, BackupStrategy};
+        struct Picky;
+        impl ServiceBackend for Picky {
+            fn provider(&self) -> &str {
+                "picky"
+            }
+            fn runtimes(&self) -> Vec<Runtime> {
+                vec![Runtime::Docker]
+            }
+            fn default_port(&self) -> u16 {
+                0
+            }
+            fn backup_spec(&self) -> BackupSpec {
+                BackupSpec {
+                    include: vec!["/config".to_string()],
+                    exclude: vec!["/config/cache".to_string()],
+                    strategies: vec![BackupStrategy::Paths],
+                }
+            }
+        }
+
+        /// Captures the context it is handed instead of running anything.
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl BackupMethod for Capture {
+            fn name(&self) -> &str {
+                "capture"
+            }
+            fn backup<'a>(
+                &'a self,
+                ctx: BackupContext<'a>,
+            ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
+                let seen = std::sync::Arc::clone(&self.0);
+                Box::pin(async move {
+                    *seen.lock().expect("capture poisoned") = ctx.exclude.to_vec();
+                    Ok(BackupArtifact {
+                        service: ctx.provider.to_string(),
+                        instance: ctx.instance.to_string(),
+                        path: "captured".into(),
+                        ..Default::default()
+                    })
+                })
+            }
+            fn restore<'a>(
+                &'a self,
+                _ctx: BackupContext<'a>,
+                _from: &'a BackupArtifact,
+            ) -> BoxFuture<'a, Result<(), ServiceError>> {
+                Box::pin(async move { Ok(()) })
+            }
+        }
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        register_method(std::sync::Arc::new(Capture(std::sync::Arc::clone(&seen))));
+        Picky
+            .backup("inst", Some(Runtime::Docker), Some("capture"))
+            .await
+            .expect("captured");
+        assert_eq!(
+            *seen.lock().expect("capture poisoned"),
+            vec!["/config/cache".to_string()],
+            "the backend's declared excludes must reach the method"
+        );
     }
 
     // ── PbsMethod: whole-guest + file-backup command branches ─────────────
@@ -2105,6 +2465,7 @@ mod tests {
                     instance,
                     provider: "abs",
                     data_paths: &[],
+                    exclude: &[],
                 })
                 .await
                 .expect_err("vzdump absent in CI");
@@ -2124,6 +2485,7 @@ mod tests {
                 instance,
                 provider: "abs",
                 data_paths: &paths,
+                exclude: &[],
             })
             .await
             .expect_err("proxmox-backup-client absent in CI");
