@@ -27,7 +27,7 @@ fn test_write_creates_parent_dirs() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("sub/nested/file.txt");
 
-    let result = ops::write_file(path.to_str().unwrap(), "nested content");
+    let result = ops::write_file(path.to_str().unwrap(), "nested content", false);
     assert!(result.is_ok());
     assert_eq!(fs::read_to_string(&path).unwrap(), "nested content");
 }

@@ -111,6 +111,75 @@ pub fn write_validated(path: &Path, contents: &[u8]) -> Result<()> {
     crate::atomic::write(path, contents)
 }
 
+/// Validate bytes bound for `path`, with a logged escape hatch.
+///
+/// The shared decision behind every orca-managed config write, wherever the
+/// bytes are going — a local file, a guest over `pct push`, a plugin's render.
+/// It lived in one call site before, so the write paths that did not happen to
+/// pass through it got no guard at all.
+///
+/// `/etc/jellyfin/network.xml` on frigg sat unparseable from 2026-03-15 to
+/// 2026-09-24. Jellyfin logged the parse failure on every startup, fell back
+/// to defaults, and silently discarded six months of real config — the reverse
+/// proxy's `KnownProxies` among it — while reporting healthy the entire time.
+/// Up and serving is not the same as running the config we think it is.
+///
+/// Unknown extensions pass through untouched: this guards formats we can
+/// actually parse and never invents an opinion about opaque bytes.
+/// `allow_unparseable` is the opt-out for repairing an already-broken file
+/// through an intermediate state; the overridden error is RETURNED so the
+/// caller can log it, because an unparseable config written deliberately and
+/// one written by accident are indistinguishable six months later.
+/// Returns the parse error that was OVERRIDDEN when `allow_unparseable` let a
+/// bad file through, so the caller can log it. `utils` carries no logging
+/// dependency by design, and a forced write that left no trace would be the
+/// same silent-bad-config failure one layer up.
+pub fn guard(path: &Path, contents: &[u8], allow_unparseable: bool) -> Result<Option<String>> {
+    let err = match validate_for_path(path, contents) {
+        Ok(()) => return Ok(None),
+        Err(e) => e,
+    };
+    if allow_unparseable {
+        return Ok(Some(format!("{err:#}")));
+    }
+    Err(err.context(
+        "pass --allow-unparseable to force the write (e.g. repairing an already-broken file)",
+    ))
+}
+
+/// Write a config file, validating the bytes BEFORE the write and the file
+/// AFTER it.
+///
+/// The "after" half is not redundant with the "before" half. The bytes being
+/// good proves the caller's intent was good; re-reading proves what is
+/// actually on disk now. A short write, a full filesystem, or a mangling
+/// filesystem all land a file that no longer parses after bytes that did — and
+/// what matters is the state a service will read, not the state we meant.
+///
+/// Writes atomically, so a crash mid-write leaves the old file rather than half
+/// of the new one. Partial config is the exact failure being guarded.
+pub fn write_guarded(
+    path: &Path,
+    contents: &[u8],
+    allow_unparseable: bool,
+) -> Result<Option<String>> {
+    let overridden = guard(path, contents, allow_unparseable)?;
+    crate::atomic::write(path, contents)?;
+    if overridden.is_some() {
+        // Forced past the check deliberately: re-reading would only refuse the
+        // write the caller explicitly asked to force.
+        return Ok(overridden);
+    }
+    validate_file(path).with_context(|| {
+        format!(
+            "wrote {} but it does not parse when read back — the file on disk \
+             is not what was validated",
+            path.display()
+        )
+    })?;
+    Ok(None)
+}
+
 /// Re-check a file already on disk. Used for the "after" half of a managed
 /// write, and by health checks asking "is the service running the config we
 /// think it is". A missing file is an error here — the caller expected one.

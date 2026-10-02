@@ -19,6 +19,9 @@ serde         = { workspace = true }
 serde_json    = { workspace = true }
 
 anyhow = { workspace = true }
+# Forced-past-validation writes must leave a trace (#563): an unparseable
+# config written deliberately and one written by accident look identical later.
+tracing = { workspace = true }
 rusqlite = { workspace = true }
 thiserror   = { workspace = true }
 tokio = { workspace = true }

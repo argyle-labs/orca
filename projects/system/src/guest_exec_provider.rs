@@ -270,17 +270,18 @@ pub struct GuestWriteFileArgs {
 /// healthy. Unknown extensions pass through untouched; `allow_unparseable` is the
 /// logged opt-out for repairing an already-broken file.
 fn check_contents_parse(path: &str, contents: &[u8], allow_unparseable: bool) -> Result<()> {
-    let err = match utils::config_format::validate_for_path(Path::new(path), contents) {
-        Ok(()) => return Ok(()),
-        Err(e) => e,
-    };
-    if allow_unparseable {
-        tracing::warn!(path, error = %format!("{err:#}"), "guest.write_file forced past config validation");
-        return Ok(());
+    // The decision itself is shared (`utils::config_format::guard`) so the
+    // local-file write path gets the same guard rather than its own near-copy.
+    if let Some(overridden) =
+        utils::config_format::guard(Path::new(path), contents, allow_unparseable)?
+    {
+        tracing::warn!(
+            path,
+            error = %overridden,
+            "guest.write_file forced past config validation"
+        );
     }
-    Err(err.context(
-        "pass --allow-unparseable to force the write (e.g. repairing an already-broken file)",
-    ))
+    Ok(())
 }
 
 /// Write a file into a guest — the confined `pct push` seam for an LXC, the
