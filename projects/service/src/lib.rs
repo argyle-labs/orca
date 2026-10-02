@@ -1038,6 +1038,12 @@ impl BackupMethod for TarMethod {
             })?;
             let handle = &ctx.instance;
             let extract = format!("tar xzf {IN_GUEST_TARBALL} -C /");
+            // NOTE: this extracts into a RUNNING unit. That is the
+            // silent-corruption case in #613 gap 5, and fixing it here needs a
+            // different transport — `<bin> exec` cannot run in a stopped
+            // container, so quiescing requires extracting host-side and
+            // copying the contents in. Tracked separately rather than
+            // half-changed under a PBS PR.
             if ctx.runtime == Runtime::Lxc {
                 run(
                     bin,
@@ -1085,6 +1091,56 @@ impl BackupMethod for TarMethod {
             }
             Ok(())
         })
+    }
+}
+
+/// Stop a container so its files can be replaced underneath it.
+///
+/// Restoring into a RUNNING service is the silent-corruption case named in
+/// #563/#613: the process holds open file handles and its own in-memory state,
+/// writes over what was just restored, and the restore appears to succeed. A
+/// SQLite database is the usual casualty.
+#[cfg(feature = "in-process")]
+async fn quiesce(bin: &str, instance: &str) -> Result<(), ServiceError> {
+    run(bin, &["stop".to_string(), instance.to_string()]).await
+}
+
+/// Start it again.
+#[cfg(feature = "in-process")]
+async fn unquiesce(bin: &str, instance: &str) -> Result<(), ServiceError> {
+    run(bin, &["start".to_string(), instance.to_string()]).await
+}
+
+/// Combine a restore outcome with the restart that followed it.
+///
+/// The restart is attempted WHETHER OR NOT the restore succeeded — leaving a
+/// service stopped after a failed restore is its own outage, and a failed
+/// restore is exactly when an operator most needs the old version back up.
+///
+/// Both failures are reported together. Collapsing them loses the distinction
+/// that decides what to do next: data restored but service down is a start
+/// command away, data not restored and service down is a different emergency.
+#[cfg(feature = "in-process")]
+fn settle(
+    what: &str,
+    instance: &str,
+    restored: Result<(), ServiceError>,
+    restarted: Result<(), ServiceError>,
+) -> Result<(), ServiceError> {
+    match (restored, restarted) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(e)) => Err(ServiceError::Other(format!(
+            "{what}: data RESTORED, but `{instance}` did not start again: {e}. \
+             The restore landed — start the service."
+        ))),
+        (Err(e), Ok(())) => Err(ServiceError::Other(format!(
+            "{what}: restore FAILED ({e}); `{instance}` was restarted on its \
+             previous data."
+        ))),
+        (Err(e), Err(r)) => Err(ServiceError::Other(format!(
+            "{what}: restore FAILED ({e}) AND `{instance}` did not start again \
+             ({r}). The service is DOWN and its data is in an unknown state."
+        ))),
     }
 }
 
@@ -1191,6 +1247,24 @@ impl PbsMethod {
     /// The runtime binary is NOT a parameter: docker and podman take the same
     /// `run` arguments, so the vector depends only on what is being run.
     fn containerize(image: &str, paths: &[String], client_args: &[String]) -> Vec<String> {
+        Self::containerize_with(image, paths, client_args, true)
+    }
+
+    /// As [`Self::containerize`], but the mounts are WRITABLE.
+    ///
+    /// For restore, where the target is the thing being written. Backup mounts
+    /// read-only on purpose; reusing that here would fail every write with a
+    /// permission error that reads like a PBS fault.
+    fn containerize_writable(image: &str, paths: &[String], client_args: &[String]) -> Vec<String> {
+        Self::containerize_with(image, paths, client_args, false)
+    }
+
+    fn containerize_with(
+        image: &str,
+        paths: &[String],
+        client_args: &[String],
+        read_only: bool,
+    ) -> Vec<String> {
         let mut args = vec![
             "run".to_string(),
             "--rm".to_string(),
@@ -1200,7 +1274,11 @@ impl PbsMethod {
         ];
         for p in paths.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
             args.push("-v".to_string());
-            args.push(format!("{p}:{p}:ro"));
+            args.push(if read_only {
+                format!("{p}:{p}:ro")
+            } else {
+                format!("{p}:{p}")
+            });
         }
         for key in ["PBS_REPOSITORY", "PBS_PASSWORD", "PBS_FINGERPRINT"] {
             if std::env::var_os(key).is_some() {
@@ -1213,6 +1291,88 @@ impl PbsMethod {
         args.push("proxmox-backup-client".to_string());
         args.extend(client_args.iter().cloned());
         args
+    }
+
+    /// The snapshot a restore reads, from the artifact a backup wrote.
+    ///
+    /// `backup` records `pbs:host/<backup-id>`; PBS addresses a snapshot as
+    /// `<type>/<id>/<time>`. With no recorded time this resolves to the group's
+    /// newest, which is what "restore this unit" means in the absence of a
+    /// chosen point.
+    ///
+    /// Returns `None` for an artifact this method did not write — a `tar`
+    /// artifact names a tarball on disk, and feeding that to the PBS client
+    /// would produce a confusing client-side error instead of a clear refusal.
+    fn snapshot_from(artifact_path: &str, timestamp: &str) -> Option<String> {
+        let group = artifact_path.strip_prefix("pbs:")?.trim();
+        if group.is_empty() {
+            return None;
+        }
+        // Already fully qualified (three segments): take it as given.
+        if group.matches('/').count() >= 2 {
+            return Some(group.to_string());
+        }
+        let t = timestamp.trim();
+        if t.is_empty() {
+            return Some(format!("{group}/latest"));
+        }
+        Some(format!("{group}/{t}"))
+    }
+
+    /// Restore every declared path from one snapshot.
+    ///
+    /// Sequential and fail-fast: paths are restored one archive at a time, and
+    /// the first failure stops the rest. Carrying on would leave the unit with
+    /// some paths at the restored version and some at the current one — a
+    /// state that is neither, and that nothing records.
+    ///
+    /// Routes through the same installed-or-containerized decision the backup
+    /// does, so a host that can back up can also restore. The two diverging
+    /// would mean a host quietly able to write backups it cannot read.
+    async fn restore_paths(snapshot: &str, ctx: &BackupContext<'_>) -> Result<(), ServiceError> {
+        for path in ctx.data_paths {
+            let args = PbsMethod::restore_args(snapshot, path);
+            match utils::path::which("proxmox-backup-client") {
+                Some(_) => run("proxmox-backup-client", &args).await?,
+                None => {
+                    let bin = PbsMethod::container_runtime().ok_or_else(|| {
+                        ServiceError::Unsupported(
+                            "restore".to_string(),
+                            format!(
+                                "{}: `proxmox-backup-client` is not installed and no \
+                                 container runtime is available to run it in.",
+                                ctx.provider
+                            ),
+                        )
+                    })?;
+                    let image = PbsMethod::client_image();
+                    // The restore TARGET must be writable — the backup path
+                    // mounts sources read-only, and reusing that here would
+                    // fail every write with a permission error that looks like
+                    // a PBS problem.
+                    let wrapped =
+                        PbsMethod::containerize_writable(&image, std::slice::from_ref(path), &args);
+                    run(bin, &wrapped).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Argument vector for a file-level `proxmox-backup-client restore`.
+    ///
+    /// One invocation per archive, because `restore` takes exactly one. The
+    /// archive name is derived from the path the SAME way `backup_args`
+    /// derives it, so a path backed up as `config.pxar` is looked for under
+    /// that name and not a second spelling of it.
+    fn restore_args(snapshot: &str, path: &str) -> Vec<String> {
+        let archive = path.trim_matches('/').replace('/', "_");
+        vec![
+            "restore".to_string(),
+            snapshot.to_string(),
+            format!("{archive}.pxar"),
+            path.to_string(),
+        ]
     }
 
     /// Argument vector for a file-level `proxmox-backup-client backup`.
@@ -1364,16 +1524,63 @@ impl BackupMethod for PbsMethod {
     fn restore<'a>(
         &'a self,
         ctx: BackupContext<'a>,
-        _from: &'a BackupArtifact,
+        from: &'a BackupArtifact,
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
         Box::pin(async move {
-            // PBS restore is destructive + guest-specific (pct restore / qmrestore
-            // / proxmox-backup-client restore); wire per-runtime intentionally
-            // rather than guess a target vmid.
-            Err(ServiceError::Other(format!(
-                "pbs restore for {} ({:?}) must be performed explicitly via pct/qm/proxmox-backup-client restore",
-                ctx.provider, ctx.runtime
-            )))
+            match ctx.runtime {
+                // Whole-guest restore (`pct restore` / `qmrestore`) DESTROYS the
+                // existing guest and needs a target vmid nobody has stated. It
+                // also restores from the whole-guest images #613 gap 1 says
+                // should not be taken in the first place, so building it here
+                // would deepen the thing that is being removed. Refused, with
+                // the command to run by hand.
+                Runtime::Lxc | Runtime::Vm => Err(ServiceError::Unsupported(
+                    "restore".to_string(),
+                    format!(
+                        "{}: a whole-guest PBS restore destroys and recreates the guest, \
+                         and the target vmid is not implied by anything here. Run it \
+                         deliberately: `pct restore <vmid> <volume>` (LXC) or \
+                         `qmrestore <volume> <vmid>` (VM). Per-unit file restore is \
+                         supported for container runtimes.",
+                        ctx.provider
+                    ),
+                )),
+                Runtime::Docker | Runtime::Podman => {
+                    if ctx.data_paths.is_empty() {
+                        return Err(ServiceError::Other(format!(
+                            "{}: no data_paths to restore into",
+                            ctx.provider
+                        )));
+                    }
+                    let snapshot = PbsMethod::snapshot_from(&from.path, &from.timestamp)
+                        .ok_or_else(|| {
+                            ServiceError::Other(format!(
+                                "{}: `{}` is not a PBS artifact — this method restores only \
+                                 snapshots it wrote (`pbs:<type>/<id>`)",
+                                ctx.provider, from.path
+                            ))
+                        })?;
+                    let bin = TarMethod::cli(ctx.runtime).ok_or_else(|| {
+                        ServiceError::Unsupported(
+                            "restore".to_string(),
+                            format!("no container CLI for {:?}", ctx.runtime),
+                        )
+                    })?;
+
+                    // STOP FIRST. Restoring into a running service lets it
+                    // write back over what was just restored from its own
+                    // in-memory state: the restore reports success and the data
+                    // is a mix of both. A SQLite database is the usual
+                    // casualty (#613 gap 5).
+                    quiesce(bin, ctx.instance).await?;
+                    let restored = PbsMethod::restore_paths(&snapshot, &ctx).await;
+                    // Attempted whether or not the restore worked: a failed
+                    // restore is exactly when the old version needs to be back
+                    // up, and leaving it stopped is its own outage.
+                    let restarted = unquiesce(bin, ctx.instance).await;
+                    settle(ctx.provider, ctx.instance, restored, restarted)
+                }
+            }
         })
     }
 }
@@ -1919,31 +2126,6 @@ mod tests {
 
     #[cfg(feature = "in-process")]
     #[tokio::test]
-    async fn pbs_restore_is_intentionally_unsupported() {
-        let pbs = PbsMethod;
-        let instance = "100";
-        let art = BackupArtifact::default();
-        let e = pbs
-            .restore(
-                BackupContext {
-                    runtime: Runtime::Lxc,
-                    instance,
-                    provider: "abs",
-                    data_paths: &[],
-                    exclude: &[],
-                },
-                &art,
-            )
-            .await
-            .expect_err("pbs restore is explicit-only");
-        assert!(
-            e.to_string().contains("must be performed explicitly"),
-            "{e}"
-        );
-    }
-
-    #[cfg(feature = "in-process")]
-    #[tokio::test]
     async fn tar_backup_rejects_empty_data_paths_and_bare_vm() {
         let tar = TarMethod;
         let instance = "inst";
@@ -2378,6 +2560,212 @@ mod tests {
     // observe that `vzdump`/`proxmox-backup-client` are missing in CI, which
     // they do whether or not the excludes and the backup id are passed at
     // all — they passed throughout the period the excludes were dropped.
+
+    // ── #613 gap 5: restore ──────────────────────────────────────────────
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn a_restore_reads_back_exactly_what_the_backup_wrote() {
+        // The archive name must be derived the SAME way on both sides. A
+        // second spelling means a restore that cannot find its own backup.
+        let backup = PbsMethod::backup_args("abs", "freyr", &["/config".to_string()], &[]);
+        let archive = backup
+            .iter()
+            .find(|a| a.ends_with(".pxar:/config"))
+            .expect("archive spec present")
+            .split(':')
+            .next()
+            .expect("archive name")
+            .to_string();
+        let restore = PbsMethod::restore_args("host/abs-freyr/latest", "/config");
+        assert_eq!(restore[2], archive, "backup wrote `{archive}`");
+        assert_eq!(restore[0], "restore");
+        assert_eq!(restore[1], "host/abs-freyr/latest");
+        // Restored back to the path it came from.
+        assert_eq!(restore[3], "/config");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn a_snapshot_resolves_from_the_artifact_a_backup_recorded() {
+        // What `backup` actually writes into the artifact.
+        assert_eq!(
+            PbsMethod::snapshot_from("pbs:host/abs-freyr", "1759300000").as_deref(),
+            Some("host/abs-freyr/1759300000")
+        );
+        // No recorded time: the group's newest, which is what "restore this
+        // unit" means with no chosen point.
+        assert_eq!(
+            PbsMethod::snapshot_from("pbs:host/abs-freyr", "").as_deref(),
+            Some("host/abs-freyr/latest")
+        );
+        // Already fully qualified — taken as given, not re-suffixed.
+        assert_eq!(
+            PbsMethod::snapshot_from("pbs:host/abs-freyr/2026-10-01T00:00:00Z", "99").as_deref(),
+            Some("host/abs-freyr/2026-10-01T00:00:00Z")
+        );
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn a_foreign_artifact_is_refused_not_guessed_at() {
+        // A `tar` artifact names a tarball on disk. Handing that to the PBS
+        // client yields a confusing client-side error instead of a clear
+        // refusal, and there is no sense in which it could succeed.
+        assert_eq!(
+            PbsMethod::snapshot_from("/var/tmp/orca-backups/abs-cont-123.tar.gz", "1"),
+            None
+        );
+        assert_eq!(PbsMethod::snapshot_from("pbs:", "1"), None);
+        assert_eq!(PbsMethod::snapshot_from("", "1"), None);
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn a_restore_target_is_mounted_writable_unlike_a_backup_source() {
+        // Backup mounts read-only on purpose. Reusing that for restore fails
+        // every write with a permission error that reads like a PBS fault.
+        let w = PbsMethod::containerize_writable(
+            "img",
+            &["/config".to_string()],
+            &["restore".to_string()],
+        );
+        assert!(
+            w.windows(2)
+                .any(|p| p[0] == "-v" && p[1] == "/config:/config"),
+            "{w:?}"
+        );
+        assert!(!w.iter().any(|a| a.ends_with(":ro")), "{w:?}");
+        // And the backup path is unchanged — still read-only.
+        let r = PbsMethod::containerize("img", &["/config".to_string()], &["backup".to_string()]);
+        assert!(
+            r.windows(2)
+                .any(|p| p[0] == "-v" && p[1] == "/config:/config:ro"),
+            "{r:?}"
+        );
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn a_failed_restore_and_a_failed_restart_are_reported_separately() {
+        let t = || ServiceError::Transport("boom".into());
+        let r = || ServiceError::Transport("no start".into());
+
+        // Restored, service down: one command from fine. Say so.
+        let e = settle("abs", "cont", Ok(()), Err(r())).unwrap_err();
+        let m = e.to_string();
+        assert!(m.contains("RESTORED"), "{m}");
+        assert!(m.contains("start the service"), "{m}");
+
+        // Restore failed but the service came back on its old data: bad, not
+        // an emergency.
+        let m = settle("abs", "cont", Err(t()), Ok(()))
+            .unwrap_err()
+            .to_string();
+        assert!(m.contains("restore FAILED"), "{m}");
+        assert!(m.contains("previous data"), "{m}");
+
+        // Both failed: the distinction that decides what to do next.
+        let m = settle("abs", "cont", Err(t()), Err(r()))
+            .unwrap_err()
+            .to_string();
+        assert!(m.contains("DOWN"), "{m}");
+        assert!(m.contains("unknown state"), "{m}");
+
+        assert!(settle("abs", "cont", Ok(()), Ok(())).is_ok());
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_whole_guest_restore_is_refused_with_the_command_to_run() {
+        // `pct restore`/`qmrestore` destroy and recreate the guest, and the
+        // target vmid is not implied by anything here. Guessing it is the one
+        // unrecoverable mistake this verb could make.
+        for rt in [Runtime::Lxc, Runtime::Vm] {
+            let e = PbsMethod
+                .restore(
+                    BackupContext {
+                        runtime: rt,
+                        instance: "113",
+                        provider: "abs",
+                        data_paths: &[],
+                        exclude: &[],
+                    },
+                    &BackupArtifact::default(),
+                )
+                .await
+                .expect_err("must refuse");
+            assert!(matches!(e, ServiceError::Unsupported(..)), "{rt:?}: {e}");
+            let m = e.to_string();
+            assert!(m.contains("pct restore"), "{rt:?}: {m}");
+            assert!(m.contains("qmrestore"), "{rt:?}: {m}");
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_restore_stops_the_unit_before_touching_its_files() {
+        // The ordering IS the correctness here: restoring into a running
+        // service lets it write back over what was just restored from its own
+        // in-memory state, and the restore reports success either way.
+        //
+        // A fake container CLI logs every invocation, so the sequence is
+        // observable. It exits 0 for stop/start and non-zero otherwise, so the
+        // restore step fails — which also exercises the restart-anyway path.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("calls.log");
+        let fake = dir.path().join("docker");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> {}\ncase \"$1\" in stop|start) exit 0 ;; *) exit 9 ;; esac\n",
+                log.display()
+            ),
+        )
+        .expect("write fake docker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let _g = EnvGuard::set(&[("PATH", dir.path().to_str())]);
+
+        let paths = ["/config".to_string()];
+        let e = PbsMethod
+            .restore(
+                BackupContext {
+                    runtime: Runtime::Docker,
+                    instance: "sonarr",
+                    provider: "abs",
+                    data_paths: &paths,
+                    exclude: &[],
+                },
+                &BackupArtifact {
+                    path: "pbs:host/abs-sonarr".into(),
+                    timestamp: "1759300000".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("fake client exits 9");
+
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        let lines: Vec<&str> = calls.lines().collect();
+        assert!(
+            lines.first().is_some_and(|l| l.starts_with("stop sonarr")),
+            "the unit must be STOPPED first: {lines:?}"
+        );
+        assert!(
+            lines.last().is_some_and(|l| l.starts_with("start sonarr")),
+            "the unit must be restarted even though the restore failed: {lines:?}"
+        );
+        // And the failure says the data was not restored, so nobody reads a
+        // restarted service as a successful restore.
+        let m = e.to_string();
+        assert!(m.contains("restore FAILED"), "{m}");
+    }
 
     // ── #613 gap 2: the client cannot exist on the hosts that need it ────
 
