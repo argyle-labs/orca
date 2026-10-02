@@ -33,7 +33,10 @@ use std::sync::{OnceLock, RwLock};
 /// leak into everything that ran afterwards. Values are leaked once so the
 /// accessors can keep returning `&'static str`.
 static HOSTNAME: RwLock<Option<&'static str>> = RwLock::new(None);
-static MACHINE_ID: RwLock<Option<&'static str>> = RwLock::new(None);
+/// Deliberately a `OnceLock`, unlike `HOSTNAME`: the machine_id is an identity
+/// KEY, and a value that can change mid-process is worse than one that is
+/// missing. Set once by `init()`, never re-derived behind a caller's back.
+static MACHINE_ID: OnceLock<String> = OnceLock::new();
 static APP_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 fn leak(s: String) -> &'static str {
@@ -49,7 +52,7 @@ pub fn init(app_dir: &Path) -> Result<()> {
     *HOSTNAME.write().expect("HOSTNAME lock") = Some(leak(capture_hostname()));
 
     let machine_id = load_or_generate_machine_id(app_dir).context("load or generate machine_id")?;
-    *MACHINE_ID.write().expect("MACHINE_ID lock") = Some(leak(machine_id));
+    MACHINE_ID.set(machine_id).ok();
     Ok(())
 }
 
@@ -67,7 +70,7 @@ pub fn hostname() -> &'static str {
     }
     let derived = leak(capture_hostname());
     let mut w = HOSTNAME.write().expect("HOSTNAME lock");
-    *w.get_or_insert(derived)
+    w.get_or_insert(derived)
 }
 
 /// Alias of [`hostname`] using the slice-7 vocabulary (`display_hostname`
@@ -76,37 +79,28 @@ pub fn display_hostname() -> &'static str {
     hostname()
 }
 
-/// Stable per-machine UUID. **Self-healing**, with one deliberate limit.
+/// Stable per-machine UUID. Requires `init()`.
 ///
-/// On a cache miss this loads (or mints and PERSISTS) the id from the state dir,
-/// the same path `init()` takes. Persisting is what makes recovery legitimate:
-/// the id stays stable across restarts, so this is re-establishing identity, not
-/// inventing it.
+/// This one is deliberately NOT self-healing, unlike [`hostname`]. Two reasons,
+/// both learned the hard way:
 ///
-/// It still panics if the id can neither be read nor persisted (e.g. a read-only
-/// state dir). That is the one case where self-healing is the WRONG answer: an
-/// in-memory-only id would differ on every restart and split this host's mesh
-/// identity across reboots — strictly worse than refusing. Recover what can be
-/// made authoritative; never substitute a wrong identity.
+/// 1. **Recovery here has a side effect.** `load_or_generate_machine_id` WRITES
+///    a file. A lazy read would turn any innocuous `machine_id()` call into a
+///    filesystem mutation in whatever state dir happened to be configured.
+/// 2. **An identity key must not change mid-process.** Callers mint certificates
+///    whose CN is this value and then compare against it. If a later `init()`
+///    (or a lazy fill) could replace it, those two reads disagree and the
+///    comparison fails — which is exactly how the mesh test suite caught an
+///    earlier attempt to make this authoritative-and-overwriting.
+///
+/// Resiliency belongs at the edges, not in an identity primitive: `init()` runs
+/// once at daemon startup and already self-heals a stale on-disk id by
+/// re-minting and persisting it.
 pub fn machine_id() -> &'static str {
-    if let Some(id) = *MACHINE_ID.read().expect("MACHINE_ID lock") {
-        return id;
-    }
-    let app_dir = APP_DIR
+    MACHINE_ID
         .get()
-        .cloned()
-        .or_else(|| contract::config::paths::state_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let derived = leak(load_or_generate_machine_id(&app_dir).unwrap_or_else(|e| {
-        panic!(
-            "host_identity: cannot establish a persistent machine_id under {}: {e:#}. \
-             Refusing to invent one -- an unpersisted id would change on every restart and \
-             split this host's mesh identity.",
-            app_dir.display()
-        )
-    }));
-    let mut w = MACHINE_ID.write().expect("MACHINE_ID lock");
-    *w.get_or_insert(derived)
+        .expect("host_identity::init() must run before machine_id()")
+        .as_str()
 }
 
 /// Hostname for standalone CLI flows (e.g. `orca install`) where `init()` may
@@ -199,7 +193,7 @@ pub fn superseded_machine_ids() -> Vec<String> {
     let Some(dir) = APP_DIR.get() else {
         return Vec::new();
     };
-    let current = (*MACHINE_ID.read().expect("MACHINE_ID lock")).unwrap_or("");
+    let current = MACHINE_ID.get().map(String::as_str).unwrap_or("");
     let retired: std::collections::HashSet<String> =
         read_id_lines(&retired_path(dir)).into_iter().collect();
 
