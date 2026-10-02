@@ -821,6 +821,12 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     // fitting the history ring, so "85% and climbing" is distinguishable from
     // "85% for two years". Reads the metrics series only.
     system::capacity_diagnostics::register();
+    // Core-owned mount-risk provider: reports provisioned mounts shaped to cause
+    // an outage — notably an uncapped writable bind mount backed by the host's
+    // own root filesystem, which measures zero bytes at rest and so is invisible
+    // to every level check. Gated on the `proxmox` capability; a host with no
+    // `pct` registers nothing rather than reporting an empty audit.
+    system::mount_diagnostics::register();
     // Default POSIX permissions provider so the share-permission introspection
     // capability works before any filesystem plugin loads; plugins may register
     // richer providers for their filesystem.

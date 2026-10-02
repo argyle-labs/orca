@@ -97,6 +97,7 @@ pub mod config_parse_diagnostics;
 /// Core diagnostics provider reporting filesystems trending toward full, judged
 /// by growth rate over the history ring rather than a current-level threshold.
 pub mod capacity_diagnostics;
+pub mod mount_diagnostics;
 
 /// Plans guest timezone convergence (orca#570's durable half). Guest TZ does not
 /// inherit from the host and nothing owned it, so thor ran 3h off while healthy.
