@@ -15,7 +15,7 @@ use colored::Colorize;
 use contract::config::APP_PLIST_LABEL;
 #[cfg(target_os = "linux")]
 use contract::config::APP_SYSTEMD_SERVICE;
-use contract::config::{APP_DAEMON_LOG_FILE, APP_LOGS_SUBDIR, APP_NAME, APP_STATE_DIR};
+use contract::config::{APP_DAEMON_STDERR_FILE, APP_LOGS_SUBDIR, APP_NAME, APP_STATE_DIR};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
@@ -239,7 +239,9 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     let plist_path = format!("{agents_dir}/{APP_PLIST_LABEL}.plist");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
-    let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
+    // Supervisor capture only — the structured log is the subscriber's
+    // rotated tee (`daemon.jsonl`). See APP_DAEMON_STDERR_FILE.
+    let daemon_log = format!("{logs_dir}/{APP_DAEMON_STDERR_FILE}");
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -295,7 +297,11 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
         "{} {APP_NAME} daemon installed — starts now and on login",
         "✓".green()
     );
-    println!("  logs: tail -f {daemon_log}");
+    // Point at the STRUCTURED log, not the stderr capture — the latter is
+    // nearly empty by design now. `orca logs` is the better answer than tail.
+    warn_about_the_orphaned_legacy_log(&logs_dir);
+    println!("  logs: orca logs   (structured, filterable)");
+    println!("  stderr/panics: tail -f {daemon_log}");
     Ok(())
 }
 
@@ -319,6 +325,24 @@ pub(crate) fn uninstall_service() -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+/// The pre-split `daemon.log` is no longer written by anything, but a long-
+/// running host can be carrying a very large one (123 MB on mint). Say so on
+/// install rather than silently leaving it on the disk — deleting an
+/// operator's logs unasked is not ours to do, and leaving them unmentioned is
+/// how 123 MB accumulated in the first place.
+fn warn_about_the_orphaned_legacy_log(logs_dir: &str) {
+    let legacy = std::path::Path::new(logs_dir).join(contract::config::APP_DAEMON_LOG_FILE_LEGACY);
+    let Ok(meta) = std::fs::metadata(&legacy) else {
+        return;
+    };
+    let mb = meta.len() / (1024 * 1024);
+    println!(
+        "  note: {} ({} MB) is from before the log split and is no longer written.\n        Safe to delete.",
+        legacy.display(),
+        mb
+    );
+}
+
 fn launchd_uid() -> Result<u32> {
     let out = Command::new("id").arg("-u").output()?;
     let uid: u32 = String::from_utf8_lossy(&out.stdout)
@@ -336,7 +360,9 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     let service_path = format!("{service_dir}/{APP_SYSTEMD_SERVICE}.service");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
-    let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
+    // Supervisor capture only — the structured log is the subscriber's
+    // rotated tee (`daemon.jsonl`). See APP_DAEMON_STDERR_FILE.
+    let daemon_log = format!("{logs_dir}/{APP_DAEMON_STDERR_FILE}");
 
     let service = format!(
         "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target\n\n\
@@ -419,7 +445,9 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
     if !chown.success() {
         anyhow::bail!("chown {user}:{user} {logs_dir} failed with status {chown}");
     }
-    let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
+    // Supervisor capture only — the structured log is the subscriber's
+    // rotated tee (`daemon.jsonl`). See APP_DAEMON_STDERR_FILE.
+    let daemon_log = format!("{logs_dir}/{APP_DAEMON_STDERR_FILE}");
     let unit = format!(
         "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target\n\n\
          [Service]\nType=simple\nUser={user}\n\
@@ -463,7 +491,9 @@ fn install_openrc(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
     if !chown.success() {
         anyhow::bail!("chown {user}:{user} {logs_dir} failed with status {chown}");
     }
-    let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
+    // Supervisor capture only — the structured log is the subscriber's
+    // rotated tee (`daemon.jsonl`). See APP_DAEMON_STDERR_FILE.
+    let daemon_log = format!("{logs_dir}/{APP_DAEMON_STDERR_FILE}");
     // OpenRC init script. supervise-daemon handles restart-on-crash without
     // requiring start-stop-daemon/pidfile bookkeeping. `command_user` drops
     // privs to the orca user. output_log/error_log keep daemon stdout+stderr
