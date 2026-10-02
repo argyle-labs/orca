@@ -26,7 +26,12 @@ path = "src/lib.rs"
 [features]
 default = ["full"]
 full = ["in-process"]
-in-process = ["dep:tokio", "contract/in-process", "deploy-target/in-process"]
+in-process = [
+    "dep:tokio",
+    "dep:tempfile",
+    "contract/in-process",
+    "deploy-target/in-process",
+]
 
 [dependencies]
 # service COMPOSES deploy-target: a backend produces a runtime-agnostic
@@ -48,6 +53,10 @@ schemars    = { workspace = true }
 # `tokio::process` subprocess backup machinery. A thin subprocess plugin links no
 # tokio — subprocess is a capability, reached via a host round-trip.
 tokio       = { workspace = true, optional = true }
+# In-process only: a quiesced container restore unpacks the tarball host-side
+# (the extract cannot run inside a stopped container) and the staging dir must
+# be removed on every path, including the failures.
+tempfile    = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The test suite (gated to `in-process`) drives async via `#[tokio::test]`.

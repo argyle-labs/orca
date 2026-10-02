@@ -921,6 +921,53 @@ impl TarMethod {
         format!("'{}'", p.replace('\'', r#"'\''"#))
     }
 
+    /// Unpack the backup tarball into a temporary directory on the HOST.
+    ///
+    /// The extract has to happen somewhere a stopped container can be fed
+    /// from, and `<bin> exec` is not available once the unit is down. The
+    /// directory is removed when the returned handle drops, including on the
+    /// error paths — a restore that fails should not also leave a full copy of
+    /// the unit's data in the host's temp space.
+    ///
+    /// Requires `tar` on the HOST. The backup side only ever needed tar inside
+    /// the guest, so this is a new requirement and is reported as a clear
+    /// refusal rather than a confusing spawn failure.
+    async fn stage(tarball: &str) -> Result<tempfile::TempDir, ServiceError> {
+        if utils::path::which("tar").is_none() {
+            return Err(ServiceError::Unsupported(
+                "restore".to_string(),
+                "`tar` is not installed on this host. A quiesced container restore \
+                 unpacks host-side, because the extract cannot run inside a stopped \
+                 container."
+                    .to_string(),
+            ));
+        }
+        let dir = tempfile::tempdir()
+            .map_err(|e| ServiceError::Other(format!("staging dir for restore: {e}")))?;
+        run(
+            "tar",
+            &[
+                "xzf".to_string(),
+                tarball.to_string(),
+                "-C".to_string(),
+                dir.path().display().to_string(),
+            ],
+        )
+        .await
+        // The commonest cause is no room for the UNCOMPRESSED payload, which
+        // tar reports as a write error naming neither the cause nor the
+        // filesystem. Say where it was unpacking.
+        .map_err(|e| {
+            ServiceError::Other(format!(
+                "unpacking `{tarball}` into `{}` failed: {e}. If the host's temp \
+                 filesystem is short of room for the uncompressed payload, point \
+                 TMPDIR somewhere with space.",
+                dir.path().display()
+            ))
+        })?;
+        Ok(dir)
+    }
+
     /// The in-guest `tar` command line.
     ///
     /// Pure, so the exclusions and the quoting are assertable. `--exclude`
@@ -1037,14 +1084,13 @@ impl BackupMethod for TarMethod {
                 ServiceError::Unsupported("restore".into(), format!("tar on {:?}", ctx.runtime))
             })?;
             let handle = &ctx.instance;
-            let extract = format!("tar xzf {IN_GUEST_TARBALL} -C /");
-            // NOTE: this extracts into a RUNNING unit. That is the
-            // silent-corruption case in #613 gap 5, and fixing it here needs a
-            // different transport — `<bin> exec` cannot run in a stopped
-            // container, so quiescing requires extracting host-side and
-            // copying the contents in. Tracked separately rather than
-            // half-changed under a PBS PR.
             if ctx.runtime == Runtime::Lxc {
+                // An LXC necessarily stays UP: `pct push` and `pct exec` both
+                // require a running container, so there is no quiesced form of
+                // this transport. Restoring into a live guest risks the same
+                // write-back corruption as everywhere else — the honest thing
+                // is that this path cannot avoid it, not that it is safe.
+                let extract = format!("tar xzf {IN_GUEST_TARBALL} -C /");
                 run(
                     bin,
                     &[
@@ -1067,29 +1113,35 @@ impl BackupMethod for TarMethod {
                     ],
                 )
                 .await?;
-            } else {
-                run(
-                    bin,
-                    &[
-                        "cp".into(),
-                        from.path.clone(),
-                        format!("{handle}:{IN_GUEST_TARBALL}"),
-                    ],
-                )
-                .await?;
-                run(
-                    bin,
-                    &[
-                        "exec".into(),
-                        handle.to_string(),
-                        "sh".into(),
-                        "-c".into(),
-                        extract,
-                    ],
-                )
-                .await?;
+                return Ok(());
             }
-            Ok(())
+
+            // Container runtimes CAN be quiesced, so they are. The old path
+            // `cp`-ed the tarball in and `exec`-ed tar INSIDE a running unit:
+            // the service wrote back over what had just been restored from its
+            // own in-memory state, and the restore reported success either way
+            // (#676).
+            //
+            // `exec` cannot run in a stopped container, so the extract moves
+            // HOST-side and the contents are copied in — both of which work on
+            // a stopped container.
+            let staging = TarMethod::stage(&from.path).await?;
+            quiesce(bin, handle).await?;
+            let restored = run(
+                bin,
+                &[
+                    "cp".into(),
+                    // The trailing `/.` copies the CONTENTS of the directory,
+                    // not the directory itself. Without it the whole staging
+                    // dir lands at `/` under its own temp name and nothing is
+                    // actually restored — while the command still succeeds.
+                    format!("{}/.", staging.path().display()),
+                    format!("{handle}:/"),
+                ],
+            )
+            .await;
+            let restarted = unquiesce(bin, handle).await;
+            settle(ctx.provider, handle, restored, restarted)
         })
     }
 }
@@ -2501,31 +2553,204 @@ mod tests {
         }
     }
 
+    /// A fake `docker`/`tar` on a controlled PATH that logs every invocation.
+    ///
+    /// Returns `(dir, logfile)`. `tar` succeeds (so staging works); `docker`
+    /// succeeds for stop/start and fails otherwise, which exercises the
+    /// restart-anyway path without needing a container runtime.
+    #[cfg(feature = "in-process")]
+    fn fake_cli(copy_succeeds: bool) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("calls.log");
+        let cp_exit = if copy_succeeds { 0 } else { 9 };
+        for (name, body) in [
+            (
+                "docker",
+                format!(
+                    "#!/bin/sh\necho \"docker $@\" >> {}\n\
+                     case \"$1\" in stop|start) exit 0 ;; *) exit {cp_exit} ;; esac\n",
+                    log.display()
+                ),
+            ),
+            (
+                "tar",
+                format!("#!/bin/sh\necho \"tar $@\" >> {}\nexit 0\n", log.display()),
+            ),
+        ] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).expect("write fake");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+        }
+        (dir, log)
+    }
+
     #[cfg(feature = "in-process")]
     #[tokio::test]
-    async fn tar_restore_builds_and_runs_both_runtime_branches() {
-        let tar = TarMethod;
-        let instance = "orca-cov-absent-instance";
-        let from = BackupArtifact {
-            path: "/var/tmp/orca-nope.tar.gz".into(),
-            ..Default::default()
-        };
-        for rt in [Runtime::Docker, Runtime::Lxc] {
-            let e = tar
-                .restore(
-                    BackupContext {
-                        runtime: rt,
-                        instance,
-                        provider: "abs",
-                        data_paths: &[],
-                        exclude: &[],
-                    },
-                    &from,
-                )
-                .await
-                .expect_err("no such instance / no runtime binary");
-            assert!(matches!(e, ServiceError::Transport(_)), "{rt:?}: {e}");
+    #[serial_test::serial(env)]
+    async fn a_container_tar_restore_stops_the_unit_before_writing_to_it() {
+        // #676: the old path `cp`-ed the tarball in and `exec`-ed tar INSIDE a
+        // running unit, so the service wrote back over what had just been
+        // restored from its own in-memory state — and reported success.
+        //
+        // The ORDER is the correctness, so the order is what is asserted.
+        let (dir, log) = fake_cli(true);
+        let _g = EnvGuard::set(&[("PATH", dir.path().to_str())]);
+
+        TarMethod
+            .restore(
+                BackupContext {
+                    runtime: Runtime::Docker,
+                    instance: "sonarr",
+                    provider: "abs",
+                    data_paths: &[],
+                    exclude: &[],
+                },
+                &BackupArtifact {
+                    path: "/var/tmp/orca-backups/abs-sonarr-1.tar.gz".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("fake docker succeeds");
+
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        let lines: Vec<&str> = calls.lines().collect();
+        let at = |needle: &str| lines.iter().position(|l| l.starts_with(needle));
+
+        let stage = at("tar xzf").expect("staged host-side");
+        let stop = at("docker stop sonarr").expect("stopped");
+        let copy = at("docker cp").expect("copied in");
+        let start = at("docker start sonarr").expect("restarted");
+
+        assert!(stop < copy, "must STOP before writing: {lines:?}");
+        assert!(copy < start, "must restart AFTER writing: {lines:?}");
+        assert!(stage < copy, "staging precedes the copy: {lines:?}");
+        // `exec` cannot run in a stopped container, and relying on it is what
+        // forced the old path to leave the unit up.
+        assert!(
+            !lines.iter().any(|l| l.starts_with("docker exec")),
+            "a quiesced restore must not exec inside the unit: {lines:?}"
+        );
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn the_copy_takes_the_staging_directorys_contents_not_the_directory() {
+        // `docker cp <dir> c:/` puts the staging dir itself at `/` under its
+        // temp name and SUCCEEDS, restoring nothing. The trailing `/.` is what
+        // copies the contents, and nothing else would catch its loss.
+        let (dir, log) = fake_cli(true);
+        let _g = EnvGuard::set(&[("PATH", dir.path().to_str())]);
+        TarMethod
+            .restore(
+                BackupContext {
+                    runtime: Runtime::Docker,
+                    instance: "sonarr",
+                    provider: "abs",
+                    data_paths: &[],
+                    exclude: &[],
+                },
+                &BackupArtifact {
+                    path: "/var/tmp/x.tar.gz".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("ok");
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        let cp = calls
+            .lines()
+            .find(|l| l.starts_with("docker cp"))
+            .expect("cp present")
+            .to_string();
+        assert!(cp.contains("/. "), "must copy CONTENTS: {cp}");
+        assert!(cp.trim_end().ends_with("sonarr:/"), "{cp}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_failed_container_restore_still_restarts_the_unit() {
+        let (dir, log) = fake_cli(false);
+        let _g = EnvGuard::set(&[("PATH", dir.path().to_str())]);
+        let e = TarMethod
+            .restore(
+                BackupContext {
+                    runtime: Runtime::Docker,
+                    instance: "sonarr",
+                    provider: "abs",
+                    data_paths: &[],
+                    exclude: &[],
+                },
+                &BackupArtifact {
+                    path: "/var/tmp/x.tar.gz".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("copy fails");
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            calls.lines().any(|l| l.starts_with("docker start sonarr")),
+            "a failed restore is exactly when the old version must come back \
+             up: {calls}"
+        );
+        let m = e.to_string();
+        assert!(m.contains("restore FAILED"), "{m}");
+        assert!(m.contains("previous data"), "{m}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn an_lxc_restore_stays_on_its_live_transport() {
+        // `pct push`/`pct exec` both require the container UP, so there is no
+        // quiesced form of this transport. It must NOT be stopped — doing so
+        // breaks the very commands the path depends on.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("calls.log");
+        let pct = dir.path().join("pct");
+        std::fs::write(
+            &pct,
+            format!("#!/bin/sh\necho \"pct $@\" >> {}\nexit 0\n", log.display()),
+        )
+        .expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&pct, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
+        let _g = EnvGuard::set(&[("PATH", dir.path().to_str())]);
+
+        TarMethod
+            .restore(
+                BackupContext {
+                    runtime: Runtime::Lxc,
+                    instance: "113",
+                    provider: "abs",
+                    data_paths: &[],
+                    exclude: &[],
+                },
+                &BackupArtifact {
+                    path: "/var/tmp/x.tar.gz".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("ok");
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(calls.contains("pct push"), "{calls}");
+        assert!(calls.contains("pct exec"), "{calls}");
+        assert!(
+            !calls.contains("pct stop"),
+            "stopping an LXC breaks push/exec, the transport this path needs: {calls}"
+        );
     }
 
     #[cfg(feature = "in-process")]
