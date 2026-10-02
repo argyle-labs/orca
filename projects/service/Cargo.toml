@@ -52,6 +52,9 @@ tokio       = { workspace = true, optional = true }
 [dev-dependencies]
 # The test suite (gated to `in-process`) drives async via `#[tokio::test]`.
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+# The PBS env-var tests mutate process environment; `serial(env)` keeps them
+# off each other's toes (and off every other env-touching test's).
+serial_test = { workspace = true }
 
 [lints]
 workspace = true
