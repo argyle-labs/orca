@@ -325,12 +325,17 @@ pub async fn mesh_join_core(
         joiner_hostname: &'a str,
         joiner_pubkey_fp: &'a str,
         joiner_display_name: &'a str,
+        /// Our mesh LISTEN port. The inviter cannot infer this — all it sees is
+        /// our ephemeral TCP source port — so reporting it is what makes us
+        /// dialable afterwards.
+        joiner_mesh_port: u16,
     }
     let body = RequestBody {
         joiner_peer_id: &joiner_peer_id,
         joiner_hostname: &joiner_hostname,
         joiner_pubkey_fp: &joiner_fp,
         joiner_display_name: &joiner_display_name,
+        joiner_mesh_port: db::ports::mesh_port(),
     };
     let env = utils::pki::sign_envelope(&signing, &body)?;
 

@@ -773,13 +773,8 @@ pub fn dev_overlay_exec_env() -> Result<Vec<(String, String)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
-
-    /// Serializes every test that mutates process-global env vars. All the
-    /// path/pid helpers read `ORCA_HOME`/`HOME`/`CARGO*`/`PATH`, which are
-    /// shared across the test binary's threads, so they must not run
-    /// concurrently. Held for the whole body of each env-mutating test.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::env_lock;
+    use std::sync::MutexGuard;
 
     /// Snapshot + restore of the env vars these helpers depend on. Restoring on
     /// drop keeps tests hermetic even if one panics mid-body.
@@ -792,7 +787,7 @@ mod tests {
         const VARS: [&'static str; 5] = ["ORCA_HOME", "HOME", "CARGO", "CARGO_HOME", "PATH"];
 
         fn new() -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = env_lock();
             let saved = Self::VARS
                 .iter()
                 .map(|k| (*k, std::env::var_os(k)))
@@ -805,12 +800,12 @@ mod tests {
         }
 
         fn set(&self, key: &str, val: impl AsRef<std::ffi::OsStr>) {
-            // Safety: single-threaded within the ENV_LOCK critical section.
+            // Safety: single-threaded within the env-lock critical section.
             unsafe { std::env::set_var(key, val) };
         }
 
         fn clear(&self, key: &str) {
-            // Safety: single-threaded within the ENV_LOCK critical section.
+            // Safety: single-threaded within the env-lock critical section.
             unsafe { std::env::remove_var(key) };
         }
     }
@@ -1003,19 +998,19 @@ mod tests {
 
     #[test]
     fn pid_alive_true_for_current_process() {
-        // pid_alive shells out to `kill` resolved via PATH; hold ENV_LOCK so a
+        // pid_alive shells out to `kill` resolved via PATH; hold the crate env lock so a
         // concurrent EnvGuard (which clears PATH) can't run and make `kill`
         // unresolvable mid-test.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         assert!(pid_alive(std::process::id()));
     }
 
     #[test]
     fn pid_alive_false_for_unused_pid() {
-        // Also resolves `kill` via PATH — serialize under ENV_LOCK so a
+        // Also resolves `kill` via PATH — serialize under the crate env lock so a
         // concurrent EnvGuard clearing PATH can't turn the "not found" IO error
         // into a misleading pass (it already returns false, but keep it honest).
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         // Very high PID is not in use on any realistic system.
         assert!(!pid_alive(4_294_967_294));
     }
@@ -1048,7 +1043,7 @@ mod tests {
                 .map(|k| (*k, std::env::var_os(k)))
                 .collect();
             for k in Self::VARS {
-                // Safety: caller holds ENV_LOCK via EnvGuard.
+                // Safety: caller holds the crate env lock via EnvGuard.
                 unsafe { std::env::remove_var(k) };
             }
             Self { saved }
@@ -1160,7 +1155,7 @@ mod tests {
 
     #[test]
     fn cmd_dev_disable_with_no_pid_and_no_state_is_clean_noop() {
-        // Holds ENV_LOCK via EnvGuard: cmd_dev_disable may shell out to `kill`
+        // Holds the crate env lock via EnvGuard: cmd_dev_disable may shell out to `kill`
         // only when a live pid/state exists — here there is neither, so no
         // process is signalled. state::read honors ORCA_HOME → Ok(None).
         let env = EnvGuard::new();
@@ -1485,7 +1480,7 @@ mod tests {
     fn resolve_checkout_root_errors_outside_git_repo() {
         // Clear inherited GIT_* (the pre-push hook exports them) so `git -C
         // <tmp> rev-parse` reports the tmp dir's real status, not the outer repo.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let _git = GitEnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
         let err = resolve_checkout_root(Some(dir.path())).unwrap_err();
@@ -1497,7 +1492,7 @@ mod tests {
 
     #[test]
     fn resolve_checkout_root_errors_when_not_orca_checkout() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let _git = GitEnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -1517,7 +1512,7 @@ mod tests {
 
     #[test]
     fn resolve_checkout_root_accepts_orca_shaped_repo() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let _git = GitEnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -1587,7 +1582,7 @@ mod tests {
 
     #[test]
     fn bootstrap_dev_home_creates_isolated_vault_and_pki() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let dev_home = dir.path().join("dev-instance");
         let fresh = bootstrap_dev_home(&dev_home).expect("bootstrap Ok");

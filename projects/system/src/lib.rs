@@ -113,6 +113,10 @@ pub mod logs_tools;
 pub mod logs_tui;
 pub mod plugin_fetch;
 pub mod plugin_manager;
+/// `identity.privilege.audit` — who can escalate on this host and how (orca#681).
+/// Read-only sudoers/doas parsing; flags dangling grants and lockout-inducing
+/// sole grants.
+pub mod privilege_tools;
 pub mod profile_tool;
 pub mod release_targets;
 pub mod retention_tools;
