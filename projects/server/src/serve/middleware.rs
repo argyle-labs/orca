@@ -30,6 +30,26 @@ fn skip_log(path: &str) -> bool {
     SKIP_LOG_PREFIXES.iter().any(|p| path.starts_with(p))
 }
 
+/// Per-request logging, in two tiers.
+///
+/// **DEBUG** — a bare `→ request` / `← response` pair (method, path, status).
+/// These were INFO, which made them 67% of the daemon log on mint: 28,016 of
+/// 41,963 lines in an 8 MB window, drowning everything an operator opens the
+/// log to find. They are routine traffic, not events.
+///
+/// **TRACE** — the same pair WITH request and response bodies, compacted,
+/// capped at 4 KiB, binary described by size. Bodies pass through the
+/// subscriber's `ScrubWriter`, which rewrites `token`/`password`/`secret`/
+/// `api_key`/`access_token`/`refresh_token` values, PVE API tokens and auth
+/// headers to `***` before anything reaches a file.
+///
+/// Turn bodies on for this target alone — `orca=trace` would bury them:
+/// ```text
+/// ORCA_LOG="warn,orca=info,orca::serve::middleware=trace" orca daemon
+/// ```
+///
+/// Bodies are collected ONLY when TRACE is enabled for this target
+/// (`tracing::enabled!`), so the non-trace path never buffers a response.
 pub async fn log_requests(req: Request, next: Next) -> Response {
     // NB: fn-path (not a closure) to satisfy `redundant_closure`; the `allow`
     // is because `id::new()` mints a fresh correlation id — it is not a
@@ -70,7 +90,7 @@ pub async fn log_requests(req: Request, next: Next) -> Response {
         Request::from_parts(parts, Body::from(bytes))
     } else {
         if !no_log {
-            tracing::info!(correlation_id = %cid, method = %method, path = %path, "→ request");
+            tracing::debug!(correlation_id = %cid, method = %method, path = %path, "→ request");
         }
         req
     };
@@ -111,7 +131,7 @@ pub async fn log_requests(req: Request, next: Next) -> Response {
         Response::from_parts(parts, Body::from(bytes))
     } else {
         if !no_log {
-            tracing::info!(correlation_id = %cid, status = %status, "← response");
+            tracing::debug!(correlation_id = %cid, status = %status, "← response");
         }
         Response::from_parts(parts, body)
     }
@@ -728,6 +748,67 @@ mod tests {
     }
 
     // ── format_body ───────────────────────────────────────────────────────────
+
+    // ── request/response logging levels + body scrubbing ────────────────
+
+    /// The routine pair must NOT be INFO. It was, and it made 28,016 of
+    /// 41,963 lines in an 8 MB window of the real daemon log — 67% noise.
+    #[test]
+    fn the_routine_request_pair_is_not_logged_at_info() {
+        let src = include_str!("middleware.rs");
+        let body = src
+            .split_once("pub async fn log_requests(")
+            .expect("fn present")
+            .1;
+        let body = body.split_once("\nasync fn ").expect("next fn").0;
+        for line in body.lines() {
+            let l = line.trim();
+            if l.starts_with("tracing::info!")
+                && (l.contains("→ request") || l.contains("← response"))
+            {
+                panic!("routine request logging is back on INFO: {l}");
+            }
+        }
+        assert!(
+            body.contains("tracing::debug!") && body.contains("tracing::trace!"),
+            "both tiers must still exist"
+        );
+    }
+
+    /// CONTROL for the body logging: a login body carries a plaintext
+    /// password, and it must not survive the path from body to log line.
+    #[test]
+    fn a_password_in_a_logged_body_is_scrubbed() {
+        let raw = Bytes::from(r#"{"username":"scott","password":"hunter2-real-secret"}"#);
+        let formatted = format_body(&raw);
+        // format_body alone does NOT scrub — the writer does. Assert the
+        // composition, which is what actually reaches the file.
+        assert!(
+            formatted.contains("hunter2-real-secret"),
+            "precondition: the formatter passes the body through verbatim"
+        );
+        let scrubbed = plugin_toolkit::logging::scrub(&formatted);
+        assert!(
+            !scrubbed.contains("hunter2-real-secret"),
+            "password reached the log: {scrubbed}"
+        );
+        assert!(scrubbed.contains("scott"), "non-secret fields must survive");
+    }
+
+    #[test]
+    fn tokens_and_api_keys_in_a_logged_body_are_scrubbed_too() {
+        for (field, val) in [
+            ("token", "tok-live-abc123"),
+            ("access_token", "at-live-abc123"),
+            ("refresh_token", "rt-live-abc123"),
+            ("api_key", "ak-live-abc123"),
+            ("secret", "sec-live-abc123"),
+        ] {
+            let raw = Bytes::from(format!(r#"{{"{field}":"{val}"}}"#));
+            let out = plugin_toolkit::logging::scrub(&format_body(&raw)).into_owned();
+            assert!(!out.contains(val), "{field} leaked: {out}");
+        }
+    }
 
     #[test]
     fn format_body_empty_bytes_returns_empty_string() {
