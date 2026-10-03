@@ -5,6 +5,7 @@ pub mod api_tokens;
 pub mod auth;
 pub mod oauth;
 pub mod oauth_store;
+pub mod onepassword;
 pub mod pki;
 pub mod secrets;
 pub mod sessions;

@@ -23,6 +23,8 @@ identities = { path = "../identities" }
 secrets = { path = "../secrets" }
 anyhow = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
 clap        = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }

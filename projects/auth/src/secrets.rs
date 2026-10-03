@@ -198,11 +198,18 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
             }
         }
         _ => {
-            if args.ref_path.is_none() {
+            let Some(ref_path) = args.ref_path.as_deref() else {
                 bail!(
                     "`ref_path` is required for backend={} (e.g. 'op://Vault/Item/field')",
                     args.backend
                 );
+            };
+            // Validate the reference at WRITE time for backends core knows how
+            // to parse. A malformed ref otherwise stores fine and only fails
+            // whenever something finally needs the secret — usually far from
+            // the typo, and the row looks healthy in `secrets list`.
+            if args.backend == crate::onepassword::BACKEND {
+                crate::onepassword::parse_ref(ref_path)?;
             }
         }
     }

@@ -348,6 +348,7 @@ version = "0.2.1-rc.10"
 dependencies = [
  "anyhow",
  "argon2",
+ "async-trait",
  "clap",
  "contract",
  "db",
@@ -368,6 +369,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
+ "tracing",
  "url",
  "utils",
 ]
