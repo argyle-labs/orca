@@ -398,6 +398,14 @@ pub struct BackupRecord {
     /// Free-form provider note (e.g. which strategy/paths were captured).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The system holding this backup. Empty = this one.
+    ///
+    /// `path` is absolute "on the host that holds it", which is unusable
+    /// without knowing which host that is. A fleet-wide listing that omitted
+    /// this would show backups a restore could not be routed to — and the
+    /// operator must never have to name a host to find out.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub system: String,
 }
 
 impl BackupRecord {
@@ -909,6 +917,7 @@ mod tests {
 
     fn sample_record() -> BackupRecord {
         BackupRecord {
+            system: String::new(),
             id: "20260731-041500".into(),
             kind: "host".into(),
             instance: "default".into(),
