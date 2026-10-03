@@ -26,16 +26,12 @@ use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
-/// Identity caches. `RwLock`, not `OnceLock`, for a specific reason: the
-/// accessors below self-heal on a miss, and with a `OnceLock` a lazy fill would
-/// permanently win over a later `init()` (whose `set()` silently no-ops). That
-/// made `init()` non-authoritative and let one caller's lazily-derived value
-/// leak into everything that ran afterwards. Values are leaked once so the
-/// accessors can keep returning `&'static str`.
+/// Identity cache. `RwLock`, not `OnceLock`: the accessor self-heals on a miss,
+/// and `OnceLock::set()` no-ops, so a lazy fill would outrank a later `init()`.
+/// Values are leaked once to keep returning `&'static str`.
 static HOSTNAME: RwLock<Option<&'static str>> = RwLock::new(None);
-/// Deliberately a `OnceLock`, unlike `HOSTNAME`: the machine_id is an identity
-/// KEY, and a value that can change mid-process is worse than one that is
-/// missing. Set once by `init()`, never re-derived behind a caller's back.
+/// `OnceLock`, unlike `HOSTNAME`: an identity key that changes mid-process is
+/// worse than one that is missing.
 static MACHINE_ID: OnceLock<String> = OnceLock::new();
 static APP_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -56,14 +52,8 @@ pub fn init(app_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Cached display hostname. **Self-healing**: on a cache miss it captures the
-/// hostname from the OS rather than panicking.
-///
-/// This used to `expect()` that `init()` had run, which shipped a crash to
-/// production for a value the process can always re-derive — and a parallel
-/// "safe" accessor (`cli_hostname_or_fallback`) had to be added to work around
-/// it. `capture_hostname()` reads the authoritative source, so recovering here
-/// is correct, not a guess.
+/// Cached display hostname. Self-healing: a cache miss re-reads the OS, which is
+/// authoritative, so no caller needs `init()` to have run.
 pub fn hostname() -> &'static str {
     if let Some(h) = *HOSTNAME.read().expect("HOSTNAME lock") {
         return h;
@@ -79,23 +69,10 @@ pub fn display_hostname() -> &'static str {
     hostname()
 }
 
-/// Stable per-machine UUID. Requires `init()`.
+/// Stable per-machine UUID. Requires `init()`, which self-heals a stale on-disk id.
 ///
-/// This one is deliberately NOT self-healing, unlike [`hostname`]. Two reasons,
-/// both learned the hard way:
-///
-/// 1. **Recovery here has a side effect.** `load_or_generate_machine_id` WRITES
-///    a file. A lazy read would turn any innocuous `machine_id()` call into a
-///    filesystem mutation in whatever state dir happened to be configured.
-/// 2. **An identity key must not change mid-process.** Callers mint certificates
-///    whose CN is this value and then compare against it. If a later `init()`
-///    (or a lazy fill) could replace it, those two reads disagree and the
-///    comparison fails — which is exactly how the mesh test suite caught an
-///    earlier attempt to make this authoritative-and-overwriting.
-///
-/// Resiliency belongs at the edges, not in an identity primitive: `init()` runs
-/// once at daemon startup and already self-heals a stale on-disk id by
-/// re-minting and persisting it.
+/// Not self-healing here, unlike [`hostname`]: deriving it writes a file, and
+/// callers mint certs against this value, so it must not change mid-process.
 pub fn machine_id() -> &'static str {
     MACHINE_ID
         .get()
@@ -106,26 +83,13 @@ pub fn machine_id() -> &'static str {
 /// Hostname for standalone CLI flows (e.g. `orca install`) where `init()` may
 /// not have run.
 ///
-/// Retained for its existing call sites, but no longer a separate safe path:
-/// `hostname()` is now self-healing, so this just delegates. Prefer
-/// `hostname()` in new code.
+/// Delegates to [`hostname`], which self-heals. Prefer it in new code.
 pub fn cli_hostname_or_fallback() -> String {
     hostname().to_string()
 }
 
-/// Read the hostname from the OS **without spawning a subprocess**.
-///
-/// This used to shell out to `hostname`. That deadlocked the test suite: the
-/// `hook` tests `libc::fork()` and the child is only allowed async-signal-safe
-/// calls, but `Command::output()` forks again and touches the libc malloc and
-/// environ locks it inherited held — the child wedged and the parent sat in
-/// `wait4` forever. Making `hostname()` self-healing put that spawn on the
-/// cache-miss path, which is how a latent hazard became a hang.
-///
-/// A spawn was never the right mechanism anyway: it depends on `PATH` (which
-/// tests legitimately clear), costs a process, and cannot be used from a
-/// post-fork child or a signal handler. `gethostname(2)` is the actual source
-/// the `hostname` binary itself reads.
+/// `gethostname(2)`. Must stay syscall-only: callers are reachable from a
+/// forked child, where spawning a subprocess deadlocks.
 fn capture_hostname() -> String {
     let raw = sysinfo::System::host_name()
         .map(|s| s.trim().to_string())
