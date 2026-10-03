@@ -257,13 +257,6 @@ jobs:
           eval "$(cargo llvm-cov show-env --sh)"
           mold -run cargo nextest run --locked --workspace --no-fail-fast
 
-      # Reads the profile data the test run just wrote — NO recompile, no rerun.
-      # Floor is the single source of truth in .coverage-floor (shared with the
-      # Makefile `coverage` target and the README badge).
-      - name: Coverage gate (line coverage >= floor)
-        run: |
-          eval "$(cargo llvm-cov show-env --sh)"
-          cargo llvm-cov report --fail-under-lines "$(cat .coverage-floor)"
 
       # Clippy runs AFTER the tests, in the SAME job, on purpose — this is the
       # whole point of merging the two jobs, and the order is load-bearing.
@@ -300,15 +293,27 @@ jobs:
         if: ${{ !cancelled() }}
         run: sccache --show-stats || true
 
+      # Reads the profile data the test run just wrote — NO recompile, no rerun.
+      # Floor is the single source of truth in .coverage-floor (shared with the
+      # Makefile `coverage` target and the README badge).
+      #
+      # ONE pass renders the HTML *and* enforces the floor. These were two
+      # steps, and each one re-merged and re-read the same profraw set from
+      # scratch: measured on the green run of PR #685, 22.2s for the
+      # fail-under pass plus 32.1s for the HTML pass. `--fail-under-lines` is
+      # evaluated after the report is written, so the artifact is still
+      # produced on a coverage failure — which is exactly when it is wanted.
+      #
       # !cancelled() rather than always(): we want the HTML report on success AND
       # on genuine failure, but NOT when a newer push superseded this run —
       # Gitea's artifact API 500s on a cancelled task ("task is not running"),
       # which produced spurious red "Create Artifact Container failed" errors.
-      - name: HTML coverage report
+      - name: Coverage report + gate (line coverage >= floor)
         if: ${{ !cancelled() }}
         run: |
           eval "$(cargo llvm-cov show-env --sh)"
-          cargo llvm-cov report --html --output-dir target/llvm-cov
+          cargo llvm-cov report --html --output-dir target/llvm-cov \
+            --fail-under-lines "$(cat .coverage-floor)"
 
       - uses: actions/upload-artifact@v3
         if: ${{ !cancelled() }}

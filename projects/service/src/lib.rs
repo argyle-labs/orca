@@ -2434,6 +2434,7 @@ mod tests {
 
     #[cfg(feature = "in-process")]
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn pbs_file_backup_rejects_empty_data_paths() {
         let pbs = PbsMethod;
         let instance = "cont";
@@ -2505,6 +2506,7 @@ mod tests {
     // ── run() / run_program(): the subprocess primitive ──────────────────
     #[cfg(feature = "in-process")]
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn run_succeeds_on_zero_exit() {
         run("sh", &["-c".into(), "exit 0".into()])
             .await
@@ -2513,6 +2515,7 @@ mod tests {
 
     #[cfg(feature = "in-process")]
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn run_maps_nonzero_exit_to_transport_error() {
         let e = run("sh", &["-c".into(), "exit 3".into()])
             .await
@@ -2523,6 +2526,7 @@ mod tests {
 
     #[cfg(feature = "in-process")]
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn run_maps_spawn_failure_to_transport_error() {
         let e = run("orca-nonexistent-binary-xyz123", &[])
             .await
@@ -2534,6 +2538,7 @@ mod tests {
     // ── TarMethod: command-construction branches (both runtimes) ──────────
     #[cfg(feature = "in-process")]
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn tar_backup_builds_and_runs_both_runtime_branches() {
         let tar = TarMethod;
         let instance = "orca-cov-absent-instance";
@@ -3009,8 +3014,12 @@ mod tests {
                 .map(|(k, _)| (*k, std::env::var_os(k)))
                 .collect();
             for (k, v) in vars {
-                // SAFETY: these tests are `serial(env)`, so no other test
+                // SAFETY: every test that mutates the environment OR spawns a
+                // subprocess is in the `serial(env)` group, so no other test
                 // thread is reading or writing the environment concurrently.
+                // Both halves matter: `std::env` is process-global, so a test
+                // left out of the group sees a PATH holding only `fake_cli`'s
+                // stubs and fails on spawn (or silently runs the wrong binary).
                 unsafe {
                     match v {
                         Some(v) => std::env::set_var(k, v),
@@ -3256,6 +3265,7 @@ mod tests {
 
     #[cfg(feature = "in-process")]
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn a_backends_declared_excludes_reach_the_method() {
         // The regression this closes: the generic path built its context from
         // `data_paths()`, so a backend could declare excludes in its spec and
@@ -3327,6 +3337,7 @@ mod tests {
     // ── PbsMethod: whole-guest + file-backup command branches ─────────────
     #[cfg(feature = "in-process")]
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn pbs_backup_guest_branch_runs_vzdump() {
         let pbs = PbsMethod;
         let instance = "100";
@@ -3434,6 +3445,7 @@ mod tests {
 
     #[cfg(feature = "in-process")]
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn generic_backup_errors_without_a_runtime() {
         // No declared runtimes and no endpoint.runtime → the generic backup
         // has nothing to back up against.
@@ -3449,6 +3461,7 @@ mod tests {
 
     #[cfg(feature = "in-process")]
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn generic_restore_errors_without_a_runtime() {
         let e = Minimal
             .restore("main", None, None, &BackupArtifact::default())
@@ -3482,6 +3495,7 @@ mod tests {
     // generic backup proceeds to method selection even for a Minimal backend.
     #[cfg(feature = "in-process")]
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn generic_backup_uses_the_runtime_override_it_is_given() {
         // Minimal declares no data_paths → tar method rejects with a clear error
         // before any subprocess.
