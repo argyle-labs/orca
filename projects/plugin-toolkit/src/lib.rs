@@ -433,6 +433,12 @@ pub use ::utils::id::new as mint_uuidv7;
 /// means "a guest can fill the host" is orca's call. Without this re-export every
 /// plugin reimplements the severity rules and they drift.
 pub use ::utils::mount_audit;
+/// Secret scrubbing — see [`utils::scrub`].
+///
+/// Re-exported so a plugin redacts against the SAME keyword list the daemon's
+/// log sink and `contract::plan`'s dry-run redactor use. A plugin rolling its
+/// own list is a list that drifts.
+pub use ::utils::scrub;
 /// Unix-epoch millis wall clock (`now_millis_since_epoch`) — see [`utils::time`].
 /// The canonical lww/tombstone clock for `endpoint_resource!(… lww = …)` tables;
 /// always available (pure std) so `db-incore` generated code can stamp it
