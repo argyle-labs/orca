@@ -113,11 +113,21 @@ pub fn cli_hostname_or_fallback() -> String {
     hostname().to_string()
 }
 
+/// Read the hostname from the OS **without spawning a subprocess**.
+///
+/// This used to shell out to `hostname`. That deadlocked the test suite: the
+/// `hook` tests `libc::fork()` and the child is only allowed async-signal-safe
+/// calls, but `Command::output()` forks again and touches the libc malloc and
+/// environ locks it inherited held — the child wedged and the parent sat in
+/// `wait4` forever. Making `hostname()` self-healing put that spawn on the
+/// cache-miss path, which is how a latent hazard became a hang.
+///
+/// A spawn was never the right mechanism anyway: it depends on `PATH` (which
+/// tests legitimately clear), costs a process, and cannot be used from a
+/// post-fork child or a signal handler. `gethostname(2)` is the actual source
+/// the `hostname` binary itself reads.
 fn capture_hostname() -> String {
-    let raw = std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
+    let raw = sysinfo::System::host_name()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
