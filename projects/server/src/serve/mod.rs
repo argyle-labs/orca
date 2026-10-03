@@ -1427,13 +1427,20 @@ fn is_hop_by_hop(name: &str) -> bool {
     )
 }
 
-async fn dev_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
-    // Route-driven: forward to the matching web provider's registered
-    // `dev_upstream` (its `npm run dev` Vite server) rather than a hardcoded
-    // fallback origin (the web UI now ships as the out-of-process peacock
-    // plugin). Falls back to the legacy `VITE_ORIGIN` const
-    // only if no provider declares a dev upstream (keeps bare-repo dev working).
-    let (http_origin, ws_origin) = contract::web::resolve(req.uri().path())
+/// Pick the dev upstream for `path` as `(http_origin, ws_origin)`.
+///
+/// Route-driven: forward to the matching web provider's registered
+/// `dev_upstream` (its `npm run dev` Vite server) rather than a hardcoded
+/// fallback origin (the web UI now ships as the out-of-process peacock
+/// plugin). Falls back to the legacy `VITE_ORIGIN` const only if no provider
+/// declares a dev upstream (keeps bare-repo dev working).
+///
+/// Split out from the handler so the SELECTION can be tested without dialing
+/// anything. Asserting selection through a proxied status made the test depend
+/// on `VITE_ORIGIN`'s port being free, which it is not on a machine running the
+/// dev server — see `dev_origins_fall_back_to_vite_without_a_provider`.
+fn dev_origins(path: &str) -> (String, String) {
+    contract::web::resolve(path)
         .and_then(|p| p.route().dev_upstream.clone())
         .map(|http| {
             let ws = http
@@ -1441,7 +1448,11 @@ async fn dev_proxy_handler(req: axum::extract::Request) -> axum::response::Respo
                 .replacen("https://", "wss://", 1);
             (http, ws)
         })
-        .unwrap_or_else(|| (VITE_ORIGIN.to_string(), VITE_WS_ORIGIN.to_string()));
+        .unwrap_or_else(|| (VITE_ORIGIN.to_string(), VITE_WS_ORIGIN.to_string()))
+}
+
+async fn dev_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
+    let (http_origin, ws_origin) = dev_origins(req.uri().path());
     proxy_to(req, http_origin, ws_origin).await
 }
 
@@ -2625,16 +2636,40 @@ mod tests {
         assert_eq!(resp.status(), 502);
     }
 
-    #[tokio::test]
-    async fn dev_proxy_handler_falls_back_to_vite_origin_without_provider() {
-        ::model::ensure_crypto_provider();
-        let req = axum::extract::Request::builder()
-            .method("GET")
-            .uri("/__no_provider_owns_this_dev_path__")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp = dev_proxy_handler(req).await;
-        assert_eq!(resp.status(), 502);
+    // Origin SELECTION, with nothing dialed.
+    //
+    // This replaces an assertion that the handler returns 502 for an unclaimed
+    // path. That only held while nothing listened on `VITE_ORIGIN`: a dev
+    // machine running `npm run dev` has a real Vite server on 127.0.0.1:12001,
+    // which answers 500 for an unknown path, so the test failed locally and
+    // passed in CI's empty container. The fallback is a pure decision — test it
+    // as one, and leave upstream behaviour to the tests that use a dead port.
+    #[test]
+    fn dev_origins_fall_back_to_vite_without_a_provider() {
+        let (http, ws) = dev_origins("/__no_provider_owns_this_dev_path__");
+        assert_eq!(http, VITE_ORIGIN);
+        assert_eq!(ws, VITE_WS_ORIGIN);
+    }
+
+    #[test]
+    fn dev_origins_prefer_a_providers_dev_upstream_and_derive_its_ws_scheme() {
+        // The control for the fallback above: when a provider owns the path its
+        // upstream wins, and the ws origin is derived rather than left http.
+        let path = "/__dev_origin_selection__";
+        register_mock(
+            "dev-origin-selection",
+            path,
+            false,
+            Some("http://127.0.0.1:1".to_string()),
+            MockBehavior::Fixed {
+                status: 200,
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+        );
+        let (http, ws) = dev_origins(path);
+        assert_eq!(http, "http://127.0.0.1:1");
+        assert_eq!(ws, "ws://127.0.0.1:1");
     }
 
     // ── proxy_to (websocket branch, malformed upgrade → error response) ──────────
