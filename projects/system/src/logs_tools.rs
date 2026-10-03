@@ -10,7 +10,7 @@
 //! returned window started at; pass it back as `cursor` to fetch the
 //! next-older window. `None` means the start of file was reached.
 
-use contract::config::{APP_DAEMON_LOG_FILE, APP_LOGS_SUBDIR, APP_STATE_DIR};
+use contract::config::{APP_DAEMON_JSONL_FILE, APP_LOGS_SUBDIR, APP_STATE_DIR};
 use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -101,7 +101,11 @@ fn parse_level(line: &str) -> Option<Level> {
 fn resolve_log_path() -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
-    format!("{logs_dir}/{APP_DAEMON_LOG_FILE}")
+    // The STRUCTURED log. This read `daemon.log` — the supervisor's
+    // stdout/stderr capture — which after the stream split holds only panics
+    // and early-boot output, so `system.logs` would have returned almost
+    // nothing.
+    format!("{logs_dir}/{APP_DAEMON_JSONL_FILE}")
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
@@ -347,6 +351,21 @@ mod tests {
         scan_backwards(&mut f, end, want, max_bytes).unwrap()
     }
 
+    #[test]
+    fn system_logs_reads_the_structured_log_not_the_stderr_capture() {
+        // After the stream split the supervisor's file holds only panics and
+        // early-boot output. Reading it would make `system.logs` return
+        // almost nothing on a healthy daemon.
+        let p = super::resolve_log_path();
+        assert!(
+            p.ends_with("daemon.jsonl"),
+            "system.logs must read the structured log, got {p}"
+        );
+        assert!(
+            !p.ends_with("daemon.log"),
+            "that is the stderr capture: {p}"
+        );
+    }
     #[test]
     fn tail_returns_last_k_lines() {
         let all: Vec<String> = (0..100).map(|i| format!("line {i:03}")).collect();

@@ -875,7 +875,11 @@ USER=orca
 HOME_DIR="$APPDATA"
 PORT=12000
 LOG_DIR="$APPDATA/.orca/logs"
-LOG_FILE="$LOG_DIR/daemon.log"
+# Supervisor capture only: wrapper chatter, panics, and anything printed
+# before logging initialises. The STRUCTURED log is the daemon's own rotated
+# tee at $LOG_DIR/daemon.jsonl — pointing both here stored every line twice
+# and neither was ever rotated (#563).
+LOG_FILE="$LOG_DIR/daemon.stderr.log"
 PID_FILE=/var/run/orca.pid
 WRAPPER="$APPDATA/run.sh"
 PLUGIN=/boot/config/plugins/orca

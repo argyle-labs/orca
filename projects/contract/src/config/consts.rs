@@ -8,10 +8,28 @@ pub const APP_DB_FILE: &str = "orca.db";
 pub const APP_STATE_DIR: &str = ".orca";
 pub const APP_PLIST_LABEL: &str = "com.orca.daemon";
 /// Subdirectory inside APP_STATE_DIR for file-backed daemon logs.
-/// Daemon stdout/stderr is captured to `{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}/daemon.log`
-/// across launchd/systemd/openrc/unraid so operators have one path to tail.
 pub const APP_LOGS_SUBDIR: &str = "logs";
-pub const APP_DAEMON_LOG_FILE: &str = "daemon.log";
+
+/// The STRUCTURED log: one JSON object per line, written by the subscriber's
+/// tee and rotated by it (32 MiB x 5). This is the daemon's real log — what
+/// `system.logs` reads and `orca logs` opens.
+pub const APP_DAEMON_JSONL_FILE: &str = "daemon.jsonl";
+
+/// Where the SUPERVISOR (launchd/systemd/openrc/unraid) captures the process's
+/// stdout+stderr.
+///
+/// Deliberately NOT the structured log. Both pointed at `daemon.log` and the
+/// subscriber also wrote its JSON to stderr, so every line was stored twice —
+/// measured at 123 MB + 36 MB of identical content on mint, unrotated (#563).
+/// orca cannot rotate this file: the supervisor holds the fd, so a rename
+/// leaves it writing to the moved inode. So the subscriber keeps stderr clean
+/// instead, and this file holds only what the tee cannot: output from before
+/// logging is initialised, panics, and allocator warnings. It stays small.
+pub const APP_DAEMON_STDERR_FILE: &str = "daemon.stderr.log";
+
+/// Pre-split filename. Still named so install can tell an operator that the
+/// old, unbounded file is now orphaned and safe to delete.
+pub const APP_DAEMON_LOG_FILE_LEGACY: &str = "daemon.log";
 pub const APP_REPO_URL: &str = "https://github.com/argyle-labs/orca";
 pub const APP_REPO_API_URL: &str = "https://api.github.com/repos/argyle-labs/orca";
 pub const APP_SYSTEMD_SERVICE: &str = "orca";
