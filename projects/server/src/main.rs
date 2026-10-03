@@ -328,7 +328,11 @@ enum AdminAction {
 fn daemon_log_path() -> Option<String> {
     let logs = contract::config::paths::orca_home()?.join("logs");
     std::fs::create_dir_all(&logs).ok()?;
-    Some(logs.join("daemon.jsonl").to_string_lossy().into_owned())
+    Some(
+        logs.join(contract::config::APP_DAEMON_JSONL_FILE)
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 #[tokio::main]

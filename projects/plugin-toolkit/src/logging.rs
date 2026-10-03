@@ -351,6 +351,21 @@ fn rotate(path: &std::path::Path, keep: u8) -> io::Result<std::fs::File> {
         .open(path)
 }
 
+/// Should the subscriber ALSO write to stderr, given a tee is active?
+///
+/// No, when the process is supervised: the supervisor captures stderr to a
+/// file, so every line would be stored twice — 123 MB + 36 MB of identical
+/// content on mint (#563), and orca cannot rotate the supervisor's copy
+/// because the supervisor holds that fd.
+///
+/// Yes, when stderr is a terminal: someone is running `orca daemon` in a shell
+/// and watching it. Silencing that would be a worse bug than the duplication.
+///
+/// Pure in its input so the rule is testable without a tty.
+pub fn stderr_wanted(tee_active: bool, stderr_is_terminal: bool) -> bool {
+    !tee_active || stderr_is_terminal
+}
+
 /// Install the global tracing subscriber: JSON-line output, EnvFilter,
 /// scrubbing writer wrapping `stderr` (+ tee file when set).
 ///
@@ -374,11 +389,19 @@ pub fn init(opts: LogInit<'_>) -> Result<()> {
             .ok()
             .map(|f| Arc::new(Mutex::new(f)))
     });
+    // Decided ONCE, not per event: whether stderr also gets the stream.
+    let want_stderr = {
+        use std::io::IsTerminal as _;
+        stderr_wanted(tee_file.is_some(), io::stderr().is_terminal())
+    };
     let make_writer = move || -> ScrubWriter<Box<dyn Write + Send>> {
-        let stderr: Box<dyn Write + Send> = Box::new(io::stderr());
-        let writer: Box<dyn Write + Send> = match &tee_file {
-            Some(file) => Box::new(Tee(stderr, SharedFile(file.clone()))),
-            None => stderr,
+        let writer: Box<dyn Write + Send> = match (&tee_file, want_stderr) {
+            // Supervised with a tee: the tee is the only structured sink, and
+            // the supervisor's stderr file stays small enough to be useful.
+            (Some(file), false) => Box::new(SharedFile(file.clone())),
+            (Some(file), true) => Box::new(Tee(Box::new(io::stderr()), SharedFile(file.clone()))),
+            // No tee — stderr is the only sink there is, terminal or not.
+            (None, _) => Box::new(io::stderr()),
         };
         ScrubWriter::new(writer)
     };
@@ -504,6 +527,26 @@ pub fn env_filter(env_var: &str, default_filter: &str) -> Result<tracing_subscri
 #[cfg(test)]
 mod tests {
     // ── #563: the daemon must not fill the disk with its own logs ───────
+
+    #[test]
+    fn a_supervised_daemon_does_not_also_write_to_stderr() {
+        // The duplication itself: supervisor captures stderr to a file AND
+        // the tee writes the same JSON. 123 MB + 36 MB of identical content.
+        assert!(!super::stderr_wanted(true, false));
+    }
+
+    #[test]
+    fn someone_watching_in_a_terminal_still_sees_the_log() {
+        // Silencing an operator running `orca daemon` in a shell would be a
+        // worse bug than the duplication this fixes.
+        assert!(super::stderr_wanted(true, true));
+    }
+
+    #[test]
+    fn with_no_tee_stderr_is_the_only_sink_so_it_always_gets_the_stream() {
+        assert!(super::stderr_wanted(false, false));
+        assert!(super::stderr_wanted(false, true));
+    }
 
     #[test]
     fn the_plan_shuffles_oldest_first_so_nothing_is_clobbered() {
