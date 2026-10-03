@@ -933,17 +933,32 @@ mod tests {
     // file (schema + migrations applied on first open), so these drive the
     // full store round-trip, not just the guard branches.
 
-    fn tmp_db_path() -> std::path::PathBuf {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("orca-notify-db-{}-{}", std::process::id(), n));
-        std::fs::create_dir_all(&dir).expect("create temp db dir");
-        dir.join("notify.db")
+    /// A throwaway DB for one test, removed when the test ends.
+    ///
+    /// This was `temp_dir()/orca-notify-db-{pid}-{seq}`, which is not unique.
+    /// nextest runs a process per test, so `seq` restarts at 0 every time and
+    /// `create_dir_all` succeeds on an existing directory — a recycled pid
+    /// reuses index 0's path and inherits the previous test's rows, which
+    /// breaks the row-count assertions (#674). It showed up only in
+    /// full-workspace runs because those spawn enough processes to recycle
+    /// pids; `-p system` alone almost never collides. Nothing cleaned up
+    /// either, so the dirs accumulated indefinitely.
+    struct TmpDb(tempfile::TempDir);
+
+    impl TmpDb {
+        fn new() -> Self {
+            Self(tempfile::TempDir::with_prefix("orca-notify-db-").expect("create temp db dir"))
+        }
+
+        fn path(&self) -> std::path::PathBuf {
+            self.0.path().join("notify.db")
+        }
     }
 
     #[tokio::test]
     async fn notify_raise_persists_system_audience_no_fan() {
-        let path = tmp_db_path();
+        let tmp = TmpDb::new();
+        let path = tmp.path();
         db::with_db_path(path, async {
             // Non-actionable info stays system-audience → no ephemeral fan.
             let args = NotifyRaiseArgs {
@@ -968,7 +983,8 @@ mod tests {
 
     #[tokio::test]
     async fn notify_raise_user_audience_fans_through_backend() {
-        let path = tmp_db_path();
+        let tmp = TmpDb::new();
+        let path = tmp.path();
         // A registered backend takes fan_ephemeral past its no-backend early
         // return, exercising the event-build (body + fix click) path. Backends
         // are process-global; nextest isolates each test in its own process,
@@ -1014,7 +1030,8 @@ mod tests {
 
     #[tokio::test]
     async fn notify_list_returns_raised_rows() {
-        let path = tmp_db_path();
+        let tmp = TmpDb::new();
+        let path = tmp.path();
         db::with_db_path(path, async {
             for (k, sev) in [("a", "info"), ("b", "error")] {
                 notify_raise(NotifyRaiseArgs {
@@ -1067,7 +1084,8 @@ mod tests {
 
     #[tokio::test]
     async fn notify_dismiss_existing_returns_updated_no_source_push() {
-        let path = tmp_db_path();
+        let tmp = TmpDb::new();
+        let path = tmp.path();
         db::with_db_path(path, async {
             notify_raise(NotifyRaiseArgs {
                 key: "k1".into(),
@@ -1092,7 +1110,8 @@ mod tests {
 
     #[tokio::test]
     async fn notify_dismiss_missing_key_yields_null() {
-        let path = tmp_db_path();
+        let tmp = TmpDb::new();
+        let path = tmp.path();
         db::with_db_path(path, async {
             let out = notify_dismiss(NotifyKeyArgs { key: "nope".into() })
                 .await
@@ -1105,7 +1124,8 @@ mod tests {
 
     #[tokio::test]
     async fn notify_suppress_existing_then_reraise_is_noop() {
-        let path = tmp_db_path();
+        let tmp = TmpDb::new();
+        let path = tmp.path();
         db::with_db_path(path, async {
             notify_raise(NotifyRaiseArgs {
                 key: "k2".into(),
@@ -1140,7 +1160,8 @@ mod tests {
 
     #[tokio::test]
     async fn notify_create_raise_dispatch_full_success() {
-        let path = tmp_db_path();
+        let tmp = TmpDb::new();
+        let path = tmp.path();
         db::with_db_path(path, async {
             let ctx = empty_ctx();
             let out = notify_create(
@@ -1170,7 +1191,8 @@ mod tests {
 
     #[tokio::test]
     async fn notify_update_dismiss_and_suppress_dispatch_full_success() {
-        let path = tmp_db_path();
+        let tmp = TmpDb::new();
+        let path = tmp.path();
         db::with_db_path(path, async {
             let ctx = empty_ctx();
             notify_raise(NotifyRaiseArgs {

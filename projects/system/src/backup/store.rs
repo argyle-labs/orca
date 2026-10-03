@@ -385,6 +385,7 @@ impl BackupSlot {
     pub fn commit(self, checksum: Option<String>, note: Option<String>) -> Result<BackupRecord> {
         let (size_bytes, file_count) = dir_size(&self.payload)?;
         let rec = BackupRecord {
+            system: String::new(),
             id: self.id,
             kind: self.domain,
             instance: self.instance,
@@ -693,6 +694,7 @@ mod tests {
         let r1 = write_backup(&store, "host", "default", "one");
         // Force distinct, later ids so ordering is deterministic regardless of clock.
         let r2 = BackupRecord {
+            system: String::new(),
             id: "29990101-000000".into(),
             ..write_backup(&store, "host", "default", "two")
         };
@@ -742,6 +744,7 @@ mod tests {
         let newer = store.root().join("host/default").join("29990101-000000");
         fs::create_dir_all(newer.join(PAYLOAD)).unwrap();
         let rec = BackupRecord {
+            system: String::new(),
             id: "29990101-000000".into(),
             kind: "host".into(),
             instance: "default".into(),
@@ -787,6 +790,7 @@ mod tests {
                 .join(format!("2026010{i}-000000"));
             fs::create_dir_all(dir.join(PAYLOAD)).unwrap();
             let rec = BackupRecord {
+                system: String::new(),
                 id: format!("2026010{i}-000000"),
                 kind: "host".into(),
                 instance: "default".into(),
@@ -812,6 +816,7 @@ mod tests {
 
     fn sample_record(id: &str) -> BackupRecord {
         BackupRecord {
+            system: String::new(),
             id: id.into(),
             kind: "host".into(),
             instance: "default".into(),
@@ -1057,6 +1062,7 @@ mod tests {
         let dir = store.root().join("host/default").join(&id);
         fs::create_dir_all(dir.join(PAYLOAD)).unwrap();
         let rec = BackupRecord {
+            system: String::new(),
             id: id.clone(),
             kind: "host".into(),
             instance: "default".into(),

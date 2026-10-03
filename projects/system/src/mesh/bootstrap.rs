@@ -52,6 +52,36 @@ struct RequestOfferBody {
     /// Optional human-readable hostname for the inviter's discovery row.
     #[serde(default)]
     joiner_display_name: Option<String>,
+    /// The joiner's mesh LISTEN port — the port peers must dial to reach it.
+    ///
+    /// Required because the inviter cannot infer it: the only port it can see is
+    /// `peer.port()`, the ephemeral SOURCE port of the joiner's inbound TCP
+    /// connection, which nothing is listening on. Recording that produced a
+    /// fleet where all 7 hosts advertised a closed ephemeral port while every
+    /// one of them had :12002 open — peers dialled the dead port, got
+    /// `tls handshake eof`, marked each other unreachable, and flapped.
+    ///
+    /// `Option` + `serde(default)` so a peer on an older build still pairs; the
+    /// inviter then falls back to the canonical mesh port rather than the socket.
+    #[serde(default)]
+    joiner_mesh_port: Option<u16>,
+}
+
+/// The joiner's dialable mesh port.
+///
+/// Prefers what the joiner reported; falls back to this host's own mesh port
+/// (the fleet-wide default) when an older build sent nothing. Treats 0 and
+/// ephemeral-range ports as unreported: a value in the ephemeral range is the
+/// signature of the old bug (a TCP source port), and recording it again would
+/// re-break reachability. Falling back to the canonical port is self-healing —
+/// a homogeneous fleet listens on the same port, and a wrong-but-plausible
+/// guess still beats a port that is guaranteed closed.
+fn dialable_joiner_port(reported: Option<u16>) -> u16 {
+    const EPHEMERAL_FLOOR: u16 = 32768;
+    match reported {
+        Some(p) if p != 0 && p < EPHEMERAL_FLOOR => p,
+        _ => db::ports::mesh_port(),
+    }
 }
 
 /// Response to `mesh/request-offer`. Returns the same `code_hint` shape as
@@ -510,13 +540,15 @@ fn handle_request_offer(
     // Record the joiner in discovery (idempotent — same fp = same row).
     let joiner_label =
         select_peer_label(&body.joiner_hostname, body.joiner_display_name.as_deref());
+    // The port peers will DIAL. Never `peer.port()` — see `joiner_mesh_port`.
+    let joiner_mesh_port = dialable_joiner_port(body.joiner_mesh_port);
     pdb::upsert_discovery(
         &conn,
         &body.joiner_pubkey_fp,
         Some(&body.joiner_peer_id),
         joiner_label,
         &peer.ip().to_string(),
-        peer.port(),
+        joiner_mesh_port,
         "unclaimed",
         true,
     )?;
@@ -544,7 +576,7 @@ fn handle_request_offer(
         &body.joiner_pubkey_fp,
         joiner_label,
         &peer.ip().to_string(),
-        peer.port(),
+        joiner_mesh_port,
         &code_hash,
         None,
         Some(&inviter_peer_id),
@@ -1158,6 +1190,7 @@ mod tests {
             // Deliberately does NOT match the real signer fp.
             joiner_pubkey_fp: "fp-does-not-match".into(),
             joiner_display_name: None,
+            joiner_mesh_port: None,
         };
         let env = utils::pki::sign_envelope(&key, &body).unwrap();
         let res = handle_request_offer(&env, test_peer());
@@ -1197,6 +1230,7 @@ mod tests {
             joiner_hostname: "abc123".into(),
             joiner_pubkey_fp: "fp".into(),
             joiner_display_name: None,
+            joiner_mesh_port: None,
         };
         let env = utils::pki::sign_envelope(&key, &body).unwrap();
         let (back, _vk): (RequestOfferBody, _) = utils::pki::verify_envelope(&env).unwrap();
@@ -1244,6 +1278,7 @@ mod tests {
             joiner_hostname: "abc123".into(),
             joiner_pubkey_fp: "fp".into(),
             joiner_display_name: None,
+            joiner_mesh_port: None,
         };
         let s = serde_json::to_string(&body).unwrap();
         assert!(s.contains(r#""joiner_pubkey_fp":"fp""#));
@@ -1536,6 +1571,7 @@ mod tests {
                 joiner_hostname: "joinhost".into(),
                 joiner_pubkey_fp: fp.clone(),
                 joiner_display_name: Some("Joiner Box".into()),
+                joiner_mesh_port: None,
             };
             let env = utils::pki::sign_envelope(&key, &body).unwrap();
             let db_file = tempfile::NamedTempFile::new().unwrap();
@@ -1574,6 +1610,7 @@ mod tests {
                 joiner_hostname: "joinhost".into(),
                 joiner_pubkey_fp: fp,
                 joiner_display_name: None,
+                joiner_mesh_port: None,
             };
             let env = utils::pki::sign_envelope(&key, &body).unwrap();
             let db_file = tempfile::NamedTempFile::new().unwrap();
@@ -1601,6 +1638,7 @@ mod tests {
                 joiner_hostname: "joinhost".into(),
                 joiner_pubkey_fp: fp,
                 joiner_display_name: None,
+                joiner_mesh_port: None,
             };
             let env = utils::pki::sign_envelope(&key, &body).unwrap();
             let db_file = tempfile::NamedTempFile::new().unwrap();
@@ -1901,5 +1939,44 @@ mod tests {
                 );
             }));
         });
+    }
+}
+
+#[cfg(test)]
+mod dialable_port_tests {
+    use super::dialable_joiner_port;
+
+    /// A reported listen port is used as-is.
+    #[test]
+    fn prefers_the_reported_listen_port() {
+        assert_eq!(dialable_joiner_port(Some(12002)), 12002);
+        assert_eq!(dialable_joiner_port(Some(9100)), 9100);
+    }
+
+    /// The regression this guards: every value below is what `peer.port()`
+    /// handed us — an ephemeral TCP source port. Recording one made all 7 fleet
+    /// hosts advertise a CLOSED port while :12002 was open on each, so peers
+    /// dialled the dead port and flapped. None may survive as a dial target.
+    #[test]
+    fn rejects_ephemeral_source_ports_and_zero() {
+        let observed = [32934u16, 55156, 32902, 53804, 60370, 54648, 34352];
+        let fallback = dialable_joiner_port(None);
+        for p in observed {
+            assert_eq!(
+                dialable_joiner_port(Some(p)),
+                fallback,
+                "ephemeral source port {p} must fall back to the canonical mesh port"
+            );
+        }
+        assert_eq!(dialable_joiner_port(Some(0)), fallback);
+    }
+
+    /// An absent value (older peer build) falls back rather than failing, and the
+    /// fallback is always a real, non-ephemeral port.
+    #[test]
+    fn missing_report_falls_back_to_a_sane_port() {
+        let p = dialable_joiner_port(None);
+        assert_ne!(p, 0);
+        assert!(p < 32768, "fallback must not itself be ephemeral, got {p}");
     }
 }

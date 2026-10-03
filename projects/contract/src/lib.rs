@@ -51,6 +51,10 @@ pub use types::{ToolCall, ToolDef, ToolResult};
 
 pub mod cluster_roster;
 mod ctx;
+/// Ask every system the same question and merge the answers. `in-process`
+/// only: it spawns, and a thin plugin links no tokio.
+#[cfg(feature = "in-process")]
+pub mod fanout;
 pub mod owner;
 mod remote;
 mod tool;
