@@ -69,19 +69,39 @@ async fn serve(
             accepted = listener.accept() => match accepted {
                 Ok(pair) => pair,
                 Err(e) => {
-                    warn!("[mesh] mesh accept error: {e}");
+                    warn!(
+                        error = %format!("{e:#}"),
+                        kind = e.kind().to_string(),
+                        "[mesh] accept error"
+                    );
                     continue;
                 }
             },
         };
         let acceptor = acceptor.clone();
+        // Per-connection correlation id. Every line below carries it, so four
+        // concurrent handshake failures are four distinguishable connections
+        // instead of four identical lines.
+        let conn_id = utils::id::new();
         // Track the per-connection task so `shutdown::drain` waits for an
         // in-flight peer tool-call to complete before the daemon exits.
         tracker.spawn(async move {
             let tls = match acceptor.accept(tcp).await {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!("[mesh] mesh TLS accept failed: {e:#}");
+                    // This was `"mesh TLS accept failed: {e}"` with no peer and
+                    // no id — unactionable, and it fired in bursts while the
+                    // fleet advertised dead ephemeral ports. The peer address is
+                    // the one field that makes it diagnosable, and it was in
+                    // scope the whole time.
+                    warn!(
+                        conn_id = %conn_id,
+                        peer_addr = %peer,
+                        peer_ip = %peer.ip(),
+                        peer_port = peer.port(),
+                        error = %format!("{e:#}"),
+                        "[mesh] TLS accept failed"
+                    );
                     return;
                 }
             };

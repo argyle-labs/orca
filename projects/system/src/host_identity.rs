@@ -24,31 +24,53 @@ use anyhow::{Context, Result};
 use db::host_addressing::{self, HostAddressingRow};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
-static HOSTNAME: OnceLock<String> = OnceLock::new();
+/// Identity caches. `RwLock`, not `OnceLock`, for a specific reason: the
+/// accessors below self-heal on a miss, and with a `OnceLock` a lazy fill would
+/// permanently win over a later `init()` (whose `set()` silently no-ops). That
+/// made `init()` non-authoritative and let one caller's lazily-derived value
+/// leak into everything that ran afterwards. Values are leaked once so the
+/// accessors can keep returning `&'static str`.
+static HOSTNAME: RwLock<Option<&'static str>> = RwLock::new(None);
+/// Deliberately a `OnceLock`, unlike `HOSTNAME`: the machine_id is an identity
+/// KEY, and a value that can change mid-process is worse than one that is
+/// missing. Set once by `init()`, never re-derived behind a caller's back.
 static MACHINE_ID: OnceLock<String> = OnceLock::new();
 static APP_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
 
 /// Capture the hostname once and load (or generate) the persistent
 /// machine_id. Safe to call more than once; subsequent calls are no-ops.
 pub fn init(app_dir: &Path) -> Result<()> {
     APP_DIR.set(app_dir.to_path_buf()).ok();
-    let hostname = capture_hostname();
-    HOSTNAME.set(hostname).ok();
+    // init() is AUTHORITATIVE: it overwrites whatever an earlier self-healing
+    // read may have derived, so an explicit init always wins.
+    *HOSTNAME.write().expect("HOSTNAME lock") = Some(leak(capture_hostname()));
 
     let machine_id = load_or_generate_machine_id(app_dir).context("load or generate machine_id")?;
     MACHINE_ID.set(machine_id).ok();
     Ok(())
 }
 
-/// Cached display hostname. Panics if `init` has not run — call init at
-/// daemon startup.
+/// Cached display hostname. **Self-healing**: on a cache miss it captures the
+/// hostname from the OS rather than panicking.
+///
+/// This used to `expect()` that `init()` had run, which shipped a crash to
+/// production for a value the process can always re-derive — and a parallel
+/// "safe" accessor (`cli_hostname_or_fallback`) had to be added to work around
+/// it. `capture_hostname()` reads the authoritative source, so recovering here
+/// is correct, not a guess.
 pub fn hostname() -> &'static str {
-    HOSTNAME
-        .get()
-        .expect("host_identity::init() must run before hostname()")
-        .as_str()
+    if let Some(h) = *HOSTNAME.read().expect("HOSTNAME lock") {
+        return h;
+    }
+    let derived = leak(capture_hostname());
+    let mut w = HOSTNAME.write().expect("HOSTNAME lock");
+    w.get_or_insert(derived)
 }
 
 /// Alias of [`hostname`] using the slice-7 vocabulary (`display_hostname`
@@ -57,7 +79,23 @@ pub fn display_hostname() -> &'static str {
     hostname()
 }
 
-/// Stable per-machine UUID. Panics if `init` has not run.
+/// Stable per-machine UUID. Requires `init()`.
+///
+/// This one is deliberately NOT self-healing, unlike [`hostname`]. Two reasons,
+/// both learned the hard way:
+///
+/// 1. **Recovery here has a side effect.** `load_or_generate_machine_id` WRITES
+///    a file. A lazy read would turn any innocuous `machine_id()` call into a
+///    filesystem mutation in whatever state dir happened to be configured.
+/// 2. **An identity key must not change mid-process.** Callers mint certificates
+///    whose CN is this value and then compare against it. If a later `init()`
+///    (or a lazy fill) could replace it, those two reads disagree and the
+///    comparison fails — which is exactly how the mesh test suite caught an
+///    earlier attempt to make this authoritative-and-overwriting.
+///
+/// Resiliency belongs at the edges, not in an identity primitive: `init()` runs
+/// once at daemon startup and already self-heals a stale on-disk id by
+/// re-minting and persisting it.
 pub fn machine_id() -> &'static str {
     MACHINE_ID
         .get()
@@ -65,21 +103,31 @@ pub fn machine_id() -> &'static str {
         .as_str()
 }
 
-/// Hostname for use in standalone CLI flows (e.g. `orca install`) where
-/// `init()` may not have run. Mirrors `capture_hostname()` but is safe to
-/// call without the OnceLock being populated.
+/// Hostname for standalone CLI flows (e.g. `orca install`) where `init()` may
+/// not have run.
+///
+/// Retained for its existing call sites, but no longer a separate safe path:
+/// `hostname()` is now self-healing, so this just delegates. Prefer
+/// `hostname()` in new code.
 pub fn cli_hostname_or_fallback() -> String {
-    if let Some(h) = HOSTNAME.get() {
-        return h.clone();
-    }
-    capture_hostname()
+    hostname().to_string()
 }
 
+/// Read the hostname from the OS **without spawning a subprocess**.
+///
+/// This used to shell out to `hostname`. That deadlocked the test suite: the
+/// `hook` tests `libc::fork()` and the child is only allowed async-signal-safe
+/// calls, but `Command::output()` forks again and touches the libc malloc and
+/// environ locks it inherited held — the child wedged and the parent sat in
+/// `wait4` forever. Making `hostname()` self-healing put that spawn on the
+/// cache-miss path, which is how a latent hazard became a hang.
+///
+/// A spawn was never the right mechanism anyway: it depends on `PATH` (which
+/// tests legitimately clear), costs a process, and cannot be used from a
+/// post-fork child or a signal handler. `gethostname(2)` is the actual source
+/// the `hostname` binary itself reads.
 fn capture_hostname() -> String {
-    let raw = std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
+    let raw = sysinfo::System::host_name()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
