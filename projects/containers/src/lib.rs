@@ -865,25 +865,16 @@ async fn containers_list(
 /// filters. Separate from the owner search's bare probe because this forwards
 /// the real arguments — a `--runtime` filter the caller asked for must survive
 /// the hop, or the answer is about a different question.
+///
+/// The dispatch itself is `contract::fanout::exec_at`: the encode/name/decode
+/// steps are identical for every domain that fans out, and were duplicated
+/// here and in `backup`.
 async fn exec_list_at(
     peer: &str,
     args: ContainersListArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ContainersListOutput> {
-    let svc = ctx.service::<Arc<dyn contract::RemoteExec>>()?;
-    #[allow(clippy::disallowed_types)]
-    let payload = serde_json::to_value(&args)?;
-    let value = svc
-        .exec(
-            peer,
-            <ContainersList as contract::OrcaToolDef>::NAME,
-            payload,
-            ctx.caller(),
-            ctx.correlation_id().map(str::to_string),
-        )
-        .await?;
-    #[allow(clippy::disallowed_types)]
-    Ok(serde_json::from_value(value)?)
+    contract::fanout::exec_at::<ContainersList>(peer, &args, ctx).await
 }
 
 /// Every container in the mesh, gathered concurrently.

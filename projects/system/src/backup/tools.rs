@@ -54,6 +54,13 @@ pub struct ProviderInfo {
     pub kind: String,
     pub title: String,
     pub instances: Vec<String>,
+    /// Which system advertises this provider. Empty = this one.
+    ///
+    /// The surface is the FLEET's, not this host's: a provider is only
+    /// actionable if you know where it lives, and the operator must never
+    /// have to name a host to find out.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub system: String,
 }
 
 /// Which facet `backup.detail` reports. `providers` = registered backup kinds +
@@ -75,12 +82,29 @@ pub struct BackupDetailArgs {
     #[arg(long, value_enum, default_value = "providers")]
     #[serde(default)]
     pub view: BackupDetailView,
+    /// INTERNAL. Answer for this system only, skipping the mesh fan-out.
+    ///
+    /// Not a CLI flag and not something an operator selects — `#[arg(skip)]`
+    /// keeps it off the surface entirely, which is the point: `peer` and
+    /// "which host" are transport concerns that must stay under the hood.
+    ///
+    /// It exists because the fan-out dispatches `backup.detail` to each
+    /// system, and without it every recipient would fan out in turn — an
+    /// exponential storm across the mesh instead of one round of calls.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_only: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvidersOutput {
     pub providers: Vec<ProviderInfo>,
+    /// Systems that could not be asked. Non-empty means this listing is
+    /// INCOMPLETE — "no such provider" means something different when part of
+    /// the fleet was never reached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_errors: Vec<String>,
 }
 
 /// `backup.detail` payload — one variant per `view`.
@@ -101,8 +125,18 @@ async fn backup_detail(
     ctx: &ToolCtx,
 ) -> anyhow::Result<BackupDetailOutput> {
     match args.view {
-        BackupDetailView::Providers => Ok(BackupDetailOutput::Providers(backup_providers().await)),
-        BackupDetailView::Targets => Ok(BackupDetailOutput::Targets(backup_targets(ctx).await?)),
+        BackupDetailView::Providers if args.local_only => {
+            Ok(BackupDetailOutput::Providers(backup_providers().await))
+        }
+        BackupDetailView::Providers => Ok(BackupDetailOutput::Providers(
+            backup_providers_fleetwide(ctx).await,
+        )),
+        BackupDetailView::Targets if args.local_only => {
+            Ok(BackupDetailOutput::Targets(backup_targets(ctx).await?))
+        }
+        BackupDetailView::Targets => Ok(BackupDetailOutput::Targets(
+            backup_targets_fleetwide(ctx).await?,
+        )),
     }
 }
 
@@ -118,9 +152,62 @@ async fn backup_providers() -> ProvidersOutput {
                 tracing::warn!("[backup] providers: enumerate {}: {e:#}", p.kind());
                 Vec::new()
             }),
+            // Local rows carry an empty system — answered in process.
+            system: String::new(),
         })
         .collect();
-    ProvidersOutput { providers }
+    ProvidersOutput {
+        providers,
+        system_errors: Vec::new(),
+    }
+}
+
+/// Every provider in the MESH, not just this host's.
+///
+/// A backup surface that reports only the local registry forces the operator
+/// to name a host to see anything else, which is the addressing #647 removes.
+/// Each remote row is tagged with the system that advertises it, so the answer
+/// stays actionable without the caller ever selecting one.
+async fn backup_providers_fleetwide(ctx: &ToolCtx) -> ProvidersOutput {
+    let local = backup_providers().await;
+    let gathered = contract::fanout::gather(ctx, local.providers, |id, ctx| async move {
+        let mut rows = exec_providers_at(&id, &ctx).await?.providers;
+        // Stamp the owner on arrival: the remote reports its own rows with an
+        // empty system (it is local to itself), which would read as ours.
+        for r in &mut rows {
+            r.system = id.clone();
+        }
+        Ok(rows)
+    })
+    .await;
+    let mut providers = gathered.rows;
+    providers.sort_by(|a, b| a.system.cmp(&b.system).then_with(|| a.kind.cmp(&b.kind)));
+    ProvidersOutput {
+        providers,
+        system_errors: gathered.system_errors,
+    }
+}
+
+/// Ask one system for its backup providers, over the shared dispatch helper
+/// so a fan-out and any future owner search cannot disagree about what a
+/// system reported.
+async fn exec_providers_at(peer: &str, ctx: &ToolCtx) -> anyhow::Result<ProvidersOutput> {
+    let out = contract::fanout::exec_at::<BackupDetail>(
+        peer,
+        &BackupDetailArgs {
+            view: BackupDetailView::Providers,
+            // Terminates the fan-out at one hop.
+            local_only: true,
+        },
+        ctx,
+    )
+    .await?;
+    match out {
+        BackupDetailOutput::Providers(p) => Ok(p),
+        BackupDetailOutput::Targets(_) => {
+            anyhow::bail!("asked for providers, system answered with targets")
+        }
+    }
 }
 
 // ── targets ───────────────────────────────────────────────────────────
@@ -138,18 +225,32 @@ pub struct TargetInfo {
     /// The concrete storage locations this kind exposes for selection (mounts,
     /// buckets). Empty if the kind advertises none.
     pub locations: Vec<TargetLocation>,
+    /// The system this target is registered on. Empty = this one.
+    ///
+    /// `fits_here` is computed against THAT system's placement, so a row is
+    /// meaningless without knowing which host it describes — a PBS target
+    /// fits on a Proxmox node and not on a Mac.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub system: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetsOutput {
-    /// Every registered target kind, with placement eligibility.
+    /// Every registered target kind across the fleet, with placement
+    /// eligibility as computed on its own system.
     pub registered: Vec<TargetInfo>,
     /// The targets `backup.run` currently fans out to (the `backup`/`targets`
     /// config, or the built-in `local` fallback).
     pub configured: Vec<BackupTargetRef>,
-    /// The detected placement the eligibility was computed against.
+    /// THIS system's detected placement. Remote rows carry their own
+    /// eligibility in `fits_here`; placement itself is per-host and is not
+    /// merged, because there is no such thing as the fleet's placement.
     pub placement: Placement,
+    /// Systems that could not be asked — this listing is INCOMPLETE when
+    /// non-empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_errors: Vec<String>,
 }
 
 async fn backup_targets(ctx: &ToolCtx) -> anyhow::Result<TargetsOutput> {
@@ -166,13 +267,59 @@ async fn backup_targets(ctx: &ToolCtx) -> anyhow::Result<TargetsOutput> {
             fits_here: t.fits(&placement),
             builtin: t.kind() == "local",
             locations,
+            system: String::new(),
         });
     }
     Ok(TargetsOutput {
         registered,
         configured: configured_target_refs(),
         placement,
+        system_errors: Vec::new(),
     })
+}
+
+/// Every backup target in the MESH.
+///
+/// This is the read that answers "where can backups actually go?" — and the
+/// answer is fleet-shaped: PBS lives on the Proxmox nodes, the Unraid boxes
+/// hold the shares, and a Mac has neither. Reporting only the local host made
+/// that question unanswerable without naming a host.
+async fn backup_targets_fleetwide(ctx: &ToolCtx) -> anyhow::Result<TargetsOutput> {
+    let local = backup_targets(ctx).await?;
+    let gathered = contract::fanout::gather(ctx, local.registered, |id, ctx| async move {
+        let mut rows = exec_targets_at(&id, &ctx).await?.registered;
+        for r in &mut rows {
+            r.system = id.clone();
+        }
+        Ok(rows)
+    })
+    .await;
+    let mut registered = gathered.rows;
+    registered.sort_by(|a, b| a.system.cmp(&b.system).then_with(|| a.kind.cmp(&b.kind)));
+    Ok(TargetsOutput {
+        registered,
+        configured: local.configured,
+        placement: local.placement,
+        system_errors: gathered.system_errors,
+    })
+}
+
+async fn exec_targets_at(peer: &str, ctx: &ToolCtx) -> anyhow::Result<TargetsOutput> {
+    let out = contract::fanout::exec_at::<BackupDetail>(
+        peer,
+        &BackupDetailArgs {
+            view: BackupDetailView::Targets,
+            local_only: true,
+        },
+        ctx,
+    )
+    .await?;
+    match out {
+        BackupDetailOutput::Targets(t) => Ok(t),
+        BackupDetailOutput::Providers(_) => {
+            anyhow::bail!("asked for targets, system answered with providers")
+        }
+    }
 }
 
 // ── list ──────────────────────────────────────────────────────────────
@@ -192,6 +339,12 @@ pub struct BackupListArgs {
     /// Opaque cursor from a previous page's `nextCursor`. Omit for the first page.
     #[arg(long)]
     pub cursor: Option<String>,
+    /// INTERNAL. Answer for this system only. Not an operator-facing flag —
+    /// see `BackupDetailArgs::local_only`; it terminates the fan-out at one
+    /// hop so one `backup list` does not storm the mesh.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_only: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -199,6 +352,11 @@ pub struct BackupListArgs {
 pub struct BackupListOutput {
     /// Matching backups, newest first.
     pub backups: Vec<BackupRecord>,
+    /// Systems that could not be asked. Non-empty means a restore is choosing
+    /// from an INCOMPLETE set — the backup you want may exist on a host that
+    /// was never reached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_errors: Vec<String>,
     /// Opaque cursor for the next page, or absent on the last page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
@@ -211,6 +369,42 @@ pub struct BackupListOutput {
 /// Aggregates across every configured target (refreshing each first).
 #[orca_tool(domain = "backup", verb = "list")]
 async fn backup_list(args: BackupListArgs, ctx: &ToolCtx) -> anyhow::Result<BackupListOutput> {
+    let local = list_locally(&args, ctx).await;
+    if args.local_only {
+        return Ok(finish_list(local, Vec::new(), &args));
+    }
+    // Every system's backups, so a restore chooses from the FLEET's set. A
+    // backup is only restorable on the host holding it, so each record is
+    // stamped with its system on arrival — without that, `path` names a
+    // directory on an unidentified machine.
+    // Forward the caller's filters: a `--kind`/`--instance` the caller asked
+    // for must survive the hop, or each system answers a different question.
+    let (kind, instance) = (args.kind.clone(), args.instance.clone());
+    let gathered = contract::fanout::gather(ctx, local, move |id, ctx| {
+        let args = BackupListArgs {
+            kind: kind.clone(),
+            instance: instance.clone(),
+            // Page the merged set, not each system's slice.
+            limit: None,
+            cursor: None,
+            local_only: true,
+        };
+        async move {
+            let mut rows = contract::fanout::exec_at::<BackupList>(&id, &args, &ctx)
+                .await?
+                .backups;
+            for r in &mut rows {
+                r.system = id.clone();
+            }
+            Ok(rows)
+        }
+    })
+    .await;
+    Ok(finish_list(gathered.rows, gathered.system_errors, &args))
+}
+
+/// This host's backups across every configured target.
+async fn list_locally(args: &BackupListArgs, ctx: &ToolCtx) -> Vec<BackupRecord> {
     let mut backups = Vec::new();
     for (r, store) in open_configured_targets(ctx, true).await {
         match store.list(args.kind.as_deref(), args.instance.as_deref()) {
@@ -218,18 +412,32 @@ async fn backup_list(args: BackupListArgs, ctx: &ToolCtx) -> anyhow::Result<Back
             Err(e) => tracing::warn!("[backup] list on target {}/{}: {e:#}", r.kind, r.name),
         }
     }
-    // Newest first across all targets; the id stamp sorts chronologically.
-    backups.sort_by(|a, b| b.id.cmp(&a.id));
-    let params = contract::paging::PageParams {
-        limit: args.limit,
-        cursor: args.cursor,
-    };
-    let page = contract::paging::Page::from_slice(backups, &params);
-    Ok(BackupListOutput {
+    backups
+}
+
+/// Sort newest-first and page ONCE over the merged set, so a page is a page of
+/// the fleet rather than of whichever system answered first.
+fn finish_list(
+    mut backups: Vec<BackupRecord>,
+    system_errors: Vec<String>,
+    args: &BackupListArgs,
+) -> BackupListOutput {
+    // The id stamp sorts chronologically; tie-break on system so a merged
+    // listing is stable rather than ordered by which host replied first.
+    backups.sort_by(|a, b| b.id.cmp(&a.id).then_with(|| a.system.cmp(&b.system)));
+    let page = contract::paging::Page::from_slice(
+        backups,
+        &contract::paging::PageParams {
+            limit: args.limit,
+            cursor: args.cursor.clone(),
+        },
+    );
+    BackupListOutput {
         backups: page.items,
         next_cursor: page.next_cursor,
         total: page.total,
-    })
+        system_errors,
+    }
 }
 
 // ── run ───────────────────────────────────────────────────────────────
@@ -239,6 +447,10 @@ async fn backup_list(args: BackupListArgs, ctx: &ToolCtx) -> anyhow::Result<Back
 pub struct BackupError {
     pub kind: String,
     pub instance: String,
+    /// The system the failure happened on. Empty = this one. A fleet-wide run
+    /// that reported a failure without naming its host would be unactionable.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub system: String,
     /// The target the failure occurred against (`<kind>/<name>`), if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
@@ -254,6 +466,11 @@ pub struct BackupRunOutput {
     pub targets: Vec<String>,
     /// Per-(target,kind,instance) failures — the run does not abort on one.
     pub errors: Vec<BackupError>,
+    /// Systems that could not be asked to run. Distinct from `errors`: those
+    /// are backups that were ATTEMPTED and failed, these were never started
+    /// at all, and an operator must be able to tell those apart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_errors: Vec<String>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -270,6 +487,11 @@ pub struct BackupRunArgs {
     #[arg(long)]
     #[serde(default)]
     pub all: bool,
+    /// INTERNAL. Run on this system only. Not an operator-facing flag — see
+    /// `BackupDetailArgs::local_only`. It terminates the fan-out at one hop.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_only: bool,
 }
 
 /// Run backups. `--kind` backs up that kind; `--all` fans out over every
@@ -286,6 +508,82 @@ pub struct BackupRunArgs {
     execute_gated = true
 )]
 async fn backup_run(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<BackupRunOutput> {
+    if !args.local_only {
+        return backup_run_fleetwide(args, ctx).await;
+    }
+    run_here(args, ctx).await
+}
+
+/// Run on every system at once.
+///
+/// A backup runs where its data is — a provider on thor can only be backed up
+/// by thor. So the fleet-wide run is genuinely simultaneous rather than
+/// routed: every system runs what IT advertises, concurrently, and the
+/// results are merged. A system that cannot be asked lands in `system_errors`
+/// and the rest of the fleet still gets backed up, because one unreachable
+/// host must not cancel everyone else's backup.
+async fn backup_run_fleetwide(
+    args: BackupRunArgs,
+    ctx: &ToolCtx,
+) -> anyhow::Result<BackupRunOutput> {
+    // Local first and unconditionally: this host's own backup must not be
+    // contingent on the mesh being healthy.
+    let mut out = run_here(
+        BackupRunArgs {
+            local_only: true,
+            ..clone_run_args(&args)
+        },
+        ctx,
+    )
+    .await?;
+
+    let remote = clone_run_args(&args);
+    let gathered = contract::fanout::gather(ctx, Vec::new(), move |id, ctx| {
+        let args = BackupRunArgs {
+            local_only: true,
+            ..clone_run_args(&remote)
+        };
+        async move {
+            let got = contract::fanout::exec_at::<BackupRun>(&id, &args, &ctx).await?;
+            // One row per system, carrying that system's whole outcome, so the
+            // merge below can attribute produced records AND failures.
+            Ok(vec![(id, got)])
+        }
+    })
+    .await;
+
+    for (system, mut got) in gathered.rows {
+        for r in &mut got.produced {
+            r.system = system.clone();
+        }
+        for e in &mut got.errors {
+            e.system = system.clone();
+        }
+        out.produced.append(&mut got.produced);
+        out.errors.append(&mut got.errors);
+        for t in got.targets {
+            // Targets are `<kind>/<name>` and collide across systems; qualify
+            // them so "wrote to local/default" says WHOSE local.
+            out.targets.push(format!("{system}:{t}"));
+        }
+    }
+    out.system_errors = gathered.system_errors;
+    Ok(out)
+}
+
+/// `BackupRunArgs` is not `Clone` (it derives `clap::Args`), and the fan-out
+/// needs one copy per system.
+fn clone_run_args(a: &BackupRunArgs) -> BackupRunArgs {
+    BackupRunArgs {
+        kind: a.kind.clone(),
+        instance: a.instance.clone(),
+        all: a.all,
+        local_only: a.local_only,
+    }
+}
+
+/// Back up what THIS system advertises.
+async fn run_here(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<BackupRunOutput> {
     let providers = resolve_run_providers(args.kind.as_deref(), args.all)?;
     if args.kind.is_none() && args.all {
         tracing::warn!("[backup] --all: backing up every registered kind");
@@ -320,6 +618,7 @@ async fn backup_run(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<Backup
         {
             tracing::warn!("[backup] target {label} sync failed: {e:#}");
             out.errors.push(BackupError {
+                system: String::new(),
                 kind: r.kind.clone(),
                 instance: String::new(),
                 target: Some(label.clone()),
@@ -409,6 +708,12 @@ pub struct BackupRestoreArgs {
     /// acknowledgement that makes a no-`--id` restore run.
     #[arg(long, default_value_t = false)]
     pub approve_all: bool,
+    /// INTERNAL. Restore on this system only — set by the routing hop once the
+    /// holder has been resolved. Not an operator-facing flag: a restore is
+    /// addressed by BACKUP ID, and finding its host is orca's problem.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_only: bool,
 }
 
 /// The outcome of a restore call: either it ran, or it refused pending a
@@ -441,14 +746,127 @@ async fn backup_restore(
     ctx: &ToolCtx,
 ) -> anyhow::Result<BackupRestoreOutput> {
     let instance = args.instance.as_deref().unwrap_or(DEFAULT_INSTANCE);
-    restore_one(
-        &args.kind,
-        instance,
-        args.id.as_deref(),
-        args.approve_all,
+    if args.local_only {
+        return restore_one(
+            &args.kind,
+            instance,
+            args.id.as_deref(),
+            args.approve_all,
+            ctx,
+        )
+        .await;
+    }
+
+    // A backup is restorable ONLY on the system holding it — `path` is local
+    // to that host. So the id is the address, and resolving it is orca's job.
+    match resolve_backup_holder(&args, instance, ctx).await? {
+        // Ours, or no id to resolve yet (the no-id call lists what is
+        // available and restores nothing, which must stay a local answer).
+        Holder::Here => {
+            restore_one(
+                &args.kind,
+                instance,
+                args.id.as_deref(),
+                args.approve_all,
+                ctx,
+            )
+            .await
+        }
+        Holder::On(system) => {
+            contract::fanout::exec_at::<BackupRestore>(
+                &system,
+                &BackupRestoreArgs {
+                    kind: args.kind.clone(),
+                    instance: args.instance.clone(),
+                    id: args.id.clone(),
+                    approve_all: args.approve_all,
+                    local_only: true,
+                },
+                ctx,
+            )
+            .await
+        }
+    }
+}
+
+/// Which system holds the backup a restore named.
+enum Holder {
+    Here,
+    On(String),
+}
+
+/// Find the system holding `id` by consulting the fleet-wide listing — the
+/// same set the operator selected from, so a restore can never address a
+/// backup the listing did not show.
+///
+/// Refuses rather than guesses when the id is ambiguous: ids are a timestamp
+/// stamp, unique within a `(kind, instance)` on ONE host, so two systems can
+/// legitimately hold the same id. Picking one would restore from a machine the
+/// operator did not mean — on a destructive verb that is not a guess worth
+/// making.
+async fn resolve_backup_holder(
+    args: &BackupRestoreArgs,
+    instance: &str,
+    ctx: &ToolCtx,
+) -> anyhow::Result<Holder> {
+    // No id and no approval: the local listing path already answers by showing
+    // what is available and restoring nothing. Nothing to route.
+    let Some(id) = args.id.as_deref() else {
+        return Ok(Holder::Here);
+    };
+    // `latest` is resolved per-system against that system's own set; routing it
+    // would need a fleet-wide notion of "latest" that does not exist.
+    if id == "latest" {
+        return Ok(Holder::Here);
+    }
+
+    let listing = backup_list(
+        BackupListArgs {
+            kind: Some(args.kind.clone()),
+            instance: Some(instance.to_string()),
+            limit: None,
+            cursor: None,
+            local_only: false,
+        },
         ctx,
     )
-    .await
+    .await?;
+
+    let holders: Vec<String> = listing
+        .backups
+        .iter()
+        .filter(|b| b.id == id)
+        .map(|b| b.system.clone())
+        .collect();
+
+    match holders.as_slice() {
+        [] if !listing.system_errors.is_empty() => anyhow::bail!(
+            "backup `{id}` not found, but {} could not be asked: {}. \
+             Refusing rather than reporting it absent.",
+            if listing.system_errors.len() == 1 {
+                "one system"
+            } else {
+                "some systems"
+            },
+            listing.system_errors.join("; ")
+        ),
+        [] => anyhow::bail!("no backup `{id}` for {}/{instance}", args.kind),
+        [one] if one.is_empty() => Ok(Holder::Here),
+        [one] => Ok(Holder::On(one.clone())),
+        many => anyhow::bail!(
+            "backup `{id}` exists on {} systems ({}); a restore must name one \
+             unambiguously rather than pick",
+            many.len(),
+            many.iter()
+                .map(|s| if s.is_empty() {
+                    "this system"
+                } else {
+                    s.as_str()
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 // ── shared machinery ──────────────────────────────────────────────────
@@ -523,6 +941,7 @@ async fn run_backups(
                         p.kind()
                     );
                     out.errors.push(BackupError {
+                        system: String::new(),
                         kind: p.kind().to_string(),
                         instance: String::new(),
                         target: None,
@@ -556,6 +975,7 @@ async fn run_one(
         Err(e) => {
             tracing::warn!("[backup] {kind}/{instance}: cannot allocate slot: {e:#}");
             out.errors.push(BackupError {
+                system: String::new(),
                 kind: kind.to_string(),
                 instance: instance.to_string(),
                 target: None,
@@ -572,6 +992,7 @@ async fn run_one(
             Err(e) => {
                 tracing::warn!("[backup] {kind}/{instance}: commit failed: {e:#}");
                 out.errors.push(BackupError {
+                    system: String::new(),
                     kind: kind.to_string(),
                     instance: instance.to_string(),
                     target: None,
@@ -585,6 +1006,7 @@ async fn run_one(
                 tracing::warn!("[backup] {kind}/{instance}: slot cleanup failed: {abort_err:#}");
             }
             out.errors.push(BackupError {
+                system: String::new(),
                 kind: kind.to_string(),
                 instance: instance.to_string(),
                 target: None,
@@ -613,6 +1035,7 @@ async fn run_one(
                 report.summary()
             );
             out.errors.push(BackupError {
+                system: String::new(),
                 kind: kind.to_string(),
                 instance: instance.to_string(),
                 target: None,
@@ -622,6 +1045,7 @@ async fn run_one(
         Err(e) => {
             tracing::error!("[backup] {kind}/{instance}: prune failed: {e:#}");
             out.errors.push(BackupError {
+                system: String::new(),
                 kind: kind.to_string(),
                 instance: instance.to_string(),
                 target: None,
@@ -1131,6 +1555,7 @@ mod tests {
 
         let restored = BackupRestoreOutput::Restored {
             record: BackupRecord {
+                system: String::new(),
                 id: "20260101-000000".into(),
                 kind: "host".into(),
                 instance: "default".into(),
@@ -1168,12 +1593,176 @@ mod tests {
 
     // ── serde output shapes (camelCase, skip_serializing_if, untagged) ──
 
+    /// A restore addressed by id must never be routed by guesswork. These pin
+    /// the refusals, because the failure mode is restoring onto a machine the
+    /// operator did not mean.
+    #[test]
+    fn restore_routing_refuses_rather_than_guesses() {
+        let src = include_str!("tools.rs");
+        let f = src
+            .split_once("async fn resolve_backup_holder(")
+            .expect("resolver present")
+            .1;
+        let f = f.split_once("\n/// ").map(|(a, _)| a).unwrap_or(f);
+
+        // Ambiguity: ids are unique per (kind, instance) on ONE host, so two
+        // systems can hold the same id.
+        assert!(
+            f.contains("many => anyhow::bail!"),
+            "an id on several systems must be refused, not picked"
+        );
+        // Incompleteness: "not found" is a different claim when part of the
+        // fleet was never reached.
+        assert!(
+            f.contains("could not be asked"),
+            "a miss with unreachable systems must not be reported as absent"
+        );
+        // And the routed hop must terminate.
+        let caller = src
+            .split_once("async fn backup_restore(")
+            .expect("tool present")
+            .1;
+        assert!(
+            caller.contains("local_only: true"),
+            "the routed restore must mark its hop, or it re-resolves forever"
+        );
+    }
+
+    fn rec(id: &str, system: &str) -> BackupRecord {
+        BackupRecord {
+            id: id.into(),
+            kind: "host".into(),
+            instance: "default".into(),
+            created_ms: 0,
+            path: "/x".into(),
+            size_bytes: 0,
+            file_count: 0,
+            checksum: None,
+            note: None,
+            system: system.into(),
+        }
+    }
+
+    #[test]
+    fn a_merged_listing_is_newest_first_across_every_system() {
+        // Paging must be applied over the MERGED set, not per system, or a
+        // page is a page of whichever host replied first.
+        let args = BackupListArgs::default();
+        let out = finish_list(
+            vec![
+                rec("20260101-000000", "willow"),
+                rec("20260301-000000", ""),
+                rec("20260201-000000", "freyr"),
+            ],
+            Vec::new(),
+            &args,
+        );
+        let ids: Vec<&str> = out.backups.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["20260301-000000", "20260201-000000", "20260101-000000"]
+        );
+    }
+
+    #[test]
+    fn a_merged_listing_is_ordered_stably_when_stamps_collide() {
+        // Two systems can take a backup in the same second. Without the
+        // tie-break the order depends on which host answered first, so the
+        // same command would page differently each run.
+        let args = BackupListArgs::default();
+        let out = finish_list(
+            vec![
+                rec("20260101-000000", "willow"),
+                rec("20260101-000000", "freyr"),
+            ],
+            Vec::new(),
+            &args,
+        );
+        let systems: Vec<&str> = out.backups.iter().map(|b| b.system.as_str()).collect();
+        assert_eq!(systems, vec!["freyr", "willow"]);
+    }
+
+    #[test]
+    fn an_unreachable_system_is_reported_on_the_listing_a_restore_selects_from() {
+        // Silence here would be the dangerous case: the operator concludes a
+        // backup does not exist when its host was simply never asked.
+        let out = finish_list(
+            vec![rec("20260101-000000", "")],
+            vec!["willow: unreachable".to_string()],
+            &BackupListArgs::default(),
+        );
+        assert_eq!(out.system_errors, vec!["willow: unreachable"]);
+        #[allow(clippy::disallowed_types)]
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(
+            json.contains("systemErrors"),
+            "incompleteness must reach the caller, not just the log: {json}"
+        );
+    }
+
+    /// The fan-out dispatches `backup.detail` to every system. If the
+    /// recipient fanned out in turn, one `orca backup detail` would become an
+    /// exponential storm across the mesh. The internal `local_only` flag is
+    /// what terminates it at one hop — this pins that it is SET on the
+    /// outbound call and HONOURED on receipt.
+    #[test]
+    fn the_fan_out_cannot_recurse_across_the_mesh() {
+        let src = include_str!("tools.rs");
+
+        // Set on the wire.
+        let sender = src
+            .split_once("async fn exec_providers_at(")
+            .expect("fan-out call present")
+            .1
+            .split_once("\nasync fn ")
+            .map(|(a, _)| a)
+            .unwrap_or("");
+        assert!(
+            sender.contains("local_only: true"),
+            "the fan-out must mark its calls local_only, or every hop re-fans"
+        );
+
+        // Honoured on receipt: the local branch must be matched BEFORE the
+        // fleet-wide one, or the guard never fires.
+        let dispatch = src
+            .split_once("async fn backup_detail(")
+            .expect("tool present")
+            .1;
+        let local_at = dispatch
+            .find("args.local_only")
+            .expect("detail must branch on local_only");
+        let fleet_at = dispatch
+            .find("backup_providers_fleetwide")
+            .expect("fleet path present");
+        assert!(
+            local_at < fleet_at,
+            "the local_only arm must come first, else the guard is dead code"
+        );
+    }
+
+    /// `local_only` is transport plumbing. An operator addresses resources by
+    /// id and never selects a host, so it must not appear as a CLI flag.
+    #[test]
+    fn the_internal_flag_is_not_part_of_the_operator_surface() {
+        let src = include_str!("tools.rs");
+        let decl = src
+            .split_once("pub local_only: bool")
+            .expect("field present")
+            .0;
+        let attrs = &decl[decl.len().saturating_sub(400)..];
+        assert!(
+            attrs.contains("#[arg(skip)]"),
+            "local_only must be #[arg(skip)] — it is under-the-hood routing, not a flag"
+        );
+    }
+
     #[test]
     fn provider_info_serializes_camel_case() {
         let info = ProviderInfo {
             kind: "host".into(),
             title: "Host".into(),
             instances: vec!["default".into(), "thor".into()],
+            system: String::new(),
         };
         let s = serde_json::to_string(&info).unwrap();
         assert_eq!(
@@ -1187,7 +1776,9 @@ mod tests {
         // The untagged enum must serialize as the bare ProvidersOutput shape —
         // no enum discriminant wrapper — so callers key on `providers`.
         let out = BackupDetailOutput::Providers(ProvidersOutput {
+            system_errors: Vec::new(),
             providers: vec![ProviderInfo {
+                system: String::new(),
                 kind: "host".into(),
                 title: "Host".into(),
                 instances: vec![],
@@ -1203,6 +1794,7 @@ mod tests {
     #[test]
     fn target_info_and_output_serialize_camel_case() {
         let info = TargetInfo {
+            system: String::new(),
             kind: "local".into(),
             title: "Local filesystem".into(),
             fits_here: true,
@@ -1215,6 +1807,7 @@ mod tests {
         assert!(s.contains(r#""locations":[]"#));
 
         let out = TargetsOutput {
+            system_errors: Vec::new(),
             registered: vec![info],
             configured: vec![BackupTargetRef::local()],
             placement: Placement::bare(),
@@ -1228,6 +1821,7 @@ mod tests {
     #[test]
     fn backup_error_omits_target_when_none() {
         let e = BackupError {
+            system: String::new(),
             kind: "host".into(),
             instance: "default".into(),
             target: None,
@@ -1237,6 +1831,7 @@ mod tests {
         assert!(!s.contains("target"), "None target is skipped: {s}");
 
         let e = BackupError {
+            system: String::new(),
             target: Some("local/default".into()),
             ..e
         };
@@ -1257,6 +1852,7 @@ mod tests {
     #[test]
     fn backup_list_output_skips_absent_cursor_and_total() {
         let out = BackupListOutput {
+            system_errors: Vec::new(),
             backups: vec![],
             next_cursor: None,
             total: None,
@@ -1265,6 +1861,7 @@ mod tests {
         assert_eq!(s, r#"{"backups":[]}"#);
 
         let out = BackupListOutput {
+            system_errors: Vec::new(),
             backups: vec![],
             next_cursor: Some("abc".into()),
             total: Some(3),
@@ -1373,6 +1970,7 @@ mod tests {
     async fn backup_detail_providers_view_returns_providers_variant() {
         let res = backup_detail(
             BackupDetailArgs {
+                local_only: false,
                 view: BackupDetailView::Providers,
             },
             &ctx(),
@@ -1597,6 +2195,7 @@ mod tests {
     #[test]
     fn restore_args_explicit_id_and_approve_all_parse() {
         let args = BackupRestoreArgs {
+            local_only: false,
             kind: "host".into(),
             instance: Some("thor".into()),
             id: Some("20260101-000000".into()),
@@ -1614,6 +2213,7 @@ mod tests {
         let out = BackupRestoreOutput::AwaitingSelection {
             message: "pick one".into(),
             available: vec![BackupRecord {
+                system: String::new(),
                 id: "20260101-000000".into(),
                 kind: "host".into(),
                 instance: "default".into(),
@@ -1648,13 +2248,17 @@ mod tests {
 
     #[test]
     fn providers_output_empty_serializes_as_empty_list() {
-        let out = ProvidersOutput { providers: vec![] };
+        let out = ProvidersOutput {
+            providers: vec![],
+            system_errors: Vec::new(),
+        };
         assert_eq!(serde_json::to_string(&out).unwrap(), r#"{"providers":[]}"#);
     }
 
     #[test]
     fn provider_info_empty_instances_serializes() {
         let info = ProviderInfo {
+            system: String::new(),
             kind: "k".into(),
             title: "K".into(),
             instances: vec![],
@@ -2015,6 +2619,7 @@ mod tests {
     async fn backup_detail_targets_view_returns_targets_variant() {
         let res = backup_detail(
             BackupDetailArgs {
+                local_only: false,
                 view: BackupDetailView::Targets,
             },
             &ctx(),
@@ -2054,6 +2659,7 @@ mod tests {
             let out = rt()
                 .block_on(backup_run(
                     BackupRunArgs {
+                        local_only: false,
                         kind: Some(pkind.into()),
                         instance: None,
                         all: false,
