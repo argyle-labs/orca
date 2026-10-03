@@ -343,6 +343,10 @@ fn warn_about_the_orphaned_legacy_log(logs_dir: &str) {
     );
 }
 
+// macOS-only: `id -u` feeds the launchd domain target. Keep this gate attached
+// to the fn — it was orphaned once when a new fn was inserted directly beneath
+// the attribute, which left this compiling on Linux as dead code.
+#[cfg(target_os = "macos")]
 fn launchd_uid() -> Result<u32> {
     let out = Command::new("id").arg("-u").output()?;
     let uid: u32 = String::from_utf8_lossy(&out.stdout)
