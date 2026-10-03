@@ -82,6 +82,14 @@ pub struct SecretWriteArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[arg(long)]
     pub value: Option<String>,
+    /// CLI only: read the value from stdin instead of `--value`, so the secret
+    /// never lands in `argv` where any local process can read it via `ps`.
+    /// Consumed into `value` in the calling process (see the manual CliOp at
+    /// the bottom of this file) and never serialized, so REST/MCP — which have
+    /// no stdin — can't be asked to honour it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[arg(long)]
+    pub value_stdin: bool,
     /// Required for external backends (e.g. `op://Personal/orca-gh/token`). Ignored for inline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[arg(long)]
@@ -191,6 +199,12 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
     // Field-based, backend-agnostic validation: `inline` stores a value locally;
     // every other backend is resolved by a registered `secrets_backend` plugin
     // from its `ref_path`, so we don't gate on a known-backends list here.
+    // Reaching the shared write path with this still set means a REST/MCP
+    // caller sent it; those surfaces have no stdin, so reject rather than
+    // silently ignore (same stance as the retired `--scope` field).
+    if args.value_stdin {
+        bail!("`value_stdin` is a CLI-only flag; REST/MCP callers must send `value`");
+    }
     match args.backend.as_str() {
         "inline" => {
             if args.value.is_none() {
@@ -198,6 +212,10 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
             }
         }
         _ => {
+            // Presence only. Core deliberately does NOT parse the reference:
+            // `op://`/`bw://` syntax is vendor knowledge, and knowing it here
+            // is what put a 1Password implementation in core in the first
+            // place. The owning backend plugin validates its own refs.
             if args.ref_path.is_none() {
                 bail!(
                     "`ref_path` is required for backend={} (e.g. 'op://Vault/Item/field')",
@@ -236,13 +254,125 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
 /// 'inline' backend, `value` is required; for external backends, `ref_path` is
 /// required (e.g. 'op://Vault/Item/field'). Write the secret on a remote system
 /// with the top-level `--peer <h>` flag.
-#[orca_tool(domain = "secrets", verb = "upsert")]
+#[orca_tool(domain = "secrets", verb = "upsert", cli = manual)]
 async fn secret_upsert(
     args: SecretWriteArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SecretMutationReport> {
     write_secret(args).await
 }
+
+/// Consume `--value-stdin` into `args.value` by reading `src`. Split out from
+/// the CliOp so the conflict / newline / empty rules are unit-testable without
+/// a real stdin.
+fn resolve_value_from_stdin<R: std::io::Read>(
+    args: &mut SecretWriteArgs,
+    src: &mut R,
+) -> anyhow::Result<()> {
+    if !args.value_stdin {
+        return Ok(());
+    }
+    if args.value.is_some() {
+        bail!("pass one of --value or --value-stdin, not both");
+    }
+    let mut buf = String::new();
+    src.read_to_string(&mut buf)
+        .map_err(|e| anyhow!("read secret value from stdin: {e}"))?;
+    // Shells and `printf` append a line ending; a stored token with a trailing
+    // "\n" silently breaks every consumer. Strip only that line ending —
+    // leading and interior whitespace can be part of the secret.
+    let value = buf.strip_suffix('\n').unwrap_or(&buf);
+    let value = value.strip_suffix('\r').unwrap_or(value);
+    if value.is_empty() {
+        bail!("--value-stdin got empty stdin; pipe the secret value in");
+    }
+    args.value = Some(value.to_string());
+    // Cleared so the flag can never be serialized onto the wire.
+    args.value_stdin = false;
+    Ok(())
+}
+
+/// Manual CLI block for `orca secrets upsert`. The generated `register_op!`
+/// parses args and dispatches straight to the daemon, but `--value-stdin` has
+/// to be consumed in the *calling* process — only the CLI has a stdin. Same
+/// reasoning as `orca auth login`'s hand-rolled block: a purely client-side
+/// affordance the daemon must not know about. The dispatch below mirrors
+/// `register_op!`'s execute-gated path verbatim so dry-run-by-default still
+/// holds for this verb.
+const _: () = {
+    use __cp::contract::{OrcaToolDef, plan::EXECUTE_FIELD};
+    use __cp::dispatch::cli::{CliBuildFn, CliOp, CliRunFn};
+    use ::plugin_toolkit as __cp;
+
+    fn build() -> __cp::clap::Command {
+        let cmd = __cp::clap::Command::new("upsert")
+            .about(<SecretUpsert as OrcaToolDef>::DESCRIPTION)
+            .arg(
+                __cp::clap::Arg::new(EXECUTE_FIELD)
+                    .long(EXECUTE_FIELD)
+                    .action(__cp::clap::ArgAction::SetTrue)
+                    .help(
+                        "Apply the change. Omitted, this reports what WOULD change and \
+                         changes nothing.",
+                    ),
+            );
+        <<SecretUpsert as OrcaToolDef>::Args as __cp::clap::Args>::augment_args(cmd)
+    }
+
+    fn run(
+        m: &__cp::clap::ArgMatches,
+        ctx: ::std::sync::Arc<__cp::contract::ToolCtx>,
+    ) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = __cp::anyhow::Result<()>> + Send>>
+    {
+        let m = m.clone();
+        Box::pin(async move {
+            let peer = ctx.peer().map(|s| s.to_string());
+            let mut args =
+                <<SecretUpsert as OrcaToolDef>::Args as __cp::clap::FromArgMatches>::from_arg_matches(&m)
+                    .map_err(|e| __cp::anyhow::anyhow!("{e}"))?;
+            resolve_value_from_stdin(&mut args, &mut ::std::io::stdin().lock())?;
+
+            let execute = m.get_flag(EXECUTE_FIELD);
+            let value = __cp::dispatch::cli::exec_gated::<SecretUpsert>(
+                args,
+                execute,
+                peer.as_deref(),
+                &ctx,
+            )
+            .await?;
+            if !execute {
+                // The plan IS the answer here — print it as-is.
+                println!(
+                    "{}",
+                    __cp::serde_json::to_string_pretty(&value)
+                        .unwrap_or_else(|_| value.to_string())
+                );
+                return Ok(());
+            }
+            let out: <SecretUpsert as OrcaToolDef>::Output = __cp::serde_json::from_value(value)
+                .map_err(|e| {
+                    __cp::anyhow::anyhow!(
+                        "decode {} output: {e}",
+                        <SecretUpsert as OrcaToolDef>::NAME
+                    )
+                })?;
+            let s = __cp::serde_json::to_string_pretty(&out)
+                .unwrap_or_else(|e| format!("<unserializable output: {e}>"));
+            println!("{s}");
+            Ok(())
+        })
+    }
+
+    __cp::inventory::submit! {
+        CliOp {
+            domain: "secrets",
+            verb: "upsert",
+            summary: <SecretUpsert as OrcaToolDef>::DESCRIPTION,
+            build: build as CliBuildFn,
+            run: run as CliRunFn,
+        }
+    }
+};
 
 /// [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends
 /// only the orca registration is removed (the upstream vault is untouched).
@@ -262,12 +392,91 @@ async fn secret_delete(
 mod tests {
     use super::*;
 
+    fn inline_args(value: Option<&str>, value_stdin: bool) -> SecretWriteArgs {
+        SecretWriteArgs {
+            name: "s".into(),
+            backend: "inline".into(),
+            value: value.map(str::to_string),
+            value_stdin,
+            ref_path: None,
+            description: None,
+        }
+    }
+
+    #[test]
+    fn value_stdin_strips_only_the_trailing_line_ending() {
+        for (input, want) in [
+            ("tok\n", "tok"),
+            ("tok\r\n", "tok"),
+            ("tok", "tok"),
+            // Interior newlines and surrounding spaces survive.
+            ("  a b\nc \n", "  a b\nc "),
+        ] {
+            let mut args = inline_args(None, true);
+            resolve_value_from_stdin(&mut args, &mut input.as_bytes()).expect("resolve");
+            assert_eq!(args.value.as_deref(), Some(want), "input {input:?}");
+            assert!(!args.value_stdin, "flag must be cleared before dispatch");
+        }
+    }
+
+    #[test]
+    fn value_and_value_stdin_together_is_an_error() {
+        let mut args = inline_args(Some("tok"), true);
+        let err = resolve_value_from_stdin(&mut args, &mut "other\n".as_bytes())
+            .expect_err("both flags rejected");
+        assert!(
+            err.to_string()
+                .contains("pass one of --value or --value-stdin"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_stdin_is_an_error_not_an_empty_secret() {
+        for input in ["", "\n", "\r\n"] {
+            let mut args = inline_args(None, true);
+            assert!(
+                resolve_value_from_stdin(&mut args, &mut input.as_bytes()).is_err(),
+                "input {input:?} must not store an empty secret"
+            );
+        }
+    }
+
+    #[test]
+    fn value_flag_is_untouched_without_value_stdin() {
+        let mut args = inline_args(Some("tok"), false);
+        resolve_value_from_stdin(&mut args, &mut "ignored\n".as_bytes()).expect("resolve");
+        assert_eq!(args.value.as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn value_stdin_parses_as_a_cli_flag() {
+        use clap::{Args, FromArgMatches};
+        let cmd = SecretWriteArgs::augment_args(clap::Command::new("upsert"));
+        let m = cmd.get_matches_from(["upsert", "s", "--value-stdin"]);
+        let args = SecretWriteArgs::from_arg_matches(&m).expect("parse");
+        assert!(args.value_stdin);
+        assert!(args.value.is_none());
+    }
+
+    #[tokio::test]
+    async fn write_rejects_value_stdin_from_a_stdinless_surface() {
+        let Err(err) = write_secret(inline_args(None, true)).await else {
+            panic!("value_stdin must be rejected off the CLI");
+        };
+        assert!(
+            err.to_string().contains("CLI-only"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn upsert_rejects_unknown_backend() {
         let args = SecretWriteArgs {
             name: "s".into(),
             backend: "nope".into(),
             value: None,
+            value_stdin: false,
             ref_path: None,
             description: None,
         };
@@ -288,6 +497,7 @@ mod tests {
             name: "gh".into(),
             backend: "onepassword".into(),
             value: None,
+            value_stdin: false,
             ref_path: Some("op://Personal/orca-gh/token".into()),
             description: None,
         })

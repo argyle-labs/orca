@@ -153,7 +153,6 @@ media = { path = "../media", default-features = false }
 service = { path = "../service", default-features = false }
 # The generic deploy-target domain (same thin shape). Same propagation contract.
 deploy-target = { path = "../deploy-target", default-features = false }
-regex       = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 # ── Gated heavy core (see [features]) ───────────────────────────────────
@@ -177,7 +176,7 @@ macro-runtime = { path = "../macro-runtime", optional = true }
 notifications = { path = "../notifications", optional = true }
 containers = { path = "../containers", optional = true }
 # Runtime primitives — plugins reach these through the toolkit, never directly.
-utils       = { path = "../utils", default-features = false }
+utils       = { path = "../utils", default-features = false, features = ["scrub_text"] }
 # `default-features = false` drops graphql's `shopify` feature, and with it
 # reqwest + toml. A plugin using the generic GraphQL client (unraid) goes
 # through delegated `utils::http`; only daemon-side `spec` proxies Shopify.
