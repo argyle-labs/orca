@@ -31,8 +31,8 @@
 
 use derive::orca_tool;
 use plugin_toolkit::media::{
-    self, Capability, MediaCredentials, MediaRole, MediaType, MediaUnit, MediaUrl, PathChange,
-    Provider, RescanOutcome, RescanTarget, merge_units,
+    self, MediaCapability, MediaCredentials, MediaProvider, MediaRole, MediaType, MediaUnit,
+    MediaUrl, PathChange, RescanOutcome, RescanTarget, merge_units,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -77,7 +77,7 @@ pub struct MediaListArgs {
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaListOutput {
-    pub providers: Vec<Provider>,
+    pub providers: Vec<MediaProvider>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,7 +105,7 @@ async fn media_list(
         }
         None => None,
     };
-    let mut providers: Vec<Provider> = media::providers()
+    let mut providers: Vec<MediaProvider> = media::providers()
         .into_iter()
         .filter(|p| want_type.is_none_or(|t| p.media_type == t))
         .filter(|p| want_role.is_none_or(|r| p.roles.contains(&r)))
@@ -147,7 +147,7 @@ pub struct MediaDetailArgs {
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ServedByEntry {
-    pub provider: Provider,
+    pub provider: MediaProvider,
     /// Reachable URL(s), resolved when the backend supports the `url` capability.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<MediaUrl>,
@@ -166,7 +166,7 @@ pub struct MediaDetailOutput {
     pub media_type: String,
     /// Acquirers registered for this type — capability, not fact. Empty is a
     /// legitimate answer (nothing registered yet), never an error.
-    pub downloaded_by: Vec<Provider>,
+    pub downloaded_by: Vec<MediaProvider>,
     /// Servers registered for this type. Multi-provider is normal (tv is served
     /// by BOTH plex and jellyfin).
     pub served_by: Vec<ServedByEntry>,
@@ -196,14 +196,14 @@ async fn media_detail(
             credentials: None,
             error: None,
         };
-        if b.supports(Capability::Url) {
+        if b.supports(MediaCapability::Url) {
             match b.url().await {
                 Ok(u) => entry.url = Some(u),
                 Err(e) => entry.error = Some(e.to_string()),
             }
         }
         if let Some(user) = args.user.as_deref()
-            && b.supports(Capability::Credentials)
+            && b.supports(MediaCapability::Credentials)
         {
             match b.credentials(user).await {
                 Ok(c) => entry.credentials = Some(c),
@@ -277,7 +277,7 @@ async fn gather_units(want_type: Option<MediaType>) -> (Vec<MediaUnit>, Vec<Medi
         {
             continue;
         }
-        if !b.supports(Capability::Units) {
+        if !b.supports(MediaCapability::Units) {
             continue;
         }
         match b.units().await {
@@ -489,7 +489,7 @@ fn parse_change(s: &str) -> anyhow::Result<PathChange> {
     }
 }
 
-/// Tell every server of this media type that ONE item's path changed, so each
+/// [MUTATES STATE] Tell every server of this media type that ONE item's path changed, so each
 /// re-reads just that item. Fire this from an acquirer (or a webhook) whenever a
 /// file is replaced, renamed or deleted — a PROPER/REPACK upgrade leaves every
 /// library row pointing at a filename that no longer exists, and playback then

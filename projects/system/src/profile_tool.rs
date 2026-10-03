@@ -45,7 +45,8 @@ pub struct ProfileOutput {
     pub recipe: String,
 }
 
-/// Toggle heap profiling for a plugin. Takes effect on the plugin's next spawn.
+/// [MUTATES STATE] Toggle heap profiling for a plugin. Takes effect on the
+/// plugin's next spawn.
 #[orca_tool(domain = "system", verb = "profile")]
 async fn system_profile(
     args: ProfileArgs,

@@ -1171,6 +1171,10 @@ fn snake_to_pascal(s: &str) -> String {
 /// visible the first time anyone calls it. A verb wrongly treated as a READ
 /// applies changes with no consent and no audit, which is not. So anything not
 /// named here gates.
+///
+/// `profile` is deliberately NOT here: `system.profile` toggles a plugin's
+/// heap-instrumentation flag (`MALLOC_CONF` injection on next spawn), so the
+/// noun-shaped name hid a write behind `role = "any"`.
 fn is_read_shaped(verb: &str) -> bool {
     // A dotted verb is classified by its LAST segment: `remediation.get` is a
     // `get`, `update.status` is a `status`. Matching the whole string made both
@@ -1192,7 +1196,7 @@ fn is_read_shaped(verb: &str) -> bool {
             | "read"
             | "logs"
             | "history"
-            | "profile"
+            | "audit"
             | "exports"
             | "entities"
             | "server_info"
@@ -1618,6 +1622,31 @@ mod tests {
                 "verb={verb} got: {out}"
             );
         }
+    }
+
+    /// `profile` reads like a noun, so it sat in the read-shaped list and gave
+    /// `system.profile` — which toggles a plugin's `MALLOC_CONF` injection —
+    /// `role = "any"`, no mutation flag and no gate. A noun-shaped name is not
+    /// evidence of a read.
+    #[test]
+    fn a_noun_shaped_write_verb_is_not_read_shaped() {
+        assert!(!is_read_shaped("profile"));
+        let attr = parse_attr(quote!(domain = "system", verb = "profile")).unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
+        assert!(out.contains("DATA_MUTATION : bool = true"), "got: {out}");
+        assert!(
+            out.contains("REQUIRED_ROLE : & 'static str = \"admin\""),
+            "got: {out}"
+        );
+        assert!(out.contains("EXECUTE_GATED : bool = true"), "got: {out}");
+    }
+
+    /// The inverse: `identity.privilege.audit` is a pure filesystem read, so
+    /// `audit` must not derive an admin-only, execute-gated mutation.
+    #[test]
+    fn audit_is_read_shaped() {
+        assert!(is_read_shaped("audit"));
+        assert!(is_read_shaped("privilege.audit"));
     }
 
     #[test]

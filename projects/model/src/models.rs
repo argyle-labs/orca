@@ -73,6 +73,7 @@ fn validate_provider(provider: &str, endpoint: Option<&str>) -> anyhow::Result<(
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelListArgs {
     /// Filter by provider.
     #[arg(long)]
@@ -89,6 +90,7 @@ pub struct ModelListArgs {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelListOutput {
     pub models: Vec<ModelRow>,
     /// Opaque cursor for the next page, or absent on the last page.
@@ -336,6 +338,7 @@ pub struct BackendStatus {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct BackendsCheckOutput {
     /// One entry per distinct backend endpoint discovered.
     pub backends: Vec<BackendStatus>,
@@ -347,7 +350,7 @@ pub struct BackendsCheckOutput {
 #[serde(default)]
 pub struct BackendsCheckArgs {}
 
-/// Probe every configured LLM backend (DB-registered providers + the
+/// [MUTATES STATE] Probe every configured LLM backend (DB-registered providers + the
 /// `LMSTUDIO_URL` / `OLLAMA_URL` env defaults + the Anthropic API if a key is
 /// configured) and report which are reachable and what they serve right now.
 /// Availability is dynamic, so this reflects live state at call time, not
@@ -510,7 +513,7 @@ mod tests {
     #[test]
     fn model_list_args_parses_fields() {
         let a: ModelListArgs = serde_json::from_str(
-            "{\"provider\":\"ollama\",\"enabled_only\":true,\"limit\":10,\"cursor\":\"c\"}",
+            "{\"provider\":\"ollama\",\"enabledOnly\":true,\"limit\":10,\"cursor\":\"c\"}",
         )
         .unwrap();
         assert_eq!(a.provider.as_deref(), Some("ollama"));
@@ -540,7 +543,7 @@ mod tests {
             total: Some(9),
         })
         .unwrap();
-        assert!(s.contains("\"next_cursor\":\"nc\""), "{s}");
+        assert!(s.contains("\"nextCursor\":\"nc\""), "{s}");
         assert!(s.contains("\"total\":9"), "{s}");
     }
 
@@ -651,7 +654,7 @@ mod tests {
             total_models: 1,
         };
         let s = serde_json::to_string(&out).unwrap();
-        assert!(s.contains("\"total_models\":1"), "{s}");
+        assert!(s.contains("\"totalModels\":1"), "{s}");
         let back: BackendsCheckOutput = serde_json::from_str(&s).unwrap();
         assert_eq!(back.total_models, 1);
         assert_eq!(back.backends.len(), 1);

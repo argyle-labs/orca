@@ -19,6 +19,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemKillOutput {
     pub killed_patterns: Vec<String>,
 }

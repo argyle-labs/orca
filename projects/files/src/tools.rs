@@ -59,6 +59,7 @@ pub struct FsSearchHit {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct FsRootEntry {
     pub name: String,
     pub path: String,

@@ -53,7 +53,7 @@ pub struct AgentRunOutput {
     pub delegated: bool,
 }
 
-/// Delegate a task to an orca agent. The model used is resolved via the
+/// [MUTATES STATE] Delegate a task to an orca agent. The model used is resolved via the
 /// `model.*` registry — per-agent pin (`agent.<name>.model_id` setting)
 /// wins, otherwise the global `is_default` model row.
 /// Prefer deterministic tools (read_doc, search_docs, list_services, etc.)

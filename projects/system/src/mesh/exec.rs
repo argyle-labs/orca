@@ -1333,7 +1333,7 @@ mod tests {
         let s = serde_json::to_string(&out).unwrap();
         assert_eq!(
             s,
-            r#"{"ok":false,"latency_ms":0,"error":"no such peer: nope"}"#
+            r#"{"ok":false,"latencyMs":0,"error":"no such peer: nope"}"#
         );
     }
 
@@ -1350,8 +1350,8 @@ mod tests {
         let s = serde_json::to_string(&out).unwrap();
         assert!(!s.contains("\"error\""), "error omitted when None: {s}");
         assert!(s.contains(r#""ok":true"#), "{s}");
-        assert!(s.contains(r#""latency_ms":7"#), "{s}");
-        assert!(s.contains(r#""peer_id":"abc""#), "{s}");
+        assert!(s.contains(r#""latencyMs":7"#), "{s}");
+        assert!(s.contains(r#""peerId":"abc""#), "{s}");
         assert!(s.contains(r#""hostname":"host-e""#), "{s}");
         assert!(s.contains(r#""version":"0.20.0""#), "{s}");
     }
@@ -1367,7 +1367,7 @@ mod tests {
         };
         let s = serde_json::to_string(&out).unwrap();
         assert!(s.contains(r#""mutual":true"#), "{s}");
-        assert!(s.contains(r#""notify_result":"ok""#), "{s}");
+        assert!(s.contains(r#""notifyResult":"ok""#), "{s}");
     }
 
     #[test]
@@ -1386,7 +1386,7 @@ mod tests {
         let s = serde_json::to_string(&dto).unwrap();
         // The field is serialized as `discovery_state`, NOT `state`, to avoid
         // colliding with MeshMember's `#[serde(tag = "state")]` discriminant.
-        assert!(s.contains(r#""discovery_state":"unclaimed""#), "{s}");
+        assert!(s.contains(r#""discoveryState":"unclaimed""#), "{s}");
         assert!(
             !s.contains(r#""state":"#),
             "must not emit bare `state`: {s}"
@@ -1410,7 +1410,7 @@ mod tests {
             created_at: 10,
         };
         let s = serde_json::to_string(&dto).unwrap();
-        assert!(s.contains(r#""ttl_secs":42"#), "{s}");
+        assert!(s.contains(r#""ttlSecs":42"#), "{s}");
         assert!(!s.contains("inviter_peer_id"), "None omitted: {s}");
         assert!(!s.contains("mesh_id"), "None omitted: {s}");
     }
@@ -1440,7 +1440,7 @@ mod tests {
             cleared: false,
         };
         let s = serde_json::to_string(&out).unwrap();
-        assert_eq!(s, r#"{"peer_id":"abc","cleared":false}"#);
+        assert_eq!(s, r#"{"peerId":"abc","cleared":false}"#);
     }
 
     // ── db-backed read/guard paths (ephemeral, migrated SQLite) ───────────────
@@ -1923,10 +1923,7 @@ mod tests {
             rows_removed: 2,
         };
         let s = serde_json::to_string(&out).unwrap();
-        assert_eq!(
-            s,
-            r#"{"peer_id":"abc","notify_result":"ok","rows_removed":2}"#
-        );
+        assert_eq!(s, r#"{"peerId":"abc","notifyResult":"ok","rowsRemoved":2}"#);
     }
 
     #[test]
@@ -1940,8 +1937,8 @@ mod tests {
             }],
         };
         let s = serde_json::to_string(&out).unwrap();
-        assert!(s.contains(r#""peer_id":"ghost""#), "{s}");
-        assert!(s.contains(r#""rows_removed":3"#), "{s}");
+        assert!(s.contains(r#""peerId":"ghost""#), "{s}");
+        assert!(s.contains(r#""rowsRemoved":3"#), "{s}");
         assert!(s.contains(r#""result":"notified""#), "{s}");
         let back: crate::mesh::MeshForgetOutput = serde_json::from_str(&s).unwrap();
         assert_eq!(back.notified.len(), 1);
@@ -2005,11 +2002,11 @@ mod tests {
         };
         let s = serde_json::to_string(&out).unwrap();
         assert!(s.contains(r#""version":"0.20.0""#), "{s}");
-        assert!(s.contains(r#""days_remaining":42"#), "{s}");
+        assert!(s.contains(r#""daysRemaining":42"#), "{s}");
         // Present Some field serializes; None cert infos are skipped.
-        assert!(s.contains("leaf_server"), "{s}");
-        assert!(!s.contains("mesh_ca"), "None mesh_ca omitted: {s}");
-        assert!(!s.contains("leaf_client"), "None leaf_client omitted: {s}");
+        assert!(s.contains("leafServer"), "{s}");
+        assert!(!s.contains("meshCa"), "None meshCa omitted: {s}");
+        assert!(!s.contains("leafClient"), "None leafClient omitted: {s}");
     }
 
     // ── cert_status: file-only read, no db/network ────────────────────────────

@@ -17,6 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ScheduleEntry {
     /// Row name (the `name` column in config_rows).
     pub name: String,
@@ -46,6 +47,7 @@ pub struct ScheduleListArgs {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ScheduleListOutput {
     pub schedules: Vec<ScheduleEntry>,
     /// Opaque cursor for the next page, or absent on the last page.
@@ -57,6 +59,7 @@ pub struct ScheduleListOutput {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct JobStatus {
     pub job_name: String,
     pub last_run_started: Option<String>,
@@ -116,6 +119,7 @@ pub struct ScheduleRunArgs {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ScheduleRunOutput {
     pub job: String,
     pub ok: bool,
@@ -221,7 +225,7 @@ async fn schedule_status(
     Ok(ScheduleStatusOutput { jobs })
 }
 
-/// Invoke a scheduled job immediately, out-of-band from the loop.
+/// [MUTATES STATE] Invoke a scheduled job immediately, out-of-band from the loop.
 /// Useful for testing schedule wiring without waiting for the next firing.
 /// `action=run` (the default and only action) runs the row's job now.
 #[orca_tool(domain = "schedule", verb = "create")]

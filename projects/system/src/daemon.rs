@@ -28,6 +28,7 @@ use utils::state::DaemonMode;
 /// `SystemStatusReport` (sourced from the daemon state file) — don't
 /// duplicate them here.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct DaemonRuntimeStatus {
     pub running: bool,
     pub pid: Option<u32>,
@@ -753,7 +754,7 @@ mod tests {
         let s = serde_json::to_string(&DaemonRuntimeStatus::default()).unwrap();
         assert_eq!(
             s,
-            r#"{"running":false,"pid":null,"port":null,"uptime_seconds":null}"#
+            r#"{"running":false,"pid":null,"port":null,"uptimeSeconds":null}"#
         );
     }
 
@@ -768,7 +769,7 @@ mod tests {
         let s = serde_json::to_string(&status).unwrap();
         assert_eq!(
             s,
-            r#"{"running":true,"pid":4321,"port":12002,"uptime_seconds":90}"#
+            r#"{"running":true,"pid":4321,"port":12002,"uptimeSeconds":90}"#
         );
         // Round-trips back to the same values.
         let back: DaemonRuntimeStatus = serde_json::from_str(&s).unwrap();

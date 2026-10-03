@@ -15,7 +15,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::system_detail_view::{DEFAULT_POINTS, SystemDetailView, build_view};
+use crate::system_detail_view::{DEFAULT_POINTS, SystemChartsView, build_view};
 use crate::system_info::{current_or_collect, history::read_tail};
 use crate::system_info_types::SystemInfoReport;
 use derive::orca_tool;
@@ -33,7 +33,7 @@ pub struct SystemInfoDetailOutput {
     /// the caller's `chartWidth`/`chartHeight`. Absent unless both dimensions
     /// are supplied. Folded in from the former `system.detail_view` tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub charts: Option<SystemDetailView>,
+    pub charts: Option<SystemChartsView>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]

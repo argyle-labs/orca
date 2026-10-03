@@ -37,8 +37,8 @@ pub mod remount_policy;
 pub mod replication_status;
 
 pub use mount_table::{
-    Health, MountEntry, RecoveryAction, mount_table, mount_table_of, probe_health, probe_health_rw,
-    probe_source, probe_source_nfs, probe_writable, source_endpoint,
+    MountEntry, MountHealth, RecoveryAction, mount_table, mount_table_of, probe_health,
+    probe_health_rw, probe_source, probe_source_nfs, probe_writable, source_endpoint,
 };
 pub use options::{
     MountOpt, OptionBuilder, apply_option_floor, option_present, parse_option_string,
@@ -256,7 +256,7 @@ pub enum StorageKind {
 /// operation so an unsupported call fails fast rather than at the transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum Capability {
+pub enum StorageCapability {
     /// Enumerate the shares/volumes this backend exposes.
     List,
     /// Enumerate the exports this host *serves* (NFS `/etc/exports`, SMB shares),
@@ -308,14 +308,14 @@ pub struct RecoverOutcome {
 /// the capabilities it advertises. This is the row `storage.list` surfaces and
 /// the topology aggregator turns into nodes/edges.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Provider {
+pub struct StorageProvider {
     /// Unique provider name (matches [`StorageBackend::name`]).
     pub name: String,
     pub kind: StorageKind,
     /// Human-readable endpoint, e.g. `nfs://10.0.0.5:/export/pool`,
     /// `smb://nas/media`, `proxmox:node/local-lvm`. Never contains secrets.
     pub endpoint: String,
-    pub capabilities: Vec<Capability>,
+    pub capabilities: Vec<StorageCapability>,
 }
 
 /// A single share/volume exposed by a backend.
@@ -374,6 +374,7 @@ pub struct MountOutcome {
 
 /// Capacity/usage snapshot for a volume.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Usage {
     pub id: String,
     pub total_bytes: u64,
@@ -386,7 +387,7 @@ pub enum StorageError {
     #[error("transport error: {0}")]
     Transport(String),
     #[error("capability not supported by backend `{0}`: {1:?}")]
-    Unsupported(String, Capability),
+    Unsupported(String, StorageCapability),
     #[error("share not found: {0}")]
     NotFound(String),
     #[error("{0}")]
@@ -403,11 +404,11 @@ pub enum StorageError {
 pub trait StorageBackend: Send + Sync {
     fn name(&self) -> &str;
     fn kind(&self) -> StorageKind;
-    fn capabilities(&self) -> Vec<Capability>;
+    fn capabilities(&self) -> Vec<StorageCapability>;
 
-    /// Provider descriptor for `storage.list` / topology.
-    fn provider(&self) -> Provider {
-        Provider {
+    /// StorageProvider descriptor for `storage.list` / topology.
+    fn provider(&self) -> StorageProvider {
+        StorageProvider {
             name: self.name().to_string(),
             kind: self.kind(),
             endpoint: self.endpoint(),
@@ -418,7 +419,7 @@ pub trait StorageBackend: Send + Sync {
     /// Non-secret endpoint string for display.
     fn endpoint(&self) -> String;
 
-    fn supports(&self, cap: Capability) -> bool {
+    fn supports(&self, cap: StorageCapability) -> bool {
         self.capabilities().contains(&cap)
     }
 
@@ -493,20 +494,20 @@ pub trait StorageBackend: Send + Sync {
     async fn list_shares(&self) -> Result<Vec<Share>, StorageError> {
         Err(StorageError::Unsupported(
             self.name().into(),
-            Capability::List,
+            StorageCapability::List,
         ))
     }
 
     /// Enumerate the exports this host *serves* — the read-side inverse of
     /// [`list_shares`](StorageBackend::list_shares). The default reports
-    /// [`Capability::Exports`] as unsupported so the `storage.exports` aggregator
+    /// [`StorageCapability::Exports`] as unsupported so the `storage.exports` aggregator
     /// skips a backend that doesn't advertise it; the actual readers (nfs parsing
     /// `/etc/exports` / `showmount -e`, unraid reading share config) live in their
     /// owning plugins.
     async fn list_exports(&self) -> Result<Vec<ExportEntry>, StorageError> {
         Err(StorageError::Unsupported(
             self.name().into(),
-            Capability::Exports,
+            StorageCapability::Exports,
         ))
     }
 
@@ -531,7 +532,7 @@ pub trait StorageBackend: Send + Sync {
     async fn upsert_export(&self, _entry: &ExportEntry) -> Result<ExportEntry, StorageError> {
         Err(StorageError::Unsupported(
             self.name().into(),
-            Capability::ExportWrite,
+            StorageCapability::ExportWrite,
         ))
     }
 
@@ -540,7 +541,7 @@ pub trait StorageBackend: Send + Sync {
     async fn remove_export(&self, _path: &str) -> Result<(), StorageError> {
         Err(StorageError::Unsupported(
             self.name().into(),
-            Capability::ExportWrite,
+            StorageCapability::ExportWrite,
         ))
     }
 
@@ -552,21 +553,21 @@ pub trait StorageBackend: Send + Sync {
     async fn mount(&self, _id: &str, _target: &str) -> Result<MountOutcome, StorageError> {
         Err(StorageError::Unsupported(
             self.name().into(),
-            Capability::Mount,
+            StorageCapability::Mount,
         ))
     }
 
     async fn unmount(&self, _target: &str) -> Result<MountOutcome, StorageError> {
         Err(StorageError::Unsupported(
             self.name().into(),
-            Capability::Unmount,
+            StorageCapability::Unmount,
         ))
     }
 
     async fn usage(&self, _id: &str) -> Result<Usage, StorageError> {
         Err(StorageError::Unsupported(
             self.name().into(),
-            Capability::Usage,
+            StorageCapability::Usage,
         ))
     }
 
@@ -901,17 +902,17 @@ fn parse_kind(s: &str) -> Result<StorageKind, StorageError> {
 }
 
 #[cfg(feature = "in-process")]
-fn parse_capability(s: &str) -> Result<Capability, StorageError> {
+fn parse_capability(s: &str) -> Result<StorageCapability, StorageError> {
     match s {
-        "list" => Ok(Capability::List),
-        "exports" => Ok(Capability::Exports),
-        "export_write" => Ok(Capability::ExportWrite),
-        "mount" => Ok(Capability::Mount),
-        "unmount" => Ok(Capability::Unmount),
-        "usage" => Ok(Capability::Usage),
-        "create" => Ok(Capability::Create),
-        "remove" => Ok(Capability::Remove),
-        "recover_stale" => Ok(Capability::RecoverStale),
+        "list" => Ok(StorageCapability::List),
+        "exports" => Ok(StorageCapability::Exports),
+        "export_write" => Ok(StorageCapability::ExportWrite),
+        "mount" => Ok(StorageCapability::Mount),
+        "unmount" => Ok(StorageCapability::Unmount),
+        "usage" => Ok(StorageCapability::Usage),
+        "create" => Ok(StorageCapability::Create),
+        "remove" => Ok(StorageCapability::Remove),
+        "recover_stale" => Ok(StorageCapability::RecoverStale),
         other => Err(StorageError::Other(format!(
             "unknown storage capability `{other}` — this plugin declares a capability \
              orca {orca} does not implement, which normally means it was built \
@@ -931,7 +932,7 @@ struct StorageProxy {
     name: String,
     kind: StorageKind,
     endpoint: String,
-    capabilities: Vec<Capability>,
+    capabilities: Vec<StorageCapability>,
     mount_style: MountStyle,
     net_fstypes: Vec<String>,
     default_source_port: Option<u16>,
@@ -968,7 +969,7 @@ impl StorageBackend for StorageProxy {
     fn kind(&self) -> StorageKind {
         self.kind
     }
-    fn capabilities(&self) -> Vec<Capability> {
+    fn capabilities(&self) -> Vec<StorageCapability> {
         self.capabilities.clone()
     }
     fn endpoint(&self) -> String {
@@ -1202,7 +1203,7 @@ pub fn backend(name: &str) -> Option<Arc<dyn StorageBackend>> {
 }
 
 /// Descriptor rows for every registered provider — the `storage.list` view.
-pub fn providers() -> Vec<Provider> {
+pub fn providers() -> Vec<StorageProvider> {
     backends().iter().map(|b| b.provider()).collect()
 }
 
@@ -1241,8 +1242,12 @@ mod tests {
         fn kind(&self) -> StorageKind {
             StorageKind::NetworkShare
         }
-        fn capabilities(&self) -> Vec<Capability> {
-            vec![Capability::List, Capability::Mount, Capability::Unmount]
+        fn capabilities(&self) -> Vec<StorageCapability> {
+            vec![
+                StorageCapability::List,
+                StorageCapability::Mount,
+                StorageCapability::Unmount,
+            ]
         }
         fn endpoint(&self) -> String {
             "nfs://nas/pool".into()
@@ -1277,8 +1282,8 @@ mod tests {
         assert_eq!(backends().iter().filter(|b| b.name() == "nas-a").count(), 1);
         let p = backend("nas-a").expect("registered");
         assert_eq!(p.kind(), StorageKind::NetworkShare);
-        assert!(p.supports(Capability::Mount));
-        assert!(!p.supports(Capability::Create));
+        assert!(p.supports(StorageCapability::Mount));
+        assert!(!p.supports(StorageCapability::Create));
     }
 
     #[tokio::test]
@@ -1337,7 +1342,7 @@ mod tests {
         let err = nas.usage("pool").await.expect_err("usage unsupported");
         assert!(matches!(
             err,
-            StorageError::Unsupported(_, Capability::Usage)
+            StorageError::Unsupported(_, StorageCapability::Usage)
         ));
         let shares = nas.list_shares().await.expect("list supported");
         assert_eq!(shares.len(), 1);
@@ -1361,13 +1366,13 @@ mod tests {
             nas.upsert_export(&entry)
                 .await
                 .expect_err("upsert unsupported"),
-            StorageError::Unsupported(_, Capability::ExportWrite)
+            StorageError::Unsupported(_, StorageCapability::ExportWrite)
         ));
         assert!(matches!(
             nas.remove_export("/export/pool")
                 .await
                 .expect_err("remove unsupported"),
-            StorageError::Unsupported(_, Capability::ExportWrite)
+            StorageError::Unsupported(_, StorageCapability::ExportWrite)
         ));
     }
 
@@ -1411,7 +1416,7 @@ mod tests {
 
         let b = backend("proxy-nas").expect("registered");
         assert_eq!(b.kind(), StorageKind::NetworkShare);
-        assert!(b.supports(Capability::List) && b.supports(Capability::Unmount));
+        assert!(b.supports(StorageCapability::List) && b.supports(StorageCapability::Unmount));
 
         let shares = b.list_shares().await.expect("proxied list_shares");
         assert_eq!(shares.len(), 1);

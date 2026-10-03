@@ -170,6 +170,7 @@ pub enum ContainerState {
 /// mounts reconciler uses to build the (mount → dependents) edge for the
 /// dep graph ([[self-healing-reconciler.md]] §2.2).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerMount {
     /// Host-side path (docker `Source`, lxc `mp*` host part).
     pub source: PathBuf,
@@ -181,6 +182,7 @@ pub struct ContainerMount {
 
 /// One open published port (host:container, protocol).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerPort {
     pub host_port: u16,
     pub container_port: u16,
@@ -195,6 +197,7 @@ pub struct ContainerPort {
 /// fields rather than a raw string so the reconciler can compare across
 /// runtimes without re-parsing.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct StartupOrdering {
     /// Lower-first start order. Proxmox `startup: order=<N>`.
     pub order: Option<u32>,
@@ -233,6 +236,7 @@ impl StartupOrdering {
 /// - `startup` — boot ordering (LXC), feeds the §2.2 forward/reverse
 ///   restart sequence.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Container {
     pub id: String,
     pub name: String,
@@ -361,7 +365,8 @@ impl Default for LogTail {
 /// `exit_code` is `None` only when the runtime couldn't report one (e.g. the
 /// process was still attached when the stream closed).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct ExecOutput {
+#[serde(rename_all = "camelCase")]
+pub struct ContainerExecOutput {
     /// Process exit code, when the runtime reported it.
     pub exit_code: Option<i64>,
     pub stdout: String,
@@ -413,7 +418,7 @@ pub trait RuntimeAdapter: Send + Sync {
         _id: &str,
         _cmd: &[String],
         _stdin: Option<String>,
-    ) -> Result<ExecOutput, AdapterError> {
+    ) -> Result<ContainerExecOutput, AdapterError> {
         Err(AdapterError::Refused(
             "exec not supported by this runtime adapter".into(),
         ))
@@ -1203,7 +1208,7 @@ pub struct ContainerCreateArgs {
     pub stdin: Option<String>,
 }
 
-/// Run a one-shot command inside a container/CT and return its captured output
+/// [MUTATES STATE] Run a one-shot command inside a container/CT and return its captured output
 /// (`action=exec`). Routes to the owning runtime adapter (`docker exec` /
 /// `pct exec`). The building block for operator shells and the migration
 /// engine's in-guest steps.
@@ -1211,7 +1216,7 @@ pub struct ContainerCreateArgs {
 async fn container_create(
     args: ContainerCreateArgs,
     _ctx: &contract::ToolCtx,
-) -> anyhow::Result<ExecOutput> {
+) -> anyhow::Result<ContainerExecOutput> {
     let Some(ContainerCreateAction::Exec) = args.action else {
         anyhow::bail!("container.create requires action=exec");
     };
@@ -1341,8 +1346,8 @@ mod tests {
             id: &str,
             cmd: &[String],
             _stdin: Option<String>,
-        ) -> Result<ExecOutput, AdapterError> {
-            Ok(ExecOutput {
+        ) -> Result<ContainerExecOutput, AdapterError> {
+            Ok(ContainerExecOutput {
                 exit_code: Some(0),
                 stdout: format!("{}:{}:{}", self.kind.as_str(), id, cmd.join(" ")),
                 stderr: String::new(),
@@ -1425,7 +1430,7 @@ mod tests {
 
     #[test]
     fn exec_output_default_is_empty() {
-        let out = ExecOutput::default();
+        let out = ContainerExecOutput::default();
         assert_eq!(out.exit_code, None);
         assert!(out.stdout.is_empty());
         assert!(out.stderr.is_empty());

@@ -534,6 +534,7 @@ pub fn should_rotate(cert_pem: &str, threshold_days: i64) -> Result<bool> {
 
 /// One cert's expiry summary.
 #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct CertInfo {
     pub cn: String,
     pub fingerprint: String,
@@ -545,6 +546,7 @@ pub struct CertInfo {
 /// Mesh cert + trust status for a host: founder/member flags, each mesh cert's
 /// days-remaining, and the running orca version.
 #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshCertStatus {
     pub founder: bool,
     pub member: bool,

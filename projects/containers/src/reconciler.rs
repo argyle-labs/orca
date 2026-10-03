@@ -95,7 +95,11 @@ pub enum ReconcileAction {
 /// Typed reason field on a [`ReconcileRow`]. Each variant carries
 /// exactly the context the operator needs to understand the action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum ReconcileReason {
     /// Started, no breaker involvement.
     StartedClean,
@@ -243,6 +247,7 @@ pub struct StaleMountBlockedPayload {
 /// stamped into the payload so the operator sees *why* the start was
 /// held without having to re-run classification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HeldPendingBreakerPayload {
     pub host: String,
     pub runtime: RuntimeKind,
@@ -1443,7 +1448,7 @@ pub enum ContainerUpdateOutput {
     Unwedge(ContainersUnwedgeOutput),
 }
 
-/// Drive a container-lifecycle imperative. `reconcile`/`reconcile_dry` run a
+/// [MUTATES STATE] Drive a container-lifecycle imperative. `reconcile`/`reconcile_dry` run a
 /// (real / plan-only) reconcile pass across every registered adapter;
 /// `unhold` clears a `Held` breaker record; `unwedge` manually triggers
 /// recovery for a wedged container — routing through the same free fns the
@@ -4070,7 +4075,7 @@ mod tests {
                 exit_code: Some(137)
             })
             .expect("ser"),
-            "{\"kind\":\"started_tentative\",\"exit_code\":137}"
+            "{\"kind\":\"started_tentative\",\"exitCode\":137}"
         );
         assert_eq!(
             serde_json::to_string(&ReconcileReason::PolicyNotAutoStart {
@@ -4088,7 +4093,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_string(&ReconcileReason::BreakerHeld { exit_code: None }).expect("ser"),
-            "{\"kind\":\"breaker_held\",\"exit_code\":null}"
+            "{\"kind\":\"breaker_held\",\"exitCode\":null}"
         );
         assert_eq!(
             serde_json::to_string(&ReconcileReason::NotACandidate {
@@ -4147,9 +4152,9 @@ mod tests {
 
     #[test]
     fn held_pending_breaker_payload_currently_running_defaults_false() {
-        let json = "{\"host\":\"h\",\"runtime\":\"docker\",\"container_id\":\"id\",\
-\"container_name\":\"n\",\"exit_code\":1,\"hold_reason\":{\"kind\":\
-\"fast_reexit_after_orca_start\",\"within_secs\":5,\"exit_code\":1}}";
+        let json = "{\"host\":\"h\",\"runtime\":\"docker\",\"containerId\":\"id\",\
+\"containerName\":\"n\",\"exitCode\":1,\"holdReason\":{\"kind\":\
+\"fast_reexit_after_orca_start\",\"withinSecs\":5,\"exitCode\":1}}";
         let p: HeldPendingBreakerPayload = serde_json::from_str(json).expect("de");
         assert!(!p.currently_running, "omitted field must default to false");
         assert_eq!(p.exit_code, Some(1));

@@ -42,6 +42,7 @@ pub struct StatusArgs {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct StatusOutput {
     /// Whether the daemon is live enough to reconcile (schema registry present).
     pub daemon_live: bool,
@@ -72,6 +73,7 @@ pub struct DiffArgs {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct DiffOutput {
     /// The reconcile plan. Nothing here is executed — read-only.
     #[serde(flatten)]
@@ -211,7 +213,7 @@ async fn config_source_diff(
 
 // ── Stubbed verbs (surface shape only) ───────────────────────────────────────
 
-/// [STUB] Write the reconcile plan to the live config store. Not implemented in
+/// [MUTATES STATE] [STUB] Write the reconcile plan to the live config store. Not implemented in
 /// the read-only slice — the mutation path (create/update/delete under
 /// `updated_by = "config.source"`) is a follow-up.
 #[orca_tool(domain = "config.source", verb = "apply")]
@@ -224,7 +226,7 @@ async fn config_source_apply(
     )
 }
 
-/// [STUB] Fetch/refresh the meerkat checkout (git pull). Not implemented in the
+/// [MUTATES STATE] [STUB] Fetch/refresh the meerkat checkout (git pull). Not implemented in the
 /// read-only slice.
 #[orca_tool(domain = "config.source", verb = "pull")]
 async fn config_source_pull(
@@ -234,7 +236,7 @@ async fn config_source_pull(
     anyhow::bail!("config.source.pull is not yet implemented (read-only slice)")
 }
 
-/// [STUB] PR-writeback of live rows back to git. Not implemented in the
+/// [MUTATES STATE] [STUB] PR-writeback of live rows back to git. Not implemented in the
 /// read-only slice.
 #[orca_tool(domain = "config.source", verb = "push")]
 async fn config_source_push(
@@ -246,7 +248,7 @@ async fn config_source_push(
     )
 }
 
-/// [STUB] One-shot pull → diff → apply → push. Not implemented in the read-only
+/// [MUTATES STATE] [STUB] One-shot pull → diff → apply → push. Not implemented in the read-only
 /// slice.
 #[orca_tool(domain = "config.source", verb = "sync")]
 async fn config_source_sync(

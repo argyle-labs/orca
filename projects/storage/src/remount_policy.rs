@@ -84,7 +84,7 @@ fn default_confirm_ticks() -> u32 {
 
 /// Fail-over / fail-back policy between a mount's ordered sources.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub struct Failover {
     /// Whether ordered-source fail-over is performed at all. When `false` the
     /// mount stays pinned to its primary source and is never re-elected.
@@ -133,7 +133,7 @@ fn default_settle_secs() -> u32 {
 /// Drain policy — how a source is released from every client before a
 /// coordinated operation (a source reboot) that will take it offline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub struct Drain {
     /// Whether a coordinated drain is performed at all.
     #[serde(default = "default_true")]
