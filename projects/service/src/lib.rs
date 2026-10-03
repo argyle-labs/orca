@@ -3014,12 +3014,8 @@ mod tests {
                 .map(|(k, _)| (*k, std::env::var_os(k)))
                 .collect();
             for (k, v) in vars {
-                // SAFETY: every test that mutates the environment OR spawns a
-                // subprocess is in the `serial(env)` group, so no other test
-                // thread is reading or writing the environment concurrently.
-                // Both halves matter: `std::env` is process-global, so a test
-                // left out of the group sees a PATH holding only `fake_cli`'s
-                // stubs and fails on spawn (or silently runs the wrong binary).
+                // SAFETY: `serial(env)` holds every test that touches the
+                // environment or spawns — both halves, or a spawner races PATH.
                 unsafe {
                     match v {
                         Some(v) => std::env::set_var(k, v),

@@ -1,31 +1,14 @@
 //! `identity.privilege.audit` — who can escalate on this host, and how.
 //!
-//! Answers the question nothing in orca could answer before: *"who can become
-//! root here, via what, and would removing a rule lock the operator out?"*
+//! Parses `sudoers`/`sudoers.d` and `doas.conf` (Alpine hosts carry both) and
+//! reports dangling targets, sole grants, blanket `NOPASSWD: ALL`, and grants
+//! that no group rule backs.
 //!
-//! Filed as orca#681 after a retired `halvor` footprint was removed from
-//! freyr/baldur/thor/frigg (2026-10-01) and three classes of latent problem
-//! surfaced, none of which were visible from any orca surface:
+//! Read-only: filesystem parsing only, no DB, no writes, safe to run anywhere.
+//! Peer-dispatchable, so `--peer <host>` reports that host's own state.
 //!
-//! - **dangling grants** — `svc` held `NOPASSWD` on three absolute paths, two of
-//!   which existed on no host at all. A `NOPASSWD` rule naming a non-existent
-//!   path is a standing escalation: whoever can create that path gets root.
-//! - **sole grants** — `skey ALL=(ALL) NOPASSWD: ALL` lived *only* inside the
-//!   retired file, and no group rule (`%sudo`/`%wheel`) granted it anywhere, so
-//!   deleting that file would have locked the operator out of four hosts. That
-//!   had to be found by reading the file by hand.
-//! - **two privilege systems** — Debian hosts use `sudoers.d`, Alpine hosts also
-//!   carry `doas.conf`. Both had to be audited separately.
-//!
-//! Read-only and side-effect free: pure filesystem parsing, no DB, no writes, so
-//! it is safe to run anywhere at any time. Peer-dispatchable, so
-//! `orca identity privilege audit --peer <host>` reports that host's own state
-//! (the handler runs there).
-//!
-//! **Coverage is honest about privilege.** `/etc/sudoers*` is typically
-//! `0440 root:root` and the daemon does not necessarily run as root, so files it
-//! cannot read are reported in `unreadable` rather than silently skipped — a
-//! partial audit must never read as a clean one.
+//! Files the daemon cannot read (sudoers is typically `0440 root:root`) land in
+//! `unreadable` with `complete: false`: a partial audit must not read as clean.
 
 use derive::orca_tool;
 use schemars::JsonSchema;

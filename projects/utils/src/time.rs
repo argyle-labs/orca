@@ -56,14 +56,8 @@ impl Timestamp {
         Self(Utc::now())
     }
 
-    /// Crate-internal bridge to the backing datetime type — used only by other
-    /// `utils` modules (e.g. `schedule`) that must hand a `DateTime` to a
-    /// library while keeping chrono hidden from all external callers. Not part
-    /// of the public surface.
-    ///
-    /// Gated on the only feature that consumes it: `utils` is tree-shakable, so
-    /// in a thin build without `schedule` this pair is genuinely unreachable and
-    /// an ungated `pub(crate)` trips `dead_code`.
+    /// Hands the backing `DateTime` to `utils::schedule`, keeping chrono out of
+    /// the public surface. Gated on its only consumer: `utils` is tree-shakable.
     #[cfg(feature = "schedule")]
     pub(crate) fn inner(&self) -> DateTime<Utc> {
         self.0

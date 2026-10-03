@@ -325,9 +325,7 @@ pub async fn mesh_join_core(
         joiner_hostname: &'a str,
         joiner_pubkey_fp: &'a str,
         joiner_display_name: &'a str,
-        /// Our mesh LISTEN port. The inviter cannot infer this — all it sees is
-        /// our ephemeral TCP source port — so reporting it is what makes us
-        /// dialable afterwards.
+        /// Our mesh LISTEN port; reporting it is what makes us dialable.
         joiner_mesh_port: u16,
     }
     let body = RequestBody {

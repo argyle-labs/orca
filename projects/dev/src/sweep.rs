@@ -492,8 +492,7 @@ cargo-machete found the following unused dependencies in /repo:
 
         #[test]
         fn binary_available_true_for_cargo() {
-            // Resolves `cargo` via PATH, so it must not run while an env-mutating
-            // test elsewhere in this binary has PATH cleared.
+            // Resolves `cargo` via PATH; must not run while a test has PATH cleared.
             let _lock = crate::env_lock();
             // `cargo` is always on PATH while `cargo test` runs — the true arm of
             // `binary_available` (status().success()).
@@ -502,8 +501,7 @@ cargo-machete found the following unused dependencies in /repo:
 
         #[test]
         fn resolve_workspace_root_none_locates_workspace() {
-            // Shells out to `cargo` via PATH — same serialization requirement as
-            // `binary_available_true_for_cargo`.
+            // Resolves `cargo` via PATH; same requirement as the test above.
             let _lock = crate::env_lock();
             // The `None` branch shells out to `cargo locate-project --workspace`
             // and returns the manifest's parent. Run from within this workspace

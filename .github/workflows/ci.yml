@@ -293,21 +293,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: sccache --show-stats || true
 
-      # Reads the profile data the test run just wrote — NO recompile, no rerun.
-      # Floor is the single source of truth in .coverage-floor (shared with the
-      # Makefile `coverage` target and the README badge).
-      #
-      # ONE pass renders the HTML *and* enforces the floor. These were two
-      # steps, and each one re-merged and re-read the same profraw set from
-      # scratch: measured on the green run of PR #685, 22.2s for the
-      # fail-under pass plus 32.1s for the HTML pass. `--fail-under-lines` is
-      # evaluated after the report is written, so the artifact is still
-      # produced on a coverage failure — which is exactly when it is wanted.
-      #
-      # !cancelled() rather than always(): we want the HTML report on success AND
-      # on genuine failure, but NOT when a newer push superseded this run —
-      # Gitea's artifact API 500s on a cancelled task ("task is not running"),
-      # which produced spurious red "Create Artifact Container failed" errors.
+      # Reads the profile data the test run just wrote — no recompile, no rerun.
+      # Floor lives in .coverage-floor (shared with `make coverage` and the badge).
+      # ONE pass renders the HTML and enforces the floor: `--fail-under-lines` is
+      # evaluated after the report is written, so the artifact survives a failure.
+      # !cancelled(): report on failure too, but not when a newer push superseded
+      # this run — Gitea's artifact API 500s on a cancelled task.
       - name: Coverage report + gate (line coverage >= floor)
         if: ${{ !cancelled() }}
         run: |
