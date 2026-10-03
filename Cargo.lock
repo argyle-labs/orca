@@ -348,7 +348,6 @@ version = "0.2.1-rc.10"
 dependencies = [
  "anyhow",
  "argon2",
- "async-trait",
  "clap",
  "contract",
  "db",
@@ -369,7 +368,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
- "tracing",
  "url",
  "utils",
 ]
@@ -4841,7 +4839,6 @@ dependencies = [
  "plugin-abi",
  "plugin-proto",
  "progenitor-client",
- "regex",
  "regress 0.10.5",
  "reqwest 0.13.4",
  "rusqlite",
@@ -8386,6 +8383,7 @@ dependencies = [
  "glob",
  "rand 0.10.2",
  "rcgen",
+ "regex",
  "reqwest 0.13.4",
  "roxmltree",
  "rustls",

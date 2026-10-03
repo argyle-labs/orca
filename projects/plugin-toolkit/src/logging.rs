@@ -10,9 +10,10 @@
 //!      Memory is zeroed on drop.
 //!   2. **Sink**: every serialised log line passes through [`scrub`],
 //!      which rewrites well-known sensitive patterns (PVE API tokens,
-//!      `Authorization: Bearer …`, `X-Api-Key: …`, JSON fields named
-//!      `token`/`password`/`secret`/`api_key`/`token_secret`) to `***`
-//!      *before* it reaches stderr or the on-disk log.
+//!      `Authorization: Bearer …`, `X-Api-Key: …`, and quoted JSON fields
+//!      whose name is secret-shaped) to `***` *before* it reaches stderr or
+//!      the on-disk log. The patterns and the sensitive-keyword list live in
+//!      [`utils::scrub`], shared with `contract::plan`'s structured redactor.
 //!
 //! - **Single setup**. Binaries call [`init`] once. EnvFilter + JSON +
 //!   scrubbing writer + tee-to-file are all wired here so the recipe
@@ -20,12 +21,12 @@
 //!
 //! ## What this does not catch
 //!
-//! Field names not on the keyword list (`apikey` vs `api_key`, custom
-//! `x-foo-secret` headers, plaintext credentials in URL path segments).
-//! Add patterns as needed; tests below pin the current coverage.
+//! Field names not on the keyword list (custom `x-foo-secret` headers,
+//! plaintext credentials in URL path segments). Add patterns in
+//! [`utils::scrub`] — not here — so every surface tightens at once; the tests
+//! below pin the coverage this module depends on.
 
 use anyhow::{Context, Result};
-use regex::Regex;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -94,59 +95,16 @@ impl Zeroize for String {
 
 // ── Sink-side scrub ────────────────────────────────────────────────────────
 
-static SCRUB_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    // Order matters: longer / more-specific patterns first so they win
-    // over the generic JSON-keyword catch.
-    vec![
-        // PVEAPIToken=user@realm!tokenid=uuid — both sides of the `=`
-        // are sensitive (the token id is half of the credential).
-        Regex::new(r#"(PVEAPIToken=)[^\s"']+"#).unwrap(),
-        // Authorization headers: Bearer / Basic / Token / PVE / etc.
-        Regex::new(r#"(?i)(authorization\s*[:=]\s*"?)([A-Za-z]+\s+)?[A-Za-z0-9._\-+/=]+"#).unwrap(),
-        // X-Api-Key / X-Auth-Token header lines and JSON pairs.
-        Regex::new(r#"(?i)(x-(?:api|auth)-(?:key|token)\s*[:=]\s*"?)[A-Za-z0-9._\-]+"#).unwrap(),
-        // Generic JSON: "token": "...", "password": "...", "secret": "...",
-        // "api_key": "...", "token_secret": "...". Quoted values only.
-        Regex::new(
-            r#"("(?:token|password|secret|api_key|apikey|token_secret|access_token|refresh_token)"\s*:\s*)"[^"]*""#,
-        )
-        .unwrap(),
-    ]
-});
-
 /// Scrub a single line, rewriting any matched secret to `***`. Returns
 /// `Cow::Borrowed` when nothing matched so the hot path stays
 /// allocation-free.
+///
+/// Thin delegation to [`utils::scrub::scrub_line`]. The patterns and the
+/// sensitive-keyword list live in `utils` so `contract::plan`'s structured
+/// redactor and this log sink decide "is this a secret?" from ONE list — a
+/// second copy here is how one of them ends up missing a field.
 pub fn scrub(line: &str) -> Cow<'_, str> {
-    let mut out: Cow<'_, str> = Cow::Borrowed(line);
-    for pat in SCRUB_PATTERNS.iter() {
-        let replaced = match &out {
-            Cow::Borrowed(s) => pat.replace_all(s, scrub_replacement),
-            Cow::Owned(s) => Cow::Owned(pat.replace_all(s, scrub_replacement).into_owned()),
-        };
-        if let Cow::Owned(s) = replaced {
-            out = Cow::Owned(s);
-        }
-    }
-    out
-}
-
-fn scrub_replacement(caps: &regex::Captures<'_>) -> String {
-    // Group 1 (if present) is a "keep" prefix — header name or JSON
-    // `"token":` — that the regex matched but should remain verbatim.
-    // The rest of the match is the secret, replaced by `***` (quoted
-    // for JSON-shape preservation when group 1 ends with `:`).
-    match caps.get(1) {
-        Some(prefix) => {
-            let prefix = prefix.as_str();
-            if prefix.trim_end().ends_with(':') {
-                format!("{prefix}\"***\"")
-            } else {
-                format!("{prefix}***")
-            }
-        }
-        None => "***".to_string(),
-    }
+    utils::scrub::scrub_line(line)
 }
 
 /// `std::io::Write` wrapper that scrubs each full line before forwarding

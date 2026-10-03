@@ -32,6 +32,8 @@ pub mod reachability;
 /// Ordered endpoint reachability paths — the ONE shared `Route` type used by
 /// mesh (contract/db/mesh) and plugins alike. No scalar URL/host fields anywhere.
 pub mod route;
+/// Secret scrubbing — the one keyword list the whole stack redacts against.
+pub mod scrub;
 pub mod time;
 /// URL percent-encoding + base/path join. orca-owned; the urlencoding lib is
 /// hidden.

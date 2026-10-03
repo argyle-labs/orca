@@ -66,8 +66,10 @@ pub struct ExecutionPlan {
     /// response; the verb refused nothing, it simply cannot yet describe itself.
     pub detailed: bool,
     /// The arguments as received, echoed so an operator can confirm the inputs
-    /// before opting in. Free-form by nature — it is whatever this verb's Args
-    /// are — which is what `JsonAny` is for.
+    /// before opting in, with every secret-shaped field redacted (the key is
+    /// kept, the value replaced — see [`ExecutionPlan::generic`]). Free-form by
+    /// nature — it is whatever this verb's Args are — which is what `JsonAny`
+    /// is for.
     #[allow(clippy::disallowed_types)]
     pub inputs: JsonAny,
     /// How to actually apply it.
@@ -77,6 +79,12 @@ pub struct ExecutionPlan {
 impl ExecutionPlan {
     /// The generic plan used when a gated verb has not implemented its own.
     /// Deliberately honest: `detailed: false` and no invented changes.
+    ///
+    /// `inputs` is redacted here, because this is the one constructor every
+    /// gated verb's dry-run funnels through. Echoing args verbatim printed
+    /// `secrets.upsert.value`, `spec.update.token`, `model.create.apiKey` and
+    /// friends straight to stdout and into anything that logged the plan; a
+    /// per-verb fix would have leaked again on the next verb added.
     #[allow(clippy::disallowed_types)]
     pub fn generic(tool: &str, inputs: JsonAny) -> Self {
         Self {
@@ -85,7 +93,7 @@ impl ExecutionPlan {
             summary: format!("{tool} would run with the inputs below; nothing was changed"),
             changes: Vec::new(),
             detailed: false,
-            inputs,
+            inputs: utils::scrub::redact_json(inputs.0).into(),
             how_to_execute: format!("re-invoke {tool} with `execute: true` to apply"),
         }
     }
@@ -118,6 +126,66 @@ mod tests {
             "generic plan must not invent changes it cannot know"
         );
         assert!(p.how_to_execute.contains("execute"));
+    }
+
+    /// The measured defect: `printf 'CANARY-VALUE-12345' | orca secrets upsert
+    /// … --value-stdin` printed the literal secret in the dry-run output.
+    #[test]
+    #[allow(clippy::disallowed_types)]
+    fn plan_never_echoes_a_secret_but_keeps_the_key() {
+        let inputs = serde_json::json!({
+            "name": "canary.probe",
+            "backend": "inline",
+            "value": "CANARY-VALUE-12345",
+        });
+        let p = ExecutionPlan::generic("secrets.upsert", inputs.into());
+        let text = serde_json::to_string(&p).expect("serialize plan");
+        assert!(
+            !text.contains("CANARY-VALUE-12345"),
+            "secret echoed in plan: {text}"
+        );
+        // The key must survive — a dry-run that drops the field lies about
+        // which inputs would be written.
+        assert!(text.contains("\"value\""), "key was dropped: {text}");
+        assert_eq!(p.inputs.0["value"], utils::scrub::REDACTED);
+        assert_eq!(p.inputs.0["name"], "canary.probe");
+        assert_eq!(p.inputs.0["backend"], "inline");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_types)]
+    fn plan_redacts_secrets_nested_in_objects_and_arrays() {
+        let inputs = serde_json::json!({
+            "host": "ct/107",
+            "auth": { "apiKey": "CANARY-VALUE-12345" },
+            "shares": [
+                { "path": "/mnt/a", "password": "CANARY-VALUE-12345" },
+                { "path": "/mnt/b", "nested": { "refresh_token": "CANARY-VALUE-12345" } },
+            ],
+        });
+        let p = ExecutionPlan::generic("storage.share.create", inputs.into());
+        let text = serde_json::to_string(&p).expect("serialize plan");
+        assert!(
+            !text.contains("CANARY-VALUE-12345"),
+            "nested secret echoed in plan: {text}"
+        );
+        // Control: the addressing fields an operator confirms against are intact.
+        assert_eq!(p.inputs.0["host"], "ct/107");
+        assert_eq!(p.inputs.0["shares"][0]["path"], "/mnt/a");
+        assert_eq!(p.inputs.0["shares"][1]["path"], "/mnt/b");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_types)]
+    fn redaction_survives_attaching_change_detail() {
+        // `detailed()` must not reconstruct `inputs` from the raw args.
+        let inputs = serde_json::json!({ "token": "CANARY-VALUE-12345" });
+        let p = ExecutionPlan::generic("spec.update", inputs.into()).detailed(
+            "would replace 1 spec",
+            vec![PlannedChange::new("spec", "overwrite")],
+        );
+        let text = serde_json::to_string(&p).expect("serialize plan");
+        assert!(!text.contains("CANARY-VALUE-12345"), "{text}");
     }
 
     #[test]

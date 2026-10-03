@@ -376,20 +376,6 @@ async fn main() -> Result<()> {
     // (which link `dispatch` only for the tool surface) free of reqwest/rustls.
     orca::daemon_client::HttpDaemonClient::install();
 
-    // Core-owned 1Password secrets backend: a secret row with
-    // backend=onepassword resolves `op://vault/item/field`.
-    //
-    // Registered HERE, in the shared pre-dispatch init, not in the serve path —
-    // CLI ops dispatch in-process through the `dispatch::cli` inventory, so a
-    // serve-only registration would make `orca secrets detail` fail on a secret
-    // that resolves fine over REST. Same surface everywhere is the rule.
-    //
-    // Unconditional, including where `op` is absent: a host that cannot resolve
-    // must still answer WHY, rather than "no secrets backend 'onepassword' is
-    // registered", which names no remedy. Registration touches no DB and spawns
-    // nothing; credentials are read lazily at resolve time.
-    auth::onepassword::register();
-
     // ntfy extracted to ~/code/ntfy (argyle-labs/ntfy) — its notification
     // backends now register through the plugin-loader's `notifications`-domain
     // proxy seam (one `NotifyProxy` per enabled endpoint, advertised by the

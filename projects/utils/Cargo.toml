@@ -16,7 +16,12 @@ path = "src/lib.rs"
 # [[plugins-stay-thin]].
 [features]
 default = ["full"]
-full = ["http", "git", "pki", "yaml", "schedule", "state", "rt", "search", "config_format"]
+full = ["http", "git", "pki", "yaml", "schedule", "state", "rt", "search", "config_format", "scrub_text"]
+# `utils::scrub::scrub_line` — the regex TEXT scrubber for log lines. Confines
+# `regex` so a thin consumer (contract, plugin tool plugins) links none of it;
+# the STRUCTURED redactor in the same module is always available and needs no
+# dependency beyond the serde_json utils already carries.
+scrub_text = ["dep:regex"]
 # `utils::state` — daemon state file (async poll helper). Pulls tokio via `rt`.
 # NOTE: no longer pulls `contract` — `state_path()` inlines the `$ORCA_HOME`
 # resolution so `utils` stays a dependency-free leaf (see route module rationale).
@@ -94,6 +99,9 @@ x509-parser = { workspace = true, optional = true }
 
 # Hashing (hash module)
 blake3 = { workspace = true }
+
+# Regex (scrub::scrub_line) — gated behind the `scrub_text` feature.
+regex  = { workspace = true, optional = true }
 
 # Glob (search module) — gated behind the `search` feature.
 glob   = { workspace = true, optional = true }
