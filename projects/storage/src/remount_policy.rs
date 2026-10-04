@@ -83,9 +83,11 @@ fn default_confirm_ticks() -> u32 {
 }
 
 /// Fail-over / fail-back policy between a mount's ordered sources.
-#[derive::snake_aliases]
+// Persisted snake_case in the mesh-replicated `mounts.remount_policy` column so
+// v0.2.1-rc.11 hosts decode it instead of defaulting and re-writing it (LWW).
+#[derive::camel_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct Failover {
     /// Whether ordered-source fail-over is performed at all. When `false` the
     /// mount stays pinned to its primary source and is never re-elected.
@@ -133,9 +135,10 @@ fn default_settle_secs() -> u32 {
 
 /// Drain policy — how a source is released from every client before a
 /// coordinated operation (a source reboot) that will take it offline.
-#[derive::snake_aliases]
+// Persisted snake_case alongside [`Failover`]; see there.
+#[derive::camel_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct Drain {
     /// Whether a coordinated drain is performed at all.
     #[serde(default = "default_true")]
@@ -162,7 +165,7 @@ impl Default for Drain {
 /// The typed per-mount remount policy — the whole engine's behaviour axis in one
 /// serde object, replacing the opaque `remount_policy` string.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "snake_case", default)]
 pub struct RemountPolicy {
     /// How aggressively a re-election may disrupt a busy mount.
     pub aggression: RemountAggression,
@@ -218,19 +221,62 @@ mod tests {
         assert_eq!(p.drain.settle_secs, 15);
     }
 
+    fn non_default_policy() -> RemountPolicy {
+        RemountPolicy {
+            aggression: RemountAggression::Force,
+            failover: Failover {
+                enabled: true,
+                return_to_primary: false,
+                confirm_ticks: 7,
+                probe: SourceProbe::Nfs,
+            },
+            drain: Drain {
+                enabled: true,
+                mode: DrainMode::Force,
+                settle_secs: 42,
+            },
+        }
+    }
+
     #[test]
     fn a_policy_persisted_in_snake_case_keeps_its_non_default_values() {
-        // Rows written before the camelCase rename. Every field is `default`,
-        // so without the aliases this would silently decode to the defaults.
+        // Every field is `default`, so a key mismatch silently decodes to the
+        // defaults rather than failing.
         let p = RemountPolicy::from_json_opt(Some(
             r#"{"aggression":"force","failover":{"enabled":true,"return_to_primary":false,"confirm_ticks":7,"probe":"nfs"},"drain":{"enabled":true,"mode":"force","settle_secs":42}}"#,
         ));
-        assert!(!p.failover.return_to_primary);
-        assert_eq!(p.failover.confirm_ticks, 7);
-        assert_eq!(p.drain.settle_secs, 42);
+        assert_eq!(p, non_default_policy());
+    }
+
+    #[test]
+    fn a_policy_written_in_camel_case_keeps_its_non_default_values() {
+        let p = RemountPolicy::from_json_opt(Some(
+            r#"{"aggression":"force","failover":{"enabled":true,"returnToPrimary":false,"confirmTicks":7,"probe":"nfs"},"drain":{"enabled":true,"mode":"force","settleSecs":42}}"#,
+        ));
+        assert_eq!(p, non_default_policy());
+    }
+
+    #[test]
+    fn policy_serializes_snake_case_and_round_trips() {
+        let p = non_default_policy();
         let written = serde_json::to_string(&p).unwrap();
-        assert!(written.contains("\"returnToPrimary\":false"), "{written}");
-        assert!(written.contains("\"settleSecs\":42"), "{written}");
+        assert!(written.contains("\"return_to_primary\":false"), "{written}");
+        assert!(written.contains("\"confirm_ticks\":7"), "{written}");
+        assert!(written.contains("\"settle_secs\":42"), "{written}");
+        assert!(!written.contains("returnToPrimary"), "{written}");
+        assert!(!written.contains("confirmTicks"), "{written}");
+        assert!(!written.contains("settleSecs"), "{written}");
+        assert_eq!(RemountPolicy::from_json_opt(Some(&written)), p);
+    }
+
+    #[test]
+    fn failover_and_drain_serialize_snake_case_standalone() {
+        let p = non_default_policy();
+        let f = serde_json::to_value(&p.failover).unwrap();
+        assert_eq!(f["return_to_primary"], false);
+        assert_eq!(f["confirm_ticks"], 7);
+        let d = serde_json::to_value(&p.drain).unwrap();
+        assert_eq!(d["settle_secs"], 42);
     }
 
     #[test]

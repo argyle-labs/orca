@@ -264,9 +264,11 @@ pub struct TopProcess {
 
 /// One sample in the per-host rolling history ring. Written every refresh
 /// tick by the daemon, read back as `SystemInfoReport.history`.
-#[derive::snake_aliases]
+// Persisted snake_case in the local metrics db so a v0.2.1-rc.11 daemon can
+// still read the history after a downgrade.
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct SystemHistoryPoint {
     /// Unix seconds at sample time.
     pub ts: i64,
@@ -299,9 +301,10 @@ pub struct SystemHistoryPoint {
 
 /// One GPU's reading inside a `SystemHistoryPoint`. Matched to a live
 /// `GpuInfo` by `name` (driver-stable across ticks).
-#[derive::snake_aliases]
+// Persisted inside [`SystemHistoryPoint`]; snake_case for the same reason.
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct GpuPoint {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -343,4 +346,50 @@ pub struct GpuInfo {
     /// only populated when `driver_status = "no_driver"` or `"no_metrics"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver_install_hint: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_point_serializes_snake_case() {
+        let p = SystemHistoryPoint {
+            ts: 1,
+            cpu_percent: Some(12.5),
+            mem_used_mb: Some(100),
+            process_rss_mb: Some(7),
+            fs_used_gb: Some(3),
+            gpus: vec![GpuPoint {
+                name: "g".into(),
+                vram_used_mb: Some(9),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["cpu_percent"], 12.5);
+        assert_eq!(v["mem_used_mb"], 100);
+        assert_eq!(v["process_rss_mb"], 7);
+        assert_eq!(v["fs_used_gb"], 3);
+        assert_eq!(v["gpus"][0]["vram_used_mb"], 9);
+        assert!(v.get("cpuPercent").is_none(), "{v}");
+        assert!(v["gpus"][0].get("vramUsedMb").is_none(), "{v}");
+    }
+
+    #[test]
+    fn history_point_decodes_snake_and_camel_case() {
+        for json in [
+            r#"{"ts":1,"cpu_percent":12.5,"mem_used_mb":100,"process_rss_mb":7,"fs_used_gb":3,"gpus":[{"name":"g","vram_used_mb":9,"temperature_c":40.0}]}"#,
+            r#"{"ts":1,"cpuPercent":12.5,"memUsedMb":100,"processRssMb":7,"fsUsedGb":3,"gpus":[{"name":"g","vramUsedMb":9,"temperatureC":40.0}]}"#,
+        ] {
+            let p: SystemHistoryPoint = serde_json::from_str(json).unwrap();
+            assert_eq!(p.cpu_percent, Some(12.5), "{json}");
+            assert_eq!(p.mem_used_mb, Some(100), "{json}");
+            assert_eq!(p.process_rss_mb, Some(7), "{json}");
+            assert_eq!(p.fs_used_gb, Some(3), "{json}");
+            assert_eq!(p.gpus[0].vram_used_mb, Some(9), "{json}");
+            assert_eq!(p.gpus[0].temperature_c, Some(40.0), "{json}");
+        }
+    }
 }

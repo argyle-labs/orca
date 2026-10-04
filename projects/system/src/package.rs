@@ -213,12 +213,12 @@ fn build_deb(
     write_script(
         &debian.join("postinst"),
         "#!/bin/sh\nset -e\n\
-         /usr/local/bin/orca system install --service-user orca 2>/dev/null || true\n",
+         /usr/local/bin/orca system install --execute --service-user orca 2>/dev/null || true\n",
     )?;
     write_script(
         &debian.join("prerm"),
         "#!/bin/sh\nset -e\n\
-         /usr/local/bin/orca system uninstall 2>/dev/null || true\n",
+         /usr/local/bin/orca system uninstall --execute 2>/dev/null || true\n",
     )?;
 
     let bin_dir = staging.join("usr/local/bin");
@@ -307,9 +307,9 @@ fn build_rpm(
              mkdir -p %{{buildroot}}/usr/local/bin\n\
              install -m 755 orca %{{buildroot}}/usr/local/bin/orca\n\n\
              %post\n\
-             /usr/local/bin/orca system install --service-user orca 2>/dev/null || true\n\n\
+             /usr/local/bin/orca system install --execute --service-user orca 2>/dev/null || true\n\n\
              %preun\n\
-             /usr/local/bin/orca system uninstall 2>/dev/null || true\n\n\
+             /usr/local/bin/orca system uninstall --execute 2>/dev/null || true\n\n\
              %files\n\
              /usr/local/bin/orca\n"
         ),
@@ -388,10 +388,10 @@ fn build_apk(binary: &Path, version: &str, arch: &str, out_dir: &Path) -> Result
              \tinstall -Dm755 \"$srcdir/orca\" \"$pkgdir/usr/local/bin/orca\"\n\
              }}\n\n\
              post_install() {{\n\
-             \t/usr/local/bin/orca system install --service-user orca 2>/dev/null || true\n\
+             \t/usr/local/bin/orca system install --execute --service-user orca 2>/dev/null || true\n\
              }}\n\n\
              pre_deinstall() {{\n\
-             \t/usr/local/bin/orca system uninstall 2>/dev/null || true\n\
+             \t/usr/local/bin/orca system uninstall --execute 2>/dev/null || true\n\
              }}\n"
         ),
     )?;
@@ -454,10 +454,10 @@ fn build_pkgbuild(version: &str, arch: &str, out_dir: &Path) -> Result<()> {
                  install -Dm755 \"$pkgname-$_ver-${{CARCH}}\" \"$pkgdir/usr/local/bin/orca\"\n\
              }}\n\n\
              post_install() {{\n\
-                 /usr/local/bin/orca system install --service-user orca 2>/dev/null || true\n\
+                 /usr/local/bin/orca system install --execute --service-user orca 2>/dev/null || true\n\
              }}\n\n\
              pre_remove() {{\n\
-                 /usr/local/bin/orca system uninstall 2>/dev/null || true\n\
+                 /usr/local/bin/orca system uninstall --execute 2>/dev/null || true\n\
              }}\n"
         ),
     )?;
@@ -523,9 +523,9 @@ set -e
 # Detect the actual logged-in user (the installer runs as root).
 REAL_USER=$(stat -f \"%Su\" /dev/console 2>/dev/null || echo \"$USER\")
 if [ -n \"$REAL_USER\" ] && [ \"$REAL_USER\" != \"root\" ]; then
-   sudo -u \"$REAL_USER\" /usr/local/bin/orca system install 2>/dev/null || true
+   sudo -u \"$REAL_USER\" /usr/local/bin/orca system install --execute 2>/dev/null || true
 else
-   /usr/local/bin/orca system install 2>/dev/null || true
+   /usr/local/bin/orca system install --execute 2>/dev/null || true
 fi
 ",
     )?;
@@ -659,7 +659,7 @@ fn build_homebrew(version: &str, out_dir: &Path) -> Result<()> {
   end
 
   def post_install
-    system bin/\"orca\", \"system\", \"install\"
+    system bin/\"orca\", \"system\", \"install\", \"--execute\"
   rescue StandardError
     nil
   end
@@ -958,7 +958,7 @@ start() {
   ln -sf "$APPDATA/bin/orca" /usr/local/bin/orca
 
   # Bootstrap-only: creates user dirs + PKI, no lifecycle. Idempotent.
-  "$APPDATA/bin/orca" system install --service-user "$USER" --port "$PORT" \
+  "$APPDATA/bin/orca" system install --execute --service-user "$USER" --port "$PORT" \
     || echo "orca: system install reported errors (continuing)" >&2
 
   # Respawn wrapper. Inner `orca daemon` self-SIGTERMs on `system update`;
@@ -1147,8 +1147,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         build_pkgbuild("0.0.4", "x86_64", dir.path()).unwrap();
         let s = std::fs::read_to_string(dir.path().join("PKGBUILD")).unwrap();
-        assert!(s.contains("orca system install --service-user orca"));
-        assert!(s.contains("orca system uninstall"));
+        assert!(s.contains("orca system install --execute --service-user orca"));
+        assert!(s.contains("orca system uninstall --execute"));
         // `system bootstrap` was folded into `system install` — must not reappear.
         assert!(!s.contains("system bootstrap"));
     }
@@ -1209,7 +1209,7 @@ mod tests {
         assert!(s.contains("/etc/rc.d/rc.orca stop"));
         // The embedded rc.orca carries the real start logic.
         assert!(s.contains("useradd"));
-        assert!(s.contains("system install --service-user"));
+        assert!(s.contains("system install --execute --service-user"));
         // HOME must be preserved across `runuser` (was the 2026-06-02 bug).
         assert!(s.contains("runuser -u $USER -- env HOME="));
         assert!(s.contains("while true"));
@@ -1339,9 +1339,9 @@ mod tests {
         assert!(control.contains("Version: 0.0.4"));
 
         let postinst = std::fs::read_to_string(staged.join("DEBIAN/postinst")).unwrap();
-        assert!(postinst.contains("system install --service-user orca"));
+        assert!(postinst.contains("system install --execute --service-user orca"));
         let prerm = std::fs::read_to_string(staged.join("DEBIAN/prerm")).unwrap();
-        assert!(prerm.contains("system uninstall"));
+        assert!(prerm.contains("system uninstall --execute"));
 
         assert!(staged.join("usr/local/bin/orca").exists());
     }
@@ -1371,7 +1371,7 @@ mod tests {
         assert!(spec.contains("Release:     rc.7%{?dist}"));
         assert!(spec.contains("BuildArch:   aarch64"));
         assert!(spec.contains("Packager:    Pkgr"));
-        assert!(spec.contains("system install --service-user orca"));
+        assert!(spec.contains("system install --execute --service-user orca"));
     }
 
     #[test]
@@ -1635,7 +1635,7 @@ mod tests {
         );
         if staging.exists() {
             let post = std::fs::read_to_string(staging.join("scripts/postinstall")).unwrap();
-            assert!(post.contains("orca system install"));
+            assert!(post.contains("orca system install --execute"));
             assert!(staging.join("root/usr/local/bin/orca").exists());
         }
     }
@@ -1904,7 +1904,7 @@ mod tests {
         assert!(spec.contains("install -m 755 orca %{buildroot}/usr/local/bin/orca"));
         assert!(spec.contains("%post"));
         assert!(spec.contains("%preun"));
-        assert!(spec.contains("/usr/local/bin/orca system uninstall"));
+        assert!(spec.contains("/usr/local/bin/orca system uninstall --execute"));
         assert!(spec.contains("%files"));
         // `system bootstrap` was folded into `system install`.
         assert!(!spec.contains("system bootstrap"));
@@ -1931,9 +1931,9 @@ mod tests {
         assert!(a.contains("source=\"orca\""));
         assert!(a.contains("install -Dm755 \"$srcdir/orca\" \"$pkgdir/usr/local/bin/orca\""));
         assert!(a.contains("post_install()"));
-        assert!(a.contains("system install --service-user orca"));
+        assert!(a.contains("system install --execute --service-user orca"));
         assert!(a.contains("pre_deinstall()"));
-        assert!(a.contains("system uninstall"));
+        assert!(a.contains("system uninstall --execute"));
     }
 
     #[test]
@@ -1968,7 +1968,7 @@ mod tests {
         assert!(s.contains("aarch64-unknown-linux-gnu"));
         assert!(s.contains("install -Dm755"));
         assert!(s.contains("pre_remove()"));
-        assert!(s.contains("orca system uninstall"));
+        assert!(s.contains("orca system uninstall --execute"));
     }
 
     // ── homebrew: url/sha placeholders, install + post_install ─────────
@@ -1991,7 +1991,71 @@ mod tests {
         assert!(s.contains("keep_alive true"));
         assert!(s.contains("log_path"));
         assert!(s.contains("def post_install"));
-        assert!(s.contains("\"orca\", \"system\", \"install\""));
+        assert!(s.contains("\"orca\", \"system\", \"install\", \"--execute\""));
+    }
+
+    /// Asserts at least one `system install`/`system uninstall` call is present
+    /// and every one passes `--execute`. `echo` lines are log text, not calls.
+    fn assert_lifecycle_calls_execute(what: &str, s: &str) {
+        let mut calls = 0;
+        for line in s.lines().filter(|l| !l.contains("echo")) {
+            for verb in ["system install", "system uninstall"] {
+                for (i, _) in line.match_indices(verb) {
+                    calls += 1;
+                    assert!(
+                        line[i + verb.len()..].starts_with(" --execute"),
+                        "{what}: `{verb}` without --execute: {line}"
+                    );
+                }
+            }
+        }
+        assert!(calls > 0, "{what}: no lifecycle call found");
+    }
+
+    // `system install`/`uninstall` are execute-gated: without `--execute` they
+    // print a dry-run plan and exit 0, so a package would install no service.
+    #[test]
+    fn generated_package_scripts_pass_execute_to_lifecycle_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+
+        build_pkgbuild("1.0.0", "x86_64", dir.path()).unwrap();
+        assert_lifecycle_calls_execute(
+            "PKGBUILD",
+            &std::fs::read_to_string(dir.path().join("PKGBUILD")).unwrap(),
+        );
+
+        build_homebrew("1.0.0", dir.path()).unwrap();
+        let rb = std::fs::read_to_string(dir.path().join("orca.rb")).unwrap();
+        assert!(rb.contains("\"orca\", \"system\", \"install\", \"--execute\"\n"));
+
+        assert_lifecycle_calls_execute("plg start()", render_rc_orca_script());
+
+        // Packagers that consume their staging dir on success only leave the
+        // scripts behind when the tool is absent.
+        if utils::path::which("dpkg-deb").is_none() {
+            build_deb(&bin, "1.0.0", "x86_64", "M", dir.path()).unwrap();
+            let debian = dir.path().join("orca-deb-staging/DEBIAN");
+            for script in ["postinst", "prerm"] {
+                let s = std::fs::read_to_string(debian.join(script)).unwrap();
+                assert_lifecycle_calls_execute(script, &s);
+            }
+        }
+        if utils::path::which("rpmbuild").is_none() {
+            build_rpm(&bin, "1.0.0", "x86_64", "M", dir.path()).unwrap();
+            assert_lifecycle_calls_execute(
+                "orca.spec",
+                &std::fs::read_to_string(dir.path().join("orca-rpm-staging/SPECS/orca.spec"))
+                    .unwrap(),
+            );
+        }
+        if utils::path::which("abuild").is_none() {
+            build_apk(&bin, "1.0.0", "x86_64", dir.path()).unwrap();
+            assert_lifecycle_calls_execute(
+                "APKBUILD",
+                &std::fs::read_to_string(dir.path().join("orca-apk-staging/APKBUILD")).unwrap(),
+            );
+        }
     }
 
     // ── plg manifest: DOCTYPE entities, CHANGES, FILE blocks ──────────
@@ -2054,7 +2118,7 @@ mod tests {
         // PATH symlink for non-login shells.
         assert!(s.contains("ln -sf \"$APPDATA/bin/orca\" /usr/local/bin/orca"));
         // Bootstrap-only install with explicit service user + port.
-        assert!(s.contains("system install --service-user \"$USER\" --port \"$PORT\""));
+        assert!(s.contains("system install --execute --service-user \"$USER\" --port \"$PORT\""));
     }
 
     #[test]
@@ -2538,7 +2602,7 @@ mod tests {
             let s = std::fs::read_to_string(&scripts).unwrap();
             // postinstall installs as the logged-in user, not root.
             assert!(s.contains("REAL_USER=$(stat -f"));
-            assert!(s.contains("system install"));
+            assert!(s.contains("system install --execute"));
         }
     }
 

@@ -153,12 +153,14 @@ pub enum BreakerStatus {
 /// Closed enum of trip reasons. Each variant carries the numeric context
 /// the operator needs to understand the trip without re-running the
 /// observation. No `Other(String)` escape hatch.
-#[derive::snake_aliases]
+// Persisted snake_case in `breaker_state.json` so a v0.2.1-rc.11 daemon can
+// still decode the file after a downgrade.
+#[derive::camel_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "snake_case"
 )]
 pub enum HoldReason {
     /// docker `RestartCount` jumped by >3 inside the 5-minute window —
@@ -943,9 +945,8 @@ mod tests {
 
     #[test]
     fn a_breaker_record_persisted_with_snake_hold_reason_still_decodes() {
-        // `breaker_state.json` written before the camelCase rename. A decode
-        // failure here makes the reconciler treat the container as Proceed,
-        // which silently disables the crash-loop breaker.
+        // A decode failure here makes the reconciler treat the container as
+        // Proceed, which silently disables the crash-loop breaker.
         let json = r#"{"host":"h","runtime":"docker","container_id":"c",
             "last_orca_start_at":null,"restart_count_snapshot":null,"recent_starts":[],
             "status":"held",
@@ -968,6 +969,33 @@ mod tests {
                 exit_code: 1
             }
         );
+    }
+
+    #[test]
+    fn hold_reason_serializes_snake_case_and_decodes_camel_case() {
+        let fast = HoldReason::FastReexitAfterOrcaStart {
+            within_secs: 5,
+            exit_code: 1,
+        };
+        let v = serde_json::to_value(&fast).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"kind":"fast_reexit_after_orca_start","within_secs":5,"exit_code":1})
+        );
+        let camel: HoldReason = serde_json::from_str(
+            r#"{"kind":"fast_reexit_after_orca_start","withinSecs":5,"exitCode":1}"#,
+        )
+        .unwrap();
+        assert_eq!(camel, fast);
+
+        let storm: HoldReason = serde_json::from_str(
+            r#"{"kind":"lxc_flapping_in5_min","transitions":4,"windowStart":"2026-10-03T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let v = serde_json::to_value(&storm).unwrap();
+        assert!(v.get("window_start").is_some(), "{v}");
+        assert!(v.get("windowStart").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<HoldReason>(v).unwrap(), storm);
     }
 
     // ── Fixtures ──────────────────────────────────────────────────

@@ -575,11 +575,11 @@ release_asset_paths() {
 # binaries in dist-release/. Mirrors the package-native matrix in
 # .github/workflows/release.yml (see [[feedback-ci-makefile-parity]]).
 #
-# Each format runs `orca system build --format <fmt>` via the freshly built
-# host-target binary; package.rs handles the per-format details. Formats
-# whose external tool is missing (dpkg-deb, rpmbuild, pkgbuild) are skipped
-# with a warning instead of failing the release — local hosts rarely have
-# every packager installed.
+# Each format runs `orca system build --execute --format <fmt>` via the
+# freshly built host-target binary; package.rs handles the per-format details.
+# Formats whose external tool is missing (dpkg-deb, rpmbuild, pkgbuild) are
+# skipped with a warning instead of failing the release — local hosts rarely
+# have every packager installed.
 build_native_packages() {
   local host
   host="$(host_target)"
@@ -601,7 +601,7 @@ build_native_packages() {
     "plg      x86_64  x86_64-unknown-linux-gnu   "
   )
 
-  local row fmt arch triple tool bin
+  local row fmt arch triple tool bin out marker
   for row in "${rows[@]}"; do
     read -r fmt arch triple tool <<< "$row"
     bin="${DIST_DIR}/orca-${triple}"
@@ -623,12 +623,27 @@ build_native_packages() {
       continue
     fi
     log "package ${fmt}/${arch} (binary: orca-${triple})"
-    "$runner" system build \
+    # `system build` is execute-gated: without --execute, or on a binary that
+    # ignores it, it prints a dry-run plan and exits 0 having written nothing.
+    marker="$(mktemp)"
+    out="$("$runner" system build --execute \
       --format "$fmt" \
       --binary "$bin" \
       --arch "$arch" \
-      --out-dir "$DIST_DIR" \
-      || die "package ${fmt}/${arch} failed"
+      --out-dir "$DIST_DIR" 2>&1)" \
+      || { rm -f "$marker"; printf '%s\n' "$out" >&2; die "package ${fmt}/${arch} failed"; }
+    printf '%s\n' "$out"
+    if printf '%s' "$out" | grep -Eq '"dryRun": *true'; then
+      rm -f "$marker"
+      die "package ${fmt}/${arch}: system build only dry-ran"
+    fi
+    # Depth 2: a source-only format (apk without abuild) rewrites the files
+    # inside an existing orca-*-staging dir without touching the dir's mtime.
+    if [ -z "$(find "$DIST_DIR" -mindepth 1 -maxdepth 2 -newer "$marker" -print -quit)" ]; then
+      rm -f "$marker"
+      die "package ${fmt}/${arch}: no new file in ${DIST_DIR}"
+    fi
+    rm -f "$marker"
   done
 }
 
