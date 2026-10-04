@@ -27,6 +27,8 @@ use mcp as _;
 use model as _;
 use namespace as _;
 use notifications as _;
+// The server crate's lib target is named `orca`.
+use orca as _;
 use orca_inventory as _;
 use plugin_toolkit as _;
 use plugins as _;
@@ -66,6 +68,14 @@ fn walk_properties(v: &Value, f: &mut impl FnMut(&str)) {
     }
 }
 
+/// Property names that stay snake_case on purpose, each with its reason.
+const SNAKE_CASE_ALLOWLIST: &[&str] = &[
+    // `SystemUpdateArgs::self_only` is sent peer-to-peer; a pre-camelCase peer
+    // ignores `selfOnly` and fans the update out across the fleet. Drop once
+    // every daemon is past the rename.
+    "self_only",
+];
+
 /// The whole tool surface is camelCase on the wire. A property name holding an
 /// underscore means some type on the path lost its
 /// `#[serde(rename_all = "camelCase")]`, which silently splits the API's
@@ -75,7 +85,7 @@ fn no_snake_case_property_names_on_the_tool_surface() {
     let mut offenders: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (origin, schema) in all_schemas() {
         walk_properties(&schema, &mut |name| {
-            if name.contains('_') {
+            if name.contains('_') && !SNAKE_CASE_ALLOWLIST.contains(&name) {
                 offenders
                     .entry(name.to_string())
                     .or_default()
@@ -110,6 +120,10 @@ fn the_openapi_surface_is_not_empty() {
     // Spot-check a tool from a crate that only this test links, so a dropped
     // side-effect import above fails loudly instead of shrinking the walk.
     assert!(names.iter().any(|n| n.starts_with("spec.")), "{names:?}");
+    assert!(
+        names.contains(&"spec.detail"),
+        "server crate not linked: {names:?}"
+    );
 }
 
 /// Two Rust types with the same ident collapse onto one `$defs` key, and the

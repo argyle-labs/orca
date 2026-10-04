@@ -43,6 +43,8 @@ containers    = { path = "../containers" }
 dev           = { path = "../dev" }
 mcp           = { path = "../mcp" }
 plugin-toolkit = { path = "../plugin-toolkit" }
+# `spec.detail` is an #[orca_tool] hosted in the server crate itself.
+server        = { path = "../server" }
 
 [lints]
 workspace = true
