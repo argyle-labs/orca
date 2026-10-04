@@ -13,6 +13,12 @@
 //! * `backup.restore`   — date-selected restore with surface-safe gating.
 //! * `backup.check`     — fleet-wide same-folder collision detection; raises a
 //!   dismissable notification per collision ([[dismissable-notifications-subsystem]]).
+//! * `backup.sync`      — for one opted-in kind on THIS host: pull the newest
+//!   backup another host wrote to the kind's targets, then back up and push.
+//!
+//! Targets come only from config rows this host owns (`backup`/`targets`), never
+//! from another host's replica; with none, the built-in `local` target is used.
+//! Each target receives the kinds [`BackupTargetRef::accepts`] allows.
 //!
 //! Kinds are entries in the [`provider`] registry (host, service, …) — there is
 //! ONE backup system, not a per-kind verb surface. The store owns dating,
@@ -26,11 +32,14 @@
 //! Dispatched through the single daemon handler so CLI / REST / MCP / UI share
 //! one path ([[feedback-cli-api-mcp-one-path]]).
 
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use contract::ToolCtx;
-use contract::backup::{BackupRecord, BackupSelector, BackupTargetRef, Placement, Retention};
+use contract::backup::{
+    BackupRecord, BackupSelector, BackupTargetRef, BackupWriter, Placement, Retention,
+};
 use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -40,10 +49,33 @@ use super::host::HostBackupProvider;
 use super::local::LocalTarget;
 use super::provider::{self, BackupProvider};
 use super::service_kind::ServiceKindProvider;
-use super::store::BackupStore;
+use super::store::{self, BackupStore};
 use super::target::{self, TargetLocation};
 
 const DEFAULT_INSTANCE: &str = "default";
+
+/// Run a synchronous call that may block on a plugin round-trip off the async
+/// worker threads.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> anyhow::Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| anyhow::anyhow!("blocking backup call panicked: {e}"))
+}
+
+/// A provider's instances, enumerated off the async workers.
+async fn instances_of(p: &Arc<dyn BackupProvider>) -> anyhow::Result<Vec<String>> {
+    let p = p.clone();
+    blocking(move || p.instances()).await?
+}
+
+/// A provider's layout for `instance`, computed off the async workers.
+async fn layout_of(p: &Arc<dyn BackupProvider>, instance: &str) -> Vec<String> {
+    let (p2, i) = (p.clone(), instance.to_string());
+    blocking(move || p2.layout(&i)).await.unwrap_or_else(|e| {
+        tracing::warn!("[backup] {}: layout: {e:#}; using flat layout", p.kind());
+        vec![p.kind().to_string(), instance.to_string()]
+    })
+}
 
 // ── providers ─────────────────────────────────────────────────────────
 
@@ -141,21 +173,22 @@ async fn backup_detail(
 }
 
 async fn backup_providers() -> ProvidersOutput {
-    let providers = provider::providers()
-        .into_iter()
-        .map(|p| ProviderInfo {
+    let mut providers = Vec::new();
+    for p in provider::providers() {
+        // Listing is tolerant: a provider whose enumeration momentarily
+        // fails shows no instances rather than failing the whole surface.
+        let instances = instances_of(&p).await.unwrap_or_else(|e| {
+            tracing::warn!("[backup] providers: enumerate {}: {e:#}", p.kind());
+            Vec::new()
+        });
+        providers.push(ProviderInfo {
             kind: p.kind().to_string(),
             title: p.title().to_string(),
-            // Listing is tolerant: a provider whose enumeration momentarily
-            // fails shows no instances rather than failing the whole surface.
-            instances: p.instances().unwrap_or_else(|e| {
-                tracing::warn!("[backup] providers: enumerate {}: {e:#}", p.kind());
-                Vec::new()
-            }),
+            instances,
             // Local rows carry an empty system — answered in process.
             system: String::new(),
-        })
-        .collect();
+        });
+    }
     ProvidersOutput {
         providers,
         system_errors: Vec::new(),
@@ -240,8 +273,8 @@ pub struct TargetsOutput {
     /// Every registered target kind across the fleet, with placement
     /// eligibility as computed on its own system.
     pub registered: Vec<TargetInfo>,
-    /// The targets `backup.run` currently fans out to (the `backup`/`targets`
-    /// config, or the built-in `local` fallback).
+    /// The targets `backup.run` currently fans out to (this host's own
+    /// `backup`/`targets` config, or the built-in `local` fallback).
     pub configured: Vec<BackupTargetRef>,
     /// THIS system's detected placement. Remote rows carry their own
     /// eligibility in `fits_here`; placement itself is per-host and is not
@@ -261,10 +294,14 @@ async fn backup_targets(ctx: &ToolCtx) -> anyhow::Result<TargetsOutput> {
             tracing::warn!("[backup] target {} available() failed: {e:#}", t.kind());
             Vec::new()
         });
+        let fits_here = {
+            let (t, placement) = (t.clone(), placement.clone());
+            blocking(move || t.fits(&placement)).await?
+        };
         registered.push(TargetInfo {
             kind: t.kind().to_string(),
             title: t.title().to_string(),
-            fits_here: t.fits(&placement),
+            fits_here,
             builtin: t.kind() == "local",
             locations,
             system: String::new(),
@@ -406,7 +443,7 @@ async fn backup_list(args: BackupListArgs, ctx: &ToolCtx) -> anyhow::Result<Back
 /// This host's backups across every configured target.
 async fn list_locally(args: &BackupListArgs, ctx: &ToolCtx) -> Vec<BackupRecord> {
     let mut backups = Vec::new();
-    for (r, store) in open_configured_targets(ctx, true).await {
+    for (r, store) in open_targets(&configured_target_refs(), ctx, true).await {
         match store.list(args.kind.as_deref(), args.instance.as_deref()) {
             Ok(mut recs) => backups.append(&mut recs),
             Err(e) => tracing::warn!("[backup] list on target {}/{}: {e:#}", r.kind, r.name),
@@ -457,6 +494,21 @@ pub struct BackupError {
     pub error: String,
 }
 
+/// A `(kind, instance)` whose backup reported nothing new, so no slot was
+/// committed.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UnchangedBackup {
+    pub kind: String,
+    pub instance: String,
+    /// The system it ran on. Empty = this one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub system: String,
+    /// The target it would have been written to (`<kind>/<name>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupRunOutput {
@@ -466,6 +518,9 @@ pub struct BackupRunOutput {
     pub targets: Vec<String>,
     /// Per-(target,kind,instance) failures — the run does not abort on one.
     pub errors: Vec<BackupError>,
+    /// Backups the kind skipped because nothing changed since the latest one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unchanged: Vec<UnchangedBackup>,
     /// Systems that could not be asked to run. Distinct from `errors`: those
     /// are backups that were ATTEMPTED and failed, these were never started
     /// at all, and an operator must be able to tell those apart.
@@ -496,10 +551,10 @@ pub struct BackupRunArgs {
 
 /// [MUTATES STATE] Run backups. `--kind` backs up that kind; `--all` fans out over every
 /// registered kind (log-and-skip on failure). All-kinds is opt-in: with neither,
-/// the run refuses and lists the kinds so the caller chooses explicitly. Backups
-/// are written to EVERY configured target (the `backup`/`targets` config, or the
-/// built-in `local` fallback); old backups beyond the retention policy are pruned
-/// per instance, per target.
+/// the run refuses and lists the kinds so the caller chooses explicitly. Each
+/// kind is written to every configured target that accepts it (this host's
+/// `backup`/`targets` config, or the built-in `local` fallback); old backups
+/// beyond the retention policy are pruned per instance, per target.
 #[orca_tool(
     domain = "backup",
     verb = "run",
@@ -559,8 +614,12 @@ async fn backup_run_fleetwide(
         for e in &mut got.errors {
             e.system = system.clone();
         }
+        for u in &mut got.unchanged {
+            u.system = system.clone();
+        }
         out.produced.append(&mut got.produced);
         out.errors.append(&mut got.errors);
+        out.unchanged.append(&mut got.unchanged);
         for t in got.targets {
             // Targets are `<kind>/<name>` and collide across systems; qualify
             // them so "wrote to local/default" says WHOSE local.
@@ -589,27 +648,50 @@ async fn run_here(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<BackupRu
         tracing::warn!("[backup] --all: backing up every registered kind");
     }
     let mut out = BackupRunOutput::default();
+    let refs = configured_target_refs();
+    let mut placed: HashSet<String> = HashSet::new();
 
-    for (r, store) in open_configured_targets(ctx, false).await {
+    for (r, store) in open_targets(&refs, ctx, false).await {
         let label = format!("{}/{}", r.kind, r.name);
+        let bound: Vec<Arc<dyn BackupProvider>> = providers
+            .iter()
+            .filter(|p| r.accepts(p.kind(), &refs))
+            .cloned()
+            .collect();
+        if bound.is_empty() {
+            continue;
+        }
+        placed.extend(bound.iter().map(|p| p.kind().to_string()));
         // Resolve THIS target's retention once (its declared default, else the
         // built-in) and apply it when pruning each committed backup below.
-        let retention = resolve_target_retention(&r);
-        let mut sub = run_backups(
-            &store,
-            &providers,
-            args.instance.as_deref(),
-            &retention,
-            ctx,
-        )
-        .await;
+        let retention = target_retention(&r).await;
+        let mut sub = match store.lock_async().await {
+            Ok(_lock) => {
+                run_backups(&store, &bound, args.instance.as_deref(), &retention, ctx).await
+            }
+            Err(e) => {
+                tracing::warn!("[backup] target {label}: {e:#}");
+                out.errors.push(BackupError {
+                    system: String::new(),
+                    kind: r.kind.clone(),
+                    instance: String::new(),
+                    target: Some(label.clone()),
+                    error: format!("{e:#}"),
+                });
+                continue;
+            }
+        };
         // Tag this target's failures so a fan-out failure is attributable.
         for e in &mut sub.errors {
             e.target.get_or_insert_with(|| label.clone());
         }
+        for u in &mut sub.unchanged {
+            u.target.get_or_insert_with(|| label.clone());
+        }
         let wrote_something = !sub.produced.is_empty();
         out.produced.append(&mut sub.produced);
         out.errors.append(&mut sub.errors);
+        out.unchanged.append(&mut sub.unchanged);
 
         // Reconcile the remote backing (git push / s3 upload) after committing.
         if wrote_something
@@ -626,6 +708,22 @@ async fn run_here(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<BackupRu
             });
         }
         out.targets.push(label);
+    }
+
+    for p in &providers {
+        if placed.contains(p.kind()) {
+            continue;
+        }
+        tracing::warn!("[backup] no configured target receives kind `{}`", p.kind());
+        if args.kind.is_some() {
+            out.errors.push(BackupError {
+                system: String::new(),
+                kind: p.kind().to_string(),
+                instance: String::new(),
+                target: None,
+                error: "no configured target receives this kind".to_string(),
+            });
+        }
     }
 
     // Self-report destinations and check the fleet for same-folder collisions.
@@ -803,7 +901,8 @@ enum Holder {
 /// stamp, unique within a `(kind, instance)` on ONE host, so two systems can
 /// legitimately hold the same id. Picking one would restore from a machine the
 /// operator did not mean — on a destructive verb that is not a guess worth
-/// making.
+/// making. The same backup seen by several systems through a shared pool is
+/// not ambiguous: see [`backup_holders`].
 async fn resolve_backup_holder(
     args: &BackupRestoreArgs,
     instance: &str,
@@ -832,12 +931,8 @@ async fn resolve_backup_holder(
     )
     .await?;
 
-    let holders: Vec<String> = listing
-        .backups
-        .iter()
-        .filter(|b| b.id == id)
-        .map(|b| b.system.clone())
-        .collect();
+    let matching: Vec<&BackupRecord> = listing.backups.iter().filter(|b| b.id == id).collect();
+    let holders = backup_holders(&matching);
 
     match holders.as_slice() {
         [] if !listing.system_errors.is_empty() => anyhow::bail!(
@@ -867,6 +962,248 @@ async fn resolve_backup_holder(
                 .join(", ")
         ),
     }
+}
+
+// ── sync ──────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BackupSyncArgs {
+    /// Kind to sync (e.g. `game-saves`). Only kinds that advertise `syncable`
+    /// are accepted; `host` never is.
+    #[arg(long)]
+    pub kind: String,
+    /// One instance to sync. Omit for every instance the kind advertises here
+    /// plus every instance already present in the kind's targets, so a host
+    /// pulls instances it has never backed up.
+    #[arg(long)]
+    pub instance: Option<String>,
+}
+
+/// What `backup.sync` did for one instance.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncInstanceOutcome {
+    pub instance: String,
+    /// The backup another host wrote that was restored here, if it was the
+    /// newest one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored: Option<BackupRecord>,
+    /// Backups committed after the restore (one per target that took one).
+    pub produced: Vec<BackupRecord>,
+    /// Targets (`<kind>/<name>`) where the kind reported nothing changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unchanged: Vec<String>,
+    /// Failures for this instance; the run continued past them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupSyncOutput {
+    pub kind: String,
+    /// Targets bound to the kind that were synced (`<kind>/<name>`).
+    pub targets: Vec<String>,
+    pub instances: Vec<SyncInstanceOutcome>,
+    /// Failures not tied to one instance: enumeration, target refresh/open/sync.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+/// [MUTATES STATE] Sync one opted-in kind with the other hosts sharing its
+/// targets, on THIS host only. For each instance: pull the targets, restore the
+/// newest backup if another host wrote it, back up (a kind reporting nothing
+/// changed commits nothing), prune, then push the targets that changed.
+/// Restoring overwrites live state, so only kinds advertising `syncable` run,
+/// never `host`. A failing instance is reported and the rest still sync.
+#[orca_tool(
+    domain = "backup",
+    verb = "sync",
+    data_mutation = true,
+    role = "admin",
+    execute_gated = true,
+    local_only = true
+)]
+async fn backup_sync(args: BackupSyncArgs, ctx: &ToolCtx) -> anyhow::Result<BackupSyncOutput> {
+    let p = sync_provider(&args.kind)?;
+    let kind = p.kind().to_string();
+    let refs = configured_target_refs();
+    let bound: Vec<BackupTargetRef> = refs
+        .iter()
+        .filter(|r| r.accepts(&kind, &refs))
+        .cloned()
+        .collect();
+    if bound.is_empty() {
+        anyhow::bail!("no configured target receives kind `{kind}`");
+    }
+
+    let mut out = BackupSyncOutput {
+        kind: kind.clone(),
+        ..Default::default()
+    };
+    let (opened, errors) = open_targets_reporting(&bound, ctx, true).await;
+    out.errors.extend(errors);
+    if opened.is_empty() {
+        anyhow::bail!(
+            "no target bound to kind `{kind}` could be opened: {}",
+            out.errors.join("; ")
+        );
+    }
+    out.targets = opened
+        .iter()
+        .map(|(r, _)| format!("{}/{}", r.kind, r.name))
+        .collect();
+
+    let instances = match &args.instance {
+        Some(i) => vec![i.clone()],
+        None => {
+            let mut all = BTreeSet::new();
+            match instances_of(&p).await {
+                Ok(v) => all.extend(v),
+                Err(e) => out.errors.push(format!("enumerate instances: {e:#}")),
+            }
+            for (r, store) in &opened {
+                match store.list(Some(&kind), None) {
+                    Ok(recs) => all.extend(recs.into_iter().map(|r| r.instance)),
+                    Err(e) => out
+                        .errors
+                        .push(format!("list target {}/{}: {e:#}", r.kind, r.name)),
+                }
+            }
+            all.into_iter().collect()
+        }
+    };
+
+    let me = store::local_writer();
+    let mut changed: HashSet<usize> = HashSet::new();
+    for instance in instances {
+        let io = sync_instance(&p, &opened, &instance, &me, &mut changed, ctx).await;
+        for e in &io.errors {
+            tracing::warn!("[backup] sync {kind}/{instance}: {e}");
+        }
+        out.instances.push(io);
+    }
+
+    for (i, (r, _)) in opened.iter().enumerate() {
+        if !changed.contains(&i) {
+            continue;
+        }
+        if let Some(tp) = target::target(&r.kind)
+            && let Err(e) = tp.sync(&r.name, ctx).await
+        {
+            out.errors
+                .push(format!("target {}/{}: sync failed: {e:#}", r.kind, r.name));
+        }
+    }
+    Ok(out)
+}
+
+/// The provider `backup.sync` may run: registered, opted in, and never `host`.
+fn sync_provider(kind: &str) -> anyhow::Result<Arc<dyn BackupProvider>> {
+    if kind == "host" {
+        anyhow::bail!("kind `host` is never synced: restoring another host's state over this one");
+    }
+    let p = provider::provider(kind)
+        .ok_or_else(|| anyhow::anyhow!("no backup provider for kind `{kind}`"))?;
+    if !p.syncable() {
+        anyhow::bail!("kind `{kind}` does not advertise `syncable`; refusing to sync it");
+    }
+    Ok(p)
+}
+
+/// One instance of a sync: restore the newest backup across `opened` when
+/// another host wrote it, then back up and prune on every target. Indices of
+/// targets whose tree changed are added to `changed`.
+///
+/// Restoring only a FOREIGN newest backup means a host never overwrites its
+/// live state with its own older backup. A failed restore skips the backup, so
+/// a half-restored state is never published as the newest.
+async fn sync_instance(
+    p: &Arc<dyn BackupProvider>,
+    opened: &[(BackupTargetRef, BackupStore)],
+    instance: &str,
+    me: &BackupWriter,
+    changed: &mut HashSet<usize>,
+    ctx: &ToolCtx,
+) -> SyncInstanceOutcome {
+    let kind = p.kind();
+    let mut io = SyncInstanceOutcome {
+        instance: instance.to_string(),
+        ..Default::default()
+    };
+
+    let mut newest: Option<(usize, BackupRecord)> = None;
+    for (i, (_, store)) in opened.iter().enumerate() {
+        if let Ok(rec) = store.resolve(kind, instance, &BackupSelector::Latest)
+            && newest.as_ref().is_none_or(|(_, b)| rec.id > b.id)
+        {
+            newest = Some((i, rec));
+        }
+    }
+    if let Some((i, rec)) = newest
+        && !rec.writer.as_ref().is_some_and(|w| w.same_host(me))
+    {
+        let (r, store) = &opened[i];
+        match restore_from(p, store, instance, &rec.id, ctx).await {
+            Ok(rec) => io.restored = Some(rec),
+            Err(e) => {
+                io.errors
+                    .push(format!("restore from {}/{}: {e:#}", r.kind, r.name));
+                return io;
+            }
+        }
+    }
+
+    for (i, (r, store)) in opened.iter().enumerate() {
+        let label = format!("{}/{}", r.kind, r.name);
+        let retention = target_retention(r).await;
+        let mut sub = BackupRunOutput::default();
+        match store.lock_async().await {
+            Ok(_lock) => run_one(store, p, instance, &retention, ctx, &mut sub).await,
+            Err(e) => {
+                io.errors.push(format!("{label}: {e:#}"));
+                continue;
+            }
+        }
+        if !sub.produced.is_empty() {
+            changed.insert(i);
+        }
+        io.produced.append(&mut sub.produced);
+        if !sub.unchanged.is_empty() {
+            io.unchanged.push(label.clone());
+        }
+        io.errors.extend(
+            sub.errors
+                .into_iter()
+                .map(|e| format!("{label}: {}", e.error)),
+        );
+    }
+    io
+}
+
+/// The systems holding the backups in `matching` (all with one id), deduped.
+///
+/// When every match names the same writer, they are ONE backup listed by each
+/// system that shares its pool, so any holder can restore it: this system if it
+/// is among them (its empty name sorts first), else the first by name. Matches
+/// without a writer, or from different writers, stay distinct.
+fn backup_holders(matching: &[&BackupRecord]) -> Vec<String> {
+    let one_backup = matching
+        .first()
+        .and_then(|r| r.writer.as_ref())
+        .is_some_and(|w| {
+            matching
+                .iter()
+                .all(|r| r.writer.as_ref().is_some_and(|o| o.same_host(w)))
+        });
+    let mut systems: Vec<String> = matching.iter().map(|r| r.system.clone()).collect();
+    systems.sort();
+    systems.dedup();
+    if one_backup {
+        systems.truncate(1);
+    }
+    systems
 }
 
 // ── shared machinery ──────────────────────────────────────────────────
@@ -916,6 +1253,18 @@ fn resolve_target_retention(r: &contract::backup::BackupTargetRef) -> Retention 
     contract::backup::resolve_retention(None, storage).value
 }
 
+/// [`resolve_target_retention`] off the async workers: a plugin target answers
+/// `default_retention` over a blocking round-trip.
+async fn target_retention(r: &BackupTargetRef) -> Retention {
+    let owned = r.clone();
+    blocking(move || resolve_target_retention(&owned))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("[backup] retention for {}/{}: {e:#}", r.kind, r.name);
+            contract::backup::resolve_retention(None, None).value
+        })
+}
+
 /// Back up each provider (optionally narrowed to one instance), committing each
 /// slot and pruning per the target's resolved `retention`. Failures are
 /// collected, never fatal — a broken provider must not stop the rest.
@@ -930,7 +1279,7 @@ async fn run_backups(
     for p in providers {
         let instances: Vec<String> = match instance_filter {
             Some(i) => vec![i.to_string()],
-            None => match p.instances() {
+            None => match instances_of(p).await {
                 Ok(v) => v,
                 // A failed enumeration is a hard error, not "back up nothing":
                 // record it so the run reports failure instead of a green run
@@ -959,7 +1308,8 @@ async fn run_backups(
 }
 
 /// Back up a single (provider, instance): allocate a slot, let the provider write
-/// it, commit or abort, then prune old backups.
+/// it, commit or abort, then prune old backups. A backup that reports nothing
+/// changed discards its slot and skips the prune, leaving the store untouched.
 async fn run_one(
     store: &BackupStore,
     p: &Arc<dyn BackupProvider>,
@@ -969,7 +1319,7 @@ async fn run_one(
     out: &mut BackupRunOutput,
 ) {
     let kind = p.kind();
-    let collection = p.layout(instance);
+    let collection = layout_of(p, instance).await;
     let slot = match store.new_slot(&collection, kind, instance) {
         Ok(s) => s,
         Err(e) => {
@@ -987,6 +1337,18 @@ async fn run_one(
     // Release the borrow on `slot` before we consume it in commit/abort.
     let payload: PathBuf = slot.payload_dir().to_path_buf();
     match p.backup(&payload, instance, ctx).await {
+        Ok(outcome) if outcome.unchanged => {
+            if let Err(e) = slot.abort() {
+                tracing::warn!("[backup] {kind}/{instance}: slot cleanup failed: {e:#}");
+            }
+            out.unchanged.push(UnchangedBackup {
+                kind: kind.to_string(),
+                instance: instance.to_string(),
+                system: String::new(),
+                target: None,
+            });
+            return;
+        }
         Ok(outcome) => match slot.commit(outcome.checksum, outcome.note) {
             Ok(rec) => out.produced.push(rec),
             Err(e) => {
@@ -1066,7 +1428,7 @@ async fn restore_one(
 ) -> anyhow::Result<BackupRestoreOutput> {
     let p = provider::provider(kind)
         .ok_or_else(|| anyhow::anyhow!("no backup provider for kind `{kind}`"))?;
-    let stores = open_configured_targets(ctx, true).await;
+    let stores = open_targets(&configured_target_refs(), ctx, true).await;
 
     let selector = match (id, approve_all) {
         (Some(i), _) => BackupSelector::parse(i),
@@ -1093,42 +1455,62 @@ async fn restore_one(
     // Pick the store+record that satisfies the selector. For `Latest`, that is
     // the newest record across all targets; for an explicit id, the first target
     // that holds it.
-    let mut best: Option<BackupRecord> = None;
+    let mut best: Option<(&BackupStore, BackupRecord)> = None;
     for (_r, store) in &stores {
         if let Ok(rec) = store.resolve(kind, instance, &selector) {
             let take = match &best {
-                Some(b) => rec.id > b.id,
+                Some((_, b)) => rec.id > b.id,
                 None => true,
             };
             if take {
-                best = Some(rec);
+                best = Some((store, rec));
             }
             if matches!(selector, BackupSelector::Id(_)) {
                 break; // an explicit id is unique; first hit wins
             }
         }
     }
-    let record = best.ok_or_else(|| anyhow::anyhow!("no matching backup for {kind}/{instance}"))?;
+    let (store, record) =
+        best.ok_or_else(|| anyhow::anyhow!("no matching backup for {kind}/{instance}"))?;
+    let record = restore_from(&p, store, instance, &record.id, ctx).await?;
+    Ok(BackupRestoreOutput::Restored { record })
+}
 
+/// Restore `instance` from backup `id` in `store`, holding the stage lock so a
+/// concurrent reconcile cannot change the payload mid-restore. The record is
+/// re-resolved under the lock, so its payload path is the one on disk now.
+async fn restore_from(
+    p: &Arc<dyn BackupProvider>,
+    store: &BackupStore,
+    instance: &str,
+    id: &str,
+    ctx: &ToolCtx,
+) -> anyhow::Result<BackupRecord> {
+    let kind = p.kind();
+    let _lock = store.lock_async().await?;
+    let record = store.resolve(kind, instance, &BackupSelector::Id(id.to_string()))?;
     let payload = PathBuf::from(&record.path);
     p.restore(&payload, instance, ctx)
         .await
         .map_err(|e| anyhow::anyhow!("restore {kind}/{instance} from {}: {e:#}", record.id))?;
-    Ok(BackupRestoreOutput::Restored { record })
+    Ok(record)
 }
 
 // ── target resolution ─────────────────────────────────────────────────
 
-/// The targets `backup.run`/`list`/`restore` operate on: the `backup`/`targets`
-/// config row, or the built-in `local` fallback when unset/empty.
+/// The targets `backup.run`/`list`/`restore`/`sync` operate on: the
+/// `backup`/`targets` config row THIS host owns, or the built-in `local`
+/// fallback when unset/empty. Another host's replica of the row is never used:
+/// its targets are where that host backs up, not this one.
 fn configured_target_refs() -> Vec<BackupTargetRef> {
     #[derive(serde::Deserialize, Default)]
     struct TargetsRow {
         #[serde(default)]
         targets: Vec<BackupTargetRef>,
     }
-    let read =
-        db::pool::with_pooled_or_open(|conn| db::config_store::get(conn, "backup", "targets"));
+    let read = db::pool::with_pooled_or_open(|conn| {
+        db::config_store::get_local(conn, "backup", "targets")
+    });
     let refs = match read {
         Ok(Some(row)) => serde_json::from_str::<TargetsRow>(&row.json)
             .map(|r| r.targets)
@@ -1149,37 +1531,48 @@ fn configured_target_refs() -> Vec<BackupTargetRef> {
     }
 }
 
-/// Open every configured target to its store, skipping (log-and-continue) any
-/// whose kind is not registered or fails to open. When `refresh` is true, each
-/// target's remote backing is pulled first (for list/restore reads).
-async fn open_configured_targets(
+/// Open each of `refs` to its store, skipping (log-and-continue) any whose kind
+/// is not registered or fails to open. When `refresh` is true, each target's
+/// remote backing is pulled first (for list/restore reads).
+async fn open_targets(
+    refs: &[BackupTargetRef],
     ctx: &ToolCtx,
     refresh: bool,
 ) -> Vec<(BackupTargetRef, BackupStore)> {
+    let (opened, errors) = open_targets_reporting(refs, ctx, refresh).await;
+    for e in errors {
+        tracing::warn!("[backup] {e}");
+    }
+    opened
+}
+
+/// [`open_targets`], returning each skip/failure as a message instead of only
+/// logging it. A failed refresh is reported but the target is still opened.
+async fn open_targets_reporting(
+    refs: &[BackupTargetRef],
+    ctx: &ToolCtx,
+    refresh: bool,
+) -> (Vec<(BackupTargetRef, BackupStore)>, Vec<String>) {
     let mut out = Vec::new();
-    for r in configured_target_refs() {
+    let mut errors = Vec::new();
+    for r in refs {
+        let label = format!("{}/{}", r.kind, r.name);
         let Some(tp) = target::target(&r.kind) else {
-            tracing::warn!(
-                "[backup] no target provider for kind `{}` (target {}/{}), skipping",
-                r.kind,
-                r.kind,
-                r.name
-            );
+            errors.push(format!(
+                "target {label}: no target provider for kind `{}`, skipping",
+                r.kind
+            ));
             continue;
         };
         if refresh && let Err(e) = tp.refresh(&r.name, ctx).await {
-            tracing::warn!(
-                "[backup] target {}/{} refresh failed: {e:#}",
-                r.kind,
-                r.name
-            );
+            errors.push(format!("target {label}: refresh failed: {e:#}"));
         }
         match tp.open(&r.name, ctx).await {
-            Ok(store) => out.push((r, store)),
-            Err(e) => tracing::warn!("[backup] target {}/{} open failed: {e:#}", r.kind, r.name),
+            Ok(store) => out.push((r.clone(), store.shared(r.shared))),
+            Err(e) => errors.push(format!("target {label}: open failed: {e:#}")),
         }
     }
-    out
+    (out, errors)
 }
 
 // ── fleet-wide collision machinery ─────────────────────────────────────
@@ -1211,7 +1604,8 @@ async fn refresh_and_check_collisions(ctx: &ToolCtx) -> anyhow::Result<Vec<colli
 /// the target's backing key plus the provider's layout sub-path.
 async fn resolve_local_destinations(ctx: &ToolCtx) -> Vec<Destination> {
     let mut out = Vec::new();
-    for r in configured_target_refs() {
+    let refs = configured_target_refs();
+    for r in &refs {
         let Some(tp) = target::target(&r.kind) else {
             continue;
         };
@@ -1224,7 +1618,10 @@ async fn resolve_local_destinations(ctx: &ToolCtx) -> Vec<Destination> {
         };
         let label = format!("{}/{}", r.kind, r.name);
         for p in provider::providers() {
-            let instances = match p.instances() {
+            if !r.accepts(p.kind(), &refs) {
+                continue;
+            }
+            let instances = match instances_of(&p).await {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(
@@ -1237,10 +1634,11 @@ async fn resolve_local_destinations(ctx: &ToolCtx) -> Vec<Destination> {
             for instance in instances {
                 out.push(Destination {
                     kind: p.kind().to_string(),
-                    subpath: p.layout(&instance).join("/"),
+                    subpath: layout_of(&p, &instance).await.join("/"),
                     instance,
                     backing_key: backing_key.clone(),
                     target: label.clone(),
+                    shared: r.shared,
                 });
             }
         }
@@ -1373,6 +1771,7 @@ mod tests {
                 Ok(super::super::provider::BackupOutcome {
                     checksum: None,
                     note: Some("stub".into()),
+                    unchanged: false,
                 })
             })
         }
@@ -1565,6 +1964,7 @@ mod tests {
                 file_count: 0,
                 checksum: None,
                 note: None,
+                writer: None,
             },
         };
         let v = serde_json::to_value(&restored).unwrap();
@@ -1640,6 +2040,7 @@ mod tests {
             checksum: None,
             note: None,
             system: system.into(),
+            writer: None,
         }
     }
 
@@ -2223,6 +2624,7 @@ mod tests {
                 file_count: 0,
                 checksum: None,
                 note: None,
+                writer: None,
             }],
         };
         let s = serde_json::to_string(&out).unwrap();
@@ -2295,6 +2697,7 @@ mod tests {
             backing_key: backing.into(),
             subpath: subpath.into(),
             target: format!("{kind}/default"),
+            shared: false,
         }
     }
 
@@ -2525,7 +2928,7 @@ mod tests {
                 db::config_store::set(conn, "h", "h", "backup", "targets", &json, "h")
             })
             .expect("set config row");
-            let opened = rt().block_on(open_configured_targets(&ctx(), false));
+            let opened = rt().block_on(open_targets(&configured_target_refs(), &ctx(), false));
             assert_eq!(opened.len(), 1, "unknown kind is skipped, known is opened");
             assert_eq!(opened[0].0.kind, kind);
         });
@@ -2739,5 +3142,354 @@ mod tests {
         });
         target::deregister_target(tkind);
         provider::deregister_provider(pkind);
+    }
+
+    // ── host-scoped targets, kind binding, unchanged, sync ─────────────
+
+    fn set_targets(json: &str) {
+        db::pool::with_pooled_or_open(|conn| {
+            db::config_store::set(conn, "h", "h", "backup", "targets", json, "h")
+        })
+        .expect("set config row");
+    }
+
+    #[test]
+    fn another_hosts_target_row_is_never_used() {
+        with_db("replica_targets.db", || {
+            db::pool::with_pooled_or_open(|conn| {
+                db::config_store::upsert_mesh_row(
+                    conn,
+                    "bragi",
+                    "backup",
+                    "targets",
+                    r#"{"targets":[{"kind":"smb","name":"saves"}]}"#,
+                    "2026-01-01T00:00:00Z",
+                    "bragi",
+                    true,
+                    "",
+                )
+            })
+            .expect("seed replica");
+            let refs = configured_target_refs();
+            assert_eq!(refs, vec![BackupTargetRef::local()], "replica ignored");
+        });
+    }
+
+    /// A syncable provider recording each restore and backing up `data.txt`, or
+    /// reporting unchanged.
+    struct SyncStub {
+        kind: String,
+        unchanged: bool,
+        syncable: bool,
+        restored: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl BackupProvider for SyncStub {
+        fn kind(&self) -> &str {
+            &self.kind
+        }
+        fn syncable(&self) -> bool {
+            self.syncable
+        }
+        fn instances(&self) -> anyhow::Result<Vec<String>> {
+            Ok(vec!["local-game".into()])
+        }
+        fn backup<'a>(
+            &'a self,
+            payload_dir: &'a Path,
+            _instance: &'a str,
+            _ctx: &'a ToolCtx,
+        ) -> contract::BoxFuture<'a, anyhow::Result<super::super::provider::BackupOutcome>>
+        {
+            Box::pin(async move {
+                if self.unchanged {
+                    return Ok(super::super::provider::BackupOutcome::unchanged(None));
+                }
+                std::fs::write(payload_dir.join("data.txt"), b"save")?;
+                Ok(super::super::provider::BackupOutcome::default())
+            })
+        }
+        fn restore<'a>(
+            &'a self,
+            payload_dir: &'a Path,
+            instance: &'a str,
+            _ctx: &'a ToolCtx,
+        ) -> contract::BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                assert!(
+                    payload_dir.join("data.txt").exists(),
+                    "payload is the real slot"
+                );
+                self.restored.lock().unwrap().push(instance.to_string());
+                Ok(())
+            })
+        }
+    }
+
+    fn sync_stub(
+        kind: &str,
+        unchanged: bool,
+    ) -> (Arc<SyncStub>, Arc<std::sync::Mutex<Vec<String>>>) {
+        let restored = Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Arc::new(SyncStub {
+                kind: kind.into(),
+                unchanged,
+                syncable: true,
+                restored: restored.clone(),
+            }),
+            restored,
+        )
+    }
+
+    /// Plant a committed backup written by another host into `root`.
+    fn plant_foreign(root: &Path, kind: &str, instance: &str, id: &str) -> BackupRecord {
+        let slot = root.join(kind).join(instance).join(id);
+        std::fs::create_dir_all(slot.join("payload")).unwrap();
+        std::fs::write(slot.join("payload/data.txt"), b"theirs").unwrap();
+        let rec = BackupRecord {
+            id: id.into(),
+            kind: kind.into(),
+            instance: instance.into(),
+            created_ms: 1,
+            path: "payload".into(),
+            size_bytes: 6,
+            file_count: 1,
+            checksum: None,
+            note: None,
+            system: String::new(),
+            writer: Some(BackupWriter {
+                host: "other-host".into(),
+                machine_id: "other-machine".into(),
+            }),
+        };
+        std::fs::write(
+            slot.join("manifest.json"),
+            serde_json::to_string(&rec).unwrap(),
+        )
+        .unwrap();
+        rec
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_backup_commits_nothing_and_skips_prune() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = BackupStore::new(tmp.path().join("b"));
+        let old = store
+            .new_slot(
+                &["unch-kind".into(), "local-game".into()],
+                "unch-kind",
+                "local-game",
+            )
+            .unwrap();
+        std::fs::write(old.payload_dir().join("f"), b"x").unwrap();
+        old.commit(None, None).unwrap();
+        let (p, _) = sync_stub("unch-kind", true);
+        let providers: Vec<Arc<dyn BackupProvider>> = vec![p];
+        let out = run_backups(&store, &providers, None, &Retention::keep_last(0), &ctx()).await;
+        assert!(out.produced.is_empty());
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.unchanged.len(), 1);
+        assert_eq!(out.unchanged[0].instance, "local-game");
+        assert_eq!(
+            store.list(Some("unch-kind"), None).unwrap().len(),
+            1,
+            "no new slot, and keep_last(0) was not applied"
+        );
+        let leftovers = std::fs::read_dir(tmp.path().join("b/unch-kind/local-game"))
+            .map(|rd| rd.count())
+            .unwrap_or(0);
+        assert_eq!(leftovers, 1, "the discarded slot is gone");
+    }
+
+    #[test]
+    fn a_kind_bound_to_a_shared_target_lands_only_there() {
+        let (unbound, pool) = ("bind-unbound", "bind-pool");
+        let pkind = "bind-saves";
+        let hkind = "bind-hostlike";
+        let tmp = tempfile::tempdir().unwrap();
+        for (k, dir) in [(unbound, "u"), (pool, "p")] {
+            target::register_target(Arc::new(RootedTarget {
+                kind: k.into(),
+                root: tmp.path().join(dir),
+                locations: vec![],
+                fail_available: false,
+            }));
+        }
+        let (saves, _) = sync_stub(pkind, false);
+        provider::register_provider(saves);
+        provider::register_provider(Arc::new(StubProvider { kind: hkind.into() }));
+        with_db("bind.db", || {
+            set_targets(&format!(
+                r#"{{"targets":[{{"kind":"{unbound}","name":"default"}},
+                    {{"kind":"{pool}","name":"default","kinds":["{pkind}"],"shared":true}}]}}"#
+            ));
+            for k in [pkind, hkind] {
+                rt().block_on(backup_run(
+                    BackupRunArgs {
+                        local_only: true,
+                        kind: Some(k.into()),
+                        instance: None,
+                        all: false,
+                    },
+                    &ctx(),
+                ))
+                .expect("run");
+            }
+            let u = BackupStore::new(tmp.path().join("u"));
+            let p = BackupStore::new(tmp.path().join("p"));
+            assert!(
+                u.list(Some(pkind), None).unwrap().is_empty(),
+                "claimed kind skips unbound"
+            );
+            assert_eq!(u.list(Some(hkind), None).unwrap().len(), 1);
+            assert!(
+                p.list(Some(hkind), None).unwrap().is_empty(),
+                "pool takes only listed kinds"
+            );
+            let pooled = p.list(Some(pkind), None).unwrap();
+            assert_eq!(pooled.len(), 1);
+            let host = crate::host_identity::hostname().to_ascii_lowercase();
+            assert!(
+                pooled[0].id.contains(
+                    host.split(|c: char| !c.is_ascii_alphanumeric())
+                        .next()
+                        .unwrap()
+                ),
+                "shared slot ids carry the writer: {}",
+                pooled[0].id
+            );
+
+            let dests = rt().block_on(resolve_local_destinations(&ctx()));
+            let d = dests
+                .iter()
+                .find(|d| d.kind == pkind)
+                .expect("pool destination");
+            assert!(d.shared);
+            assert_eq!(d.target, format!("{pool}/default"));
+            assert!(
+                !dests
+                    .iter()
+                    .any(|d| d.kind == pkind && d.target.starts_with(unbound))
+            );
+        });
+        target::deregister_target(unbound);
+        target::deregister_target(pool);
+        provider::deregister_provider(pkind);
+        provider::deregister_provider(hkind);
+    }
+
+    #[test]
+    fn sync_refuses_host_and_kinds_that_do_not_opt_in() {
+        let err = sync_provider("host")
+            .err()
+            .expect("host refused")
+            .to_string();
+        assert!(err.contains("never synced"), "{err}");
+        let kind = "sync-not-opted";
+        let restored = Arc::new(std::sync::Mutex::new(Vec::new()));
+        provider::register_provider(Arc::new(SyncStub {
+            kind: kind.into(),
+            unchanged: false,
+            syncable: false,
+            restored,
+        }));
+        let err = sync_provider(kind).err().expect("refused").to_string();
+        assert!(err.contains("syncable"), "{err}");
+        provider::deregister_provider(kind);
+        assert!(sync_provider("no-such-sync-kind").is_err());
+    }
+
+    #[test]
+    fn sync_restores_a_foreign_newest_backup_then_backs_up() {
+        let tkind = "sync-pool";
+        let pkind = "sync-saves";
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("pool");
+        target::register_target(Arc::new(RootedTarget {
+            kind: tkind.into(),
+            root: root.clone(),
+            locations: vec![],
+            fail_available: false,
+        }));
+        let (p, restored) = sync_stub(pkind, false);
+        provider::register_provider(p);
+        // A game only the other host has ever backed up.
+        let theirs = plant_foreign(&root, pkind, "their-game", "20200101-000000-other-host");
+        with_db("sync.db", || {
+            set_targets(&format!(
+                r#"{{"targets":[{{"kind":"{tkind}","name":"default","kinds":["{pkind}"],"shared":true}}]}}"#
+            ));
+            let out = rt()
+                .block_on(backup_sync(
+                    BackupSyncArgs {
+                        kind: pkind.into(),
+                        instance: None,
+                    },
+                    &ctx(),
+                ))
+                .expect("sync");
+            assert_eq!(out.targets, vec![format!("{tkind}/default")]);
+            let names: Vec<&str> = out.instances.iter().map(|i| i.instance.as_str()).collect();
+            assert_eq!(names, vec!["local-game", "their-game"], "advertised ∪ pool");
+
+            let their = &out.instances[1];
+            assert_eq!(
+                their.restored.as_ref().map(|r| r.id.as_str()),
+                Some(theirs.id.as_str())
+            );
+            assert_eq!(their.produced.len(), 1, "then backed up here");
+            let local = &out.instances[0];
+            assert!(
+                local.restored.is_none(),
+                "nothing to pull for a local-only game"
+            );
+            assert_eq!(local.produced.len(), 1);
+            assert_eq!(*restored.lock().unwrap(), vec!["their-game".to_string()]);
+
+            // Our own backup is now the newest: a second sync must not restore it.
+            let again = rt()
+                .block_on(backup_sync(
+                    BackupSyncArgs {
+                        kind: pkind.into(),
+                        instance: Some("their-game".into()),
+                    },
+                    &ctx(),
+                ))
+                .expect("second sync");
+            assert!(
+                again.instances[0].restored.is_none(),
+                "own backup never restored"
+            );
+            assert_eq!(restored.lock().unwrap().len(), 1);
+        });
+        target::deregister_target(tkind);
+        provider::deregister_provider(pkind);
+    }
+
+    #[test]
+    fn the_same_shared_backup_seen_by_several_systems_has_one_holder() {
+        let w = |h: &str| {
+            Some(BackupWriter {
+                host: h.into(),
+                machine_id: format!("{h}-id"),
+            })
+        };
+        let mut a = rec("20260101-000000-bragi", "hemlock");
+        a.writer = w("bragi");
+        let mut b = rec("20260101-000000-bragi", "");
+        b.writer = w("bragi");
+        assert_eq!(backup_holders(&[&a, &b]), vec![String::new()], "local wins");
+        let mut c = rec("20260101-000000-bragi", "willow");
+        c.writer = w("bragi");
+        assert_eq!(backup_holders(&[&a, &c]), vec!["hemlock".to_string()]);
+
+        // Different writers, or no writer, stay ambiguous.
+        let mut d = rec("20260101-000000", "willow");
+        d.writer = w("other");
+        let mut e = rec("20260101-000000", "freyr");
+        e.writer = w("bragi");
+        assert_eq!(backup_holders(&[&d, &e]).len(), 2);
+        let (f, g) = (rec("x", "willow"), rec("x", "freyr"));
+        assert_eq!(backup_holders(&[&f, &g]).len(), 2);
     }
 }

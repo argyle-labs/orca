@@ -36,9 +36,9 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::{Result, anyhow};
 use contract::backup::wire::{
-    DOMAIN_KIND, DOMAIN_TARGET, FitsArgs, InstanceArgs, NameArgs, OP_AVAILABLE, OP_BACKING_KEY,
-    OP_BACKUP, OP_DEFAULT_RETENTION, OP_DEFAULT_SCHEDULE, OP_FITS, OP_INSTANCES, OP_LAYOUT,
-    OP_OPEN, OP_REFRESH, OP_RESTORE, OP_SYNC, OP_TITLE, OpenReply, PayloadArgs,
+    CAP_SYNCABLE, DOMAIN_KIND, DOMAIN_TARGET, FitsArgs, InstanceArgs, NameArgs, OP_AVAILABLE,
+    OP_BACKING_KEY, OP_BACKUP, OP_DEFAULT_RETENTION, OP_DEFAULT_SCHEDULE, OP_FITS, OP_INSTANCES,
+    OP_LAYOUT, OP_OPEN, OP_REFRESH, OP_RESTORE, OP_SYNC, OP_TITLE, OpenReply, PayloadArgs,
 };
 use contract::backup::{BackupSchedule, Placement, Retention};
 use contract::{BoxFuture, ToolCtx};
@@ -157,6 +157,7 @@ pub fn register_kind_from_def(def: &BackendDef, invoke: BackendInvoke) -> Result
     provider::register_provider(Arc::new(BackupKindProxy {
         kind: def.kind.clone(),
         title,
+        syncable: def.capabilities.iter().any(|c| c == CAP_SYNCABLE),
         invoke,
     }));
     Ok(())
@@ -175,13 +176,16 @@ struct BackupKindProxy {
     kind: String,
     /// Plugin-supplied title, fetched once at registration ([`fetch_title`]).
     title: String,
+    /// The def advertised [`CAP_SYNCABLE`].
+    syncable: bool,
     invoke: BackendInvoke,
 }
 
 impl BackupKindProxy {
     /// Synchronous metadata call — the loader thunk is itself synchronous, so a
-    /// sync trait method (`instances`/`layout`) drives it directly. Must stay
-    /// cheap on the plugin side: it is not offloaded to a blocking pool.
+    /// sync trait method (`instances`/`layout`) drives it directly. It blocks
+    /// on a plugin round-trip, so async callers run those trait methods via
+    /// `spawn_blocking`.
     fn call_sync<T: for<'de> Deserialize<'de>>(
         &self,
         op: &str,
@@ -241,6 +245,10 @@ impl BackupProvider for BackupKindProxy {
 
     fn title(&self) -> &str {
         &self.title
+    }
+
+    fn syncable(&self) -> bool {
+        self.syncable
     }
 
     fn instances(&self) -> Result<Vec<String>> {
@@ -539,6 +547,7 @@ mod tests {
         let p = BackupKindProxy {
             kind: "vm".into(),
             title: "vm".into(),
+            syncable: false,
             invoke: thunk(r, seen),
         };
         assert_eq!(p.kind(), "vm");
@@ -561,6 +570,7 @@ mod tests {
         let p = BackupKindProxy {
             kind: "vm".into(),
             title: "vm".into(),
+            syncable: false,
             invoke: thunk(std::collections::HashMap::new(), seen),
         };
         assert!(p.instances().is_err(), "enumeration failure must surface");
@@ -650,6 +660,20 @@ mod tests {
             .expect("name == kind is accepted");
         // Clean up the process-global registry + owner map via the real teardown.
         deregister_kind("acc-kind");
+    }
+
+    #[test]
+    fn syncable_is_opt_in_through_the_capability() {
+        let plain = kind_def("sync-plain-kind", "sync.plain");
+        register_kind_from_def(&plain, thunk(Default::default(), Default::default())).unwrap();
+        assert!(!provider::provider("sync-plain-kind").unwrap().syncable());
+        deregister_kind("sync-plain-kind");
+
+        let mut opted = kind_def("sync-opted-kind", "sync.opted");
+        opted.capabilities.push(CAP_SYNCABLE.to_string());
+        register_kind_from_def(&opted, thunk(Default::default(), Default::default())).unwrap();
+        assert!(provider::provider("sync-opted-kind").unwrap().syncable());
+        deregister_kind("sync-opted-kind");
     }
 
     fn kind_def(kind: &str, owner: &str) -> BackendDef {
@@ -742,6 +766,7 @@ mod tests {
         let p = BackupKindProxy {
             kind: "vm".into(),
             title: "Proxmox VM".into(),
+            syncable: false,
             invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
         };
         assert_eq!(p.title(), "Proxmox VM");
@@ -755,6 +780,7 @@ mod tests {
         let p = BackupKindProxy {
             kind: "vm".into(),
             title: "vm".into(),
+            syncable: false,
             invoke: thunk(r, seen.clone()),
         };
         assert_eq!(
@@ -776,6 +802,7 @@ mod tests {
         let p = BackupKindProxy {
             kind: "vm".into(),
             title: "vm".into(),
+            syncable: false,
             invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
         };
         let err = p.instances().expect_err("invalid JSON must surface");
@@ -793,6 +820,7 @@ mod tests {
         let p = BackupKindProxy {
             kind: "vm".into(),
             title: "vm".into(),
+            syncable: false,
             invoke: thunk(r, seen.clone()),
         };
         let out = p
@@ -815,6 +843,7 @@ mod tests {
         let p = BackupKindProxy {
             kind: "vm".into(),
             title: "vm".into(),
+            syncable: false,
             invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
         };
         let err = p
@@ -832,6 +861,7 @@ mod tests {
         let p = BackupKindProxy {
             kind: "vm".into(),
             title: "vm".into(),
+            syncable: false,
             invoke: thunk(r, seen.clone()),
         };
         p.restore(Path::new("/tmp/payload"), "100", &ctx())
@@ -850,6 +880,7 @@ mod tests {
         let p = BackupKindProxy {
             kind: "vm".into(),
             title: "vm".into(),
+            syncable: false,
             invoke: thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
         };
         assert!(
@@ -1168,6 +1199,7 @@ mod tests {
         let p = BackupKindProxy {
             kind: "vm".into(),
             title: "vm".into(),
+            syncable: false,
             invoke: thunk(r, Arc::new(Mutex::new(Vec::new()))),
         };
         let err = p

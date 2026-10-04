@@ -36,6 +36,10 @@ pub struct Destination {
     pub subpath: String,
     /// The target ref this resolved from (`<kind>/<name>`), for messaging.
     pub target: String,
+    /// The target is a pool several hosts write on purpose (see
+    /// [`BackupTargetRef::shared`](contract::backup::BackupTargetRef::shared)).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
 }
 
 /// A destination tagged with the host that owns/writes it.
@@ -125,7 +129,10 @@ fn overlap(a: &str, b: &str) -> Option<bool> {
 /// Every collision among `dests` (fleet-wide). A collision is any two DISTINCT
 /// destination entries sharing a `backing_key` whose sub-paths overlap. Distinct
 /// entries with the same identity (e.g. one workload configured to write the same
-/// place twice) still collide — writing a folder twice is itself the bug.
+/// place twice) still collide — writing a folder twice is itself the bug. The
+/// exception is a shared pool: two destinations of the same kind that are both
+/// on `shared` targets write the same folder by design (their slot ids carry the
+/// writer), so they never collide.
 pub fn detect_collisions(dests: &[OwnedDestination]) -> Vec<Collision> {
     let mut out = Vec::new();
     for i in 0..dests.len() {
@@ -137,6 +144,9 @@ pub fn detect_collisions(dests: &[OwnedDestination]) -> Vec<Collision> {
             // Identical identity AND identical path is the same row echoed twice
             // (e.g. a host re-reporting) — not a real conflict.
             if a.identity() == b.identity() && a.dest.subpath == b.dest.subpath {
+                continue;
+            }
+            if a.dest.shared && b.dest.shared && a.dest.kind == b.dest.kind {
                 continue;
             }
             if let Some(nested) = overlap(&a.dest.subpath, &b.dest.subpath) {
@@ -167,8 +177,46 @@ mod tests {
                 backing_key: backing.to_string(),
                 subpath: subpath.to_string(),
                 target: format!("{kind}/default"),
+                shared: false,
             },
         }
+    }
+
+    fn shared(mut d: OwnedDestination) -> OwnedDestination {
+        d.dest.shared = true;
+        d
+    }
+
+    #[test]
+    fn same_kind_on_a_shared_pool_is_intentional() {
+        let a = dest(
+            "bragi",
+            "game-saves",
+            "elden",
+            "smb://nas/saves",
+            "games/elden",
+        );
+        let b = dest(
+            "hemlock",
+            "game-saves",
+            "elden",
+            "smb://nas/saves",
+            "games/elden",
+        );
+        assert!(detect_collisions(&[shared(a.clone()), shared(b.clone())]).is_empty());
+        // Only when BOTH sides declare the pool shared.
+        assert_eq!(detect_collisions(&[shared(a.clone()), b.clone()]).len(), 1);
+        assert_eq!(detect_collisions(&[a, b]).len(), 1);
+        // A different kind on the same pool path still collides.
+        let host = dest("bragi", "host", "bragi", "smb://nas/saves", "games/elden");
+        let saves = dest(
+            "hemlock",
+            "game-saves",
+            "elden",
+            "smb://nas/saves",
+            "games/elden",
+        );
+        assert_eq!(detect_collisions(&[shared(host), shared(saves)]).len(), 1);
     }
 
     #[test]

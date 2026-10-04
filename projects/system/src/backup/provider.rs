@@ -67,9 +67,18 @@ pub trait BackupProvider: Send + Sync {
         vec![self.kind().to_string(), instance.to_string()]
     }
 
+    /// Whether `backup.sync` may run this kind: restore the newest backup
+    /// another host wrote to a shared pool, then back up. Off by default; a
+    /// kind opts in only when overwriting its live state from another host's
+    /// backup is the intent (game saves), never for host or service state.
+    fn syncable(&self) -> bool {
+        false
+    }
+
     /// Capture `instance`'s state into `payload_dir` (already created, empty).
     /// The provider writes files under it and returns metadata. Returning `Err`
-    /// makes the tool layer abort the slot, leaving no partial backup.
+    /// makes the tool layer abort the slot, leaving no partial backup; an
+    /// outcome marked `unchanged` discards the slot without committing it.
     fn backup<'a>(
         &'a self,
         payload_dir: &'a Path,
@@ -159,6 +168,7 @@ mod tests {
                 Ok(BackupOutcome {
                     checksum: None,
                     note: Some("fake".into()),
+                    unchanged: false,
                 })
             })
         }

@@ -385,6 +385,12 @@ pub struct BackupRecord {
     /// When the backup completed, Unix milliseconds.
     pub created_ms: i64,
     /// Absolute path to this backup's payload directory on the host that holds it.
+    ///
+    /// Derived by the store from WHERE the manifest was found, never read back
+    /// from the manifest: a manifest on a shared pool may be written by another
+    /// host or crafted, and this path is what prune deletes. On disk it is the
+    /// slot-relative `payload`.
+    #[serde(default)]
     pub path: String,
     /// Total payload size in bytes.
     #[serde(default)]
@@ -406,6 +412,34 @@ pub struct BackupRecord {
     /// operator must never have to name a host to find out.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub system: String,
+    /// The host that wrote this backup. Absent on backups written before writer
+    /// identity was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer: Option<BackupWriter>,
+}
+
+/// The host that produced a backup. Distinguishes writers sharing one pool.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupWriter {
+    /// Display hostname of the writer.
+    pub host: String,
+    /// Stable machine id of the writer, when known. Preferred over `host` for
+    /// identity because hostnames can be reused.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub machine_id: String,
+}
+
+impl BackupWriter {
+    /// Whether two writers are the same host: by machine id when both carry
+    /// one, else by hostname.
+    pub fn same_host(&self, other: &BackupWriter) -> bool {
+        if !self.machine_id.is_empty() && !other.machine_id.is_empty() {
+            self.machine_id == other.machine_id
+        } else {
+            self.host == other.host
+        }
+    }
 }
 
 impl BackupRecord {
@@ -479,6 +513,16 @@ pub struct BackupTargetRef {
     /// Instance name within the kind. `default` for the single, unnamed target.
     #[serde(default = "default_target_name")]
     pub name: String,
+    /// The backup kinds this target receives. `None` = every kind not claimed
+    /// by another target's explicit `kinds` list (see [`Self::accepts`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<Vec<String>>,
+    /// The target's storage is intentionally shared by several hosts (a sync
+    /// pool). Slot ids written here carry a host discriminator, same-kind
+    /// destinations on it are not collisions, and it only ever receives the
+    /// kinds it lists explicitly.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
 }
 
 fn default_target_name() -> String {
@@ -488,10 +532,7 @@ fn default_target_name() -> String {
 impl BackupTargetRef {
     /// The built-in `local`/`default` target — the always-available fallback.
     pub fn local() -> Self {
-        Self {
-            kind: "local".to_string(),
-            name: default_target_name(),
-        }
+        Self::new("local", default_target_name())
     }
 
     /// A named target of the given kind.
@@ -499,12 +540,34 @@ impl BackupTargetRef {
         Self {
             kind: kind.into(),
             name: name.into(),
+            kinds: None,
+            shared: false,
         }
     }
 
     /// True if this is the built-in local file-path target.
     pub fn is_local(&self) -> bool {
         self.kind == "local"
+    }
+
+    /// Whether this target, configured alongside `all`, receives backups of
+    /// `kind`:
+    ///
+    /// * an explicit `kinds` list receives exactly those kinds;
+    /// * a `shared` target without `kinds` receives nothing, so no kind (the
+    ///   `host` kind above all) lands in a cross-host pool by default;
+    /// * otherwise every kind no other target in `all` lists explicitly.
+    pub fn accepts(&self, kind: &str, all: &[BackupTargetRef]) -> bool {
+        match &self.kinds {
+            Some(kinds) => kinds.iter().any(|k| k == kind),
+            None if self.shared => false,
+            None => !all.iter().any(|t| {
+                t != self
+                    && t.kinds
+                        .as_ref()
+                        .is_some_and(|ks| ks.iter().any(|k| k == kind))
+            }),
+        }
     }
 }
 
@@ -610,7 +673,28 @@ pub struct BackupOutcome {
     pub checksum: Option<String>,
     /// Free-form note on what was captured (paths, strategy, …).
     pub note: Option<String>,
+    /// Nothing changed since the latest backup of this instance. The store
+    /// discards the slot instead of committing it, and the target is not synced.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unchanged: bool,
 }
+
+impl BackupOutcome {
+    /// The outcome of a backup that found nothing new to capture.
+    pub fn unchanged(note: Option<String>) -> Self {
+        Self {
+            checksum: None,
+            note,
+            unchanged: true,
+        }
+    }
+}
+
+/// Lock file at a target's store root. Whoever mutates the tree beneath the
+/// root holds an exclusive `flock(2)` on it for the whole mutation: the store
+/// around backup→prune and restore, a target plugin around reconciling a local
+/// stage with its remote. Created if absent, never deleted.
+pub const STAGE_LOCK_FILE: &str = ".orca-stage.lock";
 
 /// A concrete storage location a target kind exposes for selection — the "point
 /// a target" surface. A storage plugin (smb/nfs) enumerates the mounts/shares it
@@ -673,6 +757,11 @@ pub mod wire {
     /// Human-facing title op — both KIND and TARGET expose it so the proxy can
     /// surface a plugin-supplied title over the wire (bridge Gap #4).
     pub const OP_TITLE: &str = "title";
+
+    /// KIND capability opting into `backup.sync` (restore the pool's latest,
+    /// then back up). Advertised in the backend def's `capabilities`; absent
+    /// means the kind is never synced.
+    pub const CAP_SYNCABLE: &str = "syncable";
 
     /// Args for the `layout` op — the instance whose layout segments are wanted.
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -927,7 +1016,96 @@ mod tests {
             file_count: 3,
             checksum: Some("sha256:deadbeef".into()),
             note: Some("paths: ~/.claude/memory".into()),
+            writer: None,
         }
+    }
+
+    #[test]
+    fn record_writer_round_trips_and_is_optional() {
+        let mut r = sample_record();
+        assert!(
+            !serde_json::to_string(&r).unwrap().contains("writer"),
+            "absent writer is omitted"
+        );
+        r.writer = Some(BackupWriter {
+            host: "bragi".into(),
+            machine_id: "m-1".into(),
+        });
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["writer"]["host"], "bragi");
+        assert_eq!(v["writer"]["machineId"], "m-1");
+        assert_eq!(serde_json::from_value::<BackupRecord>(v).unwrap(), r);
+    }
+
+    #[test]
+    fn record_without_path_parses() {
+        let r: BackupRecord = serde_json::from_str(
+            r#"{"id":"20260101-000000","kind":"d","instance":"i","createdMs":1}"#,
+        )
+        .unwrap();
+        assert!(r.path.is_empty());
+    }
+
+    #[test]
+    fn writers_compare_by_machine_id_then_host() {
+        let w = |h: &str, m: &str| BackupWriter {
+            host: h.into(),
+            machine_id: m.into(),
+        };
+        assert!(w("a", "1").same_host(&w("b", "1")));
+        assert!(!w("a", "1").same_host(&w("a", "2")));
+        assert!(w("a", "").same_host(&w("a", "2")));
+        assert!(!w("a", "").same_host(&w("b", "")));
+    }
+
+    #[test]
+    fn target_kind_binding_semantics() {
+        let local = BackupTargetRef::local();
+        let mut saves = BackupTargetRef::new("smb", "saves");
+        saves.kinds = Some(vec!["game-saves".into()]);
+        saves.shared = true;
+        let all = vec![local.clone(), saves.clone()];
+
+        assert!(saves.accepts("game-saves", &all));
+        assert!(!saves.accepts("host", &all));
+        // Claimed by the explicit binding, so the unbound target skips it.
+        assert!(!local.accepts("game-saves", &all));
+        assert!(local.accepts("host", &all));
+
+        // A shared target that lists no kinds receives nothing.
+        let mut pool = BackupTargetRef::new("smb", "pool");
+        pool.shared = true;
+        let all = vec![pool.clone()];
+        assert!(!pool.accepts("host", &all));
+        assert!(!pool.accepts("game-saves", &all));
+    }
+
+    #[test]
+    fn target_ref_new_fields_are_optional_on_the_wire() {
+        let r: BackupTargetRef = serde_json::from_str(r#"{"kind":"nfs","name":"nas"}"#).unwrap();
+        assert_eq!(r, BackupTargetRef::new("nfs", "nas"));
+        assert_eq!(
+            serde_json::to_string(&r).unwrap(),
+            r#"{"kind":"nfs","name":"nas"}"#
+        );
+        let r: BackupTargetRef = serde_json::from_str(
+            r#"{"kind":"smb","name":"saves","kinds":["game-saves"],"shared":true}"#,
+        )
+        .unwrap();
+        assert!(r.shared);
+        assert_eq!(r.kinds.as_deref(), Some(&["game-saves".to_string()][..]));
+    }
+
+    #[test]
+    fn outcome_unchanged_defaults_false_and_is_omitted() {
+        let o: BackupOutcome = serde_json::from_str(r#"{"checksum":null,"note":"x"}"#).unwrap();
+        assert!(!o.unchanged);
+        assert!(!serde_json::to_string(&o).unwrap().contains("unchanged"));
+        let u = BackupOutcome::unchanged(None);
+        assert_eq!(
+            serde_json::to_value(&u).unwrap()["unchanged"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]

@@ -123,8 +123,9 @@ pub(crate) fn placement() -> Placement {
         #[serde(default)]
         labels: Vec<String>,
     }
-    let read =
-        db::pool::with_pooled_or_open(|conn| db::config_store::get(conn, "backup", "placement"));
+    let read = db::pool::with_pooled_or_open(|conn| {
+        db::config_store::get_local(conn, "backup", "placement")
+    });
     match read {
         Ok(Some(row)) => match serde_json::from_str::<PlacementRow>(&row.json) {
             Ok(p) => Placement {

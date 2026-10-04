@@ -147,7 +147,7 @@ impl BackupProvider for HostBackupProvider {
 /// Load the `backup`/`host` config row, falling back to defaults on any DB or
 /// parse error so a host backup never fails just because config is unavailable.
 fn load_config() -> HostBackupConfig {
-    let read = db::pool::with_pooled_or_open(|conn| db::config_store::get(conn, NOUN, NAME));
+    let read = db::pool::with_pooled_or_open(|conn| db::config_store::get_local(conn, NOUN, NAME));
     match read {
         Ok(Some(row)) => match serde_json::from_str::<HostBackupConfig>(&row.json) {
             Ok(cfg) => cfg,
@@ -187,6 +187,7 @@ fn do_backup(
     Ok(BackupOutcome {
         checksum: None,
         note: Some(format!("host paths: {}", captured.join(", "))),
+        unchanged: false,
     })
 }
 

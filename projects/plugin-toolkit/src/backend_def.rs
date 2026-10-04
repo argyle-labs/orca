@@ -359,6 +359,18 @@ pub fn backup_kind_backend_def(kind: &str, invoke_prefix: &str) -> crate::abi::B
     }
 }
 
+/// [`backup_kind_backend_def`] for a kind that opts into `backup.sync` by
+/// advertising [`CAP_SYNCABLE`](crate::contract::backup::wire::CAP_SYNCABLE):
+/// the host may restore another host's newest backup of an instance over its
+/// live state, then back it up. Only for state meant to follow the user across
+/// hosts (game saves), never host or service state.
+pub fn syncable_backup_kind_backend_def(kind: &str, invoke_prefix: &str) -> crate::abi::BackendDef {
+    let mut def = backup_kind_backend_def(kind, invoke_prefix);
+    def.capabilities
+        .push(crate::contract::backup::wire::CAP_SYNCABLE.to_string());
+    def
+}
+
 /// Build the `backup_target`-domain [`BackendDef`](crate::abi::BackendDef) a
 /// plugin advertises to contribute a backup TARGET (the WHERE axis — `nfs` /
 /// `smb` / `s3` / `pbs`) the generic store writes beneath.
@@ -624,6 +636,17 @@ mod tests {
         )]);
         assert!(json.contains("\"domain\":\"backup_kind\""));
         assert!(json.contains("\"kind\":\"vm\""));
+    }
+
+    #[test]
+    fn syncable_backup_kind_backend_def_adds_the_capability() {
+        let plain = backup_kind_backend_def("game-saves", "raccoon.__backup_kind.game-saves");
+        assert!(!plain.capabilities.iter().any(|c| c == "syncable"));
+        let def =
+            syncable_backup_kind_backend_def("game-saves", "raccoon.__backup_kind.game-saves");
+        assert_eq!(def.name, def.kind);
+        assert!(def.capabilities.iter().any(|c| c == "syncable"));
+        assert_eq!(def.capabilities.len(), plain.capabilities.len() + 1);
     }
 
     #[test]
