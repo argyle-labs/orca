@@ -1058,6 +1058,7 @@ pub struct PluginUpdateOutput {
     /// Currently-installed semver, or `None` when not installed on this host.
     pub installed_version: Option<String>,
     /// The version an `--execute` would move to (newest, or the pinned tag).
+    /// Empty when the plugin has no catalog release source.
     pub target_version: String,
     /// True when `target_version` is strictly newer than `installed_version`
     /// (or the plugin is not yet installed). Uses the same semver comparator as
@@ -1072,11 +1073,27 @@ pub struct PluginUpdateOutput {
 /// Whether a plugin update is available: an uninstalled plugin always is (the
 /// `--execute` would install it); an installed one only when `target` is
 /// strictly newer under the shared semver comparator.
-fn plugin_update_available(installed: Option<&str>, target: &str) -> bool {
+pub(crate) fn plugin_update_available(installed: Option<&str>, target: &str) -> bool {
     match installed {
         Some(cur) => crate::update_state::is_update_available(cur, target),
         None => true,
     }
+}
+
+/// Why an `--execute` leaves the installed plugin alone, or `None` to install.
+/// The same version is never reinstalled, and resolving "newest" never
+/// downgrades a newer local install (#751); an explicit `--version` is the
+/// operator choosing that tag, so a pinned downgrade still applies.
+fn plugin_update_skip(installed: Option<&str>, target: &str, pinned: bool) -> Option<String> {
+    let cur = installed?;
+    if crate::update_state::is_update_available(cur, target) {
+        return None;
+    }
+    if crate::update_state::is_newer_full(cur, target) {
+        return (!pinned)
+            .then(|| format!("installed {cur} is newer than catalog {target}; not downgrading"));
+    }
+    Some(format!("already up to date at {cur}"))
 }
 
 /// [MUTATES STATE] Update ONE installed plugin to the newest release (or a pinned
@@ -1111,7 +1128,7 @@ async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUp
             .map(|l| l.semver.clone());
         return Ok(PluginUpdateOutput {
             name: args.name.clone(),
-            target_version: installed_version.clone().unwrap_or_default(),
+            target_version: String::new(),
             note: format!(
                 "sideloaded plugin '{}' has no catalog release source; cannot update",
                 args.name
@@ -1149,13 +1166,23 @@ async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUp
     // An uninstalled plugin, or a strictly-newer target, is an available update.
     let update_available = plugin_update_available(installed_version.as_deref(), &target_version);
 
-    if !args.execute {
-        let note = match &installed_version {
-            Some(cur) if update_available => format!(
+    let skip = plugin_update_skip(
+        installed_version.as_deref(),
+        &target_version,
+        args.version.is_some(),
+    );
+
+    if !args.execute || skip.is_some() {
+        let note = match (&installed_version, skip) {
+            (_, Some(why)) if args.execute => why,
+            (_, Some(why)) => format!("dry-run: {why}"),
+            (Some(cur), None) if update_available => format!(
                 "dry-run: update available {cur} → {target_version} (pass --execute to apply)"
             ),
-            Some(cur) => format!("dry-run: already up to date at {cur}"),
-            None => format!(
+            (Some(cur), None) => format!(
+                "dry-run: would install pinned {target_version} over {cur} (pass --execute to apply)"
+            ),
+            (None, None) => format!(
                 "dry-run: not installed; would install {target_version} (pass --execute to apply)"
             ),
         };
@@ -1448,6 +1475,22 @@ mod tests {
         assert!(!plugin_update_available(Some("0.1.1"), "0.1.1"));
         // Older target → no update (never a downgrade).
         assert!(!plugin_update_available(Some("0.2.0"), "0.1.9"));
+    }
+
+    #[test]
+    fn plugin_update_skip_never_reinstalls_or_downgrades() {
+        // Not installed: install.
+        assert_eq!(plugin_update_skip(None, "0.1.0", false), None);
+        // Strictly newer target: install.
+        assert_eq!(plugin_update_skip(Some("0.1.0"), "0.1.1", false), None);
+        // Same version, pinned or not: nothing to do.
+        assert!(plugin_update_skip(Some("0.1.1"), "0.1.1", false).is_some());
+        assert!(plugin_update_skip(Some("0.1.1"), "v0.1.1", true).is_some());
+        // Catalog older than a local install (#751): never downgrade on "newest".
+        let why = plugin_update_skip(Some("0.1.0"), "0.0.2-rc.3", false).expect("skipped");
+        assert!(why.contains("newer than catalog"), "{why}");
+        // An explicit older `--version` is the operator's choice.
+        assert_eq!(plugin_update_skip(Some("0.1.0"), "0.0.2-rc.3", true), None);
     }
 
     fn loaded(software: &str) -> plugin_loader::LoadedPluginInfo {
