@@ -32,10 +32,9 @@ DIST_DIR="${REPO_ROOT}/dist-release"
 # (e.g. `pdf`, `php-ast`); pass `--no-default-features` via cargo for headless.
 : "${RELEASE_FEATURES:=}"
 
-# Cargo profile. Defaults to `release` (fat LTO, codegen-units=1 — slow build,
-# fast binary; required for shipped releases). `make build` overrides to
-# `release-fast` (thin LTO, 16 codegen units — uses every core, slightly
-# larger/slower binary, fine for dev).
+# Cargo profile. Defaults to `release` (thin LTO, 16 codegen units; see
+# Cargo.toml). RC builds keep it but turn LTO off via CARGO_PROFILE_RELEASE_LTO
+# (release-local.sh `rc`).
 : "${RELEASE_PROFILE:=release}"
 
 # ── target sets ─────────────────────────────────────────────────────────────
@@ -394,20 +393,7 @@ cargo_build_target() {
       # object files simultaneously and hits EMFILE (ProcessFdQuotaExceeded)
       # with the default 16 units (~2800 objects). 4 units ~= 700 objects,
       # well under macOS kern.maxfilesperproc. Native macOS builds keep 16.
-      #
-      # musl: build DYNAMIC (disable the crt-static default). A statically
-      # linked musl binary cannot dlopen() anything, so a static daemon can
-      # never load cdylib plugins on Alpine hosts (baldur/freyr). Dynamic
-      # linking is the normal, supported form on Alpine — its musl loader is
-      # always present — and is what lets orca host plugins there. gnu is
-      # already dynamic, so only musl needs the override.
-      local target_rustflags="${RUSTFLAGS:-}"
-      case "$target" in
-        *-linux-musl)
-          target_rustflags="${target_rustflags:+$target_rustflags }-C target-feature=-crt-static"
-          ;;
-      esac
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4 RUSTFLAGS="$target_rustflags" \
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4 \
         cargo zigbuild --locked --profile "$RELEASE_PROFILE" --jobs "$jobs" ${features_args[@]+"${features_args[@]}"} \
         --target "$target" --manifest-path "$SERVER_TOML"
       ;;
