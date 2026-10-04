@@ -1183,9 +1183,9 @@ fn snake_to_pascal(s: &str) -> String {
 /// applies changes with no consent and no audit, which is not. So anything not
 /// named here gates.
 ///
-/// `profile` is deliberately NOT here: `system.profile` toggles a plugin's
-/// heap-instrumentation flag (`MALLOC_CONF` injection on next spawn), so the
-/// noun-shaped name hid a write behind `role = "any"`.
+/// A noun-shaped verb is not evidence of a read: `profile` is absent because
+/// `system.profile` sets a plugin's heap-instrumentation flag (`MALLOC_CONF`
+/// injected on its next spawn), which is a write.
 fn is_read_shaped(verb: &str) -> bool {
     // A dotted verb is classified by its LAST segment: `remediation.get` is a
     // `get`, `update.status` is a `status`. Matching the whole string made both
@@ -1635,10 +1635,9 @@ mod tests {
         }
     }
 
-    /// `profile` reads like a noun, so it sat in the read-shaped list and gave
-    /// `system.profile` — which toggles a plugin's `MALLOC_CONF` injection —
-    /// `role = "any"`, no mutation flag and no gate. A noun-shaped name is not
-    /// evidence of a read.
+    /// `system.profile` changes how a plugin's next process launches, so it
+    /// must derive as an admin-only, execute-gated mutation despite its
+    /// noun-shaped name.
     #[test]
     fn a_noun_shaped_write_verb_is_not_read_shaped() {
         assert!(!is_read_shaped("profile"));
@@ -1652,8 +1651,8 @@ mod tests {
         assert!(out.contains("EXECUTE_GATED : bool = true"), "got: {out}");
     }
 
-    /// The inverse: `identity.privilege.audit` is a pure filesystem read, so
-    /// `audit` must not derive an admin-only, execute-gated mutation.
+    /// `identity.privilege.audit` is a pure filesystem read, so `audit`
+    /// derives no mutation and no gate.
     #[test]
     fn audit_is_read_shaped() {
         assert!(is_read_shaped("audit"));

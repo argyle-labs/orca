@@ -47,7 +47,8 @@ fn destructive_backup_verbs_are_gated() {
 
 /// `system.profile` changes how a plugin's next process is launched
 /// (`MALLOC_CONF` injection), so a read-only identity must not reach it.
-/// `identity.privilege.audit` only reads sudo/doas grants off disk.
+/// `identity.privilege.audit` only reads sudo/doas grants off disk, but the list
+/// is sensitive, so it requires the `read` role rather than `any`.
 #[test]
 fn profile_is_a_gated_admin_write_and_privilege_audit_is_a_read() {
     let gated = dispatch::execute_gated_names();
@@ -61,7 +62,7 @@ fn profile_is_a_gated_admin_write_and_privilege_audit_is_a_read() {
     assert!(!mutations.contains(&"identity.privilege.audit"));
     assert_eq!(
         dispatch::required_role("identity.privilege.audit"),
-        Some("any")
+        Some("read")
     );
 }
 

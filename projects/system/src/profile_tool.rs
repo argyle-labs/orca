@@ -1,4 +1,5 @@
-//! `system profile <plugin>` — activate opt-in heap profiling for a plugin.
+//! `system profile <plugin> --execute` — activate opt-in heap profiling for a
+//! plugin. Execute-gated: without `--execute` it returns the plan only.
 //!
 //! Sets the per-plugin instrumentation flag (`contract::plugin_instrument`) so
 //! the plugin's NEXT spawn injects `MALLOC_CONF=prof:true,…` +
