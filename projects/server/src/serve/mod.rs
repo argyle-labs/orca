@@ -1401,11 +1401,11 @@ async fn static_handler(req: axum::extract::Request) -> axum::response::Response
 
 // ── Dev proxy ─────────────────────────────────────────────────────────────────
 // In dev mode, Rust owns port 12000 and proxies non-API requests to Vite at
-// :12001. This means the browser always uses one port for both API and UI,
+// :12004. This means the browser always uses one port for both API and UI,
 // matching the prod layout exactly.
 
-const VITE_ORIGIN: &str = "http://127.0.0.1:12001";
-const VITE_WS_ORIGIN: &str = "ws://127.0.0.1:12001";
+const VITE_ORIGIN: &str = "http://127.0.0.1:12004";
+const VITE_WS_ORIGIN: &str = "ws://127.0.0.1:12004";
 // Storybook dev server. Launched by scripts/dev.sh alongside Vite so the
 // browser sees one unified origin: /storybook/* is forwarded here and the
 // rest of the UI continues to fall through to Vite.
@@ -1612,7 +1612,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     auth_routes::set_dev_mode(dev);
 
     // Always mirror the requesting origin so cookie-bearing credentialed
-    // fetches work in all access patterns: Vite dev server (:12001 → :12000
+    // fetches work in all access patterns: Vite dev server (:12004 → :12000
     // cross-port), direct embedded UI (same-origin), and remote browser
     // access from another machine on the LAN.
     let cors = {
@@ -2640,7 +2640,7 @@ mod tests {
     //
     // This replaces an assertion that the handler returns 502 for an unclaimed
     // path. That only held while nothing listened on `VITE_ORIGIN`: a dev
-    // machine running `npm run dev` has a real Vite server on 127.0.0.1:12001,
+    // machine running `npm run dev` has a real Vite server on 127.0.0.1:12004,
     // which answers 500 for an unknown path, so the test failed locally and
     // passed in CI's empty container. The fallback is a pure decision — test it
     // as one, and leave upstream behaviour to the tests that use a dead port.
