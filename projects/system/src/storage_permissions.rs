@@ -1,6 +1,6 @@
 //! Storage permission-drift diagnostics — surfaces write-denied shares.
 //!
-//! A [`Health::WriteDenied`](plugin_toolkit::storage::Health::WriteDenied) share
+//! A [`MountHealth::WriteDenied`](plugin_toolkit::storage::MountHealth::WriteDenied) share
 //! is live and readable but denies writes because its SERVER-SIDE mode/owner
 //! drifted (the immich upload-loop class: a share that slipped 777→775 so the
 //! mounting identity lands on "other" without write). orca detects this and
@@ -25,7 +25,7 @@ use contract::diagnostics::{
     register_provider,
 };
 use plugin_toolkit::route::Route;
-use plugin_toolkit::storage::Health;
+use plugin_toolkit::storage::MountHealth;
 
 use crate::mount_converge::source_of_route;
 use crate::{host_identity, mounts, shares};
@@ -73,7 +73,7 @@ fn scan() -> Vec<Finding> {
 
     placements
         .into_iter()
-        .filter(|ep| ep.host == me && ep.health == Health::WriteDenied)
+        .filter(|ep| ep.host == me && ep.health == MountHealth::WriteDenied)
         .map(|ep| {
             let share = shares.get(&ep.share_id);
             let (server, server_path) = resolve_server_path(&ep, share);

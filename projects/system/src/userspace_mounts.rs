@@ -47,7 +47,7 @@
 //! `mount`/`unmount`, which this applier already funnels through.
 
 use crate::managed_mounts::ManagedMount;
-use plugin_toolkit::storage::{Capability, MountOutcome, MountStyle, backend};
+use plugin_toolkit::storage::{MountOutcome, MountStyle, StorageCapability, backend};
 
 /// Outcome of a userspace-process reconcile pass, surfaced by `storage.mount`.
 #[derive(Debug, Clone, Default)]
@@ -105,7 +105,7 @@ async fn reconcile_up(m: &ManagedMount, out: &mut UserspaceOutcome) {
         ));
         return;
     };
-    if !b.supports(Capability::Mount) {
+    if !b.supports(StorageCapability::Mount) {
         out.errors.push(format!(
             "{}: backend `{}` does not support mount",
             m.target, m.backend
@@ -154,7 +154,7 @@ async fn reconcile_down(m: &ManagedMount, out: &mut UserspaceOutcome) {
     let Some(b) = backend(&m.backend) else {
         return;
     };
-    if !b.supports(Capability::Unmount) {
+    if !b.supports(StorageCapability::Unmount) {
         return;
     }
     match b.unmount(&m.target).await {
@@ -173,7 +173,9 @@ pub async fn teardown(pairs: &[(String, String)]) -> Vec<String> {
         let Some(b) = backend(backend_name) else {
             continue;
         };
-        if b.mount_style() != MountStyle::UserspaceProcess || !b.supports(Capability::Unmount) {
+        if b.mount_style() != MountStyle::UserspaceProcess
+            || !b.supports(StorageCapability::Unmount)
+        {
             continue;
         }
         if let Err(e) = b.unmount(target).await {
@@ -187,7 +189,7 @@ pub async fn teardown(pairs: &[(String, String)]) -> Vec<String> {
 mod tests {
     use super::*;
     use plugin_toolkit::storage::{
-        Provider, Share, StorageBackend, StorageError, StorageKind, Usage, register_backend,
+        Share, StorageBackend, StorageError, StorageKind, StorageProvider, Usage, register_backend,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -228,8 +230,12 @@ mod tests {
         fn kind(&self) -> StorageKind {
             StorageKind::Object
         }
-        fn capabilities(&self) -> Vec<Capability> {
-            vec![Capability::Mount, Capability::Unmount, Capability::Usage]
+        fn capabilities(&self) -> Vec<StorageCapability> {
+            vec![
+                StorageCapability::Mount,
+                StorageCapability::Unmount,
+                StorageCapability::Usage,
+            ]
         }
         fn endpoint(&self) -> String {
             "s3://bucket".into()
@@ -264,8 +270,8 @@ mod tests {
                 available_bytes: 0,
             })
         }
-        fn provider(&self) -> Provider {
-            Provider {
+        fn provider(&self) -> StorageProvider {
+            StorageProvider {
                 name: self.name.clone(),
                 kind: self.kind(),
                 endpoint: self.endpoint(),
@@ -294,8 +300,8 @@ mod tests {
         fn kind(&self) -> StorageKind {
             StorageKind::NetworkShare
         }
-        fn capabilities(&self) -> Vec<Capability> {
-            vec![Capability::Mount, Capability::Unmount]
+        fn capabilities(&self) -> Vec<StorageCapability> {
+            vec![StorageCapability::Mount, StorageCapability::Unmount]
         }
         fn endpoint(&self) -> String {
             "nfs://nas".into()

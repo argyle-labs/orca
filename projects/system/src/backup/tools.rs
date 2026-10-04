@@ -494,7 +494,7 @@ pub struct BackupRunArgs {
     pub local_only: bool,
 }
 
-/// Run backups. `--kind` backs up that kind; `--all` fans out over every
+/// [MUTATES STATE] Run backups. `--kind` backs up that kind; `--all` fans out over every
 /// registered kind (log-and-skip on failure). All-kinds is opt-in: with neither,
 /// the run refuses and lists the kinds so the caller chooses explicitly. Backups
 /// are written to EVERY configured target (the `backup`/`targets` config, or the
@@ -661,7 +661,7 @@ pub struct BackupCheckOutput {
     pub collisions: Vec<CollisionInfo>,
 }
 
-/// Check the whole fleet for backup destinations that write the same folder on
+/// [MUTATES STATE] Check the whole fleet for backup destinations that write the same folder on
 /// the same backing (which corrupts backups). Re-publishes this host's resolved
 /// destinations, unions every node's, and raises a dismissable notification per
 /// collision — non-blocking, "try to correct." Also clears notifications for
@@ -730,7 +730,7 @@ pub enum BackupRestoreOutput {
     Restored { record: BackupRecord },
 }
 
-/// Restore a kind/instance from a dated backup. Destructive: without `--id` or
+/// [MUTATES STATE] Restore a kind/instance from a dated backup. Destructive: without `--id` or
 /// `--approve-all` it lists the available backups and restores nothing.
 // Restore is the most destructive verb in the system: it overwrites live app
 // data in place. Gated so an operator sees the plan before anything is touched.

@@ -151,7 +151,11 @@ pub async fn peer_update(peer_id: &str, force: bool) -> Result<PeerUpdateFields>
         // `self_only`: ask this peer about ITSELF. Since no id means every
         // system, a bare `{}` here would make each liveness pass ask every peer
         // to fan out across the whole fleet — an O(n^2) storm on a timer, whose
-        // reply would not decode as `SystemUpdateOutput` either.
+        // reply would not decode as `SystemUpdateOutput` either. Hand-written
+        // key, so it tracks the serialized spelling of `SystemUpdateArgs::
+        // self_only` — snake_case until the fleet is rolled, because older
+        // peers ignore `selfOnly` and current ones accept both. Never send
+        // both keys: serde rejects the pair as a duplicate field.
         let res = crate::mesh::exec_peer(
             peer_id,
             "system.update",

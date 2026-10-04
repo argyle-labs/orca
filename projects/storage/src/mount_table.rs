@@ -3,7 +3,7 @@
 //! Reading the kernel mount table is OS-specific (`/proc/mounts` on Linux,
 //! `/sbin/mount` output on macOS) and was previously duplicated — and divergent
 //! — across the `nfs` and `smb` plugins. This module is the single source: a
-//! typed [`MountEntry`], a typed [`Health`], the platform-gated [`mount_table`]
+//! typed [`MountEntry`], a typed [`MountHealth`], the platform-gated [`mount_table`]
 //! reader, and a runtime-agnostic timed [`probe_health`]. Backends filter the
 //! table by fstype and contribute the rows as `storage` shares.
 //!
@@ -34,7 +34,7 @@ pub struct MountEntry {
 /// speak one language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum Health {
+pub enum MountHealth {
     /// Path is a live mount and answers I/O within the budget.
     Ok,
     /// Mount is present but I/O hung past the timeout (unreachable server).
@@ -62,37 +62,39 @@ pub enum Health {
     Unknown,
 }
 
-/// What a [`Health`] verdict means for a mount-recovery sweep — the single
+/// What a [`MountHealth`] verdict means for a mount-recovery sweep — the single
 /// decision table every network-share backend (nfs, smb, and future s3) shares,
-/// so a newly added `Health` variant is classified **once, here**, never in each
+/// so a newly added `MountHealth` variant is classified **once, here**, never in each
 /// plugin's sweep. Plugins keep only their fstype-specific *realization* of a
 /// recover (fstab re-attach, autofs retrigger, …); the "which states even need
 /// recovering" decision is not theirs to re-derive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryAction {
     /// Mounted and usable enough to leave in place — a remount would not help.
-    /// [`Health::Ok`] (fully healthy) and [`Health::WriteDenied`] (live and
+    /// [`MountHealth::Ok`] (fully healthy) and [`MountHealth::WriteDenied`] (live and
     /// readable; the perm drift is server-side, fixed by chmod/chown, never by
     /// remounting) both land here.
     Leave,
     /// Not usable, and a force-release + re-attach can restore it:
-    /// [`Health::Stale`], [`Health::Timeout`], [`Health::Missing`].
+    /// [`MountHealth::Stale`], [`MountHealth::Timeout`], [`MountHealth::Missing`].
     Recover,
     /// Health could not be determined — never acted on, so a probe glitch or an
     /// unreachable foreign owner never force-releases a healthy mount:
-    /// [`Health::Error`], [`Health::Unknown`].
+    /// [`MountHealth::Error`], [`MountHealth::Unknown`].
     Indeterminate,
 }
 
-impl Health {
+impl MountHealth {
     /// Classify this verdict for a recovery sweep. See [`RecoveryAction`]. This
-    /// is the shared table — plugins call it instead of matching `Health`
+    /// is the shared table — plugins call it instead of matching `MountHealth`
     /// variants themselves, so the mapping can't drift between backends.
     pub fn recovery_action(self) -> RecoveryAction {
         match self {
-            Health::Ok | Health::WriteDenied => RecoveryAction::Leave,
-            Health::Stale | Health::Timeout | Health::Missing => RecoveryAction::Recover,
-            Health::Error | Health::Unknown => RecoveryAction::Indeterminate,
+            MountHealth::Ok | MountHealth::WriteDenied => RecoveryAction::Leave,
+            MountHealth::Stale | MountHealth::Timeout | MountHealth::Missing => {
+                RecoveryAction::Recover
+            }
+            MountHealth::Error | MountHealth::Unknown => RecoveryAction::Indeterminate,
         }
     }
 }
@@ -211,10 +213,10 @@ fn unescape_octal(s: &str) -> String {
 
 /// Time-bounded liveness probe of a mountpoint. Runtime-agnostic: the blocking
 /// `stat` runs on a worker thread and the result is awaited with a timeout, so a
-/// hung (stale) NFS/SMB handle classifies as [`Health::Stale`] instead of
+/// hung (stale) NFS/SMB handle classifies as [`MountHealth::Stale`] instead of
 /// blocking the caller forever. Async callers should still wrap this in
 /// `spawn_blocking` since it parks a thread for up to `timeout`.
-pub fn probe_health(mountpoint: &str, timeout: Duration) -> Health {
+pub fn probe_health(mountpoint: &str, timeout: Duration) -> MountHealth {
     let owned = mountpoint.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     // Detached worker: if it blocks on a stale handle it leaks one thread until
@@ -228,11 +230,11 @@ pub fn probe_health(mountpoint: &str, timeout: Duration) -> Health {
         drop(tx.send(std::fs::metadata(&owned).map(|_| ())));
     });
     match rx.recv_timeout(timeout) {
-        Ok(Ok(())) => Health::Ok,
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Health::Missing,
-        Ok(Err(_)) => Health::Stale,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Health::Stale,
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Health::Error,
+        Ok(Ok(())) => MountHealth::Ok,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => MountHealth::Missing,
+        Ok(Err(_)) => MountHealth::Stale,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => MountHealth::Stale,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => MountHealth::Error,
     }
 }
 
@@ -241,7 +243,7 @@ pub fn probe_health(mountpoint: &str, timeout: Duration) -> Health {
 static WPROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Time-bounded **writability** probe: create, write, and remove a tiny marker
-/// file directly under `mountpoint`, classifying the outcome as a [`Health`].
+/// file directly under `mountpoint`, classifying the outcome as a [`MountHealth`].
 ///
 /// This catches the permission-drift class that plain [`probe_health`] cannot —
 /// a share whose mode/owner drifted (e.g. 777 → 775) so the mounting identity
@@ -249,17 +251,17 @@ static WPROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// `Ok`, while every consumer write fails EACCES (the immich upload-loop shape).
 ///
 /// Classification:
-/// - marker written and removed cleanly → [`Health::Ok`]
-/// - `PermissionDenied` / read-only fs → [`Health::WriteDenied`]
-/// - mountpoint absent (`NotFound`) → [`Health::Missing`]
-/// - any other stat/IO error, or the probe hangs past `timeout` → [`Health::Stale`]
+/// - marker written and removed cleanly → [`MountHealth::Ok`]
+/// - `PermissionDenied` / read-only fs → [`MountHealth::WriteDenied`]
+/// - mountpoint absent (`NotFound`) → [`MountHealth::Missing`]
+/// - any other stat/IO error, or the probe hangs past `timeout` → [`MountHealth::Stale`]
 ///
 /// Runtime-agnostic and side-effect-bounded (the marker is removed on the same
 /// worker); std-only so the `storage` domain stays tokio-free. Async callers
 /// wrap it in `spawn_blocking`, mirroring [`probe_health`]. The detached worker
 /// leaks one thread only if a write hangs on a stale handle — the same, and
 /// unavoidable, tradeoff [`probe_health`] documents.
-pub fn probe_writable(mountpoint: &str, timeout: Duration) -> Health {
+pub fn probe_writable(mountpoint: &str, timeout: Duration) -> MountHealth {
     let seq = WPROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let marker =
         std::path::Path::new(mountpoint).join(format!(".orca-wprobe-{}-{seq}", std::process::id()));
@@ -272,31 +274,31 @@ pub fn probe_writable(mountpoint: &str, timeout: Duration) -> Health {
         drop(tx.send(res));
     });
     match rx.recv_timeout(timeout) {
-        Ok(Ok(())) => Health::Ok,
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Health::Missing,
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::PermissionDenied => Health::WriteDenied,
+        Ok(Ok(())) => MountHealth::Ok,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => MountHealth::Missing,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::PermissionDenied => MountHealth::WriteDenied,
         // ErrorKind::ReadOnlyFilesystem is unstable-named across toolchains;
         // match its raw errno (EROFS = 30) to fold a read-only remount into the
         // same write-denied class.
-        Ok(Err(e)) if e.raw_os_error() == Some(30) => Health::WriteDenied,
-        Ok(Err(_)) => Health::Stale,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Health::Stale,
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Health::Error,
+        Ok(Err(e)) if e.raw_os_error() == Some(30) => MountHealth::WriteDenied,
+        Ok(Err(_)) => MountHealth::Stale,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => MountHealth::Stale,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => MountHealth::Error,
     }
 }
 
 /// Combined liveness+writability probe: run [`probe_health`] first and, only if
-/// it reports [`Health::Ok`], run [`probe_writable`]. Returns the liveness
+/// it reports [`MountHealth::Ok`], run [`probe_writable`]. Returns the liveness
 /// verdict unchanged for any non-`Ok` result (a missing/stale mount is not
 /// write-probed — that would just stat-fail again). The `timeout` budgets each
 /// stage independently.
 ///
 /// Use this where a consumer actually writes to the mount (media renamers,
 /// upload targets) so a permission-drifted-but-live share reports
-/// [`Health::WriteDenied`] instead of a misleading `Ok`.
-pub fn probe_health_rw(mountpoint: &str, timeout: Duration) -> Health {
+/// [`MountHealth::WriteDenied`] instead of a misleading `Ok`.
+pub fn probe_health_rw(mountpoint: &str, timeout: Duration) -> MountHealth {
     match probe_health(mountpoint, timeout) {
-        Health::Ok => probe_writable(mountpoint, timeout),
+        MountHealth::Ok => probe_writable(mountpoint, timeout),
         other => other,
     }
 }
@@ -551,7 +553,7 @@ no parens line
     fn probe_health_missing_for_absent_path() {
         assert_eq!(
             probe_health("/nonexistent_orca_storage_probe", Duration::from_secs(1)),
-            Health::Missing
+            MountHealth::Missing
         );
     }
 
@@ -560,7 +562,7 @@ no parens line
         let dir = std::env::temp_dir();
         assert_eq!(
             probe_health(dir.to_str().unwrap(), Duration::from_secs(2)),
-            Health::Ok
+            MountHealth::Ok
         );
     }
 
@@ -577,7 +579,7 @@ no parens line
         let under = f.join("child");
         assert_eq!(
             probe_health(under.to_str().unwrap(), Duration::from_secs(2)),
-            Health::Stale
+            MountHealth::Stale
         );
         std::fs::remove_file(&f).ok();
     }
@@ -585,16 +587,16 @@ no parens line
     #[test]
     fn health_round_trips_through_serde() {
         for h in [
-            Health::Ok,
-            Health::Stale,
-            Health::Missing,
-            Health::Timeout,
-            Health::Error,
-            Health::WriteDenied,
-            Health::Unknown,
+            MountHealth::Ok,
+            MountHealth::Stale,
+            MountHealth::Missing,
+            MountHealth::Timeout,
+            MountHealth::Error,
+            MountHealth::WriteDenied,
+            MountHealth::Unknown,
         ] {
             let j = serde_json::to_string(&h).unwrap();
-            let back: Health = serde_json::from_str(&j).unwrap();
+            let back: MountHealth = serde_json::from_str(&j).unwrap();
             assert_eq!(back, h);
         }
     }
@@ -602,13 +604,13 @@ no parens line
     #[test]
     fn recovery_action_classifies_every_variant() {
         use RecoveryAction::*;
-        assert_eq!(Health::Ok.recovery_action(), Leave);
-        assert_eq!(Health::WriteDenied.recovery_action(), Leave);
-        assert_eq!(Health::Stale.recovery_action(), Recover);
-        assert_eq!(Health::Timeout.recovery_action(), Recover);
-        assert_eq!(Health::Missing.recovery_action(), Recover);
-        assert_eq!(Health::Error.recovery_action(), Indeterminate);
-        assert_eq!(Health::Unknown.recovery_action(), Indeterminate);
+        assert_eq!(MountHealth::Ok.recovery_action(), Leave);
+        assert_eq!(MountHealth::WriteDenied.recovery_action(), Leave);
+        assert_eq!(MountHealth::Stale.recovery_action(), Recover);
+        assert_eq!(MountHealth::Timeout.recovery_action(), Recover);
+        assert_eq!(MountHealth::Missing.recovery_action(), Recover);
+        assert_eq!(MountHealth::Error.recovery_action(), Indeterminate);
+        assert_eq!(MountHealth::Unknown.recovery_action(), Indeterminate);
     }
 
     #[test]
@@ -616,7 +618,7 @@ no parens line
         let dir = std::env::temp_dir();
         assert_eq!(
             probe_writable(dir.to_str().unwrap(), Duration::from_secs(2)),
-            Health::Ok
+            MountHealth::Ok
         );
     }
 
@@ -624,7 +626,7 @@ no parens line
     fn probe_writable_missing_for_absent_path() {
         assert_eq!(
             probe_writable("/nonexistent_orca_wprobe_dir", Duration::from_secs(1)),
-            Health::Missing
+            MountHealth::Missing
         );
     }
 
@@ -643,10 +645,10 @@ no parens line
         // Restore mode so cleanup can remove it.
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).ok();
         std::fs::remove_dir_all(&d).ok();
-        if got == Health::Ok {
+        if got == MountHealth::Ok {
             return; // running as root: mode bits bypassed, inconclusive
         }
-        assert_eq!(got, Health::WriteDenied);
+        assert_eq!(got, MountHealth::WriteDenied);
     }
 
     #[test]
@@ -654,7 +656,7 @@ no parens line
         // A missing path never reaches the write probe — liveness verdict wins.
         assert_eq!(
             probe_health_rw("/nonexistent_orca_rw_probe", Duration::from_secs(1)),
-            Health::Missing
+            MountHealth::Missing
         );
     }
 

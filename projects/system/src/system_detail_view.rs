@@ -35,7 +35,9 @@ pub struct ChartPoint {
     pub y: f32,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct ChartSeries {
     /// Pre-scaled SVG-space points, ordered oldest → newest.
     pub points: Vec<ChartPoint>,
@@ -62,8 +64,10 @@ pub struct GpuSeries {
     pub memory: ChartSeries,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
-pub struct SystemDetailView {
+#[serde(rename_all = "camelCase")]
+pub struct SystemChartsView {
     pub cpu: ChartSeries,
     pub mem: ChartSeries,
     /// 1-min load average normalised to a 0–100% scale. Empty series until
@@ -83,7 +87,7 @@ pub(crate) fn build_view(
     history: &[SystemHistoryPoint],
     width: u32,
     height: u32,
-) -> SystemDetailView {
+) -> SystemChartsView {
     let samples_count = history.len();
     let window_secs = match (history.first(), history.last()) {
         (Some(a), Some(b)) if samples_count >= 2 => b.ts - a.ts,
@@ -145,7 +149,7 @@ pub(crate) fn build_view(
         })
         .collect();
 
-    SystemDetailView {
+    SystemChartsView {
         cpu: series_from_pairs(&cpu_pairs, history, width, height, 100.0),
         mem: series_from_pairs(&mem_pairs, history, width, height, 100.0),
         load: empty_series(),

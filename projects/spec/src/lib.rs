@@ -34,7 +34,9 @@ pub struct ListSpecsArgs {
     pub cursor: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ListSpecsOutput {
     pub specs: Vec<SpecMetaRow>,
     /// Opaque cursor for the next page, or absent on the last page.
@@ -561,7 +563,7 @@ mod tests {
             total: Some(7),
         };
         let s = serde_json::to_string(&out).expect("serialize");
-        assert!(s.contains(r#""next_cursor":"next""#));
+        assert!(s.contains(r#""nextCursor":"next""#));
         assert!(s.contains(r#""total":7"#));
     }
 

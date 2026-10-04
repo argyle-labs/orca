@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemKillOutput {
     pub killed_patterns: Vec<String>,
 }

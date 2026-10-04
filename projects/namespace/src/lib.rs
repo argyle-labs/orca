@@ -26,7 +26,9 @@ pub use manager::{Access, Namespace, NamespaceManager, Role};
 
 // ── Shared rows ─────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct NamespaceSummary {
     pub id: String,
     pub name: String,
@@ -34,7 +36,9 @@ pub struct NamespaceSummary {
     pub is_active: bool,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct NamespaceDetail {
     pub id: String,
     pub name: String,
@@ -46,7 +50,9 @@ pub struct NamespaceDetail {
     pub access: String,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NamespaceListReport {
     pub namespaces: Vec<NamespaceSummary>,
     /// Opaque cursor for the next page, or absent on the last page.
@@ -64,14 +70,18 @@ pub struct NamespaceMutationResult {
     pub changed: bool,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NamespaceShareEntry {
     pub user_id: String,
     /// `viewer` | `collaborator`
     pub role: String,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NamespaceSharesReport {
     pub namespace_id: String,
     pub shares: Vec<NamespaceShareEntry>,

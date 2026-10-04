@@ -641,7 +641,7 @@ pub enum PluginCreateOutput {
     Invoke(PluginInvokeOutput),
 }
 
-/// Create a plugin artifact. `action=install` sideloads (`--file`) or
+/// [MUTATES STATE] Create a plugin artifact. `action=install` sideloads (`--file`) or
 /// catalog-installs (`--name`) a plugin, registering its tools live.
 /// `action=invoke` runs a loaded plugin verb by name — the static `remote_ok`
 /// core seam that makes any peer's dynamically-loaded plugin verbs reachable
@@ -1200,7 +1200,9 @@ async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUp
 // [[github-token-proxy-delegate-on-miss]].
 
 /// Args for [`plugin_serve_asset`].
+#[derive::snake_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginServeAssetArgs {
     /// Plugin name (also its `target_software` and release-asset prefix).
     #[arg(long)]
@@ -1227,7 +1229,9 @@ pub struct PluginServeAssetArgs {
 /// Result of [`plugin_serve_asset`]. `asset_b64` is base64-STANDARD of the raw
 /// plugin executable; `sha256` is the hex digest the holder verified (callers
 /// MUST re-verify after decode before installing).
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginServeAssetOutput {
     pub asset_b64: String,
     pub sha256: String,
@@ -1386,7 +1390,7 @@ pub struct PluginUninstallOutput {
     pub unloaded: bool,
 }
 
-/// Remove a plugin: delete its executable from the install dir and unregister
+/// [MUTATES STATE] Remove a plugin: delete its executable from the install dir and unregister
 /// its tools from the live registry. Idempotent — reports what it actually
 /// removed.
 #[orca_tool(domain = "plugin", verb = "delete")]
@@ -2406,7 +2410,7 @@ mod tests {
             version: "0.2.0".to_string(),
         };
         let json = serde_json::to_string(&out).unwrap();
-        assert!(json.contains("\"asset_b64\":\"YWJj\""), "{json}");
+        assert!(json.contains("\"assetB64\":\"YWJj\""), "{json}");
         assert!(json.contains("\"sha256\":\"deadbeef\""), "{json}");
         assert!(json.contains("\"version\":\"0.2.0\""), "{json}");
     }

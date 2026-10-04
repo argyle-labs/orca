@@ -105,7 +105,9 @@ pub(crate) fn labeled(mut route: Route) -> Route {
     route
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshPeerDto {
     pub peer_id: String,
     pub hostname: String,
@@ -229,7 +231,9 @@ pub struct MeshListArgs {
     pub instances: bool,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshListOutput {
     pub members: Vec<MeshMember>,
     /// Opaque cursor for the next page, or absent on the last page.
@@ -262,7 +266,9 @@ pub enum MeshListResult {
 // source-of-truth (`refreshMeshPeers` + `refreshProxmoxClusters`) lived in the
 // in-repo frontend, since extracted to the peacock plugin (argyle-labs/peacock).
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshCandidate {
     pub pubkey_fp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -273,7 +279,9 @@ pub struct MeshCandidate {
     pub can_invite: bool,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshStaleRow {
     pub peer_id: String,
     pub hostname: String,
@@ -285,7 +293,9 @@ pub struct MeshStaleRow {
     pub last_seen_at: Option<i64>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshInboundOffer {
     pub offer_id: String,
     pub peer_hostname: String,
@@ -297,7 +307,9 @@ pub struct MeshInboundOffer {
     pub ttl_secs: i64,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshSnapshotOutput {
     /// Same shape as `system.list.members` — the UI reuses the existing type.
     pub members: Vec<MeshMember>,
@@ -548,7 +560,9 @@ fn match_clusters(
 // `seedInstancesFromLoad` / `seedInboundOffersFromLoad` / `reachableAddrs`
 // utilities and the ~60-line bucketing block in `peers.svelte.ts`.
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshInstanceAddress {
     pub kind: String,
     pub kind_label: String,
@@ -564,7 +578,9 @@ pub struct MeshInstanceSecure {
 /// Fully-shaped instance row the frontend systems UI renders directly. Mirrors
 /// the legacy TS `Instance` shape but every field is snake_case so the typed
 /// SDK from regen flows through unchanged.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshInstance {
     pub id: String,
     pub peer_id: String,
@@ -621,7 +637,9 @@ pub struct MeshInstance {
     pub available_versions: Vec<crate::update::VersionEntry>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshInstancesOutput {
     pub members: Vec<MeshInstance>,
     pub candidates: Vec<MeshCandidate>,
@@ -804,7 +822,9 @@ pub enum MeshCreateOutput {
 }
 
 // kept for internal use by accept path
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshAcceptOutput {
     pub mesh_id: String,
     pub inviter_peer_id: String,
@@ -816,7 +836,9 @@ pub struct MeshAcceptOutput {
 
 // ── system.mesh.update --action trust ────────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshTrustOutput {
     pub peer_id: String,
     pub local_secure: bool,
@@ -834,7 +856,9 @@ pub struct MeshSyncOutput {
     pub peers: Vec<PeerSyncReport>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshPingOutput {
     pub ok: bool,
     pub latency_ms: u32,
@@ -850,7 +874,9 @@ pub struct MeshPingOutput {
 
 // ── system.list --discovery ─────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshDiscoveryRowDto {
     pub pubkey_fp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -874,7 +900,9 @@ pub struct MeshDiscoveryListOutput(pub Vec<MeshDiscoveryRowDto>);
 
 // ── system.list --pending ──────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshPendingOfferDto {
     pub offer_id: String,
     pub direction: String,
@@ -897,7 +925,9 @@ pub struct MeshPendingListOutput(pub Vec<MeshPendingOfferDto>);
 
 // ── system.join --action offer ────────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshOfferOutput {
     /// Pairing code minted for this offer; show to the operator so they can
     /// run `system.join --action accept` on the joiner side.
@@ -947,7 +977,9 @@ pub enum MeshDeleteOutput {
     Forget(MeshForgetOutput),
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshLeaveOutput {
     pub peer_id: String,
     pub notify_result: String,
@@ -956,13 +988,17 @@ pub struct MeshLeaveOutput {
 
 // ── mesh.leave (voluntary self exit) ──────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshLeaveSelfResult {
     pub peer_id: String,
     pub notify_result: String,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshLeaveSelfOutput {
     /// Number of peer rows removed from `mesh_peers` (one per paired peer).
     pub rows_removed: u32,
@@ -971,7 +1007,9 @@ pub struct MeshLeaveSelfOutput {
 
 // ── mesh.recover ──────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshRecoverOutput {
     pub peer_id: String,
     /// `true` if a `departed_at` flag was actually cleared. `false` means the
@@ -981,7 +1019,9 @@ pub struct MeshRecoverOutput {
 
 // ── mesh.forget ───────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshForgetNotice {
     /// A live member we asked to forget the target.
     pub peer_id: String,
@@ -989,7 +1029,9 @@ pub struct MeshForgetNotice {
     pub result: String,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshForgetOutput {
     pub peer_id: String,
     /// Rows deleted on THIS host across mesh_peers/mesh_trust/mesh_discovery/offers.
@@ -1067,7 +1109,9 @@ pub struct MeshUpdateArgs {
 }
 
 /// Result of `system.mesh.update action=settings`.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshSettingsOutput {
     pub self_secure: bool,
 }
@@ -1409,7 +1453,7 @@ pub async fn collect_mesh_instances() -> anyhow::Result<MeshInstancesOutput> {
     })
 }
 
-/// Establish mesh membership. `action` selects the pairing path:
+/// [MUTATES STATE] Establish mesh membership. `action` selects the pairing path:
 ///   - `join`   — dial the inviter DIRECTLY over the bootstrap channel (no mDNS
 ///     required) and auto-accept in one call (needs `addr`, optional `port`).
 ///   - `offer`  — push a membership offer to a joiner discovered via mDNS
@@ -1448,7 +1492,7 @@ async fn mesh_create(
     }
 }
 
-/// Mutate mesh membership state on this host (or a `--peer` target). `action`
+/// [MUTATES STATE] Mutate mesh membership state on this host (or a `--peer` target). `action`
 /// selects the operation:
 ///   - `settings`     — toggle `self_secure` (Tier-2 secrets-storage). Default.
 ///   - `trust`        — set trust for a paired peer (needs `peer_id` + `on`;
@@ -1510,7 +1554,7 @@ async fn mesh_update(
     }
 }
 
-/// Remove mesh membership. `action` selects the target:
+/// [MUTATES STATE] Remove mesh membership. `action` selects the target:
 ///   - `kick`   — evict a paired peer: best-effort notify, then drop its
 ///     `mesh_peers` + `mesh_trust` rows (needs `peer_id`). Default.
 ///   - `leave`  — voluntary self exit: notify every paired peer, then drop all
@@ -1859,7 +1903,9 @@ mod replicate_wire {
 
 pub use replicate_wire::ReplicateBundle;
 
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshPingResult {
     pub peer_id: String,
     pub version: String,
@@ -1876,7 +1922,9 @@ pub struct MeshPingResult {
 /// the human label; `channels` is the per-channel address list (`lan_v4`,
 /// `lan_v6`, `tailscale_v4`, `tailscale_v6`, `fqdn`). Source + last_seen_at
 /// stay local to the responding peer and are not propagated.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HostAddressingSnapshot {
     pub display_name: String,
     pub channels: Vec<AddressChannel>,
@@ -2487,7 +2535,7 @@ mod mesh_tests {
     #[test]
     fn ping_result_deserializes_rc24_without_addressing() {
         let json = serde_json::json!({
-            "peer_id": "abc",
+            "peerId": "abc",
             "version": "0.0.3",
             "hostname": "abc123",
         });
@@ -2499,11 +2547,11 @@ mod mesh_tests {
     #[test]
     fn ping_result_roundtrip_rc25_with_addressing() {
         let json = serde_json::json!({
-            "peer_id": "abc",
+            "peerId": "abc",
             "version": "0.0.4",
             "hostname": "abc123",
             "addressing": {
-                "display_name": "host-g",
+                "displayName": "host-g",
                 "channels": [
                     { "kind": "lan_v4", "value": "10.0.0.8" },
                     { "kind": "tailscale_v4", "value": "100.64.0.2" },
@@ -2583,7 +2631,7 @@ mod mesh_snapshot_tests {
         );
         // And it still round-trips a legacy inbound `addr` (serde default).
         let back: MeshPeerDto =
-            serde_json::from_value(serde_json::json!({"peer_id":"p1","hostname":"h","addr":"10.0.0.9","port":7777,"last_seen_at":0,"local_secure":false,"peer_secure":false,"status":"active"})).unwrap();
+            serde_json::from_value(serde_json::json!({"peerId":"p1","hostname":"h","addr":"10.0.0.9","port":7777,"lastSeenAt":0,"localSecure":false,"peerSecure":false,"status":"active"})).unwrap();
         assert_eq!(back.addr, "10.0.0.9");
     }
 
@@ -3160,7 +3208,7 @@ mod added_coverage {
         .unwrap();
         assert!(d.contains("\"state\":\"discovered\""), "got: {d}");
         // `discovery_state` must NOT be renamed to the reserved `state` key.
-        assert!(d.contains("\"discovery_state\":\"unclaimed\""), "got: {d}");
+        assert!(d.contains("\"discoveryState\":\"unclaimed\""), "got: {d}");
     }
 
     // ── serde: dispatch action enums (snake_case) ────────────────────────────
@@ -3339,7 +3387,7 @@ mod added_coverage {
             }],
         });
         let s = serde_json::to_string(&out).unwrap();
-        assert!(s.contains("\"rows_removed\":3"), "got: {s}");
+        assert!(s.contains("\"rowsRemoved\":3"), "got: {s}");
     }
 
     #[test]
@@ -3347,7 +3395,7 @@ mod added_coverage {
         let out = MeshUpdateOutput::Settings(MeshSettingsOutput { self_secure: true });
         assert_eq!(
             serde_json::to_string(&out).unwrap(),
-            r#"{"self_secure":true}"#
+            r#"{"selfSecure":true}"#
         );
     }
 

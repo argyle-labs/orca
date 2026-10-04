@@ -155,7 +155,7 @@ check:
 cache-stats:
 	@sccache --show-stats
 
-# Dev mode — Rust API :12000 + Vite :12001 + hot reload, secrets injected from 1Password
+# Dev mode — Rust API :12000 + Vite :12004 + hot reload, secrets injected from 1Password
 # Secrets live in the account set by OP_ACCOUNT (.env.local overrides .zshrc default)
 SERVE_BINARY ?=
 

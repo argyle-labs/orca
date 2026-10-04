@@ -152,7 +152,9 @@ impl std::fmt::Debug for ExecRequest {
 }
 
 /// The result of a [`GuestExec::exec`] — blocking from the caller's view.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ExecOutput {
     /// Process exit code, when it terminated normally. `None` if it was killed by
     /// a signal (see [`signal`](ExecOutput::signal)) or timed out before exiting.
@@ -549,7 +551,7 @@ mod tests {
         )
         .await
         .expect("exec dispatches");
-        assert_eq!(out["exit_code"], serde_json::json!(0));
+        assert_eq!(out["exitCode"], serde_json::json!(0));
 
         let w = dispatch_op(
             &g,

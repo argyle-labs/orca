@@ -31,7 +31,8 @@
 use crate::managed_mounts::{ManagedMount, ordered_sources};
 use crate::source_election::{Election, RemountAggression, Transition, elect, transition};
 use plugin_toolkit::storage::{
-    Health, MountEntry, RecoveryAction, mount_table, mount_table_of, probe_health, probe_source,
+    MountEntry, MountHealth, RecoveryAction, mount_table, mount_table_of, probe_health,
+    probe_source,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -1078,11 +1079,11 @@ pub struct RecoverOutcome {
 
 /// Time-bounded liveness probe of one mountpoint, offloaded to the blocking pool
 /// so a hung `stat` never stalls the async runtime for the whole timeout.
-pub async fn probe(target: &str, health_timeout: Duration) -> Health {
+pub async fn probe(target: &str, health_timeout: Duration) -> MountHealth {
     let target = target.to_string();
     tokio::task::spawn_blocking(move || probe_health(&target, health_timeout))
         .await
-        .unwrap_or(Health::Error)
+        .unwrap_or(MountHealth::Error)
 }
 
 /// Probe every target and return those that need recovery — stale, hung
@@ -1093,7 +1094,7 @@ pub async fn probe_stale(targets: &[String], health_timeout: Duration) -> Vec<St
     // Read the kernel mount table once so we can catch the false-positive
     // `probe_health` misses: a managed mountpoint that exists as a bare directory
     // with NOTHING mounted through it (no autofs trigger, no real fs). `stat`
-    // succeeds on the empty dir, so `probe_health` returns `Health::Ok` and the
+    // succeeds on the empty dir, so `probe_health` returns `MountHealth::Ok` and the
     // mount looks healthy — but autofs never loaded the direct-map entry (the
     // freyr / frigg "map written but not reloaded" case). The only reliable
     // signal is the mount table itself. See [[project-orca-nfs-automaster-defect]].
@@ -1102,7 +1103,7 @@ pub async fn probe_stale(targets: &[String], health_timeout: Duration) -> Vec<St
     for target in targets {
         let needs_recovery = matches!(
             probe(target, health_timeout).await,
-            Health::Stale | Health::Timeout | Health::Missing
+            MountHealth::Stale | MountHealth::Timeout | MountHealth::Missing
         ) || target_absent_from_table(&table, target);
         if needs_recovery {
             stale.push(target.clone());
@@ -1303,7 +1304,7 @@ pub async fn force_reload() -> Vec<String> {
 ///    handle (`umount -lf`) + retrigger so autofs remounts / fails over.
 /// 3. If still not live and `allow_reload`, escalate once more: reload + retrigger.
 ///
-/// Each rung re-probes and returns as soon as the target is `Health::Ok`.
+/// Each rung re-probes and returns as soon as the target is `MountHealth::Ok`.
 pub async fn force_and_retrigger(
     target: &str,
     allow_reload: bool,
@@ -1319,12 +1320,12 @@ pub async fn force_and_retrigger(
     // frigg `/mnt/data` case). Gated on source reachability so a down server never
     // churns the global autofs restart. Success requires a REAL mount to appear
     // (mount-table entry), not merely a clean `stat` on the same bare dir.
-    let missing_or_no_entry = matches!(probe(target, health_timeout).await, Health::Missing)
+    let missing_or_no_entry = matches!(probe(target, health_timeout).await, MountHealth::Missing)
         || target_has_no_mount(target).await;
     if allow_reload && missing_or_no_entry {
         errors.extend(force_reload().await);
         errors.extend(trigger(&one(target)).await);
-        if matches!(probe(target, health_timeout).await, Health::Ok)
+        if matches!(probe(target, health_timeout).await, MountHealth::Ok)
             && !target_has_no_mount(target).await
         {
             return (true, errors);
@@ -1338,7 +1339,7 @@ pub async fn force_and_retrigger(
     .await;
     errors.extend(r.errors);
     errors.extend(trigger(&one(target)).await);
-    if matches!(probe(target, health_timeout).await, Health::Ok) {
+    if matches!(probe(target, health_timeout).await, MountHealth::Ok) {
         return (true, errors);
     }
 
@@ -1348,7 +1349,7 @@ pub async fn force_and_retrigger(
         errors.extend(force_reload().await);
         errors.extend(trigger(&one(target)).await);
     }
-    let recovered = matches!(probe(target, health_timeout).await, Health::Ok);
+    let recovered = matches!(probe(target, health_timeout).await, MountHealth::Ok);
     (recovered, errors)
 }
 
@@ -1363,7 +1364,7 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
 
     for target in targets {
         // Classification is the shared storage decision table (`recovery_action`),
-        // not a hand-rolled match — the same table nfs/smb use, so a new Health
+        // not a hand-rolled match — the same table nfs/smb use, so a new MountHealth
         // variant is classified once. Leave = mounted and usable (Ok, or
         // WriteDenied where only server-side perms are wrong — a remount can't fix
         // that); Indeterminate = never acted on (a probe glitch must not
@@ -2691,11 +2692,11 @@ mod tests {
         assert_eq!(stale, targets, "both unmounted targets need recovery");
     }
 
-    // ── probe: a bogus path yields a concrete Health (no panic across the seam) ─
+    // ── probe: a bogus path yields a concrete MountHealth (no panic across the seam) ─
     #[tokio::test]
     async fn probe_returns_health_for_bogus_path() {
         let h = probe("/orca/not/mounted/probe", Duration::from_millis(150)).await;
-        assert_ne!(h, Health::Ok, "unmounted path must not probe healthy");
+        assert_ne!(h, MountHealth::Ok, "unmounted path must not probe healthy");
     }
 
     // ── recover: no targets is a clean, no-stale sweep ─────────────────────
@@ -2715,7 +2716,7 @@ mod tests {
     // ── recover: an existing dir probes healthy and is never acted on ──────
     #[tokio::test]
     async fn recover_healthy_target_is_classified_healthy_not_recovered() {
-        // A real, existing directory stats clean → `probe_health` => Health::Ok,
+        // A real, existing directory stats clean → `probe_health` => MountHealth::Ok,
         // so `recover` must route it to `healthy` and take NO recovery action
         // (no reload, no unmount). Deterministic: no network, no privilege.
         let tmp = tempfile::tempdir().unwrap();

@@ -42,7 +42,9 @@ pub enum PackageFormat {
     Plg,
 }
 
+#[derive::snake_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct PackageBuildArgs {
     /// Package format: deb / rpm / apk / pkgbuild / pkg / homebrew. Auto-detected when omitted.
     #[arg(long, value_enum)]
@@ -85,7 +87,9 @@ fn default_maintainer() -> String {
     "Orca <noreply@orca.local>".to_string()
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct PackageBuildOutput {
     pub format: PackageFormat,
     pub version: String,
@@ -93,7 +97,7 @@ pub struct PackageBuildOutput {
     pub out_dir: PathBuf,
 }
 
-/// Build a distributable package (deb/rpm/apk/PKGBUILD/pkg/homebrew) from the current orca binary.
+/// [MUTATES STATE] Build a distributable package (deb/rpm/apk/PKGBUILD/pkg/homebrew) from the current orca binary.
 /// Format auto-detected from host OS when not provided. Postinst scripts
 /// delegate to `system install --service-user orca` (which absorbed the old
 /// `system.bootstrap` + supervisor-install responsibilities).
@@ -1732,7 +1736,7 @@ mod tests {
         assert!(s.contains("\"format\":\"deb\""));
         assert!(s.contains("\"version\":\"9.9.9\""));
         assert!(s.contains("\"arch\":\"x86_64\""));
-        assert!(s.contains("\"out_dir\":\"/tmp/out\""));
+        assert!(s.contains("\"outDir\":\"/tmp/out\""));
     }
 
     #[test]
@@ -1753,7 +1757,7 @@ mod tests {
 
     #[test]
     fn package_build_args_honor_explicit_values() {
-        let json = r#"{"format":"homebrew","out_dir":"/pkgs","arch":"aarch64","maintainer":"Me <me@x.io>"}"#;
+        let json = r#"{"format":"homebrew","outDir":"/pkgs","arch":"aarch64","maintainer":"Me <me@x.io>"}"#;
         let args: PackageBuildArgs = serde_json::from_str(json).unwrap();
         assert_eq!(args.format, Some(PackageFormat::Homebrew));
         assert_eq!(args.out_dir, PathBuf::from("/pkgs"));

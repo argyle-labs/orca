@@ -45,6 +45,26 @@ fn destructive_backup_verbs_are_gated() {
     }
 }
 
+/// `system.profile` changes how a plugin's next process is launched
+/// (`MALLOC_CONF` injection), so a read-only identity must not reach it.
+/// `identity.privilege.audit` only reads sudo/doas grants off disk.
+#[test]
+fn profile_is_a_gated_admin_write_and_privilege_audit_is_a_read() {
+    let gated = dispatch::execute_gated_names();
+    let mutations = dispatch::data_mutation_names();
+
+    assert!(gated.contains(&"system.profile"), "gated set = {gated:?}");
+    assert!(mutations.contains(&"system.profile"));
+    assert_eq!(dispatch::required_role("system.profile"), Some("admin"));
+
+    assert!(!gated.contains(&"identity.privilege.audit"));
+    assert!(!mutations.contains(&"identity.privilege.audit"));
+    assert_eq!(
+        dispatch::required_role("identity.privilege.audit"),
+        Some("any")
+    );
+}
+
 /// Consent without authorization is not a gate: if a verb applies changes, it
 /// must also be restricted in WHO may call it, or any authenticated caller can
 /// apply changes simply by passing `execute: true`.

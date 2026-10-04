@@ -96,7 +96,7 @@ make dev
 `make dev` runs `orca dev` which:
 1. Parks any running daemon (sends `SIGUSR1` to release the port)
 2. Starts the Rust server in dev mode on port `12000`
-3. peacock runs its own Vite dev server on port `12001` and declares it to orca
+3. peacock runs its own Vite dev server on port `12004` and declares it to orca
    as the web provider's `dev_upstream`
 4. orca proxies non-API (`/`) requests from `:12000` → the peacock Vite upstream
    for hot reload

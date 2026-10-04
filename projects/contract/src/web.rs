@@ -126,7 +126,7 @@ pub struct WebRoute {
     /// providers.
     #[serde(default)]
     pub spa_fallback: bool,
-    /// Dev-mode upstream origin (e.g. `"http://127.0.0.1:12001"`). When set and
+    /// Dev-mode upstream origin (e.g. `"http://127.0.0.1:12004"`). When set and
     /// the daemon is in dev mode, the server proxies this provider's path to the
     /// upstream (the plugin's `npm run dev` Vite server) instead of calling
     /// `render`. `None` in prod builds where the plugin serves rendered assets.
@@ -145,7 +145,7 @@ pub const WEB_OWNER_SETTING_PREFIX: &str = "web.owner.";
 pub const CAP_SPA_FALLBACK: &str = "spa_fallback";
 
 /// Capability prefix on a `BackendDef` carrying the dev-mode upstream origin,
-/// e.g. `"dev_upstream=http://127.0.0.1:12001"`. Parsed into
+/// e.g. `"dev_upstream=http://127.0.0.1:12004"`. Parsed into
 /// [`WebRoute::dev_upstream`] by the loader.
 pub const CAP_DEV_UPSTREAM: &str = "dev_upstream=";
 
@@ -786,7 +786,7 @@ mod tests {
         let with = WebRoute {
             prefix: "/".to_string(),
             spa_fallback: false,
-            dev_upstream: Some("http://127.0.0.1:12001".to_string()),
+            dev_upstream: Some("http://127.0.0.1:12004".to_string()),
         };
         let json2 = serde_json::to_string(&with).unwrap();
         assert!(json2.contains("dev_upstream"));

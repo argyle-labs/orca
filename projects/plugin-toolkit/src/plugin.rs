@@ -631,7 +631,7 @@ impl Plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::{Capability, MediaBackend, MediaError, MediaType, MediaUrl};
+    use crate::media::{MediaBackend, MediaCapability, MediaError, MediaType, MediaUrl};
     use crate::service::{Runtime, ServiceBackend, ServiceCapability};
 
     // A media served_by backend for one type, answering `url`.
@@ -646,8 +646,8 @@ mod tests {
         fn media_type(&self) -> MediaType {
             self.media_type
         }
-        fn capabilities(&self) -> Vec<Capability> {
-            vec![Capability::ServedBy, Capability::Url]
+        fn capabilities(&self) -> Vec<MediaCapability> {
+            vec![MediaCapability::ServedBy, MediaCapability::Url]
         }
         fn endpoint(&self) -> String {
             "http://abs:13378".into()

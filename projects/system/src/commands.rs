@@ -46,7 +46,9 @@ pub enum SystemCreateAction {
 /// user-level install. Pass `service_user` (and optional `home_dir` /
 /// `admin_pubkey`) to also provision a system service user with SSH access
 /// (Linux, root).
+#[derive::snake_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemInstallArgs {
     /// Which create action to run. Defaults to `install`.
     #[serde(default)]
@@ -199,7 +201,9 @@ pub struct FetchReleaseAssetArgs {
 /// of the raw binary bytes; `sha256` is the hex digest the holder verified
 /// against the release `.sha256` blob (callers MUST re-verify after decode
 /// before swapping).
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct FetchReleaseAssetOutput {
     pub asset_b64: String,
     pub sha256: String,
@@ -294,11 +298,13 @@ fn page_slice<T: Clone>(full: &[T], page: usize, per_page: usize) -> Vec<T> {
 /// available_versions + pagination).
 ///
 /// One tool, many surfaces:
-///   - orca binary: `channel`, `version` (one-shot, no pin), `dev_source`, `clear_dev_source`
+///   - orca binary: `channel`, `version` (one-shot, no pin), `devSource`, `clearDevSource`
 ///   - system identity: `hostname`, `fqdn`
-///   - addressing overrides: `lan_v4`, `lan_v6`, `tailscale_v4`, `tailscale_v6`
-///   - OS package upgrade: `os_packages`
+///   - addressing overrides: `lanV4`, `lanV6`, `tailscaleV4`, `tailscaleV6`
+///   - OS package upgrade: `osPackages`
+#[derive::snake_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemUpdateArgs {
     /// The system to update. Omit to update them ALL — every joined system's
     /// daemon, then every installed plugin on every one. Pass a system id to
@@ -317,7 +323,11 @@ pub struct SystemUpdateArgs {
     /// asks one system about itself, and the terminal spelling an id-addressed
     /// call is forwarded as. Because the hop carries it, a forwarded update
     /// cannot bounce onward, so no resolution loop is possible.
-    #[serde(default)]
+    // Serialized snake_case on purpose: a peer still on the pre-camelCase
+    // release drops an unknown `selfOnly`, reads `id: None` as "every
+    // system", and the fan-out leg fans out again — with `execute`. Flip to
+    // camelCase once every fleet daemon accepts the alias.
+    #[serde(default, rename = "self_only", alias = "selfOnly")]
     #[arg(long, hide = true)]
     pub self_only: bool,
 
@@ -533,18 +543,18 @@ fn fleet_incompatible_arg(args: &SystemUpdateArgs) -> Option<&'static str> {
     [
         ("hostname", args.hostname.is_some()),
         ("fqdn", args.fqdn.is_some()),
-        ("lan_v4", args.lan_v4.is_some()),
-        ("lan_v6", args.lan_v6.is_some()),
-        ("tailscale_v4", args.tailscale_v4.is_some()),
-        ("tailscale_v6", args.tailscale_v6.is_some()),
+        ("lanV4", args.lan_v4.is_some()),
+        ("lanV6", args.lan_v6.is_some()),
+        ("tailscaleV4", args.tailscale_v4.is_some()),
+        ("tailscaleV6", args.tailscale_v6.is_some()),
         ("daemon", args.daemon.is_some()),
         ("action", args.action.is_some()),
-        ("local_login", args.local_login.is_some()),
-        ("refresh_host", args.refresh_host),
+        ("localLogin", args.local_login.is_some()),
+        ("refreshHost", args.refresh_host),
         ("channel", args.channel.is_some()),
-        ("dev_source", args.dev_source.is_some()),
-        ("clear_dev_source", args.clear_dev_source),
-        ("release_source", args.release_source.is_some()),
+        ("devSource", args.dev_source.is_some()),
+        ("clearDevSource", args.clear_dev_source),
+        ("releaseSource", args.release_source.is_some()),
     ]
     .into_iter()
     .find_map(|(name, present)| present.then_some(name))
@@ -592,8 +602,10 @@ pub enum SystemUpdateResult {
 /// would fail the entire decode and the controller would report failure for
 /// a call that actually applied successfully on the peer. See
 /// [[project-update-path-fix-plan-2026-06-01]] fix #1.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
 #[serde(default)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemUpdateOutput {
     pub current_version: String,
     pub channel: String,
@@ -649,8 +661,10 @@ pub struct SystemUpdateOutput {
     pub fetch_blocked_reason: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default, Clone)]
 #[serde(default)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingRestart {
     pub target: String,
     pub age_secs: u64,
@@ -2068,7 +2082,7 @@ mod tests {
         };
         let result = SystemUpdateResult::Update(Box::new(out));
         let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains("\"current_version\":\"0.0.9\""), "{json}");
+        assert!(json.contains("\"currentVersion\":\"0.0.9\""), "{json}");
         assert!(json.contains("\"channel\":\"beta\""), "{json}");
         // No enum tag wrapper on the untagged variant.
         assert!(!json.contains("\"Update\""), "{json}");
@@ -2083,7 +2097,7 @@ mod tests {
         // Untagged: no `Kill` wrapper key — the payload is bare.
         assert!(!json.contains("\"Kill\""), "{json}");
         assert!(
-            json.contains("\"killed_patterns\":[\"mcp-serve\"]"),
+            json.contains("\"killedPatterns\":[\"mcp-serve\"]"),
             "{json}"
         );
     }
@@ -2202,7 +2216,7 @@ mod tests {
     #[test]
     fn install_args_parses_service_user_bundle() {
         let args: SystemInstallArgs = serde_json::from_str(
-            r#"{"service_user":"orca","home_dir":"/var/lib/orca","admin_pubkey":"ssh-ed25519 AAAA","port":8099}"#,
+            r#"{"serviceUser":"orca","homeDir":"/var/lib/orca","adminPubkey":"ssh-ed25519 AAAA","port":8099}"#,
         )
         .unwrap();
         assert_eq!(args.service_user.as_deref(), Some("orca"));
@@ -2327,17 +2341,14 @@ mod tests {
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(
-            json.contains("\"addressing_set\":[\"lan_v4=10.0.0.2\"]"),
+            json.contains("\"addressingSet\":[\"lan_v4=10.0.0.2\"]"),
             "{json}"
         );
         assert!(json.contains("\"hostname\":\"host-a\""), "{json}");
         assert!(json.contains("\"fqdn\":\"host-a.example\""), "{json}");
-        assert!(
-            json.contains("\"os_package_result\":\"upgraded\""),
-            "{json}"
-        );
-        assert!(json.contains("\"update_available\":true"), "{json}");
-        assert!(json.contains("\"pinned_to\":null"), "{json}");
+        assert!(json.contains("\"osPackageResult\":\"upgraded\""), "{json}");
+        assert!(json.contains("\"updateAvailable\":true"), "{json}");
+        assert!(json.contains("\"pinnedTo\":null"), "{json}");
     }
 
     #[test]
@@ -2418,9 +2429,9 @@ mod tests {
             json.contains("\"channels\":[\"stable\",\"beta\"]"),
             "{json}"
         );
-        assert!(json.contains("\"versions_total\":42"), "{json}");
-        assert!(json.contains("\"versions_page\":1"), "{json}");
-        assert!(json.contains("\"versions_per_page\":20"), "{json}");
+        assert!(json.contains("\"versionsTotal\":42"), "{json}");
+        assert!(json.contains("\"versionsPage\":1"), "{json}");
+        assert!(json.contains("\"versionsPerPage\":20"), "{json}");
         // dev_source is no longer on the response.
         assert!(!json.contains("dev_source"), "{json}");
     }
@@ -2429,10 +2440,9 @@ mod tests {
 
     #[test]
     fn update_args_parses_versions_pagination_and_list_channels() {
-        let args: SystemUpdateArgs = serde_json::from_str(
-            r#"{"versions_page":2,"versions_per_page":5,"list_channels":true}"#,
-        )
-        .unwrap();
+        let args: SystemUpdateArgs =
+            serde_json::from_str(r#"{"versionsPage":2,"versionsPerPage":5,"listChannels":true}"#)
+                .unwrap();
         assert_eq!(args.versions_page, Some(2));
         assert_eq!(args.versions_per_page, Some(5));
         assert!(args.list_channels);
@@ -2441,7 +2451,7 @@ mod tests {
     #[test]
     fn update_args_parses_identity_and_addressing() {
         let args: SystemUpdateArgs = serde_json::from_str(
-            r#"{"hostname":"maple","fqdn":"maple.lan","lan_v4":"10.0.0.5","lan_v6":"fe80::1","tailscale_v4":"100.64.0.1","tailscale_v6":"fd00::1"}"#,
+            r#"{"hostname":"maple","fqdn":"maple.lan","lanV4":"10.0.0.5","lanV6":"fe80::1","tailscaleV4":"100.64.0.1","tailscaleV6":"fd00::1"}"#,
         )
         .unwrap();
         assert_eq!(args.hostname.as_deref(), Some("maple"));
@@ -2455,7 +2465,7 @@ mod tests {
     #[test]
     fn update_args_parses_channel_version_devsource_daemon() {
         let args: SystemUpdateArgs = serde_json::from_str(
-            r#"{"channel":"beta","version":"0.0.9","dev_source":"http://x/","clear_dev_source":true,"daemon":"park","os_packages":true,"refresh_host":true}"#,
+            r#"{"channel":"beta","version":"0.0.9","devSource":"http://x/","clearDevSource":true,"daemon":"park","osPackages":true,"refreshHost":true}"#,
         )
         .unwrap();
         assert_eq!(args.channel.as_deref(), Some("beta"));
@@ -2500,7 +2510,7 @@ mod tests {
 
     #[test]
     fn update_result_decodes_full_output_as_update() {
-        let json = r#"{"current_version":"0.0.9","channel":"beta","applied":"0.0.9","notes":["applied v0.0.9"]}"#;
+        let json = r#"{"currentVersion":"0.0.9","channel":"beta","applied":"0.0.9","notes":["applied v0.0.9"]}"#;
         let decoded: SystemUpdateResult = serde_json::from_str(json).unwrap();
         match decoded {
             SystemUpdateResult::Update(out) => {
@@ -2517,9 +2527,9 @@ mod tests {
 
     #[test]
     fn update_args_parses_local_login_true_and_false() {
-        let on: SystemUpdateArgs = serde_json::from_str(r#"{"local_login":true}"#).unwrap();
+        let on: SystemUpdateArgs = serde_json::from_str(r#"{"localLogin":true}"#).unwrap();
         assert_eq!(on.local_login, Some(true));
-        let off: SystemUpdateArgs = serde_json::from_str(r#"{"local_login":false}"#).unwrap();
+        let off: SystemUpdateArgs = serde_json::from_str(r#"{"localLogin":false}"#).unwrap();
         assert_eq!(off.local_login, Some(false));
         let unset: SystemUpdateArgs = serde_json::from_str("{}").unwrap();
         assert!(unset.local_login.is_none());
@@ -2658,7 +2668,7 @@ mod tests {
         };
         let res = SystemUpdateResult::Update(Box::new(out));
         let json = serde_json::to_string(&res).unwrap();
-        assert!(json.contains("\"current_version\":\"9.9.9\""));
+        assert!(json.contains("\"currentVersion\":\"9.9.9\""));
         assert!(!json.contains("Update"));
         // And it decodes back to the Update variant.
         match serde_json::from_str::<SystemUpdateResult>(&json).unwrap() {
@@ -2950,19 +2960,52 @@ mod tests {
     // ── addressing: no id = every system, an id = one ───────────────────────
 
     #[test]
-    fn the_wire_names_are_snake_case() {
-        // `self_only` is sent as a literal JSON key by the mesh liveness probe
-        // (peer_info) — these args carry no `rename_all`, so a camelCase key
-        // would be silently dropped and the probe would fan out fleet-wide.
+    fn self_only_is_sent_snake_case_and_accepted_either_way() {
+        // `self_only` stays snake_case on the wire until the fleet is rolled:
+        // an older peer ignores `selfOnly`, reads no id as "every system", and
+        // the leg fans out again. The fan-out legs, the forwarded hop and the
+        // liveness probe all go through this spelling.
         let a: SystemUpdateArgs =
             serde_json::from_str(r#"{"self_only":true,"id":"thor"}"#).unwrap();
         assert!(a.self_only);
         assert_eq!(a.id.as_deref(), Some("thor"));
         let camel: SystemUpdateArgs = serde_json::from_str(r#"{"selfOnly":true}"#).unwrap();
+        assert!(camel.self_only);
+        let sent = serde_json::to_value(SystemUpdateArgs {
+            self_only: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(sent["self_only"], serde_json::json!(true), "{sent}");
+        assert!(sent.get("selfOnly").is_none(), "{sent}");
+        // serde treats an alias as the same field, so a payload carrying both
+        // spellings is a duplicate-field error — never send both.
         assert!(
-            !camel.self_only,
-            "camelCase must NOT bind — peer_info sends snake_case"
+            serde_json::from_str::<SystemUpdateArgs>(r#"{"self_only":true,"selfOnly":true}"#)
+                .is_err()
         );
+    }
+
+    #[test]
+    fn snake_case_args_from_an_older_caller_still_bind() {
+        let a: SystemUpdateArgs = serde_json::from_str(
+            r#"{"os_packages":true,"versions_page":2,"lan_v4":"10.0.0.5","dev_source":"http://x/"}"#,
+        )
+        .unwrap();
+        assert!(a.os_packages);
+        assert_eq!(a.versions_page, Some(2));
+        assert_eq!(a.lan_v4.as_deref(), Some("10.0.0.5"));
+        assert_eq!(a.dev_source.as_deref(), Some("http://x/"));
+    }
+
+    #[test]
+    fn snake_case_update_output_from_an_older_peer_still_decodes() {
+        let out: SystemUpdateOutput = serde_json::from_str(
+            r#"{"current_version":"0.0.9","channel":"beta","update_available":true}"#,
+        )
+        .unwrap();
+        assert_eq!(out.current_version, "0.0.9");
+        assert_eq!(out.update_available, Some(true));
     }
 
     #[test]
@@ -3043,7 +3086,7 @@ mod tests {
                     refresh_host: true,
                     ..Default::default()
                 },
-                Some("refresh_host"),
+                Some("refreshHost"),
             ),
             (
                 SystemUpdateArgs {
