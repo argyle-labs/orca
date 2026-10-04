@@ -1,76 +1,135 @@
-//! Refuse to forward camelCase tool args to a peer that predates them.
+//! Refuse to forward renamed tool args to a peer that predates the camelCase
+//! wire.
 //!
-//! A daemon on a release before [`CAMELCASE_WIRE_SINCE`] reads tool args by
-//! their snake_case names and silently ignores unknown keys, so a forwarded
-//! `expiresInDays` is dropped and the peer mints a non-expiring token, a
-//! `refPath` is dropped from a secret write, and so on — with success reported.
-//! Args that carry no camelCase key (single-word fields only, or the types
-//! kept snake_case for the mixed window such as `system.update`) are safe and
-//! pass, so liveness probes and fleet rolls keep working against old peers.
+//! A daemon before the camelCase wire reads tool args by their snake_case
+//! names and silently ignores unknown keys, so a forwarded `expiresInDays` is
+//! dropped and the peer mints a non-expiring token, a `refPath` is dropped from
+//! a secret write, and so on — with success reported.
 //!
-//! Remove once every daemon is past the cutover.
+//! Only args whose name changed are gated. [`RENAMED_ARGS`] lists them per
+//! tool, and inventory-tests checks it against the rc.11 args schema, so args
+//! that were already camelCase there, free-form maps (env vars, headers,
+//! labels) and single-word fields pass untouched.
+//!
+//! A peer reads the camelCase wire iff its `mesh/ping` result carries
+//! `camel_wire: true`; older daemons omit the field. A failed ping refuses the
+//! call, since nothing proves the peer would keep the arguments.
+//!
+//! Remove once every daemon reports `camel_wire`.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
-/// The last release whose daemons read tool args as snake_case only.
-pub const LAST_SNAKE_WIRE_RELEASE: &str = "0.2.1-rc.11";
-/// The first release that reads camelCase tool args.
-pub const CAMELCASE_WIRE_SINCE: &str = "0.2.1-rc.12";
+/// Args renamed snake_case → camelCase since rc.11, per tool. Must match the
+/// rc.11 schema exactly (`wire_compat_renamed_args_match_the_rc11_schema`).
+pub const RENAMED_ARGS: &[(&str, &[&str])] = &[
+    ("auth.token.create", &["canMutate", "expiresInDays"]),
+    ("model.list", &["enabledOnly"]),
+    ("pki.create", &["pluginId"]),
+    ("plugin.data.detail", &["dataKey"]),
+    ("secrets.upsert", &["refPath", "valueStdin"]),
+    ("storage.share.create", &["optionsRendered"]),
+    (
+        "system.build",
+        &[
+            "codesignIdentity",
+            "outDir",
+            "pkgSignIdentity",
+            "plgBinaryUrl",
+            "plgUrl",
+        ],
+    ),
+    ("system.install", &["adminPubkey", "homeDir", "serviceUser"]),
+];
 
-/// `true` when any object key in `v` (at any depth) has an uppercase ASCII
-/// letter and a non-null value, i.e. a camelCase multi-word field whose value
-/// an old peer would drop. A dropped `null` reads as the default anyway.
+/// Renamed keys of `tool` present with a non-null value at any depth of
+/// `args`. A dropped `null` reads as the default anyway.
 #[allow(clippy::disallowed_types)]
-fn has_camel_key(v: &serde_json::Value) -> bool {
+fn renamed_keys_present(tool: &str, args: &serde_json::Value) -> Vec<&'static str> {
+    let Some((_, renamed)) = RENAMED_ARGS.iter().find(|(t, _)| *t == tool) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    collect(args, renamed, &mut found);
+    found
+}
+
+#[allow(clippy::disallowed_types)]
+fn collect(v: &serde_json::Value, renamed: &[&'static str], found: &mut Vec<&'static str>) {
     match v {
-        serde_json::Value::Object(m) => m.iter().any(|(k, child)| {
-            (!child.is_null() && k.chars().any(|c| c.is_ascii_uppercase())) || has_camel_key(child)
-        }),
-        serde_json::Value::Array(a) => a.iter().any(has_camel_key),
-        _ => false,
+        serde_json::Value::Object(m) => {
+            for (k, child) in m {
+                if !child.is_null()
+                    && let Some(r) = renamed.iter().find(|r| **r == k)
+                    && !found.contains(r)
+                {
+                    found.push(r);
+                }
+                collect(child, renamed, found);
+            }
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|c| collect(c, renamed, found)),
+        _ => {}
     }
 }
 
-/// Pure decision: `Some(reason)` when forwarding `args` for `tool` to a peer
-/// reporting `peer_version` would lose fields.
+/// Pure decision: `Some(reason)` when forwarding `args` for `tool` to `peer`
+/// could lose fields. `camel_wire` is the peer's ping marker, or the ping
+/// error when the peer could not be asked.
 #[allow(clippy::disallowed_types)]
 pub fn incompatibility(
     peer: &str,
     tool: &str,
     args: &serde_json::Value,
-    peer_version: Option<&str>,
+    camel_wire: Result<bool, String>,
 ) -> Option<String> {
-    let version = peer_version?;
-    if crate::update_state::is_newer_full(version, LAST_SNAKE_WIRE_RELEASE) {
+    let keys = renamed_keys_present(tool, args);
+    if keys.is_empty() {
         return None;
     }
-    if !has_camel_key(args) {
-        return None;
+    let keys = keys.join(", ");
+    match camel_wire {
+        Ok(true) => None,
+        Ok(false) => Some(format!(
+            "refusing to forward `{tool}` to {peer}: it predates the camelCase wire and would \
+             silently ignore {keys}. Update that host first \
+             (`orca system update --id {peer} --execute`), then retry."
+        )),
+        Err(e) => Some(format!(
+            "refusing to forward `{tool}` to {peer}: could not confirm it reads the camelCase \
+             wire ({e}), and an older peer would silently ignore {keys}."
+        )),
     }
-    Some(format!(
-        "refusing to forward `{tool}` to {peer}: it runs orca {version}, which predates the \
-         camelCase wire ({CAMELCASE_WIRE_SINCE}) and would silently ignore some of these \
-         arguments. Update that host first (`orca system update --id {peer} --execute`), then \
-         retry."
-    ))
 }
 
-/// Gate a by-peer tool call. The peer's version comes from the liveness cache,
-/// or a `mesh/ping` when the cache is cold. An unknown version (the ping
-/// failed) is not refused here: the call itself will fail to reach the peer.
+/// Gate a by-peer tool call. Pings the peer only when `args` carries a renamed
+/// key, so ordinary calls pay nothing.
 #[allow(clippy::disallowed_types)]
-pub async fn check(peer_id: &str, peer: &str, tool: &str, args: &serde_json::Value) -> Result<()> {
-    if !has_camel_key(args) {
+pub async fn check(
+    peer_id: &str,
+    peer: &str,
+    targets: &[String],
+    tool: &str,
+    args: &serde_json::Value,
+) -> Result<()> {
+    if renamed_keys_present(tool, args).is_empty() {
         return Ok(());
     }
-    let version = match crate::mesh::peer_info::liveness_if_fresh(peer_id).and_then(|l| l.version) {
-        Some(v) => Some(v),
-        None => crate::mesh::exec::ping(peer_id).await.version,
-    };
-    if let Some(reason) = incompatibility(peer, tool, args, version.as_deref()) {
+    let camel_wire = peer_reads_camel_wire(peer_id, targets)
+        .await
+        .map_err(|e| format!("{e:#}"));
+    if let Some(reason) = incompatibility(peer, tool, args, camel_wire) {
         bail!(reason);
     }
     Ok(())
+}
+
+async fn peer_reads_camel_wire(peer_id: &str, targets: &[String]) -> Result<bool> {
+    let pong = crate::mesh::dialer::try_targets_tracked(Some(peer_id), targets, |t| async move {
+        crate::mesh::ping(&t).await
+    })
+    .await
+    .with_context(|| format!("mesh/ping {peer_id}"))?;
+    Ok(pong.camel_wire)
 }
 
 #[cfg(test)]
@@ -79,63 +138,83 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn camel_args_to_a_pre_cutover_peer_are_refused() {
+    fn renamed_args_to_a_pre_cutover_peer_are_refused() {
         let args = json!({ "name": "ci", "expiresInDays": 30 });
-        let why = incompatibility("thor", "auth.token.create", &args, Some("0.2.1-rc.11"))
-            .expect("refused");
-        assert!(why.contains("thor") && why.contains("0.2.1-rc.11"), "{why}");
+        let why = incompatibility("thor", "auth.token.create", &args, Ok(false)).expect("refused");
+        assert!(
+            why.contains("thor") && why.contains("expiresInDays"),
+            "{why}"
+        );
         assert!(why.contains("Update that host first"), "{why}");
-        assert!(incompatibility("thor", "t", &args, Some("v0.2.0")).is_some());
     }
 
     #[test]
-    fn nested_camel_keys_count() {
+    fn nested_renamed_keys_count() {
         let args = json!({ "outer": { "refPath": "/x" } });
-        assert!(incompatibility("p", "t", &args, Some("0.2.1-rc.11")).is_some());
+        assert!(incompatibility("p", "secrets.upsert", &args, Ok(false)).is_some());
     }
 
     #[test]
-    fn snake_or_single_word_args_pass_to_old_peers() {
-        for args in [
-            json!({}),
-            json!({ "id": "thor", "name": "x" }),
-            json!({ "self_only": true, "release_source": "gitea" }),
-            // `system.update`'s flattened retention args serialize as null
-            // camelCase keys when unset; dropping a null loses nothing.
-            json!({ "self_only": true, "maxMb": null }),
+    fn a_failed_ping_fails_closed() {
+        let args = json!({ "expiresInDays": 30 });
+        let why = incompatibility("p", "auth.token.create", &args, Err("timed out".into()))
+            .expect("refused");
+        assert!(why.contains("timed out"), "{why}");
+    }
+
+    #[test]
+    fn camel_wire_peers_pass() {
+        let args = json!({ "expiresInDays": 30 });
+        assert!(incompatibility("p", "auth.token.create", &args, Ok(true)).is_none());
+    }
+
+    #[test]
+    fn args_camelcase_at_rc11_pass_to_old_peers() {
+        // Already camelCase at rc.11, or free-form maps whose keys are data:
+        // none is a renamed field, so an old peer reads them all.
+        for (tool, args) in [
+            (
+                "container.create",
+                json!({ "restartPolicy": "always", "env": { "TZ": "UTC", "PATH": "/bin" } }),
+            ),
+            (
+                "model.create",
+                json!({ "baseUrl": "http://x", "apiKeyRef": "k" }),
+            ),
+            (
+                "plugin.create",
+                json!({ "repoUrl": "https://x", "releaseSource": "gitea" }),
+            ),
+            (
+                "notify.create",
+                json!({ "headers": { "X-Token": "t" }, "labels": { "Team": "a" } }),
+            ),
+            ("config.set", json!({ "value": { "MaxSize": 3 } })),
+            (
+                "auth.token.create",
+                json!({ "name": "ci", "role": "admin" }),
+            ),
         ] {
-            assert!(incompatibility("p", "t", &args, Some("0.2.1-rc.11")).is_none());
+            assert!(
+                incompatibility("p", tool, &args, Ok(false)).is_none(),
+                "{tool} {args}"
+            );
         }
     }
 
     #[test]
-    fn current_and_unknown_peers_pass() {
-        let args = json!({ "expiresInDays": 30 });
-        assert!(incompatibility("p", "t", &args, Some(CAMELCASE_WIRE_SINCE)).is_none());
-        assert!(incompatibility("p", "t", &args, Some("0.2.1")).is_none());
-        assert!(incompatibility("p", "t", &args, None).is_none());
+    fn null_renamed_keys_pass() {
+        let args = json!({ "name": "ci", "expiresInDays": null });
+        assert!(incompatibility("p", "auth.token.create", &args, Ok(false)).is_none());
     }
 
     #[test]
-    fn the_snake_wire_tools_carry_no_camel_keys() {
-        // system.update and plugin.serve_asset stay snake_case for the mixed
-        // window precisely so they pass this gate against old peers.
-        let update = serde_json::to_value(crate::commands::SystemUpdateArgs {
-            self_only: true,
-            release_source: Some("gitea".into()),
-            os_packages: true,
-            ..Default::default()
-        })
-        .unwrap();
-        assert!(!has_camel_key(&update), "{update}");
-        let serve = serde_json::to_value(crate::plugin_manager::PluginServeAssetArgs {
-            name: "a".into(),
-            repo_url: "https://github.com/x/a".into(),
-            target: "t".into(),
-            version: None,
-            prerelease: false,
-        })
-        .unwrap();
-        assert!(!has_camel_key(&serve), "{serve}");
+    fn the_snake_wire_tools_carry_no_renamed_keys() {
+        for tool in ["system.update", "plugin.serve_asset"] {
+            assert!(
+                !RENAMED_ARGS.iter().any(|(t, _)| *t == tool),
+                "{tool} stays snake_case on the wire and must never be gated"
+            );
+        }
     }
 }
