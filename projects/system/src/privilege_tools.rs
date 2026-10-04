@@ -377,10 +377,10 @@ pub fn audit_root(root: &Path, host: String) -> PrivilegeAudit {
 }
 
 /// Report every sudo/doas grant on the host this runs on, flagging dangling
-/// targets and sole grants. Pure filesystem read — mutates nothing, which is
-/// why `audit` is in the derive's read-shaped verb list rather than this tool
-/// carrying a `[MUTATES STATE]` marker it would be lying about.
-#[orca_tool(domain = "identity.privilege", verb = "audit")]
+/// targets and sole grants. Pure filesystem read: `audit` is a read-shaped verb,
+/// so it is neither gated nor a mutation. `role = "read"` because the grant list
+/// maps out which accounts can become root.
+#[orca_tool(domain = "identity.privilege", verb = "audit", role = "read")]
 async fn identity_privilege_audit(
     args: IdentityPrivilegeAuditArgs,
     _ctx: &contract::ToolCtx,
