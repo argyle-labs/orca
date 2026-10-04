@@ -281,6 +281,10 @@ pub enum StorageCapability {
     RecoverStale,
 }
 
+/// Previous name of [`StorageCapability`], kept until every out-of-tree plugin
+/// has been rebuilt against the new name.
+pub type Capability = StorageCapability;
+
 /// Outcome of a [`StorageBackend::recover_stale`] sweep: a stale-mount
 /// health-probe → force-release → remount → re-probe cycle, plus recovery of
 /// declared-but-absent mounts. The reconciler logs this and continues its own
@@ -317,6 +321,14 @@ pub struct StorageProvider {
     pub endpoint: String,
     pub capabilities: Vec<StorageCapability>,
 }
+
+/// Previous name of [`StorageProvider`], kept until every out-of-tree plugin
+/// has been rebuilt against the new name.
+pub type Provider = StorageProvider;
+
+/// Previous name of [`MountHealth`], kept until every out-of-tree plugin
+/// has been rebuilt against the new name.
+pub type Health = MountHealth;
 
 /// A single share/volume exposed by a backend.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -373,6 +385,7 @@ pub struct MountOutcome {
 }
 
 /// Capacity/usage snapshot for a volume.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
@@ -406,7 +419,7 @@ pub trait StorageBackend: Send + Sync {
     fn kind(&self) -> StorageKind;
     fn capabilities(&self) -> Vec<StorageCapability>;
 
-    /// StorageProvider descriptor for `storage.list` / topology.
+    /// Provider descriptor for `storage.list` / topology.
     fn provider(&self) -> StorageProvider {
         StorageProvider {
             name: self.name().to_string(),

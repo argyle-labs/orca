@@ -42,6 +42,7 @@ pub enum PackageFormat {
     Plg,
 }
 
+#[derive::snake_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageBuildArgs {
@@ -86,6 +87,7 @@ fn default_maintainer() -> String {
     "Orca <noreply@orca.local>".to_string()
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageBuildOutput {

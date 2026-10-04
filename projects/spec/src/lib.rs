@@ -34,6 +34,7 @@ pub struct ListSpecsArgs {
     pub cursor: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ListSpecsOutput {

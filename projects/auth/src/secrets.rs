@@ -17,6 +17,7 @@ use derive::orca_tool;
 
 // ── Shared types ────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretEntry {
@@ -45,6 +46,7 @@ pub struct SecretListArgs {
     pub cursor: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretListReport {
@@ -73,6 +75,7 @@ pub struct SecretGetReport {
 
 // ── secret write args (shared by create / update / upsert) ─────────────────────
 
+#[derive::snake_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretWriteArgs {

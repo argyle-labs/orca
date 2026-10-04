@@ -123,6 +123,7 @@ pub fn runtime_str(r: Runtime) -> String {
 
 /// A backup artifact produced by [`ServiceBackend::backup`], restorable via
 /// [`ServiceBackend::restore`]. The path is on the deploy target's filesystem.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupArtifact {
@@ -174,6 +175,7 @@ pub enum ServiceInfo {
 }
 
 /// Descriptor row for `service.list` / topology — a backend's own self-report.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceProvider {

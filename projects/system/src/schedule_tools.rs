@@ -16,6 +16,7 @@ use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleEntry {
@@ -46,6 +47,7 @@ pub struct ScheduleListArgs {
     pub cursor: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleListOutput {
@@ -58,6 +60,7 @@ pub struct ScheduleListOutput {
     pub total: Option<u64>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JobStatus {
@@ -118,6 +121,7 @@ pub struct ScheduleRunArgs {
     pub name: String,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleRunOutput {

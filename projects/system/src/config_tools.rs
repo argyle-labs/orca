@@ -17,6 +17,7 @@ use derive::orca_tool;
 
 // ── Args / Output ────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigRowOut {
@@ -46,6 +47,7 @@ pub struct ConfigListArgs {
     pub cursor: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigListOutput {

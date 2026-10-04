@@ -71,6 +71,7 @@ fn validate_provider(provider: &str, endpoint: Option<&str>) -> anyhow::Result<(
 // model.list
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[derive::snake_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +90,7 @@ pub struct ModelListArgs {
     pub cursor: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelListOutput {
@@ -337,6 +339,7 @@ pub struct BackendStatus {
     pub models: Vec<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendsCheckOutput {

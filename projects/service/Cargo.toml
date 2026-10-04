@@ -46,6 +46,7 @@ contract = { path = "../contract", default-features = false }
 # default-features off keeps the thin profile from pulling http/git/tokio.
 utils = { path = "../utils", default-features = false }
 serde       = { workspace = true }
+derive      = { path = "../derive" }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 schemars    = { workspace = true }

@@ -100,7 +100,7 @@ impl MediaRole {
     }
 }
 
-/// MediaCapability strings a backend advertises (domain-interpreted). Carries both the
+/// Capability strings a backend advertises (domain-interpreted). Carries both the
 /// role markers and the concrete verbs; the media crate parses them off
 /// `BackendDef::capabilities`. Role markers (`DownloadedBy`/`ServedBy`) double as
 /// capabilities so a backend's role set is derivable from `capabilities()` alone,
@@ -139,6 +139,10 @@ pub enum MediaCapability {
     Rescan,
 }
 
+/// Previous name of [`MediaCapability`], kept until every out-of-tree plugin
+/// has been rebuilt against the new name.
+pub type Capability = MediaCapability;
+
 impl MediaCapability {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -159,6 +163,7 @@ impl MediaCapability {
 }
 
 /// A descriptor row for one registered media backend — the `media.*` list view.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaProvider {
@@ -174,6 +179,10 @@ pub struct MediaProvider {
     pub endpoint: String,
 }
 
+/// Previous name of [`MediaProvider`], kept until every out-of-tree plugin
+/// has been rebuilt against the new name.
+pub type Provider = MediaProvider;
+
 /// A reachable URL for a served-by backend, for device setup. `primary` is the
 /// best guess; `alternates` are additional reachable paths (LAN, tailscale, FQDN).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -186,6 +195,7 @@ pub struct MediaUrl {
 /// Per-user credentials for a served-by backend, so a device can be set up. The
 /// password is a [`SecretRef`] the secrets domain resolves — the media backend
 /// never inlines a plaintext secret. orca owns/propagates the actual value.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaCredentials {
@@ -283,6 +293,7 @@ impl PathChange {
 /// identity-keyed servers (ABS, komga) only know external ids. Either locator
 /// alone is enough to act on — see [`RescanTarget::is_addressable`] — so an
 /// acquirer supplies whatever it has rather than the intersection.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RescanTarget {
@@ -361,6 +372,7 @@ pub struct SeriesRef {
 }
 
 /// What a unit IS — the identity every variant resolves to.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaIdentity {
@@ -402,6 +414,7 @@ pub struct Track {
 
 /// Where bytes physically live — a reference into the storage domain. The same
 /// variant may exist in several locations (replicated across shares/hosts).
+#[derive::snake_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Location {
@@ -459,6 +472,7 @@ pub struct Source {
 /// it — what it is, its variants (resolutions/formats/tracks), where the
 /// bytes live, and who serves it and how. Assembled by merging each backend's
 /// partial view (see [`merge_units`]) by [`MediaIdentity`] external ids.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaUnit {
@@ -1203,6 +1217,20 @@ mod merge_tests {
             downloaded_by: Vec::new(),
             served_by: vec![source_by.into()],
         }
+    }
+
+    #[test]
+    fn a_snake_case_unit_from_an_older_plugin_still_decodes() {
+        let u: MediaUnit = serde_json::from_str(
+            r#"{"media_type":"movies","identity":{"title":"The Matrix","year":1999,
+                "external_ids":[{"source":"imdb","id":"tt0133093"}]},
+                "downloaded_by":["radarr"],"served_by":["plex"]}"#,
+        )
+        .unwrap();
+        assert_eq!(u.media_type, MediaType::Movies);
+        assert_eq!(u.identity.external_ids.len(), 1);
+        assert_eq!(u.downloaded_by, ["radarr"]);
+        assert_eq!(u.served_by, ["plex"]);
     }
 
     #[test]

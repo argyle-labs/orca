@@ -169,6 +169,7 @@ pub enum ContainerState {
 /// One bind mount or volume on a container. The mount source is the key the
 /// mounts reconciler uses to build the (mount → dependents) edge for the
 /// dep graph ([[self-healing-reconciler.md]] §2.2).
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerMount {
@@ -181,6 +182,7 @@ pub struct ContainerMount {
 }
 
 /// One open published port (host:container, protocol).
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerPort {
@@ -196,6 +198,7 @@ pub struct ContainerPort {
 /// docker has no equivalent and leaves every field `None`. Modeled as typed
 /// fields rather than a raw string so the reconciler can compare across
 /// runtimes without re-parsing.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StartupOrdering {
@@ -235,6 +238,7 @@ impl StartupOrdering {
 /// - `exit_code` — distinguishes clean exit from crash for the breaker.
 /// - `startup` — boot ordering (LXC), feeds the §2.2 forward/reverse
 ///   restart sequence.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Container {
@@ -364,6 +368,7 @@ impl Default for LogTail {
 /// command's exit status. `stdout`/`stderr` are best-effort UTF-8 (lossy);
 /// `exit_code` is `None` only when the runtime couldn't report one (e.g. the
 /// process was still attached when the stream closed).
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerExecOutput {
@@ -372,6 +377,10 @@ pub struct ContainerExecOutput {
     pub stdout: String,
     pub stderr: String,
 }
+
+/// Previous name of [`ContainerExecOutput`], kept until every out-of-tree plugin
+/// has been rebuilt against the new name.
+pub type ExecOutput = ContainerExecOutput;
 
 /// The surface every runtime adapter implements. Methods are intentionally
 /// the minimum set §2.1 and §2.2 need.
@@ -1273,6 +1282,21 @@ mod tests {
             exit_code: None,
             startup: None,
         }
+    }
+
+    #[test]
+    fn a_snake_case_container_from_an_older_plugin_still_decodes() {
+        let c: Container = serde_json::from_str(
+            r#"{"id":"abc","name":"sab","runtime":"docker","host":"charlie","state":"running",
+                "restart_policy":"unless-stopped","image":null,"labels":[],"mounts":[],"ports":[],
+                "started_at":"2026-10-03T00:00:00Z","finished_at":null,"restart_count":3,
+                "exit_code":137,"startup":null}"#,
+        )
+        .unwrap();
+        assert_eq!(c.restart_policy, RestartPolicy::UnlessStopped);
+        assert_eq!(c.started_at.as_deref(), Some("2026-10-03T00:00:00Z"));
+        assert_eq!(c.restart_count, 3);
+        assert_eq!(c.exit_code, Some(137));
     }
 
     #[test]

@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 /// correlation: a runtime [`crate::service_identity::ServiceRegistration`] keyed
 /// by `(host, port)` joins to the claim whose `endpoints` contain that port on a
 /// matching host.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimEndpoint {
@@ -66,6 +67,7 @@ fn is_tcp(p: &str) -> bool {
 /// One child entity a host claims to run. The inference layer matches each
 /// claim's `macs` against other peers' `interfaces[].mac` to derive
 /// `parent_peer_id`.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TopologyClaim {
@@ -376,6 +378,19 @@ impl TopologyCollector for TopologyCollectorProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_snake_case_claim_from_an_older_plugin_still_decodes() {
+        // `provider_instance` has no default: without the alias an older
+        // plugin's claim fails to decode and its topology goes empty.
+        let c: TopologyClaim = serde_json::from_str(
+            r#"{"kind":"vm","id":"100","name":"n","provider":"proxmox","provider_instance":"pve1","runs_on":"thor","service_role":"media"}"#,
+        )
+        .unwrap();
+        assert_eq!(c.provider_instance, "pve1");
+        assert_eq!(c.runs_on.as_deref(), Some("thor"));
+        assert_eq!(c.service_role.as_deref(), Some("media"));
+    }
 
     /// (c) docker and dockge see the same stack from different angles but MUST
     /// produce byte-identical service_identity keys. Docker learns the working

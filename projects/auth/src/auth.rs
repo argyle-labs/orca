@@ -161,6 +161,7 @@ async fn auth_session_create(
 
 // ── API tokens (REST/MCP bearer auth, local-host scope) ─────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiTokenSummary {
@@ -178,6 +179,7 @@ pub struct ApiTokenSummary {
     pub can_mutate: bool,
 }
 
+#[derive::snake_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenCreateArgs {
@@ -216,6 +218,7 @@ pub struct TokenListArgs {
     pub cursor: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenListOutput {
@@ -379,6 +382,7 @@ pub struct LoginArgs {
     pub password: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginOutput {

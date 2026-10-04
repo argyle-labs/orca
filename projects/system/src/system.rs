@@ -38,6 +38,7 @@ use derive::orca_tool;
 /// Storage footprint snapshot — surfaces orca.db and log-dir sizes so
 /// operators can spot bloat. Per project_db_size_and_retention: orca.db
 /// stays small, logs go to files with size+retention.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageReport {
@@ -60,6 +61,7 @@ pub struct StorageReport {
 /// actually read — the heavy host facts (hardware, processes, interfaces,
 /// history, charts) live on `system.info.detail` and are never dialed on a
 /// read path. Projected from a collected `SystemInfoReport` via `From`.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TopologyFacts {
@@ -125,6 +127,7 @@ impl From<&SystemInfoReport> for TopologyFacts {
     }
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemStatusReport {
@@ -615,6 +618,7 @@ async fn system_summary(ctx: &contract::ToolCtx) -> anyhow::Result<SystemStatusR
 
 /// One registered web-route path and who serves it. Surfaces contested paths so
 /// the user can see e.g. "path `/` is served by peacock, contested by otherui".
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct WebRouteStatus {

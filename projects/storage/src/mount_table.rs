@@ -78,7 +78,7 @@ pub enum RecoveryAction {
     /// Not usable, and a force-release + re-attach can restore it:
     /// [`MountHealth::Stale`], [`MountHealth::Timeout`], [`MountHealth::Missing`].
     Recover,
-    /// MountHealth could not be determined — never acted on, so a probe glitch or an
+    /// Health could not be determined — never acted on, so a probe glitch or an
     /// unreachable foreign owner never force-releases a healthy mount:
     /// [`MountHealth::Error`], [`MountHealth::Unknown`].
     Indeterminate,

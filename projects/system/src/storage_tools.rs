@@ -901,6 +901,7 @@ pub struct StorageShareRepairPermsArgs {
 
 /// Result of `storage.share.repair-permissions`. In dry-run it carries the
 /// detected current perms + candidates; on apply it carries what was changed.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageShareRepairPermsOutput {

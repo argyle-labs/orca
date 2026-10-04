@@ -27,6 +27,7 @@ use utils::state::DaemonMode;
 /// path fields callers might expect already live on the parent
 /// `SystemStatusReport` (sourced from the daemon state file) — don't
 /// duplicate them here.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonRuntimeStatus {

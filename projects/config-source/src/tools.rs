@@ -41,6 +41,7 @@ pub struct StatusArgs {
     pub repo: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusOutput {
@@ -72,6 +73,7 @@ pub struct DiffArgs {
     pub host: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffOutput {

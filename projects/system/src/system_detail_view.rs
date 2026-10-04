@@ -35,6 +35,7 @@ pub struct ChartPoint {
     pub y: f32,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartSeries {
@@ -63,6 +64,7 @@ pub struct GpuSeries {
     pub memory: ChartSeries,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemChartsView {
