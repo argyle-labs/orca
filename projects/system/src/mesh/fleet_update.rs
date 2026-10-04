@@ -30,7 +30,7 @@ use derive::orca_tool;
 use crate::commands::{SystemUpdateArgs, SystemUpdateResult};
 // Fleet result types live in `system` so the hook signature is expressible
 // there without `system` depending on `mesh`.
-pub use crate::fleet::{FleetPluginResult, FleetSystemResult, FleetUpdateOutput};
+pub use crate::fleet::{FleetPluginResult, FleetSystemResult, FleetUpdateOutput, UpdateRowStatus};
 use crate::plugin_manager::{
     PluginListArgs, PluginLoadStatus, PluginUpdateArgs, PluginUpdateOutput,
 };
@@ -384,22 +384,68 @@ async fn run_system(t: &Target, execute: bool, ctx: &contract::ToolCtx) -> Fleet
         Ok(SystemUpdateResult::Update(out)) => {
             row.current = Some(out.current_version.clone());
             row.target = out.latest.clone();
-            row.update_available = out.update_available.unwrap_or(false);
-            row.applied = out.applied.clone();
-            // `None` from a peer too old to compute it means UNKNOWN, which must
-            // not render as "can fetch" — but it must not render as blocked
-            // either. Defaulting false keeps the pre-#652 behaviour for old
-            // peers and only ever adds information for new ones.
-            row.blocked = out.fetch_blocked.unwrap_or(false);
-            row.blocked_reason = out.fetch_blocked_reason.clone();
-            if !out.errors.is_empty() {
-                row.error = Some(out.errors.join("; "));
+            if execute {
+                row.applied = out.applied.clone();
             }
+            (row.status, row.reason) = system_row_outcome(&out, execute);
         }
-        Ok(_) => row.error = Some("unexpected non-update system.update result".into()),
-        Err(e) => row.error = Some(format!("{e:#}")),
+        Ok(_) => {
+            row.status = UpdateRowStatus::Failed;
+            row.reason = Some("unexpected non-update system.update result".into());
+        }
+        Err(e) => {
+            row.status = UpdateRowStatus::Failed;
+            row.reason = Some(format!("{e:#}"));
+        }
     }
     row
+}
+
+/// Status and reason for one host's daemon row. Pure over the host's answer so
+/// the table is testable, and so an older peer's output maps onto the same
+/// statuses on this controller.
+fn system_row_outcome(
+    out: &crate::commands::SystemUpdateOutput,
+    execute: bool,
+) -> (UpdateRowStatus, Option<String>) {
+    let blocked = out.fetch_blocked == Some(true);
+    let blocked_reason = || {
+        out.fetch_blocked_reason
+            .clone()
+            .unwrap_or_else(|| "this host cannot fetch release assets".into())
+    };
+    if !out.errors.is_empty() {
+        let errors = out.errors.join("; ");
+        // An apply on a host that cannot fetch fails BECAUSE it cannot fetch;
+        // the structural cause names the remedy, the error alone does not.
+        return if blocked {
+            (
+                UpdateRowStatus::Blocked,
+                Some(format!("{}; {errors}", blocked_reason())),
+            )
+        } else {
+            (UpdateRowStatus::Failed, Some(errors))
+        };
+    }
+    if execute && out.applied.is_some() {
+        return (UpdateRowStatus::Updated, None);
+    }
+    // Peers that predate the server-side flag still report both versions.
+    let available = out.update_available.or_else(|| {
+        let latest = out.latest.as_deref().filter(|l| !l.is_empty())?;
+        (!out.current_version.is_empty())
+            .then(|| crate::update_state::is_update_available(&out.current_version, latest))
+    });
+    match available {
+        // `fetch_blocked: None` is a peer too old to say; it is not blocked.
+        Some(true) if blocked => (UpdateRowStatus::Blocked, Some(blocked_reason())),
+        Some(true) => (UpdateRowStatus::UpdateAvailable, None),
+        Some(false) => (UpdateRowStatus::UpToDate, None),
+        None => (
+            UpdateRowStatus::Unknown,
+            Some("host reported no channel-latest version to compare against".into()),
+        ),
+    }
 }
 
 /// Enumerate installed plugins on one host and probe/apply each to newest.
@@ -496,23 +542,46 @@ async fn probe_or_apply(
         ..Default::default()
     };
     match dispatch_at::<crate::plugin_manager::PluginUpdate>(t, args, ctx).await {
-        Ok(PluginUpdateOutput {
-            installed_version,
-            target_version,
-            update_available,
-            executed,
-            note,
-            ..
-        }) => {
-            row.installed = installed_version;
-            row.target = Some(target_version);
-            row.update_available = update_available;
-            row.updated = executed && update_available;
-            row.note = Some(note);
+        Ok(out) => {
+            (row.status, row.reason, row.applied) = plugin_row_outcome(&out);
+            row.target = (!out.target_version.is_empty()).then_some(out.target_version);
+            row.installed = out.installed_version;
         }
-        Err(e) => row.error = Some(format!("{e:#}")),
+        Err(e) => {
+            row.status = UpdateRowStatus::Failed;
+            row.reason = Some(format!("{e:#}"));
+        }
     }
     row
+}
+
+/// Status, reason and applied version for one plugin row. Derived from the
+/// versions rather than the host's `update_available` alone, so an older peer
+/// that still reinstalls the same version reads as `up_to_date`.
+fn plugin_row_outcome(
+    out: &PluginUpdateOutput,
+) -> (UpdateRowStatus, Option<String>, Option<String>) {
+    let target = out.target_version.as_str();
+    // No release source (sideloaded): the host's note says why.
+    if target.is_empty() {
+        return (UpdateRowStatus::Unknown, Some(out.note.clone()), None);
+    }
+    let installed = out.installed_version.as_deref();
+    let changed = installed.is_none_or(|cur| norm(cur) != norm(target));
+    if out.executed && changed {
+        return (UpdateRowStatus::Updated, None, Some(target.to_string()));
+    }
+    if out.update_available && !out.executed {
+        return (UpdateRowStatus::UpdateAvailable, None, None);
+    }
+    match installed {
+        Some(cur) if crate::update_state::is_newer_full(cur, target) => (
+            UpdateRowStatus::UpToDate,
+            Some("installed version newer than catalog".into()),
+            None,
+        ),
+        _ => (UpdateRowStatus::UpToDate, None, None),
+    }
 }
 
 /// [MUTATES STATE] Update the WHOLE fleet. DRY RUN by default: reports the plan
@@ -638,7 +707,7 @@ pub async fn fleet_update(
         let row = run_system(t, true, ctx).await;
         // Health-gate an apply that actually landed a new binary: wait for the
         // peer back on the new version before touching the next host.
-        if row.error.is_none()
+        if row.status == UpdateRowStatus::Updated
             && let Some(applied) = row.applied.clone()
         {
             let note = format!("{}: applied {applied}, health-gating…", t.host);
@@ -778,10 +847,9 @@ fn all_peers_unreached(rows: &[&FleetSystemResult]) -> Option<String> {
     if rows.len() < 2 {
         return None;
     }
-    if !rows
-        .iter()
-        .all(|r| r.error.as_deref().is_some_and(is_unreached))
-    {
+    if !rows.iter().all(|r| {
+        r.status == UpdateRowStatus::Failed && r.reason.as_deref().is_some_and(is_unreached)
+    }) {
         return None;
     }
     Some(format!(
@@ -821,14 +889,20 @@ fn gate_skew_note(controller_version: &str, applied: &[&str]) -> Option<String> 
 /// still running, which is the progress signal operators were reduced to
 /// grepping for side effects to get.
 fn note_system_progress(row: &FleetSystemResult) {
-    match (&row.error, &row.applied) {
-        (Some(e), _) => tracing::warn!(host = %row.host, "FAILED: {e}"),
-        (None, Some(v)) => tracing::info!(host = %row.host, "applied {v}"),
-        (None, None) => tracing::info!(
+    let reason = row.reason.as_deref().unwrap_or("");
+    match row.status {
+        UpdateRowStatus::Failed => tracing::warn!(host = %row.host, "FAILED: {reason}"),
+        UpdateRowStatus::Blocked => tracing::warn!(host = %row.host, "BLOCKED: {reason}"),
+        UpdateRowStatus::Updated => tracing::info!(
+            host = %row.host,
+            "applied {}",
+            row.applied.as_deref().unwrap_or("?")
+        ),
+        status => tracing::info!(
             host = %row.host,
             current = row.current.as_deref().unwrap_or("?"),
             target = row.target.as_deref().unwrap_or("?"),
-            update_available = row.update_available,
+            ?status,
             "probed"
         ),
     }
@@ -1346,7 +1420,8 @@ mod tests {
         FleetSystemResult {
             host: host.into(),
             id: format!("id-{host}"),
-            error: Some(err.into()),
+            status: UpdateRowStatus::Failed,
+            reason: Some(err.into()),
             ..Default::default()
         }
     }
@@ -1400,11 +1475,232 @@ mod tests {
             host: "a".into(),
             id: "id-a".into(),
             applied: Some("0.2.1".into()),
+            status: UpdateRowStatus::Updated,
             ..Default::default()
         };
         let rows = [ok, errored("b", "No route to host")];
         let refs: Vec<&FleetSystemResult> = rows.iter().collect();
         assert!(all_peers_unreached(&refs).is_none());
+    }
+
+    fn sys_out(
+        current: &str,
+        latest: Option<&str>,
+        available: Option<bool>,
+        blocked: Option<bool>,
+    ) -> crate::commands::SystemUpdateOutput {
+        crate::commands::SystemUpdateOutput {
+            current_version: current.into(),
+            latest: latest.map(Into::into),
+            update_available: available,
+            fetch_blocked: blocked,
+            fetch_blocked_reason: blocked
+                .filter(|b| *b)
+                .map(|_| "no github_token and no trusted peer".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn system_row_status_table() {
+        use UpdateRowStatus::*;
+        let cases: &[(
+            &str,
+            crate::commands::SystemUpdateOutput,
+            bool,
+            UpdateRowStatus,
+        )] = &[
+            (
+                "current",
+                sys_out("0.2.1", Some("0.2.1"), Some(false), Some(false)),
+                false,
+                UpToDate,
+            ),
+            (
+                "newer",
+                sys_out("0.2.0", Some("0.2.1"), Some(true), Some(false)),
+                false,
+                UpdateAvailable,
+            ),
+            (
+                "blocked",
+                sys_out("0.2.0", Some("0.2.1"), Some(true), Some(true)),
+                false,
+                Blocked,
+            ),
+            // Blocked only matters when there is something to fetch.
+            (
+                "blocked but current",
+                sys_out("0.2.1", Some("0.2.1"), Some(false), Some(true)),
+                false,
+                UpToDate,
+            ),
+            // Peer too old to report `fetch_blocked`: not blocked.
+            (
+                "old peer, newer",
+                sys_out("0.2.0", Some("0.2.1"), Some(true), None),
+                false,
+                UpdateAvailable,
+            ),
+            // Peer too old to report `update_available`: compare here.
+            (
+                "old peer, no flag",
+                sys_out("0.2.0", Some("0.2.1"), None, None),
+                false,
+                UpdateAvailable,
+            ),
+            (
+                "old peer, no flag, current",
+                sys_out("0.2.1", Some("0.2.1"), None, None),
+                false,
+                UpToDate,
+            ),
+            (
+                "nothing to compare",
+                sys_out("0.2.1", None, None, None),
+                false,
+                Unknown,
+            ),
+        ];
+        for (name, out, execute, want) in cases {
+            assert_eq!(system_row_outcome(out, *execute).0, *want, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_dry_run_is_never_updated() {
+        let mut out = sys_out("0.2.0", Some("0.2.1"), Some(true), Some(false));
+        out.applied = Some("0.2.1".into());
+        assert_eq!(
+            system_row_outcome(&out, false).0,
+            UpdateRowStatus::UpdateAvailable
+        );
+        assert_eq!(
+            system_row_outcome(&out, true),
+            (UpdateRowStatus::Updated, None)
+        );
+    }
+
+    #[test]
+    fn host_errors_fail_the_row_unless_the_host_cannot_fetch() {
+        let mut out = sys_out("0.2.0", Some("0.2.1"), Some(true), Some(false));
+        out.errors = vec!["check failed: 503".into()];
+        let (status, reason) = system_row_outcome(&out, true);
+        assert_eq!(status, UpdateRowStatus::Failed);
+        assert_eq!(reason.as_deref(), Some("check failed: 503"));
+
+        let mut out = sys_out("0.2.0", Some("0.2.1"), Some(true), Some(true));
+        out.errors = vec!["delegate failed".into()];
+        let (status, reason) = system_row_outcome(&out, true);
+        assert_eq!(status, UpdateRowStatus::Blocked);
+        let reason = reason.unwrap();
+        assert!(
+            reason.contains("github_token") && reason.contains("delegate failed"),
+            "{reason}"
+        );
+    }
+
+    fn plugin_out(installed: Option<&str>, target: &str, executed: bool) -> PluginUpdateOutput {
+        PluginUpdateOutput {
+            name: "peacock".into(),
+            installed_version: installed.map(Into::into),
+            target_version: target.into(),
+            update_available: crate::plugin_manager::plugin_update_available(installed, target),
+            executed,
+            note: "note".into(),
+        }
+    }
+
+    #[test]
+    fn plugin_row_status_table() {
+        use UpdateRowStatus::*;
+        let cases = [
+            (
+                "current",
+                plugin_out(Some("0.1.0"), "0.1.0", false),
+                UpToDate,
+                None,
+            ),
+            (
+                "newer, dry run",
+                plugin_out(Some("0.1.0"), "0.1.1", false),
+                UpdateAvailable,
+                None,
+            ),
+            (
+                "not installed",
+                plugin_out(None, "0.1.1", false),
+                UpdateAvailable,
+                None,
+            ),
+            (
+                "updated",
+                plugin_out(Some("0.1.0"), "0.1.1", true),
+                Updated,
+                Some("0.1.1"),
+            ),
+            // An older peer reinstalls the same version and reports executed.
+            (
+                "reinstalled same",
+                plugin_out(Some("0.1.0"), "v0.1.0", true),
+                UpToDate,
+                None,
+            ),
+            (
+                "catalog older (#751)",
+                plugin_out(Some("0.1.0"), "0.0.2-rc.3", false),
+                UpToDate,
+                None,
+            ),
+        ];
+        for (name, out, want, applied) in &cases {
+            let (status, _, got_applied) = plugin_row_outcome(out);
+            assert_eq!(status, *want, "{name}");
+            assert_eq!(got_applied.as_deref(), *applied, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_plugin_newer_than_the_catalog_says_so() {
+        let (status, reason, applied) =
+            plugin_row_outcome(&plugin_out(Some("0.1.0"), "0.0.2-rc.3", false));
+        assert_eq!(status, UpdateRowStatus::UpToDate);
+        assert_eq!(
+            reason.as_deref(),
+            Some("installed version newer than catalog")
+        );
+        assert_eq!(applied, None);
+    }
+
+    #[test]
+    fn a_sideloaded_plugin_is_unknown_with_the_hosts_note() {
+        let mut out = plugin_out(Some("0.1.0"), "", false);
+        out.note = "sideloaded plugin 'x' has no catalog release source; cannot update".into();
+        let (status, reason, _) = plugin_row_outcome(&out);
+        assert_eq!(status, UpdateRowStatus::Unknown);
+        assert!(reason.unwrap().contains("sideloaded"));
+    }
+
+    #[test]
+    fn rows_serialize_one_status_and_reason() {
+        let row = FleetSystemResult {
+            host: "thor".into(),
+            id: "id-thor".into(),
+            current: Some("0.2.0".into()),
+            target: Some("0.2.1".into()),
+            status: UpdateRowStatus::UpdateAvailable,
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&row).unwrap();
+        assert_eq!(v["status"], "update_available");
+        for gone in ["updateAvailable", "error", "blocked", "blockedReason"] {
+            assert!(v.get(gone).is_none(), "{gone} still on the wire");
+        }
+        let v = serde_json::to_value(FleetPluginResult::default()).unwrap();
+        assert_eq!(v["status"], "unknown");
+        for gone in ["updateAvailable", "updated", "note", "error"] {
+            assert!(v.get(gone).is_none(), "{gone} still on the wire");
+        }
     }
 
     #[test]

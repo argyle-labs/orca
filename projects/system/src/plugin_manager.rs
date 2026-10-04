@@ -1073,7 +1073,7 @@ pub struct PluginUpdateOutput {
 /// Whether a plugin update is available: an uninstalled plugin always is (the
 /// `--execute` would install it); an installed one only when `target` is
 /// strictly newer under the shared semver comparator.
-fn plugin_update_available(installed: Option<&str>, target: &str) -> bool {
+pub(crate) fn plugin_update_available(installed: Option<&str>, target: &str) -> bool {
     match installed {
         Some(cur) => crate::update_state::is_update_available(cur, target),
         None => true,

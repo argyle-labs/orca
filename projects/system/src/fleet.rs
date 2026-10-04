@@ -10,6 +10,23 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Outcome of one fleet-update row, daemon or plugin.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateRowStatus {
+    UpToDate,
+    /// A newer version exists and this host can obtain it.
+    UpdateAvailable,
+    /// This run applied a new version (execute only).
+    Updated,
+    /// A newer version exists but this host cannot fetch it.
+    Blocked,
+    Failed,
+    /// The host's answer does not decide the outcome.
+    #[default]
+    Unknown,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FleetSystemResult {
@@ -25,19 +42,11 @@ pub struct FleetSystemResult {
     pub current: Option<String>,
     /// Channel-latest the host would move to.
     pub target: Option<String>,
-    /// True when `target` is strictly newer than `current`.
-    pub update_available: bool,
-    /// Version applied (execute only); `None` on a dry run or no-op.
+    /// Version applied; set only when `status` is `updated`.
     pub applied: Option<String>,
-    /// Per-host error (probe/apply/health-gate). The fan-out continues past it.
-    pub error: Option<String>,
-    /// True when the host structurally cannot fetch a release asset — no local
-    /// `github_token` and no trusted peer to delegate through (#652). A row can
-    /// be both `update_available` and `blocked`: a newer version exists, and
-    /// THIS host cannot obtain it. Read them together before `--execute`.
-    pub blocked: bool,
-    /// Why [`Self::blocked`] is set, naming the remedies. `None` when not blocked.
-    pub blocked_reason: Option<String>,
+    pub status: UpdateRowStatus,
+    /// Why the row is `blocked`, `failed` or `unknown`.
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
@@ -51,15 +60,12 @@ pub struct FleetPluginResult {
     pub installed: Option<String>,
     /// Newest version resolved for the plugin.
     pub target: Option<String>,
-    /// True when `target` is strictly newer than `installed`.
-    pub update_available: bool,
-    /// True when this plugin was actually (re)installed (execute only).
-    pub updated: bool,
-    /// Human-readable note — e.g. why an unreleased/sideloaded plugin was skipped.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    /// Per-plugin error. The fan-out continues past it.
-    pub error: Option<String>,
+    /// Version installed by this run; set only when `status` is `updated`.
+    pub applied: Option<String>,
+    pub status: UpdateRowStatus,
+    /// Why the row is `blocked`, `failed` or `unknown`, or why an
+    /// `up_to_date` row was left alone (e.g. installed newer than the catalog).
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
