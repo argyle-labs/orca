@@ -105,6 +105,7 @@ pub(crate) fn labeled(mut route: Route) -> Route {
     route
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPeerDto {
@@ -230,6 +231,7 @@ pub struct MeshListArgs {
     pub instances: bool,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshListOutput {
@@ -264,6 +266,7 @@ pub enum MeshListResult {
 // source-of-truth (`refreshMeshPeers` + `refreshProxmoxClusters`) lived in the
 // in-repo frontend, since extracted to the peacock plugin (argyle-labs/peacock).
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshCandidate {
@@ -276,6 +279,7 @@ pub struct MeshCandidate {
     pub can_invite: bool,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshStaleRow {
@@ -289,6 +293,7 @@ pub struct MeshStaleRow {
     pub last_seen_at: Option<i64>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshInboundOffer {
@@ -302,6 +307,7 @@ pub struct MeshInboundOffer {
     pub ttl_secs: i64,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshSnapshotOutput {
@@ -554,6 +560,7 @@ fn match_clusters(
 // `seedInstancesFromLoad` / `seedInboundOffersFromLoad` / `reachableAddrs`
 // utilities and the ~60-line bucketing block in `peers.svelte.ts`.
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshInstanceAddress {
@@ -571,6 +578,7 @@ pub struct MeshInstanceSecure {
 /// Fully-shaped instance row the frontend systems UI renders directly. Mirrors
 /// the legacy TS `Instance` shape but every field is snake_case so the typed
 /// SDK from regen flows through unchanged.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshInstance {
@@ -629,6 +637,7 @@ pub struct MeshInstance {
     pub available_versions: Vec<crate::update::VersionEntry>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshInstancesOutput {
@@ -813,6 +822,7 @@ pub enum MeshCreateOutput {
 }
 
 // kept for internal use by accept path
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshAcceptOutput {
@@ -826,6 +836,7 @@ pub struct MeshAcceptOutput {
 
 // ── system.mesh.update --action trust ────────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshTrustOutput {
@@ -845,6 +856,7 @@ pub struct MeshSyncOutput {
     pub peers: Vec<PeerSyncReport>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPingOutput {
@@ -862,6 +874,7 @@ pub struct MeshPingOutput {
 
 // ── system.list --discovery ─────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshDiscoveryRowDto {
@@ -887,6 +900,7 @@ pub struct MeshDiscoveryListOutput(pub Vec<MeshDiscoveryRowDto>);
 
 // ── system.list --pending ──────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPendingOfferDto {
@@ -911,6 +925,7 @@ pub struct MeshPendingListOutput(pub Vec<MeshPendingOfferDto>);
 
 // ── system.join --action offer ────────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshOfferOutput {
@@ -962,6 +977,7 @@ pub enum MeshDeleteOutput {
     Forget(MeshForgetOutput),
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshLeaveOutput {
@@ -972,6 +988,7 @@ pub struct MeshLeaveOutput {
 
 // ── mesh.leave (voluntary self exit) ──────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshLeaveSelfResult {
@@ -979,6 +996,7 @@ pub struct MeshLeaveSelfResult {
     pub notify_result: String,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshLeaveSelfOutput {
@@ -989,6 +1007,7 @@ pub struct MeshLeaveSelfOutput {
 
 // ── mesh.recover ──────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshRecoverOutput {
@@ -1000,6 +1019,7 @@ pub struct MeshRecoverOutput {
 
 // ── mesh.forget ───────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshForgetNotice {
@@ -1009,6 +1029,7 @@ pub struct MeshForgetNotice {
     pub result: String,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshForgetOutput {
@@ -1088,6 +1109,7 @@ pub struct MeshUpdateArgs {
 }
 
 /// Result of `system.mesh.update action=settings`.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshSettingsOutput {
@@ -1881,6 +1903,7 @@ mod replicate_wire {
 
 pub use replicate_wire::ReplicateBundle;
 
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPingResult {
@@ -1899,6 +1922,7 @@ pub struct MeshPingResult {
 /// the human label; `channels` is the per-channel address list (`lan_v4`,
 /// `lan_v6`, `tailscale_v4`, `tailscale_v6`, `fqdn`). Source + last_seen_at
 /// stay local to the responding peer and are not propagated.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostAddressingSnapshot {

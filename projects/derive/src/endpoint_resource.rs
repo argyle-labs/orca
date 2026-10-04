@@ -351,10 +351,11 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         .map(|f| {
             let n = &f.name;
             let ty = &f.ty;
+            let alias = crate::snake_aliases::alias_attr(n);
             if f.optional {
-                quote! { #[arg(long)] pub #n: Option<#ty>, }
+                quote! { #[arg(long)] #alias pub #n: Option<#ty>, }
             } else {
-                quote! { #[arg(long)] pub #n: #ty, }
+                quote! { #[arg(long)] #alias pub #n: #ty, }
             }
         })
         .collect();
@@ -376,7 +377,8 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         .map(|f| {
             let n = &f.name;
             let ty = &f.ty;
-            quote! { #[arg(long)] pub #n: Option<#ty>, }
+            let alias = crate::snake_aliases::alias_attr(n);
+            quote! { #[arg(long)] #alias pub #n: Option<#ty>, }
         })
         .collect();
 

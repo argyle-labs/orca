@@ -74,6 +74,7 @@ impl SchemaIndex {
 
 // ── Output shapes ────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RowRef {
@@ -82,6 +83,7 @@ pub struct RowRef {
     pub name: String,
 }
 
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaInvalid {
@@ -93,6 +95,7 @@ pub struct SchemaInvalid {
 }
 
 /// The read-only reconcile plan. Nothing here is executed tonight.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffPlan {

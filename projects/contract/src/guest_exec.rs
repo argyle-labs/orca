@@ -152,6 +152,7 @@ impl std::fmt::Debug for ExecRequest {
 }
 
 /// The result of a [`GuestExec::exec`] — blocking from the caller's view.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecOutput {

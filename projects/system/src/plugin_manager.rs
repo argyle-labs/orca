@@ -1200,6 +1200,7 @@ async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUp
 // [[github-token-proxy-delegate-on-miss]].
 
 /// Args for [`plugin_serve_asset`].
+#[derive::snake_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginServeAssetArgs {
@@ -1228,6 +1229,7 @@ pub struct PluginServeAssetArgs {
 /// Result of [`plugin_serve_asset`]. `asset_b64` is base64-STANDARD of the raw
 /// plugin executable; `sha256` is the hex digest the holder verified (callers
 /// MUST re-verify after decode before installing).
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginServeAssetOutput {

@@ -1053,6 +1053,7 @@ version = "0.2.1-rc.11"
 dependencies = [
  "anyhow",
  "async-trait",
+ "derive",
  "dirs",
  "rust-embed",
  "schemars 1.2.2",
@@ -3214,6 +3215,7 @@ dependencies = [
  "plugin-toolkit",
  "plugins",
  "serde_json",
+ "server",
  "spec",
  "system",
  "tokio",
@@ -6407,6 +6409,7 @@ version = "0.2.1-rc.11"
 dependencies = [
  "contract",
  "deploy-target",
+ "derive",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -8387,6 +8390,7 @@ dependencies = [
  "blake3",
  "chrono",
  "cron",
+ "derive",
  "ed25519-dalek",
  "futures-util",
  "git2",

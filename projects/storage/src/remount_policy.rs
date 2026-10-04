@@ -83,6 +83,7 @@ fn default_confirm_ticks() -> u32 {
 }
 
 /// Fail-over / fail-back policy between a mount's ordered sources.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Failover {
@@ -132,6 +133,7 @@ fn default_settle_secs() -> u32 {
 
 /// Drain policy — how a source is released from every client before a
 /// coordinated operation (a source reboot) that will take it offline.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Drain {
@@ -160,7 +162,7 @@ impl Default for Drain {
 /// The typed per-mount remount policy — the whole engine's behaviour axis in one
 /// serde object, replacing the opaque `remount_policy` string.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case", default)]
+#[serde(rename_all = "camelCase", default)]
 pub struct RemountPolicy {
     /// How aggressively a re-election may disrupt a busy mount.
     pub aggression: RemountAggression,
@@ -214,6 +216,21 @@ mod tests {
         assert!(p.drain.enabled);
         assert_eq!(p.drain.mode, DrainMode::Lazy);
         assert_eq!(p.drain.settle_secs, 15);
+    }
+
+    #[test]
+    fn a_policy_persisted_in_snake_case_keeps_its_non_default_values() {
+        // Rows written before the camelCase rename. Every field is `default`,
+        // so without the aliases this would silently decode to the defaults.
+        let p = RemountPolicy::from_json_opt(Some(
+            r#"{"aggression":"force","failover":{"enabled":true,"return_to_primary":false,"confirm_ticks":7,"probe":"nfs"},"drain":{"enabled":true,"mode":"force","settle_secs":42}}"#,
+        ));
+        assert!(!p.failover.return_to_primary);
+        assert_eq!(p.failover.confirm_ticks, 7);
+        assert_eq!(p.drain.settle_secs, 42);
+        let written = serde_json::to_string(&p).unwrap();
+        assert!(written.contains("\"returnToPrimary\":false"), "{written}");
+        assert!(written.contains("\"settleSecs\":42"), "{written}");
     }
 
     #[test]

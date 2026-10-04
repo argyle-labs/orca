@@ -36,6 +36,7 @@ pub struct ListSchemasArgs {
     pub cursor: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ListSchemasOutput {
@@ -89,8 +90,9 @@ pub struct SchemaTableInfo {
 }
 
 /// One column entry within `tabs[*].columns[tableName]`. Field names match
-/// the HTTP `/api/schema` payload — the frontend reads `fk_target`
-/// snake_case directly.
+/// the HTTP `/api/schema` payload, camelCase like the rest of the surface
+/// (`fkTarget`).
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaColumn {

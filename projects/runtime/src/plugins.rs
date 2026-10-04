@@ -117,6 +117,7 @@ async fn plugin_list(
 // plugin.data.detail
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[derive::snake_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginDetailArgs {

@@ -62,6 +62,7 @@ pub enum NodeSource {
 }
 
 /// A non-peer entity synthesized from a host's [`contract::TopologyClaim`].
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimNode {
@@ -128,6 +129,7 @@ pub struct ClaimNode {
 
 /// A single control pathway to a synthesized entity: the provider (and which
 /// instance of it) through which the entity can be observed and acted on.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Controller {

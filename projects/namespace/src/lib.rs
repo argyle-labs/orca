@@ -26,6 +26,7 @@ pub use manager::{Access, Namespace, NamespaceManager, Role};
 
 // ── Shared rows ─────────────────────────────────────────────────────────────
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct NamespaceSummary {
@@ -35,6 +36,7 @@ pub struct NamespaceSummary {
     pub is_active: bool,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct NamespaceDetail {
@@ -48,6 +50,7 @@ pub struct NamespaceDetail {
     pub access: String,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NamespaceListReport {
@@ -67,6 +70,7 @@ pub struct NamespaceMutationResult {
     pub changed: bool,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NamespaceShareEntry {
@@ -75,6 +79,7 @@ pub struct NamespaceShareEntry {
     pub role: String,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NamespaceSharesReport {

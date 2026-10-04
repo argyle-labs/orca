@@ -39,6 +39,7 @@ in-process = ["dep:tokio"]
 utils = { path = "../utils", default-features = false }
 schemars = { workspace = true }
 serde = { workspace = true }
+derive = { path = "../derive" }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 

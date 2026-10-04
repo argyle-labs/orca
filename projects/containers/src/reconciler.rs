@@ -246,6 +246,7 @@ pub struct StaleMountBlockedPayload {
 /// on; the breaker's classifier returns the trip reason, which is
 /// stamped into the payload so the operator sees *why* the start was
 /// held without having to re-run classification.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeldPendingBreakerPayload {
