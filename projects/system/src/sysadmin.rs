@@ -175,12 +175,12 @@ pub(crate) fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str
 
     enable_linger(user);
 
-    // Grant the daemon the one privileged capability it needs: applying autofs
-    // config (write /etc/auto.* + restart autofs) via the scoped admin helper.
-    // Without this the storage self-heal / failover surface is inert (the daemon
-    // runs unprivileged and can't touch root-owned /etc). Best-effort: a failure
-    // here shouldn't abort the whole install.
-    if let Err(e) = install_autofs_sudoers(user, home_dir) {
+    // Grant the daemon its scoped privileged helpers: applying autofs config
+    // (write /etc/auto.* + restart autofs) and running verified plugins'
+    // privileged ops. Without these the storage self-heal / failover surface
+    // and plugin root ops are inert (the daemon runs unprivileged). Best-effort:
+    // a failure here shouldn't abort the whole install.
+    if let Err(e) = install_autofs_sudoers(user) {
         eprintln!("{} autofs sudoers rule not installed: {e}", "!".yellow());
     }
 
@@ -192,37 +192,84 @@ pub(crate) fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str
     Ok(())
 }
 
-/// Install `/etc/sudoers.d/orca`: a single NOPASSWD grant letting the service
-/// user run exactly `<home>/.local/bin/orca admin storage-apply` as root — the
-/// one privileged seam for autofs config. Scoped to that command with no
-/// wildcard (the payload rides on stdin), validated with `visudo -cf` before it
-/// takes effect, and removed again if validation fails so a broken drop-in can
-/// never wedge sudo.
+/// Install `/etc/sudoers.d/orca`: NOPASSWD grants letting the service user run
+/// exactly `<orca> admin storage-apply` and `<orca> admin plugin-apply` (plus
+/// the LXC helpers on Proxmox) as root, where `<orca>` is this binary's real
+/// path, the same one the daemon invokes. No argument wildcards: payloads ride
+/// on stdin. The drop-in is validated with `visudo -cf` before it is moved into
+/// place, so a broken one can never wedge sudo. On Unraid, where `/etc` is
+/// RAM-backed, the validated drop-in is also kept on the flash drive and
+/// re-installed at boot from a marked block in `/boot/config/go`.
 #[cfg(target_os = "linux")]
-fn install_autofs_sudoers(user: &str, home_dir: &str) -> Result<()> {
+fn install_autofs_sudoers(user: &str) -> Result<()> {
     validate_shell_safe("--service-user", user)?;
-    validate_shell_safe("--home-dir", home_dir)?;
     if !is_root() {
         anyhow::bail!("must be root to write /etc/sudoers.d");
     }
 
-    let binary = format!("{}/.local/bin/orca", home_dir.trim_end_matches('/'));
-    let path = "/etc/sudoers.d/orca";
+    let exe = std::env::current_exe().context("resolve the orca binary path")?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    let binary = exe
+        .to_str()
+        .context("orca binary path is not UTF-8")?
+        .to_string();
+    validate_shell_safe("orca binary path", &binary)?;
+    let is_proxmox = std::path::Path::new("/etc/pve").is_dir();
+    let contents = sudoers_contents(user, &binary, is_proxmox);
+
+    let path = std::path::Path::new(SUDOERS_DROP_IN);
+    // sudo skips drop-in names containing '.', so the staged file is inert
+    // until the rename.
+    let staged = std::path::Path::new("/etc/sudoers.d/.orca.incoming");
+    write_validated_sudoers(staged, &contents)?;
+    std::fs::rename(staged, path).with_context(|| format!("install {}", path.display()))?;
+
+    if crate::update::is_unraid()
+        && let Err(e) = persist_sudoers_on_unraid(&contents)
+    {
+        eprintln!(
+            "{} sudoers will not survive a reboot on this Unraid host: {e:#}",
+            "!".yellow()
+        );
+    }
+
+    println!(
+        "{} sudoers: {user} may run '{binary} admin storage-apply' + 'admin plugin-apply'{}",
+        "✓".green(),
+        if is_proxmox {
+            " + 'admin lxc-exec' + 'admin lxc-push'"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+const SUDOERS_DROP_IN: &str = "/etc/sudoers.d/orca";
+/// Flash-backed copy of the drop-in on Unraid.
+#[cfg(any(target_os = "linux", test))]
+const UNRAID_SUDOERS_COPY: &str = "/boot/config/plugins/orca/sudoers.d/orca";
+#[cfg(target_os = "linux")]
+const UNRAID_GO: &str = "/boot/config/go";
+#[cfg(any(target_os = "linux", test))]
+const GO_BLOCK_BEGIN: &str =
+    "# >>> orca sudoers: managed by orca; delete through the end marker to remove >>>";
+#[cfg(any(target_os = "linux", test))]
+const GO_BLOCK_END: &str = "# <<< orca sudoers <<<";
+
+/// The drop-in body for `user` and the orca binary at `binary`.
+#[cfg(any(target_os = "linux", test))]
+fn sudoers_contents(user: &str, binary: &str, is_proxmox: bool) -> String {
     let mut contents = format!(
         "# Managed by orca — do not edit.\n\
-         # Lets the unprivileged orca daemon apply autofs config (write\n\
-         # /etc/auto.* + restart autofs) via the scoped admin helper. The\n\
-         # payload is passed on stdin, so no argument wildcard is needed.\n\
-         {user} ALL=(root) NOPASSWD: {binary} admin storage-apply\n"
+         # Scoped privileged helpers for the unprivileged orca daemon. Each\n\
+         # takes its payload on stdin, so no argument wildcard is needed.\n\
+         # Autofs config (write /etc/auto.* + restart autofs).\n\
+         {user} ALL=(root) NOPASSWD: {binary} admin storage-apply\n\
+         # Plugin privileged ops: verified installed plugins, closed op sets.\n\
+         {user} ALL=(root) NOPASSWD: {binary} admin plugin-apply\n"
     );
-
-    // On Proxmox hosts, also grant the scoped LXC-exec helper: it lets the
-    // daemon run `pct exec` inside a managed container (deployment updates) via
-    // `orca admin lxc-exec`, payload on stdin, command-allowlisted in the
-    // executor. Gated to hosts that actually run LXC (`/etc/pve` present) so
-    // non-Proxmox hosts carry no pct-related grant. Same single drop-in, so it
-    // stays one visudo-validated file.
-    let is_proxmox = std::path::Path::new("/etc/pve").is_dir();
     if is_proxmox {
         contents.push_str(&format!(
             "# Proxmox host: scoped in-container exec for LXC deployment updates.\n\
@@ -231,33 +278,80 @@ fn install_autofs_sudoers(user: &str, home_dir: &str) -> Result<()> {
              {user} ALL=(root) NOPASSWD: {binary} admin lxc-push\n"
         ));
     }
+    contents
+}
 
-    std::fs::write(path, &contents).with_context(|| format!("write {path}"))?;
+/// Write `contents` to `path` as 0440 and check it with `visudo -cf`,
+/// removing it if visudo rejects it.
+#[cfg(target_os = "linux")]
+fn write_validated_sudoers(path: &std::path::Path, contents: &str) -> Result<()> {
+    std::fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
     // sudoers drop-ins must be 0440 or sudo ignores them.
-    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o440))
-        .with_context(|| format!("chmod {path}"))?;
-
-    // Validate; a bad drop-in would break sudo host-wide, so remove it on failure.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o440))
+        .with_context(|| format!("chmod {}", path.display()))?;
     let ok = Command::new("visudo")
-        .args(["-cf", path])
+        .arg("-cf")
+        .arg(path)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(true); // no visudo → assume the syntax (which we control) is fine
     if !ok {
         _ = std::fs::remove_file(path);
-        anyhow::bail!("visudo rejected {path} (removed)");
+        anyhow::bail!("visudo rejected {} (removed)", path.display());
     }
-
-    println!(
-        "{} sudoers: {user} may run 'orca admin storage-apply'{}",
-        "✓".green(),
-        if is_proxmox {
-            " + 'orca admin lxc-exec' + 'orca admin lxc-push'"
-        } else {
-            ""
-        }
-    );
     Ok(())
+}
+
+/// Keep the validated drop-in on the flash drive and make `/boot/config/go`
+/// re-install it at every boot.
+#[cfg(target_os = "linux")]
+fn persist_sudoers_on_unraid(contents: &str) -> Result<()> {
+    let copy = std::path::Path::new(UNRAID_SUDOERS_COPY);
+    if let Some(dir) = copy.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    std::fs::write(copy, contents).with_context(|| format!("write {}", copy.display()))?;
+    let go = std::fs::read_to_string(UNRAID_GO).unwrap_or_default();
+    if let Some(updated) = with_go_block(&go) {
+        std::fs::write(UNRAID_GO, updated).with_context(|| format!("write {UNRAID_GO}"))?;
+    }
+    Ok(())
+}
+
+/// The boot block that re-installs the flash copy of the drop-in.
+#[cfg(any(target_os = "linux", test))]
+fn go_block() -> String {
+    format!(
+        "{GO_BLOCK_BEGIN}\n\
+         if [ -f {UNRAID_SUDOERS_COPY} ]; then\n\
+         \x20 install -m 0440 -o root -g root {UNRAID_SUDOERS_COPY} {SUDOERS_DROP_IN}\n\
+         fi\n\
+         {GO_BLOCK_END}\n"
+    )
+}
+
+/// `go` with exactly one current orca block: any existing block (complete or
+/// truncated) is replaced, otherwise one is appended. `None` when `go` already
+/// holds exactly the current block.
+#[cfg(any(target_os = "linux", test))]
+fn with_go_block(go: &str) -> Option<String> {
+    let mut kept = String::with_capacity(go.len());
+    let mut in_block = false;
+    for line in go.split_inclusive('\n') {
+        let trimmed = line.trim_end();
+        if trimmed == GO_BLOCK_BEGIN {
+            in_block = true;
+        } else if in_block && trimmed == GO_BLOCK_END {
+            in_block = false;
+        } else if !in_block {
+            kept.push_str(line);
+        }
+    }
+    if !kept.is_empty() && !kept.ends_with('\n') {
+        kept.push('\n');
+    }
+    kept.push_str(&go_block());
+    (kept != go).then_some(kept)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -482,6 +576,73 @@ fn validate_shell_safe(label: &str, s: &str) -> Result<()> {
             "{label} '{s}' contains characters not safe to interpolate into a shell script \
              (allowed: alphanumeric, _, -, /, ., @)"
         )
+    }
+}
+
+#[cfg(test)]
+mod sudoers_tests {
+    use super::*;
+
+    #[test]
+    fn sudoers_grants_name_the_real_binary_path() {
+        let bin = "/mnt/user/appdata/orca/bin/orca";
+        let c = sudoers_contents("orca", bin, false);
+        assert!(c.contains(&format!(
+            "orca ALL=(root) NOPASSWD: {bin} admin storage-apply\n"
+        )));
+        assert!(c.contains(&format!(
+            "orca ALL=(root) NOPASSWD: {bin} admin plugin-apply\n"
+        )));
+        assert!(!c.contains("/var/lib/orca/.local/bin/orca"));
+        assert!(!c.contains("lxc-exec"));
+        let pve = sudoers_contents("orca", bin, true);
+        assert!(pve.contains(&format!("{bin} admin lxc-exec\n")));
+        assert!(pve.contains(&format!("{bin} admin lxc-push\n")));
+        assert!(
+            pve.lines()
+                .filter(|l| !l.starts_with('#'))
+                .all(|l| !l.contains('*')),
+            "no argument wildcards"
+        );
+    }
+
+    #[test]
+    fn the_go_block_is_appended_once_and_is_idempotent() {
+        let go = "#!/bin/bash\n# Start the Management Utility\n/usr/local/sbin/emhttp &\n";
+        let once = with_go_block(go).expect("first run adds the block");
+        assert!(once.starts_with(go));
+        assert!(once.ends_with(&go_block()));
+        assert_eq!(with_go_block(&once), None, "second run changes nothing");
+        assert_eq!(once.matches(GO_BLOCK_BEGIN).count(), 1);
+    }
+
+    #[test]
+    fn a_stale_or_truncated_go_block_is_replaced_in_place() {
+        let stale = format!(
+            "#!/bin/bash\n{GO_BLOCK_BEGIN}\ncp /old /etc/sudoers.d/orca\n{GO_BLOCK_END}\n\
+             /usr/local/sbin/emhttp &\n"
+        );
+        let fixed = with_go_block(&stale).unwrap();
+        assert!(!fixed.contains("/old"));
+        assert!(fixed.contains("/usr/local/sbin/emhttp &\n"));
+        assert_eq!(fixed.matches(GO_BLOCK_BEGIN).count(), 1);
+        assert_eq!(with_go_block(&fixed), None);
+
+        let no_newline = "/usr/local/sbin/emhttp &";
+        let added = with_go_block(no_newline).unwrap();
+        assert!(added.starts_with("/usr/local/sbin/emhttp &\n#"));
+    }
+
+    #[test]
+    fn the_go_block_installs_the_flash_copy_root_owned_0440() {
+        let b = go_block();
+        assert!(b.contains(&format!(
+            "install -m 0440 -o root -g root {UNRAID_SUDOERS_COPY} {SUDOERS_DROP_IN}"
+        )));
+        assert!(b.starts_with(GO_BLOCK_BEGIN) && b.trim_end().ends_with(GO_BLOCK_END));
+        // The .plg remove script deletes the block by these markers.
+        assert!(GO_BLOCK_BEGIN.starts_with("# >>> orca sudoers:"));
+        assert_eq!(GO_BLOCK_END, "# <<< orca sudoers <<<");
     }
 }
 

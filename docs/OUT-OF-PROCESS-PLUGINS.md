@@ -149,6 +149,31 @@ the DB/secret accessors emit `cap` frames and await the reply, so the plugin
 links **none** of reqwest/rustls/hyper. The plugin drives its tool futures on the
 shared orca-owned reactor (`plugin_toolkit::reactor`).
 
+## Privileged ops (`orca admin plugin-apply`)
+
+A plugin runs as the unprivileged service user. For root work on its own host
+it calls `plugin_toolkit::privileged::apply(plugin, op, payload)`, which runs
+`sudo -n $ORCA_BIN admin plugin-apply` with `{plugin, op, payload}` on stdin.
+As root, orca:
+
+1. resolves `plugin` only as a bare name in `<orca home>/plugins/` (the orca
+   home of the user who ran sudo, from passwd);
+2. checks the binary's sha256 against `.<plugin>.sha256`, which the installer
+   writes beside it on every install, and stages the verified bytes into a
+   root-only temp dir;
+3. runs the staged copy as `<plugin> --privileged-op` with `{op, payload}` on
+   stdin, a cleared environment, a fixed `PATH` and a 30-minute timeout;
+4. relays its stdout and exit status, and audits plugin, op and caller uid
+   (never the payload).
+
+The plugin's `main` serves that mode with
+`privileged::PrivilegedOps::new().op(name, handler)….serve_stdin()`: a closed
+set of ops, each validating its own payload. The reply is one
+`{ok, detail | error}` JSON line, and success needs exit 0 and `ok: true`.
+Bootstrap grants the one sudoers line for this (the real binary path, no
+wildcards). On Unraid, it also keeps the drop-in on the flash drive and
+re-installs it at boot from a marked block in `/boot/config/go`.
+
 ## Loader supervisor
 
 `plugin-loader` runs a **supervisor** over each plugin process:
