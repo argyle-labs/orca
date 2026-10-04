@@ -179,12 +179,24 @@ pub struct UpdateArgs {
     /// configure carries a config document; restore carries a BackupArtifact id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+    /// The identity the surface verified for this request, so a provider can
+    /// authorize the change itself. `None` when the request carried none; never
+    /// the host operator's ambient identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub caller: Option<crate::CallerIdentity>,
 }
 
 /// Args for [`Verb::Delete`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DeleteArgs {
     pub id: UnitId,
+    /// The identity the surface verified for this request, so a provider can
+    /// authorize the change itself. `None` when the request carried none; never
+    /// the host operator's ambient identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub caller: Option<crate::CallerIdentity>,
 }
 
 /// Args for [`Verb::Upsert`] — set an item by key, create-or-replace.
@@ -203,6 +215,12 @@ pub struct UpsertArgs {
     /// plugin's declared schema). Carried as a JSON string across the FFI boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+    /// The identity the surface verified for this request, so a provider can
+    /// authorize the change itself. `None` when the request carried none; never
+    /// the host operator's ambient identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub caller: Option<crate::CallerIdentity>,
 }
 
 fn default_upsert_action() -> String {
@@ -989,6 +1007,7 @@ pub async fn dispatch_guarded(args: VerbArgs, back_up: bool) -> Result<VerbOutco
     {
         let target = id.clone();
         let backup = VerbArgs::Update(UpdateArgs {
+            caller: None,
             id: target.clone(),
             action: ACTION_BACKUP.to_string(),
             payload: None,
@@ -1186,6 +1205,7 @@ mod tests {
 
         // It rides the ordinary Update verb, so the backup guard covers it.
         let args = VerbArgs::Update(UpdateArgs {
+            caller: None,
             id: UnitId {
                 manager: "proxmox@cluster-a".into(),
                 kind: "lxc".into(),
@@ -1211,6 +1231,7 @@ mod tests {
         );
         assert_eq!(
             Verb::of(&VerbArgs::Update(UpdateArgs {
+                caller: None,
                 id: UnitId {
                     manager: "test".into(),
                     kind: "vm".into(),
@@ -1305,6 +1326,7 @@ mod tests {
 
         let outcome = prov
             .invoke(VerbArgs::Update(UpdateArgs {
+                caller: None,
                 id: u.id.clone(),
                 action: "start".into(),
                 payload: None,
@@ -1776,6 +1798,7 @@ mod tests {
         register_provider(mock("rt-b", &["vm"], vec![uid("rt-b", "vm", "2")]));
 
         let out = dispatch(VerbArgs::Update(UpdateArgs {
+            caller: None,
             id: uid("rt-b", "vm", "2"),
             action: "start".into(),
             payload: None,
@@ -1795,6 +1818,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_targeted_unknown_owner_errors() {
         let err = dispatch(VerbArgs::Delete(DeleteArgs {
+            caller: None,
             id: uid("ghost@x", "vm", "999"),
         }))
         .await
@@ -1822,6 +1846,7 @@ mod tests {
         let out = dispatch_to(
             "dt-proxmox",
             VerbArgs::Update(UpdateArgs {
+                caller: None,
                 id: uid("dt-proxmox@c", "vm", "1"),
                 action: "start".into(),
                 payload: None,
@@ -1852,14 +1877,17 @@ mod tests {
         let id = uid("g-prov", "lxc", "100");
         // Mutating verbs targeting an existing unit are guarded…
         assert!(action_is_guarded(&VerbArgs::Update(UpdateArgs {
+            caller: None,
             id: id.clone(),
             action: "configure".into(),
             payload: None,
         })));
         assert!(action_is_guarded(&VerbArgs::Delete(DeleteArgs {
+            caller: None,
             id: id.clone()
         })));
         assert!(action_is_guarded(&VerbArgs::Upsert(UpsertArgs {
+            caller: None,
             id: id.clone(),
             action: "set".into(),
             payload: None,
@@ -1868,6 +1896,7 @@ mod tests {
         for action in ["start", "stop", "reboot", ACTION_BACKUP, ACTION_RESTORE] {
             assert!(
                 !action_is_guarded(&VerbArgs::Update(UpdateArgs {
+                    caller: None,
                     id: id.clone(),
                     action: action.into(),
                     payload: None,
@@ -1938,6 +1967,7 @@ mod tests {
 
         dispatch_guarded(
             VerbArgs::Update(UpdateArgs {
+                caller: None,
                 id: uid("grd-a", "lxc", "100"),
                 action: "configure".into(),
                 payload: None,
@@ -1967,6 +1997,7 @@ mod tests {
 
         let err = dispatch_guarded(
             VerbArgs::Update(UpdateArgs {
+                caller: None,
                 id: uid("grd-b", "lxc", "100"),
                 action: "configure".into(),
                 payload: None,
@@ -2001,6 +2032,7 @@ mod tests {
         // back_up = false → straight through, no backup.
         dispatch_guarded(
             VerbArgs::Update(UpdateArgs {
+                caller: None,
                 id: uid("grd-c", "lxc", "100"),
                 action: "configure".into(),
                 payload: None,
@@ -2012,6 +2044,7 @@ mod tests {
         // Unguarded action (`start`) → no backup even with back_up = true.
         dispatch_guarded(
             VerbArgs::Update(UpdateArgs {
+                caller: None,
                 id: uid("grd-c", "lxc", "100"),
                 action: "start".into(),
                 payload: None,
@@ -2058,12 +2091,14 @@ mod tests {
         );
         assert_eq!(
             Verb::of(&VerbArgs::Delete(DeleteArgs {
+                caller: None,
                 id: uid("m", "vm", "1"),
             })),
             Verb::Delete
         );
         assert_eq!(
             Verb::of(&VerbArgs::Upsert(UpsertArgs {
+                caller: None,
                 id: uid("m", "vm", "1"),
                 action: "set".into(),
                 payload: None,
@@ -2085,14 +2120,17 @@ mod tests {
                 payload: Some("{}".into()),
             }),
             VerbArgs::Update(UpdateArgs {
+                caller: None,
                 id: uid("m", "vm", "1"),
                 action: "start".into(),
                 payload: None,
             }),
             VerbArgs::Delete(DeleteArgs {
+                caller: None,
                 id: uid("m", "vm", "1"),
             }),
             VerbArgs::Upsert(UpsertArgs {
+                caller: None,
                 id: uid("m", "vm", "1"),
                 action: "set".into(),
                 payload: None,
@@ -2105,6 +2143,7 @@ mod tests {
         }
         // Adjacently-tagged layout: `verb` discriminates, `args` carries payload.
         let json = serde_json::to_string(&VerbArgs::Delete(DeleteArgs {
+            caller: None,
             id: uid("m", "vm", "1"),
         }))
         .unwrap();
@@ -2286,6 +2325,7 @@ mod tests {
         // INVOKE_OP → decodes the call, runs it, encodes the outcome.
         let call = InvokeCall {
             args: VerbArgs::Update(UpdateArgs {
+                caller: None,
                 id: uid("dop-a", "vm", "1"),
                 action: "start".into(),
                 payload: None,
@@ -2387,6 +2427,7 @@ mod tests {
 
         // Upsert routes to the owner by manager.
         let out = dispatch(VerbArgs::Upsert(UpsertArgs {
+            caller: None,
             id: uid("thin-a", "vm", "1"),
             action: "set".into(),
             payload: None,
@@ -2399,6 +2440,7 @@ mod tests {
         let out = dispatch_to(
             "thin-a",
             VerbArgs::Update(UpdateArgs {
+                caller: None,
                 id: uid("thin-a", "vm", "1"),
                 action: "stop".into(),
                 payload: None,
@@ -2431,6 +2473,7 @@ mod tests {
 
         // Targeted route to an unowned unit errors.
         let err = dispatch(VerbArgs::Delete(DeleteArgs {
+            caller: None,
             id: uid("ghost@x", "vm", "9"),
         }))
         .await
@@ -2520,6 +2563,7 @@ mod tests {
         // preceded by a backup dispatch.
         dispatch_guarded(
             VerbArgs::Delete(DeleteArgs {
+                caller: None,
                 id: uid("gtd", "lxc", "1"),
             }),
             true,
@@ -2528,6 +2572,7 @@ mod tests {
         .unwrap();
         dispatch_guarded(
             VerbArgs::Upsert(UpsertArgs {
+                caller: None,
                 id: uid("gtd", "lxc", "1"),
                 action: "set".into(),
                 payload: None,

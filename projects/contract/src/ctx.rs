@@ -19,6 +19,11 @@ pub struct ToolCtx {
     /// Used to mint the signed caller token when a tool dispatches to a remote
     /// peer. `None` on unauthenticated/bootstrap paths.
     auth: Option<crate::CallerIdentity>,
+    /// Identity resolved from THIS request (REST session/token user, MCP
+    /// authenticated user, verified mesh caller token). Separate from `auth`,
+    /// which defaults to the host operator: only this one is forwarded to an
+    /// out-of-process plugin, so a peer can never act as the host admin there.
+    verified_caller: Option<crate::CallerIdentity>,
     /// Target peer for this invocation. When `Some(peer)` and the tool is not
     /// `local_only`, the dispatcher (macro-emitted stanza) proxies the call
     /// via `RemoteExec` instead of running locally. Populated from the
@@ -41,6 +46,7 @@ impl ToolCtx {
         Self {
             config,
             auth: None,
+            verified_caller: None,
             peer_target: None,
             correlation_id: None,
             services: HashMap::new(),
@@ -65,6 +71,17 @@ impl ToolCtx {
     /// The ambient operator identity, if one was set.
     pub fn caller(&self) -> Option<crate::CallerIdentity> {
         self.auth.clone()
+    }
+
+    /// Record the identity a surface verified for this request. Set only from
+    /// per-request authentication, never from the host operator session.
+    pub fn set_verified_caller(&mut self, caller: Option<crate::CallerIdentity>) {
+        self.verified_caller = caller;
+    }
+
+    /// The per-request verified identity, if the surface established one.
+    pub fn verified_caller(&self) -> Option<&crate::CallerIdentity> {
+        self.verified_caller.as_ref()
     }
 
     /// Set the target peer in-place. Called by the CLI dispatcher when
@@ -184,5 +201,15 @@ mod tests {
         let mut ctx = ToolCtx::new(cfg()).with_auth(id("host_admin"));
         ctx.set_caller(None);
         assert!(ctx.caller().is_none());
+    }
+
+    #[test]
+    fn the_host_operator_is_never_the_verified_caller() {
+        let mut ctx = ToolCtx::new(cfg()).with_auth(id("host_admin"));
+        assert!(ctx.verified_caller().is_none());
+        ctx.set_caller(Some(id("alice")));
+        assert!(ctx.verified_caller().is_none());
+        ctx.set_verified_caller(Some(id("alice")));
+        assert_eq!(ctx.verified_caller().unwrap().username, "alice");
     }
 }

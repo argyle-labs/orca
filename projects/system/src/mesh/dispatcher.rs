@@ -41,7 +41,16 @@ pub fn install(ctx: Arc<ToolCtx>) {
 /// Dispatch a tool through the shared inventory, returning its structured
 /// JSON output. Returns `Err` when the dispatcher has not been installed yet
 /// (daemon not fully started) or when the tool itself errors.
-pub async fn dispatch(name: &str, args: Value, correlation_id: Option<String>) -> Result<Value> {
+///
+/// `caller` is the user `listener::authorize_role_gated` re-resolved from a
+/// verified caller token, or `None`. It is the only identity a plugin sees:
+/// the shared ctx carries the host operator, which a peer must never act as.
+pub async fn dispatch(
+    name: &str,
+    args: Value,
+    correlation_id: Option<String>,
+    caller: Option<contract::CallerIdentity>,
+) -> Result<Value> {
     let ctx = {
         let guard = CTX.lock().expect("mesh dispatcher mutex poisoned");
         guard
@@ -49,14 +58,17 @@ pub async fn dispatch(name: &str, args: Value, correlation_id: Option<String>) -
             .ok_or_else(|| anyhow::anyhow!("mesh dispatcher not installed yet"))?
             .clone()
     };
+    if correlation_id.is_none() && caller.is_none() {
+        return dispatch::dispatch(name, args, &ctx).await;
+    }
+    let mut local = (*ctx).clone();
     // Inherit the originator's correlation_id so this peer's logs join the
     // same trace as the host that initiated the request.
-    if let Some(cid) = correlation_id {
-        let mut local = (*ctx).clone();
-        local.set_correlation_id(Some(cid));
-        return dispatch::dispatch(name, args, &local).await;
+    if correlation_id.is_some() {
+        local.set_correlation_id(correlation_id);
     }
-    dispatch::dispatch(name, args, &ctx).await
+    local.set_verified_caller(caller);
+    dispatch::dispatch(name, args, &local).await
 }
 
 #[cfg(test)]
@@ -64,18 +76,20 @@ pub(crate) fn reset_for_tests() {
     *CTX.lock().expect("mesh dispatcher mutex poisoned") = None;
 }
 
+/// Serializes tests that install/reset the process-global ctx.
 #[cfg(test)]
-mod tests {
+pub(crate) async fn test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
-    use std::sync::OnceLock;
-    use tokio::sync::Mutex;
 
-    async fn test_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().await
-    }
-
-    fn make_ctx() -> Arc<ToolCtx> {
+    pub(crate) fn make_ctx() -> Arc<ToolCtx> {
         use contract::config::{Config, Model};
         use std::path::PathBuf;
         let cfg = Arc::new(Config {
@@ -98,7 +112,7 @@ mod tests {
     async fn dispatch_before_install_returns_err() {
         let _g = test_guard().await;
         reset_for_tests();
-        let err = dispatch("some.tool", serde_json::json!({}), None)
+        let err = dispatch("some.tool", serde_json::json!({}), None, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not installed"));
@@ -109,7 +123,7 @@ mod tests {
         let _g = test_guard().await;
         reset_for_tests();
         install(make_ctx());
-        let err = dispatch("ghost.tool", serde_json::json!({}), None)
+        let err = dispatch("ghost.tool", serde_json::json!({}), None, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("ghost.tool") || !err.to_string().is_empty());
