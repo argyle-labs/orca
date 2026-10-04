@@ -68,12 +68,30 @@ fn walk_properties(v: &Value, f: &mut impl FnMut(&str)) {
     }
 }
 
-/// Property names that stay snake_case on purpose, each with its reason.
-const SNAKE_CASE_ALLOWLIST: &[&str] = &[
-    // `SystemUpdateArgs::self_only` is sent peer-to-peer; a pre-camelCase peer
-    // ignores `selfOnly` and fans the update out across the fleet. Drop once
-    // every daemon is past the rename.
-    "self_only",
+/// Schemas (`"<tool> args"` / `"<tool> output"`) whose wire form stays
+/// snake_case for one release, each with its reason. Drop an entry once the
+/// fleet and plugins are past the camelCase rename.
+const SNAKE_CASE_ORIGINS: &[(&str, &str)] = &[
+    (
+        "system.update args",
+        "forwarded/fan-out legs reach previous-release peers, which drop camelCase keys",
+    ),
+    (
+        "system.update output",
+        "a previous-release controller decodes camelCase as all-default",
+    ),
+    (
+        "media.unit.rescan output",
+        "carries `RescanTarget`, sent daemon -> plugin; older media plugins drop camelCase keys",
+    ),
+    (
+        "service.create output",
+        "carries `BackupArtifact`, sent daemon -> plugin on restore; older service plugins drop camelCase keys",
+    ),
+    (
+        "system.serve_release output",
+        "a previous-release peer's upgrade path requires `asset_b64`",
+    ),
 ];
 
 /// The whole tool surface is camelCase on the wire. A property name holding an
@@ -85,7 +103,7 @@ fn no_snake_case_property_names_on_the_tool_surface() {
     let mut offenders: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (origin, schema) in all_schemas() {
         walk_properties(&schema, &mut |name| {
-            if name.contains('_') && !SNAKE_CASE_ALLOWLIST.contains(&name) {
+            if name.contains('_') && !SNAKE_CASE_ORIGINS.iter().any(|(o, _)| *o == origin) {
                 offenders
                     .entry(name.to_string())
                     .or_default()
@@ -127,15 +145,34 @@ fn the_openapi_surface_is_not_empty() {
 }
 
 /// Two Rust types with the same ident collapse onto one `$defs` key, and the
-/// emitter keeps only one body — so the other type is published with the
-/// wrong schema. Four such pairs were live when this guard was written
-/// (`SystemDetailView`, `Health`, `Provider`, `Capability`), plus
-/// `ExecOutput`; all five were resolved by renaming one side.
+/// spec can carry only one body — so the other type would be published with the
+/// wrong schema. Every schema name must belong to exactly one type body.
 #[test]
 fn no_duplicate_schema_names_in_the_spec() {
     let collisions = dispatch::openapi::colliding_schema_names();
     assert!(
         collisions.is_empty(),
         "two different types claim each of these schema names: {collisions:?}"
+    );
+}
+
+/// A tool type must not share a schema name with a utoipa-registered
+/// component: the merge keeps the utoipa body, so the tool would be published
+/// with the other type's schema.
+#[test]
+fn no_tool_schema_name_clashes_with_a_registered_component() {
+    let spec = orca::serve::openapi::orca_spec_json();
+    let components = spec["components"]["schemas"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !components.is_empty(),
+        "the built spec has no components — the walk would be vacuous"
+    );
+    let collisions = dispatch::openapi::colliding_schema_names_with(&components);
+    assert!(
+        collisions.is_empty(),
+        "tool schema names clash with registered components: {collisions:?}"
     );
 }

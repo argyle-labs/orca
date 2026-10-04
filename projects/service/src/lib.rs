@@ -123,9 +123,11 @@ pub fn runtime_str(r: Runtime) -> String {
 
 /// A backup artifact produced by [`ServiceBackend::backup`], restorable via
 /// [`ServiceBackend::restore`]. The path is on the deploy target's filesystem.
-#[derive::snake_aliases]
+// Sent daemon -> plugin on restore and persisted as a backup sidecar. Wire
+// stays snake_case until every service plugin is re-released. camelCase is
+// accepted.
+#[derive::camel_aliases]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct BackupArtifact {
     pub service: String,
     pub instance: String,

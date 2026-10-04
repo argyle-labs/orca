@@ -201,9 +201,11 @@ pub struct FetchReleaseAssetArgs {
 /// of the raw binary bytes; `sha256` is the hex digest the holder verified
 /// against the release `.sha256` blob (callers MUST re-verify after decode
 /// before swapping).
-#[derive::snake_aliases]
+// Wire stays snake_case for one release: a peer on the previous release
+// requires `asset_b64`, and this is its orca-native upgrade path. camelCase is
+// accepted.
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct FetchReleaseAssetOutput {
     pub asset_b64: String,
     pub sha256: String,
@@ -298,13 +300,17 @@ fn page_slice<T: Clone>(full: &[T], page: usize, per_page: usize) -> Vec<T> {
 /// available_versions + pagination).
 ///
 /// One tool, many surfaces:
-///   - orca binary: `channel`, `version` (one-shot, no pin), `devSource`, `clearDevSource`
+///   - orca binary: `channel`, `version` (one-shot, no pin), `dev_source`, `clear_dev_source`
 ///   - system identity: `hostname`, `fqdn`
-///   - addressing overrides: `lanV4`, `lanV6`, `tailscaleV4`, `tailscaleV6`
-///   - OS package upgrade: `osPackages`
-#[derive::snake_aliases]
+///   - addressing overrides: `lan_v4`, `lan_v6`, `tailscale_v4`, `tailscale_v6`
+///   - OS package upgrade: `os_packages`
+// Wire stays snake_case for one release: a peer on the previous release drops
+// unknown camelCase keys, so a forwarded or fan-out leg would lose `self_only`
+// (and fan out again, with `execute`) or `release_source` and still report
+// success. camelCase is accepted. Flip to camelCase + snake_aliases once every
+// daemon is past this release.
+#[derive::camel_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct SystemUpdateArgs {
     /// The system to update. Omit to update them ALL — every joined system's
     /// daemon, then every installed plugin on every one. Pass a system id to
@@ -323,11 +329,7 @@ pub struct SystemUpdateArgs {
     /// asks one system about itself, and the terminal spelling an id-addressed
     /// call is forwarded as. Because the hop carries it, a forwarded update
     /// cannot bounce onward, so no resolution loop is possible.
-    // Serialized snake_case on purpose: a peer still on the pre-camelCase
-    // release drops an unknown `selfOnly`, reads `id: None` as "every
-    // system", and the fan-out leg fans out again — with `execute`. Flip to
-    // camelCase once every fleet daemon accepts the alias.
-    #[serde(default, rename = "self_only", alias = "selfOnly")]
+    #[serde(default)]
     #[arg(long, hide = true)]
     pub self_only: bool,
 
@@ -543,18 +545,18 @@ fn fleet_incompatible_arg(args: &SystemUpdateArgs) -> Option<&'static str> {
     [
         ("hostname", args.hostname.is_some()),
         ("fqdn", args.fqdn.is_some()),
-        ("lanV4", args.lan_v4.is_some()),
-        ("lanV6", args.lan_v6.is_some()),
-        ("tailscaleV4", args.tailscale_v4.is_some()),
-        ("tailscaleV6", args.tailscale_v6.is_some()),
+        ("lan_v4", args.lan_v4.is_some()),
+        ("lan_v6", args.lan_v6.is_some()),
+        ("tailscale_v4", args.tailscale_v4.is_some()),
+        ("tailscale_v6", args.tailscale_v6.is_some()),
         ("daemon", args.daemon.is_some()),
         ("action", args.action.is_some()),
-        ("localLogin", args.local_login.is_some()),
-        ("refreshHost", args.refresh_host),
+        ("local_login", args.local_login.is_some()),
+        ("refresh_host", args.refresh_host),
         ("channel", args.channel.is_some()),
-        ("devSource", args.dev_source.is_some()),
-        ("clearDevSource", args.clear_dev_source),
-        ("releaseSource", args.release_source.is_some()),
+        ("dev_source", args.dev_source.is_some()),
+        ("clear_dev_source", args.clear_dev_source),
+        ("release_source", args.release_source.is_some()),
     ]
     .into_iter()
     .find_map(|(name, present)| present.then_some(name))
@@ -602,10 +604,12 @@ pub enum SystemUpdateResult {
 /// would fail the entire decode and the controller would report failure for
 /// a call that actually applied successfully on the peer. See
 /// [[project-update-path-fix-plan-2026-06-01]] fix #1.
-#[derive::snake_aliases]
+// Wire stays snake_case for one release: a controller on the previous release
+// decodes camelCase as all-default, and its fleet health gate would pass a
+// peer without ever seeing its version. camelCase is accepted.
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
 #[serde(default)]
-#[serde(rename_all = "camelCase")]
 pub struct SystemUpdateOutput {
     pub current_version: String,
     pub channel: String,
@@ -661,10 +665,10 @@ pub struct SystemUpdateOutput {
     pub fetch_blocked_reason: Option<String>,
 }
 
-#[derive::snake_aliases]
+// Nested in `SystemUpdateOutput`; same one-release snake_case wire.
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default, Clone)]
 #[serde(default)]
-#[serde(rename_all = "camelCase")]
 pub struct PendingRestart {
     pub target: String,
     pub age_secs: u64,
@@ -2082,7 +2086,7 @@ mod tests {
         };
         let result = SystemUpdateResult::Update(Box::new(out));
         let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains("\"currentVersion\":\"0.0.9\""), "{json}");
+        assert!(json.contains("\"current_version\":\"0.0.9\""), "{json}");
         assert!(json.contains("\"channel\":\"beta\""), "{json}");
         // No enum tag wrapper on the untagged variant.
         assert!(!json.contains("\"Update\""), "{json}");
@@ -2341,14 +2345,17 @@ mod tests {
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(
-            json.contains("\"addressingSet\":[\"lan_v4=10.0.0.2\"]"),
+            json.contains("\"addressing_set\":[\"lan_v4=10.0.0.2\"]"),
             "{json}"
         );
         assert!(json.contains("\"hostname\":\"host-a\""), "{json}");
         assert!(json.contains("\"fqdn\":\"host-a.example\""), "{json}");
-        assert!(json.contains("\"osPackageResult\":\"upgraded\""), "{json}");
-        assert!(json.contains("\"updateAvailable\":true"), "{json}");
-        assert!(json.contains("\"pinnedTo\":null"), "{json}");
+        assert!(
+            json.contains("\"os_package_result\":\"upgraded\""),
+            "{json}"
+        );
+        assert!(json.contains("\"update_available\":true"), "{json}");
+        assert!(json.contains("\"pinned_to\":null"), "{json}");
     }
 
     #[test]
@@ -2429,9 +2436,9 @@ mod tests {
             json.contains("\"channels\":[\"stable\",\"beta\"]"),
             "{json}"
         );
-        assert!(json.contains("\"versionsTotal\":42"), "{json}");
-        assert!(json.contains("\"versionsPage\":1"), "{json}");
-        assert!(json.contains("\"versionsPerPage\":20"), "{json}");
+        assert!(json.contains("\"versions_total\":42"), "{json}");
+        assert!(json.contains("\"versions_page\":1"), "{json}");
+        assert!(json.contains("\"versions_per_page\":20"), "{json}");
         // dev_source is no longer on the response.
         assert!(!json.contains("dev_source"), "{json}");
     }
@@ -2668,7 +2675,7 @@ mod tests {
         };
         let res = SystemUpdateResult::Update(Box::new(out));
         let json = serde_json::to_string(&res).unwrap();
-        assert!(json.contains("\"currentVersion\":\"9.9.9\""));
+        assert!(json.contains("\"current_version\":\"9.9.9\""));
         assert!(!json.contains("Update"));
         // And it decodes back to the Update variant.
         match serde_json::from_str::<SystemUpdateResult>(&json).unwrap() {
@@ -2960,30 +2967,57 @@ mod tests {
     // ── addressing: no id = every system, an id = one ───────────────────────
 
     #[test]
-    fn self_only_is_sent_snake_case_and_accepted_either_way() {
-        // `self_only` stays snake_case on the wire until the fleet is rolled:
-        // an older peer ignores `selfOnly`, reads no id as "every system", and
-        // the leg fans out again. The fan-out legs, the forwarded hop and the
-        // liveness probe all go through this spelling.
+    fn system_update_args_are_sent_snake_case_and_accepted_either_way() {
+        // The fan-out legs, the forwarded hop and the liveness probe all send
+        // this wire form to peers that may be on the previous release, which
+        // drops unknown camelCase keys: losing `self_only` fans out again.
         let a: SystemUpdateArgs =
             serde_json::from_str(r#"{"self_only":true,"id":"thor"}"#).unwrap();
         assert!(a.self_only);
         assert_eq!(a.id.as_deref(), Some("thor"));
-        let camel: SystemUpdateArgs = serde_json::from_str(r#"{"selfOnly":true}"#).unwrap();
+        let camel: SystemUpdateArgs =
+            serde_json::from_str(r#"{"selfOnly":true,"releaseSource":"gitea"}"#).unwrap();
         assert!(camel.self_only);
+        assert_eq!(camel.release_source.as_deref(), Some("gitea"));
         let sent = serde_json::to_value(SystemUpdateArgs {
             self_only: true,
+            release_source: Some("gitea".into()),
             ..Default::default()
         })
         .unwrap();
         assert_eq!(sent["self_only"], serde_json::json!(true), "{sent}");
-        assert!(sent.get("selfOnly").is_none(), "{sent}");
+        assert_eq!(sent["release_source"], serde_json::json!("gitea"), "{sent}");
         // serde treats an alias as the same field, so a payload carrying both
         // spellings is a duplicate-field error — never send both.
         assert!(
             serde_json::from_str::<SystemUpdateArgs>(r#"{"self_only":true,"selfOnly":true}"#)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn fetch_release_asset_output_is_sent_snake_case() {
+        let out = FetchReleaseAssetOutput {
+            asset_b64: "AA==".into(),
+            sha256: "x".into(),
+            version: "1".into(),
+        };
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["asset_b64"], serde_json::json!("AA=="), "{v}");
+        let camel: FetchReleaseAssetOutput =
+            serde_json::from_str(r#"{"assetB64":"AA==","sha256":"x","version":"1"}"#).unwrap();
+        assert_eq!(camel.asset_b64, "AA==");
+    }
+
+    #[test]
+    fn camel_case_update_output_still_decodes() {
+        let out: SystemUpdateOutput = serde_json::from_str(
+            r#"{"currentVersion":"0.0.9","updateAvailable":true,"pendingRestart":{"target":"t","ageSecs":3}}"#,
+        )
+        .unwrap();
+        assert_eq!(out.current_version, "0.0.9");
+        assert_eq!(out.update_available, Some(true));
+        assert_eq!(out.pending_restart.unwrap().age_secs, 3);
     }
 
     #[test]
@@ -3086,7 +3120,7 @@ mod tests {
                     refresh_host: true,
                     ..Default::default()
                 },
-                Some("refreshHost"),
+                Some("refresh_host"),
             ),
             (
                 SystemUpdateArgs {
