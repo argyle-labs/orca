@@ -82,6 +82,9 @@ pub mod lxc_exec;
 #[cfg(all(feature = "tools", feature = "db"))]
 pub mod plugin;
 pub mod prelude;
+/// Root ops for a plugin on its own host through orca's verified
+/// `admin plugin-apply` seam, plus the `--privileged-op` entry that serves them.
+pub mod privileged;
 /// Async subprocess utility (orca-owned surface; the runtime is internal). A
 /// plugin spawns processes here instead of naming the executor's process API.
 /// Runs on the shared reactor, so it is always available — the generic surface a

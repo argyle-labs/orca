@@ -303,6 +303,13 @@ enum AdminAction {
     /// Invoked by the daemon via `sudo -n` — the privileged surface for
     /// `guest write_file`. Never exposed over REST/MCP/peer.
     LxcPush,
+    /// Generic privileged seam for plugins: reads `{plugin, op, payload}` JSON
+    /// from stdin, resolves `plugin` only in the installed-plugin dir, checks
+    /// its binary against the sha256 recorded at install, and runs it as root
+    /// as `<plugin> --privileged-op` with `{op, payload}` on stdin, a clean env
+    /// and a timeout. Relays the plugin's JSON reply and exit status. Invoked
+    /// via `sudo -n`; never exposed over REST/MCP/peer.
+    PluginApply,
     /// List all users (id, username, role, updated_at). Local-only; requires
     /// shell + DB access. Used to diagnose replicated user-id divergence.
     ListUsers,
@@ -1004,6 +1011,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::StorageApply => cmd_admin_storage_apply().await,
         AdminAction::LxcExec => cmd_admin_lxc_exec().await,
         AdminAction::LxcPush => cmd_admin_lxc_push().await,
+        AdminAction::PluginApply => cmd_admin_plugin_apply().await,
         AdminAction::ListUsers => cmd_admin_list_users(),
         AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
     }
@@ -1107,6 +1115,57 @@ async fn cmd_admin_lxc_push() -> Result<()> {
         serde_json::to_string(&result).context("serialize LxcPushResult")?
     );
     Ok(())
+}
+
+/// `orca admin plugin-apply`: see [`system::plugin_apply`]. A refusal prints a
+/// `{ok:false, error}` line and exits 1, the same shape a plugin's own refusal
+/// takes. Every invocation is audited (plugin, op, caller uid, outcome); the
+/// payload never is.
+async fn cmd_admin_plugin_apply() -> Result<()> {
+    use std::io::{Read, Write};
+    use system::plugin_apply::{self, SeamReply};
+    let caller_uid = std::env::var("SUDO_UID").unwrap_or_else(|_| "direct".into());
+    let mut buf = String::new();
+    let run = async {
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("read plugin-apply request from stdin")?;
+        let req = plugin_apply::parse_request(&buf)?;
+        let home = plugin_apply::invoking_orca_home()
+            .context("cannot resolve the invoking user's orca home")?;
+        let out = plugin_apply::apply(&home, &req, plugin_apply::PLUGIN_APPLY_TIMEOUT).await;
+        Ok::<_, anyhow::Error>((req, out?))
+    };
+    match run.await {
+        Ok((req, out)) => {
+            tracing::info!(
+                plugin = %req.plugin,
+                op = %req.op,
+                caller_uid = %caller_uid,
+                exit_code = out.exit_code,
+                "plugin-apply ran"
+            );
+            std::io::stdout().write_all(&out.stdout)?;
+            std::io::stderr().write_all(&out.stderr)?;
+            std::process::exit(out.exit_code);
+        }
+        Err(e) => {
+            // The raw request may carry the payload, so only its validated
+            // identity fields are logged, and only when they parse.
+            let (plugin, op) = plugin_apply::parse_request(&buf)
+                .map(|r| (r.plugin, r.op))
+                .unwrap_or_else(|_| ("?".into(), "?".into()));
+            tracing::warn!(
+                plugin = %plugin,
+                op = %op,
+                caller_uid = %caller_uid,
+                error = %format!("{e:#}"),
+                "plugin-apply refused"
+            );
+            println!("{}", serde_json::to_string(&SeamReply::refused(&e))?);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn cmd_admin_reset_password(username: &str, revoke_sessions: bool) -> Result<()> {
