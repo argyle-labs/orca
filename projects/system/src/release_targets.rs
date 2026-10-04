@@ -1,12 +1,11 @@
 //! **Single source of truth** for the first-party plugin release target matrix
 //! and the rules for resolving a release asset to *this* daemon's host.
 //!
-//! Historically the set of target triples lived in two places that could drift:
-//! the shared reusable release workflow
-//! (`argyle-labs/.github/.github/workflows/plugin-release.yml`, which decides
-//! *what gets built*) and the fetch path in [`crate::plugin_fetch`] (which
-//! decides *what gets downloaded*). This module makes orca core the canonical
-//! owner of that matrix so the workflow mirrors orca — never the reverse.
+//! Two places must agree on the target triples: the shared reusable release
+//! workflow (`argyle-labs/.github/.github/workflows/plugin-release.yml`, which
+//! decides *what gets built*) and the fetch path in [`crate::plugin_fetch`]
+//! (which decides *what gets downloaded*). This module is the canonical owner
+//! of that matrix; the workflow mirrors orca, never the reverse.
 //!
 //! ## What is centralized here (clearly-safe, implemented)
 //!
@@ -38,12 +37,11 @@
 /// fleet today. **Canonical.** The shared reusable release workflow's default
 /// `targets` array must equal this set.
 ///
-/// Trimmed to the three architectures the fleet actually runs: x86_64 linux
-/// (gnu for proxmox/LXC/unraid/gaming hosts, musl-static for Alpine hosts like
-/// baldur) and aarch64 darwin (the Mac controller). The other triples
-/// (aarch64-linux, x86_64-darwin) are intentionally not built until a host that
-/// needs them exists — re-add here (and the workflow menus already list them)
-/// to turn them back on.
+/// Every plugin release builds all three: x86_64 linux gnu (proxmox/LXC/
+/// unraid/gaming hosts), x86_64 linux musl-static (Alpine hosts like baldur),
+/// and aarch64 darwin (the Mac controller). ARM is built for macOS only.
+/// aarch64-linux and x86_64-darwin are not built; add them here (the workflow
+/// menus already list them) when a host needs one.
 ///
 /// Ordering is deliberate: linux first (the mesh's server hosts), musl after
 /// its gnu sibling, darwin last (developer/Mac nodes). Callers that need a
@@ -283,8 +281,8 @@ mod tests {
     #[test]
     fn missing_assets_detects_partial_release() {
         // A release that shipped only the x86_64 gnu binary (no .sha256, no
-        // musl, no darwin) — every triple is incomplete. The aarch64-gnu binary
-        // present here is no longer a release triple, so it does not count.
+        // musl, no darwin) — every triple is incomplete. aarch64-gnu is not a
+        // release triple, so its binary does not count.
         let present = vec![
             "ntfy-v0.1.0-x86_64-unknown-linux-gnu".to_string(),
             "ntfy-v0.1.0-aarch64-unknown-linux-gnu".to_string(),

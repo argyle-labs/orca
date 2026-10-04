@@ -1854,6 +1854,7 @@ pub mod subscribe;
 pub mod subscribe_demand;
 pub mod subscribe_wire;
 pub mod transport;
+pub mod wire_compat;
 
 pub use bootstrap::handle_mesh_bootstrap_connection;
 pub use listener::handle_mesh_connection;
@@ -1903,9 +1904,11 @@ mod replicate_wire {
 
 pub use replicate_wire::ReplicateBundle;
 
-#[derive::snake_aliases]
+// The `mesh/ping` JSON-RPC result. Node-to-node wire, so snake_case: a node on
+// the previous release fails to decode `peerId` and marks the peer
+// unreachable. camelCase is accepted.
+#[derive::camel_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshPingResult {
     pub peer_id: String,
     pub version: String,
@@ -1922,9 +1925,8 @@ pub struct MeshPingResult {
 /// the human label; `channels` is the per-channel address list (`lan_v4`,
 /// `lan_v6`, `tailscale_v4`, `tailscale_v6`, `fqdn`). Source + last_seen_at
 /// stay local to the responding peer and are not propagated.
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct HostAddressingSnapshot {
     pub display_name: String,
     pub channels: Vec<AddressChannel>,
@@ -2322,6 +2324,7 @@ pub async fn exec_peer(
     let targets = crate::mesh::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
         .unwrap_or_else(|_| vec![peer.peer_addr.clone()]);
     drop(conn);
+    crate::mesh::wire_compat::check(peer_id, peer_id, tool, &args).await?;
     crate::mesh::dialer::try_targets_tracked(Some(peer_id), &targets, |t| {
         let tool = tool.to_string();
         let args = args.clone();
@@ -2535,7 +2538,7 @@ mod mesh_tests {
     #[test]
     fn ping_result_deserializes_rc24_without_addressing() {
         let json = serde_json::json!({
-            "peerId": "abc",
+            "peer_id": "abc",
             "version": "0.0.3",
             "hostname": "abc123",
         });
@@ -2547,11 +2550,11 @@ mod mesh_tests {
     #[test]
     fn ping_result_roundtrip_rc25_with_addressing() {
         let json = serde_json::json!({
-            "peerId": "abc",
+            "peer_id": "abc",
             "version": "0.0.4",
             "hostname": "abc123",
             "addressing": {
-                "displayName": "host-g",
+                "display_name": "host-g",
                 "channels": [
                     { "kind": "lan_v4", "value": "10.0.0.8" },
                     { "kind": "tailscale_v4", "value": "100.64.0.2" },
@@ -2580,6 +2583,76 @@ mod mesh_tests {
             v.get("addressing").is_none(),
             "None must be skipped on wire"
         );
+    }
+
+    /// Recursively collect every object key in a JSON value.
+    #[allow(clippy::disallowed_types)] // walks serialized wire output generically
+    fn keys(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, child) in m {
+                    out.push(k.clone());
+                    keys(child, out);
+                }
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|c| keys(c, out)),
+            _ => {}
+        }
+    }
+
+    /// Node-to-node JSON-RPC payloads reach daemons on the previous release,
+    /// which only read snake_case. A camelCase key here (a type that gained
+    /// `rename_all = "camelCase"`) silently breaks a mixed fleet. Every mesh
+    /// JSON-RPC type whose serialization changed with the camelCase rename is
+    /// listed; add new node-to-node types here.
+    #[test]
+    fn mesh_json_rpc_payloads_are_snake_case() {
+        let ping = MeshPingResult {
+            peer_id: "abc".into(),
+            version: "0.0.4".into(),
+            hostname: "h".into(),
+            addressing: Some(HostAddressingSnapshot {
+                display_name: "host-g".into(),
+                channels: vec![AddressChannel {
+                    kind: "lan_v4".into(),
+                    kind_label: "LAN".into(),
+                    value: "10.0.0.8".into(),
+                }],
+            }),
+        };
+        let bundle = ReplicateBundle {
+            peer_id: "abc".into(),
+            issued_at: 1,
+            entities: Default::default(),
+        };
+        let dev_sync = MeshDevSyncResult {
+            status: "synced".into(),
+            detail: None,
+            commits_pulled: Some(1),
+        };
+        for v in [
+            serde_json::to_value(&ping).unwrap(),
+            serde_json::to_value(&bundle).unwrap(),
+            serde_json::to_value(&dev_sync).unwrap(),
+        ] {
+            let mut ks = Vec::new();
+            keys(&v, &mut ks);
+            let camel: Vec<_> = ks
+                .iter()
+                .filter(|k| k.chars().any(|c| c.is_ascii_uppercase()))
+                .collect();
+            assert!(
+                camel.is_empty(),
+                "camelCase keys on mesh wire: {camel:?} in {v}"
+            );
+        }
+        let camel: MeshPingResult = serde_json::from_value(serde_json::json!({
+            "peerId": "abc", "version": "1", "hostname": "h",
+            "addressing": {"displayName": "d", "channels": []},
+        }))
+        .unwrap();
+        assert_eq!(camel.peer_id, "abc");
+        assert_eq!(camel.addressing.unwrap().display_name, "d");
     }
 }
 

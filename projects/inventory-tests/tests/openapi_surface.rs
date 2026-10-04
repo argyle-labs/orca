@@ -89,6 +89,14 @@ const SNAKE_CASE_ORIGINS: &[(&str, &str)] = &[
         "carries `BackupArtifact`, sent daemon -> plugin on restore; older service plugins drop camelCase keys",
     ),
     (
+        "plugin.serve_asset args",
+        "delegated plugin fetch reaches previous-release peers, which drop camelCase keys",
+    ),
+    (
+        "plugin.serve_asset output",
+        "a previous-release peer's delegated plugin fetch requires `asset_b64`",
+    ),
+    (
         "system.serve_release output",
         "a previous-release peer's upgrade path requires `asset_b64`",
     ),
@@ -98,6 +106,19 @@ const SNAKE_CASE_ORIGINS: &[(&str, &str)] = &[
 /// underscore means some type on the path lost its
 /// `#[serde(rename_all = "camelCase")]`, which silently splits the API's
 /// naming contract in two.
+/// An allowlist entry that names no schema is stale and would silently excuse
+/// a future tool that reuses the name.
+#[test]
+fn every_snake_case_origin_names_a_real_schema() {
+    let origins: Vec<String> = all_schemas().into_iter().map(|(o, _)| o).collect();
+    for (origin, _why) in SNAKE_CASE_ORIGINS {
+        assert!(
+            origins.iter().any(|o| o == origin),
+            "SNAKE_CASE_ORIGINS entry `{origin}` matches no tool schema — drop it"
+        );
+    }
+}
+
 #[test]
 fn no_snake_case_property_names_on_the_tool_surface() {
     let mut offenders: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
