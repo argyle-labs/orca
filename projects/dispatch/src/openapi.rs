@@ -416,13 +416,10 @@ fn tool_error_response(desc: &str) -> Value {
 /// Pull `$defs` out of `schema` into the shared `out` map. Keeps schemars'
 /// definition names (they're already PascalCase and stable).
 ///
-/// Two distinct Rust types with the same ident (`storage::Provider` vs
-/// `media::Provider`) land on one `$defs` key. This used to be an
-/// `or_insert`, which kept whichever arrived first and dropped the other
-/// silently — so one of the two types was described by the other's schema, and
-/// *which* one depended on `inventory` link order, i.e. it moved between
-/// builds. Names that clash are recorded in `collisions` so the caller can
-/// fail instead of emitting a quietly-wrong spec.
+/// Two distinct Rust types with the same ident land on one `$defs` key, and
+/// the first body to arrive (which depends on `inventory` link order) would
+/// describe both. A name already present with a different body is recorded in
+/// `collisions` and the existing body kept; callers report them.
 fn hoist_defs(
     schema: &mut Value,
     out: &mut Map<String, Value>,
@@ -497,6 +494,27 @@ pub fn colliding_schema_names() -> Vec<String> {
         hoist_defs(&mut (entry.args_schema)(), &mut defs, &mut collisions);
         hoist_defs(&mut (entry.output_schema)(), &mut defs, &mut collisions);
     }
+    collisions.into_iter().collect()
+}
+
+/// Tool-surface schema names whose body differs from the one already in
+/// `components` — the `components.schemas` of a built spec, so a tool type
+/// sharing a name with a utoipa-registered schema is caught. Defs are
+/// post-processed exactly as [`inject_tool_paths`] does before its merge.
+pub fn colliding_schema_names_with(components: &Map<String, Value>) -> Vec<String> {
+    let mut defs: Map<String, Value> = Map::new();
+    let mut collisions = std::collections::BTreeSet::new();
+    for entry in inventory::iter::<OpenApiToolRegistration> {
+        hoist_defs(&mut (entry.args_schema)(), &mut defs, &mut collisions);
+        hoist_defs(&mut (entry.output_schema)(), &mut defs, &mut collisions);
+    }
+    for v in defs.values_mut() {
+        rewrite_refs(v);
+        wrap_ref_siblings(v);
+        strip_meta(v);
+    }
+    let mut existing = components.clone();
+    merge_schemas(&mut existing, defs, &mut collisions);
     collisions.into_iter().collect()
 }
 

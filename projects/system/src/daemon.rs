@@ -750,8 +750,8 @@ mod tests {
     #[test]
     fn runtime_status_default_serializes_running_false_and_nulls() {
         // The `system.detail.daemon` read shape: the not-installed default must
-        // wire as running=false with every optional field null (no rename_all,
-        // so the multi-word key stays snake_case).
+        // wire as running=false with every optional field null, camelCase
+        // like the rest of the surface.
         let s = serde_json::to_string(&DaemonRuntimeStatus::default()).unwrap();
         assert_eq!(
             s,

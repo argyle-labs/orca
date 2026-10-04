@@ -1384,14 +1384,14 @@ mod tests {
             last_seen_at: 2,
         };
         let s = serde_json::to_string(&dto).unwrap();
-        // The field is serialized as `discovery_state`, NOT `state`, to avoid
+        // The field is serialized as `discoveryState`, NOT `state`, to avoid
         // colliding with MeshMember's `#[serde(tag = "state")]` discriminant.
         assert!(s.contains(r#""discoveryState":"unclaimed""#), "{s}");
         assert!(
             !s.contains(r#""state":"#),
             "must not emit bare `state`: {s}"
         );
-        assert!(!s.contains("peer_id"), "None peer_id omitted: {s}");
+        assert!(!s.contains("peerId"), "None peerId omitted: {s}");
     }
 
     #[test]
@@ -1411,8 +1411,8 @@ mod tests {
         };
         let s = serde_json::to_string(&dto).unwrap();
         assert!(s.contains(r#""ttlSecs":42"#), "{s}");
-        assert!(!s.contains("inviter_peer_id"), "None omitted: {s}");
-        assert!(!s.contains("mesh_id"), "None omitted: {s}");
+        assert!(!s.contains("inviterPeerId"), "None omitted: {s}");
+        assert!(!s.contains("meshId"), "None omitted: {s}");
     }
 
     #[test]
