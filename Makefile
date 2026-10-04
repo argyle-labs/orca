@@ -83,7 +83,6 @@ kill-dev:
 	@pkill -f 'op run --env-file .env.orca.tpl' 2>/dev/null || true
 	@pkill -f 'scripts/dev.sh' 2>/dev/null || true
 	@pkill -f 'orca serve --dev' 2>/dev/null || true
-	@[ -x $(INSTALL_PATH) ] && $(INSTALL_PATH) system kill-stale 2>/dev/null || true
 	@sleep 1
 	@echo "→ dev processes cleared"
 
@@ -108,7 +107,7 @@ deploy:
 	ORCA_RELEASE_VERSION=$$ver $(MAKE) build
 	@$(MAKE) kill-dev
 	bash scripts/install-binary.sh target/$(HOST_TARGET)/release/orca $(INSTALL_PATH)
-	$(INSTALL_PATH) system install
+	$(INSTALL_PATH) system install --execute
 	@echo "daemon installed"
 
 # Install orca on a private-repo Unraid host via the plugin manager. Cross-
@@ -169,13 +168,13 @@ run:
 # Build and install as a system daemon (launchd on macOS, systemd on Linux).
 # `system install` absorbed the former `system daemon install`.
 daemon-install: deploy
-	$(INSTALL_PATH) system install
+	$(INSTALL_PATH) system install --execute
 	@echo "daemon installed — check status with: orca system detail"
 
 # Remove daemon service file and stop the service. `system uninstall` absorbed
 # the former `system daemon uninstall`.
 daemon-uninstall:
-	$(INSTALL_PATH) system uninstall
+	$(INSTALL_PATH) system uninstall --execute
 
 # Database migrations
 # Usage:

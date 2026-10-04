@@ -86,7 +86,7 @@ LOCAL_BIN_PATH="/boot/config/plugins/orca/bin/orca"
 HOST_ORCA="$REPO_ROOT/target/$HOST_TRIPLE/release/orca"
 [ -x "$HOST_ORCA" ] || { echo "host orca build output missing: $HOST_ORCA" >&2; exit 1; }
 echo "→ generating .plg with file:// binary URL (using $HOST_ORCA)"
-"$HOST_ORCA" system build \
+"$HOST_ORCA" system build --execute \
   --format plg \
   --binary "$OUT/orca" \
   --arch "$ARCH" \

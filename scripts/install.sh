@@ -317,8 +317,6 @@ else
   fi
 
   _asset_ver="${VERSION#v}"
-  ASSET="orca-${_asset_ver}-${TARGET}"
-  ASSET_SUM="${ASSET}.sha256"
 
   echo "→ installing orca ${VERSION} (${TARGET}) to ${INSTALL_DIR}"
 
@@ -335,9 +333,17 @@ else
           }
         '
   }
+  # Same preference as `orca update` (update.rs select_asset): the versioned
+  # name, else the `orca-<triple>` name releases actually publish.
+  ASSET="orca-${_asset_ver}-${TARGET}"
   URL_BIN="$(asset_url "${ASSET}")"
+  if [ -z "$URL_BIN" ]; then
+    ASSET="orca-${TARGET}"
+    URL_BIN="$(asset_url "${ASSET}")"
+  fi
+  [ -n "$URL_BIN" ] || die "neither 'orca-${_asset_ver}-${TARGET}' nor 'orca-${TARGET}' found in release ${VERSION}"
+  ASSET_SUM="${ASSET}.sha256"
   URL_SUM="$(asset_url "${ASSET_SUM}")"
-  [ -n "$URL_BIN" ] || die "asset '${ASSET}' not found in release ${VERSION}"
   [ -n "$URL_SUM" ] || die "asset '${ASSET_SUM}' not found in release ${VERSION}"
 
   http_get_asset "$URL_BIN" "${TMP}/orca" \
@@ -360,11 +366,6 @@ if [ "$SKIP_SHA" != "1" ]; then
 fi
 
 # ── install ─────────────────────────────────────────────────────────────────
-# Kill stale runtime processes (mcp-serve, daemon) holding the old binary's
-# inode open. Uses the EXISTING binary's `system kill-stale` so the patterns
-# stay single-source in projects/server/src/commands/system.rs.
-[ -x "${INSTALL_DIR}/orca" ] && "${INSTALL_DIR}/orca" system kill-stale 2>/dev/null || true
-
 # Service-user creation (user, group, linger, SSH key) is no longer a separate
 # step: it was folded into `orca system install --service-user` (invoked below,
 # after the binary is in place). The former standalone `system bootstrap`
@@ -383,9 +384,9 @@ if [ "$(uname -s)" = "Darwin" ]; then
   codesign --force --sign - "${INSTALL_DIR}/orca" 2>/dev/null || true
 fi
 
-# Bounce the running daemon onto the new binary. kill-stale (above) already
-# killed it; this restarts whichever supervisor owns it (launchd on macOS,
-# systemd-user on Linux). Idempotent and silent if no supervisor is loaded.
+# Bounce the running daemon onto the new binary: restarts whichever supervisor
+# owns it (launchd on macOS, systemd-user on Linux). Idempotent and silent if
+# no supervisor is loaded.
 restart_orca_service() {
   case "$(uname -s)" in
     Darwin)
@@ -405,6 +406,15 @@ restart_orca_service() {
 }
 restart_orca_service
 
+# `system install` is execute-gated: without --execute it only prints a dry-run
+# plan and exits 0. Pins older than v0.2.1-rc.9 reject the flag and install
+# unconditionally, so retry without it only when --help does not list it.
+orca_system_install() {
+  "${INSTALL_DIR}/orca" system install --execute "$@" && return 0
+  "${INSTALL_DIR}/orca" system install --help 2>/dev/null | grep -q -- '--execute' && return 1
+  "${INSTALL_DIR}/orca" system install "$@"
+}
+
 mkdir -p "$ORCA_HOME_TARGET"
 printf '%s\n' "$CHANNEL" > "${ORCA_HOME_TARGET}/channel"
 
@@ -421,11 +431,11 @@ if [ "$RUN_AS_ORCA" = "1" ]; then
   # the SSH key when provided.
   echo "→ bootstrapping daemon as ${ORCA_USER} via system service"
   if [ -n "$ADMIN_PUBKEY" ]; then
-    "${INSTALL_DIR}/orca" system install --service-user "$ORCA_USER" --admin-pubkey "$ADMIN_PUBKEY" \
-      || warn "daemon install failed — re-run: ${INSTALL_DIR}/orca system install --service-user $ORCA_USER"
+    orca_system_install --service-user "$ORCA_USER" --admin-pubkey "$ADMIN_PUBKEY" \
+      || warn "daemon install failed — re-run: ${INSTALL_DIR}/orca system install --execute --service-user $ORCA_USER"
   else
-    "${INSTALL_DIR}/orca" system install --service-user "$ORCA_USER" \
-      || warn "daemon install failed — re-run: ${INSTALL_DIR}/orca system install --service-user $ORCA_USER"
+    orca_system_install --service-user "$ORCA_USER" \
+      || warn "daemon install failed — re-run: ${INSTALL_DIR}/orca system install --execute --service-user $ORCA_USER"
   fi
   # Now the user + group exist; hand the tree over.
   chown -R "$ORCA_USER" "$ORCA_HOME_DIR/.local" "$ORCA_HOME_TARGET" 2>/dev/null \
@@ -439,8 +449,8 @@ if [ "$RUN_AS_ORCA" = "1" ]; then
       && echo "✓ symlinked /usr/local/bin/orca → ${INSTALL_DIR}/orca"
   fi
   # Restart the service so it picks up the new binary instead of running the
-  # old (now-deleted) inode kill-stale terminated above. Detects systemd,
-  # openrc, and unraid rc scripts — silent no-op if none match.
+  # old (now-deleted) inode. Detects systemd, openrc, and unraid rc scripts —
+  # silent no-op if none match.
   if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled orca.service >/dev/null 2>&1; then
     systemctl restart orca.service 2>/dev/null && echo "✓ daemon restarted (systemd)"
   elif command -v rc-service >/dev/null 2>&1 && rc-service -e orca >/dev/null 2>&1; then
