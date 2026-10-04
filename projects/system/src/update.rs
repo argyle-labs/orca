@@ -312,6 +312,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
 /// entry no longer carries a redundant `is_current` flag.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
+#[serde(rename_all = "camelCase")]
 pub struct VersionEntry {
     pub tag: String,
     pub prerelease: bool,

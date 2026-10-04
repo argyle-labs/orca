@@ -30,6 +30,19 @@ system        = { path = "../system" }
 notifications = { path = "../notifications" }
 files         = { path = "../files" }
 orca-inventory = { path = "../orca-inventory" }
+# The rest of the tool-hosting crates. Needed so the OpenAPI shape guards in
+# tests/openapi_surface.rs walk the WHOLE surface — a bucket that isn't linked
+# here is silently exempt from them.
+db            = { path = "../db" }
+spec          = { path = "../spec" }
+model         = { path = "../model" }
+namespace     = { path = "../namespace" }
+conversation  = { path = "../conversation" }
+config-source = { path = "../config-source" }
+containers    = { path = "../containers" }
+dev           = { path = "../dev" }
+mcp           = { path = "../mcp" }
+plugin-toolkit = { path = "../plugin-toolkit" }
 
 [lints]
 workspace = true

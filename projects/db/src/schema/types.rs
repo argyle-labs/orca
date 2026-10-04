@@ -37,6 +37,7 @@ pub struct ListSchemasArgs {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ListSchemasOutput {
     pub schemas: Vec<SchemaDbEntry>,
     /// Opaque cursor for the next page, or absent on the last page.
@@ -91,6 +92,7 @@ pub struct SchemaTableInfo {
 /// the HTTP `/api/schema` payload — the frontend reads `fk_target`
 /// snake_case directly.
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SchemaColumn {
     pub name: String,
     #[serde(rename = "type")]

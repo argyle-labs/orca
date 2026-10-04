@@ -18,6 +18,7 @@ use derive::orca_tool;
 // ── Args / Output ────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigRowOut {
     pub id: String,
     pub host_owner: String,
@@ -46,6 +47,7 @@ pub struct ConfigListArgs {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigListOutput {
     pub rows: Vec<ConfigRowOut>,
     /// Opaque cursor for the next page, or absent on the last page.
@@ -164,7 +166,7 @@ async fn config_get(
     Ok(ConfigGetOutput { row })
 }
 
-/// Upsert a config row. Refuses to write rows owned by a different host
+/// [MUTATES STATE] Upsert a config row. Refuses to write rows owned by a different host
 /// — cross-host writes route via the mesh once peer-tool dispatch
 /// lands (§3.3).
 #[orca_tool(domain = "config", verb = "upsert")]
@@ -184,7 +186,7 @@ async fn config_set(
     Ok(ConfigSetOutput { row, created })
 }
 
-/// Delete a config row owned by the local host.
+/// [MUTATES STATE] Delete a config row owned by the local host.
 #[orca_tool(domain = "config", verb = "delete")]
 async fn config_delete(
     args: ConfigDeleteArgs,

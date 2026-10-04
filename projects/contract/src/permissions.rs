@@ -39,6 +39,7 @@ pub struct PermInfo {
 /// mode, here are examples". The repair presents these, ranked by evidence, for a
 /// human to confirm; it is never applied automatically.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct PermCandidate {
     /// The mode the reference peers carry.
     pub mode: u32,
@@ -176,6 +177,7 @@ pub fn rank_candidates(
 /// instead of 34:34, so every prune unlink failed with `Permission denied` while
 /// mode-only detection reported nothing wrong (#620).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct OwnerCandidate {
     /// Owning uid the reference peers carry.
     pub uid: u32,

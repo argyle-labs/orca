@@ -22,7 +22,7 @@ use crate::{host_identity, mounts, periodic, replication, shares};
 use notifications::dismissable::{Fix, RaiseInput, Severity};
 use plugin_toolkit::route::Route;
 use plugin_toolkit::storage::{
-    Health, RemountAggression, RemountPolicy, SourceProbe, probe_source, probe_source_nfs,
+    MountHealth, RemountAggression, RemountPolicy, SourceProbe, probe_source, probe_source_nfs,
     resolve_replication_status,
 };
 use std::collections::{HashMap, HashSet};
@@ -217,26 +217,26 @@ enum Presence {
 ///
 /// The kernel mount table is authoritative for *presence*: when the target is
 /// absent from it, the target is Missing even if `probe_health` returned
-/// `Health::Ok` — a bare mountpoint dir with nothing mounted through it `stat`s
+/// `MountHealth::Ok` — a bare mountpoint dir with nothing mounted through it `stat`s
 /// clean and reads as `Ok`, the false positive that made convergence a no-op.
-fn classify(absent_from_table: bool, health: Health) -> Presence {
+fn classify(absent_from_table: bool, health: MountHealth) -> Presence {
     if absent_from_table {
         return Presence::Missing;
     }
     match health {
-        Health::Ok => Presence::Healthy,
-        Health::Missing => Presence::Missing,
-        Health::Stale | Health::Timeout | Health::Error => Presence::Stale,
+        MountHealth::Ok => Presence::Healthy,
+        MountHealth::Missing => Presence::Missing,
+        MountHealth::Stale | MountHealth::Timeout | MountHealth::Error => Presence::Stale,
         // Present and live, only writes are denied (server-side perm drift). A
         // remount cannot fix that, so converge must leave it mounted — the fix
         // is a server-side chmod/chown, surfaced via the reported WriteDenied
         // health, not by re-mounting here.
-        Health::WriteDenied => Presence::Healthy,
+        MountHealth::WriteDenied => Presence::Healthy,
         // The convergence loop probes its own placements and never yields
         // Unknown (that is a read-layer value for an unreached peer); treat it
         // as unobserved-and-absent so a defensive path re-mounts rather than
         // assuming health.
-        Health::Unknown => Presence::Missing,
+        MountHealth::Unknown => Presence::Missing,
     }
 }
 
@@ -858,7 +858,7 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     let mut orphan_unmounts: Vec<String> = Vec::new();
     for t in orphan_targets(&ledger, &desired_targets) {
         match autofs::probe(&t, timeout).await {
-            Health::Missing => {
+            MountHealth::Missing => {
                 ledger.remove(&t);
             }
             _ => orphan_unmounts.push(t),
@@ -890,33 +890,33 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         .collect();
 
     // Probe each desired target: mounted+Ok, mounted+stale, or missing. Record
-    // the classification as a stored `Health` (written to the row at tick end so
+    // the classification as a stored `MountHealth` (written to the row at tick end so
     // `storage.mount.detail` reports it without a live probe).
     let mut mounted_any: HashSet<String> = HashSet::new();
     let mut healthy: HashSet<String> = HashSet::new();
     let mut stale_now: HashSet<String> = HashSet::new();
-    let mut health_by_target: HashMap<String, Health> = HashMap::new();
+    let mut health_by_target: HashMap<String, MountHealth> = HashMap::new();
     for d in &desired {
         // Cross-check the kernel mount table FIRST: a bare mountpoint dir that
         // exists with nothing mounted through it `stat`s clean, so `probe_health`
-        // returns `Health::Ok` and an unmounted target would be misread as healthy
+        // returns `MountHealth::Ok` and an unmounted target would be misread as healthy
         // — leaving `plan()` with nothing to do and the placement never mounted.
         // Absence from `/proc/mounts` is the only reliable "not mounted" signal.
         let absent = autofs::target_has_no_mount(&d.target).await;
         let health = autofs::probe(&d.target, timeout).await;
         match classify(absent, health) {
             Presence::Missing => {
-                health_by_target.insert(d.target.clone(), Health::Missing);
+                health_by_target.insert(d.target.clone(), MountHealth::Missing);
             }
             Presence::Healthy => {
                 mounted_any.insert(d.target.clone());
                 healthy.insert(d.target.clone());
-                health_by_target.insert(d.target.clone(), Health::Ok);
+                health_by_target.insert(d.target.clone(), MountHealth::Ok);
             }
             Presence::Stale => {
                 mounted_any.insert(d.target.clone());
                 stale_now.insert(d.target.clone());
-                health_by_target.insert(d.target.clone(), Health::Stale);
+                health_by_target.insert(d.target.clone(), MountHealth::Stale);
             }
         }
     }
@@ -1047,7 +1047,7 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     for d in &desired {
         // Only a genuinely-Ok mount is a drift candidate — never a stale-blip
         // rider kept in `healthy` to ride out a single stale probe.
-        if health_by_target.get(&d.target) != Some(&Health::Ok) {
+        if health_by_target.get(&d.target) != Some(&MountHealth::Ok) {
             continue;
         }
         let Some(live) = live_options_by_target.get(&d.target) else {
@@ -1377,7 +1377,7 @@ async fn reconcile_guest_mounts(this_host: &str) {
 /// the tick.
 fn persist_mount_state(
     this_host: &str,
-    health_by_target: &HashMap<String, Health>,
+    health_by_target: &HashMap<String, MountHealth>,
     active_by_target: &HashMap<String, String>,
     active_options_by_target: &HashMap<String, String>,
     drift_by_target: &HashMap<String, bool>,
@@ -1397,7 +1397,7 @@ fn persist_mount_state(
         let health = health_by_target
             .get(&row.target)
             .copied()
-            .unwrap_or(Health::Missing);
+            .unwrap_or(MountHealth::Missing);
         let active_route = active_by_target.get(&row.target).cloned();
         let active_options = active_options_by_target.get(&row.target).cloned();
         let drift = drift_by_target.get(&row.target).copied().unwrap_or(false);
@@ -1536,21 +1536,21 @@ mod tests {
     #[test]
     fn bare_dir_absent_from_table_classifies_missing_despite_stat_ok() {
         // THE regression: a desired target that exists only as an empty mountpoint
-        // dir `stat`s clean → `probe_health` returns `Health::Ok`, but it is absent
+        // dir `stat`s clean → `probe_health` returns `MountHealth::Ok`, but it is absent
         // from the kernel mount table. It MUST classify Missing so `plan()` mounts
         // it — the false positive that made convergence a silent no-op fleet-wide.
-        assert_eq!(classify(true, Health::Ok), Presence::Missing);
+        assert_eq!(classify(true, MountHealth::Ok), Presence::Missing);
     }
 
     #[test]
     fn classify_uses_health_when_present_in_table() {
-        assert_eq!(classify(false, Health::Ok), Presence::Healthy);
-        assert_eq!(classify(false, Health::Missing), Presence::Missing);
-        assert_eq!(classify(false, Health::Stale), Presence::Stale);
-        assert_eq!(classify(false, Health::Timeout), Presence::Stale);
-        assert_eq!(classify(false, Health::Error), Presence::Stale);
+        assert_eq!(classify(false, MountHealth::Ok), Presence::Healthy);
+        assert_eq!(classify(false, MountHealth::Missing), Presence::Missing);
+        assert_eq!(classify(false, MountHealth::Stale), Presence::Stale);
+        assert_eq!(classify(false, MountHealth::Timeout), Presence::Stale);
+        assert_eq!(classify(false, MountHealth::Error), Presence::Stale);
         // Absence from the table always wins, regardless of the stat health.
-        assert_eq!(classify(true, Health::Stale), Presence::Missing);
+        assert_eq!(classify(true, MountHealth::Stale), Presence::Missing);
     }
 
     #[test]
@@ -2806,7 +2806,7 @@ mod tests {
             host: host.to_string(),
             target: target.to_string(),
             remount_policy: None,
-            health: plugin_toolkit::storage::Health::Ok,
+            health: plugin_toolkit::storage::MountHealth::Ok,
             active_route: None,
             active_options: None,
             drift: false,
@@ -2854,7 +2854,7 @@ mod tests {
             host: host.to_string(),
             target: target.to_string(),
             remount_policy: None,
-            health: plugin_toolkit::storage::Health::Ok,
+            health: plugin_toolkit::storage::MountHealth::Ok,
             active_route: None,
             active_options: None,
             drift: false,
@@ -2948,14 +2948,14 @@ mod tests {
             insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
             persist_mount_state(
                 "h1",
-                &map1("/mnt/data", Health::Stale),
+                &map1("/mnt/data", MountHealth::Stale),
                 &map1("/mnt/data", "10.0.0.1:/e".to_string()),
                 &map1("/mnt/data", "soft,vers=4.2".to_string()),
                 &map1("/mnt/data", true),
                 &map1("/mnt/data", 2usize), // stacked → multi_mounted
             );
             let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
-            assert_eq!(row.health, Health::Stale);
+            assert_eq!(row.health, MountHealth::Stale);
             assert_eq!(row.active_route.as_deref(), Some("10.0.0.1:/e"));
             assert_eq!(row.active_options.as_deref(), Some("soft,vers=4.2"));
             assert!(row.drift);
@@ -2978,7 +2978,7 @@ mod tests {
                 &HashMap::new(),
             );
             let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
-            assert_eq!(row.health, Health::Missing);
+            assert_eq!(row.health, MountHealth::Missing);
             assert!(row.active_route.is_none());
             assert!(!row.drift);
             assert!(!row.multi_mounted);
@@ -2993,7 +2993,7 @@ mod tests {
             insert_mount("m-1", "sh-1", "h1", "/mnt/data", true);
             persist_mount_state(
                 "other-host",
-                &map1("/mnt/data", Health::Stale),
+                &map1("/mnt/data", MountHealth::Stale),
                 &map1("/mnt/data", "10.0.0.1:/e".to_string()),
                 &map1("/mnt/data", "soft".to_string()),
                 &map1("/mnt/data", true),
@@ -3001,7 +3001,7 @@ mod tests {
             );
             // Row untouched: it stays at the inserted Ok health, no drift.
             let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
-            assert_eq!(row.health, Health::Ok);
+            assert_eq!(row.health, MountHealth::Ok);
             assert!(row.active_route.is_none());
             assert!(!row.drift);
         });
@@ -3111,8 +3111,8 @@ mod tests {
         fn kind(&self) -> plugin_toolkit::storage::StorageKind {
             plugin_toolkit::storage::StorageKind::NetworkShare
         }
-        fn capabilities(&self) -> Vec<plugin_toolkit::storage::Capability> {
-            vec![plugin_toolkit::storage::Capability::Mount]
+        fn capabilities(&self) -> Vec<plugin_toolkit::storage::StorageCapability> {
+            vec![plugin_toolkit::storage::StorageCapability::Mount]
         }
         fn endpoint(&self) -> String {
             format!("fake://{}", self.name)
@@ -3467,7 +3467,7 @@ mod tests {
                 host: "h1".to_string(),
                 target: "/mnt/data".to_string(),
                 remount_policy: Some(pol.clone()),
-                health: plugin_toolkit::storage::Health::Ok,
+                health: plugin_toolkit::storage::MountHealth::Ok,
                 active_route: None,
                 active_options: None,
                 drift: false,
@@ -3509,14 +3509,14 @@ mod tests {
             // early `continue` fires and no update is issued (still readable).
             persist_mount_state(
                 "h1",
-                &map1("/mnt/data", Health::Ok),
+                &map1("/mnt/data", MountHealth::Ok),
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
             );
             let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
-            assert_eq!(row.health, Health::Ok);
+            assert_eq!(row.health, MountHealth::Ok);
             assert!(row.active_route.is_none());
             assert!(!row.drift);
             assert!(!row.multi_mounted);
@@ -3613,7 +3613,7 @@ mod tests {
             );
             // The other-host row is untouched by this host's persist pass.
             let row = mounts::endpoint_db::get_by_id("m-1").unwrap().unwrap();
-            assert_eq!(row.health, Health::Ok);
+            assert_eq!(row.health, MountHealth::Ok);
             assert!(row.active_route.is_none());
         });
     }

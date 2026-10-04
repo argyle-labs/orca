@@ -25,7 +25,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AdapterError, Container, ExecOutput, HostObservation, ListFilter, Liveness, LogTail,
+    AdapterError, Container, ContainerExecOutput, HostObservation, ListFilter, Liveness, LogTail,
     RuntimeAdapter, RuntimeKind, WedgeRecoverer, register_entry,
 };
 
@@ -141,7 +141,7 @@ impl RuntimeAdapter for ContainerRuntimeProxy {
         id: &str,
         cmd: &[String],
         stdin: Option<String>,
-    ) -> Result<ExecOutput, AdapterError> {
+    ) -> Result<ContainerExecOutput, AdapterError> {
         self.call(
             "exec",
             ExecArg {

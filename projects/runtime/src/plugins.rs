@@ -118,6 +118,7 @@ async fn plugin_list(
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginDetailArgs {
     pub id: String,
     /// Fetch the value of a specific data key.

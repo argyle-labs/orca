@@ -75,6 +75,7 @@ impl SchemaIndex {
 // ── Output shapes ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct RowRef {
     pub host_owner: String,
     pub noun: String,
@@ -82,6 +83,7 @@ pub struct RowRef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct SchemaInvalid {
     pub host_owner: String,
     pub noun: String,
@@ -92,6 +94,7 @@ pub struct SchemaInvalid {
 
 /// The read-only reconcile plan. Nothing here is executed tonight.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct DiffPlan {
     /// In repo, absent from the live store → would be created.
     pub to_add: Vec<RowRef>,

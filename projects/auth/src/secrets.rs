@@ -18,6 +18,7 @@ use derive::orca_tool;
 // ── Shared types ────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct SecretEntry {
     pub name: String,
     /// Backend kind. `"inline"` stores the value in the encrypted DB; any other
@@ -45,6 +46,7 @@ pub struct SecretListArgs {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SecretListReport {
     pub secrets: Vec<SecretEntry>,
     /// Opaque cursor for the next page, or absent on the last page.
@@ -72,6 +74,7 @@ pub struct SecretGetReport {
 // ── secret write args (shared by create / update / upsert) ─────────────────────
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SecretWriteArgs {
     pub name: String,
     /// Backend kind. Defaults to "inline".

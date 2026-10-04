@@ -162,6 +162,7 @@ async fn auth_session_create(
 // ── API tokens (REST/MCP bearer auth, local-host scope) ─────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ApiTokenSummary {
     pub id: String,
     pub name: String,
@@ -178,6 +179,7 @@ pub struct ApiTokenSummary {
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenCreateArgs {
     /// Human-readable label (e.g. "ci-runner", "scott-laptop"). Must be unique on this host.
     pub name: String,
@@ -215,6 +217,7 @@ pub struct TokenListArgs {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenListOutput {
     pub tokens: Vec<ApiTokenSummary>,
     /// Opaque cursor for the next page, or absent on the last page.
@@ -377,6 +380,7 @@ pub struct LoginArgs {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct LoginOutput {
     pub user_id: String,
     pub username: String,
@@ -778,11 +782,11 @@ mod tests {
         let v = serde_json::to_value(&row).unwrap();
         assert!(v.get("last_used_at").is_none());
         assert!(v.get("expires_at").is_none());
-        assert_eq!(v["can_mutate"], serde_json::json!(false));
+        assert_eq!(v["canMutate"], serde_json::json!(false));
         // can_mutate defaults to false when absent on the wire.
         let back: ApiTokenSummary = serde_json::from_value(serde_json::json!({
             "id": "t1", "name": "ci", "role": "read",
-            "created_at": "2021-01-01T00:00:00Z"
+            "createdAt": "2021-01-01T00:00:00Z"
         }))
         .unwrap();
         assert!(!back.can_mutate);
@@ -808,10 +812,10 @@ mod tests {
             expires_at: "2021-01-02T00:00:00Z".into(),
         };
         let v = serde_json::to_value(&out).unwrap();
-        assert_eq!(v["user_id"], "u1");
+        assert_eq!(v["userId"], "u1");
         assert_eq!(v["username"], "scott");
         assert_eq!(v["role"], "admin");
-        assert_eq!(v["expires_at"], "2021-01-02T00:00:00Z");
+        assert_eq!(v["expiresAt"], "2021-01-02T00:00:00Z");
     }
 
     #[test]
@@ -956,7 +960,7 @@ mod tests {
     #[test]
     fn token_create_args_full_round_trip() {
         let a: TokenCreateArgs = serde_json::from_str(
-            "{\"name\":\"ci\",\"role\":\"read\",\"expires_in_days\":30,\"can_mutate\":true}",
+            "{\"name\":\"ci\",\"role\":\"read\",\"expiresInDays\":30,\"canMutate\":true}",
         )
         .unwrap();
         assert_eq!(a.name, "ci");
@@ -991,26 +995,23 @@ mod tests {
             total: Some(3),
         })
         .unwrap();
-        assert!(s2.contains("\"next_cursor\":\"nc\""), "{s2}");
+        assert!(s2.contains("\"nextCursor\":\"nc\""), "{s2}");
         assert!(s2.contains("\"total\":3"), "{s2}");
     }
 
     #[test]
     fn api_token_summary_full_round_trip() {
         let src = "{\"id\":\"t1\",\"name\":\"ci\",\"role\":\"admin\",\
-             \"created_at\":\"2021-01-01T00:00:00Z\",\
-             \"last_used_at\":\"2021-02-01T00:00:00Z\",\
-             \"expires_at\":\"2022-01-01T00:00:00Z\",\"can_mutate\":true}";
+             \"createdAt\":\"2021-01-01T00:00:00Z\",\
+             \"lastUsedAt\":\"2021-02-01T00:00:00Z\",\
+             \"expiresAt\":\"2022-01-01T00:00:00Z\",\"canMutate\":true}";
         let row: ApiTokenSummary = serde_json::from_str(src).unwrap();
         assert_eq!(row.last_used_at.as_deref(), Some("2021-02-01T00:00:00Z"));
         assert_eq!(row.expires_at.as_deref(), Some("2022-01-01T00:00:00Z"));
         assert!(row.can_mutate);
         let s = serde_json::to_string(&row).unwrap();
-        assert!(
-            s.contains("\"last_used_at\":\"2021-02-01T00:00:00Z\""),
-            "{s}"
-        );
-        assert!(s.contains("\"expires_at\":\"2022-01-01T00:00:00Z\""), "{s}");
+        assert!(s.contains("\"lastUsedAt\":\"2021-02-01T00:00:00Z\""), "{s}");
+        assert!(s.contains("\"expiresAt\":\"2022-01-01T00:00:00Z\""), "{s}");
     }
 
     #[test]
