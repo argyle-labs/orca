@@ -1047,8 +1047,9 @@ async fn dial_bootstrap(
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(client_config));
     let target = format!("{host}:{port}");
-    let tcp = TcpStream::connect(&target)
+    let tcp = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&target))
         .await
+        .with_context(|| format!("connect {target} timed out"))?
         .with_context(|| format!("connect {target}"))?;
     let sni = ServerName::try_from(utils::pki::MESH_BOOTSTRAP_SAN)?.to_owned();
     let mut tls = connector
