@@ -90,10 +90,12 @@ pub fn install_mutations(names: impl IntoIterator<Item = &'static str>) {
 pub fn is_data_mutation(tool: &str) -> bool {
     MUTATIONS.get().is_some_and(|s| s.contains(tool))
         || plugin_policy(tool).is_some_and(|p| p.data_mutation)
+        || crate::unit_surface::unit_policy(tool).is_some_and(|(_, m)| m)
 }
 
 /// Role required to invoke `tool` over an authenticated surface: the core
-/// table first, then the role a loaded plugin declared for it. Returns `"any"`
+/// table, then the role a loaded plugin declared for it, then the live unit
+/// surface (mutating unit ops are `admin`). Returns `"any"`
 /// for unknown tools and for tools registered before `install` ran — the
 /// registry's own 404 path will reject unknown tool names downstream, so
 /// fall-open here keeps the gate from double-handling missing-tool errors.
@@ -102,6 +104,7 @@ pub fn required_role(tool: &str) -> &'static str {
         .get()
         .and_then(|m| m.get(tool).copied())
         .or_else(|| plugin_policy(tool).map(|p| p.role))
+        .or_else(|| crate::unit_surface::unit_policy(tool).map(|(role, _)| role))
         .unwrap_or("any")
 }
 

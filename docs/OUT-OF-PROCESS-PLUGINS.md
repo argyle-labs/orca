@@ -82,6 +82,11 @@ installs these into `dispatch::tool_roles` at load, so REST, MCP and `mesh/exec`
 gate plugin tools exactly like core ones. A manifest from an older toolkit
 omits them and its tools stay at `any`; the daemon logs a warning.
 
+Unit-surface ops (`<kind>.<action>` from a plugin's unit provider) declare no
+role. They follow the `#[orca_tool]` default: `list`/`detail` are `any`, and
+every create, update, upsert and delete is an `admin` data mutation. Update,
+upsert and delete args carry the same verified `caller`.
+
 `Invoke` carries an optional `caller` (`user_id`, `username`, `role`,
 `can_mutate`): the identity the daemon verified for that request (REST session
 or token user, MCP authenticated user, or the user re-resolved locally from a

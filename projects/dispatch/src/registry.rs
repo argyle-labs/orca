@@ -285,7 +285,9 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
         // universal `unit.<kind>.<verb>` surface share this one entrypoint.
         None => match dynamic_dispatch(name, &args, ctx.verified_caller()) {
             Some(result) => result,
-            None => match crate::unit_surface::unit_dispatch(name, &args).await {
+            None => match crate::unit_surface::unit_dispatch(name, &args, ctx.verified_caller())
+                .await
+            {
                 Some(result) => result,
                 None => match crate::diagnostics_surface::diagnostics_dispatch(name, &args).await {
                     Some(result) => result,
