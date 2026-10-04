@@ -1697,4 +1697,106 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn plugin_tool_declared_admin_is_refused_for_non_admin_rest_and_mcp_callers() {
+        let tool = "check_tool_role_plugin_test.adopt";
+        dispatch::tool_roles::install_plugin_tools([(
+            tool.to_string(),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                Some("admin"),
+                Some(true),
+                Some(false),
+            ),
+        )]);
+        let path = format!("{TOOLS_PREFIX}{tool}");
+        for role in ["viewer", "member", "read"] {
+            assert_eq!(
+                check_tool_role(&path, Some(role), false),
+                ToolRoleCheck::Forbidden {
+                    tool: tool.into(),
+                    required: "admin"
+                },
+                "{role} must be refused"
+            );
+            assert!(!mcp_tool_role_allows(tool, Some(role), false), "{role}");
+        }
+        assert_eq!(
+            check_tool_role(&path, Some("admin"), false),
+            ToolRoleCheck::Pass
+        );
+        assert!(mcp_tool_role_allows(tool, Some("admin"), false));
+        dispatch::tool_roles::remove_plugin_tools([tool]);
+    }
+
+    /// A plugin unit provider exposing one mutating action, the shape of the
+    /// docker `stack` kind's `fix`/`label_volumes`/`edit`.
+    struct StackProvider;
+
+    impl contract::unit::UnitProvider for StackProvider {
+        fn name(&self) -> &str {
+            "check-tool-role-unit"
+        }
+        fn declarations(&self) -> Vec<contract::unit::KindDeclaration> {
+            use contract::unit::{ActionDecl, KindDeclaration, Verb, VerbDecl};
+            vec![KindDeclaration {
+                kind: "ctr_stack".into(),
+                backup_spec: None,
+                verbs: vec![
+                    VerbDecl::list(),
+                    VerbDecl {
+                        verb: Verb::Update,
+                        query_schema: None,
+                        actions: vec![ActionDecl {
+                            action: "label_volumes".into(),
+                            payload_schema: None,
+                            response_schema: None,
+                        }],
+                    },
+                ],
+            }]
+        }
+        fn units(
+            &self,
+        ) -> contract::BoxFuture<'_, anyhow::Result<Vec<contract::unit::UnitDescriptor>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn invoke(
+            &self,
+            _args: contract::unit::VerbArgs,
+        ) -> contract::BoxFuture<'_, anyhow::Result<contract::unit::VerbOutcome>> {
+            Box::pin(async { anyhow::bail!("not reached") })
+        }
+    }
+
+    #[test]
+    fn mutating_unit_ops_are_refused_for_non_admin_rest_and_mcp_callers() {
+        contract::unit::register_provider(std::sync::Arc::new(StackProvider));
+        let tool = "ctr_stack.label_volumes";
+        let path = format!("{TOOLS_PREFIX}{tool}");
+        for role in ["viewer", "member", "read"] {
+            assert_eq!(
+                check_tool_role(&path, Some(role), false),
+                ToolRoleCheck::Forbidden {
+                    tool: tool.into(),
+                    required: "admin"
+                },
+                "{role} must be refused"
+            );
+            assert!(!mcp_tool_role_allows(tool, Some(role), false), "{role}");
+        }
+        assert_eq!(
+            check_tool_role(&path, Some("admin"), false),
+            ToolRoleCheck::Pass
+        );
+        assert_eq!(
+            check_tool_role(
+                &format!("{TOOLS_PREFIX}ctr_stack.list"),
+                Some("member"),
+                false
+            ),
+            ToolRoleCheck::Pass
+        );
+        contract::unit::deregister_provider("check-tool-role-unit");
+    }
 }

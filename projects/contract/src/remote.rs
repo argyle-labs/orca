@@ -12,7 +12,7 @@ use anyhow::Result;
 /// derive the effective role from its own replicated `users` table. On the
 /// CLI/daemon path this is the host admin operator; on REST it is the
 /// authenticated session user.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CallerIdentity {
     pub user_id: String,
     pub username: String,
@@ -22,6 +22,7 @@ pub struct CallerIdentity {
     /// request extensions that used to hold this are long gone; an identity
     /// that cannot answer "may this caller mutate?" forces the gate to guess,
     /// and a guessing authorization check is not one.
+    #[serde(default)]
     pub can_mutate: bool,
 }
 

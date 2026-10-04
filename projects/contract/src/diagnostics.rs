@@ -274,6 +274,7 @@ pub async fn repair(args: RepairArgs) -> Result<RepairOutcome> {
         // Dispatch the managed-unit action to whichever provider owns the unit.
         let outcome =
             crate::unit::dispatch(crate::unit::VerbArgs::Update(crate::unit::UpdateArgs {
+                caller: None,
                 id: delegate.unit.clone(),
                 action: delegate.action.clone(),
                 payload: delegate.payload.clone(),

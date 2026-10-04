@@ -39,6 +39,16 @@ pub struct ToolDef {
     pub input_schema: Schema,
     /// JSON Schema for the tool's output.
     pub output_schema: Schema,
+    /// Role required to invoke the tool (`any`/`read`/`admin`); `None` from a
+    /// plugin built before the manifest carried it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Whether the tool is dry-run unless the caller opts in with `execute`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execute_gated: Option<bool>,
+    /// Whether the tool writes to an external managed system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_mutation: Option<bool>,
 }
 
 /// JSON shape of a single domain backend a plugin contributes, in the plugin's

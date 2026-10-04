@@ -85,10 +85,15 @@ impl Backing {
     /// error `Value`. Both cross the wire as `serde_json::Value` already, so
     /// there is no String encode/decode here.
     #[cfg(unix)]
-    fn invoke(&self, tool: &str, args: sj::Value) -> std::result::Result<sj::Value, sj::Value> {
+    fn invoke(
+        &self,
+        tool: &str,
+        args: sj::Value,
+        caller: Option<plugin_proto::VerifiedCaller>,
+    ) -> std::result::Result<sj::Value, sj::Value> {
         match self {
             Backing::Process(proc) => proc
-                .invoke(tool, args)
+                .invoke(tool, args, caller)
                 .map_err(|e| sj::Value::String(format!("{e:#}"))),
         }
     }
@@ -96,7 +101,12 @@ impl Backing {
     /// On non-unix there is no subprocess backing, so `Backing` is uninhabited
     /// and this can never be called; the empty match makes that explicit.
     #[cfg(not(unix))]
-    fn invoke(&self, _tool: &str, _args: sj::Value) -> std::result::Result<sj::Value, sj::Value> {
+    fn invoke(
+        &self,
+        _tool: &str,
+        _args: sj::Value,
+        _caller: Option<plugin_proto::VerifiedCaller>,
+    ) -> std::result::Result<sj::Value, sj::Value> {
         match *self {}
     }
 }
@@ -659,7 +669,8 @@ fn rollback_domain_backends(pairs: &[(String, String)]) {
 fn make_backend_invoke(backing: Backing, invoke_prefix: String) -> BackendInvoke {
     Arc::new(move |op: &str, args: sj::Value| {
         let tool = format!("{invoke_prefix}.{op}");
-        backing.invoke(&tool, args)
+        // Domain ops are daemon-originated; no request identity rides them.
+        backing.invoke(&tool, args, None)
     })
 }
 
@@ -820,6 +831,7 @@ pub fn spawn_plugin(exe: &Path, expected_id: Option<&str>) -> Result<LoadReport>
     for name in &tool_names {
         reg.by_tool.insert(name.clone(), idx);
     }
+    install_tool_policies(&software, &tools);
     let backend_names: Vec<String> = registered.iter().map(|(_, n)| n.clone()).collect();
     reg.plugins.push(LoadedPlugin {
         software: software.clone(),
@@ -847,6 +859,40 @@ pub fn spawn_plugin(exe: &Path, expected_id: Option<&str>) -> Result<LoadReport>
         tools: tool_names,
         declared_schema,
     })
+}
+
+/// Install each tool's declared role into [`dispatch::tool_roles`], so REST,
+/// MCP and mesh gate plugin tools exactly like core ones.
+fn install_tool_policies(software: &str, tools: &HashMap<String, ToolDef>) {
+    let undeclared = tools.values().filter(|d| d.role.is_none()).count();
+    if undeclared > 0 {
+        tracing::warn!(
+            plugin = %software,
+            undeclared,
+            "plugin manifest declares no role for some tools; they stay callable by any role \
+             until the plugin is rebuilt against a toolkit that emits roles"
+        );
+    }
+    dispatch::tool_roles::install_plugin_tools(tools.values().map(|d| {
+        (
+            d.name.clone(),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                d.role.as_deref(),
+                d.execute_gated,
+                d.data_mutation,
+            ),
+        )
+    }));
+}
+
+/// The wire form of a request's verified identity.
+fn wire_caller(c: &contract::CallerIdentity) -> plugin_proto::VerifiedCaller {
+    plugin_proto::VerifiedCaller {
+        user_id: c.user_id.clone(),
+        username: c.username.clone(),
+        role: c.role.clone(),
+        can_mutate: c.can_mutate,
+    }
 }
 
 /// The plugin tool manifest entries for every loaded plugin, in load order.
@@ -929,6 +975,7 @@ pub fn unload_plugin(software: &str) -> usize {
         .flat_map(|p| p.domain_backends.iter().cloned())
         .collect();
     rollback_domain_backends(&removed_backends);
+    dispatch::tool_roles::remove_plugin_tools(removed_tools.iter().map(String::as_str));
     reg.plugins.retain(|p| p.software != software);
     for name in &removed_tools {
         reg.by_tool.remove(name);
@@ -989,7 +1036,8 @@ fn parse_invoke_result(
 pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::Value> {
     if let Some((backing, software)) = backing_for(name) {
         let owned = name.to_string();
-        let result = tokio::task::spawn_blocking(move || backing.invoke(&owned, args))
+        let caller = ctx.verified_caller().map(wire_caller);
+        let result = tokio::task::spawn_blocking(move || backing.invoke(&owned, args, caller))
             .await
             .with_context(|| format!("plugin invoke task for '{name}' panicked"))?;
         return parse_invoke_result(result, name, &software);
@@ -999,15 +1047,20 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
 
 /// Synchronous tool dispatch into the plugin registry. Returns `None` when no
 /// loaded plugin owns `name`, so a sync caller can fall through to the built-in
-/// registry.
+/// registry. `caller` must be the request's verified identity, never the host
+/// operator's.
 ///
 /// Prefer async [`dispatch`] from an async context: this runs the invoke inline,
 /// so for a subprocess plugin it blocks the calling thread on socket I/O (and
 /// must NOT be called from a tokio async worker — the capability host would
 /// `block_on` on it).
-pub fn invoke_plugin(name: &str, args: &sj::Value) -> Option<Result<sj::Value>> {
+pub fn invoke_plugin(
+    name: &str,
+    args: &sj::Value,
+    caller: Option<&contract::CallerIdentity>,
+) -> Option<Result<sj::Value>> {
     let (backing, software) = backing_for(name)?;
-    let result = backing.invoke(name, args.clone());
+    let result = backing.invoke(name, args.clone(), caller.map(wire_caller));
     Some(parse_invoke_result(result, name, &software))
 }
 
@@ -1275,7 +1328,7 @@ mod loader_tests {
         assert!(!is_loaded(sw));
         assert_eq!(unload_plugin(sw), 0);
         assert!(backing_for("loader-test-never-a-tool-xyz").is_none());
-        assert!(invoke_plugin("loader-test-never-a-tool-xyz", &sj::json!({})).is_none());
+        assert!(invoke_plugin("loader-test-never-a-tool-xyz", &sj::json!({}), None).is_none());
     }
 
     #[test]
@@ -1709,6 +1762,9 @@ mod loader_tests {
                 description: "echo the args back".into(),
                 input_schema: sj::json!({ "type": "object" }),
                 output_schema: sj::json!({ "type": "object" }),
+                role: Some("admin".into()),
+                execute_gated: Some(false),
+                data_mutation: Some(true),
             }],
             backends: vec![
                 sj::to_value(BackendDef {
@@ -1761,6 +1817,15 @@ mod loader_tests {
             report.tools
         );
 
+        // The manifest's declared role now gates the tool on every surface.
+        assert_eq!(
+            dispatch::tool_roles::required_role("loaderfakeplugin.ping"),
+            "admin"
+        );
+        assert!(dispatch::tool_roles::is_data_mutation(
+            "loaderfakeplugin.ping"
+        ));
+
         // Registry accessors now see the live plugin.
         assert!(is_loaded("loaderfakeplugin"));
         assert!(
@@ -1786,7 +1851,7 @@ mod loader_tests {
         assert_eq!(out, sj::json!({ "x": 1 }), "plugin echoed the args");
 
         // Sync invoke_plugin routes to the same subprocess.
-        let sync = invoke_plugin("loaderfakeplugin.ping", &sj::json!({ "y": 2 }))
+        let sync = invoke_plugin("loaderfakeplugin.ping", &sj::json!({ "y": 2 }), None)
             .expect("a loaded plugin owns the tool")
             .expect("sync invoke succeeds");
         assert_eq!(sync, sj::json!({ "y": 2 }), "sync path echoed the args");
@@ -1796,8 +1861,13 @@ mod loader_tests {
         assert_eq!(removed, 1, "exactly the one fake plugin was unloaded");
         assert!(!is_loaded("loaderfakeplugin"));
         assert!(
-            invoke_plugin("loaderfakeplugin.ping", &sj::json!({})).is_none(),
+            invoke_plugin("loaderfakeplugin.ping", &sj::json!({}), None).is_none(),
             "tool route freed after unload"
+        );
+        assert_eq!(
+            dispatch::tool_roles::required_role("loaderfakeplugin.ping"),
+            "any",
+            "role policy removed with the plugin"
         );
         assert!(
             !loaded_tool_defs()

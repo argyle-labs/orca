@@ -231,3 +231,21 @@ fn find_leaf<'a>(root: &'a clap::Command, tool: &str) -> Option<&'a clap::Comman
     }
     Some(cur)
 }
+
+/// A plugin's manifest is how the daemon learns its tools' roles (orca#763):
+/// every entry must carry the same role, gate and mutation flags the registry
+/// enforces in-process.
+#[test]
+fn the_plugin_manifest_carries_each_tools_policy() {
+    let manifest: Vec<plugin_toolkit::abi::ToolDef> =
+        serde_json::from_str(&dispatch::tool_manifest_json()).expect("manifest parses");
+    assert!(!manifest.is_empty());
+    let gated = dispatch::execute_gated_names();
+    let mutations = dispatch::data_mutation_names();
+    for e in &manifest {
+        let name = e.name.as_str();
+        assert_eq!(e.role.as_deref(), dispatch::required_role(name), "{name}");
+        assert_eq!(e.execute_gated, Some(gated.contains(&name)), "{name}");
+        assert_eq!(e.data_mutation, Some(mutations.contains(&name)), "{name}");
+    }
+}

@@ -158,6 +158,18 @@ pub fn unit_owns(name: &str) -> bool {
     op_specs().iter().any(|s| s.name == name)
 }
 
+/// `(required_role, data_mutation)` for a live unit op, or `None` if `name` is
+/// not one. Providers declare no per-action roles, so this follows the
+/// `#[orca_tool]` default: reads are `any`, every create/update/upsert/delete
+/// is an `admin` data mutation.
+pub fn unit_policy(name: &str) -> Option<(&'static str, bool)> {
+    let spec = resolve(name)?;
+    Some(match spec.verb {
+        Verb::List | Verb::Detail => ("any", false),
+        Verb::Create | Verb::Update | Verb::Upsert | Verb::Delete => ("admin", true),
+    })
+}
+
 // ── Full ops (with schemas) ─────────────────────────────────────────────────────
 
 /// The full operator-facing op list, with typed schemas. Powers `tools/list`,
@@ -573,12 +585,22 @@ pub fn unit_cli_commands_from(ops: Vec<UnitOp>) -> Vec<clap::Command> {
 
 /// Route a `unit.<kind>.<op>` call back through the contract-side dispatcher.
 /// Returns `None` when `name` isn't a unit op (so the caller falls through).
-pub async fn unit_dispatch(name: &str, args: &Value) -> Option<Result<Value>> {
+/// `caller` is the request's verified identity, handed to the provider on
+/// update/upsert/delete.
+pub async fn unit_dispatch(
+    name: &str,
+    args: &Value,
+    caller: Option<&contract::CallerIdentity>,
+) -> Option<Result<Value>> {
     let spec = resolve(name)?;
-    Some(run(spec, args).await)
+    Some(run(spec, args, caller.cloned()).await)
 }
 
-async fn run(spec: OpSpec, args: &Value) -> Result<Value> {
+async fn run(
+    spec: OpSpec,
+    args: &Value,
+    caller: Option<contract::CallerIdentity>,
+) -> Result<Value> {
     let outcome = match spec.verb {
         Verb::List => {
             let mut query: QueryArgs = args
@@ -605,7 +627,7 @@ async fn run(spec: OpSpec, args: &Value) -> Result<Value> {
         }
         Verb::Delete => {
             let id = parse_id(args)?;
-            unit::dispatch(VerbArgs::Delete(DeleteArgs { id })).await?
+            unit::dispatch(VerbArgs::Delete(DeleteArgs { id, caller })).await?
         }
         Verb::Update => {
             let id = parse_id(args)?;
@@ -618,6 +640,7 @@ async fn run(spec: OpSpec, args: &Value) -> Result<Value> {
                 id,
                 action,
                 payload,
+                caller,
             }))
             .await?
         }
@@ -632,6 +655,7 @@ async fn run(spec: OpSpec, args: &Value) -> Result<Value> {
                 id,
                 action,
                 payload,
+                caller,
             }))
             .await?
         }
@@ -752,7 +776,11 @@ mod tests {
                     }),
                     VerbArgs::Update(u) => VerbOutcome::Action(ActionOutcome {
                         changed: true,
-                        message: format!("spin:{}", u.id.id),
+                        message: format!(
+                            "spin:{}:{}",
+                            u.id.id,
+                            u.caller.map_or("-".to_string(), |c| c.username)
+                        ),
                     }),
                     VerbArgs::Create(c) => VerbOutcome::Action(ActionOutcome {
                         changed: true,
@@ -818,7 +846,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_list_routes_and_scopes_kind() {
         let (name, kind) = setup("list");
-        let out = unit_dispatch(&format!("{kind}.list"), &json!({}))
+        let out = unit_dispatch(&format!("{kind}.list"), &json!({}), None)
             .await
             .expect("is a unit op")
             .expect("ok");
@@ -838,19 +866,83 @@ mod tests {
         let out = unit_dispatch(
             &format!("{kind}.spin"),
             &json!({ "id": uid(&name, &kind, "w1") }),
+            None,
         )
         .await
         .expect("is a unit op")
         .expect("ok");
         assert_eq!(out["changed"], true);
-        assert_eq!(out["message"], "spin:w1");
+        assert_eq!(out["message"], "spin:w1:-");
+        assert!(unit::deregister_provider(&name));
+    }
+
+    #[test]
+    fn mutating_unit_ops_require_admin_and_reads_stay_open() {
+        let (name, kind) = setup("role");
+        for op in ["spin", "forge", "delete"] {
+            let tool = format!("{kind}.{op}");
+            assert_eq!(crate::tool_roles::required_role(&tool), "admin", "{tool}");
+            assert!(crate::tool_roles::is_data_mutation(&tool), "{tool}");
+            for role in ["member", "read", "viewer", ""] {
+                assert!(
+                    !crate::tool_roles::authorize(role, false, "admin", true),
+                    "{role} must be refused {tool}"
+                );
+            }
+        }
+        for op in ["list", "detail"] {
+            assert_eq!(
+                crate::tool_roles::required_role(&format!("{kind}.{op}")),
+                "any"
+            );
+        }
+        assert!(unit::deregister_provider(&name));
+        assert_eq!(
+            crate::tool_roles::required_role(&format!("{kind}.spin")),
+            "any"
+        );
+    }
+
+    #[tokio::test]
+    async fn unit_update_carries_the_verified_caller_never_the_host_operator() {
+        let (name, kind) = setup("caller");
+        let who = |n: &str| contract::CallerIdentity {
+            user_id: format!("u_{n}"),
+            username: n.into(),
+            role: "admin".into(),
+            can_mutate: false,
+        };
+        let cfg = contract::config::Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: contract::config::Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: std::env::temp_dir(),
+            memory_root: std::env::temp_dir(),
+            db_path: std::env::temp_dir().join("unit-surface-test.db"),
+            ports: Default::default(),
+        };
+        let host = contract::ToolCtx::new(Arc::new(cfg)).with_auth(who("host_admin"));
+        let args = json!({ "id": uid(&name, &kind, "w1") });
+        let tool = format!("{kind}.spin");
+
+        let out = crate::dispatch(&tool, args.clone(), &host).await.unwrap();
+        assert_eq!(out["message"], "spin:w1:-");
+
+        let mut per_req = host.clone();
+        per_req.set_verified_caller(Some(who("alice")));
+        let out = crate::dispatch(&tool, args, &per_req).await.unwrap();
+        assert_eq!(out["message"], "spin:w1:alice");
         assert!(unit::deregister_provider(&name));
     }
 
     #[tokio::test]
     async fn dispatch_create_infers_sole_provider() {
         let (name, kind) = setup("crt");
-        let out = unit_dispatch(&format!("{kind}.forge"), &json!({}))
+        let out = unit_dispatch(&format!("{kind}.forge"), &json!({}), None)
             .await
             .expect("is a unit op")
             .expect("ok");
@@ -860,14 +952,22 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_name_returns_none() {
-        assert!(unit_dispatch("not.a.unit.op", &json!({})).await.is_none());
-        assert!(unit_dispatch("ghost_xyz.list", &json!({})).await.is_none());
+        assert!(
+            unit_dispatch("not.a.unit.op", &json!({}), None)
+                .await
+                .is_none()
+        );
+        assert!(
+            unit_dispatch("ghost_xyz.list", &json!({}), None)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn dispatch_update_missing_id_errors() {
         let (name, kind) = setup("mis");
-        let err = unit_dispatch(&format!("{kind}.spin"), &json!({}))
+        let err = unit_dispatch(&format!("{kind}.spin"), &json!({}), None)
             .await
             .expect("is a unit op")
             .expect_err("missing id");
@@ -1005,6 +1105,7 @@ mod tests {
         let out = unit_dispatch(
             &format!("{kind}.detail"),
             &json!({ "id": uid(&name, &kind, "w1") }),
+            None,
         )
         .await
         .expect("is a unit op")
@@ -1019,6 +1120,7 @@ mod tests {
         let err = unit_dispatch(
             &format!("{kind}.detail"),
             &json!({ "id": uid(&name, &kind, "w1"), "query": 42 }),
+            None,
         )
         .await
         .expect("is a unit op")
@@ -1033,6 +1135,7 @@ mod tests {
         let out = unit_dispatch(
             &format!("{kind}.sync"),
             &json!({ "id": uid(&name, &kind, "w1"), "payload": { "size": 3 } }),
+            None,
         )
         .await
         .expect("is a unit op")
@@ -1082,16 +1185,20 @@ mod tests {
             kind: kind.clone(),
         }));
         // No provider ⇒ ambiguous error.
-        let err = unit_dispatch(&format!("{kind}.build"), &json!({}))
+        let err = unit_dispatch(&format!("{kind}.build"), &json!({}), None)
             .await
             .expect("is a unit op")
             .expect_err("ambiguous");
         assert!(err.to_string().contains("multiple providers"), "got: {err}");
         // Explicit provider ⇒ routes cleanly.
-        let out = unit_dispatch(&format!("{kind}.build"), &json!({ "provider": name_a }))
-            .await
-            .expect("is a unit op")
-            .expect("ok");
+        let out = unit_dispatch(
+            &format!("{kind}.build"),
+            &json!({ "provider": name_a }),
+            None,
+        )
+        .await
+        .expect("is a unit op")
+        .expect("ok");
         assert_eq!(out["changed"], false);
         assert!(unit::deregister_provider(&name_a));
         assert!(unit::deregister_provider(&name_b));
