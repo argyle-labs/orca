@@ -210,7 +210,7 @@ pub struct GuestExecArgs {
     pub node: Option<String>,
 }
 
-/// Run an allowlisted command inside a guest, returning its captured
+/// [MUTATES STATE] Run an allowlisted command inside a guest, returning its captured
 /// stdout/stderr/exit code. Routes to the LXC seam or the VM guest-agent backend
 /// by the guest's kind. Admin-only and side-effecting — mirrors the `orca admin
 /// lxc-exec` privilege boundary.
@@ -284,7 +284,7 @@ fn check_contents_parse(path: &str, contents: &[u8], allow_unparseable: bool) ->
     Ok(())
 }
 
-/// Write a file into a guest — the confined `pct push` seam for an LXC, the
+/// [MUTATES STATE] Write a file into a guest — the confined `pct push` seam for an LXC, the
 /// guest-agent `file-write` for a VM. Admin-only and side-effecting — mirrors the
 /// `orca admin lxc-push` privilege boundary; the payload never rides argv.
 #[orca_tool(

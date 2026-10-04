@@ -55,14 +55,16 @@ pub struct InventoryNode {
 /// container, compose stack) that a host reports running but which does not
 /// itself run orca. Claim nodes are synthesized from `system.claims[]`.
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-#[serde(tag = "node_type", rename_all = "snake_case")]
+#[serde(tag = "nodeType", rename_all = "snake_case")]
 pub enum NodeSource {
     Peer(Box<MeshInstance>),
     Claim(Box<ClaimNode>),
 }
 
 /// A non-peer entity synthesized from a host's [`contract::TopologyClaim`].
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ClaimNode {
     /// Synthetic stable id: `claim:{provider}:{provider_instance}:{kind}:{native_id}`.
     pub id: String,
@@ -127,7 +129,9 @@ pub struct ClaimNode {
 
 /// A single control pathway to a synthesized entity: the provider (and which
 /// instance of it) through which the entity can be observed and acted on.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Controller {
     pub provider: String,
     pub provider_instance: String,

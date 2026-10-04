@@ -22,7 +22,9 @@
 //! one path ([[feedback-cli-api-mcp-one-path]]).
 
 use derive::orca_tool;
-use plugin_toolkit::storage::{self, Capability, ExportEntry, MountOutcome, Provider, Usage};
+use plugin_toolkit::storage::{
+    self, ExportEntry, MountOutcome, StorageCapability, StorageProvider, Usage,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -51,7 +53,7 @@ pub struct MountView {
     pub remount_policy: Option<plugin_toolkit::storage::RemountPolicy>,
     /// Last-known liveness, written by the convergence tick — the STORED value,
     /// never a live probe (the read path takes no fan-out).
-    pub health: plugin_toolkit::storage::Health,
+    pub health: plugin_toolkit::storage::MountHealth,
     /// The share's canonical routes (failover candidates), each annotated with
     /// this placement's live state. **The route self-annotates `active`** — there
     /// is no separate `activeRoute` scalar. Derived read-only from the joined
@@ -99,7 +101,7 @@ pub struct MountRoute {
 /// host-LOCAL runtime columns (`health`, `active_route`, `active_options`,
 /// `drift`, `multi_mounted`) are freshly-probed truth. When `false` the placement
 /// belongs to another host whose owner this read could not reach: those columns
-/// are a meaningless default here, so the view reports `Health::Unknown` and
+/// are a meaningless default here, so the view reports `MountHealth::Unknown` and
 /// annotates no active route rather than presenting a peer's state as fact.
 fn mount_view(
     row: &crate::mounts::EndpointRow,
@@ -123,7 +125,7 @@ fn mount_view(
         health: if local {
             row.health
         } else {
-            plugin_toolkit::storage::Health::Unknown
+            plugin_toolkit::storage::MountHealth::Unknown
         },
         routes,
         multi_mounted: local && row.multi_mounted,
@@ -194,7 +196,7 @@ pub struct StorageListArgs {
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageListOutput {
-    pub providers: Vec<Provider>,
+    pub providers: Vec<StorageProvider>,
     /// Opaque cursor for the next page, or absent on the last page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
@@ -331,7 +333,7 @@ async fn discover_live_shares(provider: Option<&str>) -> StorageSharesOutput {
         {
             continue;
         }
-        if !b.supports(Capability::List) {
+        if !b.supports(StorageCapability::List) {
             continue;
         }
         match b.list_shares().await {
@@ -899,7 +901,9 @@ pub struct StorageShareRepairPermsArgs {
 
 /// Result of `storage.share.repair-permissions`. In dry-run it carries the
 /// detected current perms + candidates; on apply it carries what was changed.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct StorageShareRepairPermsOutput {
     pub path: String,
     /// Whether a change was applied (`false` for a dry-run detect).
@@ -943,6 +947,9 @@ fn parse_octal_mode(s: &str) -> anyhow::Result<u32> {
     u32::from_str_radix(digits, 8).map_err(|_| anyhow::anyhow!("invalid octal mode `{s}`"))
 }
 
+/// [MUTATES STATE] Repair a share's permissions. Without `--apply` it detects
+/// mode and ownership drift against sibling shares and changes nothing; with
+/// `--apply` it writes the confirmed mode/owner onto the path.
 // Not intercepted by the GENERIC gate: this verb already implements dry-run by
 // default and its plan is richer than `ExecutionPlan::generic` could be — the
 // generic one carries `detailed: false` and no changes, so gating here would
@@ -1099,7 +1106,7 @@ async fn storage_share_repair_permissions(
     })
 }
 
-/// Edit a share row, or drive a coordinated source op. `action` omitted → CRUD
+/// [MUTATES STATE] Edit a share row, or drive a coordinated source op. `action` omitted → CRUD
 /// PATCH; `drain` / `resume` / `reboot_source` → the coordinated orchestration.
 #[orca_tool(domain = "storage.share", verb = "update")]
 async fn storage_share_update(
@@ -1166,7 +1173,7 @@ async fn storage_exports(
         {
             continue;
         }
-        if !b.supports(Capability::Exports) {
+        if !b.supports(StorageCapability::Exports) {
             continue;
         }
         match b.list_exports().await {
@@ -1384,10 +1391,10 @@ pub fn plan_recovery<'a>(
     plan
 }
 
-/// Whether a registered backend of `name` advertises [`Capability::RecoverStale`].
+/// Whether a registered backend of `name` advertises [`StorageCapability::RecoverStale`].
 fn backend_recover_capable(name: &str) -> bool {
     storage::backend(name)
-        .map(|b| b.capabilities().contains(&Capability::RecoverStale))
+        .map(|b| b.capabilities().contains(&StorageCapability::RecoverStale))
         .unwrap_or(false)
 }
 
@@ -1436,7 +1443,7 @@ pub async fn recover_backends_only<'a>(
 ///
 /// Each managed mount names its owning backend ([`ManagedMount::backend`]); we
 /// group the targets by that name. For every registered backend that advertises
-/// [`Capability::RecoverStale`] we invoke `recover_stale(watch, timeout)` with
+/// [`StorageCapability::RecoverStale`] we invoke `recover_stale(watch, timeout)` with
 /// exactly the targets attributed to it — so the nfs plugin's consumer-aware
 /// bind-mount self-heal (host-healthy + consumer-stale ESTALE guard, restart of
 /// containers pinning a stale superblock) actually runs. Out-of-process plugins
@@ -1535,7 +1542,7 @@ async fn mount_recover(health_timeout_secs: Option<u64>) -> anyhow::Result<Stora
 async fn mount_unmount(provider: &str, target: &str) -> anyhow::Result<MountOutcome> {
     let b = storage::backend(provider)
         .ok_or_else(|| anyhow::anyhow!("no storage backend named `{provider}`"))?;
-    if !b.supports(Capability::Unmount) {
+    if !b.supports(StorageCapability::Unmount) {
         anyhow::bail!("backend `{provider}` does not support unmount");
     }
     Ok(b.unmount(target).await?)
@@ -1829,7 +1836,7 @@ async fn mount_unmount_addressed(
     ))
 }
 
-/// Edit a mount placement or drive one of the mount imperatives. `action`
+/// [MUTATES STATE] Edit a mount placement or drive one of the mount imperatives. `action`
 /// omitted → PATCH the `mounts` placement row (CRUD); `apply` / `unmount` /
 /// `recover` → the autofs-backed imperatives, byte-for-byte unchanged.
 #[orca_tool(domain = "storage.mount", verb = "update")]
@@ -2048,7 +2055,7 @@ pub struct StorageMountCreateArgs {
     pub force: bool,
 }
 
-/// Author a new mount placement. A placement owns no routes — it references a
+/// [MUTATES STATE] Author a new mount placement. A placement owns no routes — it references a
 /// share, whose canonical route set is the failover truth. Errors if the host
 /// already has a placement with the same `name` (`UNIQUE(host, name)`), or — the
 /// multi-mount guard — a placement already targeting the same `(host, target)`,
@@ -2089,7 +2096,7 @@ async fn storage_mount_create(
             .map(parse_remount_policy_arg)
             .transpose()?
             .flatten(),
-        health: plugin_toolkit::storage::Health::Missing,
+        health: plugin_toolkit::storage::MountHealth::Missing,
         active_route: None,
         active_options: None,
         drift: false,
@@ -2130,7 +2137,7 @@ pub struct StorageMountDeleteOutput {
     pub changed: bool,
 }
 
-/// Remove a mount placement by `id`. Idempotent — a missing id reports
+/// [MUTATES STATE] Remove a mount placement by `id`. Idempotent — a missing id reports
 /// `changed: false`.
 #[orca_tool(domain = "storage.mount", verb = "delete")]
 async fn storage_mount_delete(
@@ -2184,7 +2191,7 @@ async fn storage_detail(
     let StorageDetailView::Usage = args.view;
     let b = storage::backend(&args.provider)
         .ok_or_else(|| anyhow::anyhow!("no storage backend named `{}`", args.provider))?;
-    if !b.supports(Capability::Usage) {
+    if !b.supports(StorageCapability::Usage) {
         anyhow::bail!("backend `{}` does not support usage", args.provider);
     }
     Ok(b.usage(&args.id).await?)
@@ -2629,7 +2636,7 @@ mod tests {
             host: "h1".into(),
             target: "/mnt/data".into(),
             remount_policy: None,
-            health: plugin_toolkit::storage::Health::Ok,
+            health: plugin_toolkit::storage::MountHealth::Ok,
             active_route: active_route.map(str::to_string),
             active_options: active_options.map(str::to_string),
             drift,
@@ -2709,14 +2716,17 @@ mod tests {
 
         // Projected locally (owner) → the stored liveness is truth.
         let local = mount_view(&row, Some(&share), true);
-        assert_eq!(local.health, plugin_toolkit::storage::Health::Ok);
+        assert_eq!(local.health, plugin_toolkit::storage::MountHealth::Ok);
         assert!(local.multi_mounted);
         assert!(local.routes.iter().any(|r| r.active));
 
         // Projected as a foreign placement → this daemon has not observed it, so
         // no host-local column is presented as fact.
         let foreign = mount_view(&row, Some(&share), false);
-        assert_eq!(foreign.health, plugin_toolkit::storage::Health::Unknown);
+        assert_eq!(
+            foreign.health,
+            plugin_toolkit::storage::MountHealth::Unknown
+        );
         assert!(!foreign.multi_mounted);
         assert!(
             foreign
@@ -3535,7 +3545,7 @@ mod tests {
             host: host.into(),
             target: target.into(),
             remount_policy: None,
-            health: plugin_toolkit::storage::Health::Ok,
+            health: plugin_toolkit::storage::MountHealth::Ok,
             active_route: None,
             active_options: None,
             drift: false,
@@ -3774,7 +3784,7 @@ mod tests {
             host: crate::host_identity::machine_id().to_string(),
             target: "/mnt/data".into(),
             remount_policy: None,
-            health: plugin_toolkit::storage::Health::Ok,
+            health: plugin_toolkit::storage::MountHealth::Ok,
             active_route: None,
             active_options: None,
             drift: false,
@@ -3905,7 +3915,7 @@ mod tests {
                 host: "h1".into(),
                 target: "/mnt/a".into(),
                 remount_policy: None,
-                health: plugin_toolkit::storage::Health::Ok,
+                health: plugin_toolkit::storage::MountHealth::Ok,
                 active_route: None,
                 active_options: None,
                 drift: false,
@@ -4589,7 +4599,7 @@ mod tests {
 
     struct FakeBackend {
         name: String,
-        caps: Vec<plugin_toolkit::storage::Capability>,
+        caps: Vec<plugin_toolkit::storage::StorageCapability>,
     }
 
     #[derive::orca_async]
@@ -4600,7 +4610,7 @@ mod tests {
         fn kind(&self) -> plugin_toolkit::storage::StorageKind {
             plugin_toolkit::storage::StorageKind::NetworkShare
         }
-        fn capabilities(&self) -> Vec<plugin_toolkit::storage::Capability> {
+        fn capabilities(&self) -> Vec<plugin_toolkit::storage::StorageCapability> {
             self.caps.clone()
         }
         fn endpoint(&self) -> String {
@@ -4674,7 +4684,7 @@ mod tests {
     /// closure returns its value — we compute-then-assert in each test body).
     fn with_backend<T>(
         name: &str,
-        caps: &[plugin_toolkit::storage::Capability],
+        caps: &[plugin_toolkit::storage::StorageCapability],
         f: impl FnOnce() -> T,
     ) -> T {
         plugin_toolkit::storage::register_backend(std::sync::Arc::new(FakeBackend {
@@ -4689,12 +4699,16 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn storage_list_surfaces_registered_provider() {
-        use plugin_toolkit::storage::Capability;
+        use plugin_toolkit::storage::StorageCapability;
         let ctx = test_ctx();
-        let out = with_backend("fake-list", &[Capability::List, Capability::Usage], || {
-            rt().block_on(storage_list(StorageListArgs::default(), &ctx))
-                .expect("list ok")
-        });
+        let out = with_backend(
+            "fake-list",
+            &[StorageCapability::List, StorageCapability::Usage],
+            || {
+                rt().block_on(storage_list(StorageListArgs::default(), &ctx))
+                    .expect("list ok")
+            },
+        );
         assert_eq!(out.providers.len(), 1);
         assert_eq!(out.providers[0].name, "fake-list");
         assert_eq!(out.providers[0].endpoint, "fake://fake-list");
@@ -4704,11 +4718,11 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn storage_detail_reports_usage_from_backend() {
-        use plugin_toolkit::storage::Capability;
+        use plugin_toolkit::storage::StorageCapability;
         let ctx = test_ctx();
         let args: StorageDetailArgs =
             serde_json::from_str(r#"{"provider":"fake-usage","id":"vol-1"}"#).unwrap();
-        let usage = with_backend("fake-usage", &[Capability::Usage], || {
+        let usage = with_backend("fake-usage", &[StorageCapability::Usage], || {
             rt().block_on(storage_detail(args, &ctx)).expect("usage ok")
         });
         assert_eq!(usage.id, "vol-1");
@@ -4720,11 +4734,11 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn storage_detail_backend_without_usage_capability_errors() {
-        use plugin_toolkit::storage::Capability;
+        use plugin_toolkit::storage::StorageCapability;
         let ctx = test_ctx();
         let args: StorageDetailArgs =
             serde_json::from_str(r#"{"provider":"fake-nousage","id":"vol-1"}"#).unwrap();
-        let err = with_backend("fake-nousage", &[Capability::List], || {
+        let err = with_backend("fake-nousage", &[StorageCapability::List], || {
             rt().block_on(storage_detail(args, &ctx)).unwrap_err()
         });
         assert!(err.to_string().contains("does not support usage"), "{err}");
@@ -4733,9 +4747,9 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn storage_exports_aggregates_backend_entries() {
-        use plugin_toolkit::storage::Capability;
+        use plugin_toolkit::storage::StorageCapability;
         let ctx = test_ctx();
-        let out = with_backend("fake-exp", &[Capability::Exports], || {
+        let out = with_backend("fake-exp", &[StorageCapability::Exports], || {
             rt().block_on(storage_exports(StorageExportsArgs::default(), &ctx))
                 .expect("exports ok")
         });
@@ -4750,11 +4764,11 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn storage_exports_provider_filter_excludes_other_backends() {
-        use plugin_toolkit::storage::Capability;
+        use plugin_toolkit::storage::StorageCapability;
         let ctx = test_ctx();
         // Filter names a different backend than the one registered → skipped.
         let args: StorageExportsArgs = serde_json::from_str(r#"{"provider":"other"}"#).unwrap();
-        let out = with_backend("fake-exp2", &[Capability::Exports], || {
+        let out = with_backend("fake-exp2", &[StorageCapability::Exports], || {
             rt().block_on(storage_exports(args, &ctx))
                 .expect("exports ok")
         });
@@ -4765,9 +4779,9 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn storage_exports_skips_backend_without_exports_capability() {
-        use plugin_toolkit::storage::Capability;
+        use plugin_toolkit::storage::StorageCapability;
         let ctx = test_ctx();
-        let out = with_backend("fake-noexp", &[Capability::List], || {
+        let out = with_backend("fake-noexp", &[StorageCapability::List], || {
             rt().block_on(storage_exports(StorageExportsArgs::default(), &ctx))
                 .expect("exports ok")
         });
@@ -4779,7 +4793,7 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn discover_live_shares_joins_configured_sources_from_store() {
-        use plugin_toolkit::storage::Capability;
+        use plugin_toolkit::storage::StorageCapability;
         with_db("discover_live_join.db", || {
             let mm = crate::managed_mounts::ManagedMount {
                 name: "/mnt/data".into(),
@@ -4796,7 +4810,7 @@ mod tests {
                 enabled: true,
             };
             crate::managed_mounts::endpoint_db::insert(&mm).expect("insert managed mount");
-            let out = with_backend("fake-live", &[Capability::List], || {
+            let out = with_backend("fake-live", &[StorageCapability::List], || {
                 rt().block_on(discover_live_shares(None))
             });
             assert_eq!(out.shares.len(), 1);
@@ -4817,8 +4831,8 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn mount_unmount_returns_backend_outcome() {
-        use plugin_toolkit::storage::Capability;
-        let outcome = with_backend("fake-umount", &[Capability::Unmount], || {
+        use plugin_toolkit::storage::StorageCapability;
+        let outcome = with_backend("fake-umount", &[StorageCapability::Unmount], || {
             rt().block_on(mount_unmount("fake-umount", "/mnt/gone"))
                 .expect("unmount ok")
         });
@@ -4830,8 +4844,8 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn mount_unmount_backend_without_capability_errors() {
-        use plugin_toolkit::storage::Capability;
-        let err = with_backend("fake-noumount", &[Capability::List], || {
+        use plugin_toolkit::storage::StorageCapability;
+        let err = with_backend("fake-noumount", &[StorageCapability::List], || {
             rt().block_on(mount_unmount("fake-noumount", "/mnt/gone"))
                 .unwrap_err()
         });
@@ -4844,9 +4858,9 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn backend_recover_capable_true_for_registered_capable_backend() {
-        use plugin_toolkit::storage::Capability;
+        use plugin_toolkit::storage::StorageCapability;
         let (capable, incapable) =
-            with_backend("fake-recover", &[Capability::RecoverStale], || {
+            with_backend("fake-recover", &[StorageCapability::RecoverStale], || {
                 (
                     backend_recover_capable("fake-recover"),
                     backend_recover_capable("nope"),
@@ -4859,8 +4873,8 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn recover_backends_only_runs_capable_backend_and_merges_outcome() {
-        use plugin_toolkit::storage::Capability;
-        let merged = with_backend("fake-recover2", &[Capability::RecoverStale], || {
+        use plugin_toolkit::storage::StorageCapability;
+        let merged = with_backend("fake-recover2", &[StorageCapability::RecoverStale], || {
             rt().block_on(recover_backends_only(
                 std::iter::once(("fake-recover2", "/mnt/data")),
                 std::time::Duration::from_secs(1),
@@ -4876,9 +4890,9 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn recover_via_backends_uses_capable_backend_no_autofs_fallback() {
-        use plugin_toolkit::storage::Capability;
+        use plugin_toolkit::storage::StorageCapability;
         let mounts = vec![mm("/mnt/data", "fake-recover3")];
-        let merged = with_backend("fake-recover3", &[Capability::RecoverStale], || {
+        let merged = with_backend("fake-recover3", &[StorageCapability::RecoverStale], || {
             rt().block_on(recover_via_backends(
                 &mounts,
                 std::time::Duration::from_secs(1),
@@ -4894,7 +4908,7 @@ mod tests {
     #[test]
     #[serial_test::serial(storage_registry)]
     fn mount_recover_folds_backend_remounted_into_flat_surface() {
-        use plugin_toolkit::storage::Capability;
+        use plugin_toolkit::storage::StorageCapability;
         with_db("mount_recover_backend.db", || {
             let m = crate::managed_mounts::ManagedMount {
                 name: "/mnt/data".into(),
@@ -4911,7 +4925,7 @@ mod tests {
                 enabled: true,
             };
             crate::managed_mounts::endpoint_db::insert(&m).expect("insert managed mount");
-            let out = with_backend("fake-recover4", &[Capability::RecoverStale], || {
+            let out = with_backend("fake-recover4", &[StorageCapability::RecoverStale], || {
                 rt().block_on(mount_recover(Some(1))).expect("recover ok")
             });
             // `remounted` is appended onto `recovered`, `still_missing` onto

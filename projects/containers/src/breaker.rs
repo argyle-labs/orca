@@ -154,7 +154,11 @@ pub enum BreakerStatus {
 /// the operator needs to understand the trip without re-running the
 /// observation. No `Other(String)` escape hatch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum HoldReason {
     /// docker `RestartCount` jumped by >3 inside the 5-minute window —
     /// the runtime itself is throwing the container into a loop.

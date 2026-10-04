@@ -75,6 +75,7 @@ pub fn inject_tool_paths(spec: &mut Value) {
 
     let mut new_paths: Map<String, Value> = Map::new();
     let mut hoisted_defs: Map<String, Value> = Map::new();
+    let mut def_collisions: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut tags_seen = std::collections::BTreeSet::<String>::new();
 
     for entry in inventory::iter::<OpenApiToolRegistration> {
@@ -84,8 +85,8 @@ pub fn inject_tool_paths(spec: &mut Value) {
         let domain = tag_for(entry.domain, entry.name);
         tags_seen.insert(domain.clone());
 
-        hoist_defs(&mut args_schema, &mut hoisted_defs);
-        hoist_defs(&mut output_schema, &mut hoisted_defs);
+        hoist_defs(&mut args_schema, &mut hoisted_defs, &mut def_collisions);
+        hoist_defs(&mut output_schema, &mut hoisted_defs, &mut def_collisions);
         rewrite_refs(&mut args_schema);
         rewrite_refs(&mut output_schema);
         wrap_ref_siblings(&mut args_schema);
@@ -183,12 +184,10 @@ pub fn inject_tool_paths(spec: &mut Value) {
             .entry("schemas".to_string())
             .or_insert_with(|| Value::Object(Map::new()));
         if let Some(schemas_obj) = schemas.as_object_mut() {
-            for (k, v) in hoisted_defs {
-                // Don't clobber utoipa-registered schemas.
-                schemas_obj.entry(k).or_insert(v);
-            }
+            merge_schemas(schemas_obj, hoisted_defs, &mut def_collisions);
         }
     }
+    report_collisions("tool", &def_collisions);
 
     // `x-tagGroups` buys exactly one nav level above tags, so root domain →
     // group, two-segment domain → tag. Group names are title-cased (`storage`
@@ -238,6 +237,7 @@ pub fn inject_unit_paths(spec: &mut Value) {
 
     let mut new_paths: Map<String, Value> = Map::new();
     let mut hoisted_defs: Map<String, Value> = Map::new();
+    let mut def_collisions: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut kinds_seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for op in ops {
@@ -247,8 +247,8 @@ pub fn inject_unit_paths(spec: &mut Value) {
         let mut output_schema = op.output_schema;
         kinds_seen.insert(kind.clone());
 
-        hoist_defs(&mut args_schema, &mut hoisted_defs);
-        hoist_defs(&mut output_schema, &mut hoisted_defs);
+        hoist_defs(&mut args_schema, &mut hoisted_defs, &mut def_collisions);
+        hoist_defs(&mut output_schema, &mut hoisted_defs, &mut def_collisions);
         rewrite_refs(&mut args_schema);
         rewrite_refs(&mut output_schema);
         wrap_ref_siblings(&mut args_schema);
@@ -319,11 +319,10 @@ pub fn inject_unit_paths(spec: &mut Value) {
             .entry("schemas".to_string())
             .or_insert_with(|| Value::Object(Map::new()));
         if let Some(schemas_obj) = schemas.as_object_mut() {
-            for (k, v) in hoisted_defs {
-                schemas_obj.entry(k).or_insert(v);
-            }
+            merge_schemas(schemas_obj, hoisted_defs, &mut def_collisions);
         }
     }
+    report_collisions("unit", &def_collisions);
 
     if !kinds_seen.is_empty() {
         let tags = obj
@@ -416,15 +415,89 @@ fn tool_error_response(desc: &str) -> Value {
 
 /// Pull `$defs` out of `schema` into the shared `out` map. Keeps schemars'
 /// definition names (they're already PascalCase and stable).
-fn hoist_defs(schema: &mut Value, out: &mut Map<String, Value>) {
+///
+/// Two distinct Rust types with the same ident (`storage::Provider` vs
+/// `media::Provider`) land on one `$defs` key. This used to be an
+/// `or_insert`, which kept whichever arrived first and dropped the other
+/// silently — so one of the two types was described by the other's schema, and
+/// *which* one depended on `inventory` link order, i.e. it moved between
+/// builds. Names that clash are recorded in `collisions` so the caller can
+/// fail instead of emitting a quietly-wrong spec.
+fn hoist_defs(
+    schema: &mut Value,
+    out: &mut Map<String, Value>,
+    collisions: &mut std::collections::BTreeSet<String>,
+) {
     let Some(obj) = schema.as_object_mut() else {
         return;
     };
     if let Some(Value::Object(defs)) = obj.remove("$defs") {
         for (name, def) in defs {
-            out.entry(name).or_insert(def);
+            match out.get(&name) {
+                Some(existing) if *existing != def => {
+                    collisions.insert(name);
+                }
+                Some(_) => {}
+                None => {
+                    out.insert(name, def);
+                }
+            }
         }
     }
+}
+
+/// Merge hoisted defs into `components.schemas`. An existing entry (a
+/// utoipa-registered schema, or one an earlier injector placed) is never
+/// clobbered; a different body under the same name is recorded instead.
+fn merge_schemas(
+    schemas: &mut Map<String, Value>,
+    defs: Map<String, Value>,
+    collisions: &mut std::collections::BTreeSet<String>,
+) {
+    for (name, def) in defs {
+        match schemas.get(&name) {
+            Some(existing) if *existing != def => {
+                collisions.insert(name);
+            }
+            Some(_) => {}
+            None => {
+                schemas.insert(name, def);
+            }
+        }
+    }
+}
+
+/// Collisions are logged, not asserted: the unit surface comes from the
+/// runtime plugin catalog, so a panic here would take down `/openapi.json`
+/// over a plugin's type names. The static tool surface is held to zero by
+/// `inventory-tests`' `no_duplicate_schema_names_in_the_spec`.
+fn report_collisions(surface: &str, collisions: &std::collections::BTreeSet<String>) {
+    if !collisions.is_empty() {
+        tracing::warn!(
+            surface,
+            ?collisions,
+            "OpenAPI schema names claimed by two different types; the spec \
+             describes one of each pair with the other's schema"
+        );
+    }
+}
+
+/// Schema names that two **different** type bodies both claim across the whole
+/// `#[orca_tool]` surface. Non-empty means the generated spec misdescribes at
+/// least one type; the fix is to give one side a distinct name (a real rename
+/// or `#[schemars(rename = "…")]`), never to pick a winner here.
+///
+/// Exposed so a test in a crate that actually links the tool buckets can assert
+/// it is empty — `dispatch`'s own test binary links none, so the walk would be
+/// vacuous here.
+pub fn colliding_schema_names() -> Vec<String> {
+    let mut defs: Map<String, Value> = Map::new();
+    let mut collisions = std::collections::BTreeSet::new();
+    for entry in inventory::iter::<OpenApiToolRegistration> {
+        hoist_defs(&mut (entry.args_schema)(), &mut defs, &mut collisions);
+        hoist_defs(&mut (entry.output_schema)(), &mut defs, &mut collisions);
+    }
+    collisions.into_iter().collect()
 }
 
 /// Rewrite all `$ref: "#/$defs/X"` → `$ref: "#/components/schemas/X"`,
@@ -669,9 +742,43 @@ mod tests {
     fn hoist_defs_moves_and_clears() {
         let mut schema = json!({ "type": "object", "$defs": { "Foo": { "type": "string" } } });
         let mut out = Map::new();
-        hoist_defs(&mut schema, &mut out);
+        let mut collisions = std::collections::BTreeSet::new();
+        hoist_defs(&mut schema, &mut out, &mut collisions);
         assert!(schema.get("$defs").is_none());
         assert_eq!(out.get("Foo").unwrap(), &json!({ "type": "string" }));
+    }
+
+    #[test]
+    fn hoist_defs_reports_a_name_claimed_by_two_different_bodies() {
+        // The bug this guards: `or_insert` kept the first body and dropped the
+        // second without a word, so one of the two types shipped the other's
+        // schema — and which one won moved with `inventory` link order.
+        let mut a = json!({ "$defs": { "Dup": { "type": "string" }, "Same": { "type": "null" } } });
+        let mut b =
+            json!({ "$defs": { "Dup": { "type": "integer" }, "Same": { "type": "null" } } });
+        let mut out = Map::new();
+        let mut collisions = std::collections::BTreeSet::new();
+        hoist_defs(&mut a, &mut out, &mut collisions);
+        hoist_defs(&mut b, &mut out, &mut collisions);
+        assert_eq!(collisions.iter().cloned().collect::<Vec<_>>(), ["Dup"]);
+        // An identical repeat of the same type is not a collision.
+        assert_eq!(out.get("Same").unwrap(), &json!({ "type": "null" }));
+    }
+
+    #[test]
+    fn merge_schemas_keeps_the_existing_body_and_records_a_clash() {
+        let mut schemas = Map::new();
+        schemas.insert("Dup".into(), json!({ "type": "string" }));
+        schemas.insert("Same".into(), json!({ "type": "null" }));
+        let mut defs = Map::new();
+        defs.insert("Dup".into(), json!({ "type": "integer" }));
+        defs.insert("Same".into(), json!({ "type": "null" }));
+        defs.insert("New".into(), json!({ "type": "boolean" }));
+        let mut collisions = std::collections::BTreeSet::new();
+        merge_schemas(&mut schemas, defs, &mut collisions);
+        assert_eq!(collisions.iter().cloned().collect::<Vec<_>>(), ["Dup"]);
+        assert_eq!(schemas["Dup"], json!({ "type": "string" }));
+        assert_eq!(schemas["New"], json!({ "type": "boolean" }));
     }
 
     #[test]

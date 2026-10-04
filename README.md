@@ -155,7 +155,7 @@ Build and run from a checkout:
 git clone https://github.com/argyle-labs/orca && cd orca
 make init      # verify/install build prerequisites (rust, node, etc.)
 make install   # install git hooks + toolchain + cargo tooling (cargo-watch, cargo-audit, sccache)
-make dev       # hot-reload dev mode: Rust API on :12000 + peacock Vite dev server on :12001
+make dev       # hot-reload dev mode: Rust API on :12000 + peacock Vite dev server on :12004
 ```
 
 `make build` produces a release binary without installing it; `make deploy`
@@ -200,7 +200,7 @@ Contribution workflow, PR acceptance criteria, and the coverage policy:
 |--------|-------------|
 | `make init` | Verify/install build prerequisites |
 | `make install` | Install git hooks + toolchain + cargo tooling |
-| `make dev` | Hot-reload dev mode (dev.sh: Rust API :12000 + peacock Vite dev server :12001) |
+| `make dev` | Hot-reload dev mode (dev.sh: Rust API :12000 + peacock Vite dev server :12004) |
 | `make build` | Build the release binary (no install) |
 | `make deploy` | Build, install to `~/.local/bin/orca`, install the daemon |
 | `make run` | Run the installed binary with 1Password secrets |

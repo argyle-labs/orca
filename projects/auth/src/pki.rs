@@ -23,14 +23,18 @@ pub enum PkiKind {
     Cert,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct PkiCertEntry {
     pub plugin_id: String,
     pub cert_path: String,
 }
 
+#[derive::snake_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
+#[serde(rename_all = "camelCase")]
 pub struct PkiCreateArgs {
     /// `ca` (default) initializes the orca CA + server cert; `cert` issues a plugin cert.
     #[arg(long, default_value = "ca")]
@@ -76,7 +80,9 @@ pub struct PkiListArgs {
     pub cursor: Option<String>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct PkiListOutput {
     pub certs: Vec<PkiCertEntry>,
     /// Opaque cursor for the next page, or absent on the last page.

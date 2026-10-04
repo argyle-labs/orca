@@ -23,7 +23,7 @@
 //! expresses an `id` PK with a per-host `name` label. The mount tool surface is
 //! hand-written next to `storage.mount.update` in `storage_tools.rs`.
 
-use plugin_toolkit::storage::{Health, RemountPolicy};
+use plugin_toolkit::storage::{MountHealth, RemountPolicy};
 
 /// Table name — the mesh-replicated mount-placement store.
 pub const TABLE: &str = "mounts";
@@ -148,7 +148,7 @@ pub struct EndpointRow {
     /// own placements without a live probe; for a placement owned by another host
     /// it reads that owner's value live over the mesh, and reports `Unknown` when
     /// the owner can't be reached — a non-owner's copy of this column is not truth.
-    pub health: Health,
+    pub health: MountHealth,
     /// The source (`host:/export`) the convergence tick last mounted this
     /// placement from, when known. `None` before the first successful mount.
     pub active_route: Option<String>,
@@ -256,7 +256,7 @@ pub mod endpoint_db {
                 plugin_toolkit::serde_json::from_value(plugin_toolkit::serde_json::Value::String(
                     raw,
                 ))
-                .unwrap_or(plugin_toolkit::storage::Health::Missing)
+                .unwrap_or(plugin_toolkit::storage::MountHealth::Missing)
             },
             active_route: field_from_row(m, "active_route")?,
             active_options: field_from_row(m, "active_options")?,

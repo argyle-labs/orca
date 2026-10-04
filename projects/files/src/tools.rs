@@ -58,7 +58,9 @@ pub struct FsSearchHit {
     pub matches: Vec<FsSearchMatch>,
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct FsRootEntry {
     pub name: String,
     pub path: String,

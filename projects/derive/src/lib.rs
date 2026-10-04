@@ -62,6 +62,7 @@ mod orca_async;
 mod plugin_error;
 #[cfg(not(test))]
 mod plugin_struct;
+mod snake_aliases;
 
 /// `#[orca_async]` — orca's native sugar for async traits.
 ///
@@ -131,6 +132,16 @@ pub fn endpoint_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
+}
+
+/// `#[snake_aliases]` — on a `rename_all = "camelCase"` struct, also accept
+/// every multi-word field's snake_case spelling on decode. Place it ABOVE
+/// `#[derive(...)]`. See `snake_aliases.rs`.
+#[cfg(not(test))]
+#[proc_macro_attribute]
+pub fn snake_aliases(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as syn::DeriveInput);
+    snake_aliases::expand(item).into()
 }
 
 /// `#[orca_struct]` — inject the standard plugin-author derive set with

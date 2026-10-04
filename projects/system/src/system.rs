@@ -38,7 +38,9 @@ use derive::orca_tool;
 /// Storage footprint snapshot — surfaces orca.db and log-dir sizes so
 /// operators can spot bloat. Per project_db_size_and_retention: orca.db
 /// stays small, logs go to files with size+retention.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct StorageReport {
     /// Size of `orca.db` (including SQLite WAL/SHM if alongside) in bytes.
     pub db_size_bytes: u64,
@@ -59,7 +61,9 @@ pub struct StorageReport {
 /// actually read — the heavy host facts (hardware, processes, interfaces,
 /// history, charts) live on `system.info.detail` and are never dialed on a
 /// read path. Projected from a collected `SystemInfoReport` via `From`.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct TopologyFacts {
     /// OS hostname (`System::host_name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,8 +127,9 @@ impl From<&SystemInfoReport> for TopologyFacts {
     }
 }
 
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub struct SystemStatusReport {
     pub binary: BinaryStatus,
     pub claude_md: ClaudeMdStatus,
@@ -613,7 +618,9 @@ async fn system_summary(ctx: &contract::ToolCtx) -> anyhow::Result<SystemStatusR
 
 /// One registered web-route path and who serves it. Surfaces contested paths so
 /// the user can see e.g. "path `/` is served by peacock, contested by otherui".
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct WebRouteStatus {
     /// The exact route path.
     pub path: String,
@@ -647,12 +654,13 @@ pub struct WebRouteArgs {
     pub owner: Option<String>,
 }
 
-/// [MUTATES STATE when `--path`+`--owner` given] The single web-route ownership
-/// tool. Read-only (omit args) it reports every registered path, its active
-/// owner, and any contenders. With `--path`+`--owner` it makes that provider the
-/// active owner of that exact path and persists the choice; a bad selection is
-/// refused non-fatally (the incumbent keeps serving). Mirrors how a contested
-/// `/` is resolved: the user picks a different UI plugin here.
+/// [MUTATES STATE] The single web-route ownership tool. Mutates only when
+/// `--path` and `--owner` are both given: it makes that provider the active
+/// owner of that exact path and persists the choice; a bad selection is refused
+/// non-fatally (the incumbent keeps serving). Omit both args and it is a pure
+/// read, reporting every registered path, its active owner, and any contenders.
+/// Mirrors how a contested `/` is resolved: the user picks a different UI plugin
+/// here.
 #[orca_tool(domain = "web", verb = "update", refresh_runtime = true)]
 async fn web_update(
     args: WebRouteArgs,
@@ -1000,7 +1008,7 @@ mod tests {
         };
         let json = serde_json::to_value(&r).unwrap();
         assert!(json.get("last_retention_sweep_at").is_none());
-        assert_eq!(json["db_size_bytes"], 1);
+        assert_eq!(json["dbSizeBytes"], 1);
     }
 
     #[test]
@@ -1013,7 +1021,7 @@ mod tests {
             last_retention_sweep_at: Some(1700000000),
         };
         let json = serde_json::to_value(&r).unwrap();
-        assert_eq!(json["last_retention_sweep_at"], 1700000000_i64);
+        assert_eq!(json["lastRetentionSweepAt"], 1700000000_i64);
     }
 
     #[test]

@@ -38,7 +38,9 @@ pub struct PermInfo {
 /// A candidate mode inferred from reference peers — "N comparable shares use this
 /// mode, here are examples". The repair presents these, ranked by evidence, for a
 /// human to confirm; it is never applied automatically.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct PermCandidate {
     /// The mode the reference peers carry.
     pub mode: u32,
@@ -175,7 +177,9 @@ pub fn rank_candidates(
 /// datastore had correct modes throughout and one directory owned by 99:100
 /// instead of 34:34, so every prune unlink failed with `Permission denied` while
 /// mode-only detection reported nothing wrong (#620).
+#[derive::snake_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct OwnerCandidate {
     /// Owning uid the reference peers carry.
     pub uid: u32,

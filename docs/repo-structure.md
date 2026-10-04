@@ -134,7 +134,7 @@ make install    # git hooks + toolchain + cargo tooling (cargo-watch, cargo-audi
 The edit / build / run loop:
 
 ```sh
-make dev        # hot-reload: Rust API :12000 + peacock Vite dev server :12001, secrets from 1Password
+make dev        # hot-reload: Rust API :12000 + peacock Vite dev server :12004, secrets from 1Password
 make build      # build the release binary (no install)
 make deploy     # build, install to ~/.local/bin/orca, install the system daemon
 make run        # run the installed binary with 1Password secrets

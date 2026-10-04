@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 /// is optional so the same shape works on macOS, Linux, and (eventually)
 /// Windows — a collector failure leaves the field `None` rather than
 /// breaking the whole report.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemInfoReport {
     // ── OS ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -246,7 +248,9 @@ pub struct NetIfaceDto {
 
 /// One process in the host's top-N-by-CPU snapshot. Names are basenames
 /// (e.g. `plex-media-server`), not full argv. Memory is RSS in MiB.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct TopProcess {
     pub pid: u32,
     pub name: String,
@@ -260,7 +264,9 @@ pub struct TopProcess {
 
 /// One sample in the per-host rolling history ring. Written every refresh
 /// tick by the daemon, read back as `SystemInfoReport.history`.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemHistoryPoint {
     /// Unix seconds at sample time.
     pub ts: i64,
@@ -293,7 +299,9 @@ pub struct SystemHistoryPoint {
 
 /// One GPU's reading inside a `SystemHistoryPoint`. Matched to a live
 /// `GpuInfo` by `name` (driver-stable across ticks).
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct GpuPoint {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -307,7 +315,9 @@ pub struct GpuPoint {
 }
 
 /// One GPU detected on the host.
+#[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct GpuInfo {
     /// Display name from driver (e.g. `NVIDIA GeForce RTX 4090`).
     pub name: String,
