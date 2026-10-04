@@ -153,6 +153,7 @@ pub enum BreakerStatus {
 /// Closed enum of trip reasons. Each variant carries the numeric context
 /// the operator needs to understand the trip without re-running the
 /// observation. No `Other(String)` escape hatch.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -939,6 +940,35 @@ mod tests {
     use crate::{ContainerMount, ContainerPort, ContainerState, RestartPolicy};
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn a_breaker_record_persisted_with_snake_hold_reason_still_decodes() {
+        // `breaker_state.json` written before the camelCase rename. A decode
+        // failure here makes the reconciler treat the container as Proceed,
+        // which silently disables the crash-loop breaker.
+        let json = r#"{"host":"h","runtime":"docker","container_id":"c",
+            "last_orca_start_at":null,"restart_count_snapshot":null,"recent_starts":[],
+            "status":"held",
+            "held_reason":{"kind":"restart_storm_in5_min","count":4,"window_start":"2026-10-03T00:00:00Z"},
+            "held_since":"2026-10-03T00:00:00Z","notified_at":null}"#;
+        let r: BreakerRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(r.status, BreakerStatus::Held);
+        match r.held_reason {
+            Some(HoldReason::RestartStormIn5Min { count, .. }) => assert_eq!(count, 4),
+            other => panic!("unexpected {other:?}"),
+        }
+        let fast: HoldReason = serde_json::from_str(
+            r#"{"kind":"fast_reexit_after_orca_start","within_secs":5,"exit_code":1}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            fast,
+            HoldReason::FastReexitAfterOrcaStart {
+                within_secs: 5,
+                exit_code: 1
+            }
+        );
+    }
 
     // ── Fixtures ──────────────────────────────────────────────────
 

@@ -134,14 +134,25 @@ pub fn endpoint_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// `#[snake_aliases]` — on a `rename_all = "camelCase"` struct, also accept
-/// every multi-word field's snake_case spelling on decode. Place it ABOVE
+/// `#[snake_aliases]` — on a `rename_all = "camelCase"` struct (or an enum with
+/// `rename_all_fields = "camelCase"`), also accept every multi-word field's
+/// snake_case spelling on decode. Place it ABOVE
 /// `#[derive(...)]`. See `snake_aliases.rs`.
 #[cfg(not(test))]
 #[proc_macro_attribute]
 pub fn snake_aliases(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as syn::DeriveInput);
-    snake_aliases::expand(item).into()
+    snake_aliases::expand(item, snake_aliases::Case::Snake).into()
+}
+
+/// `#[camel_aliases]` — on a type whose wire form stays snake_case for one
+/// more release, also accept every multi-word field's camelCase spelling.
+/// Place it ABOVE `#[derive(...)]`. See `snake_aliases.rs`.
+#[cfg(not(test))]
+#[proc_macro_attribute]
+pub fn camel_aliases(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as syn::DeriveInput);
+    snake_aliases::expand(item, snake_aliases::Case::Camel).into()
 }
 
 /// `#[orca_struct]` — inject the standard plugin-author derive set with
