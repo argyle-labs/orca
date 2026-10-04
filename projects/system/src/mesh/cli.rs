@@ -964,6 +964,11 @@ pub async fn cmd_mesh_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {
 
 use utils::time::now_secs_since_epoch as now_secs;
 
+/// Caps a whole dial (connect, TLS handshake, request, response). The per-step
+/// timeouts leave the handshake unbounded, so a peer that accepts TCP and then
+/// stalls would otherwise hold the caller forever.
+const DIAL_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Dial a paired peer with our mesh client cert. Used by post-join methods
 /// (notify-trust, has-ca-key, push-ca-key, peer-leaving).
 pub async fn call_mesh_method_pub(
@@ -1015,20 +1020,25 @@ async fn dial_mesh_mtls(
 ) -> Result<serde_json::Value> {
     let connector = TlsConnector::from(Arc::new(client_config));
     let target = format!("{host}:{port}");
-    let tcp = TcpStream::connect(&target)
+    let exchange = async {
+        let tcp = TcpStream::connect(&target)
+            .await
+            .with_context(|| format!("connect {target}"))?;
+        let sni = ServerName::try_from(utils::pki::MESH_SERVER_SAN)?.to_owned();
+        let mut tls = connector.connect(sni, tcp).await.context("TLS handshake")?;
+        write_frame(
+            &mut tls,
+            &serde_json::to_vec(&Request::new(1, method, Some(params)))?,
+        )
+        .await?;
+        let raw = tokio::time::timeout(Duration::from_secs(15), read_frame(&mut tls))
+            .await
+            .context("response timed out")??;
+        parse_resp(&raw)
+    };
+    tokio::time::timeout(DIAL_EXCHANGE_TIMEOUT, exchange)
         .await
-        .with_context(|| format!("connect {target}"))?;
-    let sni = ServerName::try_from(utils::pki::MESH_SERVER_SAN)?.to_owned();
-    let mut tls = connector.connect(sni, tcp).await.context("TLS handshake")?;
-    write_frame(
-        &mut tls,
-        &serde_json::to_vec(&Request::new(1, method, Some(params)))?,
-    )
-    .await?;
-    let raw = tokio::time::timeout(Duration::from_secs(15), read_frame(&mut tls))
-        .await
-        .context("response timed out")??;
-    parse_resp(&raw)
+        .with_context(|| format!("mesh exchange with {target} timed out"))?
 }
 
 /// Dial a peer over the bootstrap SNI with a pinned pubkey. Used by `mesh
@@ -1047,24 +1057,29 @@ async fn dial_bootstrap(
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(client_config));
     let target = format!("{host}:{port}");
-    let tcp = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&target))
+    let exchange = async {
+        let tcp = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&target))
+            .await
+            .with_context(|| format!("connect {target} timed out"))?
+            .with_context(|| format!("connect {target}"))?;
+        let sni = ServerName::try_from(utils::pki::MESH_BOOTSTRAP_SAN)?.to_owned();
+        let mut tls = connector
+            .connect(sni, tcp)
+            .await
+            .context("bootstrap TLS handshake (pubkey pin mismatch?)")?;
+        write_frame(
+            &mut tls,
+            &serde_json::to_vec(&Request::new(1, method, Some(params)))?,
+        )
+        .await?;
+        let raw = tokio::time::timeout(Duration::from_secs(15), read_frame(&mut tls))
+            .await
+            .context("response timed out")??;
+        parse_resp(&raw)
+    };
+    tokio::time::timeout(DIAL_EXCHANGE_TIMEOUT, exchange)
         .await
-        .with_context(|| format!("connect {target} timed out"))?
-        .with_context(|| format!("connect {target}"))?;
-    let sni = ServerName::try_from(utils::pki::MESH_BOOTSTRAP_SAN)?.to_owned();
-    let mut tls = connector
-        .connect(sni, tcp)
-        .await
-        .context("bootstrap TLS handshake (pubkey pin mismatch?)")?;
-    write_frame(
-        &mut tls,
-        &serde_json::to_vec(&Request::new(1, method, Some(params)))?,
-    )
-    .await?;
-    let raw = tokio::time::timeout(Duration::from_secs(15), read_frame(&mut tls))
-        .await
-        .context("response timed out")??;
-    parse_resp(&raw)
+        .with_context(|| format!("bootstrap exchange with {target} timed out"))?
 }
 
 fn parse_resp(raw: &[u8]) -> Result<serde_json::Value> {

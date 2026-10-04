@@ -569,6 +569,12 @@ pub fn ensure_peer_stub(
     if exists {
         return Ok(());
     }
+    // A forgotten peer still holds a CA-valid leaf until it expires; stubbing it
+    // back in would hand it every "known peer" gate the forget was meant to close.
+    // Re-admission goes through join-confirm, which clears the tombstone.
+    if is_peer_forgotten(conn, peer_cn)? {
+        anyhow::bail!("refusing to stub peer {peer_cn}: it was forgotten from this mesh");
+    }
     let now = now_secs();
     conn.execute(
         "INSERT INTO mesh_peers
@@ -2317,6 +2323,17 @@ mod tests {
             row.peer_addr, "10.0.0.42",
             "route seeded so stub is dialable"
         );
+    }
+
+    #[test]
+    fn ensure_peer_stub_refuses_forgotten_peer() {
+        let (_d, c) = test_conn();
+        let id = utils::id::new();
+        upsert_peer(&c, &id, "gone", "10.0.0.5", 12002, Some("fp"), "ca").unwrap();
+        forget_peer(&c, &id).unwrap();
+        let err = ensure_peer_stub(&c, &id, "10.0.0.5", 12002).unwrap_err();
+        assert!(err.to_string().contains("forgotten"), "got: {err}");
+        assert!(!peer_exists(&c, &id).unwrap());
     }
 
     // ── pinned_pubkey_fp / peer_exists / peer_pubkey_fp_raw ───────────────────

@@ -153,7 +153,7 @@ fn extract_peer_cn(tls: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>)
 
 // ── TLS acceptor ─────────────────────────────────────────────────────────────
 
-fn build_acceptor(pki_dir: &Path) -> Result<TlsAcceptor> {
+pub(crate) fn build_acceptor(pki_dir: &Path) -> Result<TlsAcceptor> {
     // Eagerly materialize the bootstrap cert+key so the on-disk file exists
     // before the first handshake — the resolver re-reads it per handshake,
     // but the file has to exist on the first one too.
