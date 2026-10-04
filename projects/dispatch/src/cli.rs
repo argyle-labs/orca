@@ -541,21 +541,33 @@ fn emit_new_progress(value: &serde_json::Value, seen: &mut ProgressSeen) {
     }
     if let Some(systems) = value.get("systems").and_then(|s| s.as_array()) {
         for row in systems.iter().skip(seen.systems) {
-            let host = row.get("host").and_then(|h| h.as_str()).unwrap_or("?");
-            let line = match (
-                row.get("error").and_then(|e| e.as_str()),
-                row.get("applied").and_then(|a| a.as_str()),
-            ) {
-                (Some(e), _) => format!("{host}: FAILED {e}"),
-                (None, Some(v)) => format!("{host}: applied {v}"),
-                (None, None) => {
-                    let cur = row.get("current").and_then(|c| c.as_str()).unwrap_or("?");
-                    format!("{host}: on {cur}")
-                }
-            };
-            eprintln!("[orca] {line}");
+            eprintln!("[orca] {}", system_progress_line(row));
         }
         seen.systems = seen.systems.max(systems.len());
+    }
+}
+
+/// One narration line for a fleet-update system row, from its `status` and
+/// `reason`. A row with no `status` reads as `unknown`.
+#[allow(clippy::disallowed_types)]
+fn system_progress_line(row: &serde_json::Value) -> String {
+    let field = |k: &str| row.get(k).and_then(|v| v.as_str());
+    let host = field("host").unwrap_or("?");
+    let reason = field("reason");
+    match field("status").unwrap_or("unknown") {
+        "updated" => format!("{host}: applied {}", field("applied").unwrap_or("?")),
+        "failed" => format!("{host}: FAILED {}", reason.unwrap_or("?")),
+        "blocked" => format!("{host}: BLOCKED {}", reason.unwrap_or("?")),
+        "up_to_date" => format!("{host}: on {}", field("current").unwrap_or("?")),
+        "update_available" => format!(
+            "{host}: on {}, {} available",
+            field("current").unwrap_or("?"),
+            field("target").unwrap_or("?")
+        ),
+        status => match reason {
+            Some(r) => format!("{host}: {status} ({r})"),
+            None => format!("{host}: {status}"),
+        },
     }
 }
 
@@ -2415,7 +2427,7 @@ mod tests {
         let mut seen = ProgressSeen::default();
         let first = serde_json::json!({
             "notes": ["run record: /tmp/x.json"],
-            "systems": [{"host": "a", "applied": "0.2.1"}],
+            "systems": [{"host": "a", "applied": "0.2.1", "status": "updated"}],
         });
         emit_new_progress(&first, &mut seen);
         assert_eq!(seen.systems, 1);
@@ -2424,8 +2436,8 @@ mod tests {
         let grown = serde_json::json!({
             "notes": ["run record: /tmp/x.json", "a: healthy on 0.2.1"],
             "systems": [
-                {"host": "a", "applied": "0.2.1"},
-                {"host": "b", "error": "No route to host"},
+                {"host": "a", "applied": "0.2.1", "status": "updated"},
+                {"host": "b", "status": "failed", "reason": "No route to host"},
             ],
         });
         emit_new_progress(&grown, &mut seen);
@@ -2436,6 +2448,42 @@ mod tests {
         emit_new_progress(&grown, &mut seen);
         assert_eq!(seen.systems, 2);
         assert_eq!(seen.notes, 2);
+    }
+
+    #[test]
+    fn progress_narrates_each_row_from_its_status_and_reason() {
+        let cases = [
+            (
+                serde_json::json!({"host": "a", "status": "updated", "applied": "0.2.1"}),
+                "a: applied 0.2.1",
+            ),
+            (
+                serde_json::json!({"host": "b", "status": "failed", "reason": "No route to host",
+                    "current": "0.2.0"}),
+                "b: FAILED No route to host",
+            ),
+            (
+                serde_json::json!({"host": "c", "status": "blocked",
+                    "reason": "no github_token and no trusted peer", "current": "0.2.0"}),
+                "c: BLOCKED no github_token and no trusted peer",
+            ),
+            (
+                serde_json::json!({"host": "d", "status": "unknown",
+                    "reason": "host reported no channel-latest version to compare against"}),
+                "d: unknown (host reported no channel-latest version to compare against)",
+            ),
+            (
+                serde_json::json!({"host": "e", "status": "up_to_date", "current": "0.2.1"}),
+                "e: on 0.2.1",
+            ),
+            (
+                serde_json::json!({"host": "f", "current": "0.2.0", "error": "boom"}),
+                "f: unknown",
+            ),
+        ];
+        for (row, want) in cases {
+            assert_eq!(system_progress_line(&row), want);
+        }
     }
 
     #[test]

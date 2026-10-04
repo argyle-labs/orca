@@ -408,7 +408,15 @@ fn system_row_outcome(
     out: &crate::commands::SystemUpdateOutput,
     execute: bool,
 ) -> (UpdateRowStatus, Option<String>) {
-    let blocked = out.fetch_blocked == Some(true);
+    // Peers that predate the server-side flag still report both versions.
+    let available = out.update_available.or_else(|| {
+        let latest = out.latest.as_deref().filter(|l| !l.is_empty())?;
+        (!out.current_version.is_empty())
+            .then(|| crate::update_state::is_update_available(&out.current_version, latest))
+    });
+    // `fetch_blocked: None` is a peer too old to say; it is not blocked.
+    // Blocked only matters when there may be something to fetch.
+    let blocked = out.fetch_blocked == Some(true) && available != Some(false);
     let blocked_reason = || {
         out.fetch_blocked_reason
             .clone()
@@ -430,15 +438,21 @@ fn system_row_outcome(
     if execute && out.applied.is_some() {
         return (UpdateRowStatus::Updated, None);
     }
-    // Peers that predate the server-side flag still report both versions.
-    let available = out.update_available.or_else(|| {
-        let latest = out.latest.as_deref().filter(|l| !l.is_empty())?;
-        (!out.current_version.is_empty())
-            .then(|| crate::update_state::is_update_available(&out.current_version, latest))
-    });
     match available {
-        // `fetch_blocked: None` is a peer too old to say; it is not blocked.
         Some(true) if blocked => (UpdateRowStatus::Blocked, Some(blocked_reason())),
+        // An execute that left an available update unapplied without an error:
+        // the host's notes are the only account of why (e.g. a dev build skips
+        // release applies without a note).
+        Some(true) if execute => {
+            if out.notes.is_empty() {
+                (
+                    UpdateRowStatus::Unknown,
+                    Some("host applied nothing and gave no reason".into()),
+                )
+            } else {
+                (UpdateRowStatus::Failed, Some(out.notes.join("; ")))
+            }
+        }
         Some(true) => (UpdateRowStatus::UpdateAvailable, None),
         Some(false) => (UpdateRowStatus::UpToDate, None),
         None => (
@@ -704,7 +718,7 @@ pub async fn fleet_update(
 
     // ── PHASE 1: REMOTE daemons — sequential, health-gated. ──────────────────
     for t in targets.iter().filter(|t| !t.is_local) {
-        let row = run_system(t, true, ctx).await;
+        let mut row = run_system(t, true, ctx).await;
         // Health-gate an apply that actually landed a new binary: wait for the
         // peer back on the new version before touching the next host.
         if row.status == UpdateRowStatus::Updated
@@ -714,7 +728,11 @@ pub async fn fleet_update(
             tracing::info!("{note}");
             out.notes.push(note);
             let note = match health_gate(t, &applied, ctx).await {
-                Err(e) => format!("{}: {e}", t.host),
+                Err(e) => {
+                    row.status = UpdateRowStatus::Failed;
+                    row.reason = Some(e.clone());
+                    format!("{}: {e}", t.host)
+                }
                 Ok(()) => format!("{}: healthy on {applied}", t.host),
             };
             tracing::info!("{note}");
@@ -848,7 +866,9 @@ fn all_peers_unreached(rows: &[&FleetSystemResult]) -> Option<String> {
         return None;
     }
     if !rows.iter().all(|r| {
-        r.status == UpdateRowStatus::Failed && r.reason.as_deref().is_some_and(is_unreached)
+        r.status == UpdateRowStatus::Failed
+            && r.applied.is_none()
+            && r.reason.as_deref().is_some_and(is_unreached)
     }) {
         return None;
     }
@@ -1481,15 +1501,28 @@ mod tests {
         let rows = [ok, errored("b", "No route to host")];
         let refs: Vec<&FleetSystemResult> = rows.iter().collect();
         assert!(all_peers_unreached(&refs).is_none());
+
+        let gate_failed = FleetSystemResult {
+            applied: Some("0.2.1".into()),
+            ..errored(
+                "a",
+                "health-gate timed out; last probe error: Connection refused",
+            )
+        };
+        let rows = [gate_failed, errored("b", "No route to host")];
+        let refs: Vec<&FleetSystemResult> = rows.iter().collect();
+        assert!(all_peers_unreached(&refs).is_none());
     }
+
+    use crate::commands::SystemUpdateOutput;
 
     fn sys_out(
         current: &str,
         latest: Option<&str>,
         available: Option<bool>,
         blocked: Option<bool>,
-    ) -> crate::commands::SystemUpdateOutput {
-        crate::commands::SystemUpdateOutput {
+    ) -> SystemUpdateOutput {
+        SystemUpdateOutput {
             current_version: current.into(),
             latest: latest.map(Into::into),
             update_available: available,
@@ -1504,12 +1537,7 @@ mod tests {
     #[test]
     fn system_row_status_table() {
         use UpdateRowStatus::*;
-        let cases: &[(
-            &str,
-            crate::commands::SystemUpdateOutput,
-            bool,
-            UpdateRowStatus,
-        )] = &[
+        let cases: &[(&str, SystemUpdateOutput, bool, UpdateRowStatus)] = &[
             (
                 "current",
                 sys_out("0.2.1", Some("0.2.1"), Some(false), Some(false)),
@@ -1528,21 +1556,18 @@ mod tests {
                 false,
                 Blocked,
             ),
-            // Blocked only matters when there is something to fetch.
             (
                 "blocked but current",
                 sys_out("0.2.1", Some("0.2.1"), Some(false), Some(true)),
                 false,
                 UpToDate,
             ),
-            // Peer too old to report `fetch_blocked`: not blocked.
             (
                 "old peer, newer",
                 sys_out("0.2.0", Some("0.2.1"), Some(true), None),
                 false,
                 UpdateAvailable,
             ),
-            // Peer too old to report `update_available`: compare here.
             (
                 "old peer, no flag",
                 sys_out("0.2.0", Some("0.2.1"), None, None),
@@ -1560,6 +1585,36 @@ mod tests {
                 sys_out("0.2.1", None, None, None),
                 false,
                 Unknown,
+            ),
+            (
+                "empty latest",
+                sys_out("0.2.1", Some(""), None, None),
+                false,
+                Unknown,
+            ),
+            (
+                "empty current",
+                sys_out("", Some("0.2.1"), None, None),
+                false,
+                Unknown,
+            ),
+            (
+                "errors, blocked but current",
+                SystemUpdateOutput {
+                    errors: vec!["list versions failed: 503".into()],
+                    ..sys_out("0.2.1", Some("0.2.1"), Some(false), Some(true))
+                },
+                true,
+                Failed,
+            ),
+            (
+                "errors, blocked, newer",
+                SystemUpdateOutput {
+                    errors: vec!["apply failed: 404".into()],
+                    ..sys_out("0.2.0", Some("0.2.1"), Some(true), Some(true))
+                },
+                true,
+                Blocked,
             ),
         ];
         for (name, out, execute, want) in cases {
@@ -1600,6 +1655,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_execute_that_applied_nothing_says_why() {
+        let mut out = sys_out("0.2.0", Some("0.2.1"), Some(true), Some(false));
+        out.notes = vec!["apply failed (403); delegate: up to date".into()];
+        let (status, reason) = system_row_outcome(&out, true);
+        assert_eq!(status, UpdateRowStatus::Failed);
+        assert_eq!(
+            reason.as_deref(),
+            Some("apply failed (403); delegate: up to date")
+        );
+
+        let out = sys_out("0.2.0", Some("0.2.1"), Some(true), Some(false));
+        let (status, reason) = system_row_outcome(&out, true);
+        assert_eq!(status, UpdateRowStatus::Unknown);
+        assert!(reason.is_some());
+    }
+
     fn plugin_out(installed: Option<&str>, target: &str, executed: bool) -> PluginUpdateOutput {
         PluginUpdateOutput {
             name: "peacock".into(),
@@ -1636,6 +1708,12 @@ mod tests {
             (
                 "updated",
                 plugin_out(Some("0.1.0"), "0.1.1", true),
+                Updated,
+                Some("0.1.1"),
+            ),
+            (
+                "installed fresh",
+                plugin_out(None, "0.1.1", true),
                 Updated,
                 Some("0.1.1"),
             ),
@@ -1701,6 +1779,24 @@ mod tests {
         for gone in ["updateAvailable", "updated", "note", "error"] {
             assert!(v.get(gone).is_none(), "{gone} still on the wire");
         }
+    }
+
+    #[test]
+    fn a_record_written_before_row_status_still_parses() {
+        let raw = r#"{
+            "dryRun": false,
+            "systems": [{"host": "thor", "id": "id-thor", "current": "0.2.0",
+                "target": "0.2.1", "updateAvailable": true, "applied": "0.2.1",
+                "error": null, "blocked": false, "blockedReason": null}],
+            "plugins": [{"host": "thor", "name": "peacock", "installed": "0.1.0",
+                "target": "0.1.1", "updateAvailable": true, "updated": true, "error": null}],
+            "notes": [],
+            "errors": []
+        }"#;
+        let run: crate::fleet::FleetUpdateOutput = serde_json::from_str(raw).unwrap();
+        assert_eq!(run.systems[0].status, UpdateRowStatus::Unknown);
+        assert_eq!(run.systems[0].applied.as_deref(), Some("0.2.1"));
+        assert_eq!(run.plugins[0].status, UpdateRowStatus::Unknown);
     }
 
     #[test]

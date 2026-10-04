@@ -22,7 +22,7 @@ pub enum UpdateRowStatus {
     /// A newer version exists but this host cannot fetch it.
     Blocked,
     Failed,
-    /// The host's answer does not decide the outcome.
+    /// The host gave no comparable versions, or a record predates `status`.
     #[default]
     Unknown,
 }
@@ -42,8 +42,10 @@ pub struct FleetSystemResult {
     pub current: Option<String>,
     /// Channel-latest the host would move to.
     pub target: Option<String>,
-    /// Version applied; set only when `status` is `updated`.
+    /// Version the host reports applying; set on any execute run where the
+    /// host applied one, whatever `status` says (a failed health gate keeps it).
     pub applied: Option<String>,
+    #[serde(default)]
     pub status: UpdateRowStatus,
     /// Why the row is `blocked`, `failed` or `unknown`.
     pub reason: Option<String>,
@@ -62,6 +64,7 @@ pub struct FleetPluginResult {
     pub target: Option<String>,
     /// Version installed by this run; set only when `status` is `updated`.
     pub applied: Option<String>,
+    #[serde(default)]
     pub status: UpdateRowStatus,
     /// Why the row is `blocked`, `failed` or `unknown`, or why an
     /// `up_to_date` row was left alone (e.g. installed newer than the catalog).
