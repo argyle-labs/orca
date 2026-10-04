@@ -132,6 +132,26 @@ const SNAKE_CASE_ORIGINS: &[(&str, &str)] = &[
         "system.telemetry.list output",
         "carries `TopologyClaim`, shared with `system.list`",
     ),
+    (
+        "storage.mount.create output",
+        "carries `RemountPolicy`, persisted and mesh-replicated; a previous-release host decodes camelCase as all-default and writes that back",
+    ),
+    (
+        "storage.mount.detail output",
+        "carries `RemountPolicy`, persisted and mesh-replicated; a previous-release host decodes camelCase as all-default and writes that back",
+    ),
+    (
+        "storage.mount.list output",
+        "carries `RemountPolicy`, persisted and mesh-replicated; a previous-release host decodes camelCase as all-default and writes that back",
+    ),
+    (
+        "storage.mount.update output",
+        "carries `RemountPolicy`, persisted and mesh-replicated; a previous-release host decodes camelCase as all-default and writes that back",
+    ),
+    (
+        "system.history output",
+        "carries `SystemHistoryPoint`, persisted in the local metrics db a previous-release daemon reads after a downgrade",
+    ),
 ];
 
 /// An allowlist entry that names no schema is stale and would silently excuse
@@ -395,14 +415,9 @@ const RC11_CONTROLLER_LIMITS: &[&str] = &[
     "service.list",
     "spec.list",
     "storage.detail",
-    "storage.mount.create",
-    "storage.mount.detail",
-    "storage.mount.list",
-    "storage.mount.update",
     "storage.share.repair-permissions",
     "system.build",
     "system.certs.list",
-    "system.history",
     "system.info.detail",
     "system.join",
     "system.mesh.delete",
