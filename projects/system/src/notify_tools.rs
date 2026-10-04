@@ -405,7 +405,7 @@ pub enum NotifyCreateOutput {
     Send(notifications::notify_send::NotifySendOutput),
 }
 
-/// Create a notification. `action=raise` upserts a stateful dismissable
+/// [MUTATES STATE] Create a notification. `action=raise` upserts a stateful dismissable
 /// notification (idempotent on `key`); `action=ingest` polls every registered
 /// external source and reconciles into the store; `action=send` fires an
 /// ephemeral event through the installed dispatcher (no persistent state).
@@ -497,7 +497,7 @@ pub enum NotifyUpdateOutput {
     SyncDiagnostics(crate::notify_bridge::BridgeReport),
 }
 
-/// Update notification state. `action=dismiss` acknowledges a notification (a
+/// [MUTATES STATE] Update notification state. `action=dismiss` acknowledges a notification (a
 /// later re-raise reactivates it, and an external source that supports it is
 /// pushed the dismiss); `action=suppress` ignores it permanently; and
 /// `action=sync_diagnostics` runs the diagnostics→notification reconcile pass.

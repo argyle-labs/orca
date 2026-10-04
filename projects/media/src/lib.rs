@@ -100,7 +100,7 @@ impl MediaRole {
     }
 }
 
-/// Capability strings a backend advertises (domain-interpreted). Carries both the
+/// MediaCapability strings a backend advertises (domain-interpreted). Carries both the
 /// role markers and the concrete verbs; the media crate parses them off
 /// `BackendDef::capabilities`. Role markers (`DownloadedBy`/`ServedBy`) double as
 /// capabilities so a backend's role set is derivable from `capabilities()` alone,
@@ -108,7 +108,7 @@ impl MediaRole {
 /// ABI field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum Capability {
+pub enum MediaCapability {
     // Role markers.
     DownloadedBy,
     ServedBy,
@@ -139,28 +139,29 @@ pub enum Capability {
     Rescan,
 }
 
-impl Capability {
+impl MediaCapability {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Capability::DownloadedBy => "downloaded_by",
-            Capability::ServedBy => "served_by",
-            Capability::Url => "url",
-            Capability::Credentials => "credentials",
-            Capability::List => "list",
-            Capability::Search => "search",
-            Capability::LibraryAdd => "library_add",
-            Capability::LibraryRemove => "library_remove",
-            Capability::FixMatch => "fix_match",
-            Capability::Status => "status",
-            Capability::Units => "units",
-            Capability::Rescan => "rescan",
+            MediaCapability::DownloadedBy => "downloaded_by",
+            MediaCapability::ServedBy => "served_by",
+            MediaCapability::Url => "url",
+            MediaCapability::Credentials => "credentials",
+            MediaCapability::List => "list",
+            MediaCapability::Search => "search",
+            MediaCapability::LibraryAdd => "library_add",
+            MediaCapability::LibraryRemove => "library_remove",
+            MediaCapability::FixMatch => "fix_match",
+            MediaCapability::Status => "status",
+            MediaCapability::Units => "units",
+            MediaCapability::Rescan => "rescan",
         }
     }
 }
 
 /// A descriptor row for one registered media backend — the `media.*` list view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Provider {
+#[serde(rename_all = "camelCase")]
+pub struct MediaProvider {
     /// App identity (`audiobookshelf`, `lazylibrarian`, `plex`).
     pub name: String,
     /// The media type this registration handles.
@@ -168,7 +169,7 @@ pub struct Provider {
     /// Roles this backend plays for the type.
     pub roles: Vec<MediaRole>,
     /// Verbs advertised.
-    pub capabilities: Vec<Capability>,
+    pub capabilities: Vec<MediaCapability>,
     /// Non-secret base endpoint for display (`http://10.0.0.6:13378`).
     pub endpoint: String,
 }
@@ -186,6 +187,7 @@ pub struct MediaUrl {
 /// password is a [`SecretRef`] the secrets domain resolves — the media backend
 /// never inlines a plaintext secret. orca owns/propagates the actual value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaCredentials {
     /// The username orca manages for this user on this backend.
     pub username: String,
@@ -282,6 +284,7 @@ impl PathChange {
 /// alone is enough to act on — see [`RescanTarget::is_addressable`] — so an
 /// acquirer supplies whatever it has rather than the intersection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct RescanTarget {
     /// What changed. `Deleted` means "drop/re-locate", not "re-read".
     pub change: PathChange,
@@ -359,6 +362,7 @@ pub struct SeriesRef {
 
 /// What a unit IS — the identity every variant resolves to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaIdentity {
     pub title: String,
     #[serde(default)]
@@ -399,6 +403,7 @@ pub struct Track {
 /// Where bytes physically live — a reference into the storage domain. The same
 /// variant may exist in several locations (replicated across shares/hosts).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Location {
     /// Storage-domain provider name backing this path (`nfs` / `smb`), when known.
     #[serde(default)]
@@ -455,6 +460,7 @@ pub struct Source {
 /// bytes live, and who serves it and how. Assembled by merging each backend's
 /// partial view (see [`merge_units`]) by [`MediaIdentity`] external ids.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaUnit {
     pub media_type: MediaType,
     pub identity: MediaIdentity,
@@ -589,7 +595,7 @@ pub enum MediaError {
     #[error("transport error: {0}")]
     Transport(String),
     #[error("capability not supported by backend `{0}`: {1:?}")]
-    Unsupported(String, Capability),
+    Unsupported(String, MediaCapability),
     #[error("not found: {0}")]
     NotFound(String),
     #[error("{0}")]
@@ -608,7 +614,7 @@ pub trait MediaBackend: Send + Sync {
     /// The media type this registration handles.
     fn media_type(&self) -> MediaType;
     /// Capabilities advertised (includes the role markers).
-    fn capabilities(&self) -> Vec<Capability>;
+    fn capabilities(&self) -> Vec<MediaCapability>;
     /// Non-secret base endpoint for display.
     fn endpoint(&self) -> String;
 
@@ -616,22 +622,22 @@ pub trait MediaBackend: Send + Sync {
     fn roles(&self) -> Vec<MediaRole> {
         let mut r = Vec::new();
         let caps = self.capabilities();
-        if caps.contains(&Capability::DownloadedBy) {
+        if caps.contains(&MediaCapability::DownloadedBy) {
             r.push(MediaRole::DownloadedBy);
         }
-        if caps.contains(&Capability::ServedBy) {
+        if caps.contains(&MediaCapability::ServedBy) {
             r.push(MediaRole::ServedBy);
         }
         r
     }
 
-    fn supports(&self, cap: Capability) -> bool {
+    fn supports(&self, cap: MediaCapability) -> bool {
         self.capabilities().contains(&cap)
     }
 
     /// Descriptor row for the list view. Default builds it from the accessors.
-    fn provider(&self) -> Provider {
-        Provider {
+    fn provider(&self) -> MediaProvider {
+        MediaProvider {
             name: self.name().to_string(),
             media_type: self.media_type(),
             roles: self.roles(),
@@ -643,13 +649,16 @@ pub trait MediaBackend: Send + Sync {
     // ── served_by verbs ──
     /// Reachable URL(s) for device setup.
     async fn url(&self) -> Result<MediaUrl, MediaError> {
-        Err(MediaError::Unsupported(self.name().into(), Capability::Url))
+        Err(MediaError::Unsupported(
+            self.name().into(),
+            MediaCapability::Url,
+        ))
     }
     /// Per-user credentials (orca-managed) for device setup.
     async fn credentials(&self, _user: &str) -> Result<MediaCredentials, MediaError> {
         Err(MediaError::Unsupported(
             self.name().into(),
-            Capability::Credentials,
+            MediaCapability::Credentials,
         ))
     }
 
@@ -657,25 +666,25 @@ pub trait MediaBackend: Send + Sync {
     async fn list(&self) -> Result<Vec<MediaItem>, MediaError> {
         Err(MediaError::Unsupported(
             self.name().into(),
-            Capability::List,
+            MediaCapability::List,
         ))
     }
     async fn search(&self, _query: &str) -> Result<Vec<MediaItem>, MediaError> {
         Err(MediaError::Unsupported(
             self.name().into(),
-            Capability::Search,
+            MediaCapability::Search,
         ))
     }
     async fn library_add(&self, _item_ref: &str) -> Result<MediaMutation, MediaError> {
         Err(MediaError::Unsupported(
             self.name().into(),
-            Capability::LibraryAdd,
+            MediaCapability::LibraryAdd,
         ))
     }
     async fn library_remove(&self, _item_id: &str) -> Result<MediaMutation, MediaError> {
         Err(MediaError::Unsupported(
             self.name().into(),
-            Capability::LibraryRemove,
+            MediaCapability::LibraryRemove,
         ))
     }
     async fn fix_match(
@@ -685,7 +694,7 @@ pub trait MediaBackend: Send + Sync {
     ) -> Result<MediaMutation, MediaError> {
         Err(MediaError::Unsupported(
             self.name().into(),
-            Capability::FixMatch,
+            MediaCapability::FixMatch,
         ))
     }
 
@@ -697,7 +706,7 @@ pub trait MediaBackend: Send + Sync {
     async fn units(&self) -> Result<Vec<MediaUnit>, MediaError> {
         Err(MediaError::Unsupported(
             self.name().into(),
-            Capability::Units,
+            MediaCapability::Units,
         ))
     }
 
@@ -707,7 +716,7 @@ pub trait MediaBackend: Send + Sync {
     async fn rescan(&self, _target: &RescanTarget) -> Result<MediaMutation, MediaError> {
         Err(MediaError::Unsupported(
             self.name().into(),
-            Capability::Rescan,
+            MediaCapability::Rescan,
         ))
     }
 }
@@ -760,7 +769,7 @@ pub fn deregister_backend(name: &str) -> usize {
 }
 
 /// Descriptor rows for every registered provider — the `media.list` view.
-pub fn providers() -> Vec<Provider> {
+pub fn providers() -> Vec<MediaProvider> {
     backends().iter().map(|b| b.provider()).collect()
 }
 
@@ -846,7 +855,7 @@ pub fn stale_library_rows(items: &[MediaItem], exists: impl Fn(&str) -> bool) ->
 /// serves this media type to re-read that one item.
 ///
 /// This is deliberately a fan-out over the capability graph rather than per-app
-/// webhook wiring — `served_by` ∧ [`Capability::Rescan`] already names exactly the
+/// webhook wiring — `served_by` ∧ [`MediaCapability::Rescan`] already names exactly the
 /// set that needs telling, so a new library server opts in by advertising the
 /// capability and no acquirer changes. `downloaded_by`-only backends are never
 /// asked: an acquirer holds no library rows to invalidate.
@@ -860,7 +869,7 @@ pub async fn notify_path_invalidated(
 ) -> Vec<RescanOutcome> {
     let mut out = Vec::new();
     for b in servers_for(media_type) {
-        if !b.supports(Capability::Rescan) {
+        if !b.supports(MediaCapability::Rescan) {
             continue;
         }
         out.push(match b.rescan(target).await {
@@ -933,20 +942,20 @@ fn parse_media_type(s: &str) -> Result<MediaType, MediaError> {
 }
 
 #[cfg(feature = "in-process")]
-fn parse_capability(s: &str) -> Result<Capability, MediaError> {
+fn parse_capability(s: &str) -> Result<MediaCapability, MediaError> {
     match s {
-        "downloaded_by" => Ok(Capability::DownloadedBy),
-        "served_by" => Ok(Capability::ServedBy),
-        "url" => Ok(Capability::Url),
-        "credentials" => Ok(Capability::Credentials),
-        "list" => Ok(Capability::List),
-        "search" => Ok(Capability::Search),
-        "library_add" => Ok(Capability::LibraryAdd),
-        "library_remove" => Ok(Capability::LibraryRemove),
-        "fix_match" => Ok(Capability::FixMatch),
-        "status" => Ok(Capability::Status),
-        "units" => Ok(Capability::Units),
-        "rescan" => Ok(Capability::Rescan),
+        "downloaded_by" => Ok(MediaCapability::DownloadedBy),
+        "served_by" => Ok(MediaCapability::ServedBy),
+        "url" => Ok(MediaCapability::Url),
+        "credentials" => Ok(MediaCapability::Credentials),
+        "list" => Ok(MediaCapability::List),
+        "search" => Ok(MediaCapability::Search),
+        "library_add" => Ok(MediaCapability::LibraryAdd),
+        "library_remove" => Ok(MediaCapability::LibraryRemove),
+        "fix_match" => Ok(MediaCapability::FixMatch),
+        "status" => Ok(MediaCapability::Status),
+        "units" => Ok(MediaCapability::Units),
+        "rescan" => Ok(MediaCapability::Rescan),
         other => Err(MediaError::Other(format!(
             "unknown media capability `{other}` — this plugin declares a capability \
              orca {orca} does not implement, which normally means it was built \
@@ -965,7 +974,7 @@ struct MediaProxy {
     name: String,
     media_type: MediaType,
     endpoint: String,
-    capabilities: Vec<Capability>,
+    capabilities: Vec<MediaCapability>,
     invoke: InvokeThunk,
 }
 
@@ -996,7 +1005,7 @@ impl MediaBackend for MediaProxy {
     fn media_type(&self) -> MediaType {
         self.media_type
     }
-    fn capabilities(&self) -> Vec<Capability> {
+    fn capabilities(&self) -> Vec<MediaCapability> {
         self.capabilities.clone()
     }
     fn endpoint(&self) -> String {
@@ -1255,7 +1264,7 @@ mod rescan_tests {
     struct Spy {
         name: &'static str,
         media_type: MediaType,
-        caps: Vec<Capability>,
+        caps: Vec<MediaCapability>,
         fail: bool,
         called: Mutex<u32>,
     }
@@ -1264,7 +1273,7 @@ mod rescan_tests {
         fn new(
             name: &'static str,
             media_type: MediaType,
-            caps: Vec<Capability>,
+            caps: Vec<MediaCapability>,
             fail: bool,
         ) -> Arc<Self> {
             Arc::new(Spy {
@@ -1288,7 +1297,7 @@ mod rescan_tests {
         fn media_type(&self) -> MediaType {
             self.media_type
         }
-        fn capabilities(&self) -> Vec<Capability> {
+        fn capabilities(&self) -> Vec<MediaCapability> {
             self.caps.clone()
         }
         fn endpoint(&self) -> String {
@@ -1326,7 +1335,7 @@ mod rescan_tests {
 
     #[tokio::test]
     async fn every_capable_server_is_told_and_one_failure_is_non_fatal() {
-        let caps = vec![Capability::ServedBy, Capability::Rescan];
+        let caps = vec![MediaCapability::ServedBy, MediaCapability::Rescan];
         let ok_a = Spy::new("t1-jellyfin", MediaType::Tv, caps.clone(), false);
         let dead = Spy::new("t1-plex", MediaType::Tv, caps.clone(), true);
         let ok_b = Spy::new("t1-emby", MediaType::Tv, caps, false);
@@ -1361,7 +1370,7 @@ mod rescan_tests {
         let no_verb = Spy::new(
             "t2-navidrome",
             MediaType::Music,
-            vec![Capability::ServedBy, Capability::Url],
+            vec![MediaCapability::ServedBy, MediaCapability::Url],
             false,
         );
         register_backend(no_verb.clone());
@@ -1379,7 +1388,7 @@ mod rescan_tests {
         let acquirer = Spy::new(
             "t3-sonarr",
             MediaType::Movies,
-            vec![Capability::DownloadedBy, Capability::Rescan],
+            vec![MediaCapability::DownloadedBy, MediaCapability::Rescan],
             false,
         );
         register_backend(acquirer.clone());
@@ -1405,7 +1414,7 @@ mod rescan_tests {
         let comics = Spy::new(
             "t5-komga",
             MediaType::Comics,
-            vec![Capability::ServedBy, Capability::Rescan],
+            vec![MediaCapability::ServedBy, MediaCapability::Rescan],
             false,
         );
         register_backend(comics.clone());
@@ -1427,8 +1436,8 @@ mod rescan_tests {
             fn media_type(&self) -> MediaType {
                 MediaType::Tv
             }
-            fn capabilities(&self) -> Vec<Capability> {
-                vec![Capability::ServedBy]
+            fn capabilities(&self) -> Vec<MediaCapability> {
+                vec![MediaCapability::ServedBy]
             }
             fn endpoint(&self) -> String {
                 String::new()
@@ -1438,7 +1447,10 @@ mod rescan_tests {
             .rescan(&proper_upgrade())
             .await
             .expect_err("default impl must refuse");
-        assert!(matches!(e, MediaError::Unsupported(_, Capability::Rescan)));
+        assert!(matches!(
+            e,
+            MediaError::Unsupported(_, MediaCapability::Rescan)
+        ));
     }
 
     #[test]
@@ -1446,18 +1458,18 @@ mod rescan_tests {
         // `as_str` and `parse_capability` are separate exhaustive matches; without
         // this a new variant can be spelled two different ways on the wire.
         for c in [
-            Capability::DownloadedBy,
-            Capability::ServedBy,
-            Capability::Url,
-            Capability::Credentials,
-            Capability::List,
-            Capability::Search,
-            Capability::LibraryAdd,
-            Capability::LibraryRemove,
-            Capability::FixMatch,
-            Capability::Status,
-            Capability::Units,
-            Capability::Rescan,
+            MediaCapability::DownloadedBy,
+            MediaCapability::ServedBy,
+            MediaCapability::Url,
+            MediaCapability::Credentials,
+            MediaCapability::List,
+            MediaCapability::Search,
+            MediaCapability::LibraryAdd,
+            MediaCapability::LibraryRemove,
+            MediaCapability::FixMatch,
+            MediaCapability::Status,
+            MediaCapability::Units,
+            MediaCapability::Rescan,
         ] {
             assert_eq!(
                 parse_capability(c.as_str()).expect("parse own as_str"),

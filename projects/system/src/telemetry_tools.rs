@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::system_info_types::SystemInfoReport;
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct TelemetrySnapshotRow {
     pub peer_id: String,
     pub snapshot_at_unix: i64,

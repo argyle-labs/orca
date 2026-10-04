@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 /// by `(host, port)` joins to the claim whose `endpoints` contain that port on a
 /// matching host.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ClaimEndpoint {
     /// Container/guest-internal listening port.
     pub port: u16,
@@ -66,6 +67,7 @@ fn is_tcp(p: &str) -> bool {
 /// claim's `macs` against other peers' `interfaces[].mac` to derive
 /// `parent_peer_id`.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct TopologyClaim {
     /// `"vm"`, `"container"`, `"lxc"`.
     pub kind: String,

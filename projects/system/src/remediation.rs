@@ -131,7 +131,7 @@ pub struct RemediationSetOutput {
     pub policy: RemediationPolicy,
 }
 
-/// Set this host's self-heal remediation policy. Governs whether orca's
+/// [MUTATES STATE] Set this host's self-heal remediation policy. Governs whether orca's
 /// self-healing controllers act automatically, propose the action for approval,
 /// or stay silent.
 #[orca_tool(domain = "system", verb = "remediation.set")]

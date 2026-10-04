@@ -27,6 +27,7 @@ pub use manager::{Access, Namespace, NamespaceManager, Role};
 // ── Shared rows ─────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct NamespaceSummary {
     pub id: String,
     pub name: String,
@@ -35,6 +36,7 @@ pub struct NamespaceSummary {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct NamespaceDetail {
     pub id: String,
     pub name: String,
@@ -47,6 +49,7 @@ pub struct NamespaceDetail {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NamespaceListReport {
     pub namespaces: Vec<NamespaceSummary>,
     /// Opaque cursor for the next page, or absent on the last page.
@@ -65,6 +68,7 @@ pub struct NamespaceMutationResult {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NamespaceShareEntry {
     pub user_id: String,
     /// `viewer` | `collaborator`
@@ -72,6 +76,7 @@ pub struct NamespaceShareEntry {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NamespaceSharesReport {
     pub namespace_id: String,
     pub shares: Vec<NamespaceShareEntry>,

@@ -232,7 +232,7 @@ pub struct ServiceRestartOutput {
     pub error: Option<String>,
 }
 
-/// Restart a service this host's init system manages.
+/// [MUTATES STATE] Restart a service this host's init system manages.
 ///
 /// Exists because `system.detail` can now name a crashed service but nothing
 /// could act on it without SSH, which our own operating rule treats as

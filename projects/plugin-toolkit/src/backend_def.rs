@@ -86,7 +86,7 @@ pub fn storage_backend_def(
     backend: &dyn crate::storage::StorageBackend,
     invoke_prefix: &str,
 ) -> crate::abi::BackendDef {
-    use crate::storage::{Capability, MountStyle, StorageKind};
+    use crate::storage::{MountStyle, StorageCapability, StorageKind};
 
     let kind = match backend.kind() {
         StorageKind::NetworkShare => "network_share",
@@ -102,15 +102,15 @@ pub fn storage_backend_def(
         .into_iter()
         .map(|c| {
             match c {
-                Capability::List => "list",
-                Capability::Exports => "exports",
-                Capability::ExportWrite => "export_write",
-                Capability::Mount => "mount",
-                Capability::Unmount => "unmount",
-                Capability::Usage => "usage",
-                Capability::Create => "create",
-                Capability::Remove => "remove",
-                Capability::RecoverStale => "recover_stale",
+                StorageCapability::List => "list",
+                StorageCapability::Exports => "exports",
+                StorageCapability::ExportWrite => "export_write",
+                StorageCapability::Mount => "mount",
+                StorageCapability::Unmount => "unmount",
+                StorageCapability::Usage => "usage",
+                StorageCapability::Create => "create",
+                StorageCapability::Remove => "remove",
+                StorageCapability::RecoverStale => "recover_stale",
             }
             .to_string()
         })
@@ -655,7 +655,7 @@ mod tests {
 
     // ── storage_backend_def (derived from a live StorageBackend) ───────────────
 
-    use crate::storage::{Capability, MountStyle, StorageBackend, StorageKind};
+    use crate::storage::{MountStyle, StorageBackend, StorageCapability, StorageKind};
 
     struct MockStorage;
 
@@ -666,8 +666,12 @@ mod tests {
         fn kind(&self) -> StorageKind {
             StorageKind::NetworkShare
         }
-        fn capabilities(&self) -> Vec<Capability> {
-            vec![Capability::List, Capability::Mount, Capability::Unmount]
+        fn capabilities(&self) -> Vec<StorageCapability> {
+            vec![
+                StorageCapability::List,
+                StorageCapability::Mount,
+                StorageCapability::Unmount,
+            ]
         }
         fn endpoint(&self) -> String {
             "nfs://willow".into()

@@ -223,7 +223,7 @@ pub enum ServiceCreateOutput {
     Backup(BackupOutput),
 }
 
-/// Create a service artifact. `action=deploy` builds the backend's
+/// [MUTATES STATE] Create a service artifact. `action=deploy` builds the backend's
 /// `WorkloadSpec` and places it on a matching deploy target — the service
 /// backend describes *what* to run; the deploy target runs it (composition, not
 /// duplication). `action=backup` snapshots a service instance's config/data,
@@ -316,7 +316,7 @@ pub struct OkOutput {
     pub ok: bool,
 }
 
-/// Update a running service instance. `action=configure` applies a
+/// [MUTATES STATE] Update a running service instance. `action=configure` applies a
 /// service-specific config payload idempotently; `action=restore` restores the
 /// instance from a backup artifact path (`--from`).
 #[orca_tool(domain = "service", verb = "update")]

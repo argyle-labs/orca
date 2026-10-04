@@ -254,6 +254,12 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
 
     let entry_ident = format_ident!("EndpointEntry");
     let row_ident = format_ident!("EndpointRow");
+    // The Rust ident is deliberately the same in every expansion (each lands in
+    // its own module, and surrounding hand-written code refers to it by that
+    // name), but every resource's entry has a DIFFERENT shape — so they all
+    // claimed one `$defs` key and the spec described whichever linked first.
+    // The schema name, unlike the ident, has to be unique per resource.
+    let entry_schema_name = format!("{plugin_pascal}Entry");
 
     let list_args = format_ident!("{plugin_pascal}ListArgs");
     let list_output = format_ident!("{plugin_pascal}ListOutput");
@@ -881,7 +887,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Default)]
             #[serde(crate = #serde_path_str)]
             #[schemars(crate = #schemars_path_str)]
-            #[serde(default)]
+            #[serde(rename_all = "camelCase", default)]
             pub struct #list_args {
                 /// Max endpoints to return this page (clamped to [1, 200]; default 50).
                 // NB: bare `Option` (not fully-qualified) so clap's derive recognises
@@ -939,11 +945,13 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
             #[serde(crate = #serde_path_str)]
             #[schemars(crate = #schemars_path_str)]
+            #[serde(rename_all = "camelCase")]
             pub struct #detail_args { #[arg(long)] pub name: ::std::string::String }
 
             #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
             #[serde(crate = #serde_path_str)]
             #[schemars(crate = #schemars_path_str)]
+            #[serde(rename_all = "camelCase")]
             pub struct #detail_output { pub endpoint: #entry_ident }
 
             #[doc = #detail_doc]
@@ -968,6 +976,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
             #[serde(crate = #serde_path_str)]
             #[schemars(crate = #schemars_path_str)]
+            #[serde(rename_all = "camelCase")]
             pub struct #create_args {
                 #[arg(long)] pub name: ::std::string::String,
                 #( #create_field_decls )*
@@ -988,6 +997,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
             #[serde(crate = #serde_path_str)]
             #[schemars(crate = #schemars_path_str)]
+            #[serde(rename_all = "camelCase")]
             pub struct #create_output { pub endpoint: #entry_ident }
 
             #[doc = #create_doc]
@@ -1018,7 +1028,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Default)]
             #[serde(crate = #serde_path_str)]
             #[schemars(crate = #schemars_path_str)]
-            #[serde(default)]
+            #[serde(rename_all = "camelCase", default)]
             pub struct #update_args {
                 #[arg(long)] pub name: ::std::string::String,
                 #( #update_field_decls )*
@@ -1037,6 +1047,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
             #[serde(crate = #serde_path_str)]
             #[schemars(crate = #schemars_path_str)]
+            #[serde(rename_all = "camelCase")]
             pub struct #update_output {
                 pub endpoint: #entry_ident,
                 pub applied: ::std::vec::Vec<::std::string::String>,
@@ -1082,11 +1093,13 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
             #[serde(crate = #serde_path_str)]
             #[schemars(crate = #schemars_path_str)]
+            #[serde(rename_all = "camelCase")]
             pub struct #delete_args { #[arg(long)] pub name: ::std::string::String }
 
             #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
             #[serde(crate = #serde_path_str)]
             #[schemars(crate = #schemars_path_str)]
+            #[serde(rename_all = "camelCase")]
             pub struct #delete_output { pub name: ::std::string::String, pub changed: bool }
 
             #[doc = #delete_doc]
@@ -1132,6 +1145,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Debug, Clone)]
         #[serde(crate = #serde_path_str)]
         #[schemars(crate = #schemars_path_str)]
+        #[schemars(rename = #entry_schema_name)]
         #[serde(rename_all = "camelCase")]
         pub struct #entry_ident {
             pub name: ::std::string::String,
