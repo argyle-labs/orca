@@ -27,9 +27,8 @@ use utils::state::DaemonMode;
 /// path fields callers might expect already live on the parent
 /// `SystemStatusReport` (sourced from the daemon state file) — don't
 /// duplicate them here.
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct DaemonRuntimeStatus {
     pub running: bool,
     pub pid: Option<u32>,
@@ -750,12 +749,12 @@ mod tests {
     #[test]
     fn runtime_status_default_serializes_running_false_and_nulls() {
         // The `system.detail.daemon` read shape: the not-installed default must
-        // wire as running=false with every optional field null, camelCase
-        // like the rest of the surface.
+        // wire as running=false with every optional field null, snake_case
+        // because previous-release peers decode it.
         let s = serde_json::to_string(&DaemonRuntimeStatus::default()).unwrap();
         assert_eq!(
             s,
-            r#"{"running":false,"pid":null,"port":null,"uptimeSeconds":null}"#
+            r#"{"running":false,"pid":null,"port":null,"uptime_seconds":null}"#
         );
     }
 
@@ -770,7 +769,7 @@ mod tests {
         let s = serde_json::to_string(&status).unwrap();
         assert_eq!(
             s,
-            r#"{"running":true,"pid":4321,"port":12002,"uptimeSeconds":90}"#
+            r#"{"running":true,"pid":4321,"port":12002,"uptime_seconds":90}"#
         );
         // Round-trips back to the same values.
         let back: DaemonRuntimeStatus = serde_json::from_str(&s).unwrap();

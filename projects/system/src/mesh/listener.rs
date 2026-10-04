@@ -144,6 +144,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
                     .unwrap_or(env!("CARGO_PKG_VERSION"))
                     .to_string(),
                 hostname: crate::host_identity::hostname().to_string(),
+                camel_wire: true,
                 addressing: build_addressing_snapshot(),
             };
             value_response(id, &result)

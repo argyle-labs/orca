@@ -100,12 +100,40 @@ const SNAKE_CASE_ORIGINS: &[(&str, &str)] = &[
         "system.serve_release output",
         "a previous-release peer's upgrade path requires `asset_b64`",
     ),
+    (
+        "system.list output",
+        "previous-release roster sync decodes it; a failed decode marks new peers down",
+    ),
+    (
+        "system.detail output",
+        "a previous-release peer-detail cache decodes `SystemStatusReport`",
+    ),
+    (
+        "system.mesh.update output",
+        "a previous-release `push_trust` decodes `MeshTrustOutput`",
+    ),
+    (
+        "system.health output",
+        "carries `DaemonRuntimeStatus`, shared with `system.detail`",
+    ),
+    (
+        "system.topology output",
+        "carries `TopologyFacts`, `VersionEntry` and `TopologyClaim`, shared with `system.list`",
+    ),
+    (
+        "system.info.detail output",
+        "carries `TopologyClaim`, shared with `system.list`",
+    ),
+    (
+        "system.info.claims.list output",
+        "carries `TopologyClaim`, shared with `system.list`",
+    ),
+    (
+        "system.telemetry.list output",
+        "carries `TopologyClaim`, shared with `system.list`",
+    ),
 ];
 
-/// The whole tool surface is camelCase on the wire. A property name holding an
-/// underscore means some type on the path lost its
-/// `#[serde(rename_all = "camelCase")]`, which silently splits the API's
-/// naming contract in two.
 /// An allowlist entry that names no schema is stale and would silently excuse
 /// a future tool that reuses the name.
 #[test]
@@ -119,6 +147,10 @@ fn every_snake_case_origin_names_a_real_schema() {
     }
 }
 
+/// The whole tool surface is camelCase on the wire. A property name holding an
+/// underscore means some type on the path lost its
+/// `#[serde(rename_all = "camelCase")]`, which silently splits the API's
+/// naming contract in two.
 #[test]
 fn no_snake_case_property_names_on_the_tool_surface() {
     let mut offenders: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -195,5 +227,223 @@ fn no_tool_schema_name_clashes_with_a_registered_component() {
     assert!(
         collisions.is_empty(),
         "tool schema names clash with registered components: {collisions:?}"
+    );
+}
+
+fn snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for c in name.chars() {
+        if c.is_ascii_uppercase() {
+            out.push('_');
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Property names, per tool, of the rc.11 tool surface: `side` is `"args"` or
+/// `"outputs"`. rc.11 is the last release whose daemons read and write
+/// snake_case only.
+fn rc11_properties(side: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let all: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> =
+        serde_json::from_str(include_str!("fixtures/rc11_properties.json"))
+            .expect("parse rc.11 fixture");
+    all.get(side).cloned().unwrap_or_default()
+}
+
+fn camel_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut upper = false;
+    for c in name.chars() {
+        if c == '_' {
+            upper = true;
+        } else if upper {
+            out.push(c.to_ascii_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Every property whose rc.11 spelling (snake_case or camelCase) this build no
+/// longer emits, per tool, under its current name. Tools absent from rc.11 are
+/// skipped: an rc.11 daemon refuses them as unknown, so nothing is silently
+/// dropped.
+fn renamed_since_rc11(
+    side: &str,
+    schema: fn(&OpenApiToolRegistration) -> Value,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let rc11 = rc11_properties(side);
+    let mut renamed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for entry in inventory::iter::<OpenApiToolRegistration> {
+        let Some(old) = rc11.get(entry.name) else {
+            continue;
+        };
+        walk_properties(&schema(entry), &mut |name| {
+            if old.contains(name) {
+                return;
+            }
+            let (snake, camel) = (snake_case(name), camel_case(name));
+            if (snake != name && old.contains(&snake)) || (camel != name && old.contains(&camel)) {
+                renamed
+                    .entry(entry.name.to_string())
+                    .or_default()
+                    .insert(name.to_string());
+            }
+        });
+    }
+    renamed
+}
+
+/// `wire_compat::RENAMED_ARGS` gates forwarding to peers that predate the
+/// camelCase wire. It must name exactly the args renamed since rc.11: a
+/// missing entry lets an old peer silently drop a field; an extra one refuses
+/// calls that were already camelCase there.
+#[test]
+fn wire_compat_renamed_args_match_the_rc11_schema() {
+    let expected = renamed_since_rc11("args", |e| (e.args_schema)());
+    let actual: BTreeMap<String, BTreeSet<String>> = system::mesh::wire_compat::RENAMED_ARGS
+        .iter()
+        .map(|(tool, keys)| {
+            (
+                tool.to_string(),
+                keys.iter().map(|k| k.to_string()).collect(),
+            )
+        })
+        .collect();
+    assert!(
+        expected == actual,
+        "RENAMED_ARGS drifted from the rc.11 schema. Expected:\n{}",
+        expected
+            .iter()
+            .map(|(tool, keys)| format!(
+                "    (\"{tool}\", &[{}]),",
+                keys.iter()
+                    .map(|k| format!("\"{k}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// Outputs an rc.11 daemon decodes from an upgraded peer on its own, with no
+/// operator involved. Each must keep every rc.11 property name, or the old
+/// daemon misreads its peers.
+const RC11_DECODED_OUTPUTS: &[(&str, &str)] = &[
+    (
+        "system.list",
+        "roster sync decodes it every 60s; a failed decode marks new peers down",
+    ),
+    (
+        "system.detail",
+        "the peer-detail cache decodes `SystemStatusReport` for roster rows",
+    ),
+    (
+        "system.mesh.update",
+        "`push_trust` decodes the peer's `MeshTrustOutput`; a failure half-applies trust",
+    ),
+    (
+        "system.update",
+        "fleet rolls and the update probe decode the peer's update state",
+    ),
+    (
+        "system.health",
+        "the fleet health sweep decodes each peer's report",
+    ),
+];
+
+/// Outputs renamed since rc.11 that only an operator's `--id` call from an
+/// rc.11 CLI decodes. That old controller drops the renamed keys, and fails
+/// outright where one is required; the remedy is to run the CLI from an
+/// upgraded host. Listed so a new rename is a decision, not an accident.
+const RC11_CONTROLLER_LIMITS: &[&str] = &[
+    "auth.login",
+    "auth.token.list",
+    "config.detail",
+    "config.list",
+    "config.source.diff",
+    "config.source.status",
+    "config.upsert",
+    "container.create",
+    "container.list",
+    "container.update",
+    "files.list",
+    "guest.exec",
+    "media.detail",
+    "media.list",
+    "media.unit.detail",
+    "media.unit.list",
+    "model.backends_check",
+    "model.list",
+    "namespace.access.list",
+    "namespace.create",
+    "namespace.detail",
+    "namespace.list",
+    "pki.list",
+    "schedule.create",
+    "schedule.detail",
+    "schedule.list",
+    "schema.detail",
+    "schema.list",
+    "secrets.list",
+    "service.list",
+    "spec.list",
+    "storage.detail",
+    "storage.mount.create",
+    "storage.mount.detail",
+    "storage.mount.list",
+    "storage.mount.update",
+    "storage.share.repair-permissions",
+    "system.build",
+    "system.certs.list",
+    "system.history",
+    "system.info.detail",
+    "system.join",
+    "system.mesh.delete",
+    "system.telemetry.list",
+    "system.topology",
+    "system.uninstall",
+    "web.update",
+];
+
+#[test]
+fn rc11_decoded_outputs_keep_their_rc11_names() {
+    let renamed = renamed_since_rc11("outputs", |e| (e.output_schema)());
+    let broken: Vec<String> = RC11_DECODED_OUTPUTS
+        .iter()
+        .filter_map(|(tool, why)| {
+            renamed
+                .get(*tool)
+                .map(|keys| format!("  {tool} ({why}): {keys:?}"))
+        })
+        .collect();
+    assert!(
+        broken.is_empty(),
+        "outputs an rc.11 daemon decodes were renamed:\n{}",
+        broken.join("\n")
+    );
+}
+
+#[test]
+fn every_output_renamed_since_rc11_is_an_accepted_controller_limit() {
+    let renamed = renamed_since_rc11("outputs", |e| (e.output_schema)());
+    let unlisted: Vec<&String> = renamed
+        .keys()
+        .filter(|tool| !RC11_CONTROLLER_LIMITS.contains(&tool.as_str()))
+        .filter(|tool| !RC11_DECODED_OUTPUTS.iter().any(|(t, _)| t == tool))
+        .collect();
+    let stale: Vec<&&str> = RC11_CONTROLLER_LIMITS
+        .iter()
+        .filter(|tool| !renamed.contains_key(**tool))
+        .collect();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "unlisted renamed outputs: {unlisted:?}; stale RC11_CONTROLLER_LIMITS entries: {stale:?}"
     );
 }

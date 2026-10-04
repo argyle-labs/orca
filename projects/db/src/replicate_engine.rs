@@ -68,9 +68,8 @@ fn transport() -> Option<Arc<dyn ReplicationTransport>> {
 
 /// Per-peer outcome of a single sync (push or pull). `orca system mesh update --action sync` returns these
 /// directly so operators see exactly what happened.
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct PeerSyncReport {
     pub peer_id: String,
     pub hostname: String,

@@ -31,9 +31,8 @@ use serde::{Deserialize, Serialize};
 /// correlation: a runtime [`crate::service_identity::ServiceRegistration`] keyed
 /// by `(host, port)` joins to the claim whose `endpoints` contain that port on a
 /// matching host.
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct ClaimEndpoint {
     /// Container/guest-internal listening port.
     pub port: u16,
@@ -67,9 +66,8 @@ fn is_tcp(p: &str) -> bool {
 /// One child entity a host claims to run. The inference layer matches each
 /// claim's `macs` against other peers' `interfaces[].mac` to derive
 /// `parent_peer_id`.
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct TopologyClaim {
     /// `"vm"`, `"container"`, `"lxc"`.
     pub kind: String,

@@ -105,9 +105,8 @@ pub(crate) fn labeled(mut route: Route) -> Route {
     route
 }
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshPeerDto {
     pub peer_id: String,
     pub hostname: String,
@@ -231,9 +230,8 @@ pub struct MeshListArgs {
     pub instances: bool,
 }
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshListOutput {
     pub members: Vec<MeshMember>,
     /// Opaque cursor for the next page, or absent on the last page.
@@ -266,9 +264,8 @@ pub enum MeshListResult {
 // source-of-truth (`refreshMeshPeers` + `refreshProxmoxClusters`) lived in the
 // in-repo frontend, since extracted to the peacock plugin (argyle-labs/peacock).
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshCandidate {
     pub pubkey_fp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -279,9 +276,8 @@ pub struct MeshCandidate {
     pub can_invite: bool,
 }
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshStaleRow {
     pub peer_id: String,
     pub hostname: String,
@@ -293,9 +289,8 @@ pub struct MeshStaleRow {
     pub last_seen_at: Option<i64>,
 }
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshInboundOffer {
     pub offer_id: String,
     pub peer_hostname: String,
@@ -307,9 +302,8 @@ pub struct MeshInboundOffer {
     pub ttl_secs: i64,
 }
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshSnapshotOutput {
     /// Same shape as `system.list.members` — the UI reuses the existing type.
     pub members: Vec<MeshMember>,
@@ -560,9 +554,8 @@ fn match_clusters(
 // `seedInstancesFromLoad` / `seedInboundOffersFromLoad` / `reachableAddrs`
 // utilities and the ~60-line bucketing block in `peers.svelte.ts`.
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshInstanceAddress {
     pub kind: String,
     pub kind_label: String,
@@ -578,9 +571,8 @@ pub struct MeshInstanceSecure {
 /// Fully-shaped instance row the frontend systems UI renders directly, in the
 /// same camelCase wire form as the rest of the surface so the typed SDK from
 /// regen flows through unchanged.
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshInstance {
     pub id: String,
     pub peer_id: String,
@@ -637,9 +629,8 @@ pub struct MeshInstance {
     pub available_versions: Vec<crate::update::VersionEntry>,
 }
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshInstancesOutput {
     pub members: Vec<MeshInstance>,
     pub candidates: Vec<MeshCandidate>,
@@ -836,9 +827,8 @@ pub struct MeshAcceptOutput {
 
 // ── system.mesh.update --action trust ────────────────────────────────────────────────────────────────
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshTrustOutput {
     pub peer_id: String,
     pub local_secure: bool,
@@ -874,9 +864,8 @@ pub struct MeshPingOutput {
 
 // ── system.list --discovery ─────────────────────────────────────────────────────────────
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshDiscoveryRowDto {
     pub pubkey_fp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -900,9 +889,8 @@ pub struct MeshDiscoveryListOutput(pub Vec<MeshDiscoveryRowDto>);
 
 // ── system.list --pending ──────────────────────────────────────────────────────────────
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshPendingOfferDto {
     pub offer_id: String,
     pub direction: String,
@@ -1007,9 +995,8 @@ pub struct MeshLeaveSelfOutput {
 
 // ── mesh.recover ──────────────────────────────────────────────────────────────
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshRecoverOutput {
     pub peer_id: String,
     /// `true` if a `departed_at` flag was actually cleared. `false` means the
@@ -1109,9 +1096,8 @@ pub struct MeshUpdateArgs {
 }
 
 /// Result of `system.mesh.update action=settings`.
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MeshSettingsOutput {
     pub self_secure: bool,
 }
@@ -1913,6 +1899,10 @@ pub struct MeshPingResult {
     pub peer_id: String,
     pub version: String,
     pub hostname: String,
+    /// The responder reads camelCase tool args. Daemons that predate the
+    /// camelCase wire omit it, so `false` means "would drop renamed args".
+    #[serde(default)]
+    pub camel_wire: bool,
     /// Addressing snapshot of the responding peer (rc.25+). Optional +
     /// `#[serde(default)]` so rc.≤24 daemons that omit the field still
     /// deserialize cleanly. Callers use this to refresh
@@ -2324,7 +2314,7 @@ pub async fn exec_peer(
     let targets = crate::mesh::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
         .unwrap_or_else(|_| vec![peer.peer_addr.clone()]);
     drop(conn);
-    crate::mesh::wire_compat::check(peer_id, peer_id, tool, &args).await?;
+    crate::mesh::wire_compat::check(peer_id, peer_id, &targets, tool, &args).await?;
     crate::mesh::dialer::try_targets_tracked(Some(peer_id), &targets, |t| {
         let tool = tool.to_string();
         let args = args.clone();
@@ -2576,6 +2566,7 @@ mod mesh_tests {
             peer_id: "abc".into(),
             version: "0.0.4".into(),
             hostname: "abc123".into(),
+            camel_wire: false,
             addressing: None,
         };
         let v = serde_json::to_value(&r).unwrap();
@@ -2600,17 +2591,21 @@ mod mesh_tests {
         }
     }
 
-    /// Node-to-node JSON-RPC payloads reach daemons on the previous release,
-    /// which only read snake_case. A camelCase key here (a type that gained
-    /// `rename_all = "camelCase"`) silently breaks a mixed fleet. Every mesh
-    /// JSON-RPC type whose serialization changed with the camelCase rename is
-    /// listed; add new node-to-node types here.
+    /// Payloads a previous-release daemon decodes from this one: the mesh
+    /// JSON-RPC results, plus the `system.list` roster and `system.mesh.update`
+    /// trust output it reads back over `mesh/exec`. It only knows snake_case,
+    /// so a camelCase key here silently breaks a mixed fleet. `system.detail`
+    /// and the full output trees are checked against the rc.11 schema in
+    /// inventory-tests (`rc11_decoded_outputs_keep_their_rc11_names`); this
+    /// test pins the serialized values for the types built here. `Route` is
+    /// left empty: it was already camelCase at rc.11.
     #[test]
     fn mesh_json_rpc_payloads_are_snake_case() {
         let ping = MeshPingResult {
             peer_id: "abc".into(),
             version: "0.0.4".into(),
             hostname: "h".into(),
+            camel_wire: false,
             addressing: Some(HostAddressingSnapshot {
                 display_name: "host-g".into(),
                 channels: vec![AddressChannel {
@@ -2630,10 +2625,80 @@ mod mesh_tests {
             detail: None,
             commits_pulled: Some(1),
         };
+        let roster = MeshListOutput {
+            members: vec![
+                MeshMember::Joined(Box::new(MeshPeerDto {
+                    peer_id: "p1".into(),
+                    hostname: "h".into(),
+                    addr: String::new(),
+                    port: 7777,
+                    last_seen_at: 1,
+                    local_secure: true,
+                    peer_secure: true,
+                    status: "active".into(),
+                    routes: Routes::new(),
+                    local: false,
+                    reachable: Some(true),
+                    latency_ms: Some(3),
+                    probe_error: Some("e".into()),
+                    version: Some("v".into()),
+                    target: Some("t".into()),
+                    frontend: Some("f".into()),
+                    mode: Some("daemon".into()),
+                    channel: Some("rc".into()),
+                    pinned_to: Some("v".into()),
+                    update_latest: Some("v".into()),
+                    update_available: Some(false),
+                    update_checked_secs: Some(1),
+                    system: Some(crate::system::TopologyFacts {
+                        system_type: Some("vm".into()),
+                        parent_kind: Some("proxmox".into()),
+                        primary_ipv4: Some("10.0.0.1".into()),
+                        ..Default::default()
+                    }),
+                    pubkey_fp: Some("fp".into()),
+                })),
+                MeshMember::Handshaking(MeshPendingOfferDto {
+                    offer_id: "o".into(),
+                    direction: "in".into(),
+                    peer_pubkey_fp: "fp".into(),
+                    peer_hostname: "h".into(),
+                    peer_addr: "10.0.0.2".into(),
+                    peer_port: 7777,
+                    inviter_peer_id: Some("p".into()),
+                    mesh_id: Some("m".into()),
+                    expires_at: 1,
+                    ttl_secs: 1,
+                    created_at: 1,
+                }),
+                MeshMember::Discovered(MeshDiscoveryRowDto {
+                    pubkey_fp: "fp".into(),
+                    peer_id: Some("p".into()),
+                    hostname: "h".into(),
+                    addr: "10.0.0.3".into(),
+                    port: 7777,
+                    discovery_state: "seen".into(),
+                    can_invite: true,
+                    first_seen_at: 1,
+                    last_seen_at: 1,
+                }),
+            ],
+            next_cursor: Some("c".into()),
+            total: Some(3),
+        };
+        let trust = MeshTrustOutput {
+            peer_id: "p".into(),
+            local_secure: true,
+            peer_secure: false,
+            mutual: false,
+            notify_result: "ok".into(),
+        };
         for v in [
             serde_json::to_value(&ping).unwrap(),
             serde_json::to_value(&bundle).unwrap(),
             serde_json::to_value(&dev_sync).unwrap(),
+            serde_json::to_value(&roster).unwrap(),
+            serde_json::to_value(&trust).unwrap(),
         ] {
             let mut ks = Vec::new();
             keys(&v, &mut ks);
@@ -2653,6 +2718,38 @@ mod mesh_tests {
         .unwrap();
         assert_eq!(camel.peer_id, "abc");
         assert_eq!(camel.addressing.unwrap().display_name, "d");
+        let trust: MeshTrustOutput = serde_json::from_value(serde_json::json!({
+            "peerId": "p", "localSecure": true, "peerSecure": true,
+            "mutual": true, "notifyResult": "ok",
+        }))
+        .unwrap();
+        assert!(trust.local_secure && trust.peer_secure);
+    }
+
+    /// The camelCase-wire gate reads the `camel_wire` marker, never the
+    /// version string, so a dev build ("-dev+g…", ".dirty") is judged by what
+    /// it reports rather than ranked as an old release.
+    #[test]
+    fn ping_camel_wire_marker_is_independent_of_version_format() {
+        for version in [
+            "0.2.1-rc.12-dev+g1234abc",
+            "0.2.1-rc.12-dev+g1234abc.dirty",
+            "0.0.0",
+        ] {
+            let r: MeshPingResult = serde_json::from_value(serde_json::json!({
+                "peer_id": "p", "version": version, "hostname": "h", "camel_wire": true,
+            }))
+            .unwrap();
+            assert!(r.camel_wire, "{version}");
+        }
+        let rc11: MeshPingResult = serde_json::from_value(serde_json::json!({
+            "peer_id": "p", "version": "0.2.1-rc.11", "hostname": "h",
+        }))
+        .unwrap();
+        assert!(
+            !rc11.camel_wire,
+            "a peer that omits the marker predates the wire"
+        );
     }
 }
 
@@ -3281,7 +3378,7 @@ mod added_coverage {
         .unwrap();
         assert!(d.contains("\"state\":\"discovered\""), "got: {d}");
         // `discovery_state` must NOT be renamed to the reserved `state` key.
-        assert!(d.contains("\"discoveryState\":\"unclaimed\""), "got: {d}");
+        assert!(d.contains("\"discovery_state\":\"unclaimed\""), "got: {d}");
     }
 
     // ── serde: dispatch action enums (snake_case) ────────────────────────────
@@ -3468,7 +3565,7 @@ mod added_coverage {
         let out = MeshUpdateOutput::Settings(MeshSettingsOutput { self_secure: true });
         assert_eq!(
             serde_json::to_string(&out).unwrap(),
-            r#"{"selfSecure":true}"#
+            r#"{"self_secure":true}"#
         );
     }
 

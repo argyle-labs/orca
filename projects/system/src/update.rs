@@ -310,10 +310,9 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
 /// (with or without `v` prefix as returned by GitHub). Callers compare `tag`
 /// against the response's `current_version` to mark the running build — the
 /// entry no longer carries a redundant `is_current` flag.
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[serde(rename_all = "camelCase")]
 pub struct VersionEntry {
     pub tag: String,
     pub prerelease: bool,

@@ -9,9 +9,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct HostChannel {
     pub kind: String,
     pub value: String,
