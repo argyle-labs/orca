@@ -11,9 +11,8 @@
 //! ## What is centralized here (clearly-safe, implemented)
 //!
 //! * [`TARGET_TRIPLES`] — the release triples every first-party plugin RC
-//!   must publish (musl-static x86_64 linux + aarch64 darwin), plus
-//!   [`OPTIONAL_TARGET_TRIPLES`] it may. The reusable workflow's default
-//!   `targets` array MUST cover the required list; they are kept in
+//!   publishes (currently the three in-use fleet architectures). The reusable
+//!   workflow's default `targets` array MUST equal this list; they are kept in
 //!   sync by hand today and by a CI mirror check tomorrow (see the structural
 //!   TODO below).
 //! * [`linux_asset_candidates`] — the **linux asset-resolution fallback order**.
@@ -35,30 +34,29 @@
 //!   `plugin_fetch`'s HTTP client and is deliberately left as a TODO so this
 //!   module stays pure and unit-testable.
 
-/// The triples every first-party plugin release MUST publish. **Canonical.**
-/// The shared reusable release workflow's default `targets` array must cover
-/// this set.
+/// The first-party plugin release target triples actually in use across the
+/// fleet today. **Canonical.** The shared reusable release workflow's default
+/// `targets` array must equal this set.
 ///
-/// x86_64 linux is served by the musl-static asset alone: a static musl binary
-/// carries its own libc and runs on glibc hosts (proxmox/LXC/unraid/gaming) as
-/// well as Alpine ones, and [`linux_asset_candidates`] already prefers it. The
-/// gnu asset is therefore optional for plugins (see [`OPTIONAL_TARGET_TRIPLES`]).
-/// The orca daemon's own release still ships gnu; this matrix is plugins only.
-/// aarch64 darwin is the Mac controller. Other triples (aarch64-linux,
-/// x86_64-darwin) are not built until a host that needs them exists.
+/// Trimmed to the three architectures the fleet actually runs: x86_64 linux
+/// (gnu for proxmox/LXC/unraid/gaming hosts, musl-static for Alpine hosts like
+/// baldur) and aarch64 darwin (the Mac controller). The other triples
+/// (aarch64-linux, x86_64-darwin) are intentionally not built until a host that
+/// needs them exists — re-add here (and the workflow menus already list them)
+/// to turn them back on.
 ///
-/// Callers that need a stable set should not depend on order.
-pub const TARGET_TRIPLES: &[&str] = &["x86_64-unknown-linux-musl", "aarch64-apple-darwin"];
+/// Ordering is deliberate: linux first (the mesh's server hosts), musl after
+/// its gnu sibling, darwin last (developer/Mac nodes). Callers that need a
+/// stable set should not depend on order.
+pub const TARGET_TRIPLES: &[&str] = &[
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+];
 
-/// Triples a plugin release MAY publish but is not required to. A release that
-/// still ships them stays valid, and fetch falls back to gnu when a release has
-/// no musl asset (releases cut before musl existed).
-pub const OPTIONAL_TARGET_TRIPLES: &[&str] = &["x86_64-unknown-linux-gnu"];
-
-/// `true` if `triple` is a first-party plugin release target, required or
-/// optional.
+/// `true` if `triple` is one of the canonical first-party release targets.
 pub fn is_release_triple(triple: &str) -> bool {
-    TARGET_TRIPLES.contains(&triple) || OPTIONAL_TARGET_TRIPLES.contains(&triple)
+    TARGET_TRIPLES.contains(&triple)
 }
 
 /// The CPU-arch prefix of a Rust target triple (`"x86_64"`, `"aarch64"`), or
@@ -165,7 +163,7 @@ pub fn validate_catalog_entry(
 }
 
 /// The result shape of a per-release asset-completeness check: for a given
-/// plugin `name` + release `tag`, which of the required `TARGET_TRIPLES` are missing
+/// plugin `name` + release `tag`, which of the `TARGET_TRIPLES` are missing
 /// either their binary or their `.sha256`.
 ///
 /// TODO(structural): the actual check needs a GitHub release's asset list,
@@ -210,26 +208,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn required_and_optional_triples_are_unique_and_disjoint() {
-        let mut all: Vec<&str> = TARGET_TRIPLES
-            .iter()
-            .chain(OPTIONAL_TARGET_TRIPLES)
-            .copied()
-            .collect();
-        let n = all.len();
-        all.sort_unstable();
-        all.dedup();
-        assert_eq!(all.len(), n, "a triple is listed twice");
+    fn matrix_has_three_unique_triples() {
+        assert_eq!(TARGET_TRIPLES.len(), 3);
+        let mut sorted = TARGET_TRIPLES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 3, "target triples must be unique");
     }
 
     #[test]
-    fn plugins_require_musl_and_darwin_and_may_ship_gnu() {
-        assert_eq!(
-            TARGET_TRIPLES,
-            ["x86_64-unknown-linux-musl", "aarch64-apple-darwin"]
-        );
+    fn matrix_is_the_three_in_use_fleet_triples() {
+        // In use today: x86_64 linux (gnu + musl) and the aarch64 Mac controller.
         assert!(is_release_triple("x86_64-unknown-linux-gnu"));
-        assert!(!TARGET_TRIPLES.contains(&"x86_64-unknown-linux-gnu"));
+        assert!(is_release_triple("x86_64-unknown-linux-musl"));
+        assert!(is_release_triple("aarch64-apple-darwin"));
         // Intentionally not built until a host needs them.
         assert!(!is_release_triple("aarch64-unknown-linux-gnu"));
         assert!(!is_release_triple("aarch64-unknown-linux-musl"));
@@ -290,25 +282,21 @@ mod tests {
 
     #[test]
     fn missing_assets_detects_partial_release() {
-        // Only the gnu binary (optional) and an aarch64-gnu binary (not a
-        // release triple): every required triple is incomplete.
+        // A release that shipped only the x86_64 gnu binary (no .sha256, no
+        // musl, no darwin) — every triple is incomplete. The aarch64-gnu binary
+        // present here is no longer a release triple, so it does not count.
         let present = vec![
             "ntfy-v0.1.0-x86_64-unknown-linux-gnu".to_string(),
             "ntfy-v0.1.0-aarch64-unknown-linux-gnu".to_string(),
         ];
         let missing = missing_release_assets("ntfy", "0.1.0", &present);
-        assert_eq!(missing, TARGET_TRIPLES);
-
-        // A binary without its .sha256 is not complete.
-        let no_sha = vec!["ntfy-v0.1.0-x86_64-unknown-linux-musl".to_string()];
-        assert!(
-            missing_release_assets("ntfy", "0.1.0", &no_sha)
-                .contains(&"x86_64-unknown-linux-musl".to_string())
+        assert_eq!(
+            missing.len(),
+            TARGET_TRIPLES.len(),
+            "no triple is complete without its .sha256"
         );
-    }
 
-    #[test]
-    fn a_release_without_gnu_is_complete() {
+        // A fully complete release across every in-use triple.
         let mut full = Vec::new();
         for t in TARGET_TRIPLES {
             full.push(format!("ntfy-v0.1.0-{t}"));
