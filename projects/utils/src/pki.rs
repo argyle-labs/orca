@@ -808,14 +808,24 @@ pub fn build_refresh_csrs(host_cn: &str) -> Result<(String, String, String, Stri
 
 /// Atomically install refreshed certs received from a peer. Caller passes
 /// the certs from the mesh/refresh-cert response plus the locally-generated
-/// keys (from `build_refresh_csrs`).
+/// keys (from `build_refresh_csrs`). Nothing is written unless
+/// [`verify_refreshed_peer_certs`] accepts both leaves.
 pub fn install_refreshed_peer_certs(
     pki_dir: &Path,
+    host_cn: &str,
     client_cert_pem: &str,
     client_key_pem: &str,
     server_cert_pem: &str,
     server_key_pem: &str,
 ) -> Result<()> {
+    verify_refreshed_peer_certs(
+        pki_dir,
+        host_cn,
+        client_cert_pem,
+        client_key_pem,
+        server_cert_pem,
+        server_key_pem,
+    )?;
     atomic_write_pem(&mesh_client_cert_path(pki_dir), client_cert_pem)?;
     atomic_write_pem(&mesh_client_key_path(pki_dir), client_key_pem)?;
     atomic_write_pem(&mesh_server_cert_path(pki_dir), server_cert_pem)?;
@@ -823,7 +833,108 @@ pub fn install_refreshed_peer_certs(
     Ok(())
 }
 
-// ── File paths (plugin / legacy) ─────────────────────────────────────────────
+/// Check leaves a peer signed for us before they replace working certs. The
+/// signer is any peer, so its output is untrusted: each leaf must chain to a
+/// mesh CA this host trusts (current, or previous during an overlap window),
+/// be valid now for its role's EKU, carry the public key of the CSR we built,
+/// and name this host exactly as a self-issued leaf would.
+pub fn verify_refreshed_peer_certs(
+    pki_dir: &Path,
+    host_cn: &str,
+    client_cert_pem: &str,
+    client_key_pem: &str,
+    server_cert_pem: &str,
+    server_key_pem: &str,
+) -> Result<()> {
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::{ServerName, UnixTime};
+    use std::sync::Arc;
+
+    let mut ca_pems =
+        vec![std::fs::read_to_string(mesh_ca_cert_path(pki_dir)).context("read mesh CA cert")?];
+    if let Ok(prev) = std::fs::read_to_string(mesh_ca_previous_cert_path(pki_dir)) {
+        ca_pems.push(prev);
+    }
+    let roots = Arc::new(ca_root_store_multi(ca_pems.iter().map(String::as_str))?);
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let now = UnixTime::now();
+
+    let client_der = first_cert_der(client_cert_pem).context("refreshed client cert")?;
+    let server_der = first_cert_der(server_cert_pem).context("refreshed server cert")?;
+
+    rustls::server::WebPkiClientVerifier::builder_with_provider(roots.clone(), provider.clone())
+        .build()
+        .context("build refreshed-leaf client verifier")?
+        .verify_client_cert(&client_der, &[], now)
+        .context("refreshed client cert does not verify against the mesh CA")?;
+    rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider)
+        .build()
+        .context("build refreshed-leaf server verifier")?
+        .verify_server_cert(
+            &server_der,
+            &[],
+            &ServerName::try_from(MESH_SERVER_SAN)?,
+            &[],
+            now,
+        )
+        .context("refreshed server cert does not verify against the mesh CA")?;
+
+    check_refreshed_leaf(
+        "client",
+        client_cert_pem,
+        &client_der,
+        client_key_pem,
+        host_cn,
+        mesh_client_sans(host_cn),
+    )?;
+    check_refreshed_leaf(
+        "server",
+        server_cert_pem,
+        &server_der,
+        server_key_pem,
+        "orca-mesh-server",
+        mesh_server_sans(),
+    )
+}
+
+fn first_cert_der(cert_pem: &str) -> Result<rustls::pki_types::CertificateDer<'static>> {
+    rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        .next()
+        .context("no certificate in PEM")?
+        .context("parse cert DER")
+}
+
+fn check_refreshed_leaf(
+    role: &str,
+    cert_pem: &str,
+    cert_der: &[u8],
+    key_pem: &str,
+    expected_cn: &str,
+    mut expected_sans: Vec<String>,
+) -> Result<()> {
+    let (_, parsed) =
+        x509_parser::parse_x509_certificate(cert_der).context("parse refreshed cert")?;
+    let key = KeyPair::from_pem(key_pem).context("parse refresh CSR key")?;
+    anyhow::ensure!(
+        parsed.public_key().subject_public_key.data.as_ref() == key.public_key_raw(),
+        "refreshed {role} cert does not carry the key from our CSR"
+    );
+    let cn = peer_common_name(cert_der)?;
+    anyhow::ensure!(
+        cn == expected_cn,
+        "refreshed {role} cert CN is {cn:?}, expected {expected_cn:?}"
+    );
+    let mut sans = cert_dns_names(cert_pem).context("refreshed cert has no readable SANs")?;
+    sans.sort();
+    expected_sans.sort();
+    anyhow::ensure!(
+        sans == expected_sans,
+        "refreshed {role} cert SANs {sans:?} differ from expected {expected_sans:?}"
+    );
+    Ok(())
+}
+
+// ── File paths (plugin / legacy)─────────────────────────────────────────────
 
 pub fn ca_cert_path(pki_dir: &Path) -> PathBuf {
     pki_dir.join("ca.cert.pem")
@@ -2156,7 +2267,8 @@ mod tests {
         let (csr_c, key_c, csr_s, key_s) = build_refresh_csrs("host-r").unwrap();
         let (cert_c, _) = sign_peer_csr(dir.path(), &csr_c, "host-r", PeerRole::Client).unwrap();
         let (cert_s, _) = sign_peer_csr(dir.path(), &csr_s, "host-r", PeerRole::Server).unwrap();
-        install_refreshed_peer_certs(dir.path(), &cert_c, &key_c, &cert_s, &key_s).unwrap();
+        install_refreshed_peer_certs(dir.path(), "host-r", &cert_c, &key_c, &cert_s, &key_s)
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(mesh_client_cert_path(dir.path())).unwrap(),
             cert_c
@@ -2165,6 +2277,122 @@ mod tests {
             std::fs::read_to_string(mesh_server_cert_path(dir.path())).unwrap(),
             cert_s
         );
+    }
+
+    struct RefreshFixture {
+        dir: tempfile::TempDir,
+        key_c: String,
+        key_s: String,
+        cert_c: String,
+        cert_s: String,
+    }
+
+    fn refresh_fixture(host: &str) -> RefreshFixture {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), host).unwrap();
+        let (csr_c, key_c, csr_s, key_s) = build_refresh_csrs(host).unwrap();
+        let (cert_c, _) = sign_peer_csr(dir.path(), &csr_c, host, PeerRole::Client).unwrap();
+        let (cert_s, _) = sign_peer_csr(dir.path(), &csr_s, host, PeerRole::Server).unwrap();
+        RefreshFixture {
+            dir,
+            key_c,
+            key_s,
+            cert_c,
+            cert_s,
+        }
+    }
+
+    fn assert_install_refused(f: &RefreshFixture, cert_c: &str, cert_s: &str, needle: &str) {
+        let before = std::fs::read_to_string(mesh_client_cert_path(f.dir.path())).unwrap();
+        let err = install_refreshed_peer_certs(
+            f.dir.path(),
+            "host-r",
+            cert_c,
+            &f.key_c,
+            cert_s,
+            &f.key_s,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains(needle), "got: {err:#}");
+        assert_eq!(
+            std::fs::read_to_string(mesh_client_cert_path(f.dir.path())).unwrap(),
+            before,
+            "a refused refresh must not touch the installed certs"
+        );
+    }
+
+    #[test]
+    fn install_refreshed_refuses_leaf_for_another_host() {
+        let f = refresh_fixture("host-r");
+        let (csr, _) = build_peer_csr("host-r", PeerRole::Client).unwrap();
+        // Signed under our CA and with valid SANs for its CN — just not ours.
+        let (other, _) = sign_peer_csr(f.dir.path(), &csr, "host-x", PeerRole::Client).unwrap();
+        assert_install_refused(&f, &other, &f.cert_s, "client cert");
+    }
+
+    #[test]
+    fn install_refreshed_refuses_leaf_without_our_csr_key() {
+        let f = refresh_fixture("host-r");
+        let (csr, _) = build_peer_csr("host-r", PeerRole::Server).unwrap();
+        let (other_key_cert, _) =
+            sign_peer_csr(f.dir.path(), &csr, "host-r", PeerRole::Server).unwrap();
+        assert_install_refused(&f, &f.cert_c, &other_key_cert, "key from our CSR");
+    }
+
+    #[test]
+    fn install_refreshed_refuses_leaf_from_foreign_ca() {
+        let f = refresh_fixture("host-r");
+        let rogue = tempfile::tempdir().unwrap();
+        init_mesh_ca(rogue.path(), "rogue").unwrap();
+        let (csr_c, _, _, _) = build_refresh_csrs("host-r").unwrap();
+        let (rogue_c, _) = sign_peer_csr(rogue.path(), &csr_c, "host-r", PeerRole::Client).unwrap();
+        assert_install_refused(
+            &f,
+            &rogue_c,
+            &f.cert_s,
+            "does not verify against the mesh CA",
+        );
+    }
+
+    #[test]
+    fn install_refreshed_refuses_swapped_roles() {
+        let f = refresh_fixture("host-r");
+        assert_install_refused(&f, &f.cert_s, &f.cert_c, "does not verify");
+    }
+
+    #[test]
+    fn install_refreshed_refuses_leaf_with_extra_san() {
+        let f = refresh_fixture("host-r");
+        let ca_cert = std::fs::read_to_string(mesh_ca_cert_path(f.dir.path())).unwrap();
+        let ca_key =
+            KeyPair::from_pem(&std::fs::read_to_string(mesh_ca_key_path(f.dir.path())).unwrap())
+                .unwrap();
+        let issuer = Issuer::from_ca_cert_pem(&ca_cert, ca_key).unwrap();
+        let key = KeyPair::from_pem(&f.key_c).unwrap();
+        let mut sans = mesh_client_sans("host-r");
+        sans.push("evil.example".to_string());
+        let mut params = CertificateParams::new(sans).unwrap();
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "host-r");
+        params.distinguished_name = dn;
+        let cert = params.signed_by(&key, &issuer).unwrap().pem();
+        assert_install_refused(&f, &cert, &f.cert_s, "SANs");
+    }
+
+    #[test]
+    fn install_refreshed_accepts_leaves_under_previous_ca() {
+        let f = refresh_fixture("host-r");
+        rotate_mesh_ca(f.dir.path()).unwrap();
+        install_refreshed_peer_certs(
+            f.dir.path(),
+            "host-r",
+            &f.cert_c,
+            &f.key_c,
+            &f.cert_s,
+            &f.key_s,
+        )
+        .unwrap();
     }
 
     #[test]
