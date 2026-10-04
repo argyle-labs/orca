@@ -21,6 +21,8 @@ use mcp as _;
 use model as _;
 use namespace as _;
 use notifications as _;
+// The server crate's lib target is named `orca`.
+use orca as _;
 use orca_inventory as _;
 use plugin_toolkit as _;
 use plugins as _;
