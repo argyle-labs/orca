@@ -101,6 +101,25 @@ async fn system_telemetry_list(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_host_status_row_persisted_in_snake_case_still_decodes() {
+        // `rows_to_dtos` decodes with `.ok()`, so a row written before the
+        // camelCase rename that failed to decode would silently show no system.
+        let rows = vec![hosts::host_status::HostStatusRow {
+            snapshot_at_unix: 1,
+            received_at_unix: 2,
+            payload_json: r#"{"os_name":"Debian","os_version":"12","kernel_version":"6.1",
+                "dmi_vendor":"Dell","mem_total_mb":4096,"cpu_model":"Xeon"}"#
+                .to_string(),
+        }];
+        let dto = rows_to_dtos(rows, "p").pop().unwrap();
+        let sys = dto.system.expect("snake row decodes");
+        assert_eq!(sys.os_name.as_deref(), Some("Debian"));
+        assert_eq!(sys.kernel_version.as_deref(), Some("6.1"));
+        assert_eq!(sys.dmi_vendor.as_deref(), Some("Dell"));
+        assert_eq!(sys.cpu_model.as_deref(), Some("Xeon"));
+    }
+
     fn now() -> i64 {
         utils::time::now().unix_seconds()
     }
