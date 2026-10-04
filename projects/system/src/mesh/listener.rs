@@ -627,9 +627,10 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
 
 /// Sign refreshed CSRs for a peer that doesn't hold the mesh CA key itself
 /// (non-secure joiner that needs rotation before its 30-day cert expires).
-/// Requires the requesting peer to be a known, non-departed mesh member —
-/// the mTLS handshake already authenticated the CN, and the departed-peer
-/// gate above blocks departed CNs from reaching this method.
+/// The mTLS handshake authenticates the CN; the caller must also have a
+/// non-departed `mesh_peers` row, as the bootstrap refresh requires. The
+/// dispatch gate only rejects rows marked departed, so it lets an unknown CN
+/// (forgotten, or never paired with this host) through.
 fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertResult> {
     anyhow::ensure!(
         utils::pki::has_mesh_ca_key(&pki_dir()),
@@ -647,6 +648,13 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
     anyhow::ensure!(
         peer_cn == expected_cn,
         "refresh refused: cert CN ({peer_cn}) does not match joiner_hostname ({expected_cn})"
+    );
+    let active = db::pool::with_pooled_or_open(|conn| {
+        Ok(pdb::peer_exists(conn, peer_cn)? && !pdb::is_peer_departed(conn, peer_cn)?)
+    })?;
+    anyhow::ensure!(
+        active,
+        "refresh refused: {peer_cn} is not a known active mesh peer"
     );
 
     let pki_d = pki_dir();
@@ -1381,5 +1389,69 @@ mod tests {
             err.to_string().contains("does not match joiner_hostname"),
             "got: {err}"
         );
+    }
+
+    fn refresh_params(cn: &str) -> Value {
+        let (csr_client_pem, _, csr_server_pem, _) = utils::pki::build_refresh_csrs(cn).unwrap();
+        serde_json::json!({
+            "joiner_hostname": cn,
+            "csr_client_pem": csr_client_pem,
+            "csr_server_pem": csr_server_pem,
+        })
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn refresh_cert_signs_for_matching_cn_with_ca_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::mesh::pin_home(dir.path());
+        db::with_thread_db_path(&dir.path().join("refresh-ok.db"), || {
+            utils::pki::init_mesh_ca(&pki_dir(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+            let cn = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &cn, "hr", "127.0.0.1", 1, Some("fp-r"), "").unwrap();
+            drop(conn);
+
+            let res = handle_refresh_cert(
+                &cn,
+                req_with_params(MESH_REFRESH_CERT_METHOD, refresh_params(&cn)),
+            )
+            .unwrap();
+            assert_eq!(
+                utils::pki::cert_summary(&res.client_cert_pem).unwrap().cn,
+                cn
+            );
+            assert_eq!(
+                utils::pki::cert_summary(&res.server_cert_pem).unwrap().cn,
+                "orca-mesh-server"
+            );
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn refresh_cert_refuses_departed_or_unknown_cn() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::mesh::pin_home(dir.path());
+        db::with_thread_db_path(&dir.path().join("refresh-refused.db"), || {
+            utils::pki::init_mesh_ca(&pki_dir(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+            let departed = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &departed, "hd", "127.0.0.1", 1, Some("fp-d"), "").unwrap();
+            pdb::mark_peer_departed(&conn, &departed).unwrap();
+            drop(conn);
+
+            for cn in [departed, utils::id::new()] {
+                let err = handle_refresh_cert(
+                    &cn,
+                    req_with_params(MESH_REFRESH_CERT_METHOD, refresh_params(&cn)),
+                )
+                .unwrap_err();
+                assert!(
+                    err.to_string().contains("not a known active mesh peer"),
+                    "got: {err}"
+                );
+            }
+        });
     }
 }

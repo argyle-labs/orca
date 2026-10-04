@@ -164,14 +164,10 @@ pub fn has_mesh_ca_previous(pki_dir: &Path) -> bool {
 /// server cert is issued for.
 pub const MESH_SERVER_SAN: &str = "mesh.orca.local";
 
-/// DNS names a mesh SERVER cert is issued for.
-///
-/// Single-named. The pre-rename name is gone: a listener that still answered
-/// to it, while the dialer had already moved on, is not compat — it is a
-/// one-directional bridge that lets an upgraded host be reached but never
-/// reach back. Measured 2026-09-27: rc.6 could dial rc.7, rc.7 could not dial
-/// rc.6, and the roll meant to converge them had to travel over the broken
-/// direction. Keeping the old name only made that asymmetry quiet.
+/// DNS names a mesh SERVER cert is issued for: [`MESH_SERVER_SAN`] plus the
+/// pre-rename names from [`crate::mesh_compat`], so peers dialing either SNI
+/// can validate it. Every issuance path — self-signed and CSR-signed — must
+/// use this, or a host's cert loses a name the moment it renews via a peer.
 ///
 /// A mesh server cert lasts 30 days and rotates lazily under 7, so a host
 /// upgraded from a pre-rename build starts holding a cert without
@@ -359,11 +355,11 @@ pub enum PeerRole {
 /// host; only `csr_pem` is sent to the inviting peer.
 pub fn build_peer_csr(peer_cn: &str, role: PeerRole) -> Result<(String, String)> {
     let key = gen_keypair()?;
-    let san = match role {
-        PeerRole::Client => format!("{peer_cn}.{MESH_SERVER_SAN}"),
-        PeerRole::Server => MESH_SERVER_SAN.to_string(),
+    let sans = match role {
+        PeerRole::Client => mesh_client_sans(peer_cn),
+        PeerRole::Server => mesh_server_sans(),
     };
-    let mut params = CertificateParams::new(vec![san])?;
+    let mut params = CertificateParams::new(sans)?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![match role {
         PeerRole::Client => ExtendedKeyUsagePurpose::ClientAuth,
@@ -420,13 +416,13 @@ pub fn sign_peer_csr(
 
     // Enforce naming policy: rewrite SAN, DN, EKU regardless of what the
     // joiner asked for. Joiner-controlled fields are not trusted.
-    let san = match role {
-        PeerRole::Client => format!("{peer_cn}.{MESH_SERVER_SAN}"),
-        PeerRole::Server => MESH_SERVER_SAN.to_string(),
+    let sans = match role {
+        PeerRole::Client => mesh_client_sans(peer_cn),
+        PeerRole::Server => mesh_server_sans(),
     };
     csr.params.subject_alt_names.clear();
     csr.params = {
-        let mut p = CertificateParams::new(vec![san])?;
+        let mut p = CertificateParams::new(sans)?;
         p.is_ca = IsCa::NoCa;
         p.extended_key_usages = vec![match role {
             PeerRole::Client => ExtendedKeyUsagePurpose::ClientAuth,
@@ -2183,6 +2179,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(peer_common_name(&chain[0]).unwrap(), "alice");
+    }
+
+    fn sorted_dns_names(cert_pem: &str) -> Vec<String> {
+        let mut names = cert_dns_names(cert_pem).expect("parse cert SANs");
+        names.sort();
+        names
+    }
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn sign_peer_csr_server_sans_match_mesh_server_sans() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        let (csr, _) = build_peer_csr("joiner", PeerRole::Server).unwrap();
+        let (cert, _) = sign_peer_csr(dir.path(), &csr, "joiner", PeerRole::Server).unwrap();
+        assert_eq!(sorted_dns_names(&cert), sorted(mesh_server_sans()));
+    }
+
+    #[test]
+    fn sign_peer_csr_client_sans_match_mesh_client_sans() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        let (csr, _) = build_peer_csr("joiner", PeerRole::Client).unwrap();
+        let (cert, _) = sign_peer_csr(dir.path(), &csr, "joiner", PeerRole::Client).unwrap();
+        assert_eq!(sorted_dns_names(&cert), sorted(mesh_client_sans("joiner")));
+    }
+
+    #[test]
+    fn csr_signed_and_self_signed_server_leaves_have_identical_sans() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        let self_signed = std::fs::read_to_string(mesh_server_cert_path(dir.path())).unwrap();
+        let (csr, _) = build_peer_csr("founder", PeerRole::Server).unwrap();
+        let (csr_signed, _) = sign_peer_csr(dir.path(), &csr, "founder", PeerRole::Server).unwrap();
+        assert_eq!(
+            sorted_dns_names(&csr_signed),
+            sorted_dns_names(&self_signed)
+        );
+    }
+
+    #[test]
+    fn sign_peer_csr_overrides_joiner_requested_sans() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        let key = gen_keypair().unwrap();
+        let mut params = CertificateParams::new(vec![
+            "evil.example".to_string(),
+            "someone-else.mesh.orca.local".to_string(),
+        ])
+        .unwrap();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "someone-else");
+        params.distinguished_name = dn;
+        let csr = params.serialize_request(&key).unwrap().pem().unwrap();
+
+        let (cert, _) = sign_peer_csr(dir.path(), &csr, "joiner", PeerRole::Client).unwrap();
+        assert_eq!(sorted_dns_names(&cert), sorted(mesh_client_sans("joiner")));
+        assert_eq!(cert_summary(&cert).unwrap().cn, "joiner");
     }
 
     #[test]
