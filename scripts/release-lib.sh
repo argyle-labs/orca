@@ -227,6 +227,15 @@ current_cargo_version() {
   grep '^version' "${REPO_ROOT}/Cargo.toml" | head -1 | sed 's/version = "\(.*\)"/\1/'
 }
 
+# `name version source` for every Cargo.lock entry that has a `source`
+# (registry/git deps — i.e. everything except workspace members). Resets on
+# any table header so a trailing `[[patch.unused]]` can't overwrite the last
+# package's fields.
+lock_sourced_entries() {
+  awk '/^\[/{if(s)print n,v,s;n=v=s=""} /^name = /{n=$3} /^version = /{v=$3} /^source = /{s=$3} END{if(s)print n,v,s}' \
+    "${REPO_ROOT}/Cargo.lock"
+}
+
 write_cargo_version() {
   local new="$1"
   local workspace_toml="${REPO_ROOT}/Cargo.toml"
@@ -258,8 +267,21 @@ write_cargo_version() {
   # under `|| true`, and shipped an rc-mismatched lock that broke `cargo
   # --locked` on every branch cut from the release commit. No error
   # swallowing here — a lock we can't refresh must abort the release.
+  #
+  # `cargo update --workspace` also re-resolves any drifted non-member entry,
+  # which would make the `--locked` check below pass on a lock nobody
+  # reviewed. Snapshot every sourced (non-member) entry and fail if the
+  # update touched one: only workspace members may change here.
+  local lock_before lock_after
+  lock_before="$(lock_sourced_entries)"
   ( cd "$REPO_ROOT" && cargo update --workspace ) \
     || die "cargo update --workspace failed — refusing to ship an out-of-sync Cargo.lock"
+  lock_after="$(lock_sourced_entries)"
+  if [ "$lock_before" != "$lock_after" ]; then
+    echo "::error::cargo update --workspace changed non-member lock entries (stale/drifted Cargo.lock)" >&2
+    diff <(printf '%s\n' "$lock_before") <(printf '%s\n' "$lock_after") >&2 || true
+    die "Cargo.lock had drifted from Cargo.toml — commit a consistent lock before releasing"
+  fi
   # Guard: fail loudly if the lock still doesn't match Cargo.toml, so this
   # class of bug can never silently reach main again.
   ( cd "$REPO_ROOT" && cargo metadata --locked --format-version=1 >/dev/null 2>&1 ) \
@@ -362,7 +384,7 @@ cargo_build_target() {
   # Shared target/ dir is safe here because builds run sequentially (parallel=1).
   case "$target" in
     *-apple-darwin)
-      MACOSX_DEPLOYMENT_TARGET=11.0 cargo build \
+      MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --locked \
         --profile "$RELEASE_PROFILE" --jobs "$jobs" ${features_args[@]+"${features_args[@]}"} \
         --target "$target" --manifest-path "$SERVER_TOML"
       ;;
@@ -386,7 +408,7 @@ cargo_build_target() {
           ;;
       esac
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4 RUSTFLAGS="$target_rustflags" \
-        cargo zigbuild --profile "$RELEASE_PROFILE" --jobs "$jobs" ${features_args[@]+"${features_args[@]}"} \
+        cargo zigbuild --locked --profile "$RELEASE_PROFILE" --jobs "$jobs" ${features_args[@]+"${features_args[@]}"} \
         --target "$target" --manifest-path "$SERVER_TOML"
       ;;
   esac
