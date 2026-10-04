@@ -1056,6 +1056,9 @@ rm -f /usr/local/bin/orca
 # Split flags (-r -f) so this never trips local bash-guard hooks.
 rm -r -f "$EMHTTP"
 sed -i '/# orca-post-shfs-install hook/,/^fi$/d' /boot/config/go 2>/dev/null || true
+# The boot-time sudoers block bootstrap adds; its flash copy goes with $PLUGIN.
+sed -i '/^# >>> orca sudoers:/,/^# <<< orca sudoers <<<$/d' /boot/config/go 2>/dev/null || true
+rm -f /etc/sudoers.d/orca
 
 rm -r -f "$PLUGIN"
 # Note: appdata is intentionally preserved — it holds the binary, logs,
@@ -1248,6 +1251,11 @@ mod tests {
         assert!(!s.contains("rm -r -f /mnt/user/appdata/orca"));
         // Legacy go-hook cleanup must be present.
         assert!(s.contains("# orca-post-shfs-install hook"));
+        // The sudoers go block bootstrap writes is removed with the plugin.
+        assert!(s.contains(
+            "sed -i '/^# >>> orca sudoers:/,/^# <<< orca sudoers <<<$/d' /boot/config/go"
+        ));
+        assert!(s.contains("rm -f /etc/sudoers.d/orca"));
     }
 
     #[test]

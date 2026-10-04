@@ -111,6 +111,9 @@ pub mod logs_tools;
 /// `logs_tools` reads; the toggles and copy are the parts `tail -f | jq` has no
 /// answer for.
 pub mod logs_tui;
+/// Root side of `orca admin plugin-apply`, the plugin privileged seam (orca#762).
+#[cfg(unix)]
+pub mod plugin_apply;
 pub mod plugin_fetch;
 pub mod plugin_manager;
 /// `identity.privilege.audit` — who can escalate on this host and how (orca#681).
