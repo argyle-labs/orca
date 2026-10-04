@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow, bail};
 use plugin_proto::{
-    Frame, PROTOCOL_VERSION, ToolDef, protocol_compatible, read_frame, write_frame,
+    Frame, PROTOCOL_VERSION, ToolDef, VerifiedCaller, protocol_compatible, read_frame, write_frame,
 };
 use serde_json::Value;
 
@@ -107,6 +107,7 @@ pub fn invoke_on<S: Read + Write>(
     id: u64,
     tool: &str,
     args: Value,
+    caller: Option<VerifiedCaller>,
     principal: &str,
 ) -> Result<Value> {
     write_frame(
@@ -115,6 +116,7 @@ pub fn invoke_on<S: Read + Write>(
             id,
             tool: tool.to_string(),
             args,
+            caller,
         },
     )
     .with_context(|| format!("sending Invoke for '{tool}'"))?;
@@ -333,13 +335,13 @@ impl PluginProcess {
 
     /// Invoke a tool. Serialized by the stream `Mutex` — one `Invoke` in flight
     /// per plugin, per the serial contract.
-    pub fn invoke(&self, tool: &str, args: Value) -> Result<Value> {
+    pub fn invoke(&self, tool: &str, args: Value, caller: Option<VerifiedCaller>) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut stream = self
             .stream
             .lock()
             .map_err(|_| anyhow!("plugin '{}' session mutex poisoned", self.software))?;
-        invoke_on(&mut *stream, id, tool, args, &self.software)
+        invoke_on(&mut *stream, id, tool, args, caller, &self.software)
     }
 
     /// Best-effort graceful shutdown: send `Shutdown`, then terminate + reap.
@@ -455,10 +457,10 @@ mod tests {
         let hs = handshake(&mut orca_end, CAPABILITIES).unwrap();
         assert_eq!(hs.software, "fake");
 
-        let out = invoke_on(&mut orca_end, 1, "echo", json!({"n": 7}), "fake").unwrap();
+        let out = invoke_on(&mut orca_end, 1, "echo", json!({"n": 7}), None, "fake").unwrap();
         assert_eq!(out, json!({"n": 7}));
 
-        let err = invoke_on(&mut orca_end, 2, "missing", Value::Null, "fake")
+        let err = invoke_on(&mut orca_end, 2, "missing", Value::Null, None, "fake")
             .unwrap_err()
             .to_string();
         assert!(err.contains("no such tool"), "got: {err}");
@@ -531,8 +533,39 @@ mod tests {
             .unwrap();
         });
 
-        let out = invoke_on(&mut orca_end, 42, "work", Value::Null, "p").unwrap();
+        let out = invoke_on(&mut orca_end, 42, "work", Value::Null, None, "p").unwrap();
         assert_eq!(out, json!({"done": true}));
+        plugin.join().unwrap();
+    }
+
+    #[test]
+    fn invoke_carries_the_verified_caller_on_the_wire() {
+        let (plugin_end, mut orca_end) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || {
+            let mut s = plugin_end;
+            let (id, caller) = match read_frame(&mut s).unwrap().unwrap() {
+                Frame::Invoke { id, caller, .. } => (id, caller),
+                f => panic!("expected Invoke, got {f:?}"),
+            };
+            write_frame(
+                &mut s,
+                &Frame::Result {
+                    id,
+                    ok: true,
+                    value: serde_json::to_value(&caller).unwrap(),
+                    error: None,
+                },
+            )
+            .unwrap();
+        });
+        let alice = VerifiedCaller {
+            user_id: "u1".into(),
+            username: "alice".into(),
+            role: "admin".into(),
+            can_mutate: false,
+        };
+        let out = invoke_on(&mut orca_end, 1, "who", Value::Null, Some(alice), "p").unwrap();
+        assert_eq!(out["username"], "alice");
         plugin.join().unwrap();
     }
 
@@ -578,7 +611,7 @@ mod tests {
             .unwrap();
         });
 
-        let err = invoke_on(&mut orca_end, 1, "streamy", Value::Null, "p")
+        let err = invoke_on(&mut orca_end, 1, "streamy", Value::Null, None, "p")
             .unwrap_err()
             .to_string();
         assert!(err.contains("boom"), "got: {err}");
@@ -594,7 +627,7 @@ mod tests {
             let _ = read_frame(&mut s).unwrap();
             // drop `s` -> EOF on the orca side.
         });
-        let err = invoke_on(&mut orca_end, 5, "work", Value::Null, "p")
+        let err = invoke_on(&mut orca_end, 5, "work", Value::Null, None, "p")
             .unwrap_err()
             .to_string();
         assert!(err.contains("closed the socket"), "got: {err}");

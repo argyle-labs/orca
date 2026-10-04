@@ -74,6 +74,22 @@ major-version mismatch. Compatibility is a wire-protocol semver negotiated at
 runtime: a plugin connects to any daemon whose protocol major matches its own,
 independent of the daemon's build or libc.
 
+### Roles and the caller
+
+Each manifest entry carries the tool's `role` (`any`/`read`/`admin`),
+`execute_gated` and `data_mutation`, as `#[orca_tool]` declared them. The daemon
+installs these into `dispatch::tool_roles` at load, so REST, MCP and `mesh/exec`
+gate plugin tools exactly like core ones. A manifest from an older toolkit
+omits them and its tools stay at `any`; the daemon logs a warning.
+
+`Invoke` carries an optional `caller` (`user_id`, `username`, `role`,
+`can_mutate`): the identity the daemon verified for that request (REST session
+or token user, MCP authenticated user, or the user re-resolved locally from a
+mesh caller token). It is never the daemon's own operator identity, and is
+omitted when the request had none. The toolkit's serve loop exposes it as
+`ctx.caller()`. Both additions are serde-defaulted, so old plugins and old
+daemons interoperate.
+
 ## Host capability surface
 
 The reverse-direction `cap` messages. The set the loader serves is the

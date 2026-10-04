@@ -97,8 +97,11 @@ fn find(name: &str) -> Option<&'static dyn ErasedTool> {
 // This inverts the dependency — `dispatch` holds a fn pointer the server wires —
 // rather than re-exporting plugin-loader.
 
-/// Returns `Some(result)` iff a dynamically-loaded plugin owns `name`.
-type DynamicInvoker = dyn Fn(&str, &Value) -> Option<Result<Value>> + Send + Sync;
+/// Returns `Some(result)` iff a dynamically-loaded plugin owns `name`. The
+/// caller is the request's verified identity ([`ToolCtx::verified_caller`]),
+/// never the host operator.
+type DynamicInvoker =
+    dyn Fn(&str, &Value, Option<&contract::CallerIdentity>) -> Option<Result<Value>> + Send + Sync;
 
 /// Returns the JSON tool defs (`{name, description, input_schema, output_schema}`)
 /// of every dynamically-loaded plugin, for merging into list surfaces.
@@ -122,8 +125,12 @@ pub fn set_dynamic_dispatch(invoke: Box<DynamicInvoker>, defs: Box<DynamicDefs>)
 
 /// Try the installed dynamic fallback for `name`. `None` when no fallback is
 /// installed or no loaded plugin owns the name.
-fn dynamic_dispatch(name: &str, args: &Value) -> Option<Result<Value>> {
-    DYNAMIC_INVOKER.get().and_then(|f| f(name, args))
+fn dynamic_dispatch(
+    name: &str,
+    args: &Value,
+    caller: Option<&contract::CallerIdentity>,
+) -> Option<Result<Value>> {
+    DYNAMIC_INVOKER.get().and_then(|f| f(name, args, caller))
 }
 
 /// JSON tool defs contributed by loaded cdylib plugins. Empty when no fallback
@@ -132,11 +139,8 @@ pub fn dynamic_tool_defs() -> Vec<Value> {
     DYNAMIC_DEFS.get().map(|f| f()).unwrap_or_default()
 }
 
-/// True iff a loaded cdylib plugin owns `name` (via the installed fallback).
-/// Only consulted by the REST handler (`http_dispatch`), so it is gated with
-/// the `server` feature alongside it.
-#[cfg(feature = "server")]
-fn dynamic_owns(name: &str) -> bool {
+/// True iff a loaded plugin owns `name` (via the installed fallback).
+pub fn dynamic_owns(name: &str) -> bool {
     dynamic_tool_defs()
         .iter()
         .any(|d| d.get("name").and_then(|n| n.as_str()) == Some(name))
@@ -243,7 +247,9 @@ pub fn mcp_definitions() -> Vec<Value> {
 }
 
 /// Build the cdylib-plugin manifest as a JSON string: an array of objects
-/// `{ name, description, input_schema, output_schema }`. This is the exact
+/// `{ name, description, input_schema, output_schema, role, execute_gated,
+/// data_mutation }`. The daemon installs the last three into [`crate::tool_roles`]
+/// at plugin load so plugin tools are gated like core ones. This is the exact
 /// shape `plugin_toolkit::abi::ToolDef` deserializes, so a cdylib plugin's
 /// ABI `manifest()` entrypoint can return `tool_manifest_json()` directly —
 /// reusing its own internally-linked inventory registry rather than
@@ -259,6 +265,9 @@ pub fn tool_manifest_json() -> String {
                 "description": t.description(),
                 "input_schema": t.input_schema(),
                 "output_schema": t.output_schema(),
+                "role": t.required_role(),
+                "execute_gated": t.execute_gated(),
+                "data_mutation": t.data_mutation(),
             })
         })
         .collect();
@@ -274,7 +283,7 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
         // On a static miss, try the dynamic cdylib-plugin fallback, then the
         // live unit surface, before giving up — so loaded plugin tools AND the
         // universal `unit.<kind>.<verb>` surface share this one entrypoint.
-        None => match dynamic_dispatch(name, &args) {
+        None => match dynamic_dispatch(name, &args, ctx.verified_caller()) {
             Some(result) => result,
             None => match crate::unit_surface::unit_dispatch(name, &args).await {
                 Some(result) => result,
@@ -420,6 +429,7 @@ async fn http_dispatch(
     let ctx_owned = if caller.is_some() || peer.is_some() || correlation_id.is_some() {
         let mut ctx = (*state.ctx).clone();
         if let Some(Extension(c)) = caller {
+            ctx.set_verified_caller(Some(c.clone()));
             ctx.set_caller(Some(c));
         }
         if let Some(p) = peer {
@@ -1039,5 +1049,88 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         assert!(String::from_utf8_lossy(&bytes).contains("unknown tool"));
+    }
+
+    const FAKE_PLUGIN_TOOL: &str = "rest_fallback_test_plugin.adopt";
+
+    /// Callers the fake plugin saw, by username (`None` = no caller).
+    static SEEN: std::sync::Mutex<Vec<Option<String>>> = std::sync::Mutex::new(Vec::new());
+
+    fn install_fake_plugin() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            set_dynamic_dispatch(
+                Box::new(|name, _args, caller| {
+                    (name == FAKE_PLUGIN_TOOL).then(|| {
+                        SEEN.lock()
+                            .unwrap()
+                            .push(caller.map(|c| c.username.clone()));
+                        Ok(json!({}))
+                    })
+                }),
+                Box::new(|| vec![json!({ "name": FAKE_PLUGIN_TOOL })]),
+            );
+        });
+    }
+
+    fn identity(name: &str) -> contract::CallerIdentity {
+        contract::CallerIdentity {
+            user_id: format!("u_{name}"),
+            username: name.into(),
+            role: "admin".into(),
+            can_mutate: true,
+        }
+    }
+
+    /// The daemon's shared ctx carries the host operator. A plugin must see
+    /// only the identity a surface verified for the request, so the host
+    /// operator never rides an `Invoke`.
+    #[tokio::test]
+    async fn plugin_invoke_carries_the_verified_caller_never_the_host_operator() {
+        install_fake_plugin();
+        SEEN.lock().unwrap().clear();
+        let host = make_ctx().with_auth(identity("host_admin"));
+        dispatch(FAKE_PLUGIN_TOOL, json!({}), &host).await.unwrap();
+
+        let mut per_req = host.clone();
+        per_req.set_verified_caller(Some(identity("alice")));
+        dispatch(FAKE_PLUGIN_TOOL, json!({}), &per_req)
+            .await
+            .unwrap();
+
+        assert_eq!(*SEEN.lock().unwrap(), vec![None, Some("alice".into())]);
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn rest_fallback_never_forwards_the_daemon_identity() {
+        use axum::body::Body;
+        use axum::http::Request as AxumReq;
+        use tower::ServiceExt;
+
+        install_fake_plugin();
+        let router = axum_router(Arc::new(make_ctx().with_auth(identity("host_admin"))));
+        let post = || {
+            AxumReq::builder()
+                .method("POST")
+                .uri(format!("/{FAKE_PLUGIN_TOOL}"))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap()
+        };
+
+        SEEN.lock().unwrap().clear();
+        // No per-request identity: the shared-ctx fallback branch.
+        let resp = router.clone().oneshot(post()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let mut with_user = post();
+        with_user.extensions_mut().insert(identity("alice"));
+        let resp = router.oneshot(with_user).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let seen = SEEN.lock().unwrap().clone();
+        assert!(seen.contains(&None), "{seen:?}");
+        assert!(seen.contains(&Some("alice".into())), "{seen:?}");
+        assert!(!seen.contains(&Some("host_admin".into())), "{seen:?}");
     }
 }

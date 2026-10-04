@@ -429,7 +429,9 @@ pub async fn handle_jsonrpc(
                         }
                     }
                 }
-            } else if dispatch::names().contains(&name) {
+            } else if dispatch::names().contains(&name)
+                || (in_daemon && dispatch::dynamic_owns(name))
+            {
                 // Ambient-input overlay — the MCP equivalent of REST's
                 // header extraction in `http_dispatch`. JSON-RPC has no
                 // header/flag channel for a tool call, so peer-dispatch and

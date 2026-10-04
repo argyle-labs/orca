@@ -1697,4 +1697,35 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn plugin_tool_declared_admin_is_refused_for_non_admin_rest_and_mcp_callers() {
+        let tool = "check_tool_role_plugin_test.adopt";
+        dispatch::tool_roles::install_plugin_tools([(
+            tool.to_string(),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                Some("admin"),
+                Some(true),
+                Some(false),
+            ),
+        )]);
+        let path = format!("{TOOLS_PREFIX}{tool}");
+        for role in ["viewer", "member", "read"] {
+            assert_eq!(
+                check_tool_role(&path, Some(role), false),
+                ToolRoleCheck::Forbidden {
+                    tool: tool.into(),
+                    required: "admin"
+                },
+                "{role} must be refused"
+            );
+            assert!(!mcp_tool_role_allows(tool, Some(role), false), "{role}");
+        }
+        assert_eq!(
+            check_tool_role(&path, Some("admin"), false),
+            ToolRoleCheck::Pass
+        );
+        assert!(mcp_tool_role_allows(tool, Some("admin"), false));
+        dispatch::tool_roles::remove_plugin_tools([tool]);
+    }
 }

@@ -6,10 +6,69 @@
 //! authorization vs peer-callable allowlist).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 static ROLES: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
 static MUTATIONS: OnceLock<HashSet<&'static str>> = OnceLock::new();
+/// Plugin tools, installed at plugin load and removed at unload. The static
+/// tables are link-time and frozen; plugins come and go at runtime.
+static PLUGIN_TOOLS: RwLock<Option<HashMap<String, PluginToolPolicy>>> = RwLock::new(None);
+
+/// Authorization policy a plugin declared for one of its tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginToolPolicy {
+    pub role: &'static str,
+    pub execute_gated: bool,
+    pub data_mutation: bool,
+}
+
+impl PluginToolPolicy {
+    /// Policy from a plugin manifest entry. An absent role means the plugin
+    /// predates roles on the wire and stays `"any"`; an unrecognized one fails
+    /// closed to `"admin"` (the mesh gate ranks unknown roles lowest, so
+    /// passing one through would open the tool instead).
+    pub fn from_manifest(
+        role: Option<&str>,
+        execute_gated: Option<bool>,
+        data_mutation: Option<bool>,
+    ) -> Self {
+        let role = match role {
+            None | Some("any") => "any",
+            Some("read") => "read",
+            Some(_) => "admin",
+        };
+        Self {
+            role,
+            execute_gated: execute_gated.unwrap_or(false),
+            data_mutation: data_mutation.unwrap_or(false),
+        }
+    }
+}
+
+/// Install the policies of one plugin's tools, replacing any previous entry
+/// under the same name.
+pub fn install_plugin_tools(entries: impl IntoIterator<Item = (String, PluginToolPolicy)>) {
+    let mut guard = PLUGIN_TOOLS.write().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(HashMap::new).extend(entries);
+}
+
+/// Drop the policies of unloaded plugin tools.
+pub fn remove_plugin_tools<'a>(names: impl IntoIterator<Item = &'a str>) {
+    let mut guard = PLUGIN_TOOLS.write().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = guard.as_mut() {
+        for n in names {
+            map.remove(n);
+        }
+    }
+}
+
+fn plugin_policy(tool: &str) -> Option<PluginToolPolicy> {
+    PLUGIN_TOOLS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(tool).copied())
+}
 
 /// Install the lookup. Idempotent — first call wins; subsequent calls are
 /// no-ops. Matches the registry's single-instance lifecycle.
@@ -30,16 +89,19 @@ pub fn install_mutations(names: impl IntoIterator<Item = &'static str>) {
 /// opt-in escape hatch stays closed until the table is populated).
 pub fn is_data_mutation(tool: &str) -> bool {
     MUTATIONS.get().is_some_and(|s| s.contains(tool))
+        || plugin_policy(tool).is_some_and(|p| p.data_mutation)
 }
 
-/// Role required to invoke `tool` over an authenticated REST surface. Returns
-/// `"any"` for unknown tools and for tools registered before `install` ran —
-/// the registry's own 404 path will reject unknown tool names downstream, so
+/// Role required to invoke `tool` over an authenticated surface: the core
+/// table first, then the role a loaded plugin declared for it. Returns `"any"`
+/// for unknown tools and for tools registered before `install` ran — the
+/// registry's own 404 path will reject unknown tool names downstream, so
 /// fall-open here keeps the gate from double-handling missing-tool errors.
 pub fn required_role(tool: &str) -> &'static str {
     ROLES
         .get()
         .and_then(|m| m.get(tool).copied())
+        .or_else(|| plugin_policy(tool).map(|p| p.role))
         .unwrap_or("any")
 }
 
@@ -173,6 +235,33 @@ mod tests {
         // path with no entry for this name). Either way, unknown names map to
         // "any" so the gate falls open and the registry's own 404 wins.
         assert_eq!(required_role("__no_such_tool__"), "any");
+    }
+
+    #[test]
+    fn plugin_policy_maps_manifest_roles_and_fails_closed() {
+        let p = |r| PluginToolPolicy::from_manifest(r, None, None).role;
+        assert_eq!(p(None), "any");
+        assert_eq!(p(Some("any")), "any");
+        assert_eq!(p(Some("read")), "read");
+        assert_eq!(p(Some("admin")), "admin");
+        assert_eq!(p(Some("wizard")), "admin");
+    }
+
+    #[test]
+    fn plugin_tools_install_and_remove_drive_required_role() {
+        let name = "tool_roles_test_plugin.adopt";
+        assert_eq!(required_role(name), "any");
+        install_plugin_tools([(
+            name.to_string(),
+            PluginToolPolicy::from_manifest(Some("admin"), Some(true), Some(true)),
+        )]);
+        assert_eq!(required_role(name), "admin");
+        assert!(is_data_mutation(name));
+        assert!(!authorize("member", false, required_role(name), true));
+        assert!(authorize("admin", false, required_role(name), true));
+        remove_plugin_tools([name]);
+        assert_eq!(required_role(name), "any");
+        assert!(!is_data_mutation(name));
     }
 
     #[test]
