@@ -593,6 +593,7 @@ build_native_packages() {
     "deb      aarch64 aarch64-unknown-linux-gnu  dpkg-deb"
     "rpm      x86_64  x86_64-unknown-linux-gnu   rpmbuild"
     "rpm      aarch64 aarch64-unknown-linux-gnu  rpmbuild"
+    "apk      x86_64  x86_64-unknown-linux-musl  "
     "pkgbuild x86_64  x86_64-unknown-linux-gnu   "
     "homebrew x86_64  x86_64-unknown-linux-gnu   "
     "pkg      x86_64  x86_64-apple-darwin        pkgbuild"
@@ -636,7 +637,9 @@ build_native_packages() {
       rm -f "$marker"
       die "package ${fmt}/${arch}: system build only dry-ran"
     fi
-    if [ -z "$(find "$DIST_DIR" -mindepth 1 -maxdepth 1 -newer "$marker" -print -quit)" ]; then
+    # Depth 2: a source-only format (apk without abuild) rewrites the files
+    # inside an existing orca-*-staging dir without touching the dir's mtime.
+    if [ -z "$(find "$DIST_DIR" -mindepth 1 -maxdepth 2 -newer "$marker" -print -quit)" ]; then
       rm -f "$marker"
       die "package ${fmt}/${arch}: no new file in ${DIST_DIR}"
     fi
