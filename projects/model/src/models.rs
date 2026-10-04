@@ -353,12 +353,13 @@ pub struct BackendsCheckOutput {
 #[serde(default)]
 pub struct BackendsCheckArgs {}
 
-/// [MUTATES STATE] Probe every configured LLM backend (DB-registered providers + the
+/// Probe every configured LLM backend (DB-registered providers + the
 /// `LMSTUDIO_URL` / `OLLAMA_URL` env defaults + the Anthropic API if a key is
 /// configured) and report which are reachable and what they serve right now.
 /// Availability is dynamic, so this reflects live state at call time, not
 /// stored configuration.
-#[orca_tool(domain = "model", verb = "backends_check")]
+// `role = "read"`: the result names every configured backend endpoint.
+#[orca_tool(domain = "model", verb = "backends_check", role = "read")]
 async fn model_backends_check(
     _args: BackendsCheckArgs,
     ctx: &contract::ToolCtx,

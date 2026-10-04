@@ -134,14 +134,25 @@ pub fn endpoint_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// `#[snake_aliases]` — on a `rename_all = "camelCase"` struct, also accept
-/// every multi-word field's snake_case spelling on decode. Place it ABOVE
+/// `#[snake_aliases]` — on a `rename_all = "camelCase"` struct (or an enum with
+/// `rename_all_fields = "camelCase"`), also accept every multi-word field's
+/// snake_case spelling on decode. Place it ABOVE
 /// `#[derive(...)]`. See `snake_aliases.rs`.
 #[cfg(not(test))]
 #[proc_macro_attribute]
 pub fn snake_aliases(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as syn::DeriveInput);
-    snake_aliases::expand(item).into()
+    snake_aliases::expand(item, snake_aliases::Case::Snake).into()
+}
+
+/// `#[camel_aliases]` — on a type whose wire form stays snake_case for one
+/// more release, also accept every multi-word field's camelCase spelling.
+/// Place it ABOVE `#[derive(...)]`. See `snake_aliases.rs`.
+#[cfg(not(test))]
+#[proc_macro_attribute]
+pub fn camel_aliases(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as syn::DeriveInput);
+    snake_aliases::expand(item, snake_aliases::Case::Camel).into()
 }
 
 /// `#[orca_struct]` — inject the standard plugin-author derive set with
@@ -1183,9 +1194,9 @@ fn snake_to_pascal(s: &str) -> String {
 /// applies changes with no consent and no audit, which is not. So anything not
 /// named here gates.
 ///
-/// `profile` is deliberately NOT here: `system.profile` toggles a plugin's
-/// heap-instrumentation flag (`MALLOC_CONF` injection on next spawn), so the
-/// noun-shaped name hid a write behind `role = "any"`.
+/// A noun-shaped verb is not evidence of a read: `profile` is absent because
+/// `system.profile` sets a plugin's heap-instrumentation flag (`MALLOC_CONF`
+/// injected on its next spawn), which is a write.
 fn is_read_shaped(verb: &str) -> bool {
     // A dotted verb is classified by its LAST segment: `remediation.get` is a
     // `get`, `update.status` is a `status`. Matching the whole string made both
@@ -1208,6 +1219,7 @@ fn is_read_shaped(verb: &str) -> bool {
             | "logs"
             | "history"
             | "audit"
+            | "backends_check"
             | "exports"
             | "entities"
             | "server_info"
@@ -1635,10 +1647,9 @@ mod tests {
         }
     }
 
-    /// `profile` reads like a noun, so it sat in the read-shaped list and gave
-    /// `system.profile` — which toggles a plugin's `MALLOC_CONF` injection —
-    /// `role = "any"`, no mutation flag and no gate. A noun-shaped name is not
-    /// evidence of a read.
+    /// `system.profile` changes how a plugin's next process launches, so it
+    /// must derive as an admin-only, execute-gated mutation despite its
+    /// noun-shaped name.
     #[test]
     fn a_noun_shaped_write_verb_is_not_read_shaped() {
         assert!(!is_read_shaped("profile"));
@@ -1652,12 +1663,13 @@ mod tests {
         assert!(out.contains("EXECUTE_GATED : bool = true"), "got: {out}");
     }
 
-    /// The inverse: `identity.privilege.audit` is a pure filesystem read, so
-    /// `audit` must not derive an admin-only, execute-gated mutation.
+    /// `identity.privilege.audit` is a pure filesystem read, so `audit`
+    /// derives no mutation and no gate.
     #[test]
     fn audit_is_read_shaped() {
         assert!(is_read_shaped("audit"));
         assert!(is_read_shaped("privilege.audit"));
+        assert!(is_read_shaped("backends_check"));
     }
 
     #[test]

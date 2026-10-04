@@ -575,9 +575,9 @@ pub struct MeshInstanceSecure {
     pub peer: bool,
 }
 
-/// Fully-shaped instance row the frontend systems UI renders directly. Mirrors
-/// the legacy TS `Instance` shape but every field is snake_case so the typed
-/// SDK from regen flows through unchanged.
+/// Fully-shaped instance row the frontend systems UI renders directly, in the
+/// same camelCase wire form as the rest of the surface so the typed SDK from
+/// regen flows through unchanged.
 #[derive::snake_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -1374,7 +1374,7 @@ pub async fn collect_mesh_snapshot(ctx: &contract::ToolCtx) -> anyhow::Result<Me
 
 /// Fully-shaped instance roster for the systems UI. One round-trip returns
 /// the local synthetic row + every active joined peer projected into
-/// `MeshInstance` (snake_case fields, server-derived `reachable_addrs`),
+/// `MeshInstance` (camelCase fields, server-derived `reachableAddrs`),
 /// alongside the same candidate / stale / inbound-offer classification
 /// `system.list --snapshot` produces. Replaces the client-side seed + bucket logic in
 /// `peers.svelte.ts` (slice S3).
@@ -3295,7 +3295,7 @@ mod added_coverage {
             can_invite: true,
         };
         let s = serde_json::to_string(&c).unwrap();
-        assert!(!s.contains("peer_id"), "None peer_id must be skipped: {s}");
+        assert!(!s.contains("peerId"), "None peerId must be skipped: {s}");
     }
 
     #[test]
@@ -3309,7 +3309,7 @@ mod added_coverage {
             last_seen_at: None,
         })
         .unwrap();
-        assert!(!s.contains("last_seen_at"), "got: {s}");
+        assert!(!s.contains("lastSeenAt"), "got: {s}");
     }
 
     #[test]
@@ -3324,7 +3324,7 @@ mod added_coverage {
             ttl_secs: 5,
         })
         .unwrap();
-        assert!(!s.contains("inviter_peer_id"), "got: {s}");
+        assert!(!s.contains("inviterPeerId"), "got: {s}");
     }
 
     // ── serde: transparent newtype wrappers ──────────────────────────────────

@@ -293,9 +293,11 @@ impl PathChange {
 /// identity-keyed servers (ABS, komga) only know external ids. Either locator
 /// alone is enough to act on — see [`RescanTarget::is_addressable`] — so an
 /// acquirer supplies whatever it has rather than the intersection.
-#[derive::snake_aliases]
+// Sent daemon -> plugin. Wire stays snake_case until every media plugin is
+// re-released: an older plugin drops `externalIds`/`oldPath`/`newPath` and
+// rescans nothing. camelCase is accepted.
+#[derive::camel_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct RescanTarget {
     /// What changed. `Deleted` means "drop/re-locate", not "re-read".
     pub change: PathChange,

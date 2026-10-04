@@ -94,6 +94,7 @@ pub enum ReconcileAction {
 
 /// Typed reason field on a [`ReconcileRow`]. Each variant carries
 /// exactly the context the operator needs to understand the action.
+#[derive::snake_aliases]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(
     rename_all = "snake_case",
@@ -4063,6 +4064,26 @@ mod tests {
         for (action, expected) in cases {
             assert_eq!(serde_json::to_string(&action).expect("ser"), expected);
         }
+    }
+
+    #[test]
+    fn a_snake_case_reconcile_reason_still_decodes() {
+        let r: ReconcileReason =
+            serde_json::from_str(r#"{"kind":"started_tentative","exit_code":137}"#).unwrap();
+        assert_eq!(
+            r,
+            ReconcileReason::StartedTentative {
+                exit_code: Some(137)
+            }
+        );
+        let r: ReconcileReason =
+            serde_json::from_str(r#"{"kind":"stale_mount","blocked_sources":["/mnt/a"]}"#).unwrap();
+        assert_eq!(
+            r,
+            ReconcileReason::StaleMount {
+                blocked_sources: vec![PathBuf::from("/mnt/a")]
+            }
+        );
     }
 
     #[test]
