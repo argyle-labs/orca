@@ -1219,6 +1219,7 @@ fn is_read_shaped(verb: &str) -> bool {
             | "logs"
             | "history"
             | "audit"
+            | "backends_check"
             | "exports"
             | "entities"
             | "server_info"
@@ -1668,6 +1669,7 @@ mod tests {
     fn audit_is_read_shaped() {
         assert!(is_read_shaped("audit"));
         assert!(is_read_shaped("privilege.audit"));
+        assert!(is_read_shaped("backends_check"));
     }
 
     #[test]

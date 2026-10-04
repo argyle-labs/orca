@@ -12,6 +12,7 @@ use dispatch::ToolRegistration;
 use agents as _;
 use auth as _;
 use files as _;
+use model as _;
 use notifications as _;
 use orca_inventory as _;
 use plugins as _;
@@ -62,6 +63,18 @@ fn profile_is_a_gated_admin_write_and_privilege_audit_is_a_read() {
     assert!(!mutations.contains(&"identity.privilege.audit"));
     assert_eq!(
         dispatch::required_role("identity.privilege.audit"),
+        Some("read")
+    );
+}
+
+/// `model.backends_check` only probes reachability, so it is a read; it needs
+/// the `read` role because it lists every configured backend endpoint.
+#[test]
+fn model_backends_check_is_an_ungated_read() {
+    assert!(!dispatch::execute_gated_names().contains(&"model.backends_check"));
+    assert!(!dispatch::data_mutation_names().contains(&"model.backends_check"));
+    assert_eq!(
+        dispatch::required_role("model.backends_check"),
         Some("read")
     );
 }
