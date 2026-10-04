@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dev mode: Rust + Vite on :12000 (Rust proxies non-API to Vite at :12001).
+# Dev mode: Rust + Vite on :12000 (Rust proxies non-API to Vite at :12004).
 # Invoked via: op run --env-file .env.orca.tpl -- bash scripts/dev.sh
 #
 # Flags:
@@ -110,7 +110,7 @@ echo "  syncing specs..."
 # Override via env: ORCA_HTTP_PORT, ORCA_HTTPS_PORT.
 ORCA_HTTP_PORT="${ORCA_HTTP_PORT:-12000}"
 ORCA_HTTPS_PORT="${ORCA_HTTPS_PORT:-12443}"
-VITE_PORT="${VITE_PORT:-12001}"
+VITE_PORT="${VITE_PORT:-12004}"
 STORYBOOK_PORT="${STORYBOOK_PORT:-12002}"
 
 stop_system_daemon
