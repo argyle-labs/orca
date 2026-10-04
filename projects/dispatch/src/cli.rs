@@ -1087,7 +1087,7 @@ async fn run_unit(name: &str, args: serde_json::Value, ctx: &ToolCtx) -> Result<
     let out = if local_daemon_reachable() {
         post_daemon_raw(name, &args, ctx).await?
     } else {
-        match crate::unit_surface::unit_dispatch(name, &args).await {
+        match crate::unit_surface::unit_dispatch(name, &args, None).await {
             Some(r) => r?,
             None => anyhow::bail!("unknown unit op: {name}"),
         }

@@ -440,6 +440,9 @@ fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
 ///      row for `caller_user_id` — never the token's asserted `role`. Unknown
 ///      user or insufficient role → refuse.
 ///
+/// Returns that locally-resolved user, the only identity a mesh call may hand
+/// on to a plugin.
+///
 /// See feedback_zero_trust_no_blind_trust.md + project_remote_exec_full_fix.md.
 fn authorize_role_gated(
     conn: &rusqlite::Connection,
@@ -449,7 +452,7 @@ fn authorize_role_gated(
     required_role: &str,
     caller_token: Option<&utils::pki::SignedEnvelope>,
     now: i64,
-) -> Result<()> {
+) -> Result<contract::CallerIdentity> {
     let env = caller_token.ok_or_else(|| {
         anyhow::anyhow!(
             "mesh/exec refused: tool '{tool}' requires role '{required_role}' but no signed caller \
@@ -485,7 +488,13 @@ fn authorize_role_gated(
         user.username,
         user.role
     );
-    Ok(())
+    Ok(contract::CallerIdentity {
+        user_id: user.id,
+        username: user.username,
+        role: user.role,
+        // A caller token carries no capability grant; unknown means no.
+        can_mutate: false,
+    })
 }
 
 /// Returns true when the user's *replicated* role meets the required role.
@@ -515,9 +524,8 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> 
 
     // Reachability is default-allow: every tool — core, plugin, unit — is
     // callable cross-host unless it opted out via `local_only`. `is_allowed` is
-    // the denylist check; `required_role` is the orthogonal auth-tightening axis
-    // (unknown/plugin tools default to "any" today — narrowing writes to admin
-    // is a tracked follow-up).
+    // the denylist check; `required_role` is the orthogonal auth-tightening axis,
+    // covering plugin tools through the roles their manifests declared.
     reject_remote_local_only_action(&params.tool, &params.args)?;
 
     let required_role = dispatch::tool_roles::required_role(&params.tool);
@@ -526,8 +534,8 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> 
         dispatch::remote_ok::is_allowed(&params.tool),
         required_role,
     )?;
-    if needs_auth {
-        db::pool::with_pooled_or_open(|conn| {
+    let caller = if needs_auth {
+        Some(db::pool::with_pooled_or_open(|conn| {
             authorize_role_gated(
                 conn,
                 peer_cn,
@@ -537,13 +545,16 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> 
                 params.caller_token.as_ref(),
                 utils::time::now().unix_seconds(),
             )
-        })?;
-    }
+        })?)
+    } else {
+        None
+    };
 
     let result = crate::mesh::dispatcher::dispatch(
         &params.tool,
         params.args.clone(),
         params.correlation_id.clone(),
+        caller,
     )
     .await
     .with_context(|| format!("dispatch mesh-relayed tool '{}'", params.tool))?;
@@ -1046,6 +1057,80 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("local-only"), "got: {msg}");
         assert!(msg.contains("recover"), "got: {msg}");
+    }
+
+    const PLUGIN_ADMIN_TOOL: &str = "listener_test_plugin.adopt";
+    const PLUGIN_ANY_TOOL: &str = "listener_test_plugin.status";
+
+    /// Callers the fake plugin saw, by username (`None` = no caller).
+    static SEEN_CALLERS: std::sync::Mutex<Vec<Option<String>>> = std::sync::Mutex::new(Vec::new());
+
+    /// Load a fake plugin owning two tools whose manifest declared `admin` and
+    /// `any`, recording the caller each invoke carries.
+    fn install_fake_plugin() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            dispatch::set_dynamic_dispatch(
+                Box::new(|name, _args, caller| {
+                    name.starts_with("listener_test_plugin.").then(|| {
+                        SEEN_CALLERS
+                            .lock()
+                            .unwrap()
+                            .push(caller.map(|c| c.username.clone()));
+                        Ok(serde_json::json!({ "ran": name }))
+                    })
+                }),
+                Box::new(Vec::new),
+            );
+        });
+        dispatch::tool_roles::install_plugin_tools([
+            (
+                PLUGIN_ADMIN_TOOL.to_string(),
+                dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("admin"), None, None),
+            ),
+            (
+                PLUGIN_ANY_TOOL.to_string(),
+                dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("any"), None, None),
+            ),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn exec_refuses_an_admin_plugin_tool_without_a_caller_token() {
+        install_fake_plugin();
+        let params = serde_json::json!({ "tool": PLUGIN_ADMIN_TOOL, "args": {} });
+        let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no signed caller"), "got: {msg}");
+        assert!(msg.contains("'admin'"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn exec_without_a_token_reaches_the_plugin_with_no_caller() {
+        let _g = crate::mesh::dispatcher::test_guard().await;
+        install_fake_plugin();
+        crate::mesh::dispatcher::reset_for_tests();
+        // The shared ctx carries the host operator; a peer must never inherit it.
+        let host = (*crate::mesh::dispatcher::tests::make_ctx())
+            .clone()
+            .with_auth(contract::CallerIdentity {
+                user_id: "u_host".into(),
+                username: "host_admin".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            });
+        crate::mesh::dispatcher::install(std::sync::Arc::new(host));
+        SEEN_CALLERS.lock().unwrap().clear();
+
+        let params = serde_json::json!({ "tool": PLUGIN_ANY_TOOL, "args": {} });
+        let out = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
+            .await
+            .expect("an any-role plugin tool needs no token");
+        assert_eq!(out.result["ran"], PLUGIN_ANY_TOOL);
+        assert_eq!(*SEEN_CALLERS.lock().unwrap(), vec![None]);
+        crate::mesh::dispatcher::reset_for_tests();
     }
 
     #[test]

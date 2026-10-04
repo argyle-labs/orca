@@ -52,6 +52,29 @@ pub struct ToolDef {
     pub input_schema: Value,
     /// JSON Schema for the tool's output.
     pub output_schema: Value,
+    /// Role required to invoke the tool (`any`/`read`/`admin`). `None` from a
+    /// plugin built before roles crossed the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Whether the tool is dry-run unless the caller opts in with `execute`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execute_gated: Option<bool>,
+    /// Whether the tool writes to an external managed system, which a
+    /// `can_mutate` identity may invoke despite an `admin` role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_mutation: Option<bool>,
+}
+
+/// The identity an [`Frame::Invoke`] acts for, resolved by the daemon from the
+/// request itself (REST session, MCP auth, or a verified mesh caller token).
+/// Never the daemon's own operator identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerifiedCaller {
+    pub user_id: String,
+    pub username: String,
+    pub role: String,
+    #[serde(default)]
+    pub can_mutate: bool,
 }
 
 /// A single frame on the wire. `kind` tags the variant.
@@ -86,8 +109,16 @@ pub enum Frame {
         #[serde(default)]
         capabilities: Vec<String>,
     },
-    /// orca → plugin: invoke a tool. `id` is the daemon's request id.
-    Invoke { id: u64, tool: String, args: Value },
+    /// orca → plugin: invoke a tool. `id` is the daemon's request id. `caller`
+    /// is absent when the request carried no verified identity; omitted on the
+    /// wire then, so older plugins see the frame unchanged.
+    Invoke {
+        id: u64,
+        tool: String,
+        args: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<VerifiedCaller>,
+    },
     /// plugin → orca: result of an [`Frame::Invoke`] with the matching `id`.
     Result {
         id: u64,
@@ -240,6 +271,9 @@ mod tests {
                 description: "host facts".into(),
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
+                role: Some("admin".into()),
+                execute_gated: Some(true),
+                data_mutation: Some(true),
             }],
             backends: vec![json!({
                 "domain": "host_facts",
@@ -255,6 +289,18 @@ mod tests {
             id: 42,
             tool: "proxmox.get_facts".into(),
             args: json!({"node": "frigg"}),
+            caller: None,
+        });
+        roundtrip(&Frame::Invoke {
+            id: 43,
+            tool: "proxmox.get_facts".into(),
+            args: json!({}),
+            caller: Some(VerifiedCaller {
+                user_id: "u1".into(),
+                username: "alice".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            }),
         });
         roundtrip(&Frame::Result {
             id: 42,
@@ -283,6 +329,68 @@ mod tests {
             error: Some("upstream reset".into()),
         });
         roundtrip(&Frame::Shutdown);
+    }
+
+    #[test]
+    fn invoke_without_caller_omits_the_field() {
+        let body = serde_json::to_value(Frame::Invoke {
+            id: 1,
+            tool: "t.x".into(),
+            args: json!({}),
+            caller: None,
+        })
+        .unwrap();
+        assert!(body.get("caller").is_none(), "{body}");
+    }
+
+    #[test]
+    fn old_invoke_frame_decodes_with_no_caller() {
+        let old = br#"{"kind":"invoke","id":9,"tool":"t.x","args":{"a":1}}"#;
+        let f: Frame = serde_json::from_slice(old).unwrap();
+        assert_eq!(
+            f,
+            Frame::Invoke {
+                id: 9,
+                tool: "t.x".into(),
+                args: json!({"a": 1}),
+                caller: None,
+            }
+        );
+    }
+
+    /// An older plugin's decoder knows only `{id, tool, args}`; the extra
+    /// `caller` key must not break it.
+    #[test]
+    fn invoke_with_caller_decodes_in_an_old_shape() {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum OldFrame {
+            Invoke { id: u64, tool: String, args: Value },
+        }
+        let bytes = serde_json::to_vec(&Frame::Invoke {
+            id: 2,
+            tool: "t.x".into(),
+            args: json!({}),
+            caller: Some(VerifiedCaller {
+                user_id: "u1".into(),
+                username: "alice".into(),
+                role: "member".into(),
+                can_mutate: false,
+            }),
+        })
+        .unwrap();
+        let OldFrame::Invoke { id, tool, args } = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!((id, tool.as_str(), args), (2, "t.x", json!({})));
+    }
+
+    #[test]
+    fn old_tool_def_decodes_with_no_role() {
+        let old = br#"{"name":"t.x","description":"d","input_schema":{},"output_schema":{}}"#;
+        let d: ToolDef = serde_json::from_slice(old).unwrap();
+        assert_eq!(
+            (d.role, d.execute_gated, d.data_mutation),
+            (None, None, None)
+        );
     }
 
     #[test]

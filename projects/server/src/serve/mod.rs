@@ -646,6 +646,7 @@ async fn mcp_jsonrpc_handler(
     // the request's resolved caller so peer-dispatch mints a token bound to it.
     let mut tool_ctx = crate::mcp::build_tool_ctx(cfg.clone());
     if let Some(axum::Extension(c)) = caller {
+        tool_ctx.set_verified_caller(Some(c.clone()));
         tool_ctx = tool_ctx.with_auth(c);
     }
     let (caller_role, can_mutate) = auth

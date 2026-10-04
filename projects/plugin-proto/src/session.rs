@@ -173,7 +173,7 @@ where
     let mut cap_id = 0u64;
     while let Some(frame) = read_frame(&mut stream)? {
         match frame {
-            Frame::Invoke { id, tool, args } => {
+            Frame::Invoke { id, tool, args, .. } => {
                 let result = {
                     let mut caps = Caps {
                         stream: &mut stream,
@@ -311,6 +311,7 @@ mod tests {
                 id: 1,
                 tool: "echo".into(),
                 args: json!({"a": 1}),
+                caller: None,
             },
         )
         .unwrap();
@@ -329,6 +330,7 @@ mod tests {
                 id: 2,
                 tool: "with_cap".into(),
                 args: Value::Null,
+                caller: None,
             },
         )
         .unwrap();

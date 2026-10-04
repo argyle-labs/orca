@@ -25,11 +25,12 @@ use std::rc::Rc;
 
 use anyhow::{Context, Result, bail};
 use plugin_proto::{
-    Frame, PROTOCOL_VERSION, ToolDef, protocol_compatible, read_frame, write_frame,
+    Frame, PROTOCOL_VERSION, ToolDef, VerifiedCaller, protocol_compatible, read_frame, write_frame,
 };
 use serde_json::Value;
 
 use crate::capsink::{CapSink, CapStreamSink, with_cap_sink, with_cap_stream_sink};
+use crate::contract::{CallerIdentity, ToolCtx};
 use crate::tool_manifest::{manifest_for_prefixes, minimal_ctx};
 
 /// What a plugin declares about itself when it starts serving. The tool manifest
@@ -184,14 +185,20 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
     // orca-owned reactor (`reactor::block_on`) on the socket-owning thread, honoring
     // the cap-sink thread-affinity contract: the future runs to completion on
     // this thread, so `db_op`/`secret_op` reach the thread-local sink. ──
-    let ctx = minimal_ctx();
+    let base_ctx = minimal_ctx();
     let cap_id = Rc::new(Cell::new(0u64));
 
     loop {
         let frame = read_frame(&mut *stream.borrow_mut())?;
         let Some(frame) = frame else { break }; // clean EOF
         match frame {
-            Frame::Invoke { id, tool, args } => {
+            Frame::Invoke {
+                id,
+                tool,
+                args,
+                caller,
+            } => {
+                let ctx = invoke_ctx(&base_ctx, caller);
                 let sink = cap_sink(&stream, &cap_id);
                 let stream_sink = cap_stream_sink(&stream, &cap_id);
                 let result = with_cap_sink(sink, || {
@@ -252,6 +259,21 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
         }
     }
     Ok(())
+}
+
+/// The ctx one `Invoke` runs under: the stub base plus the identity the daemon
+/// verified for this request, so `ctx.caller()` answers for the real caller.
+fn invoke_ctx(base: &ToolCtx, caller: Option<VerifiedCaller>) -> ToolCtx {
+    let caller = caller.map(|c| CallerIdentity {
+        user_id: c.user_id,
+        username: c.username,
+        role: c.role,
+        can_mutate: c.can_mutate,
+    });
+    let mut ctx = base.clone();
+    ctx.set_caller(caller.clone());
+    ctx.set_verified_caller(caller);
+    ctx
 }
 
 /// Build the capability sink for one `Invoke`: a closure that performs a
@@ -403,6 +425,7 @@ mod tests {
                 id: 1,
                 tool: "test.__be.start".into(),
                 args: json!({"unit": "vm/100"}),
+                caller: None,
             },
         )
         .unwrap();
@@ -451,6 +474,7 @@ mod tests {
                 id: 7,
                 tool: "test.nope".into(),
                 args: json!({}),
+                caller: None,
             },
         )
         .unwrap();
@@ -498,6 +522,7 @@ mod tests {
                 id: 3,
                 tool: "test.__be.stop".into(),
                 args: json!({}),
+                caller: None,
             },
         )
         .unwrap();
@@ -520,6 +545,25 @@ mod tests {
     //  bad_backends_json_fails_before_handshake, bad_schema_json_fails_before_handshake,
     //  cap_sink_success/error/bad_op_json/shutdown/closed_connection/mismatched_id,
     //  cap_stream_sink_delivers_chunks/error_end/on_chunk_error/shutdown/bad_op_json)
+    #[test]
+    fn invoke_ctx_carries_the_frame_caller_and_nothing_else() {
+        let base = minimal_ctx();
+        assert!(invoke_ctx(&base, None).caller().is_none());
+        let ctx = invoke_ctx(
+            &base,
+            Some(VerifiedCaller {
+                user_id: "u1".into(),
+                username: "alice".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            }),
+        );
+        let c = ctx.caller().expect("caller set from the frame");
+        assert_eq!((c.username.as_str(), c.role.as_str()), ("alice", "admin"));
+        assert!(c.can_mutate);
+        assert!(base.caller().is_none(), "the shared base is untouched");
+    }
+
     #[test]
     fn incompatible_welcome_is_rejected() {
         let (plugin_end, orca_end) = UnixStream::pair().unwrap();
