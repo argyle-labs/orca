@@ -305,9 +305,9 @@ let_underscore_must_use = "deny"
 # but ~10-15% faster to compile. Worth it for CI minutes. Bump to 3 only
 # if a profiler shows a hot loop that benefits.
 opt-level = 2
-# Thin LTO instead of fat: parallelizable across codegen units, ~3-5% runtime
-# cost vs fat for a server binary, but build wall-time drops by 5-10×. Fat
-# LTO was burning GitHub minutes for negligible perf gain on I/O-bound code.
+# Thin LTO: parallel across codegen units, ~3-5% runtime cost vs fat for a
+# server binary at a fraction of the build time. Stable releases use it; RC
+# builds (CI and release-local.sh) override it with CARGO_PROFILE_RELEASE_LTO=off.
 lto = "thin"
 # 16 parallel rustc codegen tasks. Without this, cargo serializes the final
 # codegen on a single core regardless of -j. Trade: binary ~10% larger.
@@ -322,8 +322,8 @@ panic = "abort"
 strip = "debuginfo"
 
 # Same profile used by `make build`, `make deploy`, RC builds, and stable
-# builds — one cache, one set of target/<t>/release/ artifacts, every path
-# benefits from any other path's warm cache.
+# builds. RC builds change LTO through the environment, which changes every
+# artifact hash, so RC and stable artifacts do not share a warm cache.
 
 # ── Hot-path crate overrides (release) ──────────────────────────────────────
 # Bump the crates every request touches to -O3. Workspace default stays at -O2
