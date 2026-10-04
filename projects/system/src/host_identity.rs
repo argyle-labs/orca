@@ -103,6 +103,12 @@ pub fn machine_id() -> &'static str {
         .as_str()
 }
 
+/// [`machine_id`] when `init()` has run, else `None` — for callers that can
+/// degrade (e.g. stamping a backup's writer from a CLI process).
+pub fn try_machine_id() -> Option<&'static str> {
+    MACHINE_ID.get().map(String::as_str)
+}
+
 /// Hostname for standalone CLI flows (e.g. `orca install`) where `init()` may
 /// not have run.
 ///

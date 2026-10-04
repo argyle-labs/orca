@@ -11,19 +11,30 @@
 //! `<collection…>` is the provider-declared labeled layout (e.g.
 //! `hosts/thor`). The store treats it as an opaque relative path, so it
 //! organizes backups identically beneath any target root. `id` is a sortable
-//! compact UTC stamp (`YYYYMMDD-HHMMSS`). A backup's identity (`kind`+`instance`)
-//! lives in its manifest; listing and selection filter on that manifest identity,
-//! so a provider may file backups under any layout. The store owns dating,
-//! listing, selection, and retention pruning ([[service-backup-restore-location-agnostic]]).
+//! compact UTC stamp (`YYYYMMDD-HHMMSS`), suffixed with the writer's hostname on
+//! a shared store (`YYYYMMDD-HHMMSS-<host>`) so hosts sharing one pool never
+//! mint the same id; either form sorts chronologically. A backup's identity
+//! (`kind`+`instance`) lives in its manifest; listing and selection filter on
+//! that manifest identity, so a provider may file backups under any layout. The
+//! store owns dating, listing, selection, and retention pruning
+//! ([[service-backup-restore-location-agnostic]]).
+//!
 //! A slot dir with a `manifest.json` is a complete backup; one without is
-//! in-progress and is skipped by `list`/`resolve`.
+//! in-progress and is skipped by `list`/`resolve`. A manifest's slot and payload
+//! dirs are always derived from where the manifest was found, never from its
+//! contents, and its `id` must equal its slot dir's name: on a shared pool a
+//! manifest may come from another host or be crafted, and prune deletes the
+//! slot. Entries named `.orca-*` belong to the store or the target plugin (lock,
+//! staging, trash) and are never walked.
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
-use contract::backup::{BackupRecord, BackupSelector, Retention};
+use anyhow::{Context, Result, anyhow, bail};
+use contract::backup::{BackupRecord, BackupSelector, BackupWriter, Retention, STAGE_LOCK_FILE};
 use utils::time::Timestamp;
 
 /// One backup a prune selected for removal but could not remove.
@@ -34,7 +45,6 @@ pub struct PruneFailure {
     pub path: String,
     pub error: String,
 }
-
 /// What a prune INTENDED versus what it achieved.
 ///
 /// A prune that selects 107 snapshots and removes none is a total failure, but
@@ -69,17 +79,46 @@ impl PruneReport {
 
 const MANIFEST: &str = "manifest.json";
 const PAYLOAD: &str = "payload";
+/// Entries with this prefix are store/plugin bookkeeping, never backups.
+const RESERVED_PREFIX: &str = ".orca-";
+const MANIFEST_TMP: &str = ".orca-manifest.json.tmp";
+/// Matches the target plugins' acquisition limit on the same lock.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const LOCK_POLL: Duration = Duration::from_millis(250);
 
 /// A filesystem-backed store of dated backups.
 #[derive(Debug, Clone)]
 pub struct BackupStore {
     root: PathBuf,
+    shared: bool,
+}
+
+/// A complete backup and the slot dir its manifest was found in.
+struct Located {
+    rec: BackupRecord,
+    slot: PathBuf,
+}
+
+/// An exclusive hold on a store's [`STAGE_LOCK_FILE`]; released on drop.
+#[derive(Debug)]
+pub struct StageLock {
+    _file: fs::File,
 }
 
 impl BackupStore {
     /// A store rooted at `root`. The directory is created lazily on first write.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            shared: false,
+        }
+    }
+
+    /// Mark the store as a pool several hosts write: new slot ids carry this
+    /// host's name so concurrent writers never collide on an id.
+    pub fn shared(mut self, shared: bool) -> Self {
+        self.shared = shared;
+        self
     }
 
     /// The default store: `<orca state dir>/backups` (`~/.orca/backups`).
@@ -93,6 +132,51 @@ impl BackupStore {
     /// The store's root directory.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Take the exclusive stage lock, waiting up to ten minutes. Hold it for the
+    /// whole of any mutation of the tree: a target plugin reconciling the same
+    /// root with its remote takes it too.
+    pub fn lock(&self) -> Result<StageLock> {
+        self.lock_within(LOCK_TIMEOUT)
+    }
+
+    /// [`lock`](Self::lock) off the async runtime's worker threads.
+    pub async fn lock_async(&self) -> Result<StageLock> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.lock())
+            .await
+            .map_err(|e| anyhow!("stage lock task panicked: {e}"))?
+    }
+
+    fn lock_within(&self, timeout: Duration) -> Result<StageLock> {
+        fs::create_dir_all(&self.root)
+            .with_context(|| format!("create backup store root {}", self.root.display()))?;
+        let path = self.root.join(STAGE_LOCK_FILE);
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("open stage lock {}", path.display()))?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(StageLock { _file: file }),
+                Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(fs::TryLockError::WouldBlock) => bail!(
+                    "timed out after {}s waiting for stage lock {}",
+                    timeout.as_secs(),
+                    path.display()
+                ),
+                Err(fs::TryLockError::Error(e)) => {
+                    return Err(e).with_context(|| format!("lock {}", path.display()));
+                }
+            }
+        }
     }
 
     /// The directory a backup's slots live under: the target root joined with the
@@ -115,8 +199,8 @@ impl BackupStore {
     /// Creates `<root>/<collection…>/<id>/payload/`; the provider writes its files
     /// under [`BackupSlot::payload_dir`], then calls [`BackupSlot::commit`] (or
     /// [`BackupSlot::abort`] on failure). The `id` is the current UTC compact
-    /// stamp, disambiguated with a `-N` suffix if a slot for this second already
-    /// exists so ids stay unique and sortable.
+    /// stamp (plus this host's name on a shared store), disambiguated with a
+    /// `-N` suffix if that slot already exists so ids stay unique and sortable.
     pub fn new_slot(
         &self,
         collection: &[String],
@@ -125,7 +209,12 @@ impl BackupStore {
     ) -> Result<BackupSlot> {
         let now = utils::time::now();
         let created_ms = now.unix_millis();
-        let base = now.compact();
+        let writer = local_writer();
+        let base = if self.shared {
+            format!("{}-{}", now.compact(), id_host_segment(&writer.host))
+        } else {
+            now.compact()
+        };
         let coll_dir = self.collection_dir(collection);
 
         // Disambiguate collisions within the same second.
@@ -148,49 +237,95 @@ impl BackupStore {
             dir,
             payload,
             created_ms,
+            writer,
         })
     }
 
     /// List backups, newest first. `domain` (kind) / `instance` match against the
     /// manifest identity, so a backup filed under any layout
     /// (`hosts/thor`) is found by `list(Some("host"), Some("thor"))`.
-    /// `None` matches any value on that axis. In-progress slots (no manifest) are
-    /// skipped; a missing tree lists as empty.
+    /// `None` matches any value on that axis. In-progress slots (no manifest) and
+    /// invalid manifests are skipped; a missing tree lists as empty.
     pub fn list(&self, domain: Option<&str>, instance: Option<&str>) -> Result<Vec<BackupRecord>> {
-        let mut out = self.all_records()?;
-        out.retain(|r| {
-            domain.is_none_or(|k| r.kind == k) && instance.is_none_or(|i| r.instance == i)
+        Ok(self
+            .located(domain, instance)?
+            .into_iter()
+            .map(|l| l.rec)
+            .collect())
+    }
+
+    /// Matching complete backups with their slot dirs, newest first.
+    fn located(&self, domain: Option<&str>, instance: Option<&str>) -> Result<Vec<Located>> {
+        let mut out = self.all_located()?;
+        out.retain(|l| {
+            domain.is_none_or(|k| l.rec.kind == k) && instance.is_none_or(|i| l.rec.instance == i)
         });
-        // Newest first; the id stamp sorts chronologically.
-        out.sort_by(|a, b| b.id.cmp(&a.id));
+        // The id stamp sorts chronologically, across writers too.
+        out.sort_by(|a, b| b.rec.id.cmp(&a.rec.id));
         Ok(out)
     }
 
-    /// Every complete backup record in the store, in arbitrary order. Walks the
-    /// whole tree for `manifest.json` files, matching any layout a provider chose.
-    /// A missing root lists as empty.
-    fn all_records(&self) -> Result<Vec<BackupRecord>> {
+    /// Every complete backup in the store, in arbitrary order, walking the whole
+    /// tree for `manifest.json` files so any provider layout is matched. A dir
+    /// holding a manifest is a slot and is not descended further. An unreadable
+    /// root is an error; any other unreadable entry or invalid manifest is
+    /// skipped with a warning so one bad slot cannot hide the rest.
+    fn all_located(&self) -> Result<Vec<Located>> {
         let mut out = Vec::new();
         let mut stack = vec![self.root.clone()];
         while let Some(dir) = stack.pop() {
             let rd = match fs::read_dir(&dir) {
                 Ok(rd) => rd,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(anyhow!("read dir {}: {e}", dir.display())),
-            };
-            for entry in rd {
-                let entry = entry?;
-                let ft = entry.file_type()?;
-                if ft.is_dir() {
-                    // Never descend into a slot's payload — only slot metadata.
-                    if entry.file_name() != PAYLOAD {
-                        stack.push(entry.path());
-                    }
-                } else if entry.file_name() == MANIFEST
-                    && let Some(rec) = read_manifest(&entry.path())?
-                {
-                    out.push(rec);
+                Err(e) if dir == self.root => {
+                    return Err(anyhow!("read dir {}: {e}", dir.display()));
                 }
+                Err(e) => {
+                    tracing::warn!("[backup] skipping unreadable {}: {e}", dir.display());
+                    continue;
+                }
+            };
+            let mut subdirs = Vec::new();
+            let mut manifest = None;
+            for entry in rd {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!("[backup] skipping entry in {}: {e}", dir.display());
+                        continue;
+                    }
+                };
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with(RESERVED_PREFIX) {
+                    continue;
+                }
+                let Ok(ft) = entry.file_type() else {
+                    continue;
+                };
+                // DirEntry::file_type does not follow symlinks, so a link can
+                // never lead the walk (or a prune) outside the root.
+                if ft.is_dir() {
+                    if name != PAYLOAD {
+                        subdirs.push(entry.path());
+                    }
+                } else if ft.is_file() && name == MANIFEST {
+                    manifest = Some(entry.path());
+                }
+            }
+            match manifest {
+                Some(path) if dir != self.root => match load_manifest(&path) {
+                    Ok(l) => out.push(l),
+                    Err(e) => tracing::warn!("[backup] skipping {}: {e:#}", path.display()),
+                },
+                // A manifest at the root would make the root itself a slot.
+                Some(path) => {
+                    tracing::warn!(
+                        "[backup] ignoring manifest at store root {}",
+                        path.display()
+                    );
+                    stack.extend(subdirs);
+                }
+                None => stack.extend(subdirs),
             }
         }
         Ok(out)
@@ -216,41 +351,19 @@ impl BackupStore {
         }
     }
 
-    /// Delete the backup identified by `rec` (its whole slot dir). The slot dir is
-    /// the parent of the record's payload path, so removal is layout-agnostic.
+    /// Delete the backup identified by `rec` (its whole slot dir). The slot is
+    /// re-located in this store by identity; `rec.path` is never trusted.
     pub fn remove(&self, rec: &BackupRecord) -> Result<()> {
-        let Some(dir) = Path::new(&rec.path).parent() else {
-            return Ok(());
-        };
-        if !dir.exists() {
-            return Ok(());
+        let found = self
+            .located(Some(&rec.kind), Some(&rec.instance))?
+            .into_iter()
+            .find(|l| l.rec.id == rec.id && l.rec.writer == rec.writer);
+        match found {
+            Some(l) => remove_slot(&l.slot, &l.rec.id),
+            None => Ok(()),
         }
-        // Take the slot out of the store with a RENAME first, then delete it.
-        //
-        // `remove_dir_all` walks top-down: on a store whose parent directory
-        // refuses the unlink it happily deletes the manifest and payload and
-        // only then fails to remove the slot itself. The backup is destroyed,
-        // yet the prune reports it as not removed — the inverse of #610's lie,
-        // and the one that loses data. A rename needs exactly the same
-        // parent-directory write permission as the final unlink, so a store we
-        // cannot prune fails here having changed nothing at all.
-        let staged = dir.with_file_name(format!(".orca-removing-{}", rec.id));
-        fs::rename(dir, &staged)
-            .with_context(|| format!("stage backup {} for removal", dir.display()))?;
-        fs::remove_dir_all(&staged)
-            .with_context(|| format!("remove staged backup {}", staged.display()))?;
-        Ok(())
     }
 
-    /// Apply `retention` to `(domain, instance)`, deleting the backups that fall
-    /// outside the policy. Returns intent AND outcome — see [`PruneReport`].
-    ///
-    /// The full PBS/vzdump `prune-backups` model: every set axis independently
-    /// selects survivors, and a backup kept by ANY axis survives (union) —
-    /// `keep_last` keeps the N newest overall; each calendar axis
-    /// (`keep_hourly`/`daily`/`weekly`/`monthly`/`yearly`) keeps the newest one
-    /// backup in each of its most-recent N periods. An unbounded policy (no axis
-    /// set) prunes nothing.
     /// Can this store actually delete from `dir`?
     ///
     /// The real fault was an identity mismatch — PBS running as `uid=34(backup)`
@@ -293,6 +406,15 @@ impl BackupStore {
         })
     }
 
+    /// Apply `retention` to `(domain, instance)`, deleting the backups that fall
+    /// outside the policy. Returns intent AND outcome — see [`PruneReport`].
+    ///
+    /// The full PBS/vzdump `prune-backups` model: every set axis independently
+    /// selects survivors, and a backup kept by ANY axis survives (union) —
+    /// `keep_last` keeps the N newest overall; each calendar axis
+    /// (`keep_hourly`/`daily`/`weekly`/`monthly`/`yearly`) keeps the newest one
+    /// backup in each of its most-recent N periods. An unbounded policy (no axis
+    /// set) prunes nothing.
     pub fn prune(
         &self,
         domain: &str,
@@ -302,26 +424,27 @@ impl BackupStore {
         if retention.is_unbounded() {
             return Ok(PruneReport::default());
         }
-        let records = self.list(Some(domain), Some(instance))?; // newest first
-        let keep_ids = retained_ids(&records, retention);
+        let located = self.located(Some(domain), Some(instance))?; // newest first
+        let records: Vec<&BackupRecord> = located.iter().map(|l| &l.rec).collect();
+        let keep = retained(&records, retention);
 
         let mut report = PruneReport::default();
-        for rec in records {
-            if keep_ids.contains(&rec.id) {
+        for (i, l) in located.iter().enumerate() {
+            if keep.contains(&i) {
                 continue;
             }
             report.selected += 1;
             // Preflight once, on the first selection: an identity that cannot
             // unlink here fails every backup for one reason, and saying it once
             // in the store's own terms beats N identical per-snapshot errors.
-            if let Some(parent) = Path::new(&rec.path).parent().and_then(Path::parent)
+            if let Some(parent) = l.slot.parent()
                 && report.removed.is_empty()
                 && report.failures.is_empty()
                 && let Err(e) = Self::check_prunable(parent)
             {
                 report.failures.push(PruneFailure {
-                    id: rec.id.clone(),
-                    path: rec.path.clone(),
+                    id: l.rec.id.clone(),
+                    path: l.rec.path.clone(),
                     error: format!("{e:#}"),
                 });
                 continue;
@@ -329,17 +452,79 @@ impl BackupStore {
             // Attempt EVERY selected record. Bailing on the first failure used
             // to leave the rest untried, so one unwritable snapshot hid however
             // many would have succeeded (#610).
-            match self.remove(&rec) {
-                Ok(()) => report.removed.push(rec),
+            match remove_slot(&l.slot, &l.rec.id) {
+                Ok(()) => report.removed.push(l.rec.clone()),
                 Err(e) => report.failures.push(PruneFailure {
-                    id: rec.id.clone(),
-                    path: rec.path.clone(),
+                    id: l.rec.id.clone(),
+                    path: l.rec.path.clone(),
                     error: format!("{e:#}"),
                 }),
             }
         }
         Ok(report)
     }
+}
+
+/// Remove one slot dir.
+///
+/// Takes the slot out of the store with a RENAME first, then deletes it.
+/// `remove_dir_all` walks top-down: on a store whose parent directory refuses
+/// the unlink it happily deletes the manifest and payload and only then fails to
+/// remove the slot itself. The backup is destroyed, yet the prune reports it as
+/// not removed — the inverse of #610's lie, and the one that loses data. A
+/// rename needs exactly the same parent-directory write permission as the final
+/// unlink, so a store we cannot prune fails here having changed nothing at all.
+fn remove_slot(dir: &Path, id: &str) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    let staged = dir.with_file_name(format!("{RESERVED_PREFIX}removing-{id}"));
+    fs::rename(dir, &staged)
+        .with_context(|| format!("stage backup {} for removal", dir.display()))?;
+    fs::remove_dir_all(&staged)
+        .with_context(|| format!("remove staged backup {}", staged.display()))?;
+    Ok(())
+}
+
+/// The writer identity stamped on every backup this host commits.
+pub(crate) fn local_writer() -> BackupWriter {
+    BackupWriter {
+        host: crate::host_identity::hostname().to_string(),
+        machine_id: crate::host_identity::try_machine_id()
+            .unwrap_or_default()
+            .to_string(),
+    }
+}
+
+/// A hostname reduced to an id-safe segment: lowercase ASCII alphanumerics,
+/// anything else collapsed to `-`.
+fn id_host_segment(host: &str) -> String {
+    let mut out = String::new();
+    for c in host.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "host".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// A slot id must be one plain path component that cannot name a reserved or
+/// traversal entry.
+fn validate_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 255 {
+        bail!("invalid backup id length");
+    }
+    if id.starts_with('.') || id.chars().any(|c| std::path::is_separator(c) || c == '\0') {
+        bail!("invalid backup id `{id}`");
+    }
+    Ok(())
 }
 
 /// Make one layout segment safe as a single path component: strip path
@@ -372,6 +557,7 @@ pub struct BackupSlot {
     dir: PathBuf,
     payload: PathBuf,
     created_ms: i64,
+    writer: BackupWriter,
 }
 
 impl BackupSlot {
@@ -380,26 +566,26 @@ impl BackupSlot {
         &self.payload
     }
 
-    /// Finalize: measure the payload, write `manifest.json`, and return the
-    /// record. `checksum`/`note` are provider-supplied metadata.
+    /// Finalize: measure the payload, atomically write `manifest.json`, and
+    /// return the record. `checksum`/`note` are provider-supplied metadata.
     pub fn commit(self, checksum: Option<String>, note: Option<String>) -> Result<BackupRecord> {
         let (size_bytes, file_count) = dir_size(&self.payload)?;
-        let rec = BackupRecord {
+        let mut rec = BackupRecord {
             system: String::new(),
             id: self.id,
             kind: self.domain,
             instance: self.instance,
             created_ms: self.created_ms,
-            path: self.payload.to_string_lossy().into_owned(),
+            path: PAYLOAD.to_string(),
             size_bytes,
             file_count,
             checksum,
             note,
+            writer: Some(self.writer),
         };
-        let manifest = self.dir.join(MANIFEST);
         let json = serde_json::to_string_pretty(&rec).context("serialize backup manifest")?;
-        fs::write(&manifest, json)
-            .with_context(|| format!("write manifest {}", manifest.display()))?;
+        write_atomic(&self.dir, &json)?;
+        rec.path = self.payload.to_string_lossy().into_owned();
         Ok(rec)
     }
 
@@ -414,11 +600,32 @@ impl BackupSlot {
     }
 }
 
-/// The set of backup ids `retention` keeps, given `records` newest-first. The
+/// Write `<dir>/manifest.json` so a reader (or a concurrent reconcile) sees
+/// either no manifest or the whole one: temp file, fsync, rename, fsync dir.
+fn write_atomic(dir: &Path, json: &str) -> Result<()> {
+    let tmp = dir.join(MANIFEST_TMP);
+    let manifest = dir.join(MANIFEST);
+    let mut f =
+        fs::File::create(&tmp).with_context(|| format!("create manifest {}", tmp.display()))?;
+    f.write_all(json.as_bytes())
+        .and_then(|()| f.sync_all())
+        .with_context(|| format!("write manifest {}", tmp.display()))?;
+    drop(f);
+    fs::rename(&tmp, &manifest)
+        .with_context(|| format!("commit manifest {}", manifest.display()))?;
+    // Network filesystems may refuse a directory fsync; the rename is already
+    // visible, this only hardens it against a local crash.
+    if let Ok(d) = fs::File::open(dir) {
+        drop(d.sync_all());
+    }
+    Ok(())
+}
+
+/// The record indices `retention` keeps, given `records` newest-first. The
 /// count and calendar axes union — a record kept by ANY of them survives — and
 /// `max_total_bytes` then caps the result, trimming oldest until it fits. When
 /// the size cap is the only bound, it keeps the newest backups that fit.
-fn retained_ids(records: &[BackupRecord], retention: &Retention) -> HashSet<String> {
+fn retained(records: &[&BackupRecord], retention: &Retention) -> HashSet<usize> {
     let has_count_axis = retention.keep_last.is_some()
         || retention.keep_hourly.is_some()
         || retention.keep_daily.is_some()
@@ -430,9 +637,7 @@ fn retained_ids(records: &[BackupRecord], retention: &Retention) -> HashSet<Stri
     if has_count_axis {
         // keep_last: the N newest overall, regardless of period.
         if let Some(n) = retention.keep_last {
-            for rec in records.iter().take(n as usize) {
-                keep.insert(rec.id.clone());
-            }
+            keep.extend(0..records.len().min(n as usize));
         }
         // Calendar axes: the newest backup in each of the N most-recent periods.
         keep_per_bucket(
@@ -462,9 +667,7 @@ fn retained_ids(records: &[BackupRecord], retention: &Retention) -> HashSet<Stri
         );
     } else {
         // Size cap alone: every backup is a candidate; the cap below trims it.
-        for rec in records {
-            keep.insert(rec.id.clone());
-        }
+        keep.extend(0..records.len());
     }
 
     // Size cap: walk the kept records newest-first and drop the oldest that push
@@ -472,8 +675,8 @@ fn retained_ids(records: &[BackupRecord], retention: &Retention) -> HashSet<Stri
     if let Some(cap) = retention.max_total_bytes {
         let mut total: u64 = 0;
         let mut first = true;
-        for rec in records {
-            if !keep.contains(&rec.id) {
+        for (i, rec) in records.iter().enumerate() {
+            if !keep.contains(&i) {
                 continue;
             }
             let next = total.saturating_add(rec.size_bytes);
@@ -481,7 +684,7 @@ fn retained_ids(records: &[BackupRecord], retention: &Retention) -> HashSet<Stri
                 total = next;
                 first = false;
             } else {
-                keep.remove(&rec.id);
+                keep.remove(&i);
             }
         }
     }
@@ -492,17 +695,17 @@ fn retained_ids(records: &[BackupRecord], retention: &Retention) -> HashSet<Stri
 /// distinct periods (period key from `bucket`). `records` MUST be newest-first,
 /// so the first record seen for a period is that period's newest.
 fn keep_per_bucket(
-    records: &[BackupRecord],
+    records: &[&BackupRecord],
     n: Option<u32>,
     bucket: impl Fn(&Timestamp) -> String,
-    keep: &mut HashSet<String>,
+    keep: &mut HashSet<usize>,
 ) {
     let Some(n) = n else { return };
     if n == 0 {
         return;
     }
     let mut periods: Vec<String> = Vec::new(); // distinct periods, newest-first
-    for rec in records {
+    for (i, rec) in records.iter().enumerate() {
         let Some(ts) = Timestamp::from_unix_millis(rec.created_ms) else {
             continue;
         };
@@ -514,22 +717,32 @@ fn keep_per_bucket(
             break; // the N most-recent periods are full; everything else is older
         }
         periods.push(key);
-        keep.insert(rec.id.clone());
+        keep.insert(i);
     }
 }
 
-/// Read a manifest file into a record. `Ok(None)` when the file is absent (an
-/// incomplete slot); an error only on a present-but-unreadable/corrupt manifest.
-fn read_manifest(path: &Path) -> Result<Option<BackupRecord>> {
-    match fs::read_to_string(path) {
-        Ok(s) => {
-            let rec = serde_json::from_str(&s)
-                .with_context(|| format!("parse manifest {}", path.display()))?;
-            Ok(Some(rec))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(anyhow!("read manifest {}: {e}", path.display())),
+/// Load a manifest found at `path`. The slot is the manifest's dir and the
+/// payload dir is derived from it; the record's own `path` is discarded.
+fn load_manifest(path: &Path) -> Result<Located> {
+    let slot = path
+        .parent()
+        .ok_or_else(|| anyhow!("manifest has no parent dir"))?
+        .to_path_buf();
+    let slot_name = slot
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow!("slot dir name is not UTF-8"))?;
+    let raw = fs::read_to_string(path).context("read manifest")?;
+    let mut rec: BackupRecord = serde_json::from_str(&raw).context("parse manifest")?;
+    validate_id(&rec.id)?;
+    if rec.id != slot_name {
+        bail!(
+            "manifest id `{}` does not match its slot `{slot_name}`",
+            rec.id
+        );
     }
+    rec.path = slot.join(PAYLOAD).to_string_lossy().into_owned();
+    Ok(Located { rec, slot })
 }
 
 /// Total byte size and file count under `dir`, walked recursively. Symlinks are
@@ -627,6 +840,180 @@ mod tests {
         assert_eq!(removed.removed.len(), 1);
         assert!(removed.is_complete(), "every selected backup was removed");
         assert!(store.list(Some("host"), Some("thor")).unwrap().is_empty());
+    }
+
+    /// Write a raw manifest file into `<root>/<rel>/manifest.json`.
+    fn plant(store: &BackupStore, rel: &str, json: &str) -> PathBuf {
+        let dir = store.root().join(rel);
+        fs::create_dir_all(dir.join(PAYLOAD)).unwrap();
+        fs::write(dir.join(MANIFEST), json).unwrap();
+        dir
+    }
+
+    fn manifest_json(id: &str, path: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","kind":"host","instance":"default","createdMs":1,"path":"{path}"}}"#
+        )
+    }
+
+    #[test]
+    fn a_manifest_path_is_never_trusted_for_prune() {
+        let (tmp, store) = store();
+        let victim = tmp.path().join("victim");
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("precious"), "x").unwrap();
+        let slot = plant(
+            &store,
+            "host/default/20260101-000000",
+            &manifest_json("20260101-000000", &victim.join("payload").to_string_lossy()),
+        );
+
+        let listed = store.list(Some("host"), Some("default")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            Path::new(&listed[0].path),
+            slot.join(PAYLOAD),
+            "path is derived from where the manifest was found"
+        );
+
+        let report = store
+            .prune("host", "default", &Retention::keep_last(0))
+            .unwrap();
+        assert!(report.is_complete());
+        assert!(!slot.exists(), "the slot that held the manifest is removed");
+        assert!(
+            victim.join("precious").exists(),
+            "the claimed path is untouched"
+        );
+
+        // `remove` likewise re-locates by identity instead of using rec.path.
+        let slot = plant(
+            &store,
+            "host/default/20260102-000000",
+            &manifest_json("20260102-000000", "/"),
+        );
+        let mut rec = store.list(Some("host"), Some("default")).unwrap().remove(0);
+        rec.path = victim.join("payload").to_string_lossy().into_owned();
+        store.remove(&rec).unwrap();
+        assert!(!slot.exists());
+        assert!(victim.join("precious").exists());
+    }
+
+    #[test]
+    fn invalid_manifests_are_skipped_without_failing_the_listing() {
+        let (_tmp, store) = store();
+        let good = write_backup(&store, "host", "default", "ok");
+        // id does not match its slot dir.
+        plant(
+            &store,
+            "host/default/20260101-000000",
+            &manifest_json("20260101-000001", ""),
+        );
+        // id with a separator / traversal.
+        plant(&store, "host/default/x", &manifest_json("../x", ""));
+        // unparsable.
+        plant(&store, "host/default/20260103-000000", "{not json");
+        // manifest at the root would make the root a slot.
+        fs::write(store.root().join(MANIFEST), manifest_json("backups", "")).unwrap();
+
+        let listed = store.list(None, None).unwrap();
+        assert_eq!(listed.len(), 1, "only the valid backup lists: {listed:?}");
+        assert_eq!(listed[0].id, good.id);
+        let report = store
+            .prune("host", "default", &Retention::keep_last(0))
+            .unwrap();
+        assert_eq!(report.removed.len(), 1);
+        assert!(
+            store.root().exists(),
+            "a root manifest never makes the root prunable"
+        );
+    }
+
+    #[test]
+    fn reserved_entries_are_never_walked() {
+        let (_tmp, store) = store();
+        for reserved in [
+            ".orca-incoming",
+            ".orca-trash",
+            ".orca-removing-20260101-000000",
+        ] {
+            plant(
+                &store,
+                &format!("{reserved}/host/default/20260101-000000"),
+                &manifest_json("20260101-000000", ""),
+            );
+        }
+        fs::write(store.root().join(".orca-smb-stage"), "").unwrap();
+        let _lock = store.lock().unwrap();
+        assert!(store.list(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn commit_is_atomic_relative_and_stamps_the_writer() {
+        let (_tmp, store) = store();
+        let rec = write_backup(&store, "host", "default", "x");
+        let dir = store.root().join("host/default").join(&rec.id);
+        let on_disk: BackupRecord =
+            serde_json::from_str(&fs::read_to_string(dir.join(MANIFEST)).unwrap()).unwrap();
+        assert_eq!(on_disk.path, PAYLOAD, "the manifest stores a relative path");
+        assert!(
+            !dir.join(MANIFEST_TMP).exists(),
+            "no temp file is left behind"
+        );
+        let writer = rec.writer.expect("writer stamped");
+        assert_eq!(writer.host, crate::host_identity::hostname());
+        assert_eq!(on_disk.writer, Some(writer));
+        assert!(Path::new(&rec.path).is_absolute());
+    }
+
+    #[test]
+    fn shared_ids_carry_the_host_and_sort_chronologically() {
+        let (_tmp, store) = store();
+        let store = store.shared(true);
+        let rec = write_backup(&store, "game-saves", "elden", "x");
+        let host = id_host_segment(crate::host_identity::hostname());
+        assert!(
+            rec.id.ends_with(&format!("-{host}")),
+            "id {} carries {host}",
+            rec.id
+        );
+        assert_eq!(rec.date().len(), 10, "the date still derives from the id");
+
+        let mut ids = vec![
+            "20260101-000000-zeta".to_string(),
+            "20260102-000000-alpha".to_string(),
+            "20260101-120000".to_string(),
+        ];
+        ids.sort();
+        assert_eq!(
+            ids,
+            [
+                "20260101-000000-zeta",
+                "20260101-120000",
+                "20260102-000000-alpha"
+            ],
+            "the stamp prefix orders writers chronologically"
+        );
+        assert_eq!(id_host_segment("Bragi.local"), "bragi-local");
+        assert_eq!(id_host_segment("///"), "host");
+        assert!(validate_id(&rec.id).is_ok());
+    }
+
+    #[test]
+    fn the_stage_lock_is_exclusive_until_dropped() {
+        let (_tmp, store) = store();
+        let held = store.lock().unwrap();
+        assert!(store.root().join(STAGE_LOCK_FILE).exists());
+        let err = store.lock_within(Duration::from_millis(300)).unwrap_err();
+        assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+        drop(held);
+        let again = store.lock_within(Duration::from_millis(300));
+        assert!(again.is_ok());
+        drop(again);
+        assert!(
+            store.root().join(STAGE_LOCK_FILE).exists(),
+            "the lock file is never deleted"
+        );
     }
 
     #[test]
@@ -754,6 +1141,7 @@ mod tests {
             file_count: 0,
             checksum: None,
             note: None,
+            writer: None,
         };
         fs::write(newer.join(MANIFEST), serde_json::to_string(&rec).unwrap()).unwrap();
 
@@ -800,6 +1188,7 @@ mod tests {
                 file_count: 0,
                 checksum: None,
                 note: None,
+                writer: None,
             };
             fs::write(dir.join(MANIFEST), serde_json::to_string(&rec).unwrap()).unwrap();
         }
@@ -826,6 +1215,7 @@ mod tests {
             file_count: 0,
             checksum: None,
             note: None,
+            writer: None,
         }
     }
 
@@ -1072,6 +1462,7 @@ mod tests {
             file_count: 0,
             checksum: None,
             note: None,
+            writer: None,
         };
         fs::write(dir.join(MANIFEST), serde_json::to_string(&rec).unwrap()).unwrap();
         id

@@ -63,7 +63,9 @@ pub trait BackupKindPlugin: Send + Sync {
     }
 
     /// Capture `instance`'s state into `payload_dir` (host-provided, empty).
-    /// Write files under it and return metadata; `Err` aborts the slot.
+    /// Write files under it and return metadata; `Err` aborts the slot. Return
+    /// [`BackupOutcome::unchanged`] when nothing changed since the latest backup:
+    /// the host discards the slot and does not sync the target.
     fn backup(&self, payload_dir: &Path, instance: &str) -> Result<BackupOutcome, String>;
 
     /// Restore `instance` from a previously produced `payload_dir`.
@@ -253,11 +255,38 @@ mod tests {
             Ok(BackupOutcome {
                 checksum: None,
                 note: Some(format!("captured {instance}")),
+                unchanged: false,
             })
         }
         fn restore(&self, _dir: &Path, _instance: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    struct UnchangedKind;
+    impl BackupKindPlugin for UnchangedKind {
+        fn kind(&self) -> &str {
+            "game-saves"
+        }
+        fn backup(&self, _dir: &Path, _instance: &str) -> Result<BackupOutcome, String> {
+            Ok(BackupOutcome::unchanged(Some("same saves".into())))
+        }
+        fn restore(&self, _dir: &Path, _instance: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn kind_dispatch_carries_unchanged_to_the_host() {
+        let out = dispatch_kind_op(
+            &UnchangedKind,
+            OP_BACKUP,
+            serde_json::json!({"payload_dir":"/t","instance":"elden"}),
+        )
+        .unwrap();
+        assert_eq!(out["unchanged"], serde_json::json!(true));
+        let back: BackupOutcome = serde_json::from_value(out).unwrap();
+        assert!(back.unchanged);
     }
 
     #[test]

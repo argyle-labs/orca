@@ -105,8 +105,9 @@ fn local_backing_key() -> String {
 /// unavailable — it degrades to the default store.
 fn load_config(name: &str) -> LocalTargetConfig {
     let row_name = LocalTarget::row_name(name);
-    let read =
-        db::pool::with_pooled_or_open(|conn| db::config_store::get(conn, "backup", &row_name));
+    let read = db::pool::with_pooled_or_open(|conn| {
+        db::config_store::get_local(conn, "backup", &row_name)
+    });
     match read {
         Ok(Some(row)) => serde_json::from_str::<LocalTargetConfig>(&row.json).unwrap_or_else(|e| {
             tracing::warn!("[backup:local] bad backup/{row_name} config, using default store: {e}");

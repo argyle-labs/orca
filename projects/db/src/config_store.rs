@@ -235,6 +235,25 @@ pub fn get(conn: &Connection, noun: &str, name: &str) -> Result<Option<ConfigRow
     Ok(r)
 }
 
+/// The row for `(noun, name)` that THIS system owns, never a replica.
+///
+/// For per-host settings (where this host backs up to, what it captures) a
+/// replica is another machine's choice and must not apply here. `is_replica`
+/// is recomputed from ownership on every merge, so `0` means owned locally.
+pub fn get_local(conn: &Connection, noun: &str, name: &str) -> Result<Option<ConfigRow>> {
+    let r = conn
+        .query_row(
+            "SELECT id, host_owner, noun, name, json, is_replica, updated_at, updated_by
+             FROM config_rows WHERE noun = ?1 AND name = ?2 AND is_replica = 0
+             ORDER BY updated_at DESC, id ASC
+             LIMIT 1",
+            params![noun, name],
+            row_from,
+        )
+        .optional()?;
+    Ok(r)
+}
+
 /// Upsert a row owned by `host_owner`. Refuses to write if the caller's
 /// `local_host` does not match `host_owner` — cross-host writes must be
 /// routed via mesh (§3.3). Returns true if a new row was created.
@@ -565,6 +584,30 @@ mod tests {
 
     fn set_local(conn: &Connection, noun: &str, name: &str, json: &str) -> Result<bool> {
         set(conn, LOCAL, LOCAL, noun, name, json, "test")
+    }
+
+    #[test]
+    fn get_local_never_falls_back_to_a_replica() {
+        let conn = test_conn();
+        upsert_mesh_row(
+            &conn,
+            "host-b",
+            "backup",
+            "targets",
+            r#"{"targets":[]}"#,
+            "2026-01-01T00:00:00Z",
+            "host-b",
+            true,
+            "",
+        )
+        .unwrap();
+        assert!(get(&conn, "backup", "targets").unwrap().is_some());
+        assert!(get_local(&conn, "backup", "targets").unwrap().is_none());
+
+        set_local(&conn, "backup", "targets", r#"{"targets":[1]}"#).unwrap();
+        let own = get_local(&conn, "backup", "targets").unwrap().unwrap();
+        assert_eq!(own.host_owner, LOCAL);
+        assert!(!own.is_replica);
     }
 
     #[test]

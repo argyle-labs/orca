@@ -85,7 +85,11 @@ impl BackupProvider for ServiceKindProvider {
             let checksum = (!artifact.checksum.is_empty()).then(|| artifact.checksum.clone());
             let note = Some(format!("service `{instance}` artifact {}", artifact.path));
             stage_artifact(payload_dir, &artifact)?;
-            Ok(BackupOutcome { checksum, note })
+            Ok(BackupOutcome {
+                checksum,
+                note,
+                unchanged: false,
+            })
         })
     }
 
