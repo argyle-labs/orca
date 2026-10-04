@@ -628,9 +628,9 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
 /// Sign refreshed CSRs for a peer that doesn't hold the mesh CA key itself
 /// (non-secure joiner that needs rotation before its 30-day cert expires).
 /// The mTLS handshake authenticates the CN; the caller must also have a
-/// non-departed `mesh_peers` row, as the bootstrap refresh requires. The
-/// dispatch gate only rejects rows marked departed, so it lets an unknown CN
-/// (forgotten, or never paired with this host) through.
+/// non-departed `mesh_peers` row, as the bootstrap refresh requires, and no
+/// forget-tombstone. The dispatch gate only rejects rows marked departed, so
+/// it lets an unknown CN (forgotten, or never paired with this host) through.
 fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertResult> {
     anyhow::ensure!(
         utils::pki::has_mesh_ca_key(&pki_dir()),
@@ -650,7 +650,9 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
         "refresh refused: cert CN ({peer_cn}) does not match joiner_hostname ({expected_cn})"
     );
     let active = db::pool::with_pooled_or_open(|conn| {
-        Ok(pdb::peer_exists(conn, peer_cn)? && !pdb::is_peer_departed(conn, peer_cn)?)
+        Ok(pdb::peer_exists(conn, peer_cn)?
+            && !pdb::is_peer_departed(conn, peer_cn)?
+            && !pdb::is_peer_forgotten(conn, peer_cn)?)
     })?;
     anyhow::ensure!(
         active,
@@ -1452,6 +1454,76 @@ mod tests {
                     "got: {err}"
                 );
             }
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn forgotten_peer_cannot_notify_trust_its_way_into_a_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::mesh::pin_home(dir.path());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(db::with_db_path(dir.path().join("forgotten.db"), async {
+            utils::pki::init_mesh_ca(&pki_dir(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+            let cn = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &cn, "hf", "127.0.0.1", 1, Some("fp-f"), "").unwrap();
+            pdb::forget_peer(&conn, &cn).unwrap();
+            drop(conn);
+
+            let notify = dispatch(
+                req_with_params(
+                    MESH_NOTIFY_TRUST_METHOD,
+                    serde_json::json!({ "trust": true }),
+                ),
+                &cn,
+                addr(),
+            )
+            .await;
+            let notify = serde_json::to_string(&notify).unwrap();
+            assert!(notify.contains("forgotten"), "notify-trust: {notify}");
+
+            let refresh = dispatch(
+                req_with_params(MESH_REFRESH_CERT_METHOD, refresh_params(&cn)),
+                &cn,
+                addr(),
+            )
+            .await;
+            let refresh = serde_json::to_string(&refresh).unwrap();
+            assert!(
+                refresh.contains("not a known active mesh peer"),
+                "refresh: {refresh}"
+            );
+            assert!(!refresh.contains("client_cert_pem"), "refresh: {refresh}");
+        }));
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn refresh_cert_refuses_tombstoned_cn_even_with_a_peer_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::mesh::pin_home(dir.path());
+        db::with_thread_db_path(&dir.path().join("refresh-tombstoned.db"), || {
+            utils::pki::init_mesh_ca(&pki_dir(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+            let cn = utils::id::new();
+            let conn = db::open_default().unwrap();
+            // A row resurrected by any path other than join-confirm keeps the tombstone.
+            pdb::upsert_peer(&conn, &cn, "hz", "127.0.0.1", 1, Some("fp-z"), "").unwrap();
+            pdb::write_forget_tombstone(&conn, &cn).unwrap();
+            drop(conn);
+
+            let err = handle_refresh_cert(
+                &cn,
+                req_with_params(MESH_REFRESH_CERT_METHOD, refresh_params(&cn)),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("not a known active mesh peer"),
+                "got: {err}"
+            );
         });
     }
 }
