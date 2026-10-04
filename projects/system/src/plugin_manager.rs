@@ -1200,9 +1200,11 @@ async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUp
 // [[github-token-proxy-delegate-on-miss]].
 
 /// Args for [`plugin_serve_asset`].
-#[derive::snake_aliases]
+// Wire stays snake_case for one release: delegated fetch crosses versions in
+// both directions, and a previous-release peer drops camelCase keys
+// (`repoUrl`, `assetB64`). camelCase is accepted.
+#[derive::camel_aliases]
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct PluginServeAssetArgs {
     /// Plugin name (also its `target_software` and release-asset prefix).
     #[arg(long)]
@@ -1229,9 +1231,9 @@ pub struct PluginServeAssetArgs {
 /// Result of [`plugin_serve_asset`]. `asset_b64` is base64-STANDARD of the raw
 /// plugin executable; `sha256` is the hex digest the holder verified (callers
 /// MUST re-verify after decode before installing).
-#[derive::snake_aliases]
+// Same one-release snake_case wire as `PluginServeAssetArgs`.
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct PluginServeAssetOutput {
     pub asset_b64: String,
     pub sha256: String,
@@ -2410,9 +2412,40 @@ mod tests {
             version: "0.2.0".to_string(),
         };
         let json = serde_json::to_string(&out).unwrap();
-        assert!(json.contains("\"assetB64\":\"YWJj\""), "{json}");
         assert!(json.contains("\"sha256\":\"deadbeef\""), "{json}");
         assert!(json.contains("\"version\":\"0.2.0\""), "{json}");
+    }
+
+    #[test]
+    fn serve_asset_args_and_output_are_sent_snake_case() {
+        // Delegated plugin fetch crosses versions in both directions; a peer
+        // on the previous release reads only snake_case.
+        let args = PluginServeAssetArgs {
+            name: "sonarr".into(),
+            repo_url: "https://github.com/argyle-labs/sonarr".into(),
+            target: "x86_64-unknown-linux-musl".into(),
+            version: None,
+            prerelease: false,
+        };
+        let v = serde_json::to_value(&args).unwrap();
+        assert_eq!(
+            v["repo_url"], "https://github.com/argyle-labs/sonarr",
+            "{v}"
+        );
+        let out = PluginServeAssetOutput {
+            asset_b64: "YWJj".into(),
+            sha256: "x".into(),
+            version: "1".into(),
+        };
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["asset_b64"], "YWJj", "{v}");
+        let camel: PluginServeAssetArgs =
+            serde_json::from_str(r#"{"name":"a","repoUrl":"https://github.com/x/a","target":"t"}"#)
+                .unwrap();
+        assert_eq!(camel.repo_url, "https://github.com/x/a");
+        let camel: PluginServeAssetOutput =
+            serde_json::from_str(r#"{"assetB64":"YWJj","sha256":"x","version":"1"}"#).unwrap();
+        assert_eq!(camel.asset_b64, "YWJj");
     }
 
     // ── plugin.delete registration + role gate ────────────────────────────────
