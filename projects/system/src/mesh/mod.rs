@@ -2586,6 +2586,7 @@ mod mesh_tests {
     }
 
     /// Recursively collect every object key in a JSON value.
+    #[allow(clippy::disallowed_types)] // walks serialized wire output generically
     fn keys(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
             serde_json::Value::Object(m) => {
