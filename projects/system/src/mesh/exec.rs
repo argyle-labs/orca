@@ -551,6 +551,10 @@ pub async fn exec(
         })?
     };
 
+    if let Some(pid) = peer_id.as_deref() {
+        crate::mesh::wire_compat::check(pid, peer, tool, &args).await?;
+    }
+
     // Track per-address health against the resolved peer_id so the winning
     // address sorts first next time and a dead one sinks (loopback is untracked).
     let r = crate::mesh::dialer::try_targets_tracked(peer_id.as_deref(), &targets, |addr| {
