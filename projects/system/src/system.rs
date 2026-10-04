@@ -38,9 +38,8 @@ use derive::orca_tool;
 /// Storage footprint snapshot — surfaces orca.db and log-dir sizes so
 /// operators can spot bloat. Per project_db_size_and_retention: orca.db
 /// stays small, logs go to files with size+retention.
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct StorageReport {
     /// Size of `orca.db` (including SQLite WAL/SHM if alongside) in bytes.
     pub db_size_bytes: u64,
@@ -61,9 +60,8 @@ pub struct StorageReport {
 /// actually read — the heavy host facts (hardware, processes, interfaces,
 /// history, charts) live on `system.info.detail` and are never dialed on a
 /// read path. Projected from a collected `SystemInfoReport` via `From`.
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct TopologyFacts {
     /// OS hostname (`System::host_name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,9 +125,8 @@ impl From<&SystemInfoReport> for TopologyFacts {
     }
 }
 
-#[derive::snake_aliases]
+#[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct SystemStatusReport {
     pub binary: BinaryStatus,
     pub claude_md: ClaudeMdStatus,
@@ -1008,7 +1005,7 @@ mod tests {
         };
         let json = serde_json::to_value(&r).unwrap();
         assert!(json.get("last_retention_sweep_at").is_none());
-        assert_eq!(json["dbSizeBytes"], 1);
+        assert_eq!(json["db_size_bytes"], 1);
     }
 
     #[test]
@@ -1021,7 +1018,7 @@ mod tests {
             last_retention_sweep_at: Some(1700000000),
         };
         let json = serde_json::to_value(&r).unwrap();
-        assert_eq!(json["lastRetentionSweepAt"], 1700000000_i64);
+        assert_eq!(json["last_retention_sweep_at"], 1700000000_i64);
     }
 
     #[test]
