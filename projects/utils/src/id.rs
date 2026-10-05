@@ -42,6 +42,108 @@ pub fn is_uuidv7(s: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// An externally-supplied identifier that is known to be a UUID — the type for
+/// every id-named tool argument. Parsing rejects anything else (a hostname, a
+/// display name, an address), so a name can never be silently resolved where an
+/// id was asked for. The accepted text is kept verbatim (trimmed) rather than
+/// re-rendered, because stored ids are compared as text and a superseded
+/// bare-32-hex id must still match its own row.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+#[serde(transparent)]
+pub struct Id(String);
+
+impl Id {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+/// A value that is not a UUID where one was required. Carries the rejected
+/// input so callers can build a domain-specific message around it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidId(pub String);
+
+impl std::fmt::Display for InvalidId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "expected an id (UUID), got `{}`", self.0)
+    }
+}
+
+impl std::error::Error for InvalidId {}
+
+impl std::str::FromStr for Id {
+    type Err = InvalidId;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        if is_valid(trimmed) {
+            Ok(Self(trimmed.to_string()))
+        } else {
+            Err(InvalidId(s.to_string()))
+        }
+    }
+}
+
+impl std::ops::Deref for Id {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for Id {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<Id> for String {
+    fn from(id: Id) -> Self {
+        id.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Id {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// The schema every UUID-typed id shares, inlined so each id-named property
+/// carries `format: uuid` directly rather than behind a `$ref`.
+pub fn uuid_schema() -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "format": "uuid",
+    })
+}
+
+impl schemars::JsonSchema for Id {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Id".into()
+    }
+
+    fn json_schema(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        uuid_schema()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +191,43 @@ mod tests {
     fn is_valid_rejects_garbage() {
         assert!(!is_valid("not-an-id"));
         assert!(!is_valid(""));
+    }
+
+    #[test]
+    fn id_parses_uuids_and_keeps_their_text() {
+        let minted = new();
+        assert_eq!(minted.parse::<Id>().unwrap().as_str(), minted);
+        assert_eq!(
+            format!("  {minted}\n").parse::<Id>().unwrap().as_str(),
+            minted
+        );
+        // A bare 32-hex id stays bare so it still matches its stored row.
+        let bare = "dd7a73cda6222ddfaae8fbff692f27f6";
+        assert_eq!(bare.parse::<Id>().unwrap().as_str(), bare);
+    }
+
+    #[test]
+    fn id_rejects_names_and_addresses() {
+        for bad in ["mint", "10.0.0.5", "", "  ", "peer.c56ccc7c2039"] {
+            let err = bad.parse::<Id>().unwrap_err();
+            assert_eq!(err, InvalidId(bad.to_string()));
+        }
+    }
+
+    #[test]
+    fn id_serde_is_a_validated_string() {
+        let minted = new();
+        let quoted = format!("\"{minted}\"");
+        let id: Id = serde_json::from_str(&quoted).unwrap();
+        assert_eq!(serde_json::to_string(&id).unwrap(), quoted);
+        let err = serde_json::from_str::<Id>("\"mint\"").unwrap_err();
+        assert!(err.to_string().contains("`mint`"), "{err}");
+    }
+
+    #[test]
+    fn id_schema_is_an_inline_uuid_string() {
+        let schema = schemars::schema_for!(Option<Id>);
+        assert_eq!(schema.get("format").and_then(|f| f.as_str()), Some("uuid"));
+        assert!(schema.get("$ref").is_none());
     }
 }

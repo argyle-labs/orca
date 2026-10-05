@@ -63,7 +63,15 @@ async fn system_health_sweeps_every_system_with_admin_token() {
 async fn system_health_by_id_returns_one_bare_report() {
     let env = with_isolated_env();
     let token = mint_admin_token(&env);
-    // Resolve this system's own id from the sweep, then ask for it by name.
+    std::fs::write(
+        env.db_path
+            .parent()
+            .expect("isolated home")
+            .join("machine_id"),
+        utils::id::new(),
+    )
+    .expect("seed machine_id");
+    // Resolve this system's own id from the sweep, then ask for it by id.
     let (_, sweep) = oneshot_json(
         env.router(),
         "POST",
@@ -72,13 +80,15 @@ async fn system_health_by_id_returns_one_bare_report() {
         Some(serde_json::json!({})),
     )
     .await;
-    let display_name = sweep["systems"][0]["health"]["displayName"]
+    let local = &sweep["systems"][0]["health"];
+    let machine_id = local["machineId"].as_str().unwrap_or_default().to_string();
+    let display_name = local["displayName"]
         .as_str()
         .unwrap_or_default()
         .to_string();
     assert!(
-        !display_name.is_empty(),
-        "sweep must name the system: {sweep}"
+        !machine_id.is_empty() && !display_name.is_empty(),
+        "sweep must identify the system: {sweep}"
     );
 
     let (status, body) = oneshot_json(
@@ -86,7 +96,7 @@ async fn system_health_by_id_returns_one_bare_report() {
         "POST",
         "/api/v1/system.health",
         Some(&token),
-        Some(serde_json::json!({ "id": display_name })),
+        Some(serde_json::json!({ "id": machine_id })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -97,6 +107,21 @@ async fn system_health_by_id_returns_one_bare_report() {
     assert!(
         body.get("systems").is_none(),
         "a single-system answer must NOT be a mesh sweep: {body}"
+    );
+
+    // A name is not an id (#783): refused, never resolved.
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/v1/system.health",
+        Some(&token),
+        Some(serde_json::json!({ "id": display_name })),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "body: {body}");
+    assert!(
+        body.to_string().contains("expected a system id (UUID)"),
+        "body: {body}"
     );
 }
 

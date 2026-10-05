@@ -344,13 +344,26 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         .chain(std::iter::once(quote! { routes: row.routes.clone(), }))
         .collect();
 
+    // A field named `id` is the resource's canonical uuidv7 identity, so its
+    // CRUD args parse as a UUID (rejecting names) while the row keeps the
+    // stored `String`.
+    let is_uuid_id = |f: &EndpointField| f.name == "id";
+    let arg_ty = |f: &EndpointField| -> TokenStream2 {
+        if is_uuid_id(f) {
+            let crate_path = &input.crate_path;
+            quote! { #crate_path::id::Id }
+        } else {
+            f.ty.to_token_stream()
+        }
+    };
+
     // ── CreateArgs fields ────────────────────────────────────────────────
     let create_field_decls: Vec<TokenStream2> = input
         .fields
         .iter()
         .map(|f| {
             let n = &f.name;
-            let ty = &f.ty;
+            let ty = arg_ty(f);
             let alias = crate::snake_aliases::alias_attr(n);
             if f.optional {
                 quote! { #[arg(long)] #alias pub #n: Option<#ty>, }
@@ -366,7 +379,13 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         .iter()
         .map(|f| {
             let n = &f.name;
-            quote! { #n: args.#n, }
+            match (is_uuid_id(f), f.optional) {
+                (false, _) => quote! { #n: args.#n, },
+                (true, false) => quote! { #n: ::std::string::String::from(args.#n), },
+                (true, true) => {
+                    quote! { #n: args.#n.map(::std::string::String::from), }
+                }
+            }
         })
         .collect();
 
@@ -376,7 +395,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         .iter()
         .map(|f| {
             let n = &f.name;
-            let ty = &f.ty;
+            let ty = arg_ty(f);
             let alias = crate::snake_aliases::alias_attr(n);
             quote! { #[arg(long)] #alias pub #n: Option<#ty>, }
         })
@@ -389,17 +408,22 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         .map(|f| {
             let n = &f.name;
             let ns = n.to_string();
+            let v = if is_uuid_id(f) {
+                quote! { ::std::string::String::from(v) }
+            } else {
+                quote! { v }
+            };
             if f.optional {
                 quote! {
                     if let ::std::option::Option::Some(v) = args.#n {
-                        row.#n = ::std::option::Option::Some(v);
+                        row.#n = ::std::option::Option::Some(#v);
                         applied.push(#ns.to_string());
                     }
                 }
             } else {
                 quote! {
                     if let ::std::option::Option::Some(v) = args.#n {
-                        row.#n = v;
+                        row.#n = #v;
                         applied.push(#ns.to_string());
                     }
                 }

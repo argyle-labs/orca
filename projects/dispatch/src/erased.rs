@@ -105,10 +105,13 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
             // one path all surfaces (REST, MCP, CLI, mesh/exec) funnel through.
             let args = if T::EXECUTE_GATED {
                 if !execute_opt_in(&args) {
-                    let plan = contract::plan::ExecutionPlan::generic(
-                        T::NAME,
-                        without_execute(args).into(),
-                    );
+                    let args = without_execute(args);
+                    // A plan for inputs the verb would refuse is a false
+                    // promise, so they are rejected here exactly as an apply
+                    // would reject them.
+                    serde_json::from_value::<T::Args>(args.clone())
+                        .map_err(|e| anyhow::anyhow!("invalid args for {}: {e}", T::NAME))?;
+                    let plan = contract::plan::ExecutionPlan::generic(T::NAME, args.into());
                     return serde_json::to_value(&plan).map_err(|e| {
                         anyhow::anyhow!("failed to serialize plan for {}: {e}", T::NAME)
                     });
