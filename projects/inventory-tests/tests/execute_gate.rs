@@ -79,6 +79,18 @@ fn model_backends_check_is_an_ungated_read() {
     );
 }
 
+/// Gated control-plane writes that opt out of `data_mutation`, so a non-admin
+/// `can_mutate` caller can never reach them.
+const CONTROL_PLANE_WRITES: &[&str] = &[
+    "auth.session.create",
+    "auth.session.delete",
+    "auth.token.create",
+    "auth.token.delete",
+    "pki.create",
+    "secrets.delete",
+    "secrets.upsert",
+];
+
 /// Consent without authorization is not a gate: if a verb applies changes, it
 /// must also be restricted in WHO may call it, or any authenticated caller can
 /// apply changes simply by passing `execute: true`.
@@ -91,9 +103,21 @@ fn every_gated_verb_is_also_an_admin_data_mutation() {
             Some("admin"),
             "{name} is execute_gated but not role=admin — consent without authorization"
         );
-        assert!(
+        assert_eq!(
             mutations.contains(&name),
-            "{name} is execute_gated but not data_mutation — the two must agree"
+            !CONTROL_PLANE_WRITES.contains(&name),
+            "{name}: a gated verb is a data_mutation unless it is a listed control-plane write"
+        );
+    }
+}
+
+#[test]
+fn control_plane_writes_list_has_no_stale_entries() {
+    let gated = dispatch::execute_gated_names();
+    for name in CONTROL_PLANE_WRITES {
+        assert!(
+            gated.contains(name),
+            "`{name}` is not an execute_gated verb"
         );
     }
 }

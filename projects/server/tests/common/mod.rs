@@ -73,6 +73,11 @@ pub fn with_isolated_env() -> IsolatedEnv {
 /// `auth.token.create` tool would write — so the bearer auth path
 /// (`try_token_auth` → `find_by_hash`) is genuinely exercised.
 pub fn mint_token(env: &IsolatedEnv, role: &str) -> String {
+    mint_token_with(env, role, false)
+}
+
+/// [`mint_token`] with the `can_mutate` opt-in set as given.
+pub fn mint_token_with(env: &IsolatedEnv, role: &str, can_mutate: bool) -> String {
     // `open_default` reads ORCA_DB_PATH from the env this isolated fixture set.
     // Guard against a mis-ordered call (minting before `with_isolated_env`): the
     // tempdir holding the DB must still be alive.
@@ -103,7 +108,7 @@ pub fn mint_token(env: &IsolatedEnv, role: &str) -> String {
         &now,
         None,
         None,
-        false,
+        can_mutate,
     )
     .unwrap();
     plaintext

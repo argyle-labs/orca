@@ -1,11 +1,9 @@
 //! Secrets domain — named secrets with pluggable backends.
 //!
-//! Surface: `secrets.list`, `secrets.detail`, `secrets.create`,
-//! `secrets.update`, `secrets.upsert`, `secrets.delete`. The three write verbs
-//! keep the canonical CRUD vocabulary — `create` inserts (fails if the name
-//! exists), `update` modifies an existing secret (fails if it is absent), and
-//! `upsert` is the idempotent create-or-replace (HTTP PUT semantics) used for
-//! rotation and automation. The only backend in v1 is `inline` (value stored in the
+//! Surface: `secrets.list`, `secrets.detail`, `secrets.upsert`,
+//! `secrets.delete`, all admin-only. `upsert` is the idempotent
+//! create-or-replace (HTTP PUT semantics) used for rotation and automation.
+//! The only backend in v1 is `inline` (value stored in the
 //! SQLCipher-encrypted orca.db). v2 plan adds 1Password / Bitwarden / OS
 //! keychain backends as separate integration crates.
 
@@ -155,7 +153,8 @@ pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
 // ── Native dispatch ─────────────────────────────────────────────────────────
 
 /// List configured secrets (names + backends + metadata). Never returns values.
-#[orca_tool(domain = "secrets", verb = "list")]
+// Admin despite being read-shaped: `ref_path` discloses external vault layout.
+#[orca_tool(domain = "secrets", verb = "list", role = "admin")]
 async fn secret_list(
     args: SecretListArgs,
     _ctx: &contract::ToolCtx,
@@ -185,7 +184,8 @@ async fn secret_list(
 }
 
 /// [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
-#[orca_tool(domain = "secrets", verb = "detail")]
+// Admin despite being read-shaped: returns the plaintext value.
+#[orca_tool(domain = "secrets", verb = "detail", role = "admin")]
 async fn secret_detail(
     args: SecretGetArgs,
     _ctx: &contract::ToolCtx,
@@ -260,7 +260,7 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
 /// 'inline' backend, `value` is required; for external backends, `ref_path` is
 /// required (e.g. 'op://Vault/Item/field'). Write the secret on a remote system
 /// with the top-level `--peer <h>` flag.
-#[orca_tool(domain = "secrets", verb = "upsert", cli = manual)]
+#[orca_tool(domain = "secrets", verb = "upsert", cli = manual, data_mutation = false)]
 async fn secret_upsert(
     args: SecretWriteArgs,
     _ctx: &contract::ToolCtx,
@@ -382,7 +382,7 @@ const _: () = {
 
 /// [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends
 /// only the orca registration is removed (the upstream vault is untouched).
-#[orca_tool(domain = "secrets", verb = "delete")]
+#[orca_tool(domain = "secrets", verb = "delete", data_mutation = false)]
 async fn secret_delete(
     args: SecretDeleteArgs,
     _ctx: &contract::ToolCtx,
@@ -407,6 +407,20 @@ mod tests {
             ref_path: None,
             description: None,
         }
+    }
+
+    #[test]
+    fn every_secrets_verb_is_admin_only() {
+        use contract::OrcaToolDef;
+        assert_eq!(<SecretList as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        assert_eq!(<SecretDetail as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        assert_eq!(<SecretUpsert as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        assert_eq!(<SecretDelete as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        // DATA_MUTATION would let a non-admin `can_mutate` caller through.
+        const { assert!(!<SecretList as OrcaToolDef>::DATA_MUTATION) };
+        const { assert!(!<SecretDetail as OrcaToolDef>::DATA_MUTATION) };
+        const { assert!(!<SecretUpsert as OrcaToolDef>::DATA_MUTATION) };
+        const { assert!(!<SecretDelete as OrcaToolDef>::DATA_MUTATION) };
     }
 
     #[test]
