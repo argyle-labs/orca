@@ -7,6 +7,7 @@
 
 pub mod docs;
 pub mod embedded;
+pub mod guard;
 pub mod markdown;
 pub mod ops;
 pub mod roots;
@@ -59,6 +60,18 @@ fn resolve_absolute(path: &str) -> Result<PathBuf> {
 }
 
 fn resolve(
+    config: &Config,
+    root: Option<&str>,
+    path: &str,
+) -> Result<Option<(PathBuf, roots::FileRoot)>> {
+    let resolved = resolve_unguarded(config, root, path)?;
+    if let Some((dir, _)) = &resolved {
+        guard::deny_key_material(dir)?;
+    }
+    Ok(resolved)
+}
+
+fn resolve_unguarded(
     config: &Config,
     root: Option<&str>,
     path: &str,
@@ -207,10 +220,12 @@ pub async fn read(
                 .or_else(|| roots::resolve_within_root(&r.path, path).ok())
                 .filter(|p: &PathBuf| p.is_file())
                 .ok_or_else(|| anyhow!("not found: {name}/{path}"))?;
+            guard::deny_key_material(&full)?;
             Ok(apply(std::fs::read_to_string(full)?))
         }
         None => {
             let full = resolve_absolute(path)?;
+            guard::deny_key_material(&full)?;
             Ok(apply(std::fs::read_to_string(full)?))
         }
     }
@@ -236,6 +251,10 @@ pub async fn search(config: &Config, query: &str, filter: &str) -> Result<Vec<Fs
         for file in files {
             let rel = file.path.clone();
             let full = r.path.join(&rel);
+            // A root that contains a key dir (e.g. `~`) must not search into it.
+            if guard::deny_key_material(&full).is_err() {
+                continue;
+            }
             let Ok(content) = std::fs::read_to_string(&full) else {
                 continue;
             };
