@@ -953,7 +953,7 @@ pub struct MeshDeleteArgs {
     pub action: MeshDeleteAction,
     /// (kick/forget) Peer to remove.
     #[arg(long)]
-    pub peer_id: Option<String>,
+    pub peer_id: Option<crate::system_id::SystemId>,
 }
 
 /// Tagged result of `system.mesh.delete`.
@@ -1080,7 +1080,7 @@ pub struct MeshUpdateArgs {
     pub self_secure: Option<bool>,
     /// (trust/recover) Target peer.
     #[arg(long)]
-    pub peer_id: Option<String>,
+    pub peer_id: Option<crate::system_id::SystemId>,
     /// (trust) New trust value.
     #[arg(long, action = clap::ArgAction::Set)]
     pub on: Option<bool>,
@@ -3572,10 +3572,13 @@ mod added_coverage {
     #[test]
     fn mesh_update_args_deserializes_camel_case_self_secure() {
         let a: MeshUpdateArgs =
-            serde_json::from_str(r#"{"action":"trust","peerId":"p","on":true,"push":true}"#)
+            serde_json::from_str(r#"{"action":"trust","peerId":"019f0000-0000-7000-8000-000000000000","on":true,"push":true}"#)
                 .unwrap();
         assert_eq!(a.action, MeshUpdateAction::Trust);
-        assert_eq!(a.peer_id.as_deref(), Some("p"));
+        assert_eq!(
+            a.peer_id.as_deref(),
+            Some("019f0000-0000-7000-8000-000000000000")
+        );
         assert_eq!(a.on, Some(true));
         assert!(a.push);
     }
@@ -4037,6 +4040,9 @@ mod handler_dispatch_tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    /// A well-formed system id that no test seeds as a peer.
+    const GHOST: &str = "019f0000-0000-7000-8000-000000000000";
+
     fn empty_ctx() -> ToolCtx {
         ToolCtx::new(Arc::new(Config {
             anthropic_api_key: None,
@@ -4232,7 +4238,7 @@ mod handler_dispatch_tests {
             mesh_update(
                 MeshUpdateArgs {
                     action: MeshUpdateAction::Trust,
-                    peer_id: Some("some-peer".into()),
+                    peer_id: Some(GHOST.parse().unwrap()),
                     ..Default::default()
                 },
                 &ctx,
@@ -4339,7 +4345,7 @@ mod handler_dispatch_tests {
             let out = mesh_update(
                 MeshUpdateArgs {
                     action: MeshUpdateAction::Recover,
-                    peer_id: Some(pid.clone()),
+                    peer_id: Some(pid.parse().unwrap()),
                     ..Default::default()
                 },
                 &ctx,
@@ -4450,7 +4456,7 @@ mod handler_dispatch_tests {
             let out = mesh_delete(
                 MeshDeleteArgs {
                     action: MeshDeleteAction::Forget,
-                    peer_id: Some("ghost".into()),
+                    peer_id: Some(GHOST.parse().unwrap()),
                 },
                 &ctx,
             )
@@ -4458,7 +4464,7 @@ mod handler_dispatch_tests {
             .unwrap();
             match out {
                 MeshDeleteOutput::Forget(f) => {
-                    assert_eq!(f.peer_id, "ghost");
+                    assert_eq!(f.peer_id, GHOST);
                     assert_eq!(f.rows_removed, 0);
                     assert!(f.notified.is_empty());
                 }
@@ -4549,7 +4555,7 @@ mod handler_dispatch_tests {
             let out = mesh_update(
                 MeshUpdateArgs {
                     action: MeshUpdateAction::Trust,
-                    peer_id: Some(pid.clone()),
+                    peer_id: Some(pid.parse().unwrap()),
                     on: Some(true),
                     ..Default::default()
                 },
@@ -4578,7 +4584,7 @@ mod handler_dispatch_tests {
             let out = mesh_update(
                 MeshUpdateArgs {
                     action: MeshUpdateAction::Trust,
-                    peer_id: Some(pid.clone()),
+                    peer_id: Some(pid.parse().unwrap()),
                     on: Some(false),
                     ..Default::default()
                 },
@@ -4605,7 +4611,7 @@ mod handler_dispatch_tests {
                 mesh_update(
                     MeshUpdateArgs {
                         action: MeshUpdateAction::Trust,
-                        peer_id: Some("ghost".into()),
+                        peer_id: Some(GHOST.parse().unwrap()),
                         on: Some(true),
                         ..Default::default()
                     },
@@ -4614,7 +4620,7 @@ mod handler_dispatch_tests {
                 .await,
             );
             assert!(
-                format!("{err:#}").contains("no such peer: ghost"),
+                format!("{err:#}").contains(&format!("no such peer: {GHOST}")),
                 "got: {err:#}"
             );
         })
@@ -4659,7 +4665,7 @@ mod handler_dispatch_tests {
             let out = mesh_delete(
                 MeshDeleteArgs {
                     action: MeshDeleteAction::Kick,
-                    peer_id: Some(pid.clone()),
+                    peer_id: Some(pid.parse().unwrap()),
                 },
                 &ctx,
             )
@@ -4688,14 +4694,14 @@ mod handler_dispatch_tests {
                 mesh_delete(
                     MeshDeleteArgs {
                         action: MeshDeleteAction::Kick,
-                        peer_id: Some("ghost".into()),
+                        peer_id: Some(GHOST.parse().unwrap()),
                     },
                     &ctx,
                 )
                 .await,
             );
             assert!(
-                format!("{err:#}").contains("no such peer: ghost"),
+                format!("{err:#}").contains(&format!("no such peer: {GHOST}")),
                 "got: {err:#}"
             );
         })

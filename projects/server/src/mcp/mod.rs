@@ -42,6 +42,10 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let cluster_roster: Arc<dyn contract::ClusterRoster> =
         Arc::new(contract::cluster_roster::AggregateClusterRoster);
     ctx.register_service(cluster_roster);
+    // Names the system a hostname or address passed as a system id belongs to;
+    // reads this host's roster only when an args parse has already failed.
+    let arg_hint: Arc<dyn contract::ArgRefusalHint> = Arc::new(system::system_id::SystemIdHint);
+    ctx.register_service(arg_hint);
     // Everything is REMOTE_OK by default; install only the `local_only`
     // opt-outs as the denylist (reachability is default-allow, tightened per
     // tool via `local_only`, and separately gated by role).
