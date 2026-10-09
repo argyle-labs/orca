@@ -2022,11 +2022,12 @@ async fn storage_mount_detail(
     Ok(mount_view(&row, share.as_ref(), is_local))
 }
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct StorageMountCreateArgs {
     /// Per-host `name` label for the placement (unique per `host`).
     #[arg(long)]
+    #[serde(deserialize_with = "non_blank")]
     pub name: String,
     /// The `shares.id` this placement mounts.
     #[arg(long)]
@@ -2036,6 +2037,7 @@ pub struct StorageMountCreateArgs {
     pub host: String,
     /// Absolute mountpoint on `host`.
     #[arg(long)]
+    #[serde(deserialize_with = "non_blank")]
     pub target: String,
     /// Serialized remount policy (per-placement host behaviour).
     #[arg(long)]
@@ -2046,6 +2048,7 @@ pub struct StorageMountCreateArgs {
     /// proxmox plugin renders an `lxc.mount.entry` so an unprivileged guest gets
     /// the share mounted, lifecycle-tied to the guest). Omit for a host mount.
     #[arg(long)]
+    #[serde(default, deserialize_with = "opt_non_blank")]
     pub guest: Option<String>,
     /// Override the multi-mount guard: allow authoring a second placement whose
     /// `(host, target)` collides with an existing one. Off by default — stacking
@@ -2053,6 +2056,23 @@ pub struct StorageMountCreateArgs {
     #[arg(long)]
     #[serde(default)]
     pub force: bool,
+}
+
+fn non_blank<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = String::deserialize(d)?;
+    if s.trim().is_empty() {
+        return Err(serde::de::Error::custom("must not be blank"));
+    }
+    Ok(s)
+}
+
+/// Blank is refused rather than read as absent: a caller sending `""` meant a
+/// value, and dropping it would author a host mount instead of a guest one.
+fn opt_non_blank<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    match Option::<String>::deserialize(d)? {
+        Some(s) if s.trim().is_empty() => Err(serde::de::Error::custom("must not be blank")),
+        other => Ok(other),
+    }
 }
 
 /// [MUTATES STATE] Author a new mount placement. A placement owns no routes — it references a
@@ -2065,6 +2085,17 @@ async fn storage_mount_create(
     args: StorageMountCreateArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<MountView> {
+    // The CLI builds args through clap and may run this body in-process,
+    // bypassing the serde blank checks.
+    for (field, value) in [
+        ("name", Some(&args.name)),
+        ("target", Some(&args.target)),
+        ("guest", args.guest.as_ref()),
+    ] {
+        if value.is_some_and(|v| v.trim().is_empty()) {
+            anyhow::bail!("`{field}` must not be blank");
+        }
+    }
     if crate::mounts::endpoint_db::get_by_host_name(&args.host, &args.name)?.is_some() {
         anyhow::bail!(
             "mount `{}` already exists on host `{}`; use storage.mount.update",
@@ -2089,7 +2120,7 @@ async fn storage_mount_create(
         share_id: args.share_id,
         host: args.host,
         target: args.target,
-        guest: args.guest.filter(|g| !g.trim().is_empty()),
+        guest: args.guest,
         remount_policy: args
             .remount_policy
             .as_deref()
@@ -2122,8 +2153,8 @@ fn mount_at_target(host: &str, target: &str) -> anyhow::Result<Option<crate::mou
         .find(|m| m.enabled && m.host == host && m.target == target))
 }
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase", default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct StorageMountDeleteArgs {
     /// Placement uuidv7 `id` to remove.
     #[arg(long)]
@@ -2854,6 +2885,36 @@ mod tests {
         )
         .unwrap();
         assert!(forced.force);
+    }
+
+    #[test]
+    fn mount_create_args_refuse_blank_text() {
+        for (field, body) in [
+            (
+                "name",
+                r#"{"name":" ","shareId":"s","host":"h","target":"/mnt/t"}"#,
+            ),
+            (
+                "target",
+                r#"{"name":"n","shareId":"s","host":"h","target":""}"#,
+            ),
+            (
+                "guest",
+                r#"{"name":"n","shareId":"s","host":"h","target":"/mnt/t","guest":""}"#,
+            ),
+        ] {
+            let err = serde_json::from_str::<StorageMountCreateArgs>(body)
+                .err()
+                .unwrap_or_else(|| panic!("blank {field} must be refused"));
+            assert!(
+                err.to_string().contains("must not be blank"),
+                "{field}: {err}"
+            );
+        }
+        let a: StorageMountCreateArgs =
+            serde_json::from_str(r#"{"name":"n","shareId":"s","host":"h","target":"/mnt/t"}"#)
+                .unwrap();
+        assert_eq!(a.guest, None);
     }
 
     #[test]
@@ -3900,6 +3961,35 @@ mod tests {
                     .unwrap()
                     .is_some()
             );
+        });
+    }
+
+    #[test]
+    fn storage_mount_create_refuses_blank_text_built_without_serde() {
+        with_db("mount_create_blank.db", || {
+            seed_share();
+            let ctx = test_ctx();
+            let args = |name: &str, target: &str, guest: Option<&str>| StorageMountCreateArgs {
+                name: name.into(),
+                share_id: "sh-1".into(),
+                host: "h1".into(),
+                target: target.into(),
+                remount_policy: None,
+                guest: guest.map(str::to_string),
+                force: false,
+            };
+            for (field, a) in [
+                ("name", args(" ", "/mnt/data", None)),
+                ("target", args("data", "", None)),
+                ("guest", args("data", "/mnt/data", Some(""))),
+            ] {
+                let err = rt()
+                    .block_on(storage_mount_create(a, &ctx))
+                    .err()
+                    .unwrap_or_else(|| panic!("blank {field} must be refused"));
+                assert_eq!(err.to_string(), format!("`{field}` must not be blank"));
+            }
+            assert!(crate::mounts::endpoint_db::list().unwrap().is_empty());
         });
     }
 
