@@ -3196,6 +3196,8 @@ name = "inventory-tests"
 version = "0.2.1-rc.14"
 dependencies = [
  "agents",
+ "anyhow",
+ "async-trait",
  "auth",
  "clap",
  "config-source",

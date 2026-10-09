@@ -980,6 +980,23 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     } else {
         quote! {}
     };
+    // The execute gate strips the opt-in before `run`, so a gated verb that
+    // reaches `run` was already opted in and authorized here. Re-assert it on
+    // the forwarded args, or the peer's own gate answers with a plan that
+    // cannot decode as this verb's output.
+    let forward_execute_stanza = if execute_gated_lit {
+        quote! {
+            let mut __args_value = __args_value;
+            if let ::core::option::Option::Some(__obj) = __args_value.as_object_mut() {
+                __obj.insert(
+                    ::std::string::ToString::to_string(#crate_path::contract::plan::EXECUTE_FIELD),
+                    #crate_path::serde_json::Value::Bool(true),
+                );
+            }
+        }
+    } else {
+        quote! {}
+    };
     let peer_dispatch_stanza = if emit_peer_dispatch {
         quote! {
             if let ::core::option::Option::Some(__peer_id) =
@@ -989,6 +1006,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                     .service::<::std::sync::Arc<dyn #crate_path::contract::RemoteExec>>()?;
                 let __args_value = #crate_path::serde_json::to_value(&#args_forward)
                     .map_err(|e| #crate_path::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
+                #forward_execute_stanza
                 // Forward the ctx's ambient operator identity; the transport
                 // mints a signed caller token from it (project-remote-exec-full-fix
                 // S1–S4). `None` on unauthenticated paths.

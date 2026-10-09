@@ -21,6 +21,8 @@ clap      = { workspace = true }
 tokio     = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 serde_json    = { workspace = true }
 inventory     = { workspace = true }
+anyhow        = { workspace = true }
+async-trait   = { workspace = true }
 
 # Link every bucket so its inventory::submit! statics are pulled in.
 agents        = { path = "../agents" }
