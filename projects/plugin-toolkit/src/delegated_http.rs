@@ -404,11 +404,11 @@ pub mod header {
     pub const CONTENT_LENGTH: &str = "content-length";
 }
 
-/// Query/form serialization helper — turns progenitor's `QueryParam` slices and
-/// form structs into a urlencoded string via serde_urlencoded-free manual join.
+/// Query/form serialization helper — turns progenitor's `QueryParam`s (single,
+/// slice, or array) and form structs into a urlencoded string via serde_urlencoded-free manual join.
 pub mod serialize {
     /// Anything the shim can render into a `k=v&…` string. Implemented for the
-    /// `QueryParam` slices progenitor passes to `.query(&[...])`.
+    /// single `QueryParam`s and the slices/arrays progenitor passes to `.query`.
     pub trait ToQuery {
         fn to_query_string(&self) -> Result<String, String>;
     }
@@ -437,43 +437,70 @@ pub mod progenitor_client {
     /// &value)`. Rendered by [`super::serialize::ToQuery`] on the slice.
     pub struct QueryParam<'a> {
         name: &'a str,
-        value: String,
+        pairs: Result<Vec<(String, String)>, String>,
     }
     impl<'a> QueryParam<'a> {
         pub fn new<T: ::serde::Serialize>(name: &'a str, value: &T) -> Self {
-            // Scalars render as their plain string; anything else via JSON.
-            let value = match ::serde_json::to_value(value) {
-                Ok(::serde_json::Value::String(s)) => s,
-                Ok(::serde_json::Value::Null) => String::new(),
-                Ok(v) => v.to_string(),
-                Err(_) => String::new(),
-            };
-            QueryParam { name, value }
+            let pairs = ::serde_json::to_value(value)
+                .map_err(|e| e.to_string())
+                .and_then(|v| query_pairs(name, v));
+            QueryParam { name, pairs }
         }
     }
-    /// A single query parameter. progenitor chains `.query(&QueryParam::new(..))`
-    /// one param at a time (the shim's `RequestBuilder::query` appends), so the
-    /// single-item form is what the generated client actually needs; the slice /
-    /// array forms below cover callers that pass a batch.
+
+    /// Mirrors upstream progenitor-client: sequences repeat the key, `None` is
+    /// omitted, and an object flattens to its own `field=value` pairs (the
+    /// param name is dropped, as serde_urlencoded does). Anything deeper errors.
+    fn query_pairs(name: &str, v: ::serde_json::Value) -> Result<Vec<(String, String)>, String> {
+        use ::serde_json::Value;
+        match v {
+            Value::Null => Ok(Vec::new()),
+            Value::Array(items) => items
+                .into_iter()
+                .filter(|i| !i.is_null())
+                .map(|i| scalar(name, i).map(|s| (name.to_string(), s)))
+                .collect(),
+            Value::Object(fields) => fields
+                .into_iter()
+                .filter(|(_, f)| !f.is_null())
+                .map(|(k, f)| scalar(&k, f).map(|s| (k, s)))
+                .collect(),
+            v => scalar(name, v).map(|s| vec![(name.to_string(), s)]),
+        }
+    }
+
+    fn scalar(name: &str, v: ::serde_json::Value) -> Result<String, String> {
+        use ::serde_json::Value;
+        match v {
+            Value::String(s) => Ok(s),
+            Value::Bool(b) => Ok(b.to_string()),
+            Value::Number(n) => Ok(n.to_string()),
+            other => Err(format!("unsupported nested value for `{name}`: {other}")),
+        }
+    }
+
     impl super::serialize::ToQuery for QueryParam<'_> {
         fn to_query_string(&self) -> Result<String, String> {
-            if self.value.is_empty() {
-                Ok(String::new())
-            } else {
-                Ok(format!(
-                    "{}={}",
-                    urlencode(self.name),
-                    urlencode(&self.value)
-                ))
-            }
+            let pairs = self
+                .pairs
+                .as_ref()
+                .map_err(|e| format!("query param `{}`: {e}", self.name))?;
+            Ok(pairs
+                .iter()
+                .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
+                .collect::<Vec<_>>()
+                .join("&"))
         }
     }
     impl super::serialize::ToQuery for [QueryParam<'_>] {
         fn to_query_string(&self) -> Result<String, String> {
-            Ok(self
+            let parts = self
                 .iter()
-                .filter(|p| !p.value.is_empty())
-                .map(|p| format!("{}={}", urlencode(p.name), urlencode(&p.value)))
+                .map(|p| p.to_query_string())
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(parts
+                .into_iter()
+                .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join("&"))
         }
@@ -759,5 +786,94 @@ pub mod api_client {
             }
             None => Ok(Response::from_parts(status, headers, body)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::progenitor_client::QueryParam;
+    use super::serialize::ToQuery;
+
+    fn q<T: ::serde::Serialize>(name: &str, v: &T) -> String {
+        QueryParam::new(name, v).to_query_string().unwrap()
+    }
+
+    #[test]
+    fn array_repeats_key() {
+        assert_eq!(
+            q("library_id", &vec!["L", "M"]),
+            "library_id=L&library_id=M"
+        );
+    }
+
+    #[test]
+    fn reserved_chars_encoded() {
+        assert_eq!(q("search", &"a b&c=d/é"), "search=a%20b%26c%3Dd%2F%C3%A9");
+    }
+
+    #[test]
+    fn empty_array_emits_nothing() {
+        assert_eq!(q("library_id", &Vec::<String>::new()), "");
+    }
+
+    #[test]
+    fn bool_renders_plain() {
+        assert_eq!(q("unpaged", &true), "unpaged=true");
+        assert_eq!(q("unpaged", &false), "unpaged=false");
+    }
+
+    #[test]
+    fn option_none_omitted() {
+        assert_eq!(q("page", &None::<i32>), "");
+        assert_eq!(q("page", &Some(3)), "page=3");
+    }
+
+    #[test]
+    fn nested_value_rejected() {
+        let p = QueryParam::new("x", &vec![vec![1]]);
+        assert!(p.to_query_string().is_err());
+    }
+
+    #[test]
+    fn slice_joins_and_skips_empty() {
+        let none: Option<i32> = None;
+        let ps = [
+            QueryParam::new("a", &vec!["1", "2"]),
+            QueryParam::new("b", &none),
+            QueryParam::new("c", &true),
+        ];
+        assert_eq!(ps.to_query_string().unwrap(), "a=1&a=2&c=true");
+    }
+
+    #[test]
+    fn object_flattens_to_fields() {
+        let v = ::serde_json::json!({"a": 1, "b": "x"});
+        assert_eq!(q("ignored", &v), "a=1&b=x");
+    }
+
+    #[test]
+    fn empty_string_kept() {
+        assert_eq!(q("s", &""), "s=");
+    }
+
+    #[test]
+    fn null_in_array_skipped() {
+        assert_eq!(q("k", &vec![Some(1), None]), "k=1");
+    }
+
+    #[test]
+    fn nested_error_single_prefix() {
+        let e = QueryParam::new("x", &vec![vec![1]])
+            .to_query_string()
+            .unwrap_err();
+        assert_eq!(e.matches("query param").count(), 1, "{e}");
+    }
+
+    #[test]
+    fn query_error_fails_build() {
+        let rb = super::reqwest::Client::new()
+            .get("http://h/p")
+            .query(&QueryParam::new("x", &vec![vec![1]]));
+        assert!(rb.build().is_err());
     }
 }
