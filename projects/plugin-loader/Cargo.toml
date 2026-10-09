@@ -33,6 +33,8 @@ tokio      = { workspace = true }
 # host executes it here on orca's one client. (`utils::http` = the ONE HTTP home.)
 utils      = { path = "../utils" }
 tracing    = { workspace = true }
+# Peer credentials of the accepted plugin connection (SO_PEERCRED / LOCAL_PEERPID).
+libc       = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
