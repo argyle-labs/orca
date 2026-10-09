@@ -135,8 +135,10 @@ Each host has a stable `peer_id` anchored to `/etc/machine-id` (or
 a fixed path on systems where `$HOME` churns). Pairing = mutual mTLS trust;
 no asserted-role fallbacks. Self-secure = Tier-2 cred sync opt-in.
 
-Cross-host dispatch is opt-out via `local_only` flag. `--peer <name>` on CLI and
-`X-Orca-Peer` header on REST route the call through the mesh.
+Cross-host dispatch is opt-out via `local_only` flag. A verb's system id argument
+routes the call through the mesh to that system; verbs without one take the
+interim selector (`--peer <system-id>` on CLI, `X-Orca-Peer` header on REST)
+until they address systems by id themselves (orca#815).
 
 Secrets never cross to non-secure hosts; sensitive operations
 delegate back to a holder via callback.

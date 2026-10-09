@@ -13,9 +13,12 @@ for a noun's verbs — those are always authoritative. This page is the map.
 
 ## Remote dispatch
 
-Any non-`local_only` tool takes `--peer <hostname>` to run on another mesh
-member over the mTLS mesh; the peer enforces the same role checks as a local
-call. Example: `orca config list --peer <hostname>`.
+A verb that takes a system id runs on the system that id names, over the mTLS
+mesh; that system enforces the same role checks as a local call. Ids are the
+UUIDs in the `id` column of `orca system list`. To run a non-`local_only` verb
+with no id argument on another system, address it with the interim selector,
+`--peer <system-id>`, until verbs address systems by id themselves (orca#815).
+Example: `orca config list --peer <system-id>`.
 
 ---
 
