@@ -68,7 +68,7 @@ on Linux service installs; `system.certs.list` / logs show the resolved path).
 4. **Start the daemon.** On boot, `host_identity::init` mints + persists a new
    UUIDv7; verify:
    ```
-   orca system list    # note the new peer_id — must be a dashed UUIDv7
+   orca system list    # note the new id — must be a dashed UUIDv7
    ```
 5. **Re-pair.** Bring up the seed host first, then pair each other host to it via
    the bootstrap offer/accept flow (see [`mesh.md`](mesh.md) for the full model):
@@ -82,7 +82,7 @@ on Linux service installs; `system.certs.list` / logs show the resolved path).
 
 ## Verification (whole fleet)
 
-- `system.list` on any host: every `peer_id` and every `id` is a
+- `system.list` on any host: every `id` is a
   bare dashed UUIDv7 — no `system:` / `local:` / `peer.` prefixes, no bare-hex.
 - `system.topology` / `network_topology_view`: every node id (peers **and** claim
   children) is a bare UUIDv7; parent↔child is walkable purely by id.
