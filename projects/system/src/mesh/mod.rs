@@ -3742,10 +3742,12 @@ mod added_coverage {
 
     // ── pki_dir composition ──────────────────────────────────────────────────
 
+    #[serial_test::serial(env)]
     #[test]
-    fn pki_dir_ends_with_state_and_pki_components() {
-        let p = pki_dir();
-        assert!(p.ends_with(std::path::Path::new(APP_STATE_DIR).join(APP_PKI_DIR)));
+    fn pki_dir_is_the_state_dir_pki_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = crate::mesh::pin_home(tmp.path());
+        assert_eq!(pki_dir(), tmp.path().join(".orca").join(APP_PKI_DIR));
     }
 
     // ── build_instance: empty-hostname label fallback ────────────────────────
