@@ -108,6 +108,8 @@ pub(crate) fn labeled(mut route: Route) -> Route {
 #[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MeshPeerDto {
+    /// Aliases decode rosters from peers that still emit `peer_id`.
+    #[serde(rename = "id", alias = "peer_id", alias = "peerId")]
     pub peer_id: String,
     pub hostname: String,
     /// Legacy single dial address. No longer serialized — every address now
@@ -204,11 +206,89 @@ pub enum MeshMember {
     /// (when probed) ping latency + topology facts. Boxed because the joined
     /// row carries more fields than the other variants; without the
     /// indirection the whole enum pays that size on every row.
+    #[serde(with = "legacy_id")]
+    #[schemars(with = "Box<MeshPeerDto>")]
     Joined(Box<MeshPeerDto>),
     /// Pending inbound or outbound offer — pairing handshake in progress.
     Handshaking(MeshPendingOfferDto),
     /// mDNS-discovered orca that is not yet paired.
+    #[serde(with = "legacy_id")]
+    #[schemars(with = "MeshDiscoveryRowDto")]
     Discovered(MeshDiscoveryRowDto),
+}
+
+/// A roster row that also carries its system id under `peer_id`.
+trait LegacyPeerId: Serialize {
+    fn legacy_peer_id(&self) -> Option<&str>;
+}
+
+impl LegacyPeerId for MeshPeerDto {
+    fn legacy_peer_id(&self) -> Option<&str> {
+        Some(&self.peer_id)
+    }
+}
+
+impl<T: LegacyPeerId> LegacyPeerId for Box<T> {
+    fn legacy_peer_id(&self) -> Option<&str> {
+        (**self).legacy_peer_id()
+    }
+}
+
+impl LegacyPeerId for MeshDiscoveryRowDto {
+    fn legacy_peer_id(&self) -> Option<&str> {
+        self.peer_id.as_deref()
+    }
+}
+
+/// Roster rows carry their id under both `id` and `peer_id`: peers on releases
+/// that decode `peer_id` as a required field otherwise reject the whole roster.
+/// Drop once every system runs a release that reads `id`.
+mod legacy_id {
+    use super::LegacyPeerId;
+    use serde::{Deserialize, Serialize};
+
+    pub fn serialize<T, S>(row: &T, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        T: LegacyPeerId,
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct WithLegacyId<'a, T: Serialize> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            peer_id: Option<&'a str>,
+            #[serde(flatten)]
+            row: &'a T,
+        }
+        WithLegacyId {
+            peer_id: row.legacy_peer_id(),
+            row,
+        }
+        .serialize(serializer)
+    }
+
+    /// `peer_id` is an alias of `id`, so a row carrying both would be refused
+    /// as a duplicate field; the copy is dropped when it agrees with `id`, and
+    /// a row whose keys name different systems is refused.
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+    where
+        T: serde::de::DeserializeOwned,
+        D: serde::Deserializer<'de>,
+    {
+        let mut row = serde_json::Map::deserialize(deserializer)?;
+        if let Some(id) = row.get("id").cloned() {
+            for legacy in ["peer_id", "peerId"] {
+                match row.remove(legacy) {
+                    Some(other) if other != id => {
+                        return Err(serde::de::Error::custom(format!(
+                            "roster row `id` {id} and `{legacy}` {other} name different systems"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        serde_json::from_value(serde_json::Value::Object(row)).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -868,7 +948,13 @@ pub struct MeshPingOutput {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MeshDiscoveryRowDto {
     pub pubkey_fp: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The discovered system's id, when it advertises one.
+    #[serde(
+        rename = "id",
+        alias = "peer_id",
+        alias = "peerId",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub peer_id: Option<String>,
     pub hostname: String,
     pub addr: String,
@@ -4641,4 +4727,263 @@ mod handler_dispatch_tests {
     // production code. The pure classification/projection helpers they call
     // (`classify_snapshot`, `match_clusters`, `build_instance`) are already
     // covered directly in `mesh_snapshot_tests` / `added_coverage`.
+}
+
+#[cfg(test)]
+mod rc14_roster_compat_tests {
+    use super::*;
+
+    /// `system.list` roster row shapes as decoded by v0.2.1-rc.14 (c4b259f4),
+    /// where `peer_id` is a required key. Frozen: do not update alongside the
+    /// live types. Unread fields stay so decoding fails where rc.14 would. The
+    /// nested `routes` and `system` fields use the live `Routes` and
+    /// `TopologyFacts`, so drift inside those shapes is not caught here.
+    #[allow(dead_code)]
+    mod rc14 {
+        use serde::Deserialize;
+
+        #[derive::camel_aliases]
+        #[derive(Deserialize)]
+        pub struct MeshPeerDto {
+            pub peer_id: String,
+            pub hostname: String,
+            #[serde(default)]
+            pub addr: String,
+            pub port: u16,
+            pub last_seen_at: i64,
+            pub local_secure: bool,
+            pub peer_secure: bool,
+            pub status: String,
+            #[serde(default)]
+            pub routes: crate::mesh::Routes,
+            #[serde(default)]
+            pub local: bool,
+            #[serde(default)]
+            pub reachable: Option<bool>,
+            #[serde(default)]
+            pub latency_ms: Option<u32>,
+            #[serde(default)]
+            pub probe_error: Option<String>,
+            #[serde(default)]
+            pub version: Option<String>,
+            #[serde(default)]
+            pub target: Option<String>,
+            #[serde(default)]
+            pub frontend: Option<String>,
+            #[serde(default)]
+            pub mode: Option<String>,
+            #[serde(default)]
+            pub channel: Option<String>,
+            #[serde(default)]
+            pub pinned_to: Option<String>,
+            #[serde(default)]
+            pub update_latest: Option<String>,
+            #[serde(default)]
+            pub update_available: Option<bool>,
+            #[serde(default)]
+            pub update_checked_secs: Option<u64>,
+            #[serde(default)]
+            pub system: Option<crate::system::TopologyFacts>,
+            #[serde(default)]
+            pub pubkey_fp: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(tag = "state", rename_all = "lowercase")]
+        pub enum MeshMember {
+            Joined(Box<MeshPeerDto>),
+            Handshaking(MeshPendingOfferDto),
+            Discovered(MeshDiscoveryRowDto),
+        }
+
+        #[derive::camel_aliases]
+        #[derive(Deserialize)]
+        pub struct MeshListOutput {
+            pub members: Vec<MeshMember>,
+            pub next_cursor: Option<String>,
+            pub total: Option<u64>,
+        }
+
+        #[derive::camel_aliases]
+        #[derive(Deserialize)]
+        pub struct MeshDiscoveryRowDto {
+            pub pubkey_fp: String,
+            pub peer_id: Option<String>,
+            pub hostname: String,
+            pub addr: String,
+            pub port: u16,
+            pub discovery_state: String,
+            pub can_invite: bool,
+            pub first_seen_at: i64,
+            pub last_seen_at: i64,
+        }
+
+        #[derive::camel_aliases]
+        #[derive(Deserialize)]
+        pub struct MeshPendingOfferDto {
+            pub offer_id: String,
+            pub direction: String,
+            pub peer_pubkey_fp: String,
+            pub peer_hostname: String,
+            pub peer_addr: String,
+            pub peer_port: u16,
+            pub inviter_peer_id: Option<String>,
+            pub mesh_id: Option<String>,
+            pub expires_at: i64,
+            pub ttl_secs: i64,
+            pub created_at: i64,
+        }
+    }
+
+    const JOINED: &str = "019f9f7b-1176-7e40-9e30-4987d8d12dcb";
+    const DISCOVERED: &str = "019f9f7b-2222-7e40-9e30-4987d8d12dcb";
+
+    fn roster() -> MeshListOutput {
+        let joined: MeshPeerDto = serde_json::from_value(serde_json::json!({
+            "id": JOINED,
+            "hostname": "mint",
+            "port": 7777,
+            "last_seen_at": 1,
+            "local_secure": true,
+            "peer_secure": true,
+            "status": "active",
+        }))
+        .unwrap();
+        let discovered = |id: Option<&str>| MeshDiscoveryRowDto {
+            pubkey_fp: "fp".into(),
+            peer_id: id.map(str::to_string),
+            hostname: "freyr".into(),
+            addr: "10.0.0.15".into(),
+            port: 7777,
+            discovery_state: "unclaimed".into(),
+            can_invite: true,
+            first_seen_at: 1,
+            last_seen_at: 2,
+        };
+        MeshListOutput {
+            members: vec![
+                MeshMember::Joined(Box::new(joined)),
+                MeshMember::Discovered(discovered(Some(DISCOVERED))),
+                MeshMember::Discovered(discovered(None)),
+            ],
+            next_cursor: None,
+            total: Some(3),
+        }
+    }
+
+    #[test]
+    fn rc14_decodes_the_current_roster() {
+        let wire = serde_json::to_value(roster()).unwrap();
+        let old: rc14::MeshListOutput = serde_json::from_value(wire).unwrap();
+        let ids: Vec<Option<String>> = old
+            .members
+            .into_iter()
+            .map(|m| match m {
+                rc14::MeshMember::Joined(p) => Some(p.peer_id),
+                rc14::MeshMember::Discovered(d) => d.peer_id,
+                rc14::MeshMember::Handshaking(_) => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![Some(JOINED.to_string()), Some(DISCOVERED.to_string()), None]
+        );
+    }
+
+    #[test]
+    fn roster_rows_carry_the_id_under_both_keys() {
+        let wire = serde_json::to_value(roster()).unwrap();
+        let members = wire["members"].as_array().unwrap();
+        assert_eq!(members[0]["state"], "joined");
+        assert_eq!(members[0]["id"], JOINED);
+        assert_eq!(members[0]["peer_id"], JOINED);
+        assert_eq!(members[1]["state"], "discovered");
+        assert_eq!(members[1]["id"], DISCOVERED);
+        assert_eq!(members[1]["peer_id"], DISCOVERED);
+        assert!(members[2].get("id").is_none());
+        assert!(members[2].get("peer_id").is_none());
+    }
+
+    #[test]
+    fn current_roster_round_trips() {
+        let wire = serde_json::to_value(roster()).unwrap();
+        let back: MeshListOutput = serde_json::from_value(wire).unwrap();
+        match &back.members[0] {
+            MeshMember::Joined(p) => assert_eq!(p.peer_id, JOINED),
+            _ => panic!("expected joined"),
+        }
+        match &back.members[1] {
+            MeshMember::Discovered(d) => assert_eq!(d.peer_id.as_deref(), Some(DISCOVERED)),
+            _ => panic!("expected discovered"),
+        }
+    }
+
+    // A raw wire row, as an rc.14 peer emits it, is the thing under test.
+    #[allow(clippy::disallowed_types)]
+    fn rc14_discovered(key: &str) -> serde_json::Value {
+        serde_json::json!({
+            "members": [{
+                "state": "discovered",
+                key: DISCOVERED,
+                "pubkey_fp": "fp",
+                "hostname": "freyr",
+                "addr": "10.0.0.15",
+                "port": 7777,
+                "discovery_state": "unclaimed",
+                "can_invite": true,
+                "first_seen_at": 1,
+                "last_seen_at": 2,
+            }],
+        })
+    }
+
+    #[test]
+    fn rc14_discovered_rows_with_peer_id_or_peer_id_camel_decode() {
+        for key in ["peer_id", "peerId"] {
+            let list: MeshListOutput = serde_json::from_value(rc14_discovered(key)).unwrap();
+            match &list.members[0] {
+                MeshMember::Discovered(d) => {
+                    assert_eq!(d.peer_id.as_deref(), Some(DISCOVERED), "{key}")
+                }
+                _ => panic!("expected discovered"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_whose_id_and_peer_id_differ_is_refused() {
+        for key in ["peer_id", "peerId"] {
+            let mut wire = rc14_discovered(key);
+            wire["members"][0]["id"] = serde_json::json!(JOINED);
+            let err = serde_json::from_value::<MeshListOutput>(wire)
+                .err()
+                .expect("conflicting ids must not decode");
+            assert!(err.to_string().contains("name different systems"), "{err}");
+
+            let mut wire = rc14_discovered(key);
+            wire["members"][0]["id"] = serde_json::json!(DISCOVERED);
+            serde_json::from_value::<MeshListOutput>(wire).unwrap();
+        }
+    }
+
+    #[test]
+    fn rc14_roster_with_only_peer_id_decodes() {
+        let wire = serde_json::json!({
+            "members": [{
+                "state": "joined",
+                "peer_id": JOINED,
+                "hostname": "mint",
+                "port": 7777,
+                "last_seen_at": 1,
+                "local_secure": true,
+                "peer_secure": true,
+                "status": "active",
+            }],
+        });
+        let list: MeshListOutput = serde_json::from_value(wire).unwrap();
+        match &list.members[0] {
+            MeshMember::Joined(p) => assert_eq!(p.peer_id, JOINED),
+            _ => panic!("expected joined"),
+        }
+    }
 }
