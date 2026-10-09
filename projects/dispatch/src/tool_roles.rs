@@ -100,12 +100,42 @@ pub fn is_data_mutation(tool: &str) -> bool {
 /// registry's own 404 path will reject unknown tool names downstream, so
 /// fall-open here keeps the gate from double-handling missing-tool errors.
 pub fn required_role(tool: &str) -> &'static str {
+    known_role(tool).unwrap_or("any")
+}
+
+/// [`required_role`] without the fall-open: `None` exactly when the local
+/// dispatcher cannot route `tool` (no core, plugin, unit, diagnostics or UPS
+/// op under that name). Surfaces that must fail closed on an unrecognized
+/// name key off this.
+pub fn known_role(tool: &str) -> Option<&'static str> {
     ROLES
         .get()
         .and_then(|m| m.get(tool).copied())
         .or_else(|| plugin_policy(tool).map(|p| p.role))
         .or_else(|| crate::unit_surface::unit_policy(tool).map(|(role, _)| role))
-        .unwrap_or("any")
+        // Routable without an installed entry: the static table before
+        // `install`, the fixed surfaces' `any` reads (only their admin pairs
+        // are installed), and a loaded plugin tool that declared no policy.
+        .or_else(|| crate::registry::required_role(tool))
+        .or_else(|| fixed_surface_role(tool))
+        .or_else(|| crate::registry::dynamic_owns(tool).then_some("any"))
+}
+
+fn fixed_surface_role(tool: &str) -> Option<&'static str> {
+    use crate::{diagnostics_surface as diag, ups_surface as ups};
+    let pairs = if diag::diagnostics_owns(tool) {
+        diag::diagnostics_role_pairs()
+    } else if ups::ups_owns(tool) {
+        ups::ups_role_pairs()
+    } else {
+        return None;
+    };
+    Some(
+        pairs
+            .into_iter()
+            .find_map(|(n, r)| (n == tool).then_some(r))
+            .unwrap_or("any"),
+    )
 }
 
 /// True if the caller's identity-role satisfies the tool's required-role.
@@ -238,6 +268,29 @@ mod tests {
         // path with no entry for this name). Either way, unknown names map to
         // "any" so the gate falls open and the registry's own 404 wins.
         assert_eq!(required_role("__no_such_tool__"), "any");
+    }
+
+    #[test]
+    fn every_routable_tool_is_known() {
+        for def in crate::mcp_definitions() {
+            let name = def["name"].as_str().expect("tool def has a name");
+            assert!(known_role(name).is_some(), "{name} routes but is unknown");
+        }
+        assert_eq!(
+            known_role(crate::diagnostics_surface::DIAGNOSE_TOOL),
+            Some("any")
+        );
+        assert_eq!(known_role(crate::ups_surface::STATE_TOOL), Some("any"));
+        assert_eq!(known_role(crate::ups_surface::CONFIG_TOOL), Some("any"));
+        assert_eq!(
+            known_role(crate::diagnostics_surface::REPAIR_TOOL),
+            Some("admin")
+        );
+        assert_eq!(
+            known_role(crate::ups_surface::CONFIGURE_TOOL),
+            Some("admin")
+        );
+        assert_eq!(known_role("__no_such_tool__"), None);
     }
 
     #[test]

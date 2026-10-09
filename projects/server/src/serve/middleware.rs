@@ -390,13 +390,13 @@ fn caller_from_token_with(
     let ident = try_token_auth_with(conn, token, now)?;
     let uid = identity_user_id(&ident)?;
     let u = identities::users::find_by_id(conn, &uid).ok()??;
+    // Role and capability come from the TOKEN, not the user row: the token is
+    // what this call presented, and it may be scoped narrower than its
+    // issuing user.
     Some(contract::CallerIdentity {
         user_id: u.id,
         username: u.username,
-        role: u.role,
-        // The capability comes from the TOKEN, not the user row: the token is
-        // what this call presented, and it may be scoped narrower than its
-        // issuing user.
+        role: ident.role,
         can_mutate: ident.can_mutate,
     })
 }
@@ -585,8 +585,12 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
             // bound to the actual operator. Legacy NULL → no override; the
             // shared ctx's ambient host-admin identity stays in effect.
             if let Some(uid) = identity_user_id(&ident)
-                && let Some(c) = caller_from_user_id(&uid)
+                && let Some(mut c) = caller_from_user_id(&uid)
             {
+                // Dispatch re-checks the role against this identity, so it
+                // carries the token's scope, not the issuing user's.
+                c.role = ident.role.clone();
+                c.can_mutate = ident.can_mutate;
                 req.extensions_mut().insert(c);
             }
             req.extensions_mut().insert(ident);
@@ -635,24 +639,72 @@ fn tool_name_from_path(path: &str) -> Option<&str> {
 /// `require_auth`, so an `AuthIdentity` is always present for tool paths that
 /// reach it.
 ///
-/// Non-tool paths pass through unchanged. Unknown tool names fall open here
-/// (registry's own 404 wins downstream). Caller role is compared via
-/// `tool_roles::satisfies`.
+/// Non-tool paths pass through unchanged. A tool path must name a registered
+/// tool exactly as the router will decode it; anything else is a 404 here
+/// (see [`check_tool_role`]).
 pub async fn require_tool_role(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
+    let header_peer = req.headers().contains_key(dispatch::PEER_HEADER);
     let (caller_role, can_mutate) = req
         .extensions()
         .get::<AuthIdentity>()
         .map(|i| (i.role.clone(), i.can_mutate))
         .unzip();
-    match check_tool_role(&path, caller_role.as_deref(), can_mutate.unwrap_or(false)) {
+    let check = |peer_named| {
+        check_tool_role(
+            &path,
+            peer_named,
+            caller_role.as_deref(),
+            can_mutate.unwrap_or(false),
+        )
+    };
+    let mut req = req;
+    let mut decision = check(header_peer);
+    // The handler also takes the peer from a top-level body field (how
+    // MCP-stdio forwards), so only buffer the body when that could matter.
+    if !header_peer && matches!(decision, ToolRoleCheck::NotFound { .. }) {
+        let (parts, body) = req.into_parts();
+        let Ok(bytes) = axum::body::to_bytes(body, TOOL_BODY_LIMIT).await else {
+            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        };
+        if body_names_peer(&bytes) {
+            decision = check(true);
+        }
+        req = Request::from_parts(parts, Body::from(bytes));
+    }
+    match decision {
         ToolRoleCheck::Pass => next.run(req).await,
         ToolRoleCheck::Forbidden { tool, required } => (
             StatusCode::FORBIDDEN,
             format!("tool '{tool}' requires role '{required}'"),
         )
             .into_response(),
+        // Same body the registry's own unknown-tool 404 returns.
+        ToolRoleCheck::NotFound { tool } => (
+            StatusCode::NOT_FOUND,
+            axum::Json(
+                contract::OrcaError::not_found(format!("unknown tool: {tool}"))
+                    .with_code("tool.unknown"),
+            ),
+        )
+            .into_response(),
     }
+}
+
+/// The `/api/v1/*` `DefaultBodyLimit`, which sits inside this layer and so
+/// does not bound a body buffered here.
+const TOOL_BODY_LIMIT: usize = 4 * 1024 * 1024;
+
+/// True when a tool-call body carries a non-blank top-level peer selector.
+fn body_names_peer(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get(dispatch::AMBIENT_PEER_KEY)?
+                .as_str()
+                .map(|s| !s.trim().is_empty())
+        })
+        .unwrap_or(false)
 }
 
 /// Pure decision function for `require_tool_role`. Split out so the branching
@@ -665,17 +717,43 @@ pub(crate) enum ToolRoleCheck {
         tool: String,
         required: &'static str,
     },
+    NotFound {
+        tool: String,
+    },
 }
 
+/// REST role decision. The raw path is still percent-encoded while the router
+/// decodes its `{name}` segment, so the lookup runs on the decoded name — the
+/// same string the registry will dispatch. An unregistered name is refused
+/// rather than falling open to "any", unless the request names a peer (header
+/// or body `peer`) that gates it itself.
 pub(crate) fn check_tool_role(
     path: &str,
+    peer_named: bool,
     caller_role: Option<&str>,
     can_mutate: bool,
 ) -> ToolRoleCheck {
-    let Some(tool) = tool_name_from_path(path) else {
+    let Some(raw) = tool_name_from_path(path) else {
         return ToolRoleCheck::Pass;
     };
-    let required = dispatch::tool_roles::required_role(tool);
+    let Ok(tool) = utils::url::decode(raw) else {
+        return ToolRoleCheck::NotFound {
+            tool: raw.to_string(),
+        };
+    };
+    match dispatch::tool_roles::known_role(&tool) {
+        Some(required) => role_decision(&tool, required, caller_role, can_mutate),
+        None if peer_named => ToolRoleCheck::Pass,
+        None => ToolRoleCheck::NotFound { tool },
+    }
+}
+
+fn role_decision(
+    tool: &str,
+    required: &'static str,
+    caller_role: Option<&str>,
+    can_mutate: bool,
+) -> ToolRoleCheck {
     if required == "any" {
         return ToolRoleCheck::Pass;
     }
@@ -700,14 +778,21 @@ pub(crate) fn check_tool_role(
 /// Role gate for the HTTP MCP endpoint (`/api/mcp`). That single route hides
 /// the tool name inside the JSON-RPC body, so the path-keyed
 /// `require_tool_role` layer can't see it — the MCP `tools/call` path re-applies
-/// the identical decision by tool name before dispatching in-process.
+/// the role decision by tool name before dispatching in-process. The name
+/// arrives as JSON (nothing to decode), and an unknown one falls open because
+/// MCP also proxies federated servers' tools.
 pub(crate) fn mcp_tool_role_allows(
     tool: &str,
     caller_role: Option<&str>,
     can_mutate: bool,
 ) -> bool {
     matches!(
-        check_tool_role(&format!("{TOOLS_PREFIX}{tool}"), caller_role, can_mutate),
+        role_decision(
+            tool,
+            dispatch::tool_roles::required_role(tool),
+            caller_role,
+            can_mutate
+        ),
         ToolRoleCheck::Pass
     )
 }
@@ -894,28 +979,104 @@ mod tests {
     #[test]
     fn check_tool_role_passes_non_tool_paths() {
         assert_eq!(
-            check_tool_role("/api/health", Some("member"), false),
+            check_tool_role("/api/health", false, Some("member"), false),
             ToolRoleCheck::Pass
         );
-        assert_eq!(check_tool_role("/", None, false), ToolRoleCheck::Pass);
+        assert_eq!(
+            check_tool_role("/", false, None, false),
+            ToolRoleCheck::Pass
+        );
         // Bare /api/v1/ with no name is non-routable; treat as pass and
         // let the registry's own 404 handle it downstream.
         assert_eq!(
-            check_tool_role("/api/v1/", None, false),
+            check_tool_role("/api/v1/", false, None, false),
             ToolRoleCheck::Pass
         );
     }
 
     #[test]
-    fn check_tool_role_passes_unknown_tool_under_any_caller() {
-        // Unknown tool name → required_role falls open to "any".
+    fn check_tool_role_refuses_unknown_tool_unless_a_peer_is_named() {
+        let not_found = ToolRoleCheck::NotFound {
+            tool: "__no_such_tool__".into(),
+        };
         assert_eq!(
-            check_tool_role("/api/v1/__no_such_tool__", Some("member"), false),
-            ToolRoleCheck::Pass
+            check_tool_role("/api/v1/__no_such_tool__", false, Some("admin"), false),
+            not_found
         );
         assert_eq!(
-            check_tool_role("/api/v1/__no_such_tool__", None, false),
+            check_tool_role("/api/v1/__no_such_tool__", false, None, false),
+            not_found
+        );
+        // A peer-only tool is unknown here; the named peer gates it.
+        assert_eq!(
+            check_tool_role("/api/v1/__no_such_tool__", true, Some("member"), false),
             ToolRoleCheck::Pass
+        );
+    }
+
+    #[test]
+    fn check_tool_role_knows_every_routable_tool() {
+        for def in dispatch::mcp_definitions() {
+            let name = def["name"].as_str().expect("tool def has a name");
+            assert_ne!(
+                check_tool_role(
+                    &format!("{TOOLS_PREFIX}{name}"),
+                    false,
+                    Some("admin"),
+                    false
+                ),
+                ToolRoleCheck::NotFound { tool: name.into() },
+                "{name} routes but the gate 404s it"
+            );
+        }
+    }
+
+    #[test]
+    fn check_tool_role_keys_off_the_decoded_name() {
+        dispatch::tool_roles::install([("check_tool_role_test.admin_only", "admin")]);
+        if dispatch::tool_roles::required_role("check_tool_role_test.admin_only") != "admin" {
+            return;
+        }
+        let forbidden = ToolRoleCheck::Forbidden {
+            tool: "check_tool_role_test.admin_only".into(),
+            required: "admin",
+        };
+        for path in [
+            "/api/v1/check_tool_role_test%2Eadmin_only",
+            "/api/v1/check_tool_role_test%2eadmin_only",
+            "/api/v1/%63heck_tool_role_test.admin_only",
+        ] {
+            assert_eq!(
+                check_tool_role(path, false, Some("read"), false),
+                forbidden,
+                "{path}"
+            );
+            assert_eq!(
+                check_tool_role(path, true, Some("read"), false),
+                forbidden,
+                "{path} with a peer"
+            );
+            assert_eq!(
+                check_tool_role(path, false, Some("admin"), false),
+                ToolRoleCheck::Pass,
+                "{path}"
+            );
+        }
+        // Decoded once, a double-encoded name is a different, unknown name.
+        assert_eq!(
+            check_tool_role(
+                "/api/v1/check_tool_role_test%252Eadmin_only",
+                false,
+                Some("admin"),
+                false
+            ),
+            ToolRoleCheck::NotFound {
+                tool: "check_tool_role_test%2Eadmin_only".into()
+            }
+        );
+        assert_eq!(
+            check_tool_role("/api/v1/%ff", false, Some("admin"), false),
+            ToolRoleCheck::NotFound { tool: "%ff".into() }
         );
     }
 
@@ -1164,6 +1325,30 @@ mod tests {
         assert_eq!(ident.user_id, uid);
         assert_eq!(ident.username, "tester");
         assert_eq!(ident.role, "admin");
+    }
+
+    #[test]
+    fn caller_from_token_with_carries_the_token_scope_not_the_users() {
+        let (_d, c) = test_db();
+        let uid = insert_user(&c, "admin");
+        let token = "orca_read_plaintext";
+        let hash = sha256_hex(token.as_bytes());
+        insert_token_for_user(&c, "read", &hash, Some(&uid));
+        let ident = caller_from_token_with(&c, token, utils::time::now()).unwrap();
+        assert_eq!(ident.user_id, uid);
+        assert_eq!(ident.role, "read");
+        assert!(!ident.can_mutate);
+    }
+
+    #[test]
+    fn body_names_peer_only_for_a_non_blank_top_level_string() {
+        assert!(body_names_peer(br#"{"peer":"host-a"}"#));
+        assert!(!body_names_peer(br#"{"peer":"  "}"#));
+        assert!(!body_names_peer(br#"{"peer":7}"#));
+        assert!(!body_names_peer(br#"{"args":{"peer":"host-a"}}"#));
+        assert!(!body_names_peer(b"{}"));
+        assert!(!body_names_peer(b""));
+        assert!(!body_names_peer(b"not json"));
     }
 
     #[test]
@@ -1668,18 +1853,18 @@ mod tests {
         }
         let path = "/api/v1/check_tool_role_test.admin_only";
         assert_eq!(
-            check_tool_role(path, Some("admin"), false),
+            check_tool_role(path, false, Some("admin"), false),
             ToolRoleCheck::Pass
         );
         assert_eq!(
-            check_tool_role(path, Some("member"), false),
+            check_tool_role(path, false, Some("member"), false),
             ToolRoleCheck::Forbidden {
                 tool: "check_tool_role_test.admin_only".into(),
                 required: "admin"
             }
         );
         assert_eq!(
-            check_tool_role(path, None, false),
+            check_tool_role(path, false, None, false),
             ToolRoleCheck::Forbidden {
                 tool: "check_tool_role_test.admin_only".into(),
                 required: "admin"
@@ -1690,7 +1875,7 @@ mod tests {
         // entry for it), so a mutate-opted member is still Forbidden. Guards
         // the opt-in from reaching control-plane admin.
         assert_eq!(
-            check_tool_role(path, Some("member"), true),
+            check_tool_role(path, false, Some("member"), true),
             ToolRoleCheck::Forbidden {
                 tool: "check_tool_role_test.admin_only".into(),
                 required: "admin"
@@ -1712,7 +1897,7 @@ mod tests {
         let path = format!("{TOOLS_PREFIX}{tool}");
         for role in ["viewer", "member", "read"] {
             assert_eq!(
-                check_tool_role(&path, Some(role), false),
+                check_tool_role(&path, false, Some(role), false),
                 ToolRoleCheck::Forbidden {
                     tool: tool.into(),
                     required: "admin"
@@ -1722,7 +1907,7 @@ mod tests {
             assert!(!mcp_tool_role_allows(tool, Some(role), false), "{role}");
         }
         assert_eq!(
-            check_tool_role(&path, Some("admin"), false),
+            check_tool_role(&path, false, Some("admin"), false),
             ToolRoleCheck::Pass
         );
         assert!(mcp_tool_role_allows(tool, Some("admin"), false));
@@ -1776,7 +1961,7 @@ mod tests {
         let path = format!("{TOOLS_PREFIX}{tool}");
         for role in ["viewer", "member", "read"] {
             assert_eq!(
-                check_tool_role(&path, Some(role), false),
+                check_tool_role(&path, false, Some(role), false),
                 ToolRoleCheck::Forbidden {
                     tool: tool.into(),
                     required: "admin"
@@ -1786,12 +1971,13 @@ mod tests {
             assert!(!mcp_tool_role_allows(tool, Some(role), false), "{role}");
         }
         assert_eq!(
-            check_tool_role(&path, Some("admin"), false),
+            check_tool_role(&path, false, Some("admin"), false),
             ToolRoleCheck::Pass
         );
         assert_eq!(
             check_tool_role(
                 &format!("{TOOLS_PREFIX}ctr_stack.list"),
+                false,
                 Some("member"),
                 false
             ),

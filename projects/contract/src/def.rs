@@ -22,10 +22,10 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     /// (REST, MCP-over-HTTP). `"any"` (default) means any authenticated identity
     /// passes; `"admin"` requires the caller's `AuthIdentity::role == "admin"`.
     ///
-    /// Enforcement points: REST middleware on `/api/v1/*`, and `mesh/exec`
-    /// (which has no human identity and therefore refuses any admin-role tool).
-    /// CLI / loopback / MCP-stdio run in-process as the daemon owner and are
-    /// not gated here.
+    /// Enforcement points: REST middleware on `/api/v1/*`, `mesh/exec` (which
+    /// has no human identity and therefore refuses any admin-role tool), and
+    /// `dispatch::ToolWrapper::run_json` for every call whose ctx carries a
+    /// caller. A call with no caller (an in-process owner path) is not gated.
     const REQUIRED_ROLE: &'static str = "any";
     /// Whether this tool is a **data mutation** — a write against an external
     /// managed system (a proxmox VM create, an unraid plugin install, …) as
