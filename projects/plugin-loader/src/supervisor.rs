@@ -48,6 +48,64 @@ pub const SOCKET_ENV: &str = "ORCA_PLUGIN_SOCKET";
 /// plugin guessing the daemon's path. Mirrors `plugin_toolkit::process::ORCA_BIN_ENV`.
 pub const ORCA_BIN_ENV: &str = "ORCA_BIN";
 
+/// Daemon env vars a plugin inherits; everything else (API keys, tokens, OAuth
+/// secrets) is withheld. Process basics, locale, proxy/CA trust, log filters,
+/// and the per-plugin config knobs plugins read (`ORCA_OP_BIN` for onepassword,
+/// `DOCKER_*` for docker, `NUT_UPSD_HOST` for nut, …). `LC_*` is matched by
+/// prefix in [`inherited_env`].
+const INHERITED_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "TZ",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "no_proxy",
+    "all_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "ORCA_LOG",
+    "RUST_LOG",
+    "RUST_BACKTRACE",
+    "ORCA_HOME",
+    "ORCA_DB_PATH",
+    "ORCA_OP_BIN",
+    "ORCA_RCLONE_BIN",
+    "ORCA_PBS_IMAGE",
+    "ORCA_PBS_VOLUME_ROOT",
+    "ORCA_DOCKER_BACKUP_ROOTS",
+    "ORCA_DOCKER_MANAGED_ROOTS",
+    "ORCA_GITEA_RUNNER_RELEASE_SOURCE",
+    "ORCA_GITEA_RUNNER_RELEASE_HOSTS",
+    "ORCA_GITEA_RUNNER_PLAINTEXT_ORIGINS",
+    "ORCA_UNRAID_ICON_HOSTS",
+    "DOCKER_CONFIG",
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_CERT_PATH",
+    "NUT_UPSD_HOST",
+];
+
+/// Filter `vars` down to the [`INHERITED_ENV`] allowlist plus `LC_*`.
+fn inherited_env(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    vars.into_iter()
+        .filter(|(k, _)| {
+            k.to_str()
+                .is_some_and(|k| INHERITED_ENV.contains(&k) || k.starts_with("LC_"))
+        })
+        .collect()
+}
+
 /// The plugin surface learned from the handshake `Hello`.
 #[derive(Debug, Clone)]
 pub struct Handshake {
@@ -275,7 +333,13 @@ impl PluginProcess {
         let listener = UnixListener::bind(&sock_path)
             .with_context(|| format!("binding plugin socket {sock_path:?}"))?;
 
+        // Trust model: the env is scrubbed so daemon secrets don't leak by
+        // default, but the plugin runs as the daemon's uid — it can still read
+        // anything the daemon can (e.g. `~/.orca/.db_key`, mode 0600). That is
+        // not an isolation boundary; installed plugins are trusted code.
         let mut cmd = Command::new(exe);
+        cmd.env_clear();
+        cmd.envs(inherited_env(std::env::vars_os()));
         cmd.env(SOCKET_ENV, &sock_path);
         // Tell the plugin which orca binary launched it, so toolkit helpers that
         // need a privileged round-trip (e.g. `sudo -n <orca> admin lxc-exec`)
@@ -385,6 +449,28 @@ mod tests {
             backends: vec![],
             schema: Value::Null,
         }
+    }
+
+    #[test]
+    fn inherited_env_withholds_secrets() {
+        let vars = [
+            ("PATH", "/usr/bin"),
+            ("LC_ALL", "C.UTF-8"),
+            ("https_proxy", "http://p"),
+            ("ORCA_OP_BIN", "/opt/op"),
+            ("ANTHROPIC_API_KEY", "sk"),
+            ("GITHUB_TOKEN", "gh"),
+            ("ORCA_TOKEN", "t"),
+            ("ORCA_MCP_TOKEN", "t"),
+            ("ORCA_OAUTH_CLIENT_SECRET", "s"),
+        ]
+        .map(|(k, v)| (k.into(), v.into()));
+        let mut kept: Vec<String> = inherited_env(vars)
+            .into_iter()
+            .map(|(k, _)| k.into_string().unwrap())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["LC_ALL", "ORCA_OP_BIN", "PATH", "https_proxy"]);
     }
 
     #[test]
