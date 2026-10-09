@@ -115,6 +115,16 @@ fn secret_name_owned(name: &str, principal: &str) -> bool {
     name == principal || name.starts_with(&format!("{principal}."))
 }
 
+/// An agents provider name belongs to `principal` when it is the plugin id or its
+/// owner-qualified form (`argyle-labs/agents` for plugin `agents`). Provider
+/// names key the registry, so this stops one plugin replacing another's roster.
+pub(crate) fn agent_provider_owned(name: &str, principal: &str) -> bool {
+    name == principal
+        || name
+            .rsplit_once('/')
+            .is_some_and(|(owner, id)| !owner.is_empty() && id == principal)
+}
+
 /// Execute one capability request on behalf of `principal` — the authoritative
 /// plugin id bound to this session's socket (see
 /// [`supervisor::PluginProcess`](crate::supervisor::PluginProcess)). `args` is
@@ -153,6 +163,12 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
         "agents.register" => {
             let reg: AgentRegistration = serde_json::from_value(args)
                 .map_err(|e| anyhow!("agents.register: bad payload: {e}"))?;
+            if !agent_provider_owned(&reg.name, principal) {
+                return Err(anyhow!(
+                    "agents.register: plugin '{principal}' may not register provider '{}'; the provider name must be '{principal}' or '<owner>/{principal}'",
+                    reg.name
+                ));
+            }
             agents::register_from_json(
                 reg.name,
                 &reg.agents_json,
@@ -280,6 +296,51 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown capability"), "got: {err}");
+    }
+
+    #[test]
+    fn agents_register_refuses_foreign_provider_name() {
+        let err = handle_cap(
+            "agents.register",
+            json!({"name": "victim-xyz", "hooks_json": "[]"}),
+            "attacker-xyz",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("may not register provider 'victim-xyz'"),
+            "got: {err}"
+        );
+        assert!(
+            agents::registry::providers()
+                .iter()
+                .all(|p| p.name() != "victim-xyz")
+        );
+    }
+
+    #[test]
+    fn agent_provider_owned_accepts_id_and_owner_qualified_id() {
+        assert!(agent_provider_owned("agents", "agents"));
+        assert!(agent_provider_owned("argyle-labs/agents", "agents"));
+        assert!(!agent_provider_owned("argyle-labs/agents", "evil"));
+        assert!(!agent_provider_owned("/agents", "agents"));
+        assert!(!agent_provider_owned("agents-x", "agents"));
+    }
+
+    #[test]
+    fn agents_register_accepts_own_provider_name() {
+        handle_cap(
+            "agents.register",
+            json!({"name": "self-xyz", "agents_json": r#"[{"name":"self-agent-xyz","body":"b","origin":"spoofed"}]"#}),
+            "self-xyz",
+        )
+        .unwrap();
+        let agent = agents::compose_agents()
+            .into_iter()
+            .find(|a| a.name == "self-agent-xyz")
+            .unwrap();
+        assert_eq!(agent.origin, "self-xyz");
+        agents::deregister_provider("self-xyz");
     }
 
     #[test]
