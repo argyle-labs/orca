@@ -1133,6 +1133,14 @@ fn resolve_peer_addr(peers: &[pdb::PeerRow], input: &str) -> Result<String> {
 /// multi-channel dial-target list) use this; `resolve_peer_addr` is the
 /// legacy single-address projection over it.
 fn resolve_peer_row<'a>(peers: &'a [pdb::PeerRow], input: &str) -> Result<&'a pdb::PeerRow> {
+    // A blank selector would match rows with a blank hostname or addr.
+    if input.trim().is_empty() {
+        return Err(contract::OrcaError::invalid(
+            "peer: a blank peer selector matches no system; omit it to run here",
+        )
+        .with_code("args.invalid")
+        .into());
+    }
     let want = input.to_ascii_lowercase();
     let matches: Vec<&pdb::PeerRow> = peers
         .iter()
@@ -1214,6 +1222,18 @@ mod tests {
     fn resolves_by_addr() {
         let peers = vec![peer("abc", "host-e", "10.0.0.1", false)];
         assert_eq!(resolve_peer_addr(&peers, "10.0.0.1").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn a_blank_selector_matches_no_peer() {
+        let peers = vec![peer("abc", "", "", false)];
+        for blank in ["", "  "] {
+            let err = resolve_peer_row(&peers, blank).unwrap_err();
+            let err = err
+                .downcast_ref::<contract::OrcaError>()
+                .expect("OrcaError");
+            assert_eq!(err.kind, contract::ErrorKind::Invalid, "{blank:?}");
+        }
     }
 
     #[test]

@@ -206,19 +206,18 @@ pub fn build_root(mut root: Command) -> Command {
 }
 
 /// Pull `--peer` out of the matched args (top-level or any subcommand level,
-/// since it's a clap global). `None` means run locally.
-fn extract_peer_flag(matches: &ArgMatches) -> Option<String> {
+/// since it's a clap global). `None` means run locally; a blank value is
+/// refused like on every other surface.
+fn extract_peer_flag(matches: &ArgMatches) -> Result<Option<String>> {
     let mut cur = matches;
     loop {
         if let Some(v) = cur.get_one::<String>(PEER_FLAG) {
-            let t = v.trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
-            }
+            let v = serde_json::Value::String(v.clone());
+            return Ok(crate::registry::peer_selector(Some(&v))?);
         }
         match cur.subcommand() {
             Some((_, sub)) => cur = sub,
-            None => return None,
+            None => return Ok(None),
         }
     }
 }
@@ -645,7 +644,11 @@ pub async fn try_dispatch(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Res
     let op = ops().find(|o| o.domain == domain && o.verb == verb)?;
     // Lift the per-invocation peer target onto a fresh ctx clone so the
     // shared base ctx stays immutable (REST hot-path pattern).
-    let ctx = if let Some(peer) = extract_peer_flag(matches) {
+    let peer = match extract_peer_flag(matches) {
+        Ok(peer) => peer,
+        Err(e) => return Some(Err(e)),
+    };
+    let ctx = if let Some(peer) = peer {
         let mut owned = (*ctx).clone();
         owned.set_peer(Some(peer));
         Arc::new(owned)
@@ -1447,7 +1450,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_peer_flag_reads_top_level_then_subcommand_then_skips_empty() {
+    fn extract_peer_flag_reads_top_level_then_subcommand_and_refuses_blank() {
         let root = || {
             Command::new("orca")
                 .arg(clap::Arg::new(PEER_FLAG).long("peer").global(true))
@@ -1457,22 +1460,26 @@ mod tests {
                         .subcommand(Command::new("list")),
                 )
         };
+        let peer = |args: &[&str]| extract_peer_flag(&root().get_matches_from(args));
 
-        // Top-level set.
-        let m = root().get_matches_from(["orca", "--peer", "host-a", "engine", "list"]);
-        assert_eq!(extract_peer_flag(&m).as_deref(), Some("host-a"));
-
+        assert_eq!(
+            peer(&["orca", "--peer", "host-a", "engine", "list"])
+                .unwrap()
+                .as_deref(),
+            Some("host-a")
+        );
         // Subcommand-level set (clap globals attach there too).
-        let m = root().get_matches_from(["orca", "engine", "list", "--peer", "host-b"]);
-        assert_eq!(extract_peer_flag(&m).as_deref(), Some("host-b"));
-
-        // Whitespace-only value is treated as None.
-        let m = root().get_matches_from(["orca", "--peer", "   ", "engine", "list"]);
-        assert!(extract_peer_flag(&m).is_none());
-
-        // Absent.
-        let m = root().get_matches_from(["orca", "engine", "list"]);
-        assert!(extract_peer_flag(&m).is_none());
+        assert_eq!(
+            peer(&["orca", "engine", "list", "--peer", "host-b"])
+                .unwrap()
+                .as_deref(),
+            Some("host-b")
+        );
+        for blank in ["", "   "] {
+            let err = peer(&["orca", "--peer", blank, "engine", "list"]).unwrap_err();
+            assert!(err.to_string().contains("peer: "), "{err}");
+        }
+        assert!(peer(&["orca", "engine", "list"]).unwrap().is_none());
     }
 
     #[tokio::test]

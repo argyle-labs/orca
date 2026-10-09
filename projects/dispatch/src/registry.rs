@@ -166,26 +166,48 @@ pub const AMBIENT_PEER_KEY: &str = "peer";
 /// `x-correlation-id` header.
 pub const AMBIENT_CORRELATION_KEY: &str = "correlation_id";
 
+/// A caller-supplied peer selector. Absent is `None`; a blank or non-string
+/// value is refused, since reading it as "no peer" would run the call locally
+/// when the caller asked for somewhere else.
+pub fn peer_selector(
+    raw: Option<&Value>,
+) -> std::result::Result<Option<String>, contract::OrcaError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let Some(s) = raw.as_str() else {
+        return Err(invalid_peer("a peer selector must be a string"));
+    };
+    match s.trim() {
+        "" => Err(invalid_peer(
+            "a blank peer selector does not mean this system; omit it to run here",
+        )),
+        s => Ok(Some(s.to_string())),
+    }
+}
+
+fn invalid_peer(why: &str) -> contract::OrcaError {
+    contract::OrcaError::invalid(format!("{AMBIENT_PEER_KEY}: {why}")).with_code("args.invalid")
+}
+
 /// Split ambient inputs out of a JSON args object for a JSON-RPC (MCP) tool
 /// call, returning `(cleaned_args, peer, correlation_id)`. The reserved keys
 /// are removed so they never reach the tool's typed `Args`. Non-object args
 /// (rare) pass through untouched with no ambient values.
-pub fn take_ambient(mut args: Value) -> (Value, Option<String>, Option<String>) {
+pub fn take_ambient(
+    mut args: Value,
+) -> std::result::Result<(Value, Option<String>, Option<String>), contract::OrcaError> {
     let mut peer = None;
     let mut correlation_id = None;
     if let Some(obj) = args.as_object_mut() {
-        peer = obj
-            .remove(AMBIENT_PEER_KEY)
-            .and_then(|v| v.as_str().map(str::to_string))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        peer = peer_selector(obj.remove(AMBIENT_PEER_KEY).as_ref())?;
         correlation_id = obj
             .remove(AMBIENT_CORRELATION_KEY)
             .and_then(|v| v.as_str().map(str::to_string))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
     }
-    (args, peer, correlation_id)
+    Ok((args, peer, correlation_id))
 }
 
 /// Advertise the ambient `peer` property on an MCP `inputSchema` for a
@@ -387,28 +409,33 @@ async fn http_dispatch(
     // loaded (a peer-only plugin) is not a 404 when an explicit peer is named
     // — `dispatch` forwards it over the mesh. Only 404 when it is unknown AND
     // no peer was given.
-    let peer = headers
+    // REST parity with MCP's ambient `peer` arg: a top-level `peer` field in
+    // the JSON body (AMBIENT_PEER_KEY) is always stripped so it is never
+    // forwarded as a tool argument. Both selectors are validated, and two that
+    // name different systems are refused rather than one silently winning.
+    let body_peer = args
+        .as_object_mut()
+        .and_then(|obj| obj.remove(AMBIENT_PEER_KEY));
+    let body_peer = peer_selector(body_peer.as_ref()).map_err(orca_error_response)?;
+    let header_peer = headers
         .get(PEER_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        // REST parity with MCP's ambient `peer` arg: when no `X-Orca-Peer`
-        // header is present, honor a top-level `peer` field in the JSON body
-        // (AMBIENT_PEER_KEY) and strip it so it is not forwarded as a tool
-        // argument — mirrors the MCP path's `take_ambient`.
-        .or_else(|| {
-            let p = args
-                .get(AMBIENT_PEER_KEY)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)?;
-            if let Some(obj) = args.as_object_mut() {
-                obj.remove(AMBIENT_PEER_KEY);
-            }
-            Some(p)
-        });
+        .map(|v| {
+            v.to_str()
+                .map(|s| Value::String(s.to_string()))
+                .map_err(|_| {
+                    orca_error_response(invalid_peer("the X-Orca-Peer header is not valid UTF-8"))
+                })
+        })
+        .transpose()?;
+    let header_peer = peer_selector(header_peer.as_ref()).map_err(orca_error_response)?;
+    let peer = match (header_peer, body_peer) {
+        (Some(h), Some(b)) if !h.eq_ignore_ascii_case(&b) => {
+            return Err(orca_error_response(invalid_peer(&format!(
+                "the X-Orca-Peer header '{h}' and the body peer '{b}' name different systems"
+            ))));
+        }
+        (h, b) => h.or(b),
+    };
     let correlation_id = headers
         .get("x-correlation-id")
         .and_then(|v| v.to_str().ok())
@@ -884,7 +911,8 @@ mod tests {
             "peer": "host-a",
             "correlation_id": "abc-123",
             "self_secure": true
-        }));
+        }))
+        .unwrap();
         assert_eq!(peer.as_deref(), Some("host-a"));
         assert_eq!(cid.as_deref(), Some("abc-123"));
         // Reserved keys removed so they never reach the tool's typed Args.
@@ -892,15 +920,31 @@ mod tests {
     }
 
     #[test]
-    fn take_ambient_blank_and_missing_yield_none() {
-        let (clean, peer, cid) = take_ambient(json!({ "peer": "  ", "x": 1 }));
-        assert!(peer.is_none(), "blank peer must be None");
+    fn take_ambient_missing_yields_none() {
+        let (clean, peer, cid) = take_ambient(json!({ "x": 1 })).unwrap();
+        assert!(peer.is_none());
         assert!(cid.is_none());
         assert_eq!(clean, json!({ "x": 1 }));
         // Non-object args pass through untouched.
-        let (clean2, peer2, cid2) = take_ambient(json!("scalar"));
+        let (clean2, peer2, cid2) = take_ambient(json!("scalar")).unwrap();
         assert_eq!(clean2, json!("scalar"));
         assert!(peer2.is_none() && cid2.is_none());
+    }
+
+    #[test]
+    fn a_blank_peer_selector_is_refused_not_run_locally() {
+        for blank in [json!(""), json!("   ")] {
+            let err = take_ambient(json!({ "peer": blank, "x": 1 })).unwrap_err();
+            assert_eq!(err.kind, contract::ErrorKind::Invalid, "{blank}");
+            assert!(err.message.starts_with("peer: a blank"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_non_string_peer_selector_is_refused_as_such() {
+        let err = take_ambient(json!({ "peer": 7 })).unwrap_err();
+        assert_eq!(err.kind, contract::ErrorKind::Invalid);
+        assert!(err.message.contains("must be a string"), "{err}");
     }
 
     #[test]
