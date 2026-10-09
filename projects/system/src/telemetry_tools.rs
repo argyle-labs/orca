@@ -7,10 +7,10 @@
 //! snapshots, not "history".
 //!
 //! Storage holds only this host's own rows (telemetry is local-only, fetched on
-//! demand). A request for a remote peer is dispatched to that peer via the
-//! generic `--peer` path, so the rows read here are always this host's own — the
-//! wire DTO's `peer_id` / `source` fields are stamped at read time to keep the
-//! API stable. Read-only — writers live in the server's background tasks.
+//! demand), so the verb takes no address: a call addressed to another system's
+//! id is routed there like any other verb, and the rows read here are always
+//! this system's own, stamped with its id at read time. Read-only — writers
+//! live in the server's background tasks.
 //!
 //! Lives in the `system` crate (not `mesh`): it reads only `hosts::host_status`,
 //! `db::metrics`, and this crate's `SystemInfoReport`, so it carries no mesh
@@ -26,11 +26,11 @@ use crate::system_info_types::SystemInfoReport;
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TelemetrySnapshotRow {
-    pub peer_id: String,
+    /// The id of the system that recorded this snapshot.
+    pub system_id: String,
     pub snapshot_at_unix: i64,
     pub received_at_unix: i64,
-    /// Always `"local"` — telemetry is local-only. Kept on the wire for
-    /// backward compatibility with existing consumers.
+    /// Always `"local"`: every row is read from the recording system's storage.
     pub source: String,
     /// Decoded snapshot. Absent if the stored payload couldn't be parsed
     /// (typically: a schema mismatch after an upgrade).
@@ -45,11 +45,20 @@ pub struct TelemetrySnapshots(pub Vec<TelemetrySnapshotRow>);
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SystemTelemetryListArgs {
-    /// Peer whose snapshots to read. `local` (default) reads this host's own
-    /// rows; target another host with the top-level `--peer` flag, which
-    /// dispatches this verb to that host.
-    #[arg(long)]
-    pub peer_id: Option<crate::system_id::SystemId>,
+    /// Refused with a 400 unless null. These args carry no
+    /// `deny_unknown_fields`, so an ignored `peerId` would answer with this
+    /// system's rows; another system's telemetry is read by addressing the call
+    /// to its id. Null is accepted because clients that serialize an unset
+    /// optional `peerId` send it.
+    #[serde(
+        default,
+        alias = "peer_id",
+        deserialize_with = "refuse_peer_id",
+        skip_serializing
+    )]
+    #[schemars(skip)]
+    #[arg(skip)]
+    pub peer_id: Option<()>,
     /// Return only rows with `snapshot_at_unix > since_unix`. Omit for the
     /// full retained history (capped in storage).
     #[arg(long)]
@@ -60,18 +69,37 @@ pub struct SystemTelemetryListArgs {
     pub limit: Option<u32>,
 }
 
-/// Storage no longer carries `peer_id` / `source` (rows are always this host's
-/// own local telemetry), so they're stamped from the request: the requested
-/// `peer_id` and the constant `"local"` source.
+fn refuse_peer_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<()>, D::Error> {
+    match Option::<serde::de::IgnoredAny>::deserialize(d)? {
+        None => Ok(None),
+        Some(_) => Err(serde::de::Error::custom(
+            "`peerId` is not an argument of system.telemetry.list: it reads the telemetry of \
+             the system the call is addressed to; address the call to that system's id",
+        )),
+    }
+}
+
+/// This system's id, stamped onto every row it reads.
+fn this_system_id() -> anyhow::Result<&'static str> {
+    crate::host_identity::try_machine_id().ok_or_else(|| {
+        contract::OrcaError::unavailable(
+            "this system has no id: host identity was not initialized in this process",
+        )
+        .into()
+    })
+}
+
+/// Storage rows carry no system id or source (they are always this system's
+/// own), so both are stamped here.
 fn rows_to_dtos(
     rows: Vec<hosts::host_status::HostStatusRow>,
-    peer_id: &str,
+    system_id: &str,
 ) -> Vec<TelemetrySnapshotRow> {
     rows.into_iter()
         .map(|r| {
             let system = serde_json::from_str::<SystemInfoReport>(&r.payload_json).ok();
             TelemetrySnapshotRow {
-                peer_id: peer_id.to_string(),
+                system_id: system_id.to_string(),
                 snapshot_at_unix: r.snapshot_at_unix,
                 received_at_unix: r.received_at_unix,
                 source: "local".to_string(),
@@ -89,14 +117,12 @@ async fn system_telemetry_list(
     args: SystemTelemetryListArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<TelemetrySnapshots> {
-    let peer_id = args
-        .peer_id
-        .map_or_else(|| "local".to_string(), String::from);
+    let system_id = this_system_id()?;
     let limit = args.limit.unwrap_or(256) as usize;
     let rows = db::metrics::with_conn(|conn| {
         hosts::host_status::rows_since(conn, args.since_unix, limit)
     })?;
-    Ok(TelemetrySnapshots(rows_to_dtos(rows, &peer_id)))
+    Ok(TelemetrySnapshots(rows_to_dtos(rows, system_id)))
 }
 
 #[cfg(test)]
@@ -139,9 +165,17 @@ mod tests {
         hosts::host_status::insert_status(conn, t - 100, "not json at all", t, 86_400).unwrap();
     }
 
+    /// This system's id, after initializing host identity in a throwaway dir.
+    fn me() -> &'static str {
+        static HOME: std::sync::LazyLock<tempfile::TempDir> =
+            std::sync::LazyLock::new(|| tempfile::tempdir().expect("tempdir"));
+        crate::host_identity::init(HOME.path()).expect("init host identity");
+        this_system_id().expect("this system's id")
+    }
+
     fn detail(conn: &db::Conn, since_unix: Option<i64>, limit: usize) -> Vec<TelemetrySnapshotRow> {
         let rows = hosts::host_status::rows_since(conn, since_unix, limit).unwrap();
-        rows_to_dtos(rows, "local")
+        rows_to_dtos(rows, me())
     }
 
     #[test]
@@ -154,9 +188,53 @@ mod tests {
         assert_eq!(out[0].snapshot_at_unix, t - 100);
         assert_eq!(out[1].snapshot_at_unix, t - 200);
         assert!(out[0].system.is_none(), "unparseable payload → None");
-        // peer_id / source are stamped from the request, not storage.
-        assert_eq!(out[0].peer_id, "local");
         assert_eq!(out[0].source, "local");
+    }
+
+    #[test]
+    fn rows_carry_this_systems_id() {
+        let conn = metrics_conn();
+        seed(&conn, now());
+        let me = me();
+        assert_eq!(me, crate::host_identity::machine_id());
+        let out = detail(&conn, None, 256);
+        assert!(!out.is_empty());
+        assert!(out.iter().all(|r| r.system_id == me), "{me}");
+    }
+
+    #[test]
+    fn a_peer_id_is_refused_naming_it() {
+        for key in ["peerId", "peer_id"] {
+            let args = serde_json::json!({ key: "019f9f7b-3333-7e40-9e30-4987d8d12dcb" });
+            let err = serde_json::from_value::<SystemTelemetryListArgs>(args)
+                .err()
+                .unwrap_or_else(|| panic!("{key} must be refused"));
+            assert!(
+                err.to_string().contains("`peerId` is not an argument"),
+                "{err}"
+            );
+        }
+        let args: SystemTelemetryListArgs =
+            serde_json::from_value(serde_json::json!({ "limit": 5 })).unwrap();
+        assert!(args.peer_id.is_none());
+    }
+
+    #[test]
+    fn a_null_peer_id_is_accepted() {
+        for key in ["peerId", "peer_id"] {
+            let args: SystemTelemetryListArgs =
+                serde_json::from_value(serde_json::json!({ key: null, "limit": 5 }))
+                    .unwrap_or_else(|e| panic!("{key}: null must be accepted: {e}"));
+            assert!(args.peer_id.is_none());
+            assert_eq!(args.limit, Some(5));
+        }
+    }
+
+    #[test]
+    fn the_schema_offers_no_address() {
+        let schema = schemars::schema_for!(SystemTelemetryListArgs);
+        let props = schema.get("properties").expect("properties");
+        assert!(props.get("peerId").is_none(), "{props}");
     }
 
     #[test]
