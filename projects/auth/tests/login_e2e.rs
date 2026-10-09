@@ -412,7 +412,7 @@ async fn token_create_list_revoke_lifecycle() {
 
     let revoked = AuthTokenDelete::run(
         TokenRevokeArgs {
-            id: created.id.clone(),
+            id: created.id.parse().unwrap(),
         },
         &ctx,
     )
@@ -423,7 +423,7 @@ async fn token_create_list_revoke_lifecycle() {
     // Revoking a second time reports nothing was removed.
     let revoked2 = AuthTokenDelete::run(
         TokenRevokeArgs {
-            id: created.id.clone(),
+            id: created.id.parse().unwrap(),
         },
         &ctx,
     )

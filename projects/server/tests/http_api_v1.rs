@@ -103,6 +103,40 @@ async fn system_health_by_id_returns_one_bare_report() {
     );
 }
 
+/// A blank id is an invalid id, never "absent": on a mutation it would widen to
+/// "no filter".
+#[tokio::test]
+async fn blank_id_is_rejected_naming_the_argument() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    for (tool, args) in [
+        (
+            "storage.mount.update",
+            serde_json::json!({ "id": "", "enabled": false }),
+        ),
+        (
+            "storage.mount.update",
+            serde_json::json!({ "id": "   ", "enabled": false }),
+        ),
+    ] {
+        let (status, body) = oneshot_json(
+            env.router(),
+            "POST",
+            &format!("/api/v1/{tool}"),
+            Some(&token),
+            Some(args.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{tool} {args}: {body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(&format!("invalid args for {tool}: id:"))),
+            "{tool} {args}: {body}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn system_detail_capabilities_view_lists_capabilities() {
     let env = with_isolated_env();
