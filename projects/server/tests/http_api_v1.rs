@@ -13,8 +13,8 @@ mod common;
 
 use axum::http::{HeaderValue, StatusCode};
 use common::{
-    mint_admin_token, mint_token, oneshot_json, oneshot_raw, oneshot_raw_with_headers,
-    with_isolated_env,
+    mint_admin_token, mint_token, mint_token_with, oneshot_json, oneshot_raw,
+    oneshot_raw_with_headers, with_isolated_env,
 };
 
 // ── successful authenticated dispatch ───────────────────────────────────────
@@ -401,6 +401,86 @@ async fn oneshot_with_peer_header(
     )
     .await;
     (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[tokio::test]
+async fn read_role_token_forbidden_on_secrets_detail() {
+    let env = with_isolated_env();
+    let token = mint_token(&env, "read");
+    let (status, bytes) = oneshot_raw(
+        env.router(),
+        "POST",
+        "/api/v1/secrets.detail",
+        Some(&token),
+        Some(serde_json::json!({ "name": "s" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "expected 403 for read role");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("secrets.detail") && text.contains("admin"),
+        "403 body should name the tool + required role: {text}"
+    );
+}
+
+#[tokio::test]
+async fn can_mutate_read_token_forbidden_on_secrets_upsert() {
+    let env = with_isolated_env();
+    let token = mint_token_with(&env, "read", true);
+    let (status, bytes) = oneshot_raw(
+        env.router(),
+        "POST",
+        "/api/v1/secrets.upsert",
+        Some(&token),
+        Some(serde_json::json!({ "name": "s", "value": "v", "execute": true })),
+    )
+    .await;
+    let text = String::from_utf8_lossy(&bytes);
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {text}");
+}
+
+#[tokio::test]
+async fn mcp_tools_call_secrets_detail_refuses_read_token() {
+    let env = with_isolated_env();
+    let token = mint_token(&env, "read");
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/mcp",
+        Some(&token),
+        Some(serde_json::json!({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": { "name": "secrets.detail", "arguments": { "name": "s" } }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["error"]["code"], -32000, "body: {body}");
+}
+
+#[tokio::test]
+async fn admin_token_reads_secret_value() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/v1/secrets.upsert",
+        Some(&token),
+        Some(serde_json::json!({ "name": "s", "value": "v", "execute": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "upsert: {body}");
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/v1/secrets.detail",
+        Some(&token),
+        Some(serde_json::json!({ "name": "s" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "detail: {body}");
+    assert_eq!(body["value"], "v", "body: {body}");
 }
 
 #[tokio::test]
