@@ -473,7 +473,7 @@ async fn http_dispatch(
     };
     let ctx_ref: &ToolCtx = ctx_owned.as_ref().unwrap_or(&state.ctx);
     dispatch(&name, args, ctx_ref).await.map(Json).map_err(|e| {
-        if let Some(oe) = e.downcast_ref::<contract::OrcaError>() {
+        if let Some(oe) = find_orca_error(&e) {
             let kind = oe.kind;
             let body = serde_json::to_value(oe)
                 .unwrap_or_else(|_| json!({ "kind": "internal", "message": "serialize failure" }));
@@ -483,6 +483,17 @@ async fn http_dispatch(
         }
         let oe = contract::OrcaError::internal(e.to_string());
         orca_error_response(oe)
+    })
+}
+
+/// The classified error behind `e`, if any. `downcast_ref` sees through anyhow
+/// context layers, including one that is itself the `OrcaError`; the chain walk
+/// finds one held as a std `source()`.
+#[cfg(any(feature = "server", test))]
+fn find_orca_error(e: &anyhow::Error) -> Option<&contract::OrcaError> {
+    e.downcast_ref::<contract::OrcaError>().or_else(|| {
+        e.chain()
+            .find_map(|c| c.downcast_ref::<contract::OrcaError>())
     })
 }
 
@@ -917,6 +928,43 @@ mod tests {
         assert_eq!(cid.as_deref(), Some("abc-123"));
         // Reserved keys removed so they never reach the tool's typed Args.
         assert_eq!(clean, json!({ "self_secure": true }));
+    }
+
+    #[test]
+    fn find_orca_error_sees_wrapped_and_context_held_errors() {
+        let wrapped = anyhow::Error::from(contract::OrcaError::invalid("a")).context("ctx");
+        assert_eq!(find_orca_error(&wrapped).unwrap().message, "a");
+
+        #[derive(Debug)]
+        struct Marker;
+        impl std::fmt::Display for Marker {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("marker")
+            }
+        }
+        impl std::error::Error for Marker {}
+        let held = anyhow::Error::new(Marker).context(contract::OrcaError::invalid("b"));
+        assert_eq!(find_orca_error(&held).unwrap().message, "b");
+
+        // anyhow's downcast only sees context layers and the root error, so an
+        // OrcaError reachable only as another error's source() needs the chain walk.
+        #[derive(Debug)]
+        struct Sourced(contract::OrcaError);
+        impl std::fmt::Display for Sourced {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("sourced")
+            }
+        }
+        impl std::error::Error for Sourced {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let sourced = anyhow::Error::new(Sourced(contract::OrcaError::invalid("c")));
+        assert!(sourced.downcast_ref::<contract::OrcaError>().is_none());
+        assert_eq!(find_orca_error(&sourced).unwrap().message, "c");
+
+        assert!(find_orca_error(&anyhow::anyhow!("plain")).is_none());
     }
 
     #[test]

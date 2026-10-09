@@ -615,7 +615,7 @@ async fn run(
             unit::dispatch(VerbArgs::List(ListArgs { query })).await?
         }
         Verb::Detail => {
-            let id = parse_id(args)?;
+            let id = parse_id(&spec.name, args)?;
             let query: QueryArgs = args
                 .get("query")
                 .cloned()
@@ -626,11 +626,11 @@ async fn run(
             unit::dispatch(VerbArgs::Detail(DetailArgs { id, query })).await?
         }
         Verb::Delete => {
-            let id = parse_id(args)?;
+            let id = parse_id(&spec.name, args)?;
             unit::dispatch(VerbArgs::Delete(DeleteArgs { id, caller })).await?
         }
         Verb::Update => {
-            let id = parse_id(args)?;
+            let id = parse_id(&spec.name, args)?;
             let payload = args.get("payload").map(|v| v.to_string());
             let action = spec
                 .action
@@ -645,7 +645,7 @@ async fn run(
             .await?
         }
         Verb::Upsert => {
-            let id = parse_id(args)?;
+            let id = parse_id(&spec.name, args)?;
             let payload = args.get("payload").map(|v| v.to_string());
             let action = spec
                 .action
@@ -699,11 +699,12 @@ async fn run(
     value.map_err(|e| anyhow::anyhow!("encode outcome: {e}"))
 }
 
-fn parse_id(args: &Value) -> Result<UnitId> {
-    let id = args
-        .get("id")
-        .ok_or_else(|| anyhow::anyhow!("missing required \"id\" (a UnitId)"))?;
-    serde_json::from_value(id.clone()).map_err(|e| anyhow::anyhow!("invalid id: {e}"))
+fn parse_id(tool: &str, args: &Value) -> Result<UnitId> {
+    #[derive(serde::Deserialize)]
+    struct IdArg {
+        id: UnitId,
+    }
+    crate::erased::parse_named_args::<IdArg>(tool, args.clone()).map(|a| a.id)
 }
 
 #[cfg(test)]
@@ -715,6 +716,14 @@ mod tests {
         UnitProvider, VerbDecl, VerbOutcome, register_provider,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn a_missing_or_malformed_unit_id_is_invalid() {
+        let err = parse_id("test.unit", &serde_json::json!({})).unwrap_err();
+        crate::erased::assert_invalid(&err, "missing field `id`");
+        let err = parse_id("test.unit", &serde_json::json!({ "id": "" })).unwrap_err();
+        crate::erased::assert_invalid(&err, "test.unit: id: ");
+    }
 
     // Each test uses a UNIQUE (provider name, kind) pair so the process-global
     // registry doesn't cross-contaminate parallel tests.
