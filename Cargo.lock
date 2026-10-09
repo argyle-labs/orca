@@ -4813,6 +4813,7 @@ dependencies = [
  "libc",
  "plugin-proto",
  "plugin-toolkit",
+ "rusqlite",
  "secrets",
  "serde_json",
  "tempfile",
