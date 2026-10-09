@@ -320,7 +320,9 @@ async fn fs_update(args: FsUpdateArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
 
     match (args.path.as_deref(), args.content.as_deref()) {
         (Some(p), Some(c)) => {
-            let written = crate::ops::write_file(p, c, args.allow_unparseable)?;
+            let p = crate::ops::expand_tilde(p);
+            crate::guard::deny_key_material(std::path::Path::new(&p))?;
+            let written = crate::ops::write_file(&p, c, args.allow_unparseable)?;
             out.applied.push(format!("wrote:{written}"));
         }
         (Some(_), None) | (None, Some(_)) => {
@@ -334,6 +336,7 @@ async fn fs_update(args: FsUpdateArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
             .register_root_path
             .clone()
             .ok_or_else(|| anyhow::anyhow!("register_root_path required"))?;
+        crate::guard::deny_key_material(std::path::Path::new(&crate::ops::expand_tilde(&path)))?;
         let row = crate::docs::RootRow {
             name: name.clone(),
             path,
@@ -368,6 +371,7 @@ async fn fs_delete(args: FsDeleteArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
 
     if let Some(p) = &args.path {
         let resolved = crate::ops::expand_tilde(p);
+        crate::guard::deny_key_material(std::path::Path::new(&resolved))?;
         crate::ops::remove(std::path::Path::new(&resolved))?;
         out.applied.push(format!("file-deleted:{resolved}"));
     }
@@ -400,7 +404,7 @@ async fn fs_delete(args: FsDeleteArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
 mod tests {
     use super::*;
     use contract::config::{Config, Model};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     // ── ctx / scratch helpers (mirrors lib.rs test style) ────────────────────
@@ -519,6 +523,150 @@ mod tests {
             format: Some("llm".into()),
         };
         assert!(fs_read(args, &ctx()).await.is_err());
+    }
+
+    fn state_key() -> PathBuf {
+        let state = contract::config::state_dir().unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let key = state.join(".db_key");
+        if !key.exists() {
+            std::fs::write(&key, "k").unwrap();
+        }
+        key
+    }
+
+    fn assert_forbidden(err: &anyhow::Error) {
+        let oe = err
+            .downcast_ref::<contract::OrcaError>()
+            .unwrap_or_else(|| panic!("not an OrcaError: {err}"));
+        assert_eq!(oe.kind, contract::ErrorKind::Forbidden, "{oe}");
+    }
+
+    #[tokio::test]
+    async fn every_files_verb_refuses_the_db_key() {
+        let key = state_key();
+        let path = key.to_string_lossy().into_owned();
+        let read = fs_read(
+            FsReadArgs {
+                root: None,
+                path: path.clone(),
+                format: None,
+            },
+            &ctx(),
+        )
+        .await;
+        assert_forbidden(&read.err().expect("read"));
+        let stat = fs_stat(
+            FsStatArgs {
+                root: None,
+                path: path.clone(),
+            },
+            &ctx(),
+        )
+        .await;
+        assert_forbidden(&stat.err().expect("stat"));
+        let dir = key.parent().unwrap().to_string_lossy().into_owned();
+        let list = fs_list(
+            FsListArgs {
+                root: None,
+                path: dir.clone(),
+                limit: None,
+                cursor: None,
+            },
+            &ctx(),
+        )
+        .await;
+        assert_forbidden(&list.err().expect("list"));
+        let tree = fs_tree(
+            FsTreeArgs {
+                root: None,
+                path: dir,
+                raw: None,
+            },
+            &ctx(),
+        )
+        .await;
+        assert_forbidden(&tree.err().expect("tree"));
+        let update = fs_update(
+            FsUpdateArgs {
+                path: Some(path.clone()),
+                content: Some("overwritten".into()),
+                ..Default::default()
+            },
+            &ctx(),
+        )
+        .await;
+        assert_forbidden(&update.err().expect("update"));
+        let delete = fs_delete(
+            FsDeleteArgs {
+                path: Some(path),
+                ..Default::default()
+            },
+            &ctx(),
+        )
+        .await;
+        assert_forbidden(&delete.err().expect("delete"));
+        assert_ne!(std::fs::read_to_string(&key).unwrap(), "overwritten");
+    }
+
+    #[tokio::test]
+    async fn fs_update_writes_the_tilde_path_it_checked() {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let name = format!(
+            "orca-files-tilde-{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let res = fs_update(
+            FsUpdateArgs {
+                path: Some(format!("~/{name}")),
+                content: Some("hi".into()),
+                ..Default::default()
+            },
+            &ctx(),
+        )
+        .await;
+        let landed = std::fs::read_to_string(home.join(&name));
+        std::fs::remove_file(home.join(&name)).ok();
+        res.unwrap();
+        assert_eq!(landed.unwrap(), "hi");
+        assert!(!Path::new("~").join(&name).exists());
+
+        let refused = fs_update(
+            FsUpdateArgs {
+                path: Some("~/.ssh/planted".into()),
+                content: Some("x".into()),
+                ..Default::default()
+            },
+            &ctx(),
+        )
+        .await;
+        assert_forbidden(&refused.err().expect("~/.ssh write"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_read_refuses_a_symlink_or_dot_dot_into_the_state_dir() {
+        let key = state_key();
+        let state = key.parent().unwrap();
+        let dir = scratch("read-guard");
+        let link = dir.join("notes.md");
+        std::os::unix::fs::symlink(&key, &link).unwrap();
+        for path in [link, state.join("pki").join("..").join(".db_key")] {
+            let res = fs_read(
+                FsReadArgs {
+                    root: None,
+                    path: path.to_string_lossy().into_owned(),
+                    format: None,
+                },
+                &ctx(),
+            )
+            .await;
+            assert_forbidden(&res.err().unwrap_or_else(|| panic!("{}", path.display())));
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── fs_search ────────────────────────────────────────────────────────────
