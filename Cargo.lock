@@ -4807,6 +4807,7 @@ dependencies = [
  "contract",
  "db",
  "dispatch",
+ "libc",
  "plugin-proto",
  "plugin-toolkit",
  "secrets",
