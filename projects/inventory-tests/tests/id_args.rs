@@ -2,14 +2,16 @@
 //!
 //! Walks the input schema of every tool on the real `tools/list` surface and
 //! requires each property named `id`, `*_id` or `*Id` to be declared
-//! `format: uuid` — the schema `utils::id::Id` emits, and which its parser
-//! enforces on every surface. A plain `String` id would let a hostname or
+//! `format: uuid` — the schema the typed ids (`utils::id::Id`,
+//! `system::system_id::SystemId`) emit, and which their parsers enforce on every
+//! surface. A plain `String` id would let a hostname or
 //! display name through to a verb that then resolves it.
 
 #![allow(clippy::disallowed_types)] // walks the registry's own dynamic JSON schemas
 
 use std::collections::BTreeSet;
 
+use inventory_tests::{is_id_name, is_uuid_typed};
 use serde_json::Value;
 
 // Side-effect imports — link every bucket that hosts an #[orca_tool] so the walk
@@ -94,26 +96,6 @@ const NATURAL_KEY_IDS: &[(&str, &str, &str)] = &[
     ("ups.state", "id", "UPS provider's device name"),
 ];
 
-/// `(tool, property)` for system ids, which take `system::system_id::SystemId`
-/// rather than `Id`; they are typed with it in their own change.
-const UNTYPED_SYSTEM_IDS: &[(&str, &str)] = &[
-    ("system.detail", "id"),
-    ("system.health", "id"),
-    ("system.mesh.delete", "peerId"),
-    ("system.mesh.update", "peerId"),
-    ("system.telemetry.list", "peerId"),
-    ("system.update", "id"),
-];
-
-fn is_id_name(name: &str) -> bool {
-    name == "id" || name.ends_with("_id") || name.ends_with("Id")
-}
-
-fn is_uuid_typed(prop: &Value) -> bool {
-    prop.get("format").and_then(Value::as_str) == Some("uuid")
-        || prop.get("items").is_some_and(is_uuid_typed)
-}
-
 /// Collect every id-named property that is not UUID-typed, anywhere in the
 /// schema tree (nested arg structs and `$defs` included).
 fn collect(tool: &str, node: &Value, out: &mut BTreeSet<(String, String)>) {
@@ -156,17 +138,12 @@ fn every_id_argument_is_a_uuid() {
     let allowed: BTreeSet<(String, String)> = NATURAL_KEY_IDS
         .iter()
         .map(|(t, p, _)| (t.to_string(), p.to_string()))
-        .chain(
-            UNTYPED_SYSTEM_IDS
-                .iter()
-                .map(|(t, p)| (t.to_string(), p.to_string())),
-        )
         .collect();
 
     let untyped: Vec<_> = offenders.difference(&allowed).collect();
     assert!(
         untyped.is_empty(),
-        "id-named arguments must be UUID-typed (`utils::id::Id`); \
+        "id-named arguments must be UUID-typed (`utils::id::Id` / `SystemId`); \
          a natural key owned outside orca goes in NATURAL_KEY_IDS with its reason: {untyped:#?}"
     );
     let stale: Vec<_> = allowed.difference(&offenders).collect();

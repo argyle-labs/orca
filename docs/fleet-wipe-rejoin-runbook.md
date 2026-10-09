@@ -88,7 +88,7 @@ on Linux service installs; `system.certs.list` / logs show the resolved path).
   children) is a bare UUIDv7; parent↔child is walkable purely by id.
 - Pick a claim node id from the tree and resolve it via the level-specific
   detail verb (`system.detail` / `service.status`) — round-trippable selector.
-- Targeting works by id: `system_update(peer=<uuidv7>)` resolves on every host.
+- Targeting works by id: `system_update(id=<uuidv7>)` resolves on every host.
 - No ghost rows: `system.list` shows no `departed`/stale duplicates.
 
 ## Restore / resiliency notes

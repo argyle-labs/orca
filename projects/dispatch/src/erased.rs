@@ -21,9 +21,25 @@ use contract::{OrcaTool, ToolCtx};
 
 /// A tool's typed args from its JSON. A refusal is the caller's error (`Invalid`,
 /// HTTP 400), not a server fault. Its message carries the offending field's path
-/// where serde can track one, which it cannot through `#[serde(flatten)]`.
-fn parse_args<T: OrcaTool>(args: Value) -> Result<T::Args> {
-    parse_named_args(T::NAME, args)
+/// where serde can track one, which it cannot through `#[serde(flatten)]`, and
+/// any hint the ctx's [`contract::ArgRefusalHint`] adds.
+fn parse_args<T: OrcaTool>(args: Value, ctx: &ToolCtx) -> Result<T::Args> {
+    parse_named_args(T::NAME, args).map_err(|e| with_refusal_hint(e, ctx))
+}
+
+fn with_refusal_hint(err: anyhow::Error, ctx: &ToolCtx) -> anyhow::Error {
+    let Ok(hinter) = ctx.service::<std::sync::Arc<dyn contract::ArgRefusalHint>>() else {
+        return err;
+    };
+    match err.downcast::<contract::OrcaError>() {
+        Ok(mut oe) => {
+            if let Some(hint) = hinter.hint(ctx, &oe.message) {
+                oe.message = format!("{}; {hint}", oe.message);
+            }
+            oe.into()
+        }
+        Err(err) => err,
+    }
 }
 
 /// [`parse_args`] for a surface whose tools are not `OrcaTool`s.
@@ -138,7 +154,7 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
                     // A plan for inputs the verb would refuse is a false
                     // promise, so they are rejected here exactly as an apply
                     // would reject them.
-                    parse_args::<T>(args.clone())?;
+                    parse_args::<T>(args.clone(), ctx)?;
                     let plan = contract::plan::ExecutionPlan::generic(T::NAME, args.into());
                     return serde_json::to_value(&plan).map_err(|e| {
                         anyhow::anyhow!("failed to serialize plan for {}: {e}", T::NAME)
@@ -177,7 +193,7 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
             } else {
                 args
             };
-            let parsed = parse_args::<T>(args)?;
+            let parsed = parse_args::<T>(args, ctx)?;
             let out = T::run(parsed, ctx).await?;
             serde_json::to_value(&out)
                 .map_err(|e| anyhow::anyhow!("failed to serialize output of {}: {e}", T::NAME))
@@ -818,6 +834,26 @@ mod tests {
             .await
             .expect_err("a plan for args the verb would refuse must be an error");
         assert_invalid(&err, "invalid args for test.gated");
+    }
+
+    struct EchoHint;
+
+    impl contract::ArgRefusalHint for EchoHint {
+        fn hint(&self, _ctx: &ToolCtx, message: &str) -> Option<String> {
+            message.contains("target").then(|| "hinted".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_registered_hint_extends_an_args_refusal() {
+        let mut ctx = ctx();
+        ctx.register_service::<Arc<dyn contract::ArgRefusalHint>>(Arc::new(EchoHint));
+        let err = gated()
+            .run_json(serde_json::json!({ "target": 7 }), &ctx)
+            .await
+            .expect_err("invalid args");
+        assert_invalid(&err, "invalid args for test.gated: target: ");
+        assert_invalid(&err, "; hinted");
     }
 
     #[tokio::test]

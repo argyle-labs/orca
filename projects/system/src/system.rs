@@ -24,6 +24,7 @@ use crate::install_status::{
     BinaryStatus, ClaudeMdStatus, McpStatus, PkiStatus, VaultStatus, install_status_report,
 };
 use crate::retention_tools::{RetentionListOutput, retention_list_view};
+use crate::system_id::SystemId;
 use crate::system_info::current_or_collect;
 use crate::update_state::{self, read_channel_marker};
 use contract::config::{APP_LOGS_SUBDIR, APP_STATE_DIR};
@@ -207,14 +208,14 @@ pub struct SystemDetailArgs {
     #[arg(long, value_enum, default_value = "summary")]
     #[serde(default)]
     pub view: SystemDetailView,
-    /// Report on ONE system, by its id (the stable `machineId`) or its display
-    /// name. Omit to report on this system.
+    /// Report on ONE system, by its id (the stable `machineId` UUID). Omit to
+    /// report on this system.
     ///
     /// The system is the RESOURCE, never a host selector: this names the thing
     /// being asked about and orca resolves it to a route internally, the same
     /// way `system.health --id` does. A caller never says *where* to run (#647).
     #[arg(long)]
-    pub id: Option<String>,
+    pub id: Option<SystemId>,
 }
 
 /// Lean host liveness/health probe returned by `system.health`. Cheap enough to
@@ -286,7 +287,7 @@ async fn system_detail(
     // Named, and it is not us: resolve the id to a route and ask that system
     // about ITSELF. It answers locally by the arm below, so this recurses
     // exactly one hop (#647).
-    if let Some(id) = args.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(id) = args.id.as_deref() {
         let local = collect_health(ctx)?;
         if !is_self(id, &local) {
             // Ask with NO id: the peer reports on itself. Forwarding the id
@@ -323,10 +324,10 @@ async fn system_detail(
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SystemHealthArgs {
-    /// Report on ONE system, by its id (the stable `machineId`) or its display
-    /// name. Omit to report on EVERY system in the mesh.
+    /// Report on ONE system, by its id (the stable `machineId` UUID). Omit to
+    /// report on EVERY system in the mesh.
     #[arg(long)]
-    pub id: Option<String>,
+    pub id: Option<SystemId>,
 }
 
 /// One system's row in a mesh-wide health report.
@@ -379,15 +380,15 @@ async fn system_health(
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SystemHealthResult> {
     let local = collect_health(ctx)?;
-    match args.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    match args.id {
         // Named, and it is us: this system is the termination point — orca IS
         // the service here, there is nothing further to reach.
-        Some(id) if is_self(id, &local) => Ok(SystemHealthResult::One(Box::new(local))),
+        Some(id) if is_self(&id, &local) => Ok(SystemHealthResult::One(Box::new(local))),
         // Named, and it is another system: resolve the id to a route and ask it
         // about ITSELF. It answers locally by the arm above, so this recurses
         // exactly one hop and never fans out again.
         Some(id) => {
-            let report = probe_system(id, id, ctx).await;
+            let report = probe_system(&id, &id, ctx).await;
             match (report.health, report.error) {
                 (Some(h), _) => Ok(SystemHealthResult::One(Box::new(h))),
                 (None, Some(e)) => anyhow::bail!("{e}"),
@@ -405,10 +406,12 @@ async fn system_health(
                 Ok(t) => (t, None),
                 Err(e) => (Vec::new(), Some(format!("enumerate mesh systems: {e:#}"))),
             };
-            let probes = targets
-                .iter()
-                .filter(|t| !t.is_local)
-                .map(|t| async move { probe_system(&t.peer_id, &t.host, ctx).await });
+            let probes = targets.iter().filter(|t| !t.is_local).map(|t| async move {
+                match t.peer_id.parse::<utils::id::Id>() {
+                    Ok(id) => probe_system(&id.into(), &t.host, ctx).await,
+                    Err(_) => unaddressable_row(&t.host, &t.peer_id),
+                }
+            });
             let mut systems = vec![MeshHealthRow {
                 host: local.display_name.clone(),
                 id: local.machine_id.clone(),
@@ -431,11 +434,22 @@ async fn system_health(
     }
 }
 
-/// Does this id name the system we are running on? Accepts the stable
-/// `machine_id` or the operator-facing display name, because an operator types
-/// the name they know and both resolve to the same system.
+/// A roster row whose id is not a UUID. It cannot be addressed by id, so it is
+/// reported rather than probed.
+fn unaddressable_row(host: &str, id: &str) -> MeshHealthRow {
+    MeshHealthRow {
+        host: host.to_string(),
+        id: id.to_string(),
+        health: None,
+        error: Some(format!(
+            "not probed: roster row `{id}` is not a UUID, so it cannot be addressed by id; \
+             re-join `{host}` on a UUID identity (docs/fleet-wipe-rejoin-runbook.md)"
+        )),
+    }
+}
+
 fn is_self(id: &str, local: &HealthReport) -> bool {
-    id.eq_ignore_ascii_case(&local.machine_id) || id.eq_ignore_ascii_case(&local.display_name)
+    id.eq_ignore_ascii_case(&local.machine_id)
 }
 
 /// Does `id` address THIS system? The termination case every id-addressed verb
@@ -448,9 +462,9 @@ pub(crate) fn addresses_this_system(id: &str, ctx: &contract::ToolCtx) -> anyhow
 
 /// Ask one remote system for its own health, as a row that can never fail the
 /// surrounding sweep.
-async fn probe_system(id: &str, host: &str, ctx: &contract::ToolCtx) -> MeshHealthRow {
+async fn probe_system(id: &SystemId, host: &str, ctx: &contract::ToolCtx) -> MeshHealthRow {
     let args = SystemHealthArgs {
-        id: Some(id.to_string()),
+        id: Some(id.clone()),
     };
     match dispatch::cli::exec_remote::<SystemHealth>(id, args, ctx).await {
         Ok(SystemHealthResult::One(h)) => MeshHealthRow {
@@ -823,6 +837,15 @@ mod tests {
         }))
     }
 
+    #[test]
+    fn an_unaddressable_row_names_its_repair() {
+        let row = unaddressable_row("thor", "peer.c56ccc7c2039");
+        assert!(row.health.is_none());
+        let err = row.error.expect("an error");
+        assert!(err.contains("`peer.c56ccc7c2039` is not a UUID"), "{err}");
+        assert!(err.contains("re-join `thor`"), "{err}");
+    }
+
     // Serialized against the ORCA_DB_PATH-setting tests (update.rs etc): this
     // calls `db::open_default()`, which reads the ambient ORCA_DB_PATH. Without
     // serialization it can open the same fresh sqlite file a concurrent
@@ -835,32 +858,20 @@ mod tests {
     #[serial_test::serial(env)]
     async fn naming_this_system_answers_locally() {
         let ctx = empty_ctx();
-        let local = collect_health(&ctx).expect("local health");
-
-        for id in [local.machine_id.clone(), local.display_name.clone()] {
-            if id.is_empty() {
-                continue;
-            }
-            let args = SystemDetailArgs {
-                view: SystemDetailView::Summary,
-                id: Some(id.clone()),
-            };
-            // No RemoteExec is registered on this ctx, so a dispatch attempt
-            // would error — reaching a report proves it resolved to self.
-            let out = system_detail(args, &ctx).await;
-            assert!(
-                out.is_ok(),
-                "id `{id}` must answer locally: {:?}",
-                out.err()
-            );
-        }
-
-        // Whitespace is not an id; it means "this system", not "dispatch to ''".
-        let blank = SystemDetailArgs {
+        let id = utils::id::new();
+        std::fs::write(ctx.config.app_dir.join("machine_id"), &id).expect("write machine_id");
+        let args = SystemDetailArgs {
             view: SystemDetailView::Summary,
-            id: Some("   ".into()),
+            id: Some(id.parse().expect("minted id is a system id")),
         };
-        assert!(system_detail(blank, &ctx).await.is_ok());
+        // No RemoteExec is registered on this ctx, so a dispatch attempt would
+        // error — reaching a report proves it resolved to self.
+        let out = system_detail(args, &ctx).await;
+        assert!(
+            out.is_ok(),
+            "id `{id}` must answer locally: {:?}",
+            out.err()
+        );
     }
 
     #[tokio::test]

@@ -322,7 +322,7 @@ pub struct SystemUpdateArgs {
     /// fleet-wide update rather than silently ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[arg(long)]
-    pub id: Option<String>,
+    pub id: Option<crate::system_id::SystemId>,
 
     /// Act on THIS system only: never fan out, never forward. Internal — it is
     /// how the fan-out drives each of its legs, how the mesh liveness probe
@@ -705,12 +705,7 @@ async fn system_update(
     // picks a host. `self_only` is the terminal spelling — the fan-out's legs,
     // the mesh liveness probe, and the far side of the hop below all carry it,
     // so a forwarded update can never bounce onward.
-    let addressed = args
-        .id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let addressed = args.id.clone();
     let this_system = match (&addressed, args.self_only) {
         // Already the terminal leg — never resolve, never forward again.
         (_, true) => true,
@@ -2971,10 +2966,15 @@ mod tests {
         // The fan-out legs, the forwarded hop and the liveness probe all send
         // this wire form to peers that may be on the previous release, which
         // drops unknown camelCase keys: losing `self_only` fans out again.
-        let a: SystemUpdateArgs =
-            serde_json::from_str(r#"{"self_only":true,"id":"thor"}"#).unwrap();
+        let a: SystemUpdateArgs = serde_json::from_str(
+            r#"{"self_only":true,"id":"019f0000-0000-7000-8000-000000000000"}"#,
+        )
+        .unwrap();
         assert!(a.self_only);
-        assert_eq!(a.id.as_deref(), Some("thor"));
+        assert_eq!(
+            a.id.as_deref(),
+            Some("019f0000-0000-7000-8000-000000000000")
+        );
         let camel: SystemUpdateArgs =
             serde_json::from_str(r#"{"selfOnly":true,"releaseSource":"gitea"}"#).unwrap();
         assert!(camel.self_only);
