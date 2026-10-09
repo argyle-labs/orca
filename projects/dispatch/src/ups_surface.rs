@@ -88,8 +88,8 @@ async fn run_query(args: &Value, live: bool) -> Result<Value> {
     let a: UpsQueryArgs = if args.is_null() {
         UpsQueryArgs::default()
     } else {
-        serde_json::from_value(args.clone())
-            .map_err(|e| anyhow::anyhow!("invalid ups query args: {e}"))?
+        let tool = if live { STATE_TOOL } else { CONFIG_TOOL };
+        crate::erased::parse_named_args(tool, args.clone())?
     };
     if live {
         let states = ups::state(a).await;
@@ -101,8 +101,7 @@ async fn run_query(args: &Value, live: bool) -> Result<Value> {
 }
 
 async fn run_configure(args: &Value) -> Result<Value> {
-    let a: UpsConfigSetArgs = serde_json::from_value(args.clone())
-        .map_err(|e| anyhow::anyhow!("invalid ups configure args: {e}"))?;
+    let a: UpsConfigSetArgs = crate::erased::parse_named_args(CONFIGURE_TOOL, args.clone())?;
     let outcome = ups::config_set(a).await?;
     serde_json::to_value(&outcome).map_err(|e| anyhow::anyhow!("encode ups outcome: {e}"))
 }
@@ -154,6 +153,15 @@ mod tests {
     use contract::BoxFuture;
     use contract::ups::{UpsConfig, UpsConfigOutcome, UpsProvider, UpsState, register_provider};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn bad_args_are_invalid_naming_the_field() {
+        let err = ups_dispatch(CONFIGURE_TOOL, &serde_json::json!({ "provider": 7 }))
+            .await
+            .unwrap()
+            .unwrap_err();
+        crate::erased::assert_invalid(&err, "provider");
+    }
 
     struct TestUps;
     impl UpsProvider for TestUps {

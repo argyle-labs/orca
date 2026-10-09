@@ -98,8 +98,7 @@ async fn run_diagnose(args: &Value) -> Result<Value> {
     let a: DiagnoseArgs = if args.is_null() {
         DiagnoseArgs::default()
     } else {
-        serde_json::from_value(args.clone())
-            .map_err(|e| anyhow::anyhow!("invalid diagnose args: {e}"))?
+        crate::erased::parse_named_args(DIAGNOSE_TOOL, args.clone())?
     };
     let findings = diagnostics::diagnose(a).await;
     // Wrap in a record: MCP tool results must be a JSON object, not a bare
@@ -111,8 +110,7 @@ async fn run_diagnose(args: &Value) -> Result<Value> {
 }
 
 async fn run_repair(args: &Value) -> Result<Value> {
-    let a: RepairArgs = serde_json::from_value(args.clone())
-        .map_err(|e| anyhow::anyhow!("invalid repair args: {e}"))?;
+    let a: RepairArgs = crate::erased::parse_named_args(REPAIR_TOOL, args.clone())?;
     let outcome = diagnostics::repair(a).await?;
     serde_json::to_value(&outcome).map_err(|e| anyhow::anyhow!("encode outcome: {e}"))
 }
@@ -160,6 +158,15 @@ mod tests {
         DiagnosticsProvider, Finding, RepairArgs, RepairOutcome, Severity, register_provider,
     };
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn bad_args_are_invalid_naming_the_field() {
+        let err = diagnostics_dispatch(REPAIR_TOOL, &serde_json::json!({ "provider": "p" }))
+            .await
+            .unwrap()
+            .unwrap_err();
+        crate::erased::assert_invalid(&err, "repair_id");
+    }
 
     struct TestProvider {
         name: String,

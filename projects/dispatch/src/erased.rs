@@ -19,6 +19,35 @@ use std::marker::PhantomData;
 
 use contract::{OrcaTool, ToolCtx};
 
+/// A tool's typed args from its JSON. A refusal is the caller's error (`Invalid`,
+/// HTTP 400), not a server fault. Its message carries the offending field's path
+/// where serde can track one, which it cannot through `#[serde(flatten)]`.
+fn parse_args<T: OrcaTool>(args: Value) -> Result<T::Args> {
+    parse_named_args(T::NAME, args)
+}
+
+/// [`parse_args`] for a surface whose tools are not `OrcaTool`s.
+pub(crate) fn parse_named_args<A: serde::de::DeserializeOwned>(
+    tool: &str,
+    args: Value,
+) -> Result<A> {
+    serde_path_to_error::deserialize(args).map_err(|e| {
+        contract::OrcaError::invalid(format!("invalid args for {tool}: {e}"))
+            .with_code("args.invalid")
+            .into()
+    })
+}
+
+/// Asserts `err` is an `Invalid` refusal whose message contains `needle`.
+#[cfg(test)]
+pub(crate) fn assert_invalid(err: &anyhow::Error, needle: &str) {
+    let oe = err
+        .downcast_ref::<contract::OrcaError>()
+        .unwrap_or_else(|| panic!("not an OrcaError: {err}"));
+    assert_eq!(oe.kind, contract::ErrorKind::Invalid, "{oe}");
+    assert!(oe.message.contains(needle), "{oe}");
+}
+
 /// Object-safe version of OrcaTool. Implemented automatically for any OrcaTool via ToolWrapper.
 pub trait ErasedTool: Send + Sync {
     fn name(&self) -> &'static str;
@@ -105,10 +134,12 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
             // one path all surfaces (REST, MCP, CLI, mesh/exec) funnel through.
             let args = if T::EXECUTE_GATED {
                 if !execute_opt_in(&args) {
-                    let plan = contract::plan::ExecutionPlan::generic(
-                        T::NAME,
-                        without_execute(args).into(),
-                    );
+                    let args = without_execute(args);
+                    // A plan for inputs the verb would refuse is a false
+                    // promise, so they are rejected here exactly as an apply
+                    // would reject them.
+                    parse_args::<T>(args.clone())?;
+                    let plan = contract::plan::ExecutionPlan::generic(T::NAME, args.into());
                     return serde_json::to_value(&plan).map_err(|e| {
                         anyhow::anyhow!("failed to serialize plan for {}: {e}", T::NAME)
                     });
@@ -146,8 +177,7 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
             } else {
                 args
             };
-            let parsed: T::Args = serde_json::from_value(args)
-                .map_err(|e| anyhow::anyhow!("invalid args for {}: {e}", T::NAME))?;
+            let parsed = parse_args::<T>(args)?;
             let out = T::run(parsed, ctx).await?;
             serde_json::to_value(&out)
                 .map_err(|e| anyhow::anyhow!("failed to serialize output of {}: {e}", T::NAME))
@@ -779,6 +809,15 @@ mod tests {
             .expect("a plan needs no execute permission");
         assert_eq!(out["dryRun"], serde_json::json!(true));
         assert!(!ran(target));
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_with_invalid_args_is_refused_not_planned() {
+        let err = gated()
+            .run_json(serde_json::json!({ "target": 7 }), &ctx())
+            .await
+            .expect_err("a plan for args the verb would refuse must be an error");
+        assert_invalid(&err, "invalid args for test.gated");
     }
 
     #[tokio::test]
