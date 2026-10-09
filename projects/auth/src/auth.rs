@@ -233,7 +233,7 @@ pub struct TokenListOutput {
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct TokenRevokeArgs {
-    pub id: String,
+    pub id: utils::id::Id,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -1020,8 +1020,10 @@ mod tests {
 
     #[test]
     fn token_revoke_round_trips() {
-        let a: TokenRevokeArgs = serde_json::from_str("{\"id\":\"tok-9\"}").unwrap();
-        assert_eq!(a.id, "tok-9");
+        let a: TokenRevokeArgs =
+            serde_json::from_str("{\"id\":\"01900000-0000-7000-8000-000000000009\"}").unwrap();
+        assert_eq!(a.id.as_str(), "01900000-0000-7000-8000-000000000009");
+        assert!(serde_json::from_str::<TokenRevokeArgs>("{\"id\":\"tok-9\"}").is_err());
         let s = serde_json::to_string(&TokenRevokeOutput { revoked: false }).unwrap();
         assert_eq!(s, "{\"revoked\":false}");
     }
@@ -1217,16 +1219,21 @@ mod tests {
             // Revoke it — true the first time, false when already gone.
             let revoked = AuthTokenDelete::run(
                 TokenRevokeArgs {
-                    id: created.id.clone(),
+                    id: created.id.parse().unwrap(),
                 },
                 &test_ctx(),
             )
             .await
             .unwrap();
             assert!(revoked.revoked);
-            let again = AuthTokenDelete::run(TokenRevokeArgs { id: created.id }, &test_ctx())
-                .await
-                .unwrap();
+            let again = AuthTokenDelete::run(
+                TokenRevokeArgs {
+                    id: created.id.parse().unwrap(),
+                },
+                &test_ctx(),
+            )
+            .await
+            .unwrap();
             assert!(!again.revoked);
         })
         .await;
