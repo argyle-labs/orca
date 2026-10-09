@@ -62,6 +62,17 @@ fn validate_ident(kind: &str, s: &str) -> Result<()> {
     Ok(())
 }
 
+/// A namespace/table segment of a `plug__<ns>__<table>` name. `__` is the
+/// separator, so allowing it inside a segment would let `(a__b, c)` and
+/// `(a, b__c)` alias the same physical table.
+pub fn validate_segment(kind: &str, s: &str) -> Result<()> {
+    validate_ident(kind, s)?;
+    if s.contains("__") {
+        bail!("invalid {kind} identifier `{s}`: must not contain `__`");
+    }
+    Ok(())
+}
+
 /// Allow-list of column types. Keeps the declared type to SQLite's real storage
 /// classes so a plugin can't smuggle a constraint clause through the type field.
 fn validate_type(t: &str) -> Result<()> {
@@ -75,8 +86,8 @@ fn validate_type(t: &str) -> Result<()> {
 /// prefix + namespace segment is what keeps a plugin's tables in their own
 /// space and unable to collide with core orca tables or another plugin's.
 pub fn physical_table_name(namespace: &str, table: &str) -> Result<String> {
-    validate_ident("namespace", namespace)?;
-    validate_ident("table", table)?;
+    validate_segment("namespace", namespace)?;
+    validate_segment("table", table)?;
     Ok(format!("plug__{namespace}__{table}"))
 }
 
@@ -464,8 +475,25 @@ fn sql_type_for(v: &DbValue) -> &'static str {
 /// need a PK to converge), else the first column. Every identifier is validated
 /// before it reaches the derived DDL, so this can never carry injected SQL — the
 /// plugin supplies typed data, not schema.
-fn ensure_table_for_row(conn: &Connection, physical: &str, row: &DbRow) -> Result<()> {
+fn ensure_table_for_row(
+    conn: &Connection,
+    physical: &str,
+    row: &DbRow,
+    allow_ddl: bool,
+) -> Result<()> {
     let existing = existing_columns(conn, physical)?;
+    if !allow_ddl {
+        if existing.is_empty() {
+            bail!("table `{physical}` does not exist");
+        }
+        if let Some(k) = row
+            .keys()
+            .find(|k| !existing.iter().any(|(n, _)| n == k.as_str()))
+        {
+            bail!("unknown column `{k}` on `{physical}`");
+        }
+        return Ok(());
+    }
     if existing.is_empty() {
         let pk = if row.contains_key("name") {
             "name"
@@ -516,7 +544,9 @@ fn write_row(
     }
     // Core owns every table. A plugin never ships DDL — it just writes rows, and
     // core materializes (and additively evolves) the backing table from them.
-    ensure_table_for_row(conn, &physical, row)?;
+    // Core-migrated tables (empty namespace) have a fixed schema; plugins never
+    // get to evolve it.
+    ensure_table_for_row(conn, &physical, row, !namespace.is_empty())?;
     let mut cols = Vec::new();
     let mut placeholders = Vec::new();
     let mut vals: Vec<rusqlite::types::Value> = Vec::new();
@@ -935,21 +965,20 @@ mod exec_db_op_tests {
         assert_eq!(d.affected, 1);
     }
 
-    // Core owns table creation: a plugin (e.g. proxmox's endpoint_resource!)
-    // never ships DDL — the first Insert materializes the table, and Upsert
-    // converges on the conventional `name` primary key. This is the whole fix
-    // for "no such table: proxmox_endpoints".
+    // Core owns table creation for a plugin's own namespace: the plugin never
+    // ships DDL — the first Insert materializes the table, and Upsert converges
+    // on the conventional `name` primary key.
     #[test]
     fn insert_auto_materializes_table_and_upsert_converges_on_name_pk() {
         // Fresh db, table NOT pre-created (unlike `setup`).
         let conn = Connection::open_in_memory().unwrap();
-        let table = "proxmox_endpoints".to_string();
+        let table = "endpoints".to_string();
 
         // First insert creates the table from the row shape.
         let r = exec_db_op(
             &conn,
             &DbOp::Insert {
-                namespace: String::new(),
+                namespace: "proxmox".into(),
                 table: table.clone(),
                 row: row("frigg", "https://10.0.0.7:8006", true),
             },
@@ -962,7 +991,7 @@ mod exec_db_op_tests {
         exec_db_op(
             &conn,
             &DbOp::Upsert {
-                namespace: String::new(),
+                namespace: "proxmox".into(),
                 table: table.clone(),
                 row: row("frigg", "https://10.0.0.7:8006", false),
             },
@@ -971,7 +1000,7 @@ mod exec_db_op_tests {
         let l = exec_db_op(
             &conn,
             &DbOp::List {
-                namespace: String::new(),
+                namespace: "proxmox".into(),
                 table: table.clone(),
             },
         )
@@ -985,7 +1014,7 @@ mod exec_db_op_tests {
         exec_db_op(
             &conn,
             &DbOp::Insert {
-                namespace: String::new(),
+                namespace: "proxmox".into(),
                 table: table.clone(),
                 row: evolved,
             },
@@ -994,7 +1023,7 @@ mod exec_db_op_tests {
         let got = exec_db_op(
             &conn,
             &DbOp::Get {
-                namespace: String::new(),
+                namespace: "proxmox".into(),
                 table,
                 key_col: "name".into(),
                 key: "thor".into(),
@@ -1004,6 +1033,41 @@ mod exec_db_op_tests {
         assert_eq!(
             got.rows[0].get("token_id"),
             Some(&DbValue::Text("root@pam!orca".into()))
+        );
+    }
+
+    // Core-migrated tables (empty namespace) are never created or altered by a
+    // plugin write: unknown columns and missing tables are errors.
+    #[test]
+    fn core_table_write_runs_no_ddl() {
+        let conn = setup();
+        let missing = exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: String::new(),
+                table: "not_migrated".into(),
+                row: row("frigg", "https://x", true),
+            },
+        );
+        assert!(missing.is_err());
+        let mut extra = row("frigg", "https://x", true);
+        extra.insert("token_id".into(), DbValue::Text("t".into()));
+        let err = exec_db_op(
+            &conn,
+            &DbOp::Insert {
+                namespace: String::new(),
+                table: "proxmox_endpoints".into(),
+                row: extra,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown column"), "got: {err}");
+        assert!(
+            !existing_columns(&conn, "proxmox_endpoints")
+                .unwrap()
+                .iter()
+                .any(|(n, _)| n == "token_id")
         );
     }
 
@@ -1155,8 +1219,10 @@ mod exec_db_op_tests {
     fn write_to_registered_table_notifies_its_entity() {
         let mut rx = crate::replicate::subscribe();
         let conn = Connection::open_in_memory().unwrap();
-        // "endpoints" is a registered replicated entity (is_registered is a
-        // registry check, independent of schema — the row auto-materializes).
+        conn.execute_batch(
+            "CREATE TABLE endpoints (id TEXT PRIMARY KEY, provider TEXT, name TEXT)",
+        )
+        .unwrap();
         let mut r = DbRow::new();
         r.insert("id".into(), DbValue::Text("e1".into()));
         r.insert("provider".into(), DbValue::Text("p".into()));
@@ -1187,19 +1253,19 @@ mod exec_db_op_tests {
     #[test]
     fn write_to_unregistered_table_does_not_notify() {
         let mut rx = crate::replicate::subscribe();
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = setup();
         exec_db_op(
             &conn,
             &DbOp::Insert {
                 namespace: String::new(),
-                table: "plug__adversarial__unreplicated".into(),
+                table: "proxmox_endpoints".into(),
                 row: row("frigg", "https://x", true),
             },
         )
         .unwrap();
         while let Ok(ent) = rx.try_recv() {
             assert_ne!(
-                ent, "plug__adversarial__unreplicated",
+                ent, "proxmox_endpoints",
                 "unregistered table must not notify"
             );
         }
@@ -1247,5 +1313,18 @@ mod exec_db_op_tests {
         )
         .unwrap();
         assert_eq!(g.rows[0].get("v"), Some(&DbValue::Text("hello".into())));
+    }
+}
+
+#[cfg(test)]
+mod segment_tests {
+    use super::*;
+
+    #[test]
+    fn double_underscore_segments_rejected() {
+        assert!(physical_table_name("a", "b").is_ok());
+        assert!(physical_table_name("a__b", "c").is_err());
+        assert!(physical_table_name("a", "b__c").is_err());
+        assert!(physical_table_name("a_b", "c_d").is_ok());
     }
 }
