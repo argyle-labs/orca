@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use plugin_toolkit::abi::{
-    AgentRegistration, DbOp, HttpRequest, HttpResponse, HttpStreamChunk, HttpStreamRequest,
-    SecretOp,
+    AgentRegistration, DbOp, DbReply, DbRow, DbValue, HttpRequest, HttpResponse, HttpStreamChunk,
+    HttpStreamRequest, SecretOp,
 };
 use plugin_toolkit::serde_json::{self, Value};
 
@@ -63,7 +63,8 @@ fn http_client() -> &'static utils::http::Client {
     CLIENT.get_or_init(utils::http::Client::new)
 }
 
-/// Phase toggle for plugin-namespace enforcement on `db.op` / `secret.op`.
+/// Phase toggle for plugin-namespace enforcement on `secret.op` (`db.op` is
+/// always hard-enforced by [`exec_db_op_policed`]).
 ///
 /// Phase 1 (current): a cross-namespace access is logged as a loud `warn!` but
 /// still executed — this surfaces any legitimate cross-namespace usage on the
@@ -125,6 +126,183 @@ pub(crate) fn agent_provider_owned(name: &str, principal: &str) -> bool {
             .is_some_and(|(owner, id)| !owner.is_empty() && id == principal)
 }
 
+/// Access a plugin has to a core table addressed with the empty namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoreTableAccess {
+    /// Shared by all plugins; rows are confined to `provider == principal`.
+    SharedByProvider,
+    ReadWrite,
+    ReadOnly,
+}
+
+/// Default-deny policy for `db.op` with namespace "": a core table is reachable
+/// only if listed here, by its owner (`None` = every plugin). Everything else
+/// (settings, secrets, tokens, mesh, users, …) is refused.
+const CORE_TABLE_POLICY: &[(&str, Option<&str>, CoreTableAccess)] = &[
+    ("endpoints", None, CoreTableAccess::SharedByProvider),
+    ("ntfy_endpoints", Some("ntfy"), CoreTableAccess::ReadWrite),
+    ("mcp_servers", Some("mcp"), CoreTableAccess::ReadWrite),
+    ("mcp_tool_mappings", Some("mcp"), CoreTableAccess::ReadWrite),
+    ("openapi_specs", Some("mcp"), CoreTableAccess::ReadWrite),
+    ("plugins", Some("mcp"), CoreTableAccess::ReadOnly),
+    // Temporary: mcp reads credentials directly until a dedicated capability replaces this.
+    ("plugin_credentials", Some("mcp"), CoreTableAccess::ReadOnly),
+];
+
+fn core_table_access(table: &str, principal: &str) -> Option<CoreTableAccess> {
+    CORE_TABLE_POLICY
+        .iter()
+        .find(|(t, owner, _)| *t == table && owner.is_none_or(|o| o == principal))
+        .map(|(_, _, access)| *access)
+}
+
+fn deny(principal: &str, op: &DbOp, table: &str, why: &str) -> anyhow::Error {
+    tracing::warn!(
+        target: "plugin",
+        plugin = %principal,
+        op = %op.kind(),
+        namespace = %op.namespace(),
+        table = %table,
+        "db.op refused: {why}"
+    );
+    anyhow!(
+        "plugin '{principal}' may not db.op/{} on '{table}' (namespace '{}'): {why}",
+        op.kind(),
+        op.namespace()
+    )
+}
+
+fn op_table(op: &DbOp) -> &str {
+    match op {
+        DbOp::List { table, .. }
+        | DbOp::Get { table, .. }
+        | DbOp::Insert { table, .. }
+        | DbOp::Update { table, .. }
+        | DbOp::Upsert { table, .. }
+        | DbOp::Delete { table, .. } => table,
+    }
+}
+
+fn row_provider_is(row: &DbRow, principal: &str) -> bool {
+    matches!(row.get("provider"), Some(DbValue::Text(p)) if p == principal)
+}
+
+/// Every existing row in `table` whose `key_col` equals `key` must belong to
+/// `principal` — guards Update/Delete/Upsert from touching a foreign row.
+fn existing_rows_owned(
+    conn: &db::Conn,
+    table: &str,
+    key_col: &str,
+    key: &str,
+    principal: &str,
+) -> Result<bool> {
+    let existing = db::plugin_tables::exec_db_op(
+        conn,
+        &DbOp::Get {
+            namespace: String::new(),
+            table: table.to_string(),
+            key_col: key_col.to_string(),
+            key: key.to_string(),
+        },
+    )?;
+    Ok(existing.rows.iter().all(|r| row_provider_is(r, principal)))
+}
+
+/// The key value as a string; `Ok(None)` only when absent. Other types are
+/// rejected rather than treated as absent, which would skip the ownership check.
+fn key_text(v: Option<&DbValue>) -> Result<Option<String>> {
+    match v {
+        None => Ok(None),
+        Some(DbValue::Text(s)) => Ok(Some(s.clone())),
+        Some(DbValue::Int(i)) => Ok(Some(i.to_string())),
+        Some(_) => Err(anyhow!("db.op: key value must be text or integer")),
+    }
+}
+
+/// Run `op` for `principal` under the namespace policy: its own `plug__`
+/// namespace freely, core tables only per [`core_table_access`], nothing else.
+fn exec_db_op_policed(conn: &db::Conn, op: &DbOp, principal: &str) -> Result<DbReply> {
+    let table = op_table(op);
+    if db::plugin_tables::validate_segment("principal", principal).is_err() {
+        return Err(deny(principal, op, table, "invalid principal"));
+    }
+    let ns = op.namespace();
+    if ns == principal {
+        return db::plugin_tables::exec_db_op(conn, op);
+    }
+    if !ns.is_empty() {
+        return Err(deny(principal, op, table, "foreign namespace"));
+    }
+    let Some(access) = core_table_access(table, principal) else {
+        return Err(deny(principal, op, table, "core table not permitted"));
+    };
+    let is_read = matches!(op, DbOp::List { .. } | DbOp::Get { .. });
+    match access {
+        CoreTableAccess::ReadWrite => db::plugin_tables::exec_db_op(conn, op),
+        CoreTableAccess::ReadOnly if is_read => db::plugin_tables::exec_db_op(conn, op),
+        CoreTableAccess::ReadOnly => Err(deny(principal, op, table, "table is read-only")),
+        CoreTableAccess::SharedByProvider if is_read => {
+            let mut reply = db::plugin_tables::exec_db_op(conn, op)?;
+            reply.rows.retain(|r| row_provider_is(r, principal));
+            Ok(reply)
+        }
+        CoreTableAccess::SharedByProvider => {
+            // IMMEDIATE so no other writer can reassign the row between the
+            // ownership check and the write. Dropping `tx` (error or panic)
+            // rolls back.
+            let tx = rusqlite::Transaction::new_unchecked(
+                conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let reply = exec_shared_write(&tx, op, table, principal)?;
+            tx.commit()?;
+            Ok(reply)
+        }
+    }
+}
+
+/// A write to a provider-shared table. A foreign row yields `affected: 0`,
+/// indistinguishable from a missing one.
+fn exec_shared_write(conn: &db::Conn, op: &DbOp, table: &str, principal: &str) -> Result<DbReply> {
+    let owned = match op {
+        DbOp::List { .. } | DbOp::Get { .. } => true,
+        DbOp::Insert { row, .. } | DbOp::Upsert { row, .. } if !row_provider_is(row, principal) => {
+            return Err(deny(
+                principal,
+                op,
+                table,
+                "row provider must be the caller",
+            ));
+        }
+        DbOp::Insert { .. } => true,
+        DbOp::Upsert { row, .. } => match key_text(row.get("id"))? {
+            Some(id) => existing_rows_owned(conn, table, "id", &id, principal)?,
+            None => true,
+        },
+        DbOp::Update { key_col, row, .. } => {
+            if row.get("provider").is_some() && !row_provider_is(row, principal) {
+                return Err(deny(
+                    principal,
+                    op,
+                    table,
+                    "row provider must be the caller",
+                ));
+            }
+            let Some(key) = key_text(row.get(key_col))? else {
+                return Err(deny(principal, op, table, "update without key value"));
+            };
+            existing_rows_owned(conn, table, key_col, &key, principal)?
+        }
+        DbOp::Delete { key_col, key, .. } => {
+            existing_rows_owned(conn, table, key_col, key, principal)?
+        }
+    };
+    if !owned {
+        return Ok(DbReply::default());
+    }
+    db::plugin_tables::exec_db_op(conn, op)
+}
+
 /// Execute one capability request on behalf of `principal` — the authoritative
 /// plugin id bound to this session's socket (see
 /// [`supervisor::PluginProcess`](crate::supervisor::PluginProcess)). `args` is
@@ -136,14 +314,8 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
         "db.op" => {
             let op: DbOp =
                 serde_json::from_value(args).map_err(|e| anyhow!("db.op: bad op payload: {e}"))?;
-            enforce_namespace(
-                "db.op",
-                op.kind(),
-                principal,
-                op.namespace(),
-                op.namespace() == principal,
-            )?;
-            let reply = db::plugin_tables::exec_db_op_pooled(&op)?;
+            let reply =
+                db::pool::with_pooled_or_open(|conn| exec_db_op_policed(conn, &op, principal))?;
             Ok(serde_json::to_value(reply)?)
         }
         "secret.op" => {
@@ -383,6 +555,300 @@ mod tests {
         // Foreign namespace under phase-1 warn-first: allowed (Ok), logged.
         // (Phase 2 flips HARD_ENFORCE_NAMESPACE so this returns Err instead.)
         assert!(enforce_namespace("db.op", "get", "p", "other", false).is_ok());
+    }
+
+    fn policy_conn() -> db::Conn {
+        let conn = db::Conn::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE endpoints (id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL);
+             INSERT INTO endpoints VALUES ('a1', 'alpha', 'one'), ('b1', 'beta', 'two');
+             CREATE TABLE ntfy_endpoints (name TEXT PRIMARY KEY);
+             CREATE TABLE mcp_servers (name TEXT PRIMARY KEY);
+             CREATE TABLE plugin_credentials (name TEXT PRIMARY KEY);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn list(table: &str) -> DbOp {
+        DbOp::List {
+            namespace: String::new(),
+            table: table.into(),
+        }
+    }
+
+    fn count_provider(conn: &db::Conn, provider: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM endpoints WHERE provider = ?1",
+            [provider],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn ep_row(id: &str, provider: &str) -> DbRow {
+        let mut r = DbRow::new();
+        r.insert("id".into(), DbValue::Text(id.into()));
+        r.insert("provider".into(), DbValue::Text(provider.into()));
+        r.insert("name".into(), DbValue::Text("n".into()));
+        r
+    }
+
+    fn name_row() -> DbRow {
+        let mut r = DbRow::new();
+        r.insert("name".into(), DbValue::Text("x".into()));
+        r
+    }
+
+    #[test]
+    fn db_op_refuses_settings_read() {
+        let conn = policy_conn();
+        let err = exec_db_op_policed(&conn, &list("settings"), "alpha")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'settings'"), "got: {err}");
+    }
+
+    #[test]
+    fn db_op_refuses_secrets_write() {
+        let conn = policy_conn();
+        let op = DbOp::Upsert {
+            namespace: String::new(),
+            table: "secrets".into(),
+            row: name_row(),
+        };
+        assert!(exec_db_op_policed(&conn, &op, "mcp").is_err());
+    }
+
+    #[test]
+    fn endpoints_list_returns_only_own_rows() {
+        let conn = policy_conn();
+        let reply = exec_db_op_policed(&conn, &list("endpoints"), "alpha").unwrap();
+        assert_eq!(reply.rows.len(), 1);
+        assert!(row_provider_is(&reply.rows[0], "alpha"));
+    }
+
+    #[test]
+    fn endpoints_update_and_delete_of_foreign_row_refused() {
+        let conn = policy_conn();
+        let upd = DbOp::Update {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            key_col: "id".into(),
+            row: ep_row("b1", "alpha"),
+        };
+        assert_eq!(
+            exec_db_op_policed(&conn, &upd, "alpha").unwrap().affected,
+            0
+        );
+        let del = DbOp::Delete {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            key_col: "id".into(),
+            key: "b1".into(),
+        };
+        assert_eq!(
+            exec_db_op_policed(&conn, &del, "alpha").unwrap().affected,
+            0
+        );
+        let missing = DbOp::Delete {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            key_col: "id".into(),
+            key: "zz".into(),
+        };
+        assert_eq!(
+            exec_db_op_policed(&conn, &missing, "alpha")
+                .unwrap()
+                .affected,
+            0
+        );
+        assert_eq!(count_provider(&conn, "beta"), 1);
+        let own = DbOp::Update {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            key_col: "id".into(),
+            row: ep_row("a1", "alpha"),
+        };
+        assert_eq!(
+            exec_db_op_policed(&conn, &own, "alpha").unwrap().affected,
+            1
+        );
+    }
+
+    #[test]
+    fn endpoints_insert_with_foreign_provider_refused() {
+        let conn = policy_conn();
+        let op = DbOp::Insert {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            row: ep_row("a2", "beta"),
+        };
+        assert!(exec_db_op_policed(&conn, &op, "alpha").is_err());
+        let hijack = DbOp::Upsert {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            row: ep_row("b1", "alpha"),
+        };
+        assert_eq!(
+            exec_db_op_policed(&conn, &hijack, "alpha")
+                .unwrap()
+                .affected,
+            0
+        );
+        assert_eq!(count_provider(&conn, "beta"), 1);
+    }
+
+    #[test]
+    fn ntfy_endpoints_only_for_ntfy() {
+        let conn = policy_conn();
+        assert!(exec_db_op_policed(&conn, &list("ntfy_endpoints"), "ntfy").is_ok());
+        assert!(exec_db_op_policed(&conn, &list("ntfy_endpoints"), "proxmox").is_err());
+        assert!(exec_db_op_policed(&conn, &list("proxmox_endpoints"), "proxmox").is_err());
+    }
+
+    #[test]
+    fn every_policy_table_exists_in_migrated_schema() {
+        let conn = db::testing::test_conn();
+        for (table, _, _) in CORE_TABLE_POLICY {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "policy table `{table}` has no migration");
+        }
+    }
+
+    #[test]
+    fn mcp_tables_only_for_mcp() {
+        let conn = policy_conn();
+        let ins = DbOp::Insert {
+            namespace: String::new(),
+            table: "mcp_servers".into(),
+            row: name_row(),
+        };
+        assert!(exec_db_op_policed(&conn, &ins, "mcp").is_ok());
+        assert!(exec_db_op_policed(&conn, &list("mcp_servers"), "alpha").is_err());
+    }
+
+    #[test]
+    fn plugin_credentials_read_only_for_mcp() {
+        let conn = policy_conn();
+        assert!(exec_db_op_policed(&conn, &list("plugin_credentials"), "mcp").is_ok());
+        assert!(exec_db_op_policed(&conn, &list("plugin_credentials"), "alpha").is_err());
+        let ins = DbOp::Insert {
+            namespace: String::new(),
+            table: "plugin_credentials".into(),
+            row: name_row(),
+        };
+        assert!(exec_db_op_policed(&conn, &ins, "mcp").is_err());
+    }
+
+    #[test]
+    fn foreign_plugin_namespace_refused() {
+        let conn = policy_conn();
+        let op = DbOp::List {
+            namespace: "beta".into(),
+            table: "things".into(),
+        };
+        assert!(exec_db_op_policed(&conn, &op, "alpha").is_err());
+        let via_core = list("plug__beta__things");
+        assert!(exec_db_op_policed(&conn, &via_core, "alpha").is_err());
+    }
+
+    #[test]
+    fn invalid_principal_refused() {
+        let conn = policy_conn();
+        for p in ["", "Bad", "a__b"] {
+            let op = DbOp::List {
+                namespace: p.into(),
+                table: "things".into(),
+            };
+            assert!(exec_db_op_policed(&conn, &op, p).is_err(), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn core_table_write_never_runs_ddl() {
+        let conn = policy_conn();
+        let mut row = ep_row("a2", "alpha");
+        row.insert("evil".into(), DbValue::Text("x".into()));
+        let op = DbOp::Insert {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            row,
+        };
+        let err = exec_db_op_policed(&conn, &op, "alpha")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown column"), "got: {err}");
+        let cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('endpoints') WHERE name = 'evil'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 0);
+        // A missing core table is not created either.
+        let ins = DbOp::Insert {
+            namespace: String::new(),
+            table: "mcp_tool_mappings".into(),
+            row: name_row(),
+        };
+        assert!(exec_db_op_policed(&conn, &ins, "mcp").is_err());
+    }
+
+    #[test]
+    fn non_text_key_rejected() {
+        let conn = policy_conn();
+        let mut row = ep_row("b1", "alpha");
+        row.insert("id".into(), DbValue::Blob(b"b1".to_vec()));
+        let ups = DbOp::Upsert {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            row: row.clone(),
+        };
+        assert!(exec_db_op_policed(&conn, &ups, "alpha").is_err());
+        let upd = DbOp::Update {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            key_col: "id".into(),
+            row,
+        };
+        assert!(exec_db_op_policed(&conn, &upd, "alpha").is_err());
+    }
+
+    #[test]
+    fn shared_write_leaves_no_open_transaction() {
+        let conn = policy_conn();
+        let bad = DbOp::Insert {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            row: ep_row("a1", "alpha"),
+        };
+        assert!(exec_db_op_policed(&conn, &bad, "alpha").is_err());
+        assert!(conn.is_autocommit());
+        let mut extra = ep_row("a4", "alpha");
+        extra.insert("evil".into(), DbValue::Text("x".into()));
+        let failing = DbOp::Upsert {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            row: extra,
+        };
+        assert!(exec_db_op_policed(&conn, &failing, "alpha").is_err());
+        assert!(conn.is_autocommit());
+        assert_eq!(count_provider(&conn, "alpha"), 1);
+        let ok = DbOp::Insert {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            row: ep_row("a3", "alpha"),
+        };
+        assert_eq!(exec_db_op_policed(&conn, &ok, "alpha").unwrap().affected, 1);
+        assert!(conn.is_autocommit());
     }
 
     #[test]
