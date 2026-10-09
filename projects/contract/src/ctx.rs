@@ -87,8 +87,10 @@ impl ToolCtx {
     /// Set the target peer in-place. Called by the CLI dispatcher when
     /// `--peer <h>` is present (and by REST/MCP middleware on equivalent
     /// per-request inputs) before the tool's `OrcaTool::run` fires.
+    /// A blank target is kept as given, so it fails to resolve rather than
+    /// silently running here; surfaces refuse one before it gets this far.
     pub fn set_peer(&mut self, peer: Option<String>) {
-        self.peer_target = peer.filter(|s| !s.trim().is_empty());
+        self.peer_target = peer;
     }
 
     /// Builder-style peer setter, mirroring `with_auth`. Useful when

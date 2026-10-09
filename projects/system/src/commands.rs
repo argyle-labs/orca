@@ -1391,9 +1391,9 @@ async fn delegate_fetch_and_apply(
         };
         // Setting ctx.peer triggers the macro-emitted peer_dispatch stanza
         // inside `system_serve_release`, routing the call through
-        // RemoteExec to `peer.peer_hostname` and returning the typed
+        // RemoteExec to `peer.peer_id` and returning the typed
         // `FetchReleaseAssetOutput` directly.
-        let peered = ctx.clone().with_peer(peer.peer_hostname.clone());
+        let peered = ctx.clone().with_peer(peer.peer_id.clone());
         let out = match system_serve_release(args, &peered).await {
             Ok(o) => o,
             Err(e) => {

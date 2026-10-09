@@ -14,7 +14,7 @@
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderValue, Request, StatusCode};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -154,10 +154,25 @@ pub async fn oneshot_raw(
     bearer: Option<&str>,
     body: Option<serde_json::Value>,
 ) -> (StatusCode, Vec<u8>) {
+    oneshot_raw_with_headers(router, method, path, bearer, body, &[]).await
+}
+
+/// Like [`oneshot_raw`] with extra request headers.
+pub async fn oneshot_raw_with_headers(
+    router: Router,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+    body: Option<serde_json::Value>,
+    headers: &[(&str, HeaderValue)],
+) -> (StatusCode, Vec<u8>) {
     let peer: SocketAddr = "127.0.0.1:9999".parse().unwrap();
     let mut builder = Request::builder().method(method).uri(path);
     if let Some(tok) = bearer {
         builder = builder.header(axum::http::header::AUTHORIZATION, format!("Bearer {tok}"));
+    }
+    for (name, value) in headers {
+        builder = builder.header(*name, value.clone());
     }
     let req_body = match &body {
         Some(json) => {

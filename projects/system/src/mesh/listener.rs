@@ -163,7 +163,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         },
         MESH_EXEC_METHOD => match handle_exec(request, peer_cn).await {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, exec_error_object(&e)),
         },
         MESH_REPLICATE_EXPORT_METHOD => match handle_replicate_export() {
             Ok(env) => value_response(id, &env),
@@ -511,6 +511,29 @@ fn role_satisfies(role: &str, required: &str) -> bool {
     role_rank(role) >= role_rank(required)
 }
 
+/// A relayed tool's failure as a JSON-RPC error. A classified `OrcaError`
+/// keeps its kind and code in `data`, so the caller re-raises it with the same
+/// kind, and so the same HTTP status, rather than as a generic internal error.
+fn exec_error_object(e: &anyhow::Error) -> ErrorObject {
+    // `downcast_ref` sees through anyhow context layers; the chain walk finds
+    // one held as a std `source()`.
+    let Some(oe) = e.downcast_ref::<contract::OrcaError>().or_else(|| {
+        e.chain()
+            .find_map(|c| c.downcast_ref::<contract::OrcaError>())
+    }) else {
+        return ErrorObject::internal(&format!("{e:#}"));
+    };
+    ErrorObject {
+        code: if oe.kind == contract::ErrorKind::Invalid {
+            -32602
+        } else {
+            -32603
+        },
+        message: oe.message.clone(),
+        data: Some(serde_json::json!({ "kind": oe.kind, "code": oe.code })),
+    }
+}
+
 /// Handle `mesh/exec`: dispatch an allowlisted local tool on this peer's behalf.
 /// The mesh mTLS chain proves the caller is a paired peer; the REMOTE_OK
 /// allowlist guards which tools are reachable, and role-gated tools require a
@@ -733,6 +756,30 @@ fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relayed_invalid_args_error_stays_invalid_across_the_mesh() {
+        let e = anyhow::Error::from(contract::OrcaError::invalid("invalid args for t: id: bad"))
+            .context("dispatch mesh-relayed tool 't'");
+        let obj = exec_error_object(&e);
+        assert_eq!(obj.code, -32602);
+        let back = crate::mesh::peer_error("10.0.0.1", obj);
+        let oe = back
+            .downcast_ref::<contract::OrcaError>()
+            .expect("re-raised as an OrcaError");
+        assert_eq!(oe.kind, contract::ErrorKind::Invalid);
+        assert_eq!(oe.message, "invalid args for t: id: bad");
+        assert!(back.downcast_ref::<crate::mesh::PeerAnswered>().is_some());
+        // A relay that re-raises it keeps the kind for the next hop.
+        let relayed = back.context("dispatch mesh-relayed tool 't'");
+        assert_eq!(exec_error_object(&relayed).code, -32602);
+
+        let plain = exec_error_object(&anyhow::anyhow!("boom"));
+        assert_eq!(plain.code, -32603);
+        let plain = crate::mesh::peer_error("10.0.0.1", plain);
+        assert!(plain.downcast_ref::<contract::OrcaError>().is_none());
+        assert!(plain.downcast_ref::<crate::mesh::PeerAnswered>().is_some());
+    }
 
     #[test]
     fn remote_ok_gate_refuses_local_only() {
