@@ -1356,7 +1356,7 @@ async fn delegate_plugin_fetch(
         };
         // Setting ctx.peer triggers the macro-emitted peer_dispatch stanza in
         // `plugin_serve_asset`, routing the call through RemoteExec to the peer.
-        let peered = ctx.clone().with_peer(peer.peer_hostname.clone());
+        let peered = ctx.clone().with_peer(peer.peer_id.clone());
         let out = match plugin_serve_asset(args, &peered).await {
             Ok(o) => o,
             Err(e) => {
