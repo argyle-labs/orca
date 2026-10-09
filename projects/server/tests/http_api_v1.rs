@@ -11,8 +11,11 @@
 
 mod common;
 
-use axum::http::StatusCode;
-use common::{mint_admin_token, mint_token, oneshot_json, oneshot_raw, with_isolated_env};
+use axum::http::{HeaderValue, StatusCode};
+use common::{
+    mint_admin_token, mint_token, oneshot_json, oneshot_raw, oneshot_raw_with_headers,
+    with_isolated_env,
+};
 
 // ── successful authenticated dispatch ───────────────────────────────────────
 
@@ -234,6 +237,110 @@ async fn read_role_token_allowed_on_any_role_tool() {
         "read role should pass on any-tool: {body}"
     );
     assert!(body["capabilities"].is_array(), "body: {body}");
+}
+
+/// A blank `peer` selector is refused, never read as "run on this system".
+#[tokio::test]
+async fn blank_peer_selector_is_rejected() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    for peer in ["", "   "] {
+        let (status, body) = oneshot_json(
+            env.router(),
+            "POST",
+            "/api/v1/system.health",
+            Some(&token),
+            Some(serde_json::json!({ "peer": peer })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{peer:?}: {body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("peer: ")),
+            "{peer:?}: {body}"
+        );
+    }
+}
+
+/// The body `peer` is validated even when the `X-Orca-Peer` header is given.
+#[tokio::test]
+async fn blank_body_peer_is_rejected_beside_a_header() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let (status, body) = oneshot_with_peer_header(
+        env.router(),
+        &token,
+        HeaderValue::from_static("host-a"),
+        serde_json::json!({ "peer": "" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("peer: a blank"), "{body}");
+}
+
+#[tokio::test]
+async fn blank_peer_header_is_rejected() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let (status, body) = oneshot_with_peer_header(
+        env.router(),
+        &token,
+        HeaderValue::from_static("   "),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("peer: a blank"), "{body}");
+}
+
+/// A header and body `peer` naming different systems is ambiguous, so neither wins.
+#[tokio::test]
+async fn conflicting_header_and_body_peer_is_rejected() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let (status, body) = oneshot_with_peer_header(
+        env.router(),
+        &token,
+        HeaderValue::from_static("host-a"),
+        serde_json::json!({ "peer": "host-b" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("peer: "), "{body}");
+}
+
+#[tokio::test]
+async fn non_utf8_peer_header_is_rejected_as_such() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let (status, body) = oneshot_with_peer_header(
+        env.router(),
+        &token,
+        HeaderValue::from_bytes(b"host-\xff").unwrap(),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("not valid UTF-8"), "{body}");
+}
+
+async fn oneshot_with_peer_header(
+    router: axum::Router,
+    token: &str,
+    peer: HeaderValue,
+    body: serde_json::Value,
+) -> (StatusCode, String) {
+    let (status, bytes) = oneshot_raw_with_headers(
+        router,
+        "POST",
+        "/api/v1/system.health",
+        Some(token),
+        Some(body),
+        &[("x-orca-peer", peer)],
+    )
+    .await;
+    (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[tokio::test]
