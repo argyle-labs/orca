@@ -16,14 +16,21 @@ leave, and the security model.
 | See incoming pairing offers on this host | `orca system list --pending` |
 | Accept an offer | `orca system join --action accept <6-char-code>` |
 | List mesh members | `orca system list` |
-| Promote a peer to mutually-trusted | `orca system mesh update --action trust --peer-id <peer-id> on` |
+| Promote a peer to mutually-trusted | `orca system mesh update --action trust --peer-id <system-id> --on true` |
 | Enable secrets storage on this host | `orca system mesh update --action settings --self-secure true` |
-| Verify a peer end-to-end | `orca system health --id <host>` |
+| Verify a peer end-to-end | `orca system health --id <system-id>` |
 | Show cert expiry / rotation status | `orca system certs list` |
 | Rotate the mesh CA (with overlap) | `orca system mesh update --action recover [--overlap-days 14]` |
 | Leave the mesh (keep local data) | `orca system mesh delete --action leave` |
 | Leave + wipe stored secrets | `orca system mesh delete --action leave --wipe-secrets` |
 | Leave + factory-reset (everything but binary + bootstrap identity) | `orca system mesh delete --action leave --wipe-all` |
+
+A `<system-id>` is the system's UUID, never its hostname or address. Look one
+up in the `id` column of `orca system list`. To run a verb with no id argument,
+such as `orca system certs list`, on another system, address the call with the
+interim selector (`--peer <system-id>` on the CLI, `peer` in MCP arguments, the
+`X-Orca-Peer` header on REST) until verbs address systems by id themselves
+(orca#815).
 
 ## What the mesh is
 
@@ -66,7 +73,8 @@ The fast path is fully automatic on a shared LAN.
 
 After this:
 
-* `orca system health --id <inviter>` should succeed both directions.
+* `orca system health --id <inviter-id>` should succeed both directions
+  (`orca system list` shows the inviter's `id`).
 * `orca system list` on both hosts shows the other.
 * Secrets storage on the joiner is **off** until the user opts in with
   `orca system mesh update --action settings --self-secure true`.
@@ -96,11 +104,11 @@ CA-replication and the ability to invite further hosts, both sides must
 flag each other secure:
 
 ```
-# On hotel:
-orca system mesh update --action trust --peer-id peer.foxtrot on
+# On hotel (foxtrot's id from `orca system list`):
+orca system mesh update --action trust --peer-id 019f9f7b-2222-7e40-9e30-4987d8d12dcb --on true
 
-# On foxtrot:
-orca system mesh update --action trust --peer-id peer.hotel on
+# On foxtrot (hotel's id):
+orca system mesh update --action trust --peer-id 019f9f7b-1176-7e40-9e30-4987d8d12dcb --on true
 ```
 
 The moment both bits are true, the host that already has the mesh CA
@@ -108,7 +116,7 @@ private key pushes it to the peer via `mesh/push-ca-key` over the existing
 mTLS channel. From that point, the newly-trusted host can extend its own
 offers (`can_invite=1` in its mDNS advertisement).
 
-`orca system mesh update --action trust --peer-id <peer-id> off` reverses the local flag and notifies the
+`orca system mesh update --action trust --peer-id <system-id> --on false` reverses the local flag and notifies the
 peer; mutual-trust falls back to false on both sides.
 
 ## self-secure (secrets gate)

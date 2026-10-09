@@ -132,10 +132,10 @@ The daemon listens on HTTP `:12000`, HTTPS `:12443`, and mesh mTLS `:12002`
 
 ## Upgrades
 
-The normal path is a mesh self-update, which runs entirely over the mesh mesh:
+The normal path is a mesh self-update, which runs entirely over the mesh:
 
 ```sh
-system_update(peer=<id>, channel=beta)   # apply the channel's latest release
+system_update(id=<id>, channel=beta)   # apply the channel's latest release
 ```
 
 See [`force-update-runbook.md`](force-update-runbook.md) for the escalation

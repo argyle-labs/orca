@@ -49,6 +49,9 @@ pub use json_any::JsonAny;
 mod types;
 pub use types::{ToolCall, ToolDef, ToolResult};
 
+pub mod arg_hint;
+pub use arg_hint::ArgRefusalHint;
+
 pub mod cluster_roster;
 mod ctx;
 /// Ask every system the same question and merge the answers. `in-process`

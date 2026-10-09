@@ -29,6 +29,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use utils::id::Id;
 
+use crate::system_id::SystemId;
+
 // ── mount placement views (reference-object pattern) ─────────────────────────
 
 /// A reference to another table's row — a field that points at `<table>.id`
@@ -1586,9 +1588,9 @@ pub struct StorageMountUpdateArgs {
     /// New `shares.id` this placement mounts.
     #[arg(long)]
     pub share_id: Option<Id>,
-    /// New target host (peer id) for this placement.
+    /// New target host (system id) for this placement.
     #[arg(long)]
-    pub host: Option<String>,
+    pub host: Option<SystemId>,
     /// New absolute mountpoint on `host`; also the `action=unmount` target.
     /// With `action=unmount --id`, optional — it defaults to the addressed
     /// placement's own target, and overrides it when given.
@@ -1673,7 +1675,7 @@ fn mount_row_edit(args: &StorageMountUpdateArgs) -> anyhow::Result<StorageMountE
         applied.push("share_id".to_string());
     }
     if let Some(v) = args.host.clone() {
-        row.host = v;
+        row.host = v.into();
         applied.push("host".to_string());
     }
     if let Some(v) = args.target.clone() {
@@ -1864,9 +1866,9 @@ async fn storage_mount_update(
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StorageMountListArgs {
-    /// Restrict to placements targeting a single host (peer id). Empty = all.
+    /// Restrict to placements targeting a single host (system id). Omit for all.
     #[arg(long)]
-    pub host: Option<String>,
+    pub host: Option<SystemId>,
 }
 
 /// Per-owner timeout for the live foreign-liveness read. A live `storage.mount.list`
@@ -1972,9 +1974,9 @@ pub struct StorageMountDetailArgs {
     /// Placement uuidv7 `id`. Preferred; unambiguous.
     #[arg(long)]
     pub id: Option<Id>,
-    /// Host (peer id) — with `--name`, resolves the per-host-unique placement.
+    /// Host (system id) — with `--name`, resolves the per-host-unique placement.
     #[arg(long)]
-    pub host: Option<String>,
+    pub host: Option<SystemId>,
     /// Per-host `name` label — with `--host`, resolves the placement.
     #[arg(long)]
     pub name: Option<String>,
@@ -2033,9 +2035,9 @@ pub struct StorageMountCreateArgs {
     /// The `shares.id` this placement mounts.
     #[arg(long)]
     pub share_id: Id,
-    /// Target host (peer id) — the host whose convergence loop materializes it.
+    /// Target host (system id) — the host whose convergence loop materializes it.
     #[arg(long)]
-    pub host: String,
+    pub host: SystemId,
     /// Absolute mountpoint on `host`.
     #[arg(long)]
     #[serde(deserialize_with = "non_blank")]
@@ -2119,7 +2121,7 @@ async fn storage_mount_create(
         id: plugin_toolkit::mint_uuidv7(),
         name: args.name,
         share_id: args.share_id.into(),
-        host: args.host,
+        host: args.host.into(),
         target: args.target,
         guest: args.guest,
         remount_policy: args
@@ -2665,7 +2667,7 @@ mod tests {
             id: "m1".into(),
             name: "data".into(),
             share_id: "share-1".into(),
-            host: "h1".into(),
+            host: "01900000-0000-7000-8000-0000000000a1".into(),
             target: "/mnt/data".into(),
             remount_policy: None,
             health: plugin_toolkit::storage::MountHealth::Ok,
@@ -2857,11 +2859,33 @@ mod tests {
     }
 
     #[test]
+    fn mount_host_must_be_a_system_id() {
+        for host in ["willow", "", "   "] {
+            let list = format!(r#"{{"host":"{host}"}}"#);
+            assert!(
+                serde_json::from_str::<StorageMountListArgs>(&list).is_err(),
+                "{list}"
+            );
+            let create = format!(
+                r#"{{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"{host}","target":"/mnt/t"}}"#
+            );
+            assert!(
+                serde_json::from_str::<StorageMountCreateArgs>(&create).is_err(),
+                "{create}"
+            );
+        }
+    }
+
+    #[test]
     fn mount_list_args_host_scope() {
         let a: StorageMountListArgs = serde_json::from_str("{}").unwrap();
         assert!(a.host.is_none());
-        let a2: StorageMountListArgs = serde_json::from_str(r#"{"host":"willow"}"#).unwrap();
-        assert_eq!(a2.host.as_deref(), Some("willow"));
+        let a2: StorageMountListArgs =
+            serde_json::from_str(r#"{"host":"01900000-0000-7000-8000-0000000000a3"}"#).unwrap();
+        assert_eq!(
+            a2.host.as_deref(),
+            Some("01900000-0000-7000-8000-0000000000a3")
+        );
     }
 
     #[test]
@@ -2872,21 +2896,26 @@ mod tests {
             by_id.id.as_deref(),
             Some("01900000-0000-7000-8000-00000000000a")
         );
-        let by_pair: StorageMountDetailArgs =
-            serde_json::from_str(r#"{"host":"h1","name":"data"}"#).unwrap();
-        assert_eq!(by_pair.host.as_deref(), Some("h1"));
+        let by_pair: StorageMountDetailArgs = serde_json::from_str(
+            r#"{"host":"01900000-0000-7000-8000-0000000000a1","name":"data"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            by_pair.host.as_deref(),
+            Some("01900000-0000-7000-8000-0000000000a1")
+        );
         assert_eq!(by_pair.name.as_deref(), Some("data"));
     }
 
     #[test]
     fn mount_create_args_force_defaults_false() {
         let a: StorageMountCreateArgs =
-            serde_json::from_str(r#"{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"h","target":"/mnt/t"}"#)
+            serde_json::from_str(r#"{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"01900000-0000-7000-8000-0000000000a4","target":"/mnt/t"}"#)
                 .unwrap();
         assert!(!a.force);
         assert_eq!(a.share_id.as_str(), "01900000-0000-7000-8000-0000000000f3");
         let forced: StorageMountCreateArgs = serde_json::from_str(
-            r#"{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"h","target":"/mnt/t","force":true}"#,
+            r#"{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"01900000-0000-7000-8000-0000000000a4","target":"/mnt/t","force":true}"#,
         )
         .unwrap();
         assert!(forced.force);
@@ -2897,15 +2926,15 @@ mod tests {
         for (field, body) in [
             (
                 "name",
-                r#"{"name":" ","shareId":"01900000-0000-7000-8000-0000000000f3","host":"h","target":"/mnt/t"}"#,
+                r#"{"name":" ","shareId":"01900000-0000-7000-8000-0000000000f3","host":"01900000-0000-7000-8000-0000000000a4","target":"/mnt/t"}"#,
             ),
             (
                 "target",
-                r#"{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"h","target":""}"#,
+                r#"{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"01900000-0000-7000-8000-0000000000a4","target":""}"#,
             ),
             (
                 "guest",
-                r#"{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"h","target":"/mnt/t","guest":""}"#,
+                r#"{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"01900000-0000-7000-8000-0000000000a4","target":"/mnt/t","guest":""}"#,
             ),
         ] {
             let err = serde_json::from_str::<StorageMountCreateArgs>(body)
@@ -2917,7 +2946,7 @@ mod tests {
             );
         }
         let a: StorageMountCreateArgs =
-            serde_json::from_str(r#"{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"h","target":"/mnt/t"}"#)
+            serde_json::from_str(r#"{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"01900000-0000-7000-8000-0000000000a4","target":"/mnt/t"}"#)
                 .unwrap();
         assert_eq!(a.guest, None);
     }
@@ -3191,7 +3220,7 @@ mod tests {
         assert_eq!(view.id, "m1");
         assert_eq!(view.name, "data");
         assert_eq!(view.share.id, "share-1");
-        assert_eq!(view.host.id, "h1");
+        assert_eq!(view.host.id, "01900000-0000-7000-8000-0000000000a1");
         assert_eq!(view.target, "/mnt/data");
         assert!(view.enabled);
         assert!(!view.multi_mounted);
@@ -3377,7 +3406,7 @@ mod tests {
     #[test]
     fn mount_update_args_crud_placement_fields() {
         let a: StorageMountUpdateArgs = serde_json::from_str(
-            r#"{"id":"01900000-0000-7000-8000-00000000000a","name":"data","shareId":"01900000-0000-7000-8000-0000000000f2","host":"willow","target":"/mnt/d","enabled":false}"#,
+            r#"{"id":"01900000-0000-7000-8000-00000000000a","name":"data","shareId":"01900000-0000-7000-8000-0000000000f2","host":"01900000-0000-7000-8000-0000000000a3","target":"/mnt/d","enabled":false}"#,
         )
         .unwrap();
         assert!(a.action.is_none());
@@ -3389,7 +3418,10 @@ mod tests {
             a.share_id.as_deref(),
             Some("01900000-0000-7000-8000-0000000000f2")
         );
-        assert_eq!(a.host.as_deref(), Some("willow"));
+        assert_eq!(
+            a.host.as_deref(),
+            Some("01900000-0000-7000-8000-0000000000a3")
+        );
         assert_eq!(a.target.as_deref(), Some("/mnt/d"));
         assert_eq!(a.enabled, Some(false));
     }
@@ -3397,7 +3429,7 @@ mod tests {
     #[test]
     fn mount_create_args_remount_policy_optional() {
         let a: StorageMountCreateArgs = serde_json::from_str(
-            r#"{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"h","target":"/mnt/t","remountPolicy":"{}"}"#,
+            r#"{"name":"n","shareId":"01900000-0000-7000-8000-0000000000f3","host":"01900000-0000-7000-8000-0000000000a4","target":"/mnt/t","remountPolicy":"{}"}"#,
         )
         .unwrap();
         assert_eq!(a.remount_policy.as_deref(), Some("{}"));
@@ -3724,7 +3756,11 @@ mod tests {
     fn mount_row_edit_applies_and_persists() {
         with_db("mount_edit.db", || {
             seed_share();
-            seed_mount("01900000-0000-7000-8000-000000000001", "h1", "/mnt/data");
+            seed_mount(
+                "01900000-0000-7000-8000-000000000001",
+                "01900000-0000-7000-8000-0000000000a1",
+                "/mnt/data",
+            );
             let args: StorageMountUpdateArgs = serde_json::from_str(
                 r#"{"id":"01900000-0000-7000-8000-000000000001","name":"data2","target":"/mnt/data2","remountPolicy":"{\"aggression\":\"force\"}","enabled":false}"#,
             )
@@ -3765,11 +3801,19 @@ mod tests {
     fn mount_row_edit_blocks_collision_at_target() {
         with_db("mount_collision.db", || {
             seed_share();
-            // Existing enabled placement occupies /mnt/shared on h1.
-            seed_mount("m-existing", "h1", "/mnt/shared");
+            // Existing enabled placement occupies /mnt/shared on the host.
+            seed_mount(
+                "m-existing",
+                "01900000-0000-7000-8000-0000000000a1",
+                "/mnt/shared",
+            );
             // A second placement on the same host, elsewhere; move it onto the
             // occupied target and expect the multi-mount guard to fire.
-            seed_mount("01900000-0000-7000-8000-000000000004", "h1", "/mnt/other");
+            seed_mount(
+                "01900000-0000-7000-8000-000000000004",
+                "01900000-0000-7000-8000-0000000000a1",
+                "/mnt/other",
+            );
             let args: StorageMountUpdateArgs = serde_json::from_str(
                 r#"{"id":"01900000-0000-7000-8000-000000000004","target":"/mnt/shared"}"#,
             )
@@ -3786,10 +3830,18 @@ mod tests {
     fn mount_at_target_finds_and_misses() {
         with_db("mount_at_target.db", || {
             seed_share();
-            seed_mount("01900000-0000-7000-8000-000000000001", "h1", "/mnt/data");
-            let hit = mount_at_target("h1", "/mnt/data").unwrap();
+            seed_mount(
+                "01900000-0000-7000-8000-000000000001",
+                "01900000-0000-7000-8000-0000000000a1",
+                "/mnt/data",
+            );
+            let hit = mount_at_target("01900000-0000-7000-8000-0000000000a1", "/mnt/data").unwrap();
             assert_eq!(hit.unwrap().id, "01900000-0000-7000-8000-000000000001");
-            assert!(mount_at_target("h1", "/mnt/nowhere").unwrap().is_none());
+            assert!(
+                mount_at_target("01900000-0000-7000-8000-0000000000a1", "/mnt/nowhere")
+                    .unwrap()
+                    .is_none()
+            );
             assert!(
                 mount_at_target("other-host", "/mnt/data")
                     .unwrap()
@@ -3986,7 +4038,7 @@ mod tests {
             seed_share();
             let ctx = test_ctx();
             let args: StorageMountCreateArgs = serde_json::from_str(
-                r#"{"name":"data","shareId":"01900000-0000-7000-8000-0000000000f1","host":"h1","target":"/mnt/data"}"#,
+                r#"{"name":"data","shareId":"01900000-0000-7000-8000-0000000000f1","host":"01900000-0000-7000-8000-0000000000a1","target":"/mnt/data"}"#,
             )
             .unwrap();
             let view = rt()
@@ -3996,9 +4048,12 @@ mod tests {
             assert_eq!(view.target, "/mnt/data");
             assert_eq!(view.share.id, "01900000-0000-7000-8000-0000000000f1");
             assert!(
-                crate::mounts::endpoint_db::get_by_host_name("h1", "data")
-                    .unwrap()
-                    .is_some()
+                crate::mounts::endpoint_db::get_by_host_name(
+                    "01900000-0000-7000-8000-0000000000a1",
+                    "data"
+                )
+                .unwrap()
+                .is_some()
             );
         });
     }
@@ -4011,7 +4066,7 @@ mod tests {
             let args = |name: &str, target: &str, guest: Option<&str>| StorageMountCreateArgs {
                 name: name.into(),
                 share_id: "01900000-0000-7000-8000-0000000000f1".parse().unwrap(),
-                host: "h1".into(),
+                host: "01900000-0000-7000-8000-0000000000a1".parse().unwrap(),
                 target: target.into(),
                 remount_policy: None,
                 guest: guest.map(str::to_string),
@@ -4041,7 +4096,7 @@ mod tests {
                 id: "m-existing".into(),
                 name: "dup".into(),
                 share_id: "01900000-0000-7000-8000-0000000000f1".into(),
-                host: "h1".into(),
+                host: "01900000-0000-7000-8000-0000000000a1".into(),
                 target: "/mnt/a".into(),
                 remount_policy: None,
                 health: plugin_toolkit::storage::MountHealth::Ok,
@@ -4054,7 +4109,7 @@ mod tests {
             crate::mounts::endpoint_db::insert(&row).unwrap();
             let ctx = test_ctx();
             let args: StorageMountCreateArgs = serde_json::from_str(
-                r#"{"name":"dup","shareId":"01900000-0000-7000-8000-0000000000f1","host":"h1","target":"/mnt/b"}"#,
+                r#"{"name":"dup","shareId":"01900000-0000-7000-8000-0000000000f1","host":"01900000-0000-7000-8000-0000000000a1","target":"/mnt/b"}"#,
             )
             .unwrap();
             let err = rt().block_on(storage_mount_create(args, &ctx)).unwrap_err();
@@ -4066,10 +4121,14 @@ mod tests {
     fn storage_mount_create_blocks_target_collision_unless_forced() {
         with_db("mount_create_collision.db", || {
             seed_share();
-            seed_mount("occupant", "h1", "/mnt/shared");
+            seed_mount(
+                "occupant",
+                "01900000-0000-7000-8000-0000000000a1",
+                "/mnt/shared",
+            );
             let ctx = test_ctx();
             let args: StorageMountCreateArgs = serde_json::from_str(
-                r#"{"name":"newname","shareId":"01900000-0000-7000-8000-0000000000f1","host":"h1","target":"/mnt/shared"}"#,
+                r#"{"name":"newname","shareId":"01900000-0000-7000-8000-0000000000f1","host":"01900000-0000-7000-8000-0000000000a1","target":"/mnt/shared"}"#,
             )
             .unwrap();
             let err = rt().block_on(storage_mount_create(args, &ctx)).unwrap_err();
@@ -4079,7 +4138,7 @@ mod tests {
             );
 
             let forced: StorageMountCreateArgs = serde_json::from_str(
-                r#"{"name":"newname","shareId":"01900000-0000-7000-8000-0000000000f1","host":"h1","target":"/mnt/shared","force":true}"#,
+                r#"{"name":"newname","shareId":"01900000-0000-7000-8000-0000000000f1","host":"01900000-0000-7000-8000-0000000000a1","target":"/mnt/shared","force":true}"#,
             )
             .unwrap();
             let view = rt()
@@ -4093,7 +4152,11 @@ mod tests {
     fn storage_mount_delete_is_idempotent() {
         with_db("mount_delete.db", || {
             seed_share();
-            seed_mount("01900000-0000-7000-8000-000000000001", "h1", "/mnt/data");
+            seed_mount(
+                "01900000-0000-7000-8000-000000000001",
+                "01900000-0000-7000-8000-0000000000a1",
+                "/mnt/data",
+            );
             let ctx = test_ctx();
             let out = rt()
                 .block_on(storage_mount_delete(
@@ -4230,14 +4293,15 @@ mod tests {
         with_db("md_missing_hostname.db", || {
             let ctx = test_ctx();
             let args = StorageMountDetailArgs {
-                host: Some("h1".into()),
+                host: Some("01900000-0000-7000-8000-0000000000a1".parse().unwrap()),
                 name: Some("ghost".into()),
                 ..Default::default()
             };
             let err = rt().block_on(storage_mount_detail(args, &ctx)).unwrap_err();
             assert!(
-                err.to_string()
-                    .contains("no mount placement `ghost` on host `h1`"),
+                err.to_string().contains(
+                    "no mount placement `ghost` on host `01900000-0000-7000-8000-0000000000a1`"
+                ),
                 "{err}"
             );
         });
@@ -4247,7 +4311,11 @@ mod tests {
     fn storage_mount_detail_by_id_returns_view() {
         with_db("md_by_id.db", || {
             seed_share();
-            seed_mount("01900000-0000-7000-8000-000000000001", "h1", "/mnt/data");
+            seed_mount(
+                "01900000-0000-7000-8000-000000000001",
+                "01900000-0000-7000-8000-0000000000a1",
+                "/mnt/data",
+            );
             let ctx = test_ctx();
             let view = rt()
                 .block_on(storage_mount_detail(
@@ -4270,8 +4338,12 @@ mod tests {
     fn storage_mount_list_filters_by_host_and_lists_all() {
         with_db("ml_filter.db", || {
             seed_share();
-            seed_mount("01900000-0000-7000-8000-000000000001", "h1", "/mnt/a");
-            seed_mount("m-2", "h2", "/mnt/b");
+            seed_mount(
+                "01900000-0000-7000-8000-000000000001",
+                "01900000-0000-7000-8000-0000000000a1",
+                "/mnt/a",
+            );
+            seed_mount("m-2", "01900000-0000-7000-8000-0000000000a2", "/mnt/b");
             let ctx = test_ctx();
             // Unscoped: both placements.
             let all = rt()
@@ -4282,13 +4354,13 @@ mod tests {
             let scoped = rt()
                 .block_on(storage_mount_list(
                     StorageMountListArgs {
-                        host: Some("h2".into()),
+                        host: Some("01900000-0000-7000-8000-0000000000a2".parse().unwrap()),
                     },
                     &ctx,
                 ))
                 .expect("list ok");
             assert_eq!(scoped.len(), 1);
-            assert_eq!(scoped[0].host.id, "h2");
+            assert_eq!(scoped[0].host.id, "01900000-0000-7000-8000-0000000000a2");
         });
     }
 
