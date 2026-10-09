@@ -2,7 +2,7 @@
 //! replicated mesh-wide so the whole fleet's mount topology is visible and any
 //! node can author a placement for any host ([[mesh-data-is-eventually-consistent]]).
 //! Each host's convergence loop materializes only the rows whose `host` is its
-//! own peer id.
+//! own system id.
 //!
 //! Supersedes the per-host-local `managed_mounts` table (which, being local and
 //! unreplicated, is exactly why the fleet drifted). Named `mount` while the two
@@ -134,8 +134,8 @@ pub struct EndpointRow {
     pub name: String,
     /// The share this placement mounts, by its uuidv7 `shares.id`.
     pub share_id: String,
-    /// The peer id of the host this placement targets. A host's convergence loop
-    /// acts only on rows whose `host` equals its own peer id.
+    /// The system id of the host this placement targets. A host's convergence
+    /// loop acts only on rows whose `host` equals its own system id.
     pub host: String,
     /// Absolute mountpoint on `host`.
     pub target: String,

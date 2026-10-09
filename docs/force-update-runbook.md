@@ -3,23 +3,29 @@
 When a host is stuck on the wrong version, wedged mid-update, or otherwise
 misbehaving, escalate through these levels **in order**. Each level is more
 invasive than the last; stop as soon as the host reports the target version and
-`pending_restart == null`. The default path is always the **encrypted mesh
+`pending_restart == null`. The default path is always the **encrypted
 mesh** — SSH is the last resort (see [Mesh-first policy](#mesh-first-policy)).
 
-Throughout, target the host by its **`machine_id` (peer_id)** when it resolves;
-fall back to **hostname** if identity convergence hasn't completed (see Level 4).
+Throughout, target the host by its **system id**, a UUID shown in the `id`
+column of `orca system list`. Verbs that take `--id` route the call to that
+system themselves; `--id` takes a UUID only and refuses a hostname. A verb with
+no `--id` of its own, such as `system.certs.list`, reports on the system the
+call is addressed to: address it to the host's id with the ambient selector
+(`--peer <id>` on the CLI, `peer` in MCP arguments, the `X-Orca-Peer` header on
+REST). That selector is interim, in place until verbs address systems by id
+themselves (orca#815).
 
 ## Level 0 — Diagnose before you touch anything
 
-Read-only probes (all peer-dispatchable):
+Read-only probes:
 
-- `system_update(peer=<id>)` — omit all other args. Reports `current_version`,
+- `system_update(id=<id>)` — omit all other args. Reports `current_version`,
   `channel`, `pinned_to`, `update_available`, `pending_restart`. A
   `-dev+<hash>.dirty` version means a hand-built binary, not a release.
-- `system.certs.list` (`--peer <id>`) — leaf/CA cert days-remaining + `self_secure`. A leaf
-  at `0` days is the cert-expiry deadlock (mesh handshakes fail; see
-  [self-heal](#appendix-cert-expiry-deadlock)).
-- `system.list` / `system.health` (target with `--peer <id>`) — reachability,
+- `system.certs.list`, addressed to the host's id — leaf/CA cert days-remaining
+  and `self_secure` for that host. A leaf at `0` days is the cert-expiry
+  deadlock (mesh handshakes fail; see [self-heal](#appendix-cert-expiry-deadlock)).
+- `system.list` / `system.health --id <id>` — reachability,
   `local_secure`/`peer_secure`.
 - Log scan on the host: `database is locked` (identity convergence failing),
   `certificate expired`, `TLS accept failed`.
@@ -27,7 +33,7 @@ Read-only probes (all peer-dispatchable):
 ## Level 1 — Normal mesh self-update
 
 ```
-system_update(peer=<id>, channel=beta)   # applies the channel's latest release
+system_update(id=<id>, channel=beta)     # applies the channel's latest release
 ```
 
 The host downloads its own target-triple asset over the mesh, sha256-verifies,
@@ -40,7 +46,7 @@ Symptom: host is on a `…-dev+…dirty` build, is pinned, or `update_available`
 `false` while running the wrong version.
 
 ```
-system_update(peer=<id>, version=<tag>)  # e.g. 0.1.1-rc.18
+system_update(id=<id>, version=<tag>)    # e.g. 0.1.1-rc.18
 ```
 
 Passing an explicit `version` **clears any pin and applies that exact release** —
@@ -49,7 +55,7 @@ token-less host is served the asset automatically by a token-holding peer via
 `system_serve_release`.)
 
 > Real example: a host was stuck on `0.1.1-rc.17-dev+gb012fb7.dirty` (a
-> manually-scp'd binary). `system_update(peer=<host>, version=0.1.1-rc.18)`
+> manually-scp'd binary). `system_update(id=<id>, version=0.1.1-rc.18)`
 > returned `applied: 0.1.1-rc.18`, notes `["pin cleared", "applied ..."]`, and
 > the supervisor auto-restarted onto the release. No SSH needed.
 
@@ -58,19 +64,19 @@ token-less host is served the asset automatically by a token-holding peer via
 If `pending_restart` persists (new binary staged but old one still running):
 
 ```
-system_update(peer=<id>, daemon=reclaim)   # or "stop" / "park"
+system_update(id=<id>, daemon=reclaim)     # or "stop" / "park"
 ```
 
 This cycles the supervised daemon onto the staged binary. Re-probe to confirm.
 
-## Level 4 — Targeting fallback (identity not converged)
+## Level 4 — The id doesn't resolve (stale identity)
 
-If a host won't resolve by `machine_id` ("no active paired peer matches
-'<id>'") but resolves by hostname, its `mesh_peers` identity on the caller is
-stale — usually because `converge_peer_identity` has been failing (look for
-`database is locked` in the caller's log; fixed by the busy_timeout change in
-rc.18+). **Target by hostname** to get the update through; once the caller runs
-the fix and convergence completes, `machine_id` targeting works again.
+If `--id <id>` fails with "no active paired peer matches '<id>'", the caller's
+roster holds the host under a stale identity, usually because
+`converge_peer_identity` has been failing (look for `database is locked` in the
+caller's log). Repair the identity rather than working around it: fix the
+caller, let convergence complete (or re-pair the host), then read the host's
+current id from `orca system list` and retry with `--id <id>`.
 
 ## Level 5 — SSH force-reinstall (LAST RESORT)
 
@@ -100,9 +106,9 @@ can't reach hosts your key isn't on, and is easy to get wrong (wrong libc).
 
 ## Verification (run after every level)
 
-- `system_update(peer=<id>)` → `current_version == target`, `pending_restart == null`.
-- `system.certs.list` (`--peer <id>`) → leaf certs healthy.
-- `system.health` (via `--peer <id>`) / `system.list` → reachable, mutual-secure.
+- `system_update(id=<id>)` → `current_version == target`, `pending_restart == null`.
+- `system.certs.list`, addressed to the host's id → leaf certs healthy.
+- `system.health --id <id>` / `system.list` → reachable, mutual-secure.
 - Host log tail is clean (no lock / cert / handshake errors).
 
 ## Appendix: cert-expiry deadlock

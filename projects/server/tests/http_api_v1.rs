@@ -66,7 +66,14 @@ async fn system_health_sweeps_every_system_with_admin_token() {
 async fn system_health_by_id_returns_one_bare_report() {
     let env = with_isolated_env();
     let token = mint_admin_token(&env);
-    // Resolve this system's own id from the sweep, then ask for it by name.
+    std::fs::write(
+        env.db_path
+            .parent()
+            .expect("isolated home")
+            .join("machine_id"),
+        utils::id::new(),
+    )
+    .expect("seed machine_id");
     let (_, sweep) = oneshot_json(
         env.router(),
         "POST",
@@ -75,13 +82,15 @@ async fn system_health_by_id_returns_one_bare_report() {
         Some(serde_json::json!({})),
     )
     .await;
-    let display_name = sweep["systems"][0]["health"]["displayName"]
+    let local = &sweep["systems"][0]["health"];
+    let machine_id = local["machineId"].as_str().unwrap_or_default().to_string();
+    let display_name = local["displayName"]
         .as_str()
         .unwrap_or_default()
         .to_string();
     assert!(
-        !display_name.is_empty(),
-        "sweep must name the system: {sweep}"
+        !machine_id.is_empty() && !display_name.is_empty(),
+        "sweep must identify the system: {sweep}"
     );
 
     let (status, body) = oneshot_json(
@@ -89,7 +98,7 @@ async fn system_health_by_id_returns_one_bare_report() {
         "POST",
         "/api/v1/system.health",
         Some(&token),
-        Some(serde_json::json!({ "id": display_name })),
+        Some(serde_json::json!({ "id": machine_id })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -101,15 +110,32 @@ async fn system_health_by_id_returns_one_bare_report() {
         body.get("systems").is_none(),
         "a single-system answer must NOT be a mesh sweep: {body}"
     );
+
+    // A name is not an id (#783): refused, never resolved.
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/v1/system.health",
+        Some(&token),
+        Some(serde_json::json!({ "id": display_name })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body.to_string().contains("expected a system id (UUID)"),
+        "body: {body}"
+    );
 }
 
-/// A blank id is an invalid id, never "absent": on a mutation it would widen to
-/// "no filter".
+/// A blank id is an invalid id, never "absent": on a read it would widen to a
+/// sweep, on a mutation to "this system" or "no filter".
 #[tokio::test]
 async fn blank_id_is_rejected_naming_the_argument() {
     let env = with_isolated_env();
     let token = mint_admin_token(&env);
     for (tool, args) in [
+        ("system.health", serde_json::json!({ "id": "" })),
+        ("system.health", serde_json::json!({ "id": "   " })),
         (
             "storage.mount.update",
             serde_json::json!({ "id": "", "enabled": false }),

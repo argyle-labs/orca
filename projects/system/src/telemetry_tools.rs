@@ -49,7 +49,7 @@ pub struct SystemTelemetryListArgs {
     /// rows; target another host with the top-level `--peer` flag, which
     /// dispatches this verb to that host.
     #[arg(long)]
-    pub peer_id: Option<String>,
+    pub peer_id: Option<crate::system_id::SystemId>,
     /// Return only rows with `snapshot_at_unix > since_unix`. Omit for the
     /// full retained history (capped in storage).
     #[arg(long)]
@@ -89,7 +89,9 @@ async fn system_telemetry_list(
     args: SystemTelemetryListArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<TelemetrySnapshots> {
-    let peer_id = args.peer_id.unwrap_or_else(|| "local".to_string());
+    let peer_id = args
+        .peer_id
+        .map_or_else(|| "local".to_string(), String::from);
     let limit = args.limit.unwrap_or(256) as usize;
     let rows = db::metrics::with_conn(|conn| {
         hosts::host_status::rows_since(conn, args.since_unix, limit)
