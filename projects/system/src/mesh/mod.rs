@@ -2476,6 +2476,83 @@ pub(crate) async fn connect_mesh_tls(
     }
 }
 
+/// Marks an error as the peer's answer rather than a failure to reach it, so
+/// the dialer does not retry it on another address. `peer_id` is filled in by
+/// the dialer when it knows which peer the address belongs to.
+#[derive(Debug)]
+pub(crate) struct PeerAnswered {
+    pub(crate) peer_id: Option<String>,
+    pub(crate) addr: String,
+}
+
+impl std::fmt::Display for PeerAnswered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.peer_id {
+            Some(id) => write!(f, "answered by peer {id} at {}", self.addr),
+            None => write!(f, "answered by the peer at {}", self.addr),
+        }
+    }
+}
+
+impl std::error::Error for PeerAnswered {}
+
+/// Longest peer error message relayed, in bytes.
+const PEER_MESSAGE_MAX: usize = 4096;
+
+/// A peer's JSON-RPC error, always marked [`PeerAnswered`]: the peer received
+/// the call, so retrying another address could run a mutating tool twice. One
+/// carrying an `OrcaError` kind is re-raised as that error so a remote 400
+/// stays a 400 on this host's surface. The peer's text is untrusted, so
+/// control characters are stripped and its length capped; a 401 is never
+/// relayed, since it would read as this host refusing the caller's own
+/// credentials.
+fn peer_error(addr: &str, err: utils::jsonrpc::ErrorObject) -> anyhow::Error {
+    let answered = anyhow::Error::new(PeerAnswered {
+        peer_id: None,
+        addr: addr.to_string(),
+    });
+    let message = sanitize_peer_message(&err.message);
+    let data = err.data.as_ref();
+    let kind = data
+        .and_then(|d| d.get("kind"))
+        .and_then(|k| serde_json::from_value::<contract::ErrorKind>(k.clone()).ok());
+    let Some(kind) = kind else {
+        return answered.context(format!("peer returned error: {message}"));
+    };
+    let kind = match kind {
+        contract::ErrorKind::Unauthorized => contract::ErrorKind::Forbidden,
+        k => k,
+    };
+    let mut oe = contract::OrcaError::new(kind, message);
+    if let Some(code) = data
+        .and_then(|d| d.get("code"))
+        .and_then(|c| c.as_str())
+        .filter(|c| is_relayable_code(c))
+    {
+        oe = oe.with_code(code);
+    }
+    answered.context(oe)
+}
+
+fn sanitize_peer_message(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().min(PEER_MESSAGE_MAX));
+    for c in raw.chars().filter(|c| !c.is_control()) {
+        if out.len() + c.len_utf8() > PEER_MESSAGE_MAX {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `^[a-z0-9_.]{1,64}$`: the shape of orca's own error codes.
+fn is_relayable_code(code: &str) -> bool {
+    (1..=64).contains(&code.len())
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.')
+}
+
 /// Generic mTLS JSON-RPC roundtrip to a peer over the mesh channel. One-shot:
 /// connect → write one request → read one response → return. No pooling yet;
 /// adopters call this directly per peer. Keeping the connection short-lived
@@ -2515,7 +2592,7 @@ where
         }
     };
     if let Some(err) = resp.error {
-        anyhow::bail!("peer returned error: {}", err.message);
+        return Err(peer_error(host, err));
     }
     let result = resp.result.context("peer response had no result")?;
     serde_json::from_value(result).with_context(|| format!("parse {method} result"))
@@ -2524,6 +2601,57 @@ where
 #[cfg(test)]
 mod mesh_tests {
     use super::*;
+
+    fn classified(kind: &str, code: &str, message: &str) -> utils::jsonrpc::ErrorObject {
+        utils::jsonrpc::ErrorObject {
+            code: -32603,
+            message: message.to_string(),
+            data: Some(serde_json::json!({ "kind": kind, "code": code })),
+        }
+    }
+
+    #[test]
+    fn a_peer_401_is_never_relayed() {
+        let e = peer_error("10.0.0.1", classified("unauthorized", "auth.denied", "no"));
+        let oe = e.downcast_ref::<contract::OrcaError>().unwrap();
+        assert_eq!(oe.kind, contract::ErrorKind::Forbidden);
+        assert_eq!(oe.code.as_deref(), Some("auth.denied"));
+    }
+
+    #[test]
+    fn a_peer_error_code_is_relayed_only_in_orca_code_shape() {
+        let long = "a".repeat(65);
+        for bad in [
+            "",
+            "Args.Invalid",
+            "args invalid",
+            "args-invalid",
+            long.as_str(),
+        ] {
+            let e = peer_error("10.0.0.1", classified("invalid", bad, "x"));
+            let oe = e.downcast_ref::<contract::OrcaError>().unwrap();
+            assert_eq!(oe.code, None, "{bad:?}");
+        }
+        let e = peer_error("10.0.0.1", classified("invalid", "args.invalid_2", "x"));
+        let oe = e.downcast_ref::<contract::OrcaError>().unwrap();
+        assert_eq!(oe.code.as_deref(), Some("args.invalid_2"));
+    }
+
+    #[test]
+    fn a_peer_message_is_stripped_of_control_characters_and_capped() {
+        let e = peer_error(
+            "10.0.0.1",
+            classified("invalid", "args.invalid", "bad\n\u{1b}[31mid\r"),
+        );
+        let oe = e.downcast_ref::<contract::OrcaError>().unwrap();
+        assert_eq!(oe.message, "bad[31mid");
+
+        let huge = "\u{e9}".repeat(PEER_MESSAGE_MAX);
+        let e = peer_error("10.0.0.1", utils::jsonrpc::ErrorObject::internal(&huge));
+        let shown = format!("{e}");
+        assert!(shown.len() <= "peer returned error: ".len() + PEER_MESSAGE_MAX);
+        assert!(e.downcast_ref::<PeerAnswered>().is_some());
+    }
 
     #[test]
     fn ping_result_deserializes_rc24_without_addressing() {
