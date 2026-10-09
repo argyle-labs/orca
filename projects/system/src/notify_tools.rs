@@ -383,7 +383,7 @@ pub struct NotifyCreateArgs {
     pub body: Option<String>,
     /// `raise`: optional user targeting.
     #[arg(long = "user-id")]
-    pub user_id: Option<String>,
+    pub user_id: Option<utils::id::Id>,
     /// `send`: event class — `heartbeat`|`drift`|`rotation`|`lifecycle`|`alert`|
     /// `approval`. Defaults to `alert`.
     #[arg(long)]
@@ -434,7 +434,7 @@ async fn notify_create(
                     .title
                     .ok_or_else(|| anyhow::anyhow!("`title` is required for action=raise"))?,
                 body: args.body,
-                user_id: args.user_id,
+                user_id: args.user_id.map(String::from),
             };
             Ok(NotifyCreateOutput::Raise(Box::new(
                 notify_raise(raise).await?,
