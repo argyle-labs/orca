@@ -256,8 +256,9 @@ struct ToolAttr {
     /// mutations default to `role = "admin"` but become invokable by a
     /// non-admin identity that holds the `can_mutate` opt-in capability. Set by
     /// the surface generators on mutating operations; control-plane admin tools
-    /// leave it off so the opt-in can't reach them. Default off.
-    data_mutation: bool,
+    /// leave it off so the opt-in can't reach them. Default: derived from the
+    /// verb shape; `data_mutation = false` opts a control-plane write out.
+    data_mutation: Option<bool>,
     /// Opt-in: `#[orca_tool(..., execute_gated = true)]` makes this verb
     /// **dry-run by default** — invoked without `execute: true` it returns an
     /// `ExecutionPlan` and changes nothing. Enforced centrally in
@@ -291,7 +292,7 @@ impl Parse for ToolAttr {
         let mut cli_mode = None;
         let mut remote_ok = true;
         let mut refresh_runtime = false;
-        let mut data_mutation = false;
+        let mut data_mutation: Option<bool> = None;
         let mut execute_gated: Option<bool> = None;
         let mut role: Option<LitStr> = None;
         let mut title: Option<LitStr> = None;
@@ -370,7 +371,7 @@ impl Parse for ToolAttr {
                     };
                 }
                 "data_mutation" => {
-                    data_mutation = match &nv.value {
+                    data_mutation = Some(match &nv.value {
                         Expr::Lit(ExprLit {
                             lit: Lit::Bool(b), ..
                         }) => b.value,
@@ -380,7 +381,7 @@ impl Parse for ToolAttr {
                                 "data_mutation expects a bool literal",
                             ));
                         }
-                    };
+                    });
                 }
                 "execute_gated" => {
                     execute_gated = Some(match &nv.value {
@@ -876,8 +877,9 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let remote_ok_lit = attr.remote_ok;
     let read_shaped = is_read_shaped(verb.value().as_str());
     // A verb that changes something is a data mutation, whether or not anyone
-    // remembered to say so.
-    let data_mutation_lit = attr.data_mutation || !read_shaped;
+    // remembered to say so. Control-plane writes (auth, secrets) opt out with
+    // `data_mutation = false` so the `can_mutate` escape hatch cannot reach them.
+    let data_mutation_lit = attr.data_mutation.unwrap_or(!read_shaped);
     // Dry-run is the DEFAULT for every verb that changes something (#636). The
     // gate is DERIVED from the verb's own shape rather than opted into: an
     // opt-in flag is how 61 mutating endpoints ended up ungated while two were
@@ -1696,6 +1698,15 @@ mod tests {
         let attr = parse_attr(quote!(domain = "h", verb = "login", execute_gated = false)).unwrap();
         let out = expand(attr, ok_fn()).unwrap().to_string();
         assert!(out.contains("EXECUTE_GATED : bool = false"), "got: {out}");
+    }
+
+    #[test]
+    fn an_explicit_data_mutation_opt_out_wins_over_the_derivation() {
+        let attr =
+            parse_attr(quote!(domain = "h", verb = "delete", data_mutation = false)).unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
+        assert!(out.contains("DATA_MUTATION : bool = false"), "got: {out}");
+        assert!(out.contains("EXECUTE_GATED : bool = true"), "got: {out}");
     }
 
     #[test]

@@ -92,7 +92,7 @@ async fn auth_session_detail(
 }
 
 /// [MUTATES STATE] Remove a stored credential. `removed=false` if nothing was stored.
-#[orca_tool(domain = "auth.session", verb = "delete")]
+#[orca_tool(domain = "auth.session", verb = "delete", data_mutation = false)]
 async fn auth_session_delete(
     args: AuthLogoutArgs,
     _ctx: &contract::ToolCtx,
@@ -113,7 +113,7 @@ async fn auth_session_delete(
 }
 
 /// [MUTATES STATE] Authenticate with a provider. Anthropic: pass `key`. GitHub: device-flow. Atlassian: PKCE.
-#[orca_tool(domain = "auth.session", verb = "create")]
+#[orca_tool(domain = "auth.session", verb = "create", data_mutation = false)]
 async fn auth_session_create(
     args: AuthLoginArgs,
     _ctx: &contract::ToolCtx,
@@ -273,7 +273,7 @@ fn compute_expires_at(base: utils::time::Timestamp, days: Option<u32>) -> Option
 /// [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is
 /// returned exactly once and cannot be recovered from the DB. Token only
 /// authenticates calls to this host's `:12000` — not to other peers.
-#[orca_tool(domain = "auth.token", verb = "create")]
+#[orca_tool(domain = "auth.token", verb = "create", data_mutation = false)]
 async fn auth_token_create(
     args: TokenCreateArgs,
     ctx: &contract::ToolCtx,
@@ -345,7 +345,7 @@ async fn auth_token_list(
 }
 
 /// [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
-#[orca_tool(domain = "auth.token", verb = "delete")]
+#[orca_tool(domain = "auth.token", verb = "delete", data_mutation = false)]
 async fn auth_token_delete(
     args: TokenRevokeArgs,
     _ctx: &contract::ToolCtx,
@@ -651,7 +651,12 @@ pub struct LogoutOutput {
 /// active session to clear.
 // Not execute-gated, for the same reason as `login`, and because refusing to
 // revoke a session until a second opt-in arrives is a security footgun.
-#[orca_tool(domain = "auth", verb = "logout", execute_gated = false)]
+#[orca_tool(
+    domain = "auth",
+    verb = "logout",
+    execute_gated = false,
+    data_mutation = false
+)]
 async fn auth_logout(_args: LogoutArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<LogoutOutput> {
     let session_path = files::ops::orca_home().map(|d| d.join("session"));
     let mut revoked = false;
@@ -677,6 +682,19 @@ async fn auth_logout(_args: LogoutArgs, _ctx: &contract::ToolCtx) -> anyhow::Res
 mod tests {
     use super::*;
     use utils::time::Timestamp;
+
+    #[test]
+    fn auth_and_pki_writes_are_not_data_mutations() {
+        use contract::OrcaToolDef;
+        // DATA_MUTATION would let a non-admin `can_mutate` caller through.
+        // `auth.login` is role "any", so the flag never widens it.
+        const { assert!(!<AuthSessionCreate as OrcaToolDef>::DATA_MUTATION) };
+        const { assert!(!<AuthSessionDelete as OrcaToolDef>::DATA_MUTATION) };
+        const { assert!(!<AuthTokenCreate as OrcaToolDef>::DATA_MUTATION) };
+        const { assert!(!<AuthTokenDelete as OrcaToolDef>::DATA_MUTATION) };
+        const { assert!(!<AuthLogout as OrcaToolDef>::DATA_MUTATION) };
+        const { assert!(!<crate::pki::PkiCreate as OrcaToolDef>::DATA_MUTATION) };
+    }
 
     // ── validate_token_role ─────────────────────────────────────────────────
 
