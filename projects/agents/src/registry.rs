@@ -192,12 +192,43 @@ struct FfiAgentProvider {
 }
 
 impl FfiAgentProvider {
-    fn fetch<T: for<'de> Deserialize<'de>>(&self, op: &str) -> Vec<T> {
+    fn fetch<T: for<'de> Deserialize<'de> + Originated>(&self, op: &str) -> Vec<T> {
         match (self.invoke)(op, serde_json::json!({})) {
-            Ok(value) => serde_json::from_value(value).unwrap_or_default(),
+            Ok(value) => stamp_origin(
+                serde_json::from_value(value).unwrap_or_default(),
+                &self.name,
+            ),
             Err(_) => Vec::new(),
         }
     }
+}
+
+/// An item whose `origin` core overwrites with the registering provider name,
+/// so a plugin cannot attribute its contributions to another provider.
+trait Originated {
+    fn set_origin(&mut self, origin: &str);
+}
+
+macro_rules! impl_originated {
+    ($($t:ty),*) => {$(
+        impl Originated for $t {
+            fn set_origin(&mut self, origin: &str) {
+                self.origin = origin.to_string();
+            }
+        }
+    )*};
+}
+impl_originated!(AgentDef, HookDef, SkillDef, CommandDef, PromptFragment);
+
+fn stamp_origin<T: Originated>(mut items: Vec<T>, origin: &str) -> Vec<T> {
+    for item in &mut items {
+        item.set_origin(origin);
+    }
+    items
+}
+
+fn decode_stamped<T: for<'de> Deserialize<'de> + Originated>(json: &str, origin: &str) -> Vec<T> {
+    stamp_origin(serde_json::from_str(json).unwrap_or_default(), origin)
 }
 
 impl AgentProvider for FfiAgentProvider {
@@ -275,12 +306,12 @@ pub fn register_from_json(
     prompt_fragments_json: &str,
 ) {
     register_provider(Arc::new(StaticProvider {
+        agents: decode_stamped(agents_json, &name),
+        hooks: decode_stamped(hooks_json, &name),
+        skills: decode_stamped(skills_json, &name),
+        commands: decode_stamped(commands_json, &name),
+        prompt_fragments: decode_stamped(prompt_fragments_json, &name),
         name,
-        agents: serde_json::from_str(agents_json).unwrap_or_default(),
-        hooks: serde_json::from_str(hooks_json).unwrap_or_default(),
-        skills: serde_json::from_str(skills_json).unwrap_or_default(),
-        commands: serde_json::from_str(commands_json).unwrap_or_default(),
-        prompt_fragments: serde_json::from_str(prompt_fragments_json).unwrap_or_default(),
     }));
 }
 
@@ -374,7 +405,7 @@ mod tests {
 
         let roster = compose_agents();
         let owl = roster.iter().find(|a| a.name == "ffi-owl-xyz").unwrap();
-        assert_eq!(owl.origin, "ext");
+        assert_eq!(owl.origin, "ext-plugin-xyz");
 
         deregister_provider("ext-plugin-xyz");
     }
@@ -428,11 +459,14 @@ mod tests {
         assert!(
             agents
                 .iter()
-                .any(|a| a.name == "j-agent-1" && a.origin == "jp")
+                .any(|a| a.name == "j-agent-1" && a.origin == "json-plugin-xyz")
         );
 
         let hooks = compose_hooks();
-        let h = hooks.iter().find(|h| h.origin == "jp").unwrap();
+        let h = hooks
+            .iter()
+            .find(|h| h.origin == "json-plugin-xyz")
+            .unwrap();
         assert_eq!(h.event, HookEvent::PreToolUse);
         assert_eq!(h.matcher, "Write|Edit");
         assert_eq!(h.command, "echo hi");
@@ -446,7 +480,11 @@ mod tests {
         assert!(cmds.iter().any(|c| c.name == "j-cmd-1" && c.body == "c"));
 
         let frags = compose_prompt_fragments();
-        assert!(frags.iter().any(|f| f.heading == "H" && f.origin == "jp"));
+        assert!(
+            frags
+                .iter()
+                .any(|f| f.heading == "H" && f.origin == "json-plugin-xyz")
+        );
 
         deregister_provider("json-plugin-xyz");
     }
@@ -545,7 +583,7 @@ mod tests {
         assert!(compose_agents().iter().any(|a| a.name == "fa"));
         let hook = compose_hooks()
             .iter()
-            .find(|h| h.origin == "fo")
+            .find(|h| h.origin == "ffi-all-xyz")
             .cloned()
             .unwrap();
         assert_eq!(hook.event, HookEvent::Stop);

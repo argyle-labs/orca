@@ -697,6 +697,15 @@ fn register_backends(
                 def.domain
             );
         };
+        // Agent providers are keyed by name and contribute hooks into the
+        // operator's Claude config, so a plugin may only register its own.
+        if def.domain == "agents" && !capability::agent_provider_owned(&def.name, software) {
+            rollback_domain_backends(&registered);
+            bail!(
+                "plugin '{software}' may not register agents provider '{}'; the provider name must be '{software}' or '<owner>/{software}'",
+                def.name
+            );
+        }
         let invoke = make_backend_invoke(backing.clone(), def.invoke_prefix.clone());
         if let Err(e) = register(def, invoke) {
             rollback_domain_backends(&registered);
@@ -1769,7 +1778,7 @@ mod loader_tests {
             backends: vec![
                 sj::to_value(BackendDef {
                     domain: "agents".into(),
-                    name: "loaderfakeplugin-agents".into(),
+                    name: "argyle-labs/loaderfakeplugin".into(),
                     invoke_prefix: "loaderfakeplugin-agents".into(),
                     ..Default::default()
                 })
