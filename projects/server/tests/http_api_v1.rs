@@ -403,6 +403,202 @@ async fn oneshot_with_peer_header(
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
+// ── role gate keys off the decoded tool name (#819) ─────────────────────────
+
+/// `auth.token.create` is admin-only; a read token reaching it could mint
+/// itself an admin token.
+const ENCODED_ADMIN_TOOL: &str = "/api/v1/auth.token%2Ecreate";
+
+#[tokio::test]
+async fn read_token_forbidden_on_a_percent_encoded_admin_tool() {
+    let env = with_isolated_env();
+    let token = mint_token(&env, "read");
+    for path in [
+        ENCODED_ADMIN_TOOL,
+        "/api/v1/auth%2Etoken%2Ecreate",
+        "/api/v1/auth.token%2ecreate",
+        "/api/v1/%61uth.token.create",
+    ] {
+        let (status, bytes) = oneshot_raw(
+            env.router(),
+            "POST",
+            path,
+            Some(&token),
+            Some(serde_json::json!({ "name": "x", "role": "admin", "execute": true })),
+        )
+        .await;
+        let text = String::from_utf8_lossy(&bytes);
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {text}");
+        assert!(text.contains("auth.token.create"), "{path}: {text}");
+    }
+}
+
+#[tokio::test]
+async fn double_encoded_or_mixed_case_tool_names_are_unknown() {
+    let env = with_isolated_env();
+    // Even an admin gets a 404: no tool answers to these spellings.
+    let token = mint_admin_token(&env);
+    for path in [
+        "/api/v1/auth.token%252Ecreate",
+        "/api/v1/Auth.Token.Create",
+        "/api/v1/auth.token.CREATE",
+    ] {
+        let (status, bytes) = oneshot_raw(
+            env.router(),
+            "POST",
+            path,
+            Some(&token),
+            Some(serde_json::json!({ "name": "x", "role": "admin", "execute": true })),
+        )
+        .await;
+        let text = String::from_utf8_lossy(&bytes);
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {text}");
+        assert!(text.contains("tool.unknown"), "{path}: {text}");
+    }
+}
+
+#[tokio::test]
+async fn admin_token_still_reaches_admin_tools() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/v1/auth.token.create",
+        Some(&token),
+        Some(serde_json::json!({ "name": "x", "role": "read", "execute": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body["token"].is_string(), "body: {body}");
+}
+
+const PLUGIN_ANY_TOOL: &str = "http_api_v1_plugin.ping";
+const PLUGIN_ADMIN_TOOL: &str = "http_api_v1_plugin.reset";
+
+fn install_fake_plugin() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        dispatch::set_dynamic_dispatch(
+            Box::new(|name, _args, _caller| {
+                name.starts_with("http_api_v1_plugin.")
+                    .then(|| Ok(serde_json::json!({ "ran": name })))
+            }),
+            Box::new(|| {
+                [PLUGIN_ANY_TOOL, PLUGIN_ADMIN_TOOL]
+                    .into_iter()
+                    .map(|n| serde_json::json!({ "name": n }))
+                    .collect()
+            }),
+        );
+    });
+    dispatch::tool_roles::install_plugin_tools([
+        (
+            PLUGIN_ANY_TOOL.to_string(),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("any"), None, None),
+        ),
+        (
+            PLUGIN_ADMIN_TOOL.to_string(),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("admin"), None, None),
+        ),
+    ]);
+}
+
+#[tokio::test]
+async fn read_token_routes_to_an_any_role_plugin_tool_but_not_an_admin_one() {
+    let env = with_isolated_env();
+    install_fake_plugin();
+    let token = mint_token(&env, "read");
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        &format!("/api/v1/{PLUGIN_ANY_TOOL}"),
+        Some(&token),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["ran"], PLUGIN_ANY_TOOL, "body: {body}");
+
+    let (status, _) = oneshot_raw(
+        env.router(),
+        "POST",
+        "/api/v1/http_api_v1_plugin%2Ereset",
+        Some(&token),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn admin_token_routes_to_an_admin_plugin_tool() {
+    let env = with_isolated_env();
+    install_fake_plugin();
+    let token = mint_admin_token(&env);
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        &format!("/api/v1/{PLUGIN_ADMIN_TOOL}"),
+        Some(&token),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["ran"], PLUGIN_ADMIN_TOOL, "body: {body}");
+}
+
+/// The fixed diagnostics/UPS reads are `any` and route through the REST
+/// dispatcher, so the role gate must know them (MCP-stdio reaches them here).
+#[tokio::test]
+async fn read_token_reaches_fixed_surface_reads() {
+    let env = with_isolated_env();
+    let token = mint_token(&env, "read");
+    for tool in ["diagnostics.diagnose", "ups.state", "ups.config"] {
+        let (status, bytes) = oneshot_raw(
+            env.router(),
+            "POST",
+            &format!("/api/v1/{tool}"),
+            Some(&token),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        let text = String::from_utf8_lossy(&bytes);
+        assert_ne!(status, StatusCode::NOT_FOUND, "{tool}: {text}");
+        assert_ne!(status, StatusCode::FORBIDDEN, "{tool}: {text}");
+    }
+}
+
+/// A body `peer` forwards an unknown name like the `X-Orca-Peer` header does.
+#[tokio::test]
+async fn body_peer_forwards_a_locally_unknown_tool() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let path = "/api/v1/peer_only_plugin.tool";
+    let (status, bytes) = oneshot_raw(
+        env.router(),
+        "POST",
+        path,
+        Some(&token),
+        Some(serde_json::json!({ "peer": "host-a" })),
+    )
+    .await;
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(!text.contains("tool.unknown"), "{status}: {text}");
+
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({ "peer": "  " }),
+        serde_json::json!({ "args": { "peer": "host-a" } }),
+    ] {
+        let (status, bytes) =
+            oneshot_raw(env.router(), "POST", path, Some(&token), Some(body.clone())).await;
+        let text = String::from_utf8_lossy(&bytes);
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}: {text}");
+        assert!(text.contains("tool.unknown"), "{body}: {text}");
+    }
+}
+
 #[tokio::test]
 async fn read_role_token_forbidden_on_secrets_detail() {
     let env = with_isolated_env();

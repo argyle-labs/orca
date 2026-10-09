@@ -32,7 +32,7 @@ use axum::{
 /// "update this system" so the same REST surface that does local work also
 /// drives the fleet.
 #[cfg(feature = "server")]
-const PEER_HEADER: &str = "x-orca-peer";
+pub const PEER_HEADER: &str = "x-orca-peer";
 use serde_json::{Value, json};
 use std::collections::HashMap;
 #[cfg(feature = "server")]

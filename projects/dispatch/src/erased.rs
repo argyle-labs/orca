@@ -144,10 +144,31 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
 
     fn run_json<'a>(&'a self, args: Value, ctx: &'a ToolCtx) -> BoxFuture<'a, Result<Value>> {
         Box::pin(async move {
+            // Every caller-bearing call is authorized here, not only at the
+            // surface: `run_json` is the one path REST, MCP, CLI and mesh/exec
+            // all funnel through, so a surface that mis-keys its own gate (an
+            // encoded path, a missed re-check) still cannot reach the body.
+            // No caller means an in-process owner path with nothing to check.
+            if let Some(caller) = ctx.caller()
+                && !crate::tool_roles::authorize(
+                    &caller.role,
+                    caller.can_mutate,
+                    T::REQUIRED_ROLE,
+                    T::DATA_MUTATION,
+                )
+            {
+                return Err(contract::OrcaError::forbidden(format!(
+                    "{} requires role '{}'; caller '{}' has '{}'",
+                    T::NAME,
+                    T::REQUIRED_ROLE,
+                    caller.username,
+                    caller.role
+                ))
+                .into());
+            }
             // Dry-run is the DEFAULT for every verb that applies changes. No
             // opt-in ⇒ describe and return; the tool body is never entered, so
-            // this cannot half-apply. Enforced here because `run_json` is the
-            // one path all surfaces (REST, MCP, CLI, mesh/exec) funnel through.
+            // this cannot half-apply.
             let args = if T::EXECUTE_GATED {
                 if !execute_opt_in(&args) {
                     let args = without_execute(args);
@@ -159,32 +180,6 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
                     return serde_json::to_value(&plan).map_err(|e| {
                         anyhow::anyhow!("failed to serialize plan for {}: {e}", T::NAME)
                     });
-                }
-                // Opting in is not the same as being allowed. A caller who
-                // asks to APPLY must hold the verb's permission, checked here
-                // and not only at the surface: the REST middleware enforced
-                // this, MCP re-implemented it, and the CLI and mesh/exec paths
-                // enforced nothing at all. Three copies and two gaps is how a
-                // permission model becomes decorative.
-                //
-                // Refused loudly, never downgraded to a dry run — a surface
-                // that returns a plan where the caller asked to apply reports
-                // success for work it did not do.
-                if let Some(caller) = ctx.caller()
-                    && !crate::tool_roles::authorize(
-                        &caller.role,
-                        caller.can_mutate,
-                        T::REQUIRED_ROLE,
-                        T::DATA_MUTATION,
-                    )
-                {
-                    anyhow::bail!(
-                        "{} requires role '{}' to execute; caller '{}' has '{}'",
-                        T::NAME,
-                        T::REQUIRED_ROLE,
-                        caller.username,
-                        caller.role
-                    );
                 }
                 // Strip the opt-in before typed deserialization: it is the
                 // gate's field, not the verb's, and `deny_unknown_fields` args
@@ -809,6 +804,41 @@ mod tests {
             .await
             .expect("can_mutate authorizes a data mutation");
         assert!(ran(target));
+    }
+
+    #[tokio::test]
+    async fn a_caller_below_the_required_role_is_refused_on_an_ungated_tool() {
+        // The surface gate is not the only gate: an ungated admin tool reached
+        // through a surface that mis-keyed its own check must still refuse.
+        let w = ToolWrapper::<DoubleTool>(PhantomData);
+        let err = w
+            .run_json(serde_json::json!({ "n": 1 }), &ctx_as("read", true))
+            .await
+            .expect_err("a read caller must not run an admin tool");
+        let oe = err
+            .downcast_ref::<contract::OrcaError>()
+            .unwrap_or_else(|| panic!("not an OrcaError: {err}"));
+        assert_eq!(oe.kind, contract::ErrorKind::Forbidden, "{oe}");
+        assert!(oe.message.contains("requires role 'admin'"), "{oe}");
+
+        let out = w
+            .run_json(serde_json::json!({ "n": 1 }), &ctx_as("admin", false))
+            .await
+            .expect("an admin runs it");
+        assert_eq!(out["doubled"], serde_json::json!(2));
+    }
+
+    #[tokio::test]
+    async fn a_caller_below_the_required_role_cannot_plan_an_admin_verb() {
+        let target = "unauthorized-admin-plan-target";
+        admin_gated()
+            .run_json(
+                serde_json::json!({ "target": target }),
+                &ctx_as("member", false),
+            )
+            .await
+            .expect_err("role is checked before the dry-run branch");
+        assert!(!ran(target));
     }
 
     #[tokio::test]
