@@ -132,9 +132,11 @@ fn same_v4_slash_24(a: &str, b: &str) -> bool {
     matches!((prefix(a), prefix(b)), (Some(x), Some(y)) if x == y)
 }
 
-/// Try `f(target)` for each `target` in order. Return the first `Ok` value;
-/// if every attempt fails, return the last error. `Err("no dial targets")`
-/// when the slice is empty.
+/// Try `f(target)` for each `target` in order. Return the first `Ok` value, or
+/// stop at the first error the peer answered with (marked
+/// [`crate::mesh::PeerAnswered`]): another address would get the same answer.
+/// If every attempt fails to reach the peer, return the last error.
+/// `Err("no dial targets")` when the slice is empty.
 ///
 /// Generic over the future + return so this combinator is testable without
 /// touching the TLS stack. Callers compose this with `call_typed` (or any
@@ -171,6 +173,16 @@ where
                     crate::mesh::route_health::record_success(pid, t);
                 }
                 return Ok(r);
+            }
+            // The route worked; only the call failed.
+            Err(mut e) if e.downcast_ref::<crate::mesh::PeerAnswered>().is_some() => {
+                if let Some(pid) = peer_id {
+                    crate::mesh::route_health::record_success(pid, t);
+                    if let Some(answered) = e.downcast_mut::<crate::mesh::PeerAnswered>() {
+                        answered.peer_id = Some(pid.to_string());
+                    }
+                }
+                return Err(e);
             }
             Err(e) => {
                 if let Some(pid) = peer_id {
@@ -334,6 +346,64 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("fail: b"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn try_targets_stops_at_an_error_the_peer_answered() {
+        let targets = vec!["a".to_string(), "b".to_string()];
+        let mut tried: Vec<String> = Vec::new();
+        let err = try_targets(&targets, |t| {
+            tried.push(t);
+            async {
+                Err::<(), _>(
+                    anyhow::Error::new(crate::mesh::PeerAnswered {
+                        peer_id: None,
+                        addr: "a".into(),
+                    })
+                    .context(contract::OrcaError::invalid("bad id")),
+                )
+            }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(tried, vec!["a"]);
+        assert!(err.downcast_ref::<contract::OrcaError>().is_some());
+    }
+
+    #[tokio::test]
+    async fn try_targets_stops_at_a_plain_json_rpc_error_and_names_the_peer() {
+        let targets = vec!["a".to_string(), "b".to_string()];
+        let mut tried: Vec<String> = Vec::new();
+        let err = try_targets_tracked(Some("peer-under-test"), &targets, |t| {
+            tried.push(t.clone());
+            async move {
+                Err::<(), _>(crate::mesh::peer_error(
+                    &t,
+                    utils::jsonrpc::ErrorObject::internal("boom"),
+                ))
+            }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(tried, vec!["a"]);
+        assert!(err.downcast_ref::<contract::OrcaError>().is_none());
+        assert!(
+            format!("{err:#}").contains("answered by peer peer-under-test at a"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_targets_retries_a_classified_error_raised_locally() {
+        let targets = vec!["a".to_string(), "b".to_string()];
+        let mut tried: Vec<String> = Vec::new();
+        try_targets(&targets, |t| {
+            tried.push(t);
+            async { Err::<(), _>(contract::OrcaError::unavailable("no route").into()) }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(tried, vec!["a", "b"]);
     }
 
     #[tokio::test]
