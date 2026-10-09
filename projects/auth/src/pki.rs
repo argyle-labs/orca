@@ -95,7 +95,7 @@ pub struct PkiListOutput {
 
 /// [MUTATES STATE] Initialize orca PKI (CA + server cert) or issue a plugin cert.
 /// `kind=ca` is safe to re-run; `kind=cert` requires `plugin_id`.
-#[orca_tool(domain = "pki", verb = "create")]
+#[orca_tool(domain = "pki", verb = "create", data_mutation = false)]
 async fn pki_create(
     args: PkiCreateArgs,
     _ctx: &contract::ToolCtx,
