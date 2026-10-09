@@ -227,6 +227,48 @@ fn stamp_origin<T: Originated>(mut items: Vec<T>, origin: &str) -> Vec<T> {
     items
 }
 
+/// Drop hooks whose matcher or command carries a control character other than
+/// tab, or a Unicode format (Cf) character such as a bidi override or
+/// zero-width space; either can disguise the command an operator approves.
+fn valid_hooks(hooks: Vec<HookDef>) -> Vec<HookDef> {
+    let clean = |s: &str| {
+        !s.chars()
+            .any(|c| (c.is_control() && c != '\t') || is_format_char(c))
+    };
+    hooks
+        .into_iter()
+        .filter(|h| clean(&h.matcher) && clean(&h.command))
+        .collect()
+}
+
+/// Unicode general category Cf (format characters).
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
 fn decode_stamped<T: for<'de> Deserialize<'de> + Originated>(json: &str, origin: &str) -> Vec<T> {
     stamp_origin(serde_json::from_str(json).unwrap_or_default(), origin)
 }
@@ -239,7 +281,7 @@ impl AgentProvider for FfiAgentProvider {
         self.fetch("agents")
     }
     fn hooks(&self) -> Vec<HookDef> {
-        self.fetch("hooks")
+        valid_hooks(self.fetch("hooks"))
     }
     fn skills(&self) -> Vec<SkillDef> {
         self.fetch("skills")
@@ -307,7 +349,7 @@ pub fn register_from_json(
 ) {
     register_provider(Arc::new(StaticProvider {
         agents: decode_stamped(agents_json, &name),
-        hooks: decode_stamped(hooks_json, &name),
+        hooks: valid_hooks(decode_stamped(hooks_json, &name)),
         skills: decode_stamped(skills_json, &name),
         commands: decode_stamped(commands_json, &name),
         prompt_fragments: decode_stamped(prompt_fragments_json, &name),
@@ -328,10 +370,31 @@ pub fn compose_agents() -> Vec<AgentDef> {
     by_name.into_values().collect()
 }
 
-/// Compose all hooks across registered providers (no dedup — every contribution
-/// is a distinct binding; core groups them by `event` when writing settings).
+/// Compose the operator-approved hooks across registered providers (no dedup —
+/// every contribution is a distinct binding; core groups them by `event` when
+/// writing settings). A hook runs an arbitrary shell command in the operator's
+/// Claude session, so only `(origin, hash)` pairs approved via
+/// `agent_hook.approve` are returned; see [`crate::hook_approval`].
 pub fn compose_hooks() -> Vec<HookDef> {
-    providers().iter().flat_map(|p| p.hooks()).collect()
+    let approved = crate::hook_approval::load();
+    all_hooks()
+        .into_iter()
+        .filter(|h| crate::hook_approval::is_approved(&approved, h))
+        .collect()
+}
+
+/// Registered hooks still awaiting operator approval (withheld by [`compose_hooks`]).
+#[cfg(test)]
+pub(crate) fn compose_unapproved_hooks() -> Vec<HookDef> {
+    let approved = crate::hook_approval::load();
+    all_hooks()
+        .into_iter()
+        .filter(|h| !crate::hook_approval::is_approved(&approved, h))
+        .collect()
+}
+
+pub(crate) fn all_hooks() -> Vec<HookDef> {
+    valid_hooks(providers().iter().flat_map(|p| p.hooks()).collect())
 }
 
 /// Compose all skills across registered providers. Registration order is
@@ -462,7 +525,7 @@ mod tests {
                 .any(|a| a.name == "j-agent-1" && a.origin == "json-plugin-xyz")
         );
 
-        let hooks = compose_hooks();
+        let hooks = compose_unapproved_hooks();
         let h = hooks
             .iter()
             .find(|h| h.origin == "json-plugin-xyz")
@@ -581,7 +644,7 @@ mod tests {
         register_from_def("ffi-all-xyz".to_string(), invoke);
 
         assert!(compose_agents().iter().any(|a| a.name == "fa"));
-        let hook = compose_hooks()
+        let hook = compose_unapproved_hooks()
             .iter()
             .find(|h| h.origin == "ffi-all-xyz")
             .cloned()

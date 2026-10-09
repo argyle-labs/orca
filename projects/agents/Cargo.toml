@@ -19,6 +19,9 @@ derive       = { path = "../derive" }
 schemars         = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
+sha2             = { workspace = true }
+hex              = { workspace = true }
+tempfile         = { workspace = true }
 
 db = { package = "db", path = "../db" }
 anyhow = { workspace = true }

@@ -8,6 +8,7 @@
 pub mod agents;
 pub mod commands;
 pub mod embedded;
+pub mod hook_approval;
 pub mod registry;
 pub mod settings;
 
