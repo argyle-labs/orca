@@ -897,15 +897,43 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
+    // `pin_home` holds the crate HOME lock across the awaits on purpose: mesh
+    // tests repoint ORCA_HOME under that lock, not under `serial(env)`. Safe on
+    // the current-thread runtime: nothing awaited here takes the lock.
+    #[allow(clippy::await_holding_lock)]
     async fn system_health_is_lean() {
-        let ctx = empty_ctx();
-        let out = system_health(SystemHealthArgs::default(), &ctx).await;
-        assert!(out.is_ok(), "system_health failed: {:?}", out.err());
-        let h = local_row(out.unwrap());
-        assert!(!h.version.is_empty());
-        assert!(h.checked_at_ms > 0);
-        // `healthy` mirrors the local daemon runtime snapshot.
-        assert_eq!(h.healthy, h.daemon.running);
+        // (state file pid, expected running): absent, our own live pid, dead pid.
+        for (pid, running) in [
+            (None, false),
+            (Some(std::process::id()), true),
+            (Some(99_999_999), false),
+        ] {
+            // A fresh home per case, so the daemon state is the one written here
+            // rather than whatever daemon or roster the host happens to have.
+            let tmp = tempfile::tempdir().unwrap();
+            let _home = crate::mesh::pin_home(tmp.path());
+            if let Some(pid) = pid {
+                utils::state::write(&utils::state::DaemonState {
+                    daemon_pid: pid,
+                    active_pid: pid,
+                    port: 12002,
+                    mode: utils::state::DaemonMode::Daemon,
+                    binary: "/usr/local/bin/orca".to_string(),
+                    version: "0.0.0-test".to_string(),
+                    started_at: utils::time::Timestamp::now(),
+                })
+                .expect("write daemon state");
+            }
+            let ctx = empty_ctx();
+            let out = system_health(SystemHealthArgs::default(), &ctx).await;
+            assert!(out.is_ok(), "system_health failed: {:?}", out.err());
+            let h = local_row(out.unwrap());
+            assert!(!h.version.is_empty());
+            assert!(h.checked_at_ms > 0);
+            assert_eq!(h.daemon.running, running, "pid {pid:?}");
+            assert_eq!(h.healthy, running, "pid {pid:?}");
+            assert_eq!(h.daemon.pid, pid);
+        }
     }
 
     #[tokio::test]
