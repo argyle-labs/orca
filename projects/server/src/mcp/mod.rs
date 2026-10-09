@@ -439,7 +439,16 @@ pub async fn handle_jsonrpc(
                 // Strip them and fold onto a per-call ctx clone (base ctx
                 // stays immutable across concurrent calls) so the universal
                 // macro peer-dispatch stanza fires for every remote_ok tool.
-                let (clean_args, peer, correlation_id) = dispatch::take_ambient(args.clone());
+                let (clean_args, peer, correlation_id) = match dispatch::take_ambient(args.clone())
+                {
+                    Ok(ambient) => ambient,
+                    Err(e) => {
+                        return Some(reply(
+                            id,
+                            json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
+                        ));
+                    }
+                };
                 let ctx_owned = if peer.is_some() || correlation_id.is_some() {
                     let mut ctx = tool_ctx.clone();
                     ctx.set_peer(peer);
@@ -1546,6 +1555,28 @@ mod tests {
             resp["error"]["code"], -32000,
             "insufficient role must yield an authz error, not a dispatch"
         );
+    }
+
+    #[tokio::test]
+    async fn handle_jsonrpc_tools_call_refuses_a_blank_peer() {
+        ::model::ensure_crypto_provider();
+        let (ctx, pool, cfg) = jsonrpc_fixtures();
+        let mut reg = HashMap::new();
+        let tool = *dispatch::names()
+            .first()
+            .expect("a core tool is registered");
+        let req = json!({
+            "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+            "params": { "name": tool, "arguments": { "peer": "  " } }
+        });
+        let resp = handle_jsonrpc(&req, &ctx, &pool, &mut reg, &cfg, true, Some("admin"), true)
+            .await
+            .expect("tools/call must reply");
+        assert_eq!(resp["result"]["isError"], true, "{resp}");
+        let text = resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("peer: a blank"), "{resp}");
     }
 
     #[tokio::test]
