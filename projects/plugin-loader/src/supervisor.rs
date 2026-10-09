@@ -325,13 +325,9 @@ impl PluginProcess {
     /// sideload from an arbitrary path before the id is recorded), the declared
     /// `Hello` id is accepted and used as the principal.
     pub fn spawn(exe: &Path, expected_id: Option<&str>) -> Result<Self> {
-        use std::os::unix::net::UnixListener;
-
-        let sock_path = socket_path_for(exe);
         // Bind BEFORE spawn so the child's connect() can't race an unbound path.
-        _ = std::fs::remove_file(&sock_path);
-        let listener = UnixListener::bind(&sock_path)
-            .with_context(|| format!("binding plugin socket {sock_path:?}"))?;
+        let (rendezvous, listener) = bind_rendezvous(private_socket_dir()?, "s.sock")?;
+        let sock_path = rendezvous.sock.clone();
 
         // Trust model: the env is scrubbed so daemon secrets don't leak by
         // default, but the plugin runs as the daemon's uid — it can still read
@@ -358,17 +354,33 @@ impl PluginProcess {
                 cmd.env(k, v);
             }
         }
-        let child = cmd
+        let spawned = cmd
             .spawn()
-            .with_context(|| format!("spawning plugin executable {exe:?}"))?;
-
-        // The child connects back; accept its single session connection.
-        let (mut stream, _addr) = listener
-            .accept()
-            .with_context(|| format!("accepting connection from plugin {exe:?}"))?;
-        // The path is only needed for the connect rendezvous; unlink now so a
+            .with_context(|| format!("spawning plugin executable {exe:?}"));
+        let accepted = spawned.and_then(|mut child| {
+            // The child connects back; accept its single session connection.
+            let stream = listener
+                .accept()
+                .map(|(stream, _addr)| stream)
+                .with_context(|| format!("accepting connection from plugin {exe:?}"))
+                .and_then(|stream| {
+                    verify_peer(&stream, child.id())
+                        .with_context(|| format!("plugin {exe:?} session peer"))?;
+                    Ok(stream)
+                });
+            match stream {
+                Ok(stream) => Ok((child, stream)),
+                Err(e) => {
+                    _ = child.kill();
+                    _ = child.wait();
+                    Err(e)
+                }
+            }
+        });
+        // The dir is only needed for the connect rendezvous; remove it now so a
         // crash can't leave a stale socket blocking a respawn.
-        _ = std::fs::remove_file(&sock_path);
+        drop(rendezvous);
+        let (child, mut stream) = accepted?;
 
         let hs = handshake(&mut stream, CAPABILITIES)?;
         // Authoritative principal: the install id when known (validate the
@@ -424,12 +436,141 @@ impl Drop for PluginProcess {
     }
 }
 
-/// A per-plugin socket rendezvous path under the temp dir. The plugin name plus
-/// the daemon pid keeps it unique across plugins and daemon restarts without
-/// needing a clock or RNG (both unavailable / undesirable here).
-fn socket_path_for(exe: &Path) -> std::path::PathBuf {
-    let stem = exe.file_stem().and_then(|s| s.to_str()).unwrap_or("plugin");
-    std::env::temp_dir().join(format!("orca-plugin-{stem}-{}.sock", std::process::id()))
+/// Create a fresh 0700 directory under the temp dir to hold one plugin's
+/// rendezvous socket, so no other uid can connect to (or pre-plant) it.
+///
+/// `mkdir` with the mode is atomic (umask only narrows it). The name is
+/// predictable, so an existing entry is adopted only if it is a real directory
+/// (not a symlink) owned by us with mode 0700 — e.g. left by a crashed spawn.
+///
+/// Names stay short: macOS `$TMPDIR` is long and `sun_path` caps at 104 bytes.
+fn private_socket_dir() -> Result<std::path::PathBuf> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "orca-plugin-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    ensure_private_dir(&dir)?;
+    Ok(dir)
+}
+
+fn ensure_private_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("creating plugin socket dir {dir:?}")),
+    }
+    let meta = std::fs::symlink_metadata(dir)
+        .with_context(|| format!("inspecting plugin socket dir {dir:?}"))?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    if !meta.file_type().is_dir()
+        || meta.uid() != euid
+        || meta.permissions().mode() & 0o777 != 0o700
+    {
+        bail!("plugin socket dir {dir:?} is not a 0700 directory owned by uid {euid} — refusing");
+    }
+    Ok(())
+}
+
+/// A plugin's private socket dir and socket path, removed on drop so every
+/// exit path from [`PluginProcess::spawn`] cleans up.
+struct Rendezvous {
+    dir: std::path::PathBuf,
+    sock: std::path::PathBuf,
+}
+
+impl Drop for Rendezvous {
+    fn drop(&mut self) {
+        _ = std::fs::remove_file(&self.sock);
+        _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+/// Bind `name` inside `dir`, which the returned guard (or a failed bind)
+/// removes.
+fn bind_rendezvous(
+    dir: std::path::PathBuf,
+    name: &str,
+) -> Result<(Rendezvous, std::os::unix::net::UnixListener)> {
+    let rendezvous = Rendezvous {
+        sock: dir.join(name),
+        dir,
+    };
+    _ = std::fs::remove_file(&rendezvous.sock);
+    let listener = std::os::unix::net::UnixListener::bind(&rendezvous.sock)
+        .with_context(|| format!("binding plugin socket {:?}", rendezvous.sock))?;
+    Ok((rendezvous, listener))
+}
+
+/// Refuse a session connection that did not come from the spawned child.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn verify_peer(stream: &std::os::unix::net::UnixStream, child_pid: u32) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred`/`len` are valid for the ucred-sized write SO_PEERCRED does.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast(),
+            &raw mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("SO_PEERCRED");
+    }
+    check_peer_pid(cred.pid as u32, child_pid)
+}
+
+/// Refuse a session connection that did not come from the spawned child.
+#[cfg(target_vendor = "apple")]
+fn verify_peer(stream: &std::os::unix::net::UnixStream, child_pid: u32) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: `pid`/`len` are valid for the pid_t-sized write LOCAL_PEERPID does.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast(),
+            &raw mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("LOCAL_PEERPID");
+    }
+    check_peer_pid(pid as u32, child_pid)
+}
+
+/// Platforms without a peer-pid query rely on the 0700 socket dir alone.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn verify_peer(_stream: &std::os::unix::net::UnixStream, _child_pid: u32) -> Result<()> {
+    Ok(())
+}
+
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "android", target_vendor = "apple")),
+    allow(dead_code)
+)]
+fn check_peer_pid(peer_pid: u32, child_pid: u32) -> Result<()> {
+    if peer_pid != child_pid {
+        bail!("connection came from pid {peer_pid}, not the spawned plugin pid {child_pid}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -449,6 +590,75 @@ mod tests {
             backends: vec![],
             schema: Value::Null,
         }
+    }
+
+    #[test]
+    fn private_socket_dir_is_owner_only() {
+        // Skip inside the spawned plugin child: it is killed mid-run and
+        // would leak the dir.
+        if std::env::var_os(SOCKET_ENV).is_some() {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = private_socket_dir().unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        std::fs::remove_dir(&dir).unwrap();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[test]
+    fn bind_failure_removes_socket_dir() {
+        // Skip inside the spawned plugin child: it is killed mid-run and
+        // would leak the dir.
+        if std::env::var_os(SOCKET_ENV).is_some() {
+            return;
+        }
+        let dir = private_socket_dir().unwrap();
+        // Longer than any platform's sun_path, so bind() must fail.
+        let res = bind_rendezvous(dir.clone(), &"s".repeat(200));
+        assert!(res.is_err());
+        assert!(!dir.exists(), "socket dir left behind: {dir:?}");
+    }
+
+    #[test]
+    fn rendezvous_drop_removes_socket_and_dir() {
+        // Skip inside the spawned plugin child: it is killed mid-run and
+        // would leak the dir.
+        if std::env::var_os(SOCKET_ENV).is_some() {
+            return;
+        }
+        let dir = private_socket_dir().unwrap();
+        let (rendezvous, _listener) = bind_rendezvous(dir.clone(), "s.sock").unwrap();
+        assert!(rendezvous.sock.exists());
+        drop(rendezvous);
+        assert!(!dir.exists(), "socket dir left behind: {dir:?}");
+    }
+
+    #[test]
+    fn ensure_private_dir_refuses_loose_or_symlinked_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let loose = tmp.path().join("loose");
+        std::fs::create_dir(&loose).unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(ensure_private_dir(&loose).is_err());
+
+        let target = tmp.path().join("target");
+        ensure_private_dir(&target).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(ensure_private_dir(&link).is_err());
+
+        // A leftover dir that is already ours and 0700 is adopted.
+        ensure_private_dir(&target).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn verify_peer_matches_connecting_pid_only() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        verify_peer(&a, std::process::id()).unwrap();
+        assert!(verify_peer(&a, std::process::id() + 1).is_err());
     }
 
     #[test]
@@ -745,21 +955,17 @@ mod tests {
     }
 
     #[test]
-    fn socket_path_uses_stem_and_pid() {
-        let p = socket_path_for(Path::new("/opt/plugins/jellyfin"));
+    fn private_socket_dir_names_by_pid() {
+        // Skip inside the spawned plugin child: it is killed mid-run and
+        // would leak the dir.
+        if std::env::var_os(SOCKET_ENV).is_some() {
+            return;
+        }
+        let p = private_socket_dir().unwrap();
+        std::fs::remove_dir(&p).unwrap();
         let name = p.file_name().unwrap().to_str().unwrap();
-        assert!(name.starts_with("orca-plugin-jellyfin-"), "got: {name}");
-        assert!(name.ends_with(&format!("{}.sock", std::process::id())));
-        // A pathless / extension-only exe falls back to a stable stem.
-        let fallback = socket_path_for(Path::new("plugin.exe"));
-        assert!(
-            fallback
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .starts_with("orca-plugin-plugin-")
-        );
+        let prefix = format!("orca-plugin-{}-", std::process::id());
+        assert!(name.starts_with(&prefix), "got: {name}");
     }
 
     #[test]
