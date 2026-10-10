@@ -29,8 +29,11 @@ pub struct SystemInfoReport {
 
     // ── Virtualization ──
     /// Hypervisor / container kind: `kvm`, `qemu`, `vmware`, `lxc`,
-    /// `docker`, `none`, etc. Linux-only — read from `/sys/class/dmi/id/`
-    /// + `/proc/1/cgroup`. macOS reports `None`.
+    /// `docker`, `none`, etc. Linux-only. Container signals (`container=` in
+    /// `/proc/1/environ`, `/run/systemd/container`, `/.dockerenv`,
+    /// `/proc/1/cgroup`, lxcfs mounted over `/proc`) win over DMI
+    /// (`/sys/class/dmi/id/`), which inside a container describes the host.
+    /// macOS reports `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtualization: Option<String>,
     /// DMI system vendor (`QEMU`, `Dell Inc.`, `LENOVO`, ...). Linux-only.
