@@ -1915,6 +1915,40 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    async fn naming_this_system_by_its_own_id_answers_here() {
+        reset_registry();
+        register_adapter(Arc::new(RowsAdapter {
+            kind: RuntimeKind::Docker,
+            rows: vec![row("local-only", "mint", RuntimeKind::Docker)],
+            fail: false,
+        }));
+        let me = "019f9f7b-1111-7e40-9e30-4987d8d12dcb";
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = SpyMesh {
+            peers: vec![peer(me, "mint", true), peer("mid-baldur", "baldur", false)],
+            holdings: Default::default(),
+            calls: Arc::clone(&calls),
+        }
+        .ctx();
+
+        let out = containers_list(
+            ContainersListArgs {
+                system: Some(me.into()),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .await
+        .expect("own id resolves to this system");
+
+        assert_eq!(out.containers.len(), 1);
+        assert_eq!(out.containers[0].name, "local-only");
+        assert!(calls.lock().unwrap().is_empty(), "dialed itself");
+        reset_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     async fn naming_this_system_answers_here_without_dialing_anyone() {
         reset_registry();
         register_adapter(Arc::new(RowsAdapter {
