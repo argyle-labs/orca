@@ -7,10 +7,10 @@
 //! snapshots, not "history".
 //!
 //! Storage holds only this host's own rows (telemetry is local-only, fetched on
-//! demand), so the verb takes no address: a call addressed to another system's
-//! id is routed there like any other verb, and the rows read here are always
-//! this system's own, stamped with its id at read time. Read-only — writers
-//! live in the server's background tasks.
+//! demand), so `--id <other system>` is forwarded to that system, which reads
+//! and stamps its own rows. Rows are only ever stamped with the id of the
+//! system that read them. Read-only — writers live in the server's background
+//! tasks.
 //!
 //! Lives in the `system` crate (not `mesh`): it reads only `hosts::host_status`,
 //! `db::metrics`, and this crate's `SystemInfoReport`, so it carries no mesh
@@ -20,6 +20,7 @@ use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::system_id::SystemId;
 use crate::system_info_types::SystemInfoReport;
 
 #[derive::snake_aliases]
@@ -47,9 +48,9 @@ pub struct TelemetrySnapshots(pub Vec<TelemetrySnapshotRow>);
 pub struct SystemTelemetryListArgs {
     /// Refused with a 400 unless null. These args carry no
     /// `deny_unknown_fields`, so an ignored `peerId` would answer with this
-    /// system's rows; another system's telemetry is read by addressing the call
-    /// to its id. Null is accepted because clients that serialize an unset
-    /// optional `peerId` send it.
+    /// system's rows; another system's telemetry is read with `id`. Null is
+    /// accepted because clients that serialize an unset optional `peerId`
+    /// send it.
     #[serde(
         default,
         alias = "peer_id",
@@ -59,6 +60,10 @@ pub struct SystemTelemetryListArgs {
     #[schemars(skip)]
     #[arg(skip)]
     pub peer_id: Option<()>,
+    /// Read ONE system's telemetry, by its id (the stable `machineId` UUID).
+    /// Omit for this system.
+    #[arg(long)]
+    pub id: Option<SystemId>,
     /// Return only rows with `snapshot_at_unix > since_unix`. Omit for the
     /// full retained history (capped in storage).
     #[arg(long)]
@@ -74,7 +79,7 @@ fn refuse_peer_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<()>, 
         None => Ok(None),
         Some(_) => Err(serde::de::Error::custom(
             "`peerId` is not an argument of system.telemetry.list: it reads the telemetry of \
-             the system the call is addressed to; address the call to that system's id",
+             the system named by `id`; pass that system's id as `id`",
         )),
     }
 }
@@ -109,14 +114,39 @@ fn rows_to_dtos(
         .collect()
 }
 
+/// Refuse a forwarded answer containing any row stamped with a different
+/// system's id, so one host's numbers can never be returned as another's.
+fn only_rows_of(id: &str, out: TelemetrySnapshots) -> anyhow::Result<TelemetrySnapshots> {
+    if let Some(r) = out.0.iter().find(|r| !r.system_id.eq_ignore_ascii_case(id)) {
+        anyhow::bail!(
+            "system `{id}` answered with telemetry stamped `{}`; refusing to label it `{id}`",
+            r.system_id
+        );
+    }
+    Ok(out)
+}
+
 /// Per-host snapshot timeseries, newest-first. Latest snapshot is already on
 /// `system.list` (each member row enriches its `system` field from the same
 /// `host_status` table), so this verb is the timeseries tail behind it.
 #[orca_tool(domain = "system.telemetry", verb = "list")]
 async fn system_telemetry_list(
     args: SystemTelemetryListArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<TelemetrySnapshots> {
+    // Without a host identity this system cannot be the one `id` names, so
+    // the read still forwards rather than failing on the missing identity.
+    if let Some(id) = args.id.clone()
+        && !crate::host_identity::try_machine_id().is_some_and(|me| id.eq_ignore_ascii_case(me))
+    {
+        // Ask with NO id: the target reports on itself, so a hop can never
+        // bounce onward.
+        let remote = SystemTelemetryListArgs { id: None, ..args };
+        let out = dispatch::cli::exec_remote::<SystemTelemetryList>(&id, remote, ctx)
+            .await
+            .map_err(|e| anyhow::anyhow!("telemetry of system `{id}` is unavailable: {e:#}"))?;
+        return only_rows_of(&id, out);
+    }
     let system_id = this_system_id()?;
     let limit = args.limit.unwrap_or(256) as usize;
     let rows = db::metrics::with_conn(|conn| {
@@ -235,6 +265,127 @@ mod tests {
         let schema = schemars::schema_for!(SystemTelemetryListArgs);
         let props = schema.get("properties").expect("properties");
         assert!(props.get("peerId").is_none(), "{props}");
+    }
+
+    const THOR: &str = "019f9f7b-3333-7e40-9e30-4987d8d12dcb";
+
+    /// `(peer, tool, forwarded id, forwarded limit)` per forwarded call.
+    type Calls =
+        std::sync::Arc<std::sync::Mutex<Vec<(String, String, Option<String>, Option<u64>)>>>;
+
+    /// Records every forwarded call and answers with one row stamped `stamp`,
+    /// or fails when `stamp` is `None` (an unreachable system).
+    struct SpyMesh {
+        stamp: Option<&'static str>,
+        calls: Calls,
+    }
+
+    #[async_trait::async_trait]
+    impl contract::RemoteExec for SpyMesh {
+        #[allow(clippy::disallowed_types)]
+        async fn exec(
+            &self,
+            peer: &str,
+            tool: &str,
+            args: serde_json::Value,
+            _caller: Option<contract::CallerIdentity>,
+            _correlation_id: Option<String>,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.calls.lock().unwrap().push((
+                peer.to_string(),
+                tool.to_string(),
+                args.get("id").and_then(|v| v.as_str()).map(str::to_string),
+                args.get("limit").and_then(|v| v.as_u64()),
+            ));
+            let Some(stamp) = self.stamp else {
+                anyhow::bail!("unreachable");
+            };
+            Ok(serde_json::json!([{
+                "systemId": stamp,
+                "snapshotAtUnix": 7,
+                "receivedAtUnix": 8,
+                "source": "local",
+            }]))
+        }
+    }
+
+    fn spy_ctx(stamp: Option<&'static str>) -> (contract::ToolCtx, Calls) {
+        use contract::config::{Config, Model};
+        let dir = std::env::temp_dir().join("orca-telemetry-route-test");
+        let mut ctx = contract::ToolCtx::new(std::sync::Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: dir.clone(),
+            memory_root: dir.clone(),
+            db_path: dir.join("telemetry-test.db"),
+            ports: Default::default(),
+        }));
+        let calls = std::sync::Arc::default();
+        ctx.register_service(std::sync::Arc::new(SpyMesh {
+            stamp,
+            calls: std::sync::Arc::clone(&calls),
+        }) as std::sync::Arc<dyn contract::RemoteExec>);
+        (ctx, calls)
+    }
+
+    fn addressed_to(id: &str) -> SystemTelemetryListArgs {
+        serde_json::from_value(serde_json::json!({ "id": id, "limit": 5 })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_id_naming_another_system_reads_that_systems_telemetry() {
+        me();
+        let (ctx, calls) = spy_ctx(Some(THOR));
+        let out = system_telemetry_list(addressed_to(THOR), &ctx)
+            .await
+            .expect("routed read");
+        assert_eq!(out.0.len(), 1);
+        assert_eq!(out.0[0].system_id, THOR);
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].0, THOR);
+        assert_eq!(calls[0].1, "system.telemetry.list");
+        // The target reports on itself: the id is not forwarded, the filters are.
+        assert_eq!(calls[0].2, None);
+        assert_eq!(calls[0].3, Some(5));
+    }
+
+    #[tokio::test]
+    async fn a_remote_read_forwards_without_a_host_identity() {
+        // Deliberately no `me()`: under nextest this process has no identity.
+        let (ctx, calls) = spy_ctx(Some(THOR));
+        let out = system_telemetry_list(addressed_to(THOR), &ctx)
+            .await
+            .expect("forwarded without a local identity");
+        assert_eq!(out.0[0].system_id, THOR);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_system_is_an_error_not_local_rows() {
+        me();
+        let (ctx, _) = spy_ctx(None);
+        let err = system_telemetry_list(addressed_to(THOR), &ctx)
+            .await
+            .err()
+            .expect("unreachable target must fail");
+        assert!(err.to_string().contains(THOR), "{err}");
+    }
+
+    #[tokio::test]
+    async fn rows_stamped_with_another_system_are_refused() {
+        let me = me();
+        let (ctx, _) = spy_ctx(Some(me));
+        let err = system_telemetry_list(addressed_to(THOR), &ctx)
+            .await
+            .err()
+            .expect("mislabelled rows must be refused");
+        assert!(err.to_string().contains("refusing"), "{err}");
     }
 
     #[test]
