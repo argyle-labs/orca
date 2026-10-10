@@ -68,9 +68,10 @@ base64 = { workspace = true }
 # macOS self-restart detaches the launchctl-kickstart helper into its own
 # session via `setsid(2)` so the supervisor killing THIS daemon's job (which
 # SIGKILLs the whole job process tree) can't take the helper down mid-restart.
-# No `setsid` binary ships on macOS, so we call it through `pre_exec`. libc is
-# already present transitively; declared direct + macOS-only here.
-[target.'cfg(target_os = "macos")'.dependencies]
+# No `setsid` binary ships on macOS, so we call it through `pre_exec`. The
+# crontab helper (`cron.rs`) also needs getpwnam_r/geteuid/kill on Linux. libc
+# is already present transitively; declared direct for every unix target.
+[target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
 [dev-dependencies]
@@ -79,8 +80,7 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 serial_test = { workspace = true }
 wiremock = { workspace = true }
 db = { package = "db", path = "../db", features = ["test-util"] }
-# Non-macOS dev-dep: a hook test drives libc fork/dup2/waitpid directly, which
-# must compile on the Linux CI runner too (the prod dep above is macOS-only).
+# A hook test drives libc fork/dup2/waitpid directly.
 libc = { workspace = true }
 
 [lints]
