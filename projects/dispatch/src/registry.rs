@@ -35,9 +35,10 @@ use axum::{
 pub const PEER_HEADER: &str = "x-orca-peer";
 use serde_json::{Value, json};
 use std::collections::HashMap;
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "in-process"))]
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::erased::{ErasedTool, value_to_text};
 use crate::inventory_slice::ToolRegistration;
@@ -60,16 +61,11 @@ fn cache() -> &'static ToolCache {
         let mut ordered: Vec<Box<dyn ErasedTool>> = Vec::new();
         let mut by_name: HashMap<&'static str, usize> = HashMap::new();
         for entry in inventory::iter::<ToolRegistration> {
-            // Dedup by name rather than panicking. A `cdylib` built with
-            // `crate-type = ["cdylib", "rlib"]` (the orca plugin artifact shape)
-            // emits the `inventory` link-section entries twice — once from each
-            // crate-type's object set — so a plugin's own `tool_manifest_json()`
-            // would otherwise see every tool twice. This walk runs inside the
-            // plugin's `extern "C"` `manifest()` accessor, where a panic cannot
-            // unwind across FFI and would abort the host process — exactly the
-            // UB-equivalent the abi contract forbids. First registration wins;
-            // genuinely conflicting names are a build-time concern, not a
-            // runtime abort.
+            // Dedup by name rather than panicking: an artifact built with more
+            // than one crate-type (e.g. `["cdylib", "rlib"]`) emits each
+            // `inventory` entry once per crate-type, and a duplicate must not
+            // abort `tool_manifest_json()` while a plugin builds its handshake
+            // manifest. First registration wins.
             if by_name.contains_key(entry.name) {
                 continue;
             }
@@ -126,31 +122,100 @@ pub fn set_dynamic_dispatch(invoke: Box<DynamicInvoker>, defs: Box<DynamicDefs>)
 /// Try the installed dynamic fallback for `name`. `None` when no fallback is
 /// installed or no loaded plugin owns the name.
 ///
-/// The invoker blocks (plugin socket I/O, capability `block_on`), so it runs on
-/// a dedicated thread: called on an async worker it would panic with a nested
-/// runtime (#798). dispatch links no tokio runtime, so `spawn_blocking` is not
-/// available, and `block_in_place` panics on current-thread runtimes.
+/// This layer owns keeping plugin invokes off async workers: the invoker blocks
+/// on plugin socket I/O, so it runs on a dedicated thread (a nested `block_on`
+/// there would panic, #798). Threads are capped by [`invoke_permits`] and each
+/// call is bounded by [`plugin_invoke_timeout`].
+#[cfg(feature = "in-process")]
 async fn dynamic_dispatch(
     name: &str,
     args: &Value,
     caller: Option<&contract::CallerIdentity>,
 ) -> Option<Result<Value>> {
     let invoker = DYNAMIC_INVOKER.get()?;
-    let (name, args, caller) = (name.to_string(), args.clone(), caller.cloned());
-    let (tx, rx) = futures::channel::oneshot::channel();
-    let spawned = std::thread::Builder::new()
-        .name("plugin-invoke".into())
-        .spawn(move || {
-            // A dropped receiver means the caller went away; nothing to report.
-            tx.send(invoker(&name, &args, caller.as_ref())).ok();
-        });
-    if let Err(e) = spawned {
-        return Some(Err(anyhow::anyhow!("spawn plugin invoke thread: {e}")));
+    let (owned, args, caller) = (name.to_string(), args.clone(), caller.cloned());
+    let result = run_off_worker(invoke_permits(), plugin_invoke_timeout(), move || {
+        invoker(&owned, &args, caller.as_ref())
+    })
+    .await;
+    match result {
+        Ok(found) => found,
+        Err(e) => Some(Err(e.context(format!("plugin tool '{name}'")))),
     }
-    match rx.await {
-        Ok(result) => result,
-        Err(_) => Some(Err(anyhow::anyhow!("plugin invoke thread panicked"))),
-    }
+}
+
+/// Without `in-process` no host installs an invoker, so nothing to bound.
+#[cfg(not(feature = "in-process"))]
+async fn dynamic_dispatch(
+    name: &str,
+    args: &Value,
+    caller: Option<&contract::CallerIdentity>,
+) -> Option<Result<Value>> {
+    DYNAMIC_INVOKER.get().and_then(|f| f(name, args, caller))
+}
+
+/// Upper bound on one plugin invoke, from `ORCA_PLUGIN_INVOKE_TIMEOUT_SECS`
+/// (default 300s). The plugin loader applies the same bound to its socket I/O.
+pub fn plugin_invoke_timeout() -> Duration {
+    static TIMEOUT: OnceLock<Duration> = OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        let secs = std::env::var("ORCA_PLUGIN_INVOKE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(300);
+        Duration::from_secs(secs)
+    })
+}
+
+/// Concurrent plugin-invoke threads, from `ORCA_PLUGIN_INVOKE_THREADS`
+/// (default 32).
+#[cfg(feature = "in-process")]
+fn invoke_permits() -> Arc<tokio::sync::Semaphore> {
+    static PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    PERMITS
+        .get_or_init(|| {
+            let n = std::env::var("ORCA_PLUGIN_INVOKE_THREADS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(32);
+            Arc::new(tokio::sync::Semaphore::new(n))
+        })
+        .clone()
+}
+
+/// Run blocking `f` on its own thread, holding a permit from `permits` for the
+/// thread's whole life so a hung call keeps counting against the cap. Waiting
+/// for a permit and for `f` both count toward `timeout`; on timeout the thread
+/// is abandoned, not killed.
+#[cfg(feature = "in-process")]
+async fn run_off_worker<T: Send + 'static>(
+    permits: Arc<tokio::sync::Semaphore>,
+    timeout: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T> {
+    let span = tracing::Span::current();
+    let run = async move {
+        let permit = permits
+            .acquire_owned()
+            .await
+            .map_err(|e| anyhow::anyhow!("plugin invoke pool closed: {e}"))?;
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::Builder::new()
+            .name("plugin-invoke".into())
+            .spawn(move || {
+                let _permit = permit;
+                // A dropped receiver means the caller went away; nothing to report.
+                tx.send(span.in_scope(f)).ok();
+            })
+            .map_err(|e| anyhow::anyhow!("spawn plugin invoke thread: {e}"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("plugin invoke thread panicked"))
+    };
+    tokio::time::timeout(timeout, run)
+        .await
+        .map_err(|_| anyhow::anyhow!("plugin invoke timed out after {timeout:?}"))?
 }
 
 /// JSON tool defs contributed by loaded cdylib plugins. Empty when no fallback
@@ -1205,6 +1270,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, json!({ "nested": true }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plugin_invoke_that_hangs_times_out() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let err = run_off_worker(permits.clone(), Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(500))
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+        assert_eq!(
+            permits.available_permits(),
+            0,
+            "the hung thread still holds its permit"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plugin_invoke_waits_for_a_free_permit_within_the_timeout() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let _held = permits.clone().acquire_owned().await.unwrap();
+        let err = run_off_worker(permits, Duration::from_millis(50), || ())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plugin_invoke_returns_the_thread_result_and_frees_the_permit() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let out = run_off_worker(permits.clone(), Duration::from_secs(5), || 7)
+            .await
+            .unwrap();
+        assert_eq!(out, 7);
+        // The permit drops with the thread, just after it sends.
+        let _permit = tokio::time::timeout(Duration::from_secs(5), permits.acquire())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     fn identity(name: &str) -> contract::CallerIdentity {
