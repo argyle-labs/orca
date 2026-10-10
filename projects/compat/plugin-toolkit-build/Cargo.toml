@@ -1,0 +1,15 @@
+[package]
+name = "plugin-toolkit-build"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# Compatibility re-export for plugins still resolving `plugin-toolkit-build` by
+# git; remove once every plugin depends on `orca-plugin-toolkit-build`.
+
+[lib]
+name = "plugin_toolkit_build"
+path = "src/lib.rs"
+
+[dependencies]
+orca_plugin_toolkit_build = { path = "../../plugin-toolkit-build", package = "orca-plugin-toolkit-build" }

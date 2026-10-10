@@ -1,5 +1,5 @@
 [package]
-name = "service"
+name = "orca-service"
 version.workspace = true
 edition.workspace = true
 
@@ -38,15 +38,15 @@ in-process = [
 # `WorkloadSpec` for a `Runtime`, and the generic `service.deploy` tool hands it
 # to a registered deploy target's `launch`. service never drives pct/docker
 # itself — placement mechanics live once, in deploy-target.
-deploy-target = { path = "../deploy-target", default-features = false }
+deploy-target = { workspace = true }
 # Shared canonical BoxFuture (async-desugar) alias lives in contract.
-contract = { path = "../contract", default-features = false }
+contract = { workspace = true }
 # The first-class `Route`/`Routes` reachability primitive on `Endpoint`
 # (no scalar base_url). `route` is a dependency-free leaf module of utils, so
 # default-features off keeps the thin profile from pulling http/git/tokio.
-utils = { path = "../utils", default-features = false }
+utils = { workspace = true }
 serde       = { workspace = true }
-derive      = { path = "../derive" }
+derive      = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 schemars    = { workspace = true }

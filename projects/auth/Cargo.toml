@@ -1,5 +1,6 @@
 [package]
-name = "auth"
+name = "orca-auth"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -8,19 +9,19 @@ name = "auth"
 path = "src/lib.rs"
 
 [dependencies]
-plugin-toolkit = { path = "../plugin-toolkit" }
-macro-runtime = { path = "../macro-runtime" }
-contract    = { path = "../contract", default-features = false }
-derive       = { path = "../derive" }
+plugin-toolkit = { workspace = true, default-features = true }
+macro-runtime = { workspace = true }
+contract    = { workspace = true }
+derive       = { workspace = true }
 schemars         = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 
-utils = { path = "../utils" }
-files = { path = "../files" }
-db = { package = "db", path = "../db" }
-identities = { path = "../identities" }
-secrets = { path = "../secrets" }
+utils = { workspace = true, default-features = true }
+files = { workspace = true }
+db = { workspace = true, default-features = true }
+identities = { workspace = true }
+secrets = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 clap        = { workspace = true }
@@ -33,10 +34,10 @@ reqwest = { workspace = true }
 rpassword = { workspace = true }
 
 [dev-dependencies]
-db = { path = "../db", features = ["test-util"] }
+db = { workspace = true, default-features = true, features = ["test-util"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
-model      = { path = "../model" }
+model      = { workspace = true }
 
 [lints]
 workspace = true

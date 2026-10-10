@@ -1,5 +1,5 @@
 [package]
-name = "notifications"
+name = "orca-notifications"
 version.workspace = true
 edition.workspace = true
 
@@ -14,7 +14,7 @@ default = ["config"]
 config = ["dep:toml"]
 
 [dependencies]
-macro-runtime = { path = "../macro-runtime" }
+macro-runtime = { workspace = true }
 # `default-features = false` drops `db`'s `http` feature, and with it reqwest.
 # This edge is the ONLY path by which `db` reaches a thin plugin's graph
 # (`db` -> `notifications` -> `containers` -> `plugin-toolkit`), so taking `db`'s
@@ -23,13 +23,13 @@ macro-runtime = { path = "../macro-runtime" }
 # `db::{pool, settings::get, settings::secret_get}`, none of which need http.
 # The daemon is unaffected: server/runtime/mcp/spec still take `db`'s defaults,
 # and cargo unifies the feature back on for that build.
-db          = { package = "db", path = "../db", default-features = false }
+db          = { workspace = true }
 rusqlite    = { workspace = true }
 # Light core only (`utils::time` — the sole module this crate uses). Taking
 # `utils`' `full` default here re-enabled `config_format` for the WHOLE graph via
 # feature unification, so every thin plugin linked an XML parser again even after
 # #606 opted `contract` and `containers` out. Measured on proxmox at v0.2.1-rc.3.
-utils       = { path = "../utils", default-features = false }
+utils       = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 # Drives the cdylib JSON-proxy backend (`NotifyProxy`) off the async runtime via
@@ -46,13 +46,13 @@ lettre      = { workspace = true }
 tracing     = { workspace = true }
 
 # `#[orca_tool]` machinery.
-derive      = { path = "../derive" }
+derive      = { workspace = true }
 schemars    = { workspace = true }
 
 clap        = { workspace = true }
 
 [dev-dependencies]
-db = { path = "../db", features = ["test-util"] }
+db = { workspace = true, default-features = true, features = ["test-util"] }
 tokio = { workspace = true }
 
 [lints]

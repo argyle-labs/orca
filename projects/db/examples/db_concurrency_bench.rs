@@ -5,7 +5,7 @@
 //!
 //! Run with:
 //!     ORCA_DB_PATH=$(mktemp -u).db \
-//!       cargo run --release -p db --example db_concurrency_bench --quiet
+//!       cargo run --release -p orca-db --example db_concurrency_bench --quiet
 //!
 //! Uses an unencrypted on-disk DB (via `ORCA_DB_PATH`) so the seam's
 //! `open_default()` path is exercised end to end. Each "read" is a CPU-bound

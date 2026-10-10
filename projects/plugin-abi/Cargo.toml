@@ -1,5 +1,5 @@
 [package]
-name = "plugin-abi"
+name = "orca-plugin-abi"
 # INDEPENDENT of the workspace version — deliberately NOT `version.workspace`.
 #
 # The capability contract in src/lib.rs is FROZEN across orca releases so a

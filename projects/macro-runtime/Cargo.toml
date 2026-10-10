@@ -1,5 +1,5 @@
 [package]
-name = "macro-runtime"
+name = "orca-macro-runtime"
 version.workspace = true
 edition.workspace = true
 
@@ -30,13 +30,13 @@ replication = ["dep:rusqlite", "dep:tracing"]
 
 [dependencies]
 # Workspace crates the macros emit paths into.
-contract    = { path = "../contract" }
-derive      = { path = "../derive" }
-dispatch    = { path = "../dispatch" }
+contract    = { workspace = true, default-features = true }
+derive      = { workspace = true }
+dispatch    = { workspace = true, default-features = true }
 # Light utils seam — only the tree-shaken core (no contract/tokio/glob) — so
 # generated replication code can stamp the canonical unix-millis lww clock
 # (`now_millis_since_epoch`) instead of hand-rolling `SystemTime`.
-utils       = { path = "../utils", default-features = false }
+utils       = { workspace = true }
 
 # Ecosystem crates the macros emit paths into.
 anyhow      = { workspace = true }

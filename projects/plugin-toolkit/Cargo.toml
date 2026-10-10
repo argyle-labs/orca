@@ -1,5 +1,5 @@
 [package]
-name = "plugin-toolkit"
+name = "orca-plugin-toolkit"
 version.workspace = true
 edition.workspace = true
 
@@ -115,8 +115,8 @@ anyhow      = { workspace = true }
 async-trait = { workspace = true }
 clap        = { workspace = true }
 inventory   = { workspace = true }
-plugin-abi  = { path = "../plugin-abi" }
-plugin-proto = { path = "../plugin-proto" }
+plugin-abi  = { workspace = true }
+plugin-proto = { workspace = true }
 schemars    = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
@@ -141,18 +141,18 @@ tikv-jemallocator = { workspace = true }
 # is re-exported to plugins as `plugin_toolkit::{hash,id,url}` — see lib.rs. This
 # is why plugins drop their own sha2/uuid/urlencoding deps: the seams are
 # single-sourced in utils, not duplicated here.
-derive      = { path = "../derive" }
+derive      = { workspace = true }
 # The generic storage domain (thin: serde/trait/registry only) stays always-on
 # so storage adapters need no feature flag. `default-features = false` sheds its
 # tokio-bound host-side proxy on the thin profile; toolkit's `in-process` turns
 # it back on (see [features]) so the in-daemon build is unchanged.
-storage = { path = "../storage", default-features = false }
-media = { path = "../media", default-features = false }
+storage = { workspace = true }
+media = { workspace = true }
 # The generic service domain (same thin shape + a subprocess backup capability
 # that is also `in-process`-gated). Same propagation contract as storage.
-service = { path = "../service", default-features = false }
+service = { workspace = true }
 # The generic deploy-target domain (same thin shape). Same propagation contract.
-deploy-target = { path = "../deploy-target", default-features = false }
+deploy-target = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 # ── Gated heavy core (see [features]) ───────────────────────────────────
@@ -164,24 +164,24 @@ tikv-jemalloc-ctl = { workspace = true, optional = true }
 # here. Plugins never dep it directly.
 graphql_client = { workspace = true, optional = true }
 # Internal infra re-exported (trait anchors, macro definitions, db).
-contract    = { path = "../contract", default-features = false, optional = true }
-db          = { package = "db", path = "../db", optional = true }
-secrets = { path = "../secrets", optional = true }
+contract    = { workspace = true, optional = true }
+db          = { workspace = true, default-features = true, optional = true }
+secrets = { workspace = true, optional = true }
 # `default-features = false` sheds dispatch's `full`→`in-process`→`contract/
 # in-process` chain on the thin profile; toolkit's own `in-process` re-enables it
 # via `dispatch?/in-process` so the in-daemon build is unchanged. Without this the
 # thin `tools` build would drag tokio back in through dispatch's default.
-dispatch    = { path = "../dispatch", default-features = false, optional = true }
-macro-runtime = { path = "../macro-runtime", optional = true }
-notifications = { path = "../notifications", optional = true }
-containers = { path = "../containers", optional = true }
+dispatch    = { workspace = true, optional = true }
+macro-runtime = { workspace = true, optional = true }
+notifications = { workspace = true, default-features = true, optional = true }
+containers = { workspace = true, optional = true }
 # Runtime primitives — plugins reach these through the toolkit, never directly.
-utils       = { path = "../utils", default-features = false, features = ["scrub_text"] }
+utils       = { workspace = true, features = ["scrub_text"] }
 # `default-features = false` drops graphql's `shopify` feature, and with it
 # reqwest + toml. A plugin using the generic GraphQL client (unraid) goes
 # through delegated `utils::http`; only daemon-side `spec` proxies Shopify.
-graphql     = { path = "../graphql", optional = true, default-features = false }
-openapi     = { path = "../openapi", optional = true }
+graphql     = { workspace = true, optional = true }
+openapi     = { workspace = true, optional = true }
 reqwest     = { workspace = true, features = ["cookies", "multipart"], optional = true }
 # Install a process-default rustls CryptoProvider before building a reqwest
 # client — required because reqwest links `rustls-no-provider` and a plugin

@@ -1,5 +1,6 @@
 [package]
-name = "plugins"
+name = "orca-plugins"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -8,15 +9,15 @@ name = "plugins"
 path = "src/lib.rs"
 
 [dependencies]
-plugin-toolkit = { path = "../plugin-toolkit" }
-contract    = { path = "../contract", default-features = false }
-derive       = { path = "../derive" }
+plugin-toolkit = { workspace = true, default-features = true }
+contract    = { workspace = true }
+derive       = { workspace = true }
 schemars         = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 
-files    = { path = "../files" }
-db = { package = "db", path = "../db" }
+files    = { workspace = true }
+db = { workspace = true, default-features = true }
 anyhow = { workspace = true }
 clap        = { workspace = true }
 rusqlite = { workspace = true }

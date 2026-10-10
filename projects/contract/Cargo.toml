@@ -1,5 +1,5 @@
 [package]
-name = "contract"
+name = "orca-contract"
 version.workspace = true
 edition.workspace = true
 
@@ -36,10 +36,10 @@ in-process = ["dep:tokio"]
 # `utils`' default feature is `full` (yaml/toml/xml/git/pki/reqwest). `contract` is
 # reached by every thin plugin through `plugin-toolkit`, so taking defaults here
 # was the dominant path that made a thin plugin link an XML parser.
-utils = { path = "../utils", default-features = false }
+utils = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
-derive = { path = "../derive" }
+derive = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 

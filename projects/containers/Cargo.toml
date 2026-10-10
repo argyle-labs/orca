@@ -1,5 +1,5 @@
 [package]
-name = "containers"
+name = "orca-containers"
 version.workspace = true
 edition.workspace = true
 
@@ -8,7 +8,7 @@ name = "containers"
 path = "src/lib.rs"
 
 [dependencies]
-macro-runtime = { path = "../macro-runtime" }
+macro-runtime = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
@@ -20,17 +20,17 @@ tracing     = { workspace = true }
 # `containers` is a dependency of `plugin-toolkit`, so taking defaults here made
 # every THIN plugin link an XML parser (roxmltree, via `config_format`) plus the
 # http/git stacks — breaking the plugins-stay-thin rule from a transitive default.
-utils       = { path = "../utils", default-features = false }
+utils       = { workspace = true }
 
 # `#[orca_tool]` machinery.
-contract    = { path = "../contract", default-features = false }
-derive      = { path = "../derive" }
+contract    = { workspace = true }
+derive      = { workspace = true }
 schemars    = { workspace = true }
 
 # Backend-agnostic notification dispatcher. C3 wires every reconciler
 # event through `Dispatcher` — no ntfy/email/slack-specific code lands in
 # this crate ([[feedback-notifications-backend-agnostic]]).
-notifications = { path = "../notifications", default-features = false }
+notifications = { workspace = true }
 
 # Docker Engine API client. Typed responses (containers, host config,
 # mounts, restart policy) over the local Unix socket; default features

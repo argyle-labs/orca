@@ -238,12 +238,26 @@ lock_sourced_entries() {
 write_cargo_version() {
   local new="$1"
   local workspace_toml="${REPO_ROOT}/Cargo.toml"
+  local old
+  old="$(current_cargo_version)"
   # Replace the first `version = "..."` line in the workspace root.
   # Don't match on the old value — avoids regex-escaping pre-release strings.
   if [ "$(uname -s)" = "Darwin" ]; then
     sed -i '' 's/^version = ".*"/version = "'"$new"'"/' "$workspace_toml"
   else
     sed -i 's/^version = ".*"/version = "'"$new"'"/' "$workspace_toml"
+  fi
+  # Internal [workspace.dependencies] pin the exact workspace version so
+  # published orca-* crates move in lockstep; plugin-abi has its own version.
+  # Only `path = "projects/…"` lines are touched, so third-party `=x.y.z` pins
+  # that happen to share the old version stay put.
+  local old_re
+  old_re="$(printf '%s' "$old" | sed 's/[][\\.*^$/]/\\&/g')"
+  local pin_expr='/path = "projects\//s/version = "='"$old_re"'"/version = "='"$new"'"/'
+  if [ "$(uname -s)" = "Darwin" ]; then
+    sed -i '' "$pin_expr" "$workspace_toml"
+  else
+    sed -i "$pin_expr" "$workspace_toml"
   fi
   log "workspace version → $new ($(grep '^version' "$workspace_toml" | head -1))"
   # Keep the README release badge in sync. orca is a private repo, so a live

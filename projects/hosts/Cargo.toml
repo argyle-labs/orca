@@ -1,5 +1,6 @@
 [package]
-name = "hosts"
+name = "orca-hosts"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -14,8 +15,8 @@ path = "src/lib.rs"
 # moves to the `configs` crate, invert that (pass the value in) to avoid an
 # upward hosts->configs dependency.
 [dependencies]
-db    = { package = "db", path = "../db" }
-utils = { path = "../utils" }
+db    = { workspace = true, default-features = true }
+utils = { workspace = true, default-features = true }
 
 anyhow   = { workspace = true }
 rusqlite = { workspace = true }
@@ -23,7 +24,7 @@ serde    = { workspace = true }
 tracing  = { workspace = true }
 
 [dev-dependencies]
-db = { path = "../db", features = ["test-util"] }
+db = { workspace = true, default-features = true, features = ["test-util"] }
 serde_json = { workspace = true }
 
 [lints]

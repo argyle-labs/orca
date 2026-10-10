@@ -8,7 +8,7 @@
 #   ignore_regex=<llvm-cov --ignore-filename-regex for untested members>
 #
 # A path maps to the member whose directory is its nearest ancestor; docs/**
-# maps to `files`. The set is closed over reverse dependencies (normal, dev and
+# maps to `orca-files`. The set is closed over reverse dependencies (normal, dev and
 # build edges, any target), so a library change still tests every dependent. A
 # partial run also tests ALWAYS_PACKAGES (not their dependents), whose tests
 # walk the repo and docs.
@@ -20,8 +20,8 @@
 # to use instead of running cargo.
 set -euo pipefail
 
-ALWAYS_PACKAGES="${CI_ALWAYS_PACKAGES-inventory-tests plugin-toolkit}"
-DOCS_PACKAGE="${CI_DOCS_PACKAGE-files}"
+ALWAYS_PACKAGES="${CI_ALWAYS_PACKAGES-orca-inventory-tests orca-plugin-toolkit}"
+DOCS_PACKAGE="${CI_DOCS_PACKAGE-orca-files}"
 
 if [ -n "${CI_METADATA_JSON:-}" ]; then
   meta="$(cat "$CI_METADATA_JSON")"

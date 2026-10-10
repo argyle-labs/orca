@@ -33,7 +33,7 @@ pctile() { # pctile <fraction> < sorted_numbers
 
 run_micro() {
   echo "== db-crate microbench (writer path vs reader pool) =="
-  cargo build --release -p db --example db_concurrency_bench
+  cargo build --release -p orca-db --example db_concurrency_bench
   ORCA_DB_PATH="$(mktemp -u)_bench.db" \
     ./target/release/examples/db_concurrency_bench
 }

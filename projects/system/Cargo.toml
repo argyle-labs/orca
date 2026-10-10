@@ -1,5 +1,6 @@
 [package]
-name = "system"
+name = "orca-system"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -11,30 +12,30 @@ path = "src/lib.rs"
 # `db-incore`: `managed_mounts` uses `endpoint_resource!` compiled INTO the
 # daemon, so its CRUD needs the in-process pooled-connection fallback (no
 # capability sink / host FFI channel in-core). Plugins never enable this.
-plugin-toolkit = { path = "../plugin-toolkit", features = ["db-incore"] }
-dispatch   = { path = "../dispatch" }
-plugin-loader = { path = "../plugin-loader" }
-contract  = { path = "../contract", default-features = false }
-derive     = { path = "../derive" }
+plugin-toolkit = { workspace = true, default-features = true, features = ["db-incore"] }
+dispatch   = { workspace = true, default-features = true }
+plugin-loader = { workspace = true }
+contract  = { workspace = true }
+derive     = { workspace = true }
 schemars       = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
 
-utils = { path = "../utils" }
-files = { path = "../files" }
-agents = { path = "../agents", default-features = false }
-db = { package = "db", path = "../db" }
-hosts = { path = "../hosts" }
-identities = { path = "../identities" }
-secrets = { path = "../secrets" }
-notifications = { path = "../notifications" }
+utils = { workspace = true, default-features = true }
+files = { workspace = true }
+agents = { workspace = true }
+db = { workspace = true, default-features = true }
+hosts = { workspace = true }
+identities = { workspace = true }
+secrets = { workspace = true }
+notifications = { workspace = true, default-features = true }
 # Core container reconciler (auto-start + crashloop breaker + wedge recovery).
 # The `container_reconcile` driver schedules its `reconcile()` and gates the
 # state-changing actions on the host remediation policy. No cycle: `containers`
 # depends on none of the higher-level crates.
-containers = { path = "../containers" }
-auth = { path = "../auth" }
-dev = { path = "../dev" }
+containers = { workspace = true }
+auth = { workspace = true }
+dev = { workspace = true }
 # Mesh transport (folded in from the former mesh crate): mTLS over
 # SNI=mesh.orca.local, mDNS discovery, and the concurrent fleet fan-out.
 futures = { workspace = true }
@@ -79,7 +80,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 serial_test = { workspace = true }
 wiremock = { workspace = true }
-db = { package = "db", path = "../db", features = ["test-util"] }
+db = { workspace = true, default-features = true, features = ["test-util"] }
 # A hook test drives libc fork/dup2/waitpid directly.
 libc = { workspace = true }
 

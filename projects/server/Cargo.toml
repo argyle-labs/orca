@@ -1,5 +1,6 @@
 [package]
-name = "server"
+name = "orca-server"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -26,34 +27,34 @@ pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
 # the bursty JSON/serde churn of periodic drivers (mimalloc held pages far
 # longer here). Config in main.rs via `malloc_conf`.
 tikv-jemallocator = { workspace = true }
-plugin-toolkit = { path = "../plugin-toolkit" }
+plugin-toolkit = { workspace = true, default-features = true }
 # Workspace crates
-utils = { path = "../utils" }
-dispatch = { path = "../dispatch", features = ["server"] }
-plugin-loader = { path = "../plugin-loader" }
-derive    = { path = "../derive" }
-contract = { path = "../contract" }
-db         = { package = "db", path = "../db" }
-identities = { path = "../identities" }
+utils = { workspace = true, default-features = true }
+dispatch = { workspace = true, default-features = true, features = ["server"] }
+plugin-loader = { workspace = true }
+derive    = { workspace = true }
+contract = { workspace = true, default-features = true }
+db         = { workspace = true, default-features = true }
+identities = { workspace = true }
 # Domain crates
-auth     = { path = "../auth" }
-orca-inventory = { path = "../orca-inventory" }
-system   = { path = "../system" }
+auth     = { workspace = true }
+orca-inventory = { workspace = true }
+system   = { workspace = true }
 # Notifications dispatcher — linked so the daemon can register the in-tree
 # `smtp` email backend at startup (`notifications::smtp::register_from_settings`).
-notifications = { path = "../notifications" }
+notifications = { workspace = true, default-features = true }
 # ConfigSource domain (git-repo ⇆ config-store reconcile). Linked so its
 # `#[orca_tool]` inventory registers into the daemon surface (mirrors `system`).
-config-source = { path = "../config-source" }
-dev      = { path = "../dev" }
-namespace = { path = "../namespace" }
-spec     = { path = "../spec" }
-agents   = { path = "../agents" }
-plugins  = { path = "../runtime" }
-files    = { path = "../files" }
-mcp      = { path = "../mcp" }
-model      = { path = "../model" }
-conversation = { path = "../conversation" }
+config-source = { workspace = true }
+dev      = { workspace = true }
+namespace = { workspace = true }
+spec     = { workspace = true }
+agents   = { workspace = true, default-features = true }
+plugins  = { workspace = true }
+files    = { workspace = true }
+mcp      = { workspace = true }
+model      = { workspace = true }
+conversation = { workspace = true }
 # Integration crates (flat names, no facade)
 # dockge + homeassistant + the *arr stack (sonarr/radarr/prowlarr/lidarr + shared
 # `arr` base) extracted to external cdylib repos (~/code/{dockge,homeassistant,arr});
@@ -151,12 +152,12 @@ tracing-subscriber = { workspace = true }
 tempfile   = { workspace = true }
 tower      = { workspace = true }
 serde_json = { workspace = true }
-db = { package = "db", path = "../db" }
+db = { workspace = true, default-features = true }
 # Force-link the registry tool crates so integration tests walk the real,
 # fully-populated `dispatch::mcp_definitions()` inventory (inventory statics
 # are otherwise dead-code-stripped from the separate test binary).
-spec    = { path = "../spec" }
-plugins = { path = "../runtime" }
+spec    = { workspace = true }
+plugins = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,5 +1,5 @@
 [package]
-name = "plugin-proto"
+name = "orca-plugin-proto"
 version.workspace = true
 edition.workspace = true
 

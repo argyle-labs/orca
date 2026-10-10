@@ -1,5 +1,6 @@
 [package]
-name = "conversation"
+name = "orca-conversation"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -8,13 +9,13 @@ name = "conversation"
 path = "src/lib.rs"
 
 [dependencies]
-plugin-toolkit = { path = "../plugin-toolkit" }
-contract = { path = "../contract" }
-derive    = { path = "../derive" }
+plugin-toolkit = { workspace = true, default-features = true }
+contract = { workspace = true, default-features = true }
+derive    = { workspace = true }
 schemars      = { workspace = true }
 serde         = { workspace = true }
-utils    = { path = "../utils" }
-model           = { path = "../model" }
+utils    = { workspace = true, default-features = true }
+model           = { workspace = true }
 
 anyhow        = { workspace = true }
 clap          = { workspace = true }
@@ -27,12 +28,12 @@ serde_json    = { workspace = true }
 tokio         = { workspace = true }
 tokio-util    = { workspace = true }
 unicode-width = { workspace = true }
-agents        = { path = "../agents" }
+agents        = { workspace = true, default-features = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-db = { path = "../db" }
-namespace = { path = "../namespace" }
+db = { workspace = true, default-features = true }
+namespace = { workspace = true }
 
 [lints]
 workspace = true

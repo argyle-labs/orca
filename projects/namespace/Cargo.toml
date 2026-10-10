@@ -1,5 +1,6 @@
 [package]
-name = "namespace"
+name = "orca-namespace"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -13,14 +14,14 @@ path = "src/lib.rs"
 # (no service trait, per feedback_no_indirection).
 
 [dependencies]
-plugin-toolkit = { path = "../plugin-toolkit" }
-contract = { path = "../contract", default-features = false }
-derive    = { path = "../derive" }
+plugin-toolkit = { workspace = true, default-features = true }
+contract = { workspace = true }
+derive    = { workspace = true }
 schemars      = { workspace = true }
 serde         = { workspace = true }
 
-utils = { path = "../utils" }
-db         = { package = "db", path = "../db" }
+utils = { workspace = true, default-features = true }
+db         = { workspace = true, default-features = true }
 anyhow     = { workspace = true }
 rusqlite   = { workspace = true }
 thiserror  = { workspace = true }

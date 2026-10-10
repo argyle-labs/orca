@@ -1,5 +1,6 @@
 [package]
 name = "orca-inventory"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -17,11 +18,11 @@ path = "src/lib.rs"
 # depends on (workspace dep `inventory = "0.3"`). Lib name is `orca_inventory`.
 
 [dependencies]
-plugin-toolkit = { path = "../plugin-toolkit" }
-contract       = { path = "../contract", default-features = false }
-derive         = { path = "../derive" }
+plugin-toolkit = { workspace = true, default-features = true }
+contract       = { workspace = true }
+derive         = { workspace = true }
 
-system = { path = "../system" }
+system = { workspace = true }
 
 schemars   = { workspace = true }
 serde      = { workspace = true }

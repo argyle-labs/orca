@@ -1236,7 +1236,7 @@ pub fn source_port_for_fstype(fstype: &str) -> Option<u16> {
 
 // The suite drives async via `#[tokio::test]` and exercises the host-side
 // `register_from_def` proxy, so it is owned by the `in-process` profile (the one
-// that links tokio). `cargo test -p storage` uses the default (in-process)
+// that links tokio). `cargo test -p orca-storage` uses the default (in-process)
 // profile; a thin `--no-default-features` build compiles with no tests rather
 // than dragging tokio in as a dev-dep on the reactor-free profile.
 #[cfg(all(test, feature = "in-process"))]
