@@ -194,7 +194,8 @@ pub(crate) fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str
 
 /// Install `/etc/sudoers.d/orca`: NOPASSWD grants letting the service user run
 /// exactly `<orca> admin storage-apply` and `<orca> admin plugin-apply` (plus
-/// the LXC helpers on Proxmox) as root, where `<orca>` is this binary's real
+/// the LXC helpers on Proxmox, and `admin cron-apply` when the
+/// `/etc/orca/cron-users` allow-list exists) as root, where `<orca>` is this binary's real
 /// path, the same one the daemon invokes. No argument wildcards: payloads ride
 /// on stdin. The drop-in is validated with `visudo -cf` before it is moved into
 /// place, so a broken one can never wedge sudo. On Unraid, where `/etc` is
@@ -215,7 +216,8 @@ fn install_autofs_sudoers(user: &str) -> Result<()> {
         .to_string();
     validate_shell_safe("orca binary path", &binary)?;
     let is_proxmox = std::path::Path::new("/etc/pve").is_dir();
-    let contents = sudoers_contents(user, &binary, is_proxmox);
+    let cron = std::path::Path::new(crate::cron::CRON_USERS_ALLOWLIST).exists();
+    let contents = sudoers_contents(user, &binary, is_proxmox, cron);
 
     let path = std::path::Path::new(SUDOERS_DROP_IN);
     // sudo skips drop-in names containing '.', so the staged file is inert
@@ -234,8 +236,9 @@ fn install_autofs_sudoers(user: &str) -> Result<()> {
     }
 
     println!(
-        "{} sudoers: {user} may run '{binary} admin storage-apply' + 'admin plugin-apply'{}",
+        "{} sudoers: {user} may run '{binary} admin storage-apply' + 'admin plugin-apply'{}{}",
         "✓".green(),
+        if cron { " + 'admin cron-apply'" } else { "" },
         if is_proxmox {
             " + 'admin lxc-exec' + 'admin lxc-push'"
         } else {
@@ -260,7 +263,7 @@ const GO_BLOCK_END: &str = "# <<< orca sudoers <<<";
 
 /// The drop-in body for `user` and the orca binary at `binary`.
 #[cfg(any(target_os = "linux", test))]
-fn sudoers_contents(user: &str, binary: &str, is_proxmox: bool) -> String {
+fn sudoers_contents(user: &str, binary: &str, is_proxmox: bool, cron: bool) -> String {
     let mut contents = format!(
         "# Managed by orca — do not edit.\n\
          # Scoped privileged helpers for the unprivileged orca daemon. Each\n\
@@ -270,6 +273,13 @@ fn sudoers_contents(user: &str, binary: &str, is_proxmox: bool) -> String {
          # Plugin privileged ops: verified installed plugins, closed op sets.\n\
          {user} ALL=(root) NOPASSWD: {binary} admin plugin-apply\n"
     );
+    if cron {
+        contents.push_str(&format!(
+            "# Crontabs of the users listed in {}.\n\
+             {user} ALL=(root) NOPASSWD: {binary} admin cron-apply\n",
+            crate::cron::CRON_USERS_ALLOWLIST
+        ));
+    }
     if is_proxmox {
         contents.push_str(&format!(
             "# Proxmox host: scoped in-container exec for LXC deployment updates.\n\
@@ -586,16 +596,21 @@ mod sudoers_tests {
     #[test]
     fn sudoers_grants_name_the_real_binary_path() {
         let bin = "/mnt/user/appdata/orca/bin/orca";
-        let c = sudoers_contents("orca", bin, false);
+        let c = sudoers_contents("orca", bin, false, false);
         assert!(c.contains(&format!(
             "orca ALL=(root) NOPASSWD: {bin} admin storage-apply\n"
         )));
         assert!(c.contains(&format!(
             "orca ALL=(root) NOPASSWD: {bin} admin plugin-apply\n"
         )));
+        assert!(!c.contains("cron-apply"), "no allow-list, no cron grant");
+        let cron = sudoers_contents("orca", bin, false, true);
+        assert!(cron.contains(&format!(
+            "orca ALL=(root) NOPASSWD: {bin} admin cron-apply\n"
+        )));
         assert!(!c.contains("/var/lib/orca/.local/bin/orca"));
         assert!(!c.contains("lxc-exec"));
-        let pve = sudoers_contents("orca", bin, true);
+        let pve = sudoers_contents("orca", bin, true, true);
         assert!(pve.contains(&format!("{bin} admin lxc-exec\n")));
         assert!(pve.contains(&format!("{bin} admin lxc-push\n")));
         assert!(
