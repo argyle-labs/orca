@@ -26,10 +26,11 @@
 //! — no per-plugin read multiplexing.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use plugin_proto::{
@@ -156,6 +157,19 @@ pub fn handshake<S: Read + Write>(stream: &mut S, capabilities: &[&str]) -> Resu
     })
 }
 
+/// A tool's own error, delivered in a well-formed `Result` frame — the
+/// session is still in sync, unlike an I/O or protocol failure.
+#[derive(Debug)]
+struct ToolFailed(String);
+
+impl std::fmt::Display for ToolFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ToolFailed {}
+
 /// Drive one tool invocation to completion over `stream`. Writes `Invoke{id}`,
 /// then services `Cap`/`Log` frames until the `Result` with the matching `id`.
 /// A `Cap` is executed via [`capability::handle_cap`] and answered with a
@@ -193,10 +207,11 @@ pub fn invoke_on<S: Read + Write>(
                 return if ok {
                     Ok(value)
                 } else {
-                    Err(anyhow!(
+                    Err(ToolFailed(format!(
                         "plugin tool '{tool}' failed: {}",
                         error.unwrap_or_else(|| "unknown error".into())
                     ))
+                    .into())
                 };
             }
             Frame::Cap {
@@ -316,9 +331,27 @@ pub struct PluginProcess {
     pub manifest: Vec<ToolDef>,
     pub backends: Vec<Value>,
     pub schema: Value,
-    child: Child,
-    stream: Mutex<std::os::unix::net::UnixStream>,
+    exe: PathBuf,
+    session: Mutex<Session>,
+    io_timeout: Duration,
     next_id: AtomicU64,
+}
+
+/// The live child + its socket. `healthy` goes false when an invoke fails
+/// mid-exchange or panics, since the stream may then hold a partial or stale
+/// frame; the next invoke respawns the child.
+struct Session {
+    child: Child,
+    stream: std::os::unix::net::UnixStream,
+    healthy: bool,
+}
+
+impl Session {
+    fn stop(&mut self) {
+        _ = write_frame(&mut self.stream, &Frame::Shutdown);
+        _ = self.child.kill();
+        _ = self.child.wait();
+    }
 }
 
 impl PluginProcess {
@@ -331,38 +364,7 @@ impl PluginProcess {
     /// and it becomes the session **principal** for capability namespace
     /// scoping — so a plugin cannot widen its reach by lying in `Hello`.
     pub fn spawn(exe: &Path, expected_id: &str) -> Result<Self> {
-        let (mut child, mut stream) = launch(exe, |cmd| {
-            // Tell the plugin which orca binary launched it, so toolkit helpers
-            // that need a privileged round-trip (e.g. `sudo -n <orca> admin
-            // lxc-exec`) can reach it. The daemon's own path is authoritative — a
-            // plugin never guesses it. Best-effort: absent ORCA_BIN, the toolkit
-            // falls back to a direct (non-orca) path where one exists.
-            if let Ok(orca_bin) = std::env::current_exe() {
-                cmd.env(ORCA_BIN_ENV, orca_bin);
-            }
-            // Opt-in instrumentation: when the daemon has enabled profiling for
-            // this plugin, inject MALLOC_CONF + ORCA_PLUGIN_INSTRUMENT so the
-            // respawned process activates jemalloc heap profiling and its
-            // auto-diagnostics provider. Empty (no-op) for every plugin that is
-            // not enabled.
-            for (k, v) in contract::plugin_instrument::env_for(expected_id) {
-                cmd.env(k, v);
-            }
-        })?;
-
-        let bound = handshake(&mut stream, CAPABILITIES).and_then(|hs| {
-            let principal = resolve_principal(expected_id, &hs.software)
-                .with_context(|| format!("plugin binary {exe:?} handshake identity"))?;
-            Ok((hs, principal))
-        });
-        let (hs, principal) = match bound {
-            Ok(b) => b,
-            Err(e) => {
-                _ = child.kill();
-                _ = child.wait();
-                return Err(e);
-            }
-        };
+        let (child, stream, hs, principal) = start(exe, expected_id)?;
         tracing::info!(
             plugin = %principal,
             version = %hs.semver,
@@ -378,30 +380,66 @@ impl PluginProcess {
             manifest: hs.manifest,
             backends: hs.backends,
             schema: hs.schema,
-            child,
-            stream: Mutex::new(stream),
+            exe: exe.to_path_buf(),
+            session: Mutex::new(Session {
+                child,
+                stream,
+                healthy: true,
+            }),
+            io_timeout: dispatch::plugin_invoke_timeout(),
             next_id: AtomicU64::new(1),
         })
     }
 
-    /// Invoke a tool. Serialized by the stream `Mutex` — one `Invoke` in flight
-    /// per plugin, per the serial contract.
+    /// Invoke a tool. Serialized by the session `Mutex` — one `Invoke` in
+    /// flight per plugin, per the serial contract. Each socket read and write is
+    /// bounded by `io_timeout`, so a hung plugin releases the mutex and thread.
+    /// A session left unhealthy (failed exchange, poisoned by a panic) is
+    /// respawned first.
     pub fn invoke(&self, tool: &str, args: Value, caller: Option<VerifiedCaller>) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut stream = self
-            .stream
-            .lock()
-            .map_err(|_| anyhow!("plugin '{}' session mutex poisoned", self.software))?;
-        invoke_on(&mut *stream, id, tool, args, caller, &self.software)
+        let mut session = self.session.lock().unwrap_or_else(|poisoned| {
+            self.session.clear_poison();
+            let mut session = poisoned.into_inner();
+            session.healthy = false;
+            session
+        });
+        if !session.healthy {
+            self.respawn(&mut session)?;
+        }
+        session.stream.set_read_timeout(Some(self.io_timeout))?;
+        session.stream.set_write_timeout(Some(self.io_timeout))?;
+        // Cleared until the exchange completes, so an unwind leaves it false.
+        session.healthy = false;
+        let result = invoke_on(&mut session.stream, id, tool, args, caller, &self.software);
+        // A tool error arrives as a well-formed `Result` frame; anything else
+        // means the stream is mid-frame or the plugin is gone.
+        session.healthy = match &result {
+            Ok(_) => true,
+            Err(e) => e.is::<ToolFailed>(),
+        };
+        result
+    }
+
+    fn respawn(&self, session: &mut Session) -> Result<()> {
+        tracing::warn!(plugin = %self.software, "respawning plugin after a broken session");
+        session.stop();
+        let (child, stream, _, _) = start(&self.exe, &self.software)
+            .with_context(|| format!("respawning plugin '{}'", self.software))?;
+        *session = Session {
+            child,
+            stream,
+            healthy: true,
+        };
+        Ok(())
     }
 
     /// Best-effort graceful shutdown: send `Shutdown`, then terminate + reap.
     pub fn shutdown(&mut self) {
-        if let Ok(mut stream) = self.stream.lock() {
-            _ = write_frame(&mut *stream, &Frame::Shutdown);
-        }
-        _ = self.child.kill();
-        _ = self.child.wait();
+        self.session
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .stop();
     }
 }
 
@@ -409,6 +447,47 @@ impl Drop for PluginProcess {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// Launch `exe` and complete the handshake, returning the child, its socket,
+/// the handshake, and the validated principal.
+fn start(
+    exe: &Path,
+    expected_id: &str,
+) -> Result<(Child, std::os::unix::net::UnixStream, Handshake, String)> {
+    let (mut child, mut stream) = launch(exe, |cmd| {
+        // Tell the plugin which orca binary launched it, so toolkit helpers
+        // that need a privileged round-trip (e.g. `sudo -n <orca> admin
+        // lxc-exec`) can reach it. The daemon's own path is authoritative — a
+        // plugin never guesses it. Best-effort: absent ORCA_BIN, the toolkit
+        // falls back to a direct (non-orca) path where one exists.
+        if let Ok(orca_bin) = std::env::current_exe() {
+            cmd.env(ORCA_BIN_ENV, orca_bin);
+        }
+        // Opt-in instrumentation: when the daemon has enabled profiling for
+        // this plugin, inject MALLOC_CONF + ORCA_PLUGIN_INSTRUMENT so the
+        // respawned process activates jemalloc heap profiling and its
+        // auto-diagnostics provider. Empty (no-op) for every plugin that is
+        // not enabled.
+        for (k, v) in contract::plugin_instrument::env_for(expected_id) {
+            cmd.env(k, v);
+        }
+    })?;
+
+    let bound = handshake(&mut stream, CAPABILITIES).and_then(|hs| {
+        let principal = resolve_principal(expected_id, &hs.software)
+            .with_context(|| format!("plugin binary {exe:?} handshake identity"))?;
+        Ok((hs, principal))
+    });
+    let (hs, principal) = match bound {
+        Ok(b) => b,
+        Err(e) => {
+            _ = child.kill();
+            _ = child.wait();
+            return Err(e);
+        }
+    };
+    Ok((child, stream, hs, principal))
 }
 
 /// Read a plugin binary's declared id + version WITHOUT granting it anything:
@@ -1041,5 +1120,78 @@ mod tests {
             resolve_principal("calibre-web", "calibre-web").unwrap(),
             "calibre-web"
         );
+    }
+
+    /// Spawn this test binary as the `loaderfakeplugin` subprocess (see
+    /// `plugin_child_serve_entrypoint` in lib.rs). `None` inside that child.
+    fn spawn_fake_plugin() -> Option<PluginProcess> {
+        if std::env::var(SOCKET_ENV).is_ok() {
+            return None;
+        }
+        let exe = std::env::current_exe().unwrap();
+        Some(PluginProcess::spawn(&exe, "loaderfakeplugin").unwrap())
+    }
+
+    fn child_pid(proc: &PluginProcess) -> u32 {
+        proc.session.lock().unwrap().child.id()
+    }
+
+    #[test]
+    fn invoke_respawns_after_a_panic_poisons_the_session() {
+        let Some(proc) = spawn_fake_plugin() else {
+            return;
+        };
+        let before = child_pid(&proc);
+        thread::scope(|s| {
+            s.spawn(|| {
+                let _session = proc.session.lock().unwrap();
+                panic!("poison the session");
+            })
+            .join()
+            .unwrap_err();
+        });
+        assert!(proc.session.is_poisoned());
+
+        let out = proc
+            .invoke("loaderfakeplugin.ping", json!({ "n": 1 }), None)
+            .unwrap();
+        assert_eq!(out, json!({ "n": 1 }));
+        assert!(!proc.session.is_poisoned());
+        assert_ne!(child_pid(&proc), before, "a fresh child serves the invoke");
+    }
+
+    #[test]
+    fn invoke_times_out_on_a_hung_plugin_then_respawns() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        proc.io_timeout = Duration::from_millis(200);
+        let before = child_pid(&proc);
+
+        let err = proc
+            .invoke("loaderfakeplugin.hang", json!({}), None)
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("awaiting Result"),
+            "got: {err:#}"
+        );
+
+        let out = proc
+            .invoke("loaderfakeplugin.ping", json!({ "n": 2 }), None)
+            .unwrap();
+        assert_eq!(out, json!({ "n": 2 }));
+        assert_ne!(child_pid(&proc), before);
+    }
+
+    #[test]
+    fn a_tool_error_keeps_the_session() {
+        let Some(proc) = spawn_fake_plugin() else {
+            return;
+        };
+        let before = child_pid(&proc);
+        proc.invoke("loaderfakeplugin.nope", json!({}), None)
+            .unwrap_err();
+        assert!(proc.session.lock().unwrap().healthy);
+        assert_eq!(child_pid(&proc), before);
     }
 }

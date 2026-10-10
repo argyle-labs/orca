@@ -1848,12 +1848,13 @@ mod loader_tests {
         };
         // Serve until the daemon sends Shutdown (on unload/drop). The tool echoes
         // its args so the driver can assert the round-trip; anything else errors.
-        let _served = plugin_proto::serve(stream, hello, |tool, args, _caps| {
-            if tool == "loaderfakeplugin.ping" {
+        let _served = plugin_proto::serve(stream, hello, |tool, args, _caps| match tool {
+            "loaderfakeplugin.ping" => Ok(args),
+            "loaderfakeplugin.hang" => {
+                std::thread::sleep(std::time::Duration::from_secs(30));
                 Ok(args)
-            } else {
-                Err(format!("no such tool: {tool}"))
             }
+            _ => Err(format!("no such tool: {tool}")),
         });
     }
 
