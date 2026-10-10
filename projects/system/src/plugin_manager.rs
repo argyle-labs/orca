@@ -207,7 +207,7 @@ fn restore_incumbent(backup: Option<&Path>, dest: &Path, software: &str) -> Stri
     if let Err(e) = record_install_hash(dest) {
         tracing::warn!(plugin = %software, error = %format!("{e:#}"), "restored plugin has no install hash");
     }
-    match plugin_loader::spawn_plugin(dest, Some(software)) {
+    match plugin_loader::spawn_plugin(dest, software) {
         Ok(report) => {
             apply_plugin_schema(&report);
             tracing::info!(
@@ -291,7 +291,7 @@ pub fn scan_and_load() -> (Vec<String>, Vec<String>) {
         if is_executable_plugin(&path) {
             // The install-dir filename is the authoritative plugin id; validate
             // the plugin's handshake against it and use it as the principal.
-            match plugin_loader::spawn_plugin(&path, Some(fname)) {
+            match plugin_loader::spawn_plugin(&path, fname) {
                 Ok(report) => {
                     apply_plugin_schema(&report);
                     tracing::info!(
@@ -619,13 +619,13 @@ pub struct PluginCreateArgs {
     /// Which create action to run: `install` or `invoke`.
     #[arg(long, value_enum)]
     pub action: PluginCreateAction,
-    /// `install`: absolute path to an executable plugin to **sideload**.
-    /// Mutually exclusive with `name`.
+    /// `install`: absolute path to an executable plugin to **sideload**. Needs
+    /// `name`; without it the file is only probed.
     #[arg(long)]
     #[serde(default)]
     pub file: Option<String>,
-    /// `install`: catalog name to auto-download + install from its GitHub
-    /// release. Mutually exclusive with `file`.
+    /// `install`: the plugin's name — the catalog entry to fetch (alone), or
+    /// the name a `file` sideload must declare in its handshake.
     #[arg(long)]
     #[serde(default)]
     pub name: Option<String>,
@@ -637,6 +637,11 @@ pub struct PluginCreateArgs {
     #[arg(long, default_value_t = false)]
     #[serde(default)]
     pub prerelease: bool,
+    /// `install` with `--file`: allow overwriting an already-installed plugin
+    /// with the same name.
+    #[arg(long, default_value_t = false)]
+    #[serde(default)]
+    pub replace: bool,
     /// `invoke`: fully-qualified verb of a loaded plugin, e.g.
     /// `proxmox.put_set_timezone`.
     #[arg(long)]
@@ -673,6 +678,7 @@ async fn plugin_create(args: PluginCreateArgs, ctx: &ToolCtx) -> Result<PluginCr
                 name: args.name,
                 version: args.version,
                 prerelease: args.prerelease,
+                replace: args.replace,
             };
             Ok(PluginCreateOutput::Install(
                 plugin_install(install, ctx).await?,
@@ -760,14 +766,14 @@ async fn plugin_invoke(args: PluginInvokeArgs, ctx: &ToolCtx) -> Result<PluginIn
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PluginInstallArgs {
-    /// Absolute path to an executable plugin to **sideload**. Mutually exclusive
-    /// with `name`. The plugin is spawned and handshaked before the file is
-    /// accepted.
+    /// Absolute path to an executable plugin to **sideload**. Needs `name`;
+    /// without it the file is only probed. The plugin is spawned and handshaked
+    /// before the file is accepted.
     #[arg(long)]
     pub file: Option<String>,
-    /// Catalog name to auto-download + install from its GitHub release,
-    /// selecting the asset that matches this daemon's target triple. Mutually
-    /// exclusive with `file`.
+    /// The plugin's name: the catalog entry to fetch (alone — downloads the
+    /// GitHub release asset matching this daemon's target triple), or the name a
+    /// `file` sideload must declare in its handshake.
     #[arg(long)]
     pub name: Option<String>,
     /// With `--name`: explicit plugin version/tag to install (e.g. `0.1.1-rc.2`).
@@ -778,6 +784,10 @@ pub struct PluginInstallArgs {
     /// picking the newest release. Off by default (stable only).
     #[arg(long, default_value_t = false)]
     pub prerelease: bool,
+    /// With `--file`: allow overwriting an already-installed plugin with the
+    /// same name.
+    #[arg(long, default_value_t = false)]
+    pub replace: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -801,14 +811,12 @@ pub struct PluginInstallOutput {
 ///   `plugin-proto` wire handshake FIRST; only on a clean handshake copy it into
 ///   the install dir under a deterministic name and register its tools live (no
 ///   restart). On a handshake failure the install is refused and nothing is
-///   copied.
-/// * `--name <catalog-name>` — auto-download from the catalog and install.
+///   copied. `--name` is required and the handshake must declare it; without it
+///   the file is probed (no capabilities granted) and the error carries its
+///   declared name and the command to run.
+/// * `--name <catalog-name>` alone — auto-download from the catalog and install.
 async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<PluginInstallOutput> {
-    if args.file.is_some() && args.name.is_some() {
-        bail!("pass exactly one of --file (sideload) or --name (catalog install), not both");
-    }
-
-    if let Some(name) = &args.name {
+    if let (None, Some(name)) = (&args.file, &args.name) {
         return install_from_catalog(name, args.version.as_deref(), args.prerelease, _ctx).await;
     }
 
@@ -831,12 +839,23 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
 
     #[cfg(unix)]
     {
+        let Some(name) = args.name.as_deref() else {
+            let (declared, version) = plugin_loader::probe_plugin(src)
+                .with_context(|| format!("probing {file}: plugin handshake failed"))?;
+            bail!(
+                "sideload requires an explicit plugin name; nothing was installed. \
+                 {file} declares name '{declared}' version {version} (probed with no \
+                 capabilities). To install it: \
+                 orca plugin create --action install --file {file} --name {declared} --execute"
+            );
+        };
+        check_sideload_name(name, args.replace)?;
+
         // ── Spawn + handshake FIRST, from the source path — refuse before
-        //    touching the install dir. A failed handshake returns the loader's
-        //    clean error and installs nothing.
-        // Trust-on-first-use: the id is learned from this handshake and recorded
-        // as the install filename below, so there is no prior id to validate.
-        let report = plugin_loader::spawn_plugin(src, None)
+        //    touching the install dir. A failed handshake (including a declared
+        //    name other than `name`) returns the loader's clean error and
+        //    installs nothing.
+        let report = plugin_loader::spawn_plugin(src, name)
             .with_context(|| format!("refusing to install {file}: plugin handshake failed"))?;
         apply_plugin_schema(&report);
 
@@ -884,6 +903,22 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
             loaded_live: true,
         })
     }
+}
+
+/// Refuse a sideload name that is reserved for core, or that would silently
+/// overwrite an installed plugin without `replace`.
+fn check_sideload_name(name: &str, replace: bool) -> Result<()> {
+    if !plugin_loader::is_valid_plugin_id(name) {
+        bail!("plugin name '{name}' must match ^[a-z][a-z0-9_-]{{0,63}}$");
+    }
+    if plugin_loader::is_reserved_plugin_id(name) {
+        bail!("plugin name '{name}' is reserved for orca core; choose another name");
+    }
+    let on_disk = install_dir().is_some_and(|d| d.join(install_filename(name)).exists());
+    if !replace && (on_disk || plugin_loader::is_loaded(name)) {
+        bail!("plugin '{name}' is already installed; pass --replace to overwrite it");
+    }
+    Ok(())
 }
 
 /// Install a first-party plugin from its GitHub release (the `--name` path).
@@ -1004,7 +1039,7 @@ pub(crate) async fn install_from_catalog(
         // rejected file so the next startup scan doesn't trip on it, then put the
         // incumbent back — a rejected upgrade must be a no-op, not an uninstall.
         // The catalog target_software is the authoritative id (== dest filename).
-        let report = match plugin_loader::spawn_plugin(&dest, Some(&entry.target_software)) {
+        let report = match plugin_loader::spawn_plugin(&dest, &entry.target_software) {
             Ok(r) => r,
             Err(e) => {
                 if let Err(rm) = std::fs::remove_file(&dest) {
@@ -2002,7 +2037,80 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn install_rejects_both_file_and_name() {
+    async fn sideload_refuses_reserved_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let bin = tmp.path().join("komga-main.bin");
+        std::fs::write(&bin, b"").unwrap();
+        let args = PluginInstallArgs {
+            file: Some(bin.display().to_string()),
+            name: Some("github_token".to_string()),
+            ..Default::default()
+        };
+        let err = plugin_install(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reserved"),
+            "unexpected: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn sideload_refuses_malformed_name_before_probe_or_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        // An empty file: reaching a probe/spawn would fail differently.
+        let bin = tmp.path().join("komga-main.bin");
+        std::fs::write(&bin, b"").unwrap();
+        for name in [
+            "model.0190f2c4-7b1e-7c3a-9a8e-1d2c3b4a5f6e",
+            "../x",
+            "Komga",
+        ] {
+            let args = PluginInstallArgs {
+                file: Some(bin.display().to_string()),
+                name: Some(name.to_string()),
+                ..Default::default()
+            };
+            let err = plugin_install(args, &ctx).await.unwrap_err();
+            assert!(format!("{err:#}").contains("must match"), "{name}: {err:#}");
+        }
+        assert!(
+            !install_dir()
+                .unwrap()
+                .join(install_filename("../x"))
+                .exists()
+        );
+        check_sideload_name("calibre-web", false).expect("hyphenated name is valid");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn sideload_refuses_installed_name_without_replace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let dir = install_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(install_filename("komga")), b"").unwrap();
+        let bin = tmp.path().join("komga-main.bin");
+        std::fs::write(&bin, b"").unwrap();
+        let args = PluginInstallArgs {
+            file: Some(bin.display().to_string()),
+            name: Some("komga".to_string()),
+            ..Default::default()
+        };
+        let err = plugin_install(args, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("already installed; pass --replace"),
+            "unexpected: {err:#}"
+        );
+        check_sideload_name("komga", true).expect("replace allows overwrite");
+        check_sideload_name("kavita", false).expect("a fresh name is allowed");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn install_file_and_name_takes_the_sideload_path() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let args = PluginInstallArgs {
@@ -2010,10 +2118,11 @@ mod tests {
             name: Some("jellyfin".to_string()),
             version: None,
             prerelease: false,
+            replace: false,
         };
         let err = plugin_install(args, &ctx).await.unwrap_err();
         assert!(
-            format!("{err:#}").contains("exactly one"),
+            format!("{err:#}").contains("no such file"),
             "unexpected: {err:#}"
         );
     }
@@ -2042,6 +2151,7 @@ mod tests {
             name: None,
             version: None,
             prerelease: false,
+            replace: false,
         };
         let err = plugin_install(args, &ctx).await.unwrap_err();
         assert!(
@@ -2061,6 +2171,7 @@ mod tests {
             name: None,
             version: None,
             prerelease: false,
+            replace: false,
             tool: None,
             args: serde_json::json!({}),
         };
@@ -2187,9 +2298,9 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn create_install_rejects_both_file_and_name() {
-        // action=install forwards to plugin_install, which bails before any fetch
-        // or subprocess when both --file and --name are supplied.
+    async fn create_install_file_and_name_takes_the_sideload_path() {
+        // action=install forwards to plugin_install; --file plus --name is a
+        // sideload, so a missing file bails before any fetch or subprocess.
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let args = PluginCreateArgs {
@@ -2198,12 +2309,13 @@ mod tests {
             name: Some("jellyfin".to_string()),
             version: None,
             prerelease: false,
+            replace: false,
             tool: None,
             args: serde_json::json!({}),
         };
         let err = plugin_create(args, &ctx).await.unwrap_err();
         assert!(
-            format!("{err:#}").contains("exactly one"),
+            format!("{err:#}").contains("no such file"),
             "unexpected: {err:#}"
         );
     }
@@ -2221,6 +2333,7 @@ mod tests {
             name: None,
             version: None,
             prerelease: false,
+            replace: false,
             tool: None,
             args: serde_json::json!({}),
         };
@@ -2245,6 +2358,7 @@ mod tests {
             name: None,
             version: None,
             prerelease: false,
+            replace: false,
             tool: None,
             args: serde_json::json!({}),
         };
@@ -2268,6 +2382,7 @@ mod tests {
             name: None,
             version: None,
             prerelease: false,
+            replace: false,
             tool: Some("nope-plugin.nope".to_string()),
             args: serde_json::json!({}),
         };
@@ -2674,6 +2789,7 @@ mod tests {
                 name: Some("totally-unknown-plugin".to_string()),
                 version: None,
                 prerelease: false,
+                replace: false,
             },
             &ctx,
         )
@@ -2702,6 +2818,7 @@ mod tests {
                 name: Some("wip".to_string()),
                 version: None,
                 prerelease: false,
+                replace: false,
             },
             &ctx,
         )
@@ -3065,6 +3182,7 @@ mod tests {
                 name: Some("svc-daemon".to_string()),
                 version: None,
                 prerelease: false,
+                replace: false,
             },
             &ctx,
         )

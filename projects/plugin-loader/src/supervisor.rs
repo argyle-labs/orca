@@ -282,19 +282,27 @@ pub fn invoke_on<S: Read + Write>(
     }
 }
 
-/// Resolve the authoritative session principal from the install id (if known)
-/// and the plugin's self-declared handshake id. `Some(id)` validates equality
-/// (a mismatch is a hard error — id mismatch or tampering); `None` is
-/// trust-on-first-use and accepts the declared id.
-fn resolve_principal(expected_id: Option<&str>, declared: &str) -> Result<String> {
-    match expected_id {
-        Some(id) if declared != id => bail!(
-            "plugin declared id '{declared}' but orca is loading it as '{id}' \
-             — refusing (id mismatch or tampering)"
-        ),
-        Some(id) => Ok(id.to_string()),
-        None => Ok(declared.to_string()),
+/// Bind the session principal to the id orca launched the plugin under. The
+/// self-declared `Hello` id is never trusted: a mismatch is refused so a plugin
+/// cannot claim another plugin's namespace. An empty or reserved
+/// ([`crate::is_reserved_plugin_id`]) id is refused, since a principal owns
+/// every secret named `<id>` / `<id>.…`.
+fn resolve_principal(expected_id: &str, declared: &str) -> Result<String> {
+    if !crate::is_valid_plugin_id(expected_id) {
+        bail!(
+            "refusing to load plugin as '{expected_id}': id must match ^[a-z][a-z0-9_-]{{0,63}}$"
+        );
     }
+    if crate::is_reserved_plugin_id(expected_id) {
+        bail!("refusing to load plugin as '{expected_id}': id is reserved for orca core");
+    }
+    if declared != expected_id {
+        bail!(
+            "plugin declared id '{declared}' but orca is loading it as '{expected_id}' \
+             — refusing (id mismatch or tampering)"
+        );
+    }
+    Ok(expected_id.to_string())
 }
 
 /// A spawned plugin subprocess and its session socket.
@@ -318,75 +326,43 @@ impl PluginProcess {
     /// return a live process advertising the daemon's capabilities.
     ///
     /// `expected_id` is the authoritative plugin id orca is loading this binary
-    /// as (the install-dir filename). When `Some`, the self-declared `Hello` id
-    /// is validated against it (mismatch is refused) and it becomes the session
-    /// **principal** for capability namespace scoping — so a plugin cannot widen
-    /// its reach by lying in `Hello`. When `None` (trust-on-first-use, e.g. a
-    /// sideload from an arbitrary path before the id is recorded), the declared
-    /// `Hello` id is accepted and used as the principal.
-    pub fn spawn(exe: &Path, expected_id: Option<&str>) -> Result<Self> {
-        // Bind BEFORE spawn so the child's connect() can't race an unbound path.
-        let (rendezvous, listener) = bind_rendezvous(private_socket_dir()?, "s.sock")?;
-        let sock_path = rendezvous.sock.clone();
-
-        // Trust model: the env is scrubbed so daemon secrets don't leak by
-        // default, but the plugin runs as the daemon's uid — it can still read
-        // anything the daemon can (e.g. `~/.orca/.db_key`, mode 0600). That is
-        // not an isolation boundary; installed plugins are trusted code.
-        let mut cmd = Command::new(exe);
-        cmd.env_clear();
-        cmd.envs(inherited_env(std::env::vars_os()));
-        cmd.env(SOCKET_ENV, &sock_path);
-        // Tell the plugin which orca binary launched it, so toolkit helpers that
-        // need a privileged round-trip (e.g. `sudo -n <orca> admin lxc-exec`)
-        // can reach it. The daemon's own path is authoritative — a plugin never
-        // guesses it. Best-effort: absent ORCA_BIN, the toolkit falls back to a
-        // direct (non-orca) path where one exists.
-        if let Ok(orca_bin) = std::env::current_exe() {
-            cmd.env(ORCA_BIN_ENV, orca_bin);
-        }
-        // Opt-in instrumentation: when the daemon has enabled profiling for this
-        // plugin, inject MALLOC_CONF + ORCA_PLUGIN_INSTRUMENT so the respawned
-        // process activates jemalloc heap profiling and its auto-diagnostics
-        // provider. Empty (no-op) for every plugin that is not enabled.
-        if let Some(id) = expected_id {
-            for (k, v) in contract::plugin_instrument::env_for(id) {
+    /// as (the install-dir filename, or the operator-supplied sideload id). The
+    /// self-declared `Hello` id is validated against it (mismatch is refused)
+    /// and it becomes the session **principal** for capability namespace
+    /// scoping — so a plugin cannot widen its reach by lying in `Hello`.
+    pub fn spawn(exe: &Path, expected_id: &str) -> Result<Self> {
+        let (mut child, mut stream) = launch(exe, |cmd| {
+            // Tell the plugin which orca binary launched it, so toolkit helpers
+            // that need a privileged round-trip (e.g. `sudo -n <orca> admin
+            // lxc-exec`) can reach it. The daemon's own path is authoritative — a
+            // plugin never guesses it. Best-effort: absent ORCA_BIN, the toolkit
+            // falls back to a direct (non-orca) path where one exists.
+            if let Ok(orca_bin) = std::env::current_exe() {
+                cmd.env(ORCA_BIN_ENV, orca_bin);
+            }
+            // Opt-in instrumentation: when the daemon has enabled profiling for
+            // this plugin, inject MALLOC_CONF + ORCA_PLUGIN_INSTRUMENT so the
+            // respawned process activates jemalloc heap profiling and its
+            // auto-diagnostics provider. Empty (no-op) for every plugin that is
+            // not enabled.
+            for (k, v) in contract::plugin_instrument::env_for(expected_id) {
                 cmd.env(k, v);
             }
-        }
-        let spawned = cmd
-            .spawn()
-            .with_context(|| format!("spawning plugin executable {exe:?}"));
-        let accepted = spawned.and_then(|mut child| {
-            // The child connects back; accept its single session connection.
-            let stream = listener
-                .accept()
-                .map(|(stream, _addr)| stream)
-                .with_context(|| format!("accepting connection from plugin {exe:?}"))
-                .and_then(|stream| {
-                    verify_peer(&stream, child.id())
-                        .with_context(|| format!("plugin {exe:?} session peer"))?;
-                    Ok(stream)
-                });
-            match stream {
-                Ok(stream) => Ok((child, stream)),
-                Err(e) => {
-                    _ = child.kill();
-                    _ = child.wait();
-                    Err(e)
-                }
-            }
-        });
-        // The dir is only needed for the connect rendezvous; remove it now so a
-        // crash can't leave a stale socket blocking a respawn.
-        drop(rendezvous);
-        let (child, mut stream) = accepted?;
+        })?;
 
-        let hs = handshake(&mut stream, CAPABILITIES)?;
-        // Authoritative principal: the install id when known (validate the
-        // self-declared handshake id against it), else trust-on-first-use.
-        let principal = resolve_principal(expected_id, &hs.software)
-            .with_context(|| format!("plugin binary {exe:?} handshake identity"))?;
+        let bound = handshake(&mut stream, CAPABILITIES).and_then(|hs| {
+            let principal = resolve_principal(expected_id, &hs.software)
+                .with_context(|| format!("plugin binary {exe:?} handshake identity"))?;
+            Ok((hs, principal))
+        });
+        let (hs, principal) = match bound {
+            Ok(b) => b,
+            Err(e) => {
+                _ = child.kill();
+                _ = child.wait();
+                return Err(e);
+            }
+        };
         tracing::info!(
             plugin = %principal,
             version = %hs.semver,
@@ -396,8 +372,7 @@ impl PluginProcess {
         );
 
         Ok(Self {
-            // Authoritative identity is the install id (validated equal above),
-            // or the declared id on trust-on-first-use.
+            // Authoritative identity is the expected id (validated equal above).
             software: principal,
             semver: hs.semver,
             manifest: hs.manifest,
@@ -434,6 +409,69 @@ impl Drop for PluginProcess {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// Read a plugin binary's declared id + version WITHOUT granting it anything:
+/// the `Welcome` advertises no capabilities, no tool is ever invoked (so no
+/// `Cap` request is serviced), neither `ORCA_BIN` nor instrumentation env is
+/// passed, and the child is killed as soon as `Hello` is read. The binary still
+/// runs as the daemon user for the duration of the handshake.
+pub fn probe(exe: &Path) -> Result<Handshake> {
+    let (mut child, mut stream) = launch(exe, |_| {})?;
+    let hs = handshake(&mut stream, &[]);
+    _ = write_frame(&mut stream, &Frame::Shutdown);
+    _ = child.kill();
+    _ = child.wait();
+    hs
+}
+
+/// Bind a private rendezvous socket, spawn `exe` with the scrubbed env plus
+/// whatever `configure` adds, and accept its peer-verified session connection.
+/// The child is killed and reaped on any failure.
+fn launch(
+    exe: &Path,
+    configure: impl FnOnce(&mut Command),
+) -> Result<(Child, std::os::unix::net::UnixStream)> {
+    // Bind BEFORE spawn so the child's connect() can't race an unbound path.
+    let (rendezvous, listener) = bind_rendezvous(private_socket_dir()?, "s.sock")?;
+    let sock_path = rendezvous.sock.clone();
+
+    // Trust model: the env is scrubbed so daemon secrets don't leak by
+    // default, but the plugin runs as the daemon's uid — it can still read
+    // anything the daemon can (e.g. `~/.orca/.db_key`, mode 0600). That is
+    // not an isolation boundary; installed plugins are trusted code.
+    let mut cmd = Command::new(exe);
+    cmd.env_clear();
+    cmd.envs(inherited_env(std::env::vars_os()));
+    cmd.env(SOCKET_ENV, &sock_path);
+    configure(&mut cmd);
+    let spawned = cmd
+        .spawn()
+        .with_context(|| format!("spawning plugin executable {exe:?}"));
+    let accepted = spawned.and_then(|mut child| {
+        // The child connects back; accept its single session connection.
+        let stream = listener
+            .accept()
+            .map(|(stream, _addr)| stream)
+            .with_context(|| format!("accepting connection from plugin {exe:?}"))
+            .and_then(|stream| {
+                verify_peer(&stream, child.id())
+                    .with_context(|| format!("plugin {exe:?} session peer"))?;
+                Ok(stream)
+            });
+        match stream {
+            Ok(stream) => Ok((child, stream)),
+            Err(e) => {
+                _ = child.kill();
+                _ = child.wait();
+                Err(e)
+            }
+        }
+    });
+    // The dir is only needed for the connect rendezvous; remove it now so a
+    // crash can't leave a stale socket blocking a respawn.
+    drop(rendezvous);
+    accepted
 }
 
 /// Create a fresh 0700 directory under the temp dir to hold one plugin's
@@ -969,18 +1007,39 @@ mod tests {
     }
 
     #[test]
-    fn resolve_principal_validates_and_tofu() {
-        // Trust-on-first-use: declared id accepted as principal.
-        assert_eq!(resolve_principal(None, "jellyfin").unwrap(), "jellyfin");
-        // Known id matching the declaration: accepted.
+    fn resolve_principal_binds_to_expected_id() {
         assert_eq!(
-            resolve_principal(Some("jellyfin"), "jellyfin").unwrap(),
+            resolve_principal("jellyfin", "jellyfin").unwrap(),
             "jellyfin"
         );
-        // Known id disagreeing with the declaration: refused.
-        let err = resolve_principal(Some("jellyfin"), "evil")
+        let err = resolve_principal("jellyfin", "evil")
             .unwrap_err()
             .to_string();
         assert!(err.contains("id mismatch or tampering"), "got: {err}");
+        assert!(resolve_principal("", "jellyfin").is_err());
+    }
+
+    #[test]
+    fn resolve_principal_refuses_reserved_ids() {
+        for id in ["orca", "github_token", "secrets", "mesh"] {
+            let err = resolve_principal(id, id).unwrap_err().to_string();
+            assert!(err.contains("reserved"), "{id}: {err}");
+        }
+    }
+
+    #[test]
+    fn resolve_principal_refuses_malformed_ids() {
+        for id in [
+            "model.0190f2c4-7b1e-7c3a-9a8e-1d2c3b4a5f6e",
+            "../x",
+            "Jellyfin",
+        ] {
+            let err = resolve_principal(id, id).unwrap_err().to_string();
+            assert!(err.contains("must match"), "{id}: {err}");
+        }
+        assert_eq!(
+            resolve_principal("calibre-web", "calibre-web").unwrap(),
+            "calibre-web"
+        );
     }
 }

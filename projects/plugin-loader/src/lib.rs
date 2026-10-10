@@ -769,12 +769,12 @@ pub struct LoadReport {
 /// backend's ops route back through the subprocess.
 ///
 /// `expected_id` is the authoritative plugin id orca is loading this binary as
-/// (the install-dir filename). When `Some`, it is validated against the plugin's
-/// self-declared handshake id and becomes the session principal that confines
-/// the plugin's `db.op`/`secret.op` to its own namespace. Pass `None` only for
-/// trust-on-first-use (sideloading an arbitrary file before its id is recorded).
+/// (the install-dir filename, or the operator-supplied sideload id). It is
+/// validated against the plugin's self-declared handshake id and becomes the
+/// session principal that confines the plugin's `db.op`/`secret.op` to its own
+/// namespace. Reserved core ids ([`is_reserved_plugin_id`]) are refused.
 #[cfg(unix)]
-pub fn spawn_plugin(exe: &Path, expected_id: Option<&str>) -> Result<LoadReport> {
+pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
     let proc = supervisor::PluginProcess::spawn(exe, expected_id)?;
     let software = proc.software.clone();
     let semver = proc.semver.clone();
@@ -949,6 +949,50 @@ pub fn loaded_plugins() -> Vec<LoadedPluginInfo> {
             }
         })
         .collect()
+}
+
+/// Ids a plugin may never load as. A plugin's principal owns every secret named
+/// `<id>` or `<id>.…`, so an id equal to a core secret name (or a core
+/// namespace) would hand the plugin that secret.
+pub const RESERVED_PLUGIN_IDS: &[&str] = &[
+    "orca",
+    "core",
+    "system",
+    "auth",
+    "secret",
+    "secrets",
+    "mesh",
+    "model",
+    "notify",
+    "plugin",
+    "db",
+    "github",
+    "github_token",
+    "anthropic",
+    "anthropic_api_key",
+    "release_source_api",
+];
+
+pub fn is_reserved_plugin_id(id: &str) -> bool {
+    RESERVED_PLUGIN_IDS.contains(&id)
+}
+
+/// Whether `id` matches `^[a-z][a-z0-9_-]{0,63}$`. No `.` (a dotted id would
+/// own a core secret's `<id>.…` names past the reserved list) and no `/`
+/// (the id becomes the install filename).
+pub fn is_valid_plugin_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && id.len() <= 64
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Declared id + semver of a plugin binary, read via a capability-less
+/// handshake ([`supervisor::probe`]). Registers nothing.
+#[cfg(unix)]
+pub fn probe_plugin(exe: &Path) -> Result<(String, String)> {
+    let hs = supervisor::probe(exe)?;
+    Ok((hs.software, hs.semver))
 }
 
 /// Whether a plugin reporting `software` as its `target_software` is currently
@@ -1817,7 +1861,23 @@ mod loader_tests {
         unload_plugin("loaderfakeplugin");
 
         let exe = std::env::current_exe().expect("test binary path");
-        let report = spawn_plugin(&exe, Some("loaderfakeplugin")).expect("fake plugin loads");
+
+        let (id, version) = probe_plugin(&exe).expect("probe reads Hello");
+        assert_eq!(
+            (id.as_str(), version.as_str()),
+            ("loaderfakeplugin", "9.9.9")
+        );
+        assert!(
+            !is_loaded("loaderfakeplugin"),
+            "probe must register nothing"
+        );
+
+        let err =
+            spawn_plugin(&exe, "someotherid").expect_err("declared id != expected id is refused");
+        assert!(format!("{err:#}").contains("id mismatch"), "got: {err:#}");
+        assert!(!is_loaded("someotherid") && !is_loaded("loaderfakeplugin"));
+
+        let report = spawn_plugin(&exe, "loaderfakeplugin").expect("fake plugin loads");
         assert_eq!(report.software, "loaderfakeplugin");
         assert_eq!(report.semver, "9.9.9");
         assert!(
@@ -1884,6 +1944,50 @@ mod loader_tests {
                 .any(|t| t.name == "loaderfakeplugin.ping"),
             "tool def gone after unload"
         );
+    }
+
+    #[test]
+    fn plugin_id_shape_is_enforced() {
+        for id in [
+            "jellyfin",
+            "calibre-web",
+            "github_token",
+            "a",
+            &"a".repeat(64),
+        ] {
+            assert!(is_valid_plugin_id(id), "{id} must be valid");
+        }
+        for id in [
+            "",
+            "model.0190f2c4-7b1e-7c3a-9a8e-1d2c3b4a5f6e",
+            "../x",
+            "a/b",
+            "..",
+            "Jellyfin",
+            "1plugin",
+            "-x",
+            &"a".repeat(65),
+        ] {
+            assert!(!is_valid_plugin_id(id), "{id} must be refused");
+        }
+    }
+
+    #[test]
+    fn reserved_plugin_ids_cover_core_secret_names() {
+        for id in [
+            "orca",
+            "github_token",
+            "anthropic_api_key",
+            "release_source_api",
+            "secrets",
+            "notify",
+            "model",
+        ] {
+            assert!(is_reserved_plugin_id(id), "{id} must be reserved");
+        }
+        for id in ["jellyfin", "komga", "agents", "gitea", "mcp", "hydra"] {
+            assert!(!is_reserved_plugin_id(id), "{id} is a real plugin id");
+        }
     }
 
     #[test]
