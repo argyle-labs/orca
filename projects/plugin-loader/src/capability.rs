@@ -16,7 +16,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use plugin_toolkit::abi::{
     AgentRegistration, DbOp, DbReply, DbRow, DbValue, HttpRequest, HttpResponse, HttpStreamChunk,
     HttpStreamRequest, SecretOp,
@@ -61,51 +61,6 @@ fn cap_runtime() -> &'static tokio::runtime::Runtime {
 fn http_client() -> &'static utils::http::Client {
     static CLIENT: OnceLock<utils::http::Client> = OnceLock::new();
     CLIENT.get_or_init(utils::http::Client::new)
-}
-
-/// Phase toggle for plugin-namespace enforcement on `secret.op` (`db.op` is
-/// always hard-enforced by [`exec_db_op_policed`]).
-///
-/// Phase 1 (current): a cross-namespace access is logged as a loud `warn!` but
-/// still executed — this surfaces any legitimate cross-namespace usage on the
-/// real fleet before it can break anything. Phase 2 (next release): flip this to
-/// `true` so [`enforce_namespace`] rejects instead of warning.
-const HARD_ENFORCE_NAMESPACE: bool = false;
-
-/// Confine a capability op to its calling plugin's `principal`. `target` is the
-/// namespace (for `db.op`) or the `<principal>.`-prefix check subject (for
-/// `secret.op`) the op wants to touch; `owned` says whether it belongs to the
-/// principal. Returns `Err` only under hard-enforce; otherwise warns and allows.
-fn enforce_namespace(
-    cap: &str,
-    op_kind: &str,
-    principal: &str,
-    target: &str,
-    owned: bool,
-) -> Result<()> {
-    if owned {
-        return Ok(());
-    }
-    if HARD_ENFORCE_NAMESPACE {
-        return Err(anyhow!(
-            "plugin '{principal}' may not {cap}/{op_kind} outside its namespace (target '{target}')"
-        ));
-    }
-    // Fires per plugin per reconcile tick while the crossing persists; dedupe
-    // so each distinct (plugin, cap, op) crossing is surfaced exactly once
-    // rather than every ~2s. Still WARN — it flags things that break at
-    // hard-enforce — just not spammy.
-    if plugin_toolkit::logging::should_warn_once(&format!("xns:{principal}:{cap}:{op_kind}")) {
-        tracing::warn!(
-            target: "plugin",
-            plugin = %principal,
-            cap = %cap,
-            op = %op_kind,
-            attempted = %target,
-            "cross-namespace capability access (phase-1 allow; will be rejected once hard-enforce lands)"
-        );
-    }
-    Ok(())
 }
 
 /// A secret `name` belongs to `principal` when it is exactly the principal or is
@@ -321,8 +276,13 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
         "secret.op" => {
             let op: SecretOp = serde_json::from_value(args)
                 .map_err(|e| anyhow!("secret.op: bad op payload: {e}"))?;
-            let owned = secret_name_owned(op.name(), principal);
-            enforce_namespace("secret.op", op.kind(), principal, op.name(), owned)?;
+            if !secret_name_owned(op.name(), principal) {
+                bail!(
+                    "plugin '{principal}' may not secret.op/{} outside its namespace (target '{}')",
+                    op.kind(),
+                    op.name()
+                );
+            }
             let reply = secrets::exec_secret_op_pooled(&op)?;
             Ok(serde_json::to_value(reply)?)
         }
@@ -549,12 +509,18 @@ mod tests {
     }
 
     #[test]
-    fn enforce_namespace_allows_own_and_permits_foreign_in_phase1() {
-        // Own namespace: always Ok.
-        assert!(enforce_namespace("db.op", "get", "p", "p", true).is_ok());
-        // Foreign namespace under phase-1 warn-first: allowed (Ok), logged.
-        // (Phase 2 flips HARD_ENFORCE_NAMESPACE so this returns Err instead.)
-        assert!(enforce_namespace("db.op", "get", "p", "other", false).is_ok());
+    fn secret_op_refuses_foreign_name() {
+        let err = handle_cap(
+            "secret.op",
+            serde_json::to_value(SecretOp::Get {
+                name: "jellyfin.api_key".into(),
+            })
+            .unwrap(),
+            "proxmox",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("outside its namespace"), "got: {err}");
     }
 
     fn policy_conn() -> db::Conn {
