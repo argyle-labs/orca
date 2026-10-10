@@ -73,6 +73,7 @@ fn publish_http_port(port: u16) {
 }
 
 pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()> {
+    install_panic_hook();
     // Prod guard for `--dev`: drops `Secure` cookie, serves plain HTTP, and
     // relaxes SameSite. Safe on a single-user laptop; unsafe the moment a
     // multi-user host adopts it. Refuse if more than one user exists.
@@ -173,18 +174,22 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     Ok(())
 }
 
-/// Route panics through tracing so a crashed task leaves a backtrace in the
-/// daemon log, then defer to the default hook (stderr).
-fn install_panic_hook() {
+/// Route panics through tracing so a crashed task lands in the daemon log.
+/// Until a global subscriber is installed, the default hook prints instead, so
+/// a panic is reported exactly once. The backtrace honors `RUST_BACKTRACE` /
+/// `RUST_LIB_BACKTRACE` (`Backtrace::capture`); unset, nothing is captured.
+pub fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        if !tracing::dispatcher::has_been_set() {
+            return default(info);
+        }
         let thread = std::thread::current();
         tracing::error!(
             thread = thread.name().unwrap_or("<unnamed>"),
-            backtrace = %std::backtrace::Backtrace::force_capture(),
+            backtrace = %std::backtrace::Backtrace::capture(),
             "panic: {info}"
         );
-        default(info);
     }));
 }
 
