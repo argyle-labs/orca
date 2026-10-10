@@ -769,12 +769,12 @@ pub struct LoadReport {
 /// backend's ops route back through the subprocess.
 ///
 /// `expected_id` is the authoritative plugin id orca is loading this binary as
-/// (the install-dir filename). When `Some`, it is validated against the plugin's
-/// self-declared handshake id and becomes the session principal that confines
-/// the plugin's `db.op`/`secret.op` to its own namespace. Pass `None` only for
-/// trust-on-first-use (sideloading an arbitrary file before its id is recorded).
+/// (the install-dir filename, or the operator-supplied sideload id). It is
+/// validated against the plugin's self-declared handshake id and becomes the
+/// session principal that confines the plugin's `db.op`/`secret.op` to its own
+/// namespace. Reserved core ids ([`is_reserved_plugin_id`]) are refused.
 #[cfg(unix)]
-pub fn spawn_plugin(exe: &Path, expected_id: Option<&str>) -> Result<LoadReport> {
+pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
     let proc = supervisor::PluginProcess::spawn(exe, expected_id)?;
     let software = proc.software.clone();
     let semver = proc.semver.clone();
@@ -985,6 +985,14 @@ pub fn is_valid_plugin_id(id: &str) -> bool {
     bytes.next().is_some_and(|b| b.is_ascii_lowercase())
         && id.len() <= 64
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Declared id + semver of a plugin binary, read via a capability-less
+/// handshake ([`supervisor::probe`]). Registers nothing.
+#[cfg(unix)]
+pub fn probe_plugin(exe: &Path) -> Result<(String, String)> {
+    let hs = supervisor::probe(exe)?;
+    Ok((hs.software, hs.semver))
 }
 
 /// Whether a plugin reporting `software` as its `target_software` is currently
@@ -1854,12 +1862,22 @@ mod loader_tests {
 
         let exe = std::env::current_exe().expect("test binary path");
 
-        let err = spawn_plugin(&exe, Some("someotherid"))
-            .expect_err("declared id != expected id is refused");
+        let (id, version) = probe_plugin(&exe).expect("probe reads Hello");
+        assert_eq!(
+            (id.as_str(), version.as_str()),
+            ("loaderfakeplugin", "9.9.9")
+        );
+        assert!(
+            !is_loaded("loaderfakeplugin"),
+            "probe must register nothing"
+        );
+
+        let err =
+            spawn_plugin(&exe, "someotherid").expect_err("declared id != expected id is refused");
         assert!(format!("{err:#}").contains("id mismatch"), "got: {err:#}");
         assert!(!is_loaded("someotherid") && !is_loaded("loaderfakeplugin"));
 
-        let report = spawn_plugin(&exe, Some("loaderfakeplugin")).expect("fake plugin loads");
+        let report = spawn_plugin(&exe, "loaderfakeplugin").expect("fake plugin loads");
         assert_eq!(report.software, "loaderfakeplugin");
         assert_eq!(report.semver, "9.9.9");
         assert!(
