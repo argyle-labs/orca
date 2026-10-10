@@ -30,3 +30,6 @@ namespace = { path = "../namespace" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+uuid = { workspace = true }

@@ -8,7 +8,6 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use anyhow::{Context, anyhow};
 use derive::orca_tool;
@@ -19,9 +18,6 @@ use sha2::{Digest, Sha256};
 use crate::registry::HookDef;
 
 pub type Approvals = BTreeSet<(String, String)>;
-
-// Serializes read-modify-write of the approvals file within this process.
-static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Content hash of a hook: sha256 over event, matcher and command, each
 /// length-prefixed (u64 LE) so no field boundary can be shifted into another.
@@ -54,13 +50,24 @@ pub fn is_approved(approvals: &Approvals, hook: &HookDef) -> bool {
 
 /// Persist approval of `(origin, hash)`.
 pub fn approve(origin: &str, hash: &str) -> anyhow::Result<()> {
-    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = store_path().ok_or_else(|| anyhow!("cannot resolve orca home"))?;
-    let mut approvals = load();
-    approvals.insert((origin.to_string(), hash.to_string()));
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
+    // Read-modify-write under an exclusive lock on a sidecar file: the CLI, the
+    // daemon and concurrent callers each hold their own fd, and an in-process
+    // mutex would let one process's write drop another's approval.
+    let lock_path = path.with_extension("lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("open {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("lock {}", lock_path.display()))?;
+    let mut approvals = load();
+    approvals.insert((origin.to_string(), hash.to_string()));
     write_private_synced(&path, &serde_json::to_vec_pretty(&approvals)?)
         .with_context(|| format!("write {}", path.display()))?;
     Ok(())
@@ -242,6 +249,24 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_approvals_are_all_kept() {
+        let tag = uuid::Uuid::now_v7().simple().to_string();
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let origin = format!("concurrent-{tag}-{i}");
+                std::thread::spawn(move || approve(&origin, "h").unwrap())
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let approvals = load();
+        for i in 0..16 {
+            assert!(approvals.contains(&(format!("concurrent-{tag}-{i}"), "h".to_string())));
+        }
+    }
+
+    #[test]
     fn unapproved_hook_is_not_composed() {
         register("hook-unapproved-xyz", "echo unapproved");
         assert!(
@@ -259,24 +284,23 @@ mod tests {
 
     #[test]
     fn approved_hook_is_composed_and_change_reverts_approval() {
-        register("hook-approved-xyz", "echo approved");
+        // The test home is keyed by pid and outlives the process, so a reused
+        // pid can inherit an earlier run's approvals; a fresh origin can't match.
+        let origin = format!("hook-approved-{}", uuid::Uuid::now_v7().simple());
+        register(&origin, "echo approved");
         let hook = compose_unapproved_hooks()
             .into_iter()
-            .find(|h| h.origin == "hook-approved-xyz")
+            .find(|h| h.origin == origin)
             .unwrap();
         approve(&hook.origin, &hook_hash(&hook)).unwrap();
         assert!(
             compose_hooks()
                 .iter()
-                .any(|h| h.origin == "hook-approved-xyz" && h.command == "echo approved")
+                .any(|h| h.origin == origin && h.command == "echo approved")
         );
 
-        register("hook-approved-xyz", "echo changed");
-        assert!(
-            compose_hooks()
-                .iter()
-                .all(|h| h.origin != "hook-approved-xyz")
-        );
-        deregister_provider("hook-approved-xyz");
+        register(&origin, "echo changed");
+        assert!(compose_hooks().iter().all(|h| h.origin != origin));
+        deregister_provider(&origin);
     }
 }

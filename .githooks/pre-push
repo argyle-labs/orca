@@ -4,6 +4,36 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# The gate tests each pushed commit, never the working tree: a branch can be
+# pushed without checking it out, and uncommitted files (yours or a concurrent
+# session's) can't pass or fail it. Commits are synced into one fixed export
+# dir with its own target dir. `rsync -c` rewrites only files whose content
+# changed, so mtimes stay truthful and cargo rebuilds only what changed; a raw
+# `git archive` stamps every file with the commit date and lets cargo reuse
+# artifacts compiled from different source.
+ZERO=0000000000000000000000000000000000000000
+shas=()
+while read -r _lref lsha _rref _rsha; do
+  [ "$lsha" = "$ZERO" ] && continue # branch deletion
+  shas+=("$lsha")
+done
+if [ "${#shas[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+GATE_DIR="$ROOT/target/prepush"
+mkdir -p "$GATE_DIR"
+LOCK="$GATE_DIR/lock"
+until mkdir "$LOCK" 2>/dev/null; do
+  echo "==> waiting for another push's gate ($LOCK)"
+  sleep 5
+done
+GATE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/orca-prepush.XXXXXX")"
+trap 'rm -rf "$GATE_TMP"; rmdir "$LOCK"' EXIT
+export CARGO_TARGET_DIR="$GATE_DIR/target"
+# Tests that open the db must never touch the operator's live ~/.orca.
+export ORCA_HOME="$GATE_TMP/orca-home"
+
 # Cheap KDF for the local test build (matches CI). Honored only in
 # debug/test builds (cfg!(debug_assertions)); release binaries ignore it, so
 # production KDF strength is never affected. Skips the memory-hard Argon2 +
@@ -58,18 +88,38 @@ run_bounded() {
 # defect to fix (make it deterministic, or fix the code it caught) — never a
 # reason to drop the check. For a faster inner loop scoped to changed crates,
 # run ./scripts/check-fast.sh; this hook is the full pre-push guarantee.
-echo "==> rustfmt"
-cargo fmt --all -- --check
-
-echo "==> clippy (-D warnings, matches CI)"
-RUSTFLAGS="-D warnings" cargo clippy --tests --locked --workspace -- -D warnings
-
-echo "==> tests (nextest — matches CI's cargo llvm-cov nextest)"
 if ! command -v cargo-nextest >/dev/null 2>&1; then
   echo "error: cargo-nextest is not installed, but CI runs tests under nextest." >&2
   echo "       install it:  cargo install cargo-nextest --locked" >&2
   exit 1
 fi
-run_bounded 600 cargo nextest run --locked --workspace --no-fail-fast
+
+gate() {
+  echo "==> rustfmt"
+  cargo fmt --all -- --check
+
+  echo "==> clippy (-D warnings, matches CI)"
+  RUSTFLAGS="-D warnings" cargo clippy --tests --locked --workspace -- -D warnings
+
+  echo "==> tests (nextest — matches CI's cargo llvm-cov nextest)"
+  run_bounded 600 cargo nextest run --locked --workspace --no-fail-fast
+}
+
+gated=" "
+for sha in "${shas[@]}"; do
+  tree="$(git rev-parse "$sha^{tree}")"
+  case "$gated" in *" $tree "*) continue ;; esac
+  gated="$gated$tree "
+  stage="$GATE_TMP/stage"
+  rm -rf "$stage"
+  mkdir -p "$stage"
+  git archive "$sha" | tar -x -C "$stage"
+  rsync -rlc --delete "$stage/" "$GATE_DIR/src/"
+  echo "==> gating $(git log -1 --format='%h %s' "$sha")"
+  (
+    cd "$GATE_DIR/src"
+    gate
+  )
+done
 
 echo "pre-push checks passed (fmt + clippy + nextest; coverage floor runs in Gitea CI)."
