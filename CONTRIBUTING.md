@@ -45,6 +45,11 @@ make coverage  # llvm-cov workspace floor (see docs/coverage-baseline.md)
 For a fast inner loop scoped to changed crates: `./scripts/check-fast.sh` and
 `make test-changed`.
 
+`.github/workflows/ci.yml` is generated: one job per workspace crate, wired as
+the crate dependency graph. After adding, removing or re-wiring a crate, run
+`scripts/gen-ci-crate-dag.sh --write` and commit the result; lint fails when
+the workflow drifts from `cargo metadata`.
+
 ## Acceptance criteria
 
 A PR is mergeable when **all** of the following hold. These mirror the CI jobs
