@@ -46,6 +46,12 @@ env:
   # SQLCipher PBKDF2 cost that otherwise makes auth/secrets tests run tens of
   # seconds each under coverage instrumentation.
   ORCA_TEST_FAST_KDF: "1"
+  # No DWARF on CI: less compile, link and cache weight. Trade-off:
+  # RUST_BACKTRACE frames lose file:line, but a panic still prints its
+  # location. Coverage is unaffected (-Cinstrument-coverage emits its own
+  # mapping sections). Local dev keeps line tables.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
   # ── Kill vendored OpenSSL on the PR gate (biggest cold-compile win) ────────
   # OpenSSL is pulled in vendored TWICE — via git2's `vendored-openssl` and via
