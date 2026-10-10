@@ -53,7 +53,7 @@ pub enum HttpError {
     #[error("invalid url: {0}")]
     InvalidUrl(String),
     #[error("request failed: {0}")]
-    Request(#[from] reqwest::Error),
+    Request(reqwest::Error),
     #[error("decode response: {0}")]
     Decode(String),
     #[error("response body exceeded {MAX_RESPONSE_BYTES} bytes")]
@@ -64,6 +64,14 @@ pub enum HttpError {
         summary: String,
         response: Box<Response>,
     },
+}
+
+// reqwest's Display/Debug embed the full request URL, query string included;
+// callers put API keys in query params, so the URL is stripped at conversion.
+impl From<reqwest::Error> for HttpError {
+    fn from(e: reqwest::Error) -> Self {
+        HttpError::Request(e.without_url())
+    }
 }
 
 /// HTTP client with a composable base configuration. Internally pools two
@@ -733,6 +741,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status, 200);
+    }
+
+    #[tokio::test]
+    async fn transport_error_does_not_leak_query_secrets() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let err = Client::new()
+            .get(format!("http://127.0.0.1:{port}/api?apikey=SECRET"))
+            .query("token", "SECRET")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::Request(_)));
+        assert!(!format!("{err}").contains("SECRET"), "{err}");
+        assert!(!format!("{err:?}").contains("SECRET"), "{err:?}");
     }
 
     #[tokio::test]
