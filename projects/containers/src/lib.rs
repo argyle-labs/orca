@@ -793,6 +793,66 @@ pub struct ContainersListArgs {
     /// wants the fleet picture asks for it.
     #[arg(long)]
     pub all_systems: Option<bool>,
+    /// Refused unless null. These args carry no `deny_unknown_fields`, so an
+    /// ignored `id`, `peerId`, `peer` or `systemId` would answer with THIS
+    /// system's containers when the caller meant another system's.
+    #[serde(default, deserialize_with = "refuse_list_id", skip_serializing)]
+    #[schemars(skip)]
+    #[arg(skip)]
+    pub id: Option<()>,
+    #[serde(
+        default,
+        alias = "peer_id",
+        deserialize_with = "refuse_peer_id",
+        skip_serializing
+    )]
+    #[schemars(skip)]
+    #[arg(skip)]
+    pub peer_id: Option<()>,
+    #[serde(default, deserialize_with = "refuse_peer", skip_serializing)]
+    #[schemars(skip)]
+    #[arg(skip)]
+    pub peer: Option<()>,
+    #[serde(
+        default,
+        alias = "system_id",
+        deserialize_with = "refuse_system_id",
+        skip_serializing
+    )]
+    #[schemars(skip)]
+    #[arg(skip)]
+    pub system_id: Option<()>,
+}
+
+/// Accept only null for a refused addressing key; anything else is a 400
+/// naming the argument that addresses a system.
+fn refuse_addressing<'de, D: serde::Deserializer<'de>>(
+    d: D,
+    key: &str,
+) -> Result<Option<()>, D::Error> {
+    match Option::<serde::de::IgnoredAny>::deserialize(d)? {
+        None => Ok(None),
+        Some(_) => Err(serde::de::Error::custom(format!(
+            "`{key}` is not an argument of this verb: name the system with `system` \
+             (its id or display name)"
+        ))),
+    }
+}
+
+fn refuse_list_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<()>, D::Error> {
+    refuse_addressing(d, "id")
+}
+
+fn refuse_peer_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<()>, D::Error> {
+    refuse_addressing(d, "peerId")
+}
+
+fn refuse_peer<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<()>, D::Error> {
+    refuse_addressing(d, "peer")
+}
+
+fn refuse_system_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<()>, D::Error> {
+    refuse_addressing(d, "systemId")
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Default, Debug)]
@@ -1073,6 +1133,29 @@ pub struct ContainerDetailArgs {
     /// where to run (#647).
     #[arg(long)]
     pub system: Option<String>,
+    /// Refused unless null, for the same reason as on `container.list`.
+    #[serde(
+        default,
+        alias = "peer_id",
+        deserialize_with = "refuse_peer_id",
+        skip_serializing
+    )]
+    #[schemars(skip)]
+    #[arg(skip)]
+    pub peer_id: Option<()>,
+    #[serde(default, deserialize_with = "refuse_peer", skip_serializing)]
+    #[schemars(skip)]
+    #[arg(skip)]
+    pub peer: Option<()>,
+    #[serde(
+        default,
+        alias = "system_id",
+        deserialize_with = "refuse_system_id",
+        skip_serializing
+    )]
+    #[schemars(skip)]
+    #[arg(skip)]
+    pub system_id: Option<()>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Default)]
@@ -1135,6 +1218,7 @@ async fn container_detail(
         runtime: args.runtime,
         tail: args.tail,
         system: None,
+        ..Default::default()
     };
     match owner::find(&id, &[], ctx).await {
         owner::Found::On(peer) => exec_detail_at(&peer, args, ctx).await,
@@ -1835,6 +1919,7 @@ mod tests {
                 cursor: None,
                 system: None,
                 all_systems: None,
+                ..Default::default()
             },
             &tool_ctx(),
         )
@@ -1857,6 +1942,7 @@ mod tests {
                 cursor: None,
                 system: None,
                 all_systems: None,
+                ..Default::default()
             },
             &tool_ctx(),
         )
@@ -1909,6 +1995,78 @@ mod tests {
         assert_eq!(
             *calls.lock().unwrap(),
             vec![("mid-baldur".to_string(), "container.list".to_string())]
+        );
+        reset_registry();
+    }
+
+    #[test]
+    fn an_ignored_system_address_is_refused_not_answered_locally() {
+        let thor = "019f9f7b-3333-7e40-9e30-4987d8d12dcb";
+        for (key, args) in [
+            ("`id`", serde_json::json!({ "id": thor })),
+            ("`peerId`", serde_json::json!({ "peerId": thor })),
+            ("`peerId`", serde_json::json!({ "peer_id": thor })),
+            ("`peer`", serde_json::json!({ "peer": thor })),
+            ("`systemId`", serde_json::json!({ "systemId": thor })),
+            ("`systemId`", serde_json::json!({ "system_id": thor })),
+        ] {
+            let err = serde_json::from_value::<ContainersListArgs>(args)
+                .err()
+                .unwrap_or_else(|| panic!("{key} must be refused on container.list"));
+            assert!(err.to_string().contains(key), "{err}");
+            assert!(err.to_string().contains("`system`"), "{err}");
+        }
+        for (key, field) in [
+            ("`peerId`", "peerId"),
+            ("`peer`", "peer"),
+            ("`systemId`", "systemId"),
+        ] {
+            let err = serde_json::from_value::<ContainerDetailArgs>(
+                serde_json::json!({ "id": "sonarr", field: thor }),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{key} must be refused on container.detail"));
+            assert!(err.to_string().contains(key), "{err}");
+        }
+
+        // Null is what clients send for an unset optional; it addresses nothing.
+        let args: ContainersListArgs = serde_json::from_value(
+            serde_json::json!({ "id": null, "peerId": null, "peer": null, "systemId": null }),
+        )
+        .unwrap();
+        assert!(args.id.is_none() && args.peer_id.is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_system_id_from_the_wire_routes_the_list_to_it() {
+        reset_registry();
+        register_adapter(Arc::new(RowsAdapter {
+            kind: RuntimeKind::Docker,
+            rows: vec![row("local-only", "mint", RuntimeKind::Docker)],
+            fail: false,
+        }));
+        let thor = "019f9f7b-3333-7e40-9e30-4987d8d12dcb";
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = SpyMesh {
+            peers: vec![peer("", "mint", true), peer(thor, "thor", false)],
+            holdings: [(
+                thor.to_string(),
+                vec![row("plex", "thor", RuntimeKind::Docker)],
+            )]
+            .into_iter()
+            .collect(),
+            calls: Arc::clone(&calls),
+        }
+        .ctx();
+        let args: ContainersListArgs =
+            serde_json::from_value(serde_json::json!({ "system": thor })).unwrap();
+        let out = containers_list(args, &ctx).await.expect("routed list");
+        assert_eq!(out.containers.len(), 1);
+        assert_eq!(out.containers[0].name, "plex");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(thor.to_string(), "container.list".to_string())]
         );
         reset_registry();
     }
@@ -2110,6 +2268,7 @@ mod tests {
                 runtime: None,
                 tail: Some(3),
                 system: None,
+                ..Default::default()
             },
             &ctx,
         )
@@ -2148,6 +2307,7 @@ mod tests {
                 runtime: None,
                 tail: None,
                 system: None,
+                ..Default::default()
             },
             &ctx,
         )
@@ -2206,6 +2366,7 @@ mod tests {
                 runtime: None,
                 tail: Some(7),
                 system: None,
+                ..Default::default()
             },
             &tool_ctx(),
         )
