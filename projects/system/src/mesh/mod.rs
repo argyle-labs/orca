@@ -1290,14 +1290,13 @@ impl contract::RemoteExec for MeshRemoteExec {
         // a second enumeration here could disagree with the one a fleet roll
         // uses, and a domain searching a different set than the roller walks
         // is how a container goes missing on a host that is plainly joined.
-        Ok(crate::mesh::fleet_update::fleet_targets()?
-            .into_iter()
-            .map(|t| contract::PeerRef {
-                id: t.peer_id,
-                name: t.host,
-                is_local: t.is_local,
-            })
-            .collect())
+        let local_id = crate::host_identity::try_machine_id().ok_or_else(|| {
+            anyhow::anyhow!("this system has no id: host identity was not initialized")
+        })?;
+        Ok(peer_refs(
+            crate::mesh::fleet_update::fleet_targets()?,
+            local_id,
+        ))
     }
 
     async fn refresh_peer_runtime(&self, peer: &str) -> anyhow::Result<()> {
@@ -1307,6 +1306,27 @@ impl contract::RemoteExec for MeshRemoteExec {
         crate::mesh::peer_info::peer_detail(peer, true).await?;
         Ok(())
     }
+}
+
+/// Project fleet targets to `PeerRef`s, giving the local entry this system's
+/// real id: `Target` leaves it blank (fleet-update rows use a blank id to mean
+/// "not remote"), but a caller addressing this system by its own id must match.
+fn peer_refs(
+    targets: Vec<crate::mesh::fleet_update::Target>,
+    local_id: &str,
+) -> Vec<contract::PeerRef> {
+    targets
+        .into_iter()
+        .map(|t| contract::PeerRef {
+            id: if t.is_local {
+                local_id.to_string()
+            } else {
+                t.peer_id
+            },
+            name: t.host,
+            is_local: t.is_local,
+        })
+        .collect()
 }
 
 // ── Tools ───────────────────────────────────────────────────────────────────
@@ -1658,6 +1678,34 @@ async fn mesh_delete(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_local_peer_ref_carries_this_systems_id() {
+        use crate::mesh::fleet_update::Target;
+        let me = "019f9f7b-1111-7e40-9e30-4987d8d12dcb";
+        let thor = "019f9f7b-3333-7e40-9e30-4987d8d12dcb";
+        let refs = super::peer_refs(
+            vec![
+                Target {
+                    host: "thor".into(),
+                    peer_id: thor.into(),
+                    peer_ref: thor.into(),
+                    is_local: false,
+                },
+                Target {
+                    host: "mint".into(),
+                    peer_id: String::new(),
+                    peer_ref: "local".into(),
+                    is_local: true,
+                },
+            ],
+            me,
+        );
+        assert_eq!(refs[0].id, thor);
+        assert!(!refs[0].is_local);
+        assert_eq!(refs[1].id, me);
+        assert!(refs[1].is_local);
+    }
+
     use super::*;
 
     #[test]
