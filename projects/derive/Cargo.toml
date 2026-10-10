@@ -1,5 +1,5 @@
 [package]
-name = "derive"
+name = "orca-derive"
 version.workspace = true
 edition.workspace = true
 

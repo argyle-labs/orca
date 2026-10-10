@@ -1,5 +1,5 @@
 [package]
-name = "dispatch"
+name = "orca-dispatch"
 version.workspace = true
 edition.workspace = true
 
@@ -33,7 +33,7 @@ in-process = ["contract/in-process", "dep:tokio"]
 server = ["dep:axum", "dep:tower"]
 
 [dependencies]
-contract = { path = "../contract", default-features = false }
+contract = { workspace = true }
 anyhow        = { workspace = true }
 axum          = { workspace = true, optional = true }
 futures       = { workspace = true }

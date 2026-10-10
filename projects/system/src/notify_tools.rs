@@ -941,7 +941,7 @@ mod tests {
     /// reuses index 0's path and inherits the previous test's rows, which
     /// breaks the row-count assertions (#674). It showed up only in
     /// full-workspace runs because those spawn enough processes to recycle
-    /// pids; `-p system` alone almost never collides. Nothing cleaned up
+    /// pids; `-p orca-system` alone almost never collides. Nothing cleaned up
     /// either, so the dirs accumulated indefinitely.
     struct TmpDb(tempfile::TempDir);
 

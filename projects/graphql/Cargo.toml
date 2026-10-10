@@ -1,5 +1,5 @@
 [package]
-name = "graphql"
+name = "orca-graphql"
 version.workspace = true
 edition.workspace = true
 
@@ -21,7 +21,7 @@ thiserror   = { workspace = true }
 # `config_format` for the WHOLE graph via feature unification, so every
 # graphql-shaped plugin (unraid) linked an XML parser and a TOML parser — the
 # same trap as #606/#628, one crate downstream.
-utils       = { path = "../utils", default-features = false, features = ["http"] }
+utils       = { workspace = true, features = ["http"] }
 anyhow         = { workspace = true }
 schemars       = { workspace = true }
 graphql-parser = { workspace = true }

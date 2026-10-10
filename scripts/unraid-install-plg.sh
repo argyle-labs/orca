@@ -57,7 +57,7 @@ else
   # pattern in scripts/release-lib.sh::build_orca_targets.
   command -v cargo-zigbuild >/dev/null \
     || { echo "cargo-zigbuild missing — cargo install cargo-zigbuild + brew install zig" >&2; exit 1; }
-  cargo zigbuild --release --target "$TRIPLE" -p server
+  cargo zigbuild --release --target "$TRIPLE" -p orca-server
 fi
 
 # Also build a host-native binary so the .plg generator picks up any
@@ -66,7 +66,7 @@ fi
 # scripts themselves.
 HOST_TRIPLE="$(rustc -vV | awk '/^host:/ {print $2}')"
 echo "→ building host orca for $HOST_TRIPLE (template-render only)"
-cargo build --release --target "$HOST_TRIPLE" -p server
+cargo build --release --target "$HOST_TRIPLE" -p orca-server
 if [ -n "$PREBUILT_BIN" ]; then
   BIN_SRC="$PREBUILT_BIN"
 else

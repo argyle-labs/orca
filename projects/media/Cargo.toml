@@ -1,5 +1,5 @@
 [package]
-name = "media"
+name = "orca-media"
 version.workspace = true
 edition.workspace = true
 
@@ -21,7 +21,7 @@ full = ["in-process"]
 in-process = ["dep:tokio"]
 
 [dependencies]
-derive = { path = "../derive" }
+derive = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }

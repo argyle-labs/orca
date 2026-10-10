@@ -1,5 +1,6 @@
 [package]
-name = "identities"
+name = "orca-identities"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -12,10 +13,10 @@ path = "src/lib.rs"
 # depends only on db (pool + replication engine) + the derive/replication
 # machinery. Schema (CREATE TABLE) stays in db::apply_schema.
 [dependencies]
-db            = { package = "db", path = "../db" }
-derive        = { path = "../derive" }
-macro-runtime = { path = "../macro-runtime" }
-utils         = { path = "../utils" }
+db            = { workspace = true, default-features = true }
+derive        = { workspace = true }
+macro-runtime = { workspace = true }
+utils         = { workspace = true, default-features = true }
 
 anyhow   = { workspace = true }
 rusqlite = { workspace = true }
@@ -23,7 +24,7 @@ serde    = { workspace = true }
 tracing  = { workspace = true }
 
 [dev-dependencies]
-db = { path = "../db", features = ["test-util"] }
+db = { workspace = true, default-features = true, features = ["test-util"] }
 
 [lints]
 workspace = true

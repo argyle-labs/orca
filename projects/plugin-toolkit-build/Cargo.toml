@@ -1,5 +1,5 @@
 [package]
-name = "plugin-toolkit-build"
+name = "orca-plugin-toolkit-build"
 version.workspace = true
 edition.workspace = true
 
@@ -25,8 +25,8 @@ path = "src/lib.rs"
 [dependencies]
 anyhow      = { workspace = true }
 serde_json  = { workspace = true }
-utils       = { path = "../utils", default-features = false, features = ["yaml"] }
-openapi     = { path = "../openapi" }
+utils       = { workspace = true, features = ["yaml"] }
+openapi     = { workspace = true }
 openapiv3   = { workspace = true }
 progenitor  = { workspace = true }
 prettyplease = "0.2"

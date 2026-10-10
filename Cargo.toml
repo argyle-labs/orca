@@ -208,6 +208,49 @@ wiremock = "0.6"
 x509-parser = "0.18"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
+# Internal crates — declared once here; members use `x.workspace = true`.
+# The key is the flat import name; `package` is the published `orca-*` name.
+# The exact version pin keeps published crates in lockstep.
+agents = { path = "projects/agents", version = "=0.2.1-rc.14", package = "orca-agents", default-features = false }
+app-kit = { path = "projects/app-kit", version = "=0.2.1-rc.14", package = "orca-app-kit" }
+auth = { path = "projects/auth", version = "=0.2.1-rc.14", package = "orca-auth" }
+config-source = { path = "projects/config-source", version = "=0.2.1-rc.14", package = "orca-config-source" }
+containers = { path = "projects/containers", version = "=0.2.1-rc.14", package = "orca-containers" }
+contract = { path = "projects/contract", version = "=0.2.1-rc.14", package = "orca-contract", default-features = false }
+conversation = { path = "projects/conversation", version = "=0.2.1-rc.14", package = "orca-conversation" }
+db = { path = "projects/db", version = "=0.2.1-rc.14", package = "orca-db", default-features = false }
+deploy-target = { path = "projects/deploy-target", version = "=0.2.1-rc.14", package = "orca-deploy-target", default-features = false }
+derive = { path = "projects/derive", version = "=0.2.1-rc.14", package = "orca-derive" }
+dev = { path = "projects/dev", version = "=0.2.1-rc.14", package = "orca-dev" }
+dispatch = { path = "projects/dispatch", version = "=0.2.1-rc.14", package = "orca-dispatch", default-features = false }
+files = { path = "projects/files", version = "=0.2.1-rc.14", package = "orca-files" }
+graphql = { path = "projects/graphql", version = "=0.2.1-rc.14", package = "orca-graphql", default-features = false }
+hosts = { path = "projects/hosts", version = "=0.2.1-rc.14", package = "orca-hosts" }
+identities = { path = "projects/identities", version = "=0.2.1-rc.14", package = "orca-identities" }
+inventory-tests = { path = "projects/inventory-tests", version = "=0.2.1-rc.14", package = "orca-inventory-tests" }
+macro-runtime = { path = "projects/macro-runtime", version = "=0.2.1-rc.14", package = "orca-macro-runtime" }
+mcp = { path = "projects/mcp", version = "=0.2.1-rc.14", package = "orca-mcp" }
+media = { path = "projects/media", version = "=0.2.1-rc.14", package = "orca-media", default-features = false }
+model = { path = "projects/model", version = "=0.2.1-rc.14", package = "orca-model" }
+namespace = { path = "projects/namespace", version = "=0.2.1-rc.14", package = "orca-namespace" }
+notifications = { path = "projects/notifications", version = "=0.2.1-rc.14", package = "orca-notifications", default-features = false }
+openapi = { path = "projects/openapi", version = "=0.2.1-rc.14", package = "orca-openapi" }
+orca-inventory = { path = "projects/orca-inventory", version = "=0.2.1-rc.14", package = "orca-inventory" }
+plugin-abi = { path = "projects/plugin-abi", version = "=0.1.0", package = "orca-plugin-abi" }
+plugin-loader = { path = "projects/plugin-loader", version = "=0.2.1-rc.14", package = "orca-plugin-loader" }
+plugin-proto = { path = "projects/plugin-proto", version = "=0.2.1-rc.14", package = "orca-plugin-proto" }
+plugin-toolkit = { path = "projects/plugin-toolkit", version = "=0.2.1-rc.14", package = "orca-plugin-toolkit", default-features = false }
+plugin-toolkit-build = { path = "projects/plugin-toolkit-build", version = "=0.2.1-rc.14", package = "orca-plugin-toolkit-build" }
+plugins = { path = "projects/runtime", version = "=0.2.1-rc.14", package = "orca-plugins" }
+route = { path = "projects/route", version = "=0.2.1-rc.14", package = "orca-route" }
+secrets = { path = "projects/secrets", version = "=0.2.1-rc.14", package = "orca-secrets" }
+orca = { path = "projects/server", version = "=0.2.1-rc.14", package = "orca-server" }
+service = { path = "projects/service", version = "=0.2.1-rc.14", package = "orca-service", default-features = false }
+spec = { path = "projects/spec", version = "=0.2.1-rc.14", package = "orca-spec" }
+storage = { path = "projects/storage", version = "=0.2.1-rc.14", package = "orca-storage", default-features = false }
+system = { path = "projects/system", version = "=0.2.1-rc.14", package = "orca-system" }
+utils = { path = "projects/utils", version = "=0.2.1-rc.14", package = "orca-utils", default-features = false }
+
 [workspace]
 members = [
     "projects/app-kit",
@@ -220,9 +263,9 @@ members = [
     "projects/plugin-abi",
     "projects/plugin-proto",
     "projects/plugin-loader",
-    # Domain crates — one per cohesive surface. HARD RULE: keep flat names
-    # (no `orca-tools-` prefix). Each crate's `#[orca_tool]` fns and their
-    # service trait live in the same module file.
+    # Domain crates — one per cohesive surface. HARD RULE: package names are
+    # `orca-*`; directories and import names stay flat. Each crate's
+    # `#[orca_tool]` fns and their service trait live in the same module file.
     "projects/auth",
     "projects/dev",
     "projects/inventory-tests",

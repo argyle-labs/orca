@@ -1,5 +1,6 @@
 [package]
-name = "model"
+name = "orca-model"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -10,7 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 # THIN PROFILE: this core crate uses `#[orca_tool]` only → just the `tools` feature.
 # Drops the `full` default's containers(bollard)/graphql/notify/openapi bloat.
-plugin-toolkit = { path = "../plugin-toolkit", default-features = false, features = ["tools"] }
+plugin-toolkit = { workspace = true, features = ["tools"] }
 # macro-runtime is the absolute-path landing crate for code emitted by
 # our derive/`endpoint_resource!` macros. Hand-written `use serde::*`,
 # `anyhow::bail!`, `tokio::*` still resolve against direct deps because
@@ -18,12 +19,12 @@ plugin-toolkit = { path = "../plugin-toolkit", default-features = false, feature
 # `::tokio::…` at the call site (the proc-macro layer can't re-route
 # them through a re-export without `#[serde(crate = "...")]`-style
 # per-item annotations). See [[project-orca-macro-runtime-migration]].
-contract  = { path = "../contract" }
-derive    = { path = "../derive" }
+contract  = { workspace = true, default-features = true }
+derive    = { workspace = true }
 
-utils    = { path = "../utils" }
-files    = { path = "../files" }
-db       = { package = "db", path = "../db" }
+utils    = { workspace = true, default-features = true }
+files    = { workspace = true }
+db       = { workspace = true, default-features = true }
 
 anyhow       = { workspace = true }
 rusqlite = { workspace = true }
@@ -37,7 +38,7 @@ tokio        = { workspace = true }
 tokio-util   = { workspace = true }
 
 [dev-dependencies]
-db = { path = "../db", features = ["test-util"] }
+db = { workspace = true, default-features = true, features = ["test-util"] }
 tempfile = { workspace = true }
 
 [lints]

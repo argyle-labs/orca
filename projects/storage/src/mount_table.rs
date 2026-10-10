@@ -710,7 +710,7 @@ no parens line
 
     #[test]
     fn source_endpoint_without_registered_backend_has_no_port() {
-        // No backend owns `nfs4` in a bare `-p storage` unit run, so the port
+        // No backend owns `nfs4` in a bare `-p orca-storage` unit run, so the port
         // cannot be resolved and `source_endpoint` yields `None` even though the
         // host parses — the port grammar lives in the plugin, not core.
         assert_eq!(source_endpoint("primary:/srv/pool", "nfs4"), None);

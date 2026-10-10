@@ -1,5 +1,6 @@
 [package]
-name = "route"
+name = "orca-route"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -19,10 +20,10 @@ in-process = ["dep:tokio", "contract/in-process"]
 
 [dependencies]
 # Shared canonical BoxFuture (async-desugar) alias lives in contract.
-contract = { path = "../contract", default-features = false }
+contract = { workspace = true }
 # The first-class `Route`/`Routes` primitive a realizer acts on. `route` is a
 # dependency-free leaf module of utils, so default-features off keeps this thin.
-utils = { path = "../utils", default-features = false }
+utils = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }

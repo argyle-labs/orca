@@ -141,8 +141,8 @@ make run        # run the installed binary with 1Password secrets
 
 # Run the daemon directly while iterating:
 make kill-dev                 # clear any running dev processes / stale daemon
-cargo run -p server -- serve --dev   # backend only, no peacock web UI / HMR
-cargo run -p server -- mcp-serve     # MCP stdio server (simulate Claude Code)
+cargo run -p orca-server -- serve --dev   # backend only, no peacock web UI / HMR
+cargo run -p orca-server -- mcp-serve     # MCP stdio server (simulate Claude Code)
 ```
 
 The daemon is installed as a launchd (macOS) / systemd (Linux) service via

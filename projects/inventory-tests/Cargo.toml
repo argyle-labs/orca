@@ -1,5 +1,5 @@
 [package]
-name = "inventory-tests"
+name = "orca-inventory-tests"
 version.workspace = true
 edition.workspace = true
 publish = false
@@ -12,14 +12,15 @@ publish = false
 # orca_dispatch::cache() with "duplicate tool name").
 
 [lib]
+name = "inventory_tests"
 path = "src/lib.rs"
 
 [dependencies]
 serde_json    = { workspace = true }
 
 [dev-dependencies]
-dispatch = { path = "../dispatch" }
-contract  = { path = "../contract" }
+dispatch = { workspace = true, default-features = true }
+contract  = { workspace = true, default-features = true }
 clap      = { workspace = true }
 tokio     = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 inventory     = { workspace = true }
@@ -28,28 +29,28 @@ async-trait   = { workspace = true }
 tempfile      = { workspace = true }
 
 # Link every bucket so its inventory::submit! statics are pulled in.
-agents        = { path = "../agents" }
-auth          = { path = "../auth" }
-plugins       = { path = "../runtime" }
-system        = { path = "../system" }
-notifications = { path = "../notifications" }
-files         = { path = "../files" }
-orca-inventory = { path = "../orca-inventory" }
+agents        = { workspace = true, default-features = true }
+auth          = { workspace = true }
+plugins       = { workspace = true }
+system        = { workspace = true }
+notifications = { workspace = true, default-features = true }
+files         = { workspace = true }
+orca-inventory = { workspace = true }
 # The rest of the tool-hosting crates. Needed so the OpenAPI shape guards in
 # tests/openapi_surface.rs walk the WHOLE surface — a bucket that isn't linked
 # here is silently exempt from them.
-db            = { path = "../db" }
-spec          = { path = "../spec" }
-model         = { path = "../model" }
-namespace     = { path = "../namespace" }
-conversation  = { path = "../conversation" }
-config-source = { path = "../config-source" }
-containers    = { path = "../containers" }
-dev           = { path = "../dev" }
-mcp           = { path = "../mcp" }
-plugin-toolkit = { path = "../plugin-toolkit" }
+db            = { workspace = true, default-features = true }
+spec          = { workspace = true }
+model         = { workspace = true }
+namespace     = { workspace = true }
+conversation  = { workspace = true }
+config-source = { workspace = true }
+containers    = { workspace = true }
+dev           = { workspace = true }
+mcp           = { workspace = true }
+plugin-toolkit = { workspace = true, default-features = true }
 # `spec.detail` is an #[orca_tool] hosted in the server crate itself.
-server        = { path = "../server" }
+orca          = { workspace = true }
 
 [lints]
 workspace = true

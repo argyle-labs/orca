@@ -1,5 +1,6 @@
 [package]
-name = "dev"
+name = "orca-dev"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -8,9 +9,9 @@ name = "dev"
 path = "src/lib.rs"
 
 [dependencies]
-contract = { path = "../contract", default-features = false }
-files    = { path = "../files" }
-utils    = { path = "../utils" }
+contract = { workspace = true }
+files    = { workspace = true }
+utils    = { workspace = true, default-features = true }
 
 anyhow     = { workspace = true }
 axum       = { workspace = true }

@@ -456,7 +456,7 @@ mod tests {
     }
 
     /// Measurement harness against a real spec. Run with:
-    /// `PROXMOX_SPEC=/abs/path/proxmox.openapi.json cargo test -p plugin-toolkit-build \
+    /// `PROXMOX_SPEC=/abs/path/proxmox.openapi.json cargo test -p orca-plugin-toolkit-build \
     ///   descriptor::tests::measure_real_spec -- --ignored --nocapture`
     #[test]
     #[ignore]

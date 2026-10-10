@@ -9,7 +9,7 @@
 /// unload everything again.  Tests are `#[ignore]` so they never run in CI;
 /// invoke individually:
 ///
-///   cargo test -p orca lmstudio_ -- --ignored --nocapture
+///   cargo test -p orca-server lmstudio_ -- --ignored --nocapture
 ///
 /// Requirements: LM Studio running on localhost:1234, `lms` CLI on PATH,
 /// and the models referenced below available on disk.

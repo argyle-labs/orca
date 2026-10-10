@@ -1,5 +1,6 @@
 [package]
-name = "config-source"
+name = "orca-config-source"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -11,16 +12,16 @@ path = "src/lib.rs"
 # The `#[orca_tool]` macro expands to `plugin_toolkit::` paths (inventory
 # submission + dispatch glue). `db-incore` gives the in-process pooled DB
 # connection the tools read through (mirrors `system`).
-plugin-toolkit = { path = "../plugin-toolkit", features = ["db-incore"] }
+plugin-toolkit = { workspace = true, default-features = true, features = ["db-incore"] }
 # Live in-daemon schema surface + liveness discriminator. `openapi::inject_*`
 # build the running spec from static tool inventory + the live plugin unit
 # catalog (`unit_surface::unit_ops`); no cycle — dispatch never deps this crate.
-dispatch  = { path = "../dispatch" }
-contract  = { path = "../contract", default-features = false }
-derive    = { path = "../derive" }
+dispatch  = { workspace = true, default-features = true }
+contract  = { workspace = true }
+derive    = { workspace = true }
 # Config-row + per-noun schema reads run against the daemon's pooled
 # in-process connection (mirrors `system`).
-db        = { package = "db", path = "../db" }
+db        = { workspace = true, default-features = true }
 
 schemars   = { workspace = true }
 serde      = { workspace = true }

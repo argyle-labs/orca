@@ -1,5 +1,6 @@
 [package]
-name = "app-kit"
+name = "orca-app-kit"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -50,12 +51,12 @@ path = "bin/uniffi-bindgen.rs"
 # Pull in every #[orca_tool] with its native body. The app embeds the full
 # orca core in-process — peer/HTTP transports are not used; UI ↔ core is a
 # direct UniFFI call (see project_mobile_as_standalone_orca.md).
-auth     = { path = "../auth" }
-system   = { path = "../system" }
-agents   = { path = "../agents" }
-plugins  = { path = "../runtime" }
-dispatch = { path = "../dispatch" }
-contract = { path = "../contract" }
+auth     = { workspace = true }
+system   = { workspace = true }
+agents   = { workspace = true, default-features = true }
+plugins  = { workspace = true }
+dispatch = { workspace = true, default-features = true }
+contract = { workspace = true, default-features = true }
 
 uniffi    = { workspace = true, features = ["cli"] }
 tokio     = { workspace = true }

@@ -34,7 +34,7 @@ The tool registers via `inventory` at link time. If the domain crate is already 
 ### Step 3: Verify
 
 ```bash
-cargo check -p server
+cargo check -p orca-server
 orca example greet --target world          # CLI surface
 ```
 
@@ -59,7 +59,7 @@ In `build_router()`, add the route next to the other fixed routes, e.g. `.route(
 ### Step 3: Verify
 
 ```bash
-cargo check -p server
+cargo check -p orca-server
 cargo run -- serve --dev
 curl http://localhost:12000/api/my-thing
 ```
@@ -138,7 +138,7 @@ Link the new page from wherever its section is indexed so it's discoverable — 
 `rust-embed` re-embeds the whole `docs/` tree on every build — no code change needed to register the file.
 
 ```bash
-cargo build -p server
+cargo build -p orca-server
 cargo run -- serve --dev      # then browse the docs surface
 ```
 

@@ -1,5 +1,6 @@
 [package]
-name = "spec"
+name = "orca-spec"
+publish = false
 version.workspace = true
 edition.workspace = true
 
@@ -12,19 +13,19 @@ path = "src/lib.rs"
 # children of the namespace crate.
 
 [dependencies]
-plugin-toolkit = { path = "../plugin-toolkit" }
-contract = { path = "../contract", default-features = false }
-derive   = { path = "../derive" }
-db       = { path = "../db" }
-graphql  = { path = "../graphql" }
-mcp      = { path = "../mcp" }
+plugin-toolkit = { workspace = true, default-features = true }
+contract = { workspace = true }
+derive   = { workspace = true }
+db       = { workspace = true, default-features = true }
+graphql  = { workspace = true, default-features = true }
+mcp      = { workspace = true }
 
 
 schemars   = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }
-utils      = { path = "../utils" }
+utils      = { workspace = true, default-features = true }
 clap       = { workspace = true }
 
 [lints]
