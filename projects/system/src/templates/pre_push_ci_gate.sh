@@ -23,7 +23,13 @@
 #
 # Gates each pushed COMMIT, never HEAD or the working tree: a branch can be
 # pushed without checking it out, and a shared checkout may sit on another
-# session's branch with its uncommitted files.
+# session's branch with its uncommitted files. The commit is exported with
+# `git archive`, so only TRACKED files are gated: an untracked local override
+# (e.g. a `.cargo/config.toml` path patch) is ignored on purpose, matching CI.
+#
+# Only branch pushes (refs/heads/*) are freshness-checked and cargo-gated. A
+# tag points at a commit already gated when its branch was pushed, and tags
+# routinely mark older commits, so tag pushes pass straight through.
 #
 # Escape hatches: `git push --no-verify` bypasses entirely; ORCA_PREPUSH_SKIP_TEST=1
 # skips only the (slow) test step; ORCA_PREPUSH_SKIP_CLIPPY=1 skips clippy — use
@@ -32,6 +38,7 @@
 set -euo pipefail
 
 ZERO=0000000000000000000000000000000000000000
+remote="${1:-origin}"
 # Pushed refs as "<remote ref> <local sha>" lines; stdin is read once here and
 # replayed to a chained repo-local hook.
 pushed=""
@@ -51,26 +58,29 @@ done
 prepush_freshness_guard() {
   if [ -n "${ORCA_PREPUSH_SKIP_FRESH:-}" ]; then return 0; fi
   if [ -z "$pushed" ]; then return 0; fi
-  # Resolve the base branch from origin/HEAD; fall back to main.
-  base="$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
+  # Resolve the base branch from <remote>/HEAD; fall back to main.
+  base="$(git rev-parse --abbrev-ref "$remote/HEAD" 2>/dev/null | sed "s#^$remote/##" || true)"
   if [ -z "$base" ] || [ "$base" = "HEAD" ]; then base=main; fi
+  # FETCH_HEAD rather than a tracking ref: $remote may be a URL.
   # Offline (or no such remote branch) → don't block.
-  if ! git fetch -q origin "$base" 2>/dev/null; then return 0; fi
-  if ! git rev-parse -q --verify "refs/remotes/origin/$base" >/dev/null 2>&1; then return 0; fi
+  if ! git fetch -q "$remote" "$base" 2>/dev/null; then return 0; fi
+  base_sha="$(git rev-parse -q --verify FETCH_HEAD 2>/dev/null || true)"
+  if [ -z "$base_sha" ]; then return 0; fi
   stale=0
   while read -r rref sha; do
     if [ -z "$sha" ]; then continue; fi
+    case "$rref" in refs/heads/*) ;; *) continue ;; esac
     if [ "$rref" = "refs/heads/$base" ]; then continue; fi
-    if git merge-base --is-ancestor "refs/remotes/origin/$base" "$sha"; then continue; fi
-    behind="$(git rev-list --count "$sha..refs/remotes/origin/$base" 2>/dev/null || echo '?')"
-    echo "pre-push BLOCKED: '${rref#refs/heads/}' ($(git rev-parse --short "$sha")) is $behind commit(s) behind origin/$base." >&2
+    if git merge-base --is-ancestor "$base_sha" "$sha"; then continue; fi
+    behind="$(git rev-list --count "$sha..$base_sha" 2>/dev/null || echo '?')"
+    echo "pre-push BLOCKED: branch '${rref#refs/heads/}' ($(git rev-parse --short "$sha")) is $behind commit(s) behind $remote/$base." >&2
     stale=1
   done <<PUSHED
 $pushed
 PUSHED
   if [ "$stale" = 1 ]; then
     echo "  A PR from a stale branch is out-of-date-with-base. Rebase before pushing:" >&2
-    echo "     git fetch origin $base && git rebase origin/$base" >&2
+    echo "     git fetch $remote $base && git rebase FETCH_HEAD" >&2
     echo "  (override once with: ORCA_PREPUSH_SKIP_FRESH=1 git push …)" >&2
     exit 1
   fi
@@ -136,6 +146,7 @@ case "$origin" in
     gated=" "
     while read -r rref sha; do
       if [ -z "$sha" ]; then continue; fi
+      case "$rref" in refs/heads/*) ;; *) continue ;; esac
       if ! git cat-file -e "$sha:Cargo.toml" 2>/dev/null; then continue; fi
       tree="$(git rev-parse "$sha^{tree}")"
       case "$gated" in *" $tree "*) continue ;; esac
