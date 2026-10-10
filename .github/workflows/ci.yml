@@ -7,11 +7,16 @@ name: CI
 # Run the "Release" workflow manually for full validation before a release.
 
 on:
-  # CI is a pre-merge gate: it runs on pull_request (and on-demand via
-  # workflow_dispatch). It deliberately does NOT run on push to main — a merge
-  # gate belongs before the merge, and re-running the full test+coverage suite
-  # on the post-merge push is pure double-work (the PR already proved that exact
-  # tree green). Main is protected by requiring green PRs.
+  # CI is a pre-merge gate: it runs on pull_request. It deliberately does NOT
+  # run on push to main — a merge gate belongs before the merge, and re-running
+  # it on the post-merge push is pure double-work (the PR already proved that
+  # exact tree green). Main is protected by requiring green PRs.
+  #
+  # A PR tests only the crates its changes touch plus their reverse
+  # dependents, so it cannot enforce the workspace-wide coverage floor. The
+  # nightly schedule and workflow_dispatch run the FULL workspace with the
+  # floor: that is where coverage is gated. The nightly runs once a day on
+  # main's tip regardless of pushes, so it is not a per-push run.
   #
   # CI runs on GITEA (canonical), executed by our self-hosted Gitea act_runner.
   # `runs-on: ubuntu-latest` is just the LABEL that runner advertises — it maps
@@ -19,6 +24,8 @@ on:
   # a Gitea shop; CI must not depend on GitHub-hosted runners.
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * *"
 
 # Cancel in-flight runs when a newer commit arrives on the same ref.
 # Saves runner minutes on rapid-fire pushes / PR force-pushes.
@@ -96,6 +103,9 @@ jobs:
     outputs:
       workflows:               ${{ steps.filter.outputs.workflows }}
       rust:                    ${{ steps.filter.outputs.rust }}
+      full:                    ${{ steps.filter.outputs.full }}
+      changed:                 ${{ steps.filter.outputs.changed }}
+      changed_count:           ${{ steps.filter.outputs.changed_count }}
     steps:
       # Full history so the detector can diff locally with git and NEVER call
       # the GitHub API. The previous dorny/paths-filter step fetched the
@@ -114,15 +124,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Only a PR is scoped to its changes; schedule and dispatch run the
+          # full workspace.
+          if [ "$EVENT" != "pull_request" ]; then
+            printf 'workflows=true\nrust=true\nfull=true\nchanged=\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Resolve the diff range without touching the GitHub API.
           range=""
-          if [ "$EVENT" = "pull_request" ]; then
-            git fetch --no-tags origin "$BASE_REF" >/dev/null 2>&1 || true
-            if base_sha="$(git merge-base "origin/$BASE_REF" HEAD 2>/dev/null)"; then
-              range="$base_sha...HEAD"
-            fi
-          elif git rev-parse HEAD^ >/dev/null 2>&1; then
-            range="HEAD^...HEAD"
+          git fetch --no-tags origin "$BASE_REF" >/dev/null 2>&1 || true
+          if base_sha="$(git merge-base "origin/$BASE_REF" HEAD 2>/dev/null)"; then
+            range="$base_sha...HEAD"
           fi
 
           # Fail OPEN: if the range can't be determined (first commit, shallow
@@ -132,11 +145,13 @@ jobs:
             {
               echo "workflows=true"
               echo "rust=true"
+              echo "full=true"
+              echo "changed="
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          changed="$(git diff --name-only "$range")"
+          changed="$(git diff --name-only --no-renames "$range")"
           echo "Changed files in $range:"
           echo "$changed"
 
@@ -147,17 +162,23 @@ jobs:
             case "$f" in
               .github/workflows/*) workflows=true ;;
             esac
+            # Any path but a LICENSE can affect a Rust test (inventory-tests
+            # checks paths cited from docs, hooks/ and .github/), so gate on
+            # exclusion and let ci-affected-crates.sh pick the crates.
             case "$f" in
-              # projects/* covers non-.rs compile inputs (migrations, SQL,
-              # include_str!/include_dir! assets, build.rs inputs).
-              *.rs|*/Cargo.toml|Cargo.toml|Cargo.lock|projects/*) rust=true ;;
-              scripts/ci-target-cache*) rust=true ;;
+              LICENSE*) ;;
+              *) rust=true ;;
             esac
           done <<< "$changed"
 
           {
             echo "workflows=$workflows"
             echo "rust=$rust"
+            echo "full=false"
+            echo "changed_count=$(printf '%s\n' "$changed" | grep -c .)"
+            echo "changed<<CHANGED_EOF"
+            echo "$changed"
+            echo "CHANGED_EOF"
           } >> "$GITHUB_OUTPUT"
 
   # ── Sanitize guard ───────────────────────────────────────────────────────
@@ -206,7 +227,7 @@ jobs:
     # pure double-work: the PR already proved this exact tree green. Coverage/
     # tests are validated on the PR; main is protected by requiring green PRs.
     if: |
-      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
       (github.event_name == 'pull_request'
         && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'))
     runs-on: ubuntu-latest
@@ -223,8 +244,43 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Target cache script tests
-        run: time scripts/ci-target-cache.test.sh
+      - name: Ensure libssl-dev + mold + jq (no-op if image already has them)
+        run: |
+          set -uo pipefail
+          need=()
+          command -v mold >/dev/null 2>&1 || need+=(mold)
+          dpkg -s libssl-dev >/dev/null 2>&1 || need+=(libssl-dev)
+          command -v jq >/dev/null 2>&1 || need+=(jq)
+          if [ "${#need[@]}" -gt 0 ]; then
+            (apt-get update -y && apt-get install -y --no-install-recommends "${need[@]}") \
+              || echo "::warning::could not install ${need[*]} — image should provide them"
+          fi
+
+      - name: CI script tests
+        run: |
+          time scripts/ci-target-cache.test.sh
+          time scripts/ci-affected-crates.test.sh
+
+      # The crates this PR can affect: changed crates plus every workspace
+      # reverse dependent (scripts/ci-affected-crates.sh). `-p` unifies
+      # features over the selected crates only, unlike --workspace; the nightly
+      # full run covers that difference. mode=all on
+      # schedule/dispatch or when a change maps to no crate. mode=none skips
+      # the Rust build but keeps the job green.
+      - name: Select crates
+        id: select
+        env:
+          FULL: ${{ needs.changes.outputs.full }}
+          CHANGED: ${{ needs.changes.outputs.changed }}
+          # A mismatch means the list was truncated in transit: test everything.
+          CI_EXPECTED_COUNT: ${{ needs.changes.outputs.changed_count }}
+        run: |
+          set -euo pipefail
+          if [ "$FULL" = "true" ]; then
+            printf 'mode=all\nargs=--workspace\npackages=\nignore_regex=\n' | tee -a "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "$CHANGED" | scripts/ci-affected-crates.sh | tee -a "$GITHUB_OUTPUT"
+          fi
 
       # Persist target/ across runs through the act_runner cache server, so a
       # run recompiles only the workspace crates whose source changed (sccache
@@ -233,6 +289,7 @@ jobs:
       # per commit so a PR's cache moves forward; restore falls back to the
       # newest entry for this branch, then for the same Cargo.lock.
       - name: Restore target dir
+        if: steps.select.outputs.mode != 'none'
         id: target-cache
         uses: actions/cache/restore@v4
         with:
@@ -247,6 +304,7 @@ jobs:
       # downstream) cached. Tests compare against env!("ORCA_VERSION"), and the
       # -dev suffix keeps dev-build behaviour.
       - name: Pin ORCA_RELEASE_VERSION
+        if: steps.select.outputs.mode != 'none'
         run: |
           v="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
           [ -n "$v" ] || exit 1
@@ -255,21 +313,12 @@ jobs:
       # Backdates unchanged sources so cargo trusts the restored fingerprints.
       # See scripts/ci-target-cache.sh.
       - name: Reset mtimes of unchanged sources
+        if: steps.select.outputs.mode != 'none'
         run: time scripts/ci-target-cache.sh restore
-
-      - name: Ensure libssl-dev + mold (no-op if image already has them)
-        run: |
-          set -uo pipefail
-          need=()
-          command -v mold >/dev/null 2>&1 || need+=(mold)
-          dpkg -s libssl-dev >/dev/null 2>&1 || need+=(libssl-dev)
-          if [ "${#need[@]}" -gt 0 ]; then
-            (apt-get update -y && apt-get install -y --no-install-recommends "${need[@]}") \
-              || echo "::warning::could not install ${need[*]} — image should provide them"
-          fi
 
       # Costs no compilation, so it fails fast before the expensive phase.
       - name: Format check
+        if: steps.select.outputs.mode != 'none'
         run: time cargo fmt --all -- --check
 
       # The README badge is generated from .coverage-floor by `make
@@ -301,9 +350,10 @@ jobs:
       # produced, which prune uses to drop stale test binaries.
       - name: Build test binaries (instrumented)
         id: build
+        if: steps.select.outputs.mode != 'none'
         run: |
           eval "$(cargo llvm-cov show-env --sh)"
-          time mold -run cargo nextest run --locked --workspace --no-run --timings \
+          time mold -run cargo nextest run --locked ${{ steps.select.outputs.args }} --no-run --timings \
             --cargo-message-format json-render-diagnostics > "$RUNNER_TEMP/cargo-build.json"
 
       - uses: actions/upload-artifact@v3
@@ -319,6 +369,10 @@ jobs:
         id: prune
         if: steps.build.outcome == 'success'
         run: |
+          # Only a full run saves the cache: a partial build lists only the
+          # selected crates' executables, so pruning removes every other
+          # crate's test binaries, which is fine for this run's coverage but
+          # would hollow out a saved cache.
           rc=0
           time scripts/ci-target-cache.sh prune "$RUNNER_TEMP/cargo-build.json" || rc=$?
           # 3 = cargo listed no executables; nothing was pruned, do not save.
@@ -329,7 +383,10 @@ jobs:
           [ "$rc" -eq 0 ] || exit "$rc"
           size_mb="$(du -sm target | cut -f1)"
           echo "target/ = ${size_mb} MiB"
-          if [ "$size_mb" -gt 12288 ]; then
+          if [ "${{ steps.select.outputs.mode }}" != "all" ]; then
+            echo "partial run: target cache not saved"
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          elif [ "$size_mb" -gt 12288 ]; then
             echo "::warning title=target cache not saved::target/ is ${size_mb} MiB after pruning, over the 12288 MiB cap"
             echo "save=false" >> "$GITHUB_OUTPUT"
           else
@@ -350,9 +407,10 @@ jobs:
           key: ${{ steps.target-cache.outputs.cache-primary-key }}
 
       - name: Unit + integration tests (instrumented)
+        if: steps.select.outputs.mode != 'none'
         run: |
           eval "$(cargo llvm-cov show-env --sh)"
-          time mold -run cargo nextest run --locked --workspace --no-fail-fast
+          time mold -run cargo nextest run --locked ${{ steps.select.outputs.args }} --no-fail-fast
 
 
       # Clippy runs AFTER the tests, in the SAME job, on purpose — this is the
@@ -379,15 +437,15 @@ jobs:
       # `!cancelled()` so a test failure still yields lint feedback in the same
       # run, instead of hiding it behind a red test step.
       - name: Clippy
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.select.outputs.mode != 'none' }}
         run: |
           eval "$(cargo llvm-cov show-env --sh)"
-          time mold -run cargo clippy --workspace --tests --locked -- -D warnings
+          time mold -run cargo clippy ${{ steps.select.outputs.args }} --tests --locked -- -D warnings
 
       # sccache hit/miss stats — surfaces cache effectiveness in the run log so a
       # regression in hit rate is visible. Non-fatal.
       - name: sccache stats
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.select.outputs.mode != 'none' }}
         run: time sccache --show-stats || true
 
       # Reads the profile data the test run just wrote — NO recompile, no rerun.
@@ -405,23 +463,35 @@ jobs:
       # on genuine failure, but NOT when a newer push superseded this run —
       # Gitea's artifact API 500s on a cancelled task ("task is not running"),
       # which produced spurious red "Create Artifact Container failed" errors.
-      - name: Coverage report + gate (line coverage >= floor)
-        if: ${{ !cancelled() }}
+      #
+      # The floor is workspace-wide, so only a full run enforces it. A partial
+      # run reports on the tested crates alone, ungated.
+      - name: Coverage report + gate (line coverage >= floor on full runs)
+        if: ${{ !cancelled() && steps.select.outputs.mode != 'none' }}
+        env:
+          MODE: ${{ steps.select.outputs.mode }}
+          IGNORE_REGEX: ${{ steps.select.outputs.ignore_regex }}
         run: |
           eval "$(cargo llvm-cov show-env --sh)"
-          time cargo llvm-cov report --html --output-dir target/llvm-cov \
-            --fail-under-lines "$(cat .coverage-floor)"
+          if [ "$MODE" = "all" ]; then
+            time cargo llvm-cov report --html --output-dir target/llvm-cov \
+              --fail-under-lines "$(cat .coverage-floor)"
+          else
+            echo "::notice title=coverage floor skipped::partial run (${{ steps.select.outputs.packages }}); the $(cat .coverage-floor)% floor is enforced only on full runs (nightly, workflow_dispatch)"
+            time cargo llvm-cov report --html --output-dir target/llvm-cov \
+              --ignore-filename-regex "$IGNORE_REGEX"
+          fi
 
       # The HTML report is thousands of small files, and upload-artifact@v3
       # sends them one by one — the slowest step of a green run. Ship it as one
       # archive, and only when someone will read it: a failed run, or a
       # manual/scheduled run.
       - name: Archive coverage report
-        if: ${{ failure() || (!cancelled() && github.event_name != 'pull_request') }}
+        if: ${{ steps.select.outputs.mode != 'none' && (failure() || (!cancelled() && github.event_name != 'pull_request')) }}
         run: tar -C target -czf target/coverage-html.tgz llvm-cov
 
       - uses: actions/upload-artifact@v3
-        if: ${{ failure() || (!cancelled() && github.event_name != 'pull_request') }}
+        if: ${{ steps.select.outputs.mode != 'none' && (failure() || (!cancelled() && github.event_name != 'pull_request')) }}
         with:
           name: coverage-html
           path: target/coverage-html.tgz
