@@ -1952,6 +1952,94 @@ mod tests {
         assert!(report.done.iter().any(|m| m.contains("installed")));
     }
 
+    /// Runs the shipped hook in a throwaway repo whose origin path contains
+    /// `argyle-labs`, feeding it pre-push stdin lines directly.
+    #[cfg(unix)]
+    #[test]
+    fn pre_push_gate_runs_freshness_against_real_repo() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+
+        let have = |bin: &str| Command::new(bin).arg("--version").output().is_ok();
+        if !have("bash") || !have("git") {
+            eprintln!("skipping: bash or git not available");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let remote = tmp.path().join("argyle-labs").join("remote.git");
+        let work = tmp.path().join("work");
+        let hook = tmp.path().join("pre-push");
+        std::fs::write(&hook, PRE_PUSH_GATE).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let git = |dir: &std::path::Path, args: &[&str]| -> String {
+            let out = Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(
+            &work,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        let old = git(&work, &["rev-parse", "HEAD"]);
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        git(&work, &["push", "-q", "origin", "main"]);
+
+        let zero = "0".repeat(40);
+        let run = |line: String| -> bool {
+            let mut child = Command::new("bash")
+                .arg(&hook)
+                .args(["origin", remote.to_str().unwrap()])
+                .current_dir(&work)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env_remove("ORCA_PREPUSH_SKIP_FRESH")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(line.as_bytes())
+                .unwrap();
+            child.wait().unwrap().success()
+        };
+
+        assert!(
+            run(format!("refs/tags/v1 {old} refs/tags/v1 {zero}\n")),
+            "tag push on an older commit must pass"
+        );
+        assert!(
+            !run(format!("refs/heads/feat {old} refs/heads/feat {zero}\n")),
+            "stale branch must be blocked"
+        );
+        assert!(
+            run(format!("(delete) {zero} refs/heads/feat {old}\n")),
+            "branch delete must pass"
+        );
+    }
+
     // ── InstallReport serde round-trip ────────────────────────────────────
 
     #[test]

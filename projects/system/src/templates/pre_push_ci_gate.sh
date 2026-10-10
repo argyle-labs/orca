@@ -21,50 +21,98 @@
 # trip (and, if merged as-is, can reintroduce regressions main already fixed).
 # Blocking at push time makes that structurally impossible.
 #
+# Gates each pushed COMMIT, never HEAD or the working tree: a branch can be
+# pushed without checking it out, and a shared checkout may sit on another
+# session's branch with its uncommitted files. The commit is exported with
+# `git archive`, so only TRACKED files are gated: an untracked local override
+# (e.g. a `.cargo/config.toml` path patch) is ignored on purpose, matching CI.
+#
+# Only branch pushes (refs/heads/*) are freshness-checked and cargo-gated. A
+# tag points at a commit already gated when its branch was pushed, and tags
+# routinely mark older commits, so tag pushes pass straight through.
+#
 # Escape hatches: `git push --no-verify` bypasses entirely; ORCA_PREPUSH_SKIP_TEST=1
 # skips only the (slow) test step; ORCA_PREPUSH_SKIP_CLIPPY=1 skips clippy — use
 # these when the local orca workspace a plugin patches against is mid-refactor;
 # ORCA_PREPUSH_SKIP_FRESH=1 skips only the branch-freshness guard.
 set -euo pipefail
 
-# Refuse to push a branch that is behind its base branch. Uses explicit `if`
-# blocks throughout (never `[ … ] && …` chains) so `set -e` cannot abort the
-# hook on an expected non-zero test — the release-stage footgun. Best-effort:
-# offline, detached HEAD, or an absent base all return 0 (never block spuriously).
+ZERO=0000000000000000000000000000000000000000
+remote="${1:-origin}"
+# Pushed refs as "<remote ref> <local sha>" lines; stdin is read once here and
+# replayed to a chained repo-local hook.
+pushed=""
+stdin_buf=""
+while read -r lref lsha rref rsha; do
+  stdin_buf="$stdin_buf$lref $lsha $rref $rsha
+"
+  if [ "$lsha" = "$ZERO" ]; then continue; fi # branch deletion
+  pushed="$pushed$rref $lsha
+"
+done
+
+# Refuse to push a commit that does not contain its base branch tip. Uses
+# explicit `if` blocks throughout (never `[ … ] && …` chains) so `set -e`
+# cannot abort the hook on an expected non-zero test. Best-effort: offline or
+# an absent base returns 0 (never block spuriously).
 prepush_freshness_guard() {
   if [ -n "${ORCA_PREPUSH_SKIP_FRESH:-}" ]; then return 0; fi
-  cur="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  if [ -z "$cur" ] || [ "$cur" = "HEAD" ]; then return 0; fi
-  # Resolve the base branch from origin/HEAD; fall back to main.
-  base="$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
-  if [ -z "$base" ]; then base=main; fi
-  if [ "$cur" = "$base" ]; then return 0; fi
+  if [ -z "$pushed" ]; then return 0; fi
+  # Resolve the base branch from <remote>/HEAD; fall back to main.
+  base="$(git rev-parse --abbrev-ref "$remote/HEAD" 2>/dev/null | sed "s#^$remote/##" || true)"
+  if [ -z "$base" ] || [ "$base" = "HEAD" ]; then base=main; fi
+  # FETCH_HEAD rather than a tracking ref: $remote may be a URL.
   # Offline (or no such remote branch) → don't block.
-  if ! git fetch -q origin "$base" 2>/dev/null; then return 0; fi
-  if ! git rev-parse -q --verify "refs/remotes/origin/$base" >/dev/null 2>&1; then return 0; fi
-  # Contains the base tip → fresh, allow.
-  if git merge-base --is-ancestor "refs/remotes/origin/$base" HEAD; then return 0; fi
-  behind="$(git rev-list --count "HEAD..refs/remotes/origin/$base" 2>/dev/null || echo '?')"
-  echo "pre-push BLOCKED: branch '$cur' is $behind commit(s) behind origin/$base." >&2
-  echo "  A PR from a stale branch is out-of-date-with-base. Rebase before pushing:" >&2
-  echo "     git fetch origin $base && git rebase origin/$base" >&2
-  echo "  (override once with: ORCA_PREPUSH_SKIP_FRESH=1 git push …)" >&2
-  exit 1
+  if ! git fetch -q "$remote" "$base" 2>/dev/null; then return 0; fi
+  base_sha="$(git rev-parse -q --verify FETCH_HEAD 2>/dev/null || true)"
+  if [ -z "$base_sha" ]; then return 0; fi
+  stale=0
+  while read -r rref sha; do
+    if [ -z "$sha" ]; then continue; fi
+    case "$rref" in refs/heads/*) ;; *) continue ;; esac
+    if [ "$rref" = "refs/heads/$base" ]; then continue; fi
+    if git merge-base --is-ancestor "$base_sha" "$sha"; then continue; fi
+    behind="$(git rev-list --count "$sha..$base_sha" 2>/dev/null || echo '?')"
+    echo "pre-push BLOCKED: branch '${rref#refs/heads/}' ($(git rev-parse --short "$sha")) is $behind commit(s) behind $remote/$base." >&2
+    stale=1
+  done <<PUSHED
+$pushed
+PUSHED
+  if [ "$stale" = 1 ]; then
+    echo "  A PR from a stale branch is out-of-date-with-base. Rebase before pushing:" >&2
+    echo "     git fetch $remote $base && git rebase FETCH_HEAD" >&2
+    echo "  (override once with: ORCA_PREPUSH_SKIP_FRESH=1 git push …)" >&2
+    exit 1
+  fi
+}
+
+# Run a cargo command against an exported tree. cargo-workdir syncs it into a
+# fixed per-name dir with a persistent target (incremental, serialized per
+# name); without it, build in the export directly.
+in_export() {
+  if command -v cargo-workdir >/dev/null 2>&1; then
+    cargo-workdir --name "$gate_name" "$export_dir" -- "$@"
+  else
+    (cd "$export_dir" && "$@")
+  fi
 }
 
 run_ci_gate() {
-  root="$1"
-  cd "$root"
+  sha="$1"
+  rm -rf "$export_dir"
+  mkdir -p "$export_dir"
+  git archive "$sha" | tar -x -C "$export_dir"
+  echo "pre-push: gating $(git log -1 --format='%h %s' "$sha")"
 
   echo "pre-push: cargo fmt --check"
-  if ! cargo fmt --check; then
+  if ! in_export cargo fmt --check; then
     echo "pre-push BLOCKED: formatting drift. Run 'cargo fmt' and re-push." >&2
     exit 1
   fi
 
   if [ -z "${ORCA_PREPUSH_SKIP_CLIPPY:-}" ]; then
     echo "pre-push: cargo clippy --all-targets -- -D warnings"
-    if ! cargo clippy --all-targets -- -D warnings; then
+    if ! in_export cargo clippy --all-targets -- -D warnings; then
       echo "pre-push BLOCKED: clippy warnings. Fix them and re-push" >&2
       echo "  (or ORCA_PREPUSH_SKIP_CLIPPY=1 git push … if the workspace is mid-refactor)." >&2
       exit 1
@@ -73,7 +121,7 @@ run_ci_gate() {
 
   if [ -z "${ORCA_PREPUSH_SKIP_TEST:-}" ]; then
     echo "pre-push: cargo test"
-    if ! cargo test; then
+    if ! in_export cargo test; then
       echo "pre-push BLOCKED: tests failed. Fix them and re-push" >&2
       echo "  (or ORCA_PREPUSH_SKIP_TEST=1 git push … to skip tests)." >&2
       exit 1
@@ -84,23 +132,39 @@ run_ci_gate() {
 }
 
 # Gate argyle-labs repos; no-op elsewhere. Branch-freshness applies to EVERY
-# argyle-labs repo (cargo or not); the fmt/clippy/test CI gate only to cargo ones.
+# argyle-labs repo (cargo or not); the fmt/clippy/test CI gate only to commits
+# whose tree has a Cargo.toml. Repos with their own core.hooksPath (orca's
+# .githooks) never reach this hook, so they are not double-gated.
 root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 origin="$(git config --get remote.origin.url 2>/dev/null || true)"
 case "$origin" in
   *argyle-labs*)
     prepush_freshness_guard
-    if [ -n "$root" ] && [ -f "$root/Cargo.toml" ]; then
-      run_ci_gate "$root"
-    fi
+    gate_name="$(basename "${root:-repo}")-prepush"
+    export_dir="$(mktemp -d "${TMPDIR:-/tmp}/prepush-export.XXXXXX")"
+    trap 'rm -rf "$export_dir"' EXIT
+    gated=" "
+    while read -r rref sha; do
+      if [ -z "$sha" ]; then continue; fi
+      case "$rref" in refs/heads/*) ;; *) continue ;; esac
+      if ! git cat-file -e "$sha:Cargo.toml" 2>/dev/null; then continue; fi
+      tree="$(git rev-parse "$sha^{tree}")"
+      case "$gated" in *" $tree "*) continue ;; esac
+      gated="$gated$tree "
+      run_ci_gate "$sha"
+    done <<PUSHED
+$pushed
+PUSHED
     ;;
 esac
 
-# Don't shadow a repo-local pre-push the operator maintains: chain to it.
+# Don't shadow a repo-local pre-push the operator maintains: chain to it,
+# replaying the ref lines it expects on stdin.
 git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null || true)"
 local_hook="${git_dir:+$git_dir/hooks/pre-push}"
 if [ -n "$local_hook" ] && [ -x "$local_hook" ] && [ "$local_hook" != "$0" ]; then
-  exec "$local_hook" "$@"
+  printf '%s' "$stdin_buf" | "$local_hook" "$@"
+  exit $?
 fi
 
 exit 0
