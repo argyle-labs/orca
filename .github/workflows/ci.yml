@@ -148,7 +148,10 @@ jobs:
               .github/workflows/*) workflows=true ;;
             esac
             case "$f" in
-              *.rs|*/Cargo.toml|Cargo.toml|Cargo.lock) rust=true ;;
+              # projects/* covers non-.rs compile inputs (migrations, SQL,
+              # include_str!/include_dir! assets, build.rs inputs).
+              *.rs|*/Cargo.toml|Cargo.toml|Cargo.lock|projects/*) rust=true ;;
+              scripts/ci-target-cache*) rust=true ;;
             esac
           done <<< "$changed"
 
@@ -220,6 +223,40 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Target cache script tests
+        run: time scripts/ci-target-cache.test.sh
+
+      # Persist target/ across runs through the act_runner cache server, so a
+      # run recompiles only the workspace crates whose source changed (sccache
+      # cannot serve instrumented workspace crates). Each job restores into its
+      # own container, so concurrent jobs never share a live target dir. Keyed
+      # per commit so a PR's cache moves forward; restore falls back to the
+      # newest entry for this branch, then for the same Cargo.lock.
+      - name: Restore target dir
+        id: target-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: target
+          key: rust-target-ci-rust-1.95.0-${{ hashFiles('Cargo.lock') }}-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            rust-target-ci-rust-1.95.0-${{ hashFiles('Cargo.lock') }}-${{ github.head_ref || github.ref_name }}-
+            rust-target-ci-rust-1.95.0-${{ hashFiles('Cargo.lock') }}-
+
+      # server/system build scripts derive ORCA_VERSION from git and rerun on
+      # .git/HEAD and .git/index; a fixed version keeps them (and everything
+      # downstream) cached. Tests compare against env!("ORCA_VERSION"), and the
+      # -dev suffix keeps dev-build behaviour.
+      - name: Pin ORCA_RELEASE_VERSION
+        run: |
+          v="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          [ -n "$v" ] || exit 1
+          echo "ORCA_RELEASE_VERSION=${v}-dev+gci" >> "$GITHUB_ENV"
+
+      # Backdates unchanged sources so cargo trusts the restored fingerprints.
+      # See scripts/ci-target-cache.sh.
+      - name: Reset mtimes of unchanged sources
+        run: time scripts/ci-target-cache.sh restore
+
       - name: Ensure libssl-dev + mold (no-op if image already has them)
         run: |
           set -uo pipefail
@@ -258,17 +295,64 @@ jobs:
       # allowlist on its rustc wrapper — dependencies are built uninstrumented.
       # That is why coverage no longer forces its own full build, which was the
       # original reason it was split into a nightly job.
-      - name: Unit + integration tests (instrumented)
+      #
+      # Built in its own step so the target cache is saved only from a
+      # COMPLETE build. The cargo JSON stream lists every executable this build
+      # produced, which prune uses to drop stale test binaries.
+      - name: Build test binaries (instrumented)
+        id: build
         run: |
           eval "$(cargo llvm-cov show-env --sh)"
-          time mold -run cargo nextest run --locked --workspace --no-fail-fast --timings
+          time mold -run cargo nextest run --locked --workspace --no-run --timings \
+            --cargo-message-format json-render-diagnostics > "$RUNNER_TEMP/cargo-build.json"
 
       - uses: actions/upload-artifact@v3
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.build.outcome != 'skipped' }}
         with:
           name: cargo-timings
           path: target/cargo-timings/
           retention-days: 14
+
+      # Also runs when the cache is not saved: stale test binaries would
+      # otherwise be merged into the coverage report.
+      - name: Prune target dir
+        id: prune
+        if: steps.build.outcome == 'success'
+        run: |
+          rc=0
+          time scripts/ci-target-cache.sh prune "$RUNNER_TEMP/cargo-build.json" || rc=$?
+          # 3 = cargo listed no executables; nothing was pruned, do not save.
+          if [ "$rc" -eq 3 ]; then
+            echo "save=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ "$rc" -eq 0 ] || exit "$rc"
+          size_mb="$(du -sm target | cut -f1)"
+          echo "target/ = ${size_mb} MiB"
+          if [ "$size_mb" -gt 12288 ]; then
+            echo "::warning title=target cache not saved::target/ is ${size_mb} MiB after pruning, over the 12288 MiB cap"
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Saved before the tests so their profraw output never enters the cache.
+      # The sentinel is written last, so only a complete cache is trusted on
+      # restore. An existing key (a rerun of the same commit) is left
+      # as is.
+      - name: Record target cache manifest
+        if: steps.prune.outputs.save == 'true'
+        run: scripts/ci-target-cache.sh record
+      - uses: actions/cache/save@v4
+        if: steps.prune.outputs.save == 'true'
+        with:
+          path: target
+          key: ${{ steps.target-cache.outputs.cache-primary-key }}
+
+      - name: Unit + integration tests (instrumented)
+        run: |
+          eval "$(cargo llvm-cov show-env --sh)"
+          time mold -run cargo nextest run --locked --workspace --no-fail-fast
 
 
       # Clippy runs AFTER the tests, in the SAME job, on purpose — this is the
