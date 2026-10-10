@@ -237,9 +237,9 @@ pub fn invoke_on<S: Read + Write>(
                             },
                         )
                         .map_err(|e| {
-                            let e = anyhow!("streaming capability '{cap}': write chunk: {e}");
-                            *sink_err = Some(anyhow!("{e}"));
-                            e
+                            let msg = anyhow!("streaming capability '{cap}': write chunk: {e}");
+                            *sink_err = Some(anyhow::Error::from(e).context("write chunk"));
+                            msg
                         })
                     })
                 };
@@ -416,10 +416,12 @@ impl PluginProcess {
     /// most `session_wait` for it, so callers stuck behind a wedged plugin give
     /// back their invoke threads. Each socket read and write is bounded by
     /// `idle_timeout`; any frame (including a heartbeat) resets the read wait,
-    /// so only a silent plugin times out. The whole exchange is capped by
-    /// `max_invoke`, which heartbeats don't reset; hitting it respawns the
-    /// plugin. A stale session is drained first, and a broken one (failed
-    /// exchange, poisoned by a panic) respawned.
+    /// so only a silent plugin times out. Every socket read and write is also
+    /// capped by `max_invoke`, which heartbeats and streamed chunks don't
+    /// reset; hitting it kills the plugin. A plain `Cap` runs host-side between
+    /// socket operations and is bounded only by its own timeouts, so it can
+    /// overrun `max_invoke` by that much. A stale session is drained first, and
+    /// a broken one (failed exchange, poisoned by a panic) respawned.
     pub fn invoke(&self, tool: &str, args: Value, caller: Option<VerifiedCaller>) -> Result<Value> {
         let mut session = self.lock_session()?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -451,7 +453,11 @@ impl PluginProcess {
         session.state = match &result {
             Ok(_) => SessionState::Healthy,
             Err(e) if e.is::<ToolFailed>() => SessionState::Healthy,
-            Err(e) if is_ceiling(e) => SessionState::Broken,
+            Err(e) if is_ceiling(e) => {
+                tracing::warn!(plugin = %self.software, "invoke hit its ceiling; killing the plugin");
+                session.stop();
+                SessionState::Broken
+            }
             Err(e) if is_idle_timeout(e) => SessionState::Stale(id),
             Err(_) => SessionState::Broken,
         };
@@ -532,8 +538,8 @@ impl Drop for PluginProcess {
     }
 }
 
-/// The plugin socket with each read capped at `idle` and at the time left
-/// before `deadline`, which no frame extends.
+/// The plugin socket with each read and write capped at `idle` and at the time
+/// left before `deadline`, which no frame extends.
 struct Ceiling<'a> {
     stream: &'a mut std::os::unix::net::UnixStream,
     idle: Duration,
@@ -574,7 +580,22 @@ impl Read for Ceiling<'_> {
 
 impl Write for Ceiling<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.stream.write(buf)
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::other(CeilingHit));
+        }
+        self.stream.set_write_timeout(Some(self.idle.min(left)))?;
+        match self.stream.write(buf) {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && Instant::now() >= self.deadline =>
+            {
+                Err(std::io::Error::other(CeilingHit))
+            }
+            r => r,
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -1380,7 +1401,7 @@ mod tests {
         let Some(mut proc) = spawn_fake_plugin() else {
             return;
         };
-        proc.idle_timeout = Duration::from_millis(250);
+        proc.idle_timeout = Duration::from_secs(2);
         proc.max_invoke = Duration::from_millis(600);
         let before = child_pid(&proc);
         let started = Instant::now();
@@ -1396,6 +1417,47 @@ mod tests {
             .unwrap();
         assert_eq!(out, json!({ "n": 5 }));
         assert_ne!(child_pid(&proc), before, "respawned after the ceiling");
+    }
+
+    #[test]
+    fn a_streaming_cap_past_the_ceiling_errors() {
+        use std::io::Write as _;
+        let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", http.local_addr().unwrap());
+        thread::spawn(move || {
+            let (mut conn, _) = http.accept().unwrap();
+            let mut req = [0u8; 1024];
+            _ = conn.read(&mut req);
+            _ = conn.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+            while conn.write_all(b"4\r\ndata\r\n").is_ok() {
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let (mut plugin_end, mut orca_end) = UnixStream::pair().unwrap();
+        thread::spawn(move || {
+            read_frame(&mut plugin_end).unwrap();
+            write_frame(
+                &mut plugin_end,
+                &Frame::Cap {
+                    id: 1,
+                    cap: "http.stream".into(),
+                    args: json!({ "method": "GET", "url": url }),
+                },
+            )
+            .unwrap();
+            while let Ok(Some(_)) = read_frame(&mut plugin_end) {}
+        });
+
+        let mut stream = Ceiling {
+            stream: &mut orca_end,
+            idle: Duration::from_secs(5),
+            deadline: Instant::now() + Duration::from_millis(600),
+        };
+        let started = Instant::now();
+        let err = invoke_on(&mut stream, 7, "fake.stream", json!({}), None, "fake").unwrap_err();
+        assert!(is_ceiling(&err), "got: {err:#}");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
