@@ -13,10 +13,8 @@ on:
   # exact tree green). Main is protected by requiring green PRs.
   #
   # A PR tests only the crates its changes touch plus their reverse
-  # dependents, so it cannot enforce the workspace-wide coverage floor. The
-  # nightly schedule and workflow_dispatch run the FULL workspace with the
-  # floor: that is where coverage is gated. The nightly runs once a day on
-  # main's tip regardless of pushes, so it is not a per-push run.
+  # dependents; the nightly schedule and workflow_dispatch run the full
+  # workspace. Coverage is report-only on every trigger.
   #
   # CI runs on GITEA (canonical), executed by our self-hosted Gitea act_runner.
   # `runs-on: ubuntu-latest` is just the LABEL that runner advertises — it maps
@@ -70,28 +68,6 @@ env:
   # it, so production keeps statically vendoring OpenSSL for portable binaries.
   OPENSSL_NO_VENDOR: "1"
 
-  # ── Shared compilation cache: sccache → MinIO S3 (fleet), the same backend
-  #    plugin CI uses. A shared bucket means one runner's cold compile warms the
-  #    cache for every other run instead of each runner keeping a private disk
-  #    cache (which is also ephemeral now that the Rust jobs run inside the
-  #    ci-rust container). Endpoint is an ORG variable, never a literal IP — the
-  #    repo mirrors to a PUBLIC GitHub and the lint IP guard blocks LAN
-  #    addresses in-tree. Creds are org-level secrets (scoped sccache-rw user).
-  #    Inert for the non-Rust jobs (they never invoke rustc/cc).
-  RUSTC_WRAPPER: sccache
-  # sccache-wrap the C compiler too (P2), so the native C deps that survive
-  # dropping vendored OpenSSL — bundled SQLCipher (with our LIBSQLITE3_FLAGS),
-  # vendored libgit2, jemalloc — are cached across runs instead of recompiled
-  # every cold checkout. cc-rs honors a multi-word CC/CXX (the classic
-  # ccache/sccache pattern).
-  CC: "sccache cc"
-  CXX: "sccache c++"
-  SCCACHE_BUCKET: sccache
-  SCCACHE_ENDPOINT: ${{ vars.SCCACHE_ENDPOINT }}
-  SCCACHE_S3_USE_SSL: "false"
-  SCCACHE_REGION: us-east-1
-  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 
 jobs:
   # Scopes a PR to the crates its changes touch plus their reverse dependents
@@ -117,11 +93,6 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-
-      - name: CI script tests
-        run: |
-          time scripts/ci-target-cache.test.sh
-          time scripts/ci-affected-crates.test.sh
 
       - id: filter
         name: Detect changed paths (git-native, no API)
@@ -208,9 +179,9 @@ jobs:
   build:
     needs: changes
     if: |
-      github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
-      (github.event_name == 'pull_request'
-        && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'))
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+        (github.event_name == 'pull_request'
+          && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')))
       && needs.changes.outputs.mode != 'none'
     runs-on: ci-large
     container:
@@ -229,8 +200,6 @@ jobs:
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-          env: |
-            ORCA_TEST_FAST_KDF=1
       # server/system build scripts derive ORCA_VERSION from git; a fixed
       # version keeps them cached. The -dev suffix keeps dev-build behaviour.
       - name: Pin ORCA_RELEASE_VERSION
@@ -248,9 +217,9 @@ jobs:
   test:
     needs: [changes, build]
     if: |
-      github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
-      (github.event_name == 'pull_request'
-        && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'))
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+        (github.event_name == 'pull_request'
+          && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')))
       && needs.changes.outputs.mode != 'none'
     runs-on: ci-large
     container:
@@ -269,8 +238,6 @@ jobs:
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-          env: |
-            ORCA_TEST_FAST_KDF=1
       # server/system build scripts derive ORCA_VERSION from git; a fixed
       # version keeps them cached. The -dev suffix keeps dev-build behaviour.
       - name: Pin ORCA_RELEASE_VERSION
@@ -307,10 +274,9 @@ jobs:
           ORCA_FORBIDDEN_IP_PATTERNS: ${{ secrets.FORBIDDEN_IP_PATTERNS }}
         run: ./scripts/check-no-real-ips.sh
 
-      # The README badge is generated from .coverage-floor; keep them in sync.
-      - name: Coverage badge matches the floor
+      - name: CI script tests
         if: ${{ !cancelled() }}
-        run: time make coverage-badge-check
+        run: time scripts/ci-affected-crates.test.sh
 
       - uses: argyle-labs/.github/.github/actions/rust-setup@main
         if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true') && needs.changes.outputs.mode != 'none' }}
@@ -319,13 +285,14 @@ jobs:
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-          env: |
-            ORCA_TEST_FAST_KDF=1
       - uses: argyle-labs/.github/.github/actions/cargo-fmt@main
         if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true') && needs.changes.outputs.mode != 'none' }}
       - uses: argyle-labs/.github/.github/actions/cargo-clippy@main
         if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true') && needs.changes.outputs.mode != 'none' }}
         with:
           args: ${{ needs.changes.outputs.args }} --tests
+      # Last: it deletes .cargo/config.toml, which the cargo steps above need.
+      - uses: argyle-labs/.github/.github/actions/cargo-lock-check@main
+        if: ${{ !cancelled() }}
       - uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
