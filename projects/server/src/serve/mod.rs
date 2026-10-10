@@ -176,8 +176,8 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
 
 /// Route panics through tracing so a crashed task lands in the daemon log.
 /// Until a global subscriber is installed, the default hook prints instead, so
-/// a panic is reported exactly once. The backtrace honors `RUST_BACKTRACE` /
-/// `RUST_LIB_BACKTRACE` (`Backtrace::capture`); unset, nothing is captured.
+/// a panic is reported exactly once. The backtrace is always captured, since
+/// panics are rare and the daemon rarely runs with `RUST_BACKTRACE` set.
 pub fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -187,7 +187,7 @@ pub fn install_panic_hook() {
         let thread = std::thread::current();
         tracing::error!(
             thread = thread.name().unwrap_or("<unnamed>"),
-            backtrace = %std::backtrace::Backtrace::capture(),
+            backtrace = %std::backtrace::Backtrace::force_capture(),
             "panic: {info}"
         );
     }));

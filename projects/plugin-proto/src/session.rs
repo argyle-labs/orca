@@ -28,6 +28,11 @@ pub struct Caps<'a, S: std::io::Read + std::io::Write> {
 }
 
 impl<S: std::io::Read + std::io::Write> Caps<'_, S> {
+    /// Tell the host this invoke is still alive, resetting its idle timeout.
+    pub fn heartbeat(&mut self) -> Result<(), String> {
+        write_frame(self.stream, &Frame::heartbeat()).map_err(|e| format!("heartbeat: {e}"))
+    }
+
     /// Request a host capability and block until its result. `Err` carries the
     /// daemon's error message (or a session error rendered as a string).
     pub fn call(&mut self, cap: &str, args: Value) -> Result<Value, String> {

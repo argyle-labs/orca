@@ -409,8 +409,8 @@ fn exec_http_stream(
     // `on_chunk` is borrowed and not `Send`, so the stream is driven on the cap
     // runtime and each chunk is relayed back to run `on_chunk` on this thread.
     // The bounded channel gives backpressure; a consumer that stalls past the
-    // invoke timeout, or drops the receiver, ends the task.
-    let send_timeout = dispatch::plugin_invoke_timeout();
+    // plugin idle timeout, or drops the receiver, ends the task.
+    let send_timeout = dispatch::plugin_idle_timeout();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Value>>(16);
     cap_runtime().spawn(
         async move {

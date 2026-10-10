@@ -1892,6 +1892,17 @@ mod loader_tests {
                 std::thread::sleep(std::time::Duration::from_secs(30));
                 Ok(args)
             }
+            "loaderfakeplugin.beat" => {
+                for _ in 0..5 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    caps.heartbeat()?;
+                }
+                Ok(args)
+            }
+            "loaderfakeplugin.late" => {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                Ok(args)
+            }
             _ => Err(format!("no such tool: {tool}")),
         });
     }

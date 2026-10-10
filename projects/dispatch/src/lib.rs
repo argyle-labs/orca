@@ -54,8 +54,8 @@ pub use inventory_slice::ToolRegistration;
 pub use registry::{
     AMBIENT_PEER_KEY, CliArgs, clap_command, cli_dispatch, data_mutation_names, dispatch,
     dispatch_text, dynamic_owns, dynamic_tool_defs, execute_gated_names, local_only_names,
-    mcp_definitions, names, plugin_invoke_timeout, remote_ok_names, required_role, role_table,
-    set_dynamic_dispatch, take_ambient, tool_exists, tool_manifest_json,
+    mcp_definitions, names, plugin_idle_timeout, plugin_permit_wait, remote_ok_names,
+    required_role, role_table, set_dynamic_dispatch, take_ambient, tool_exists, tool_manifest_json,
 };
 #[cfg(feature = "server")]
 pub use registry::{PEER_HEADER, axum_router};

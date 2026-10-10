@@ -22,6 +22,9 @@
 use std::cell::Cell;
 use std::io::{Read, Write};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use plugin_proto::{
@@ -138,13 +141,33 @@ pub fn serve(spec: PluginSpec) -> Result<()> {
         .with_context(|| format!("{SOCKET_ENV} not set — this binary must be run by orca"))?;
     let stream = std::os::unix::net::UnixStream::connect(&path)
         .with_context(|| format!("connect plugin socket {path}"))?;
-    serve_on(stream, spec)
+    let beat = stream.try_clone().context("clone plugin socket")?;
+    serve_session(stream, spec, Some((Box::new(beat), HEARTBEAT_EVERY)))
 }
 
 /// Serve over an already-connected stream. Split from [`serve`] so the loop is
 /// testable over an in-memory `UnixStream` pair.
 pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Result<()> {
-    let stream = Rc::new(std::cell::RefCell::new(stream));
+    serve_session(stream, spec, None)
+}
+
+/// How often a running tool tells orca it is alive, well inside orca's
+/// default idle timeout.
+const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
+
+/// `heartbeat`: a second writer onto the same socket plus its period.
+fn serve_session<S: Read + Write + 'static>(
+    stream: S,
+    spec: PluginSpec,
+    heartbeat: Option<(Box<dyn Write + Send>, Duration)>,
+) -> Result<()> {
+    let write_lock = Arc::new(Mutex::new(()));
+    let stream = Rc::new(std::cell::RefCell::new(FrameWriter {
+        inner: stream,
+        pending: Vec::new(),
+        lock: Arc::clone(&write_lock),
+    }));
+    let heartbeat = heartbeat.map(|(writer, every)| Heartbeat::start(writer, write_lock, every));
 
     // ── Handshake: Hello → Welcome (major-compatible). ──
     let manifest: Vec<ToolDef> = derive_manifest(&spec.prefixes)?;
@@ -198,6 +221,7 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
                 args,
                 caller,
             } => {
+                let beating = heartbeat.as_ref().map(Heartbeat::busy);
                 let ctx = invoke_ctx(&base_ctx, caller);
                 let sink = cap_sink(&stream, &cap_id);
                 let stream_sink = cap_stream_sink(&stream, &cap_id);
@@ -237,6 +261,7 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
                         crate::reactor::block_on(crate::dispatch::dispatch(&tool, args, &ctx))
                     })
                 });
+                drop(beating);
                 let reply = match result {
                     Ok(value) => Frame::Result {
                         id,
@@ -259,6 +284,92 @@ pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Resul
         }
     }
     Ok(())
+}
+
+/// Buffers each frame and writes it whole under `lock`, so heartbeat frames
+/// from another thread never interleave with it. Relies on `write_frame`
+/// flushing once per frame.
+struct FrameWriter<S> {
+    inner: S,
+    pending: Vec<u8>,
+    lock: Arc<Mutex<()>>,
+}
+
+impl<S: Read> Read for FrameWriter<S> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<S: Write> Write for FrameWriter<S> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.pending.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let pending = std::mem::take(&mut self.pending);
+        self.inner.write_all(&pending)?;
+        self.inner.flush()
+    }
+}
+
+/// Sends a heartbeat frame every `every` while a tool runs.
+struct Heartbeat {
+    busy: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Marks a tool as running until dropped.
+struct Busy(Arc<AtomicBool>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Heartbeat {
+    fn start(mut writer: Box<dyn Write + Send>, lock: Arc<Mutex<()>>, every: Duration) -> Self {
+        let busy = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (b, st) = (Arc::clone(&busy), Arc::clone(&stop));
+        let thread = std::thread::Builder::new()
+            .name("plugin-heartbeat".into())
+            .spawn(move || {
+                loop {
+                    std::thread::park_timeout(every);
+                    if st.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    if b.load(Ordering::SeqCst) {
+                        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+                        if write_frame(&mut writer, &Frame::heartbeat()).is_err() {
+                            return;
+                        }
+                    }
+                }
+            })
+            .ok();
+        Self { busy, stop, thread }
+    }
+
+    fn busy(&self) -> Busy {
+        self.busy.store(true, Ordering::SeqCst);
+        Busy(Arc::clone(&self.busy))
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            t.thread().unpark();
+            _ = t.join();
+        }
+    }
 }
 
 /// The ctx one `Invoke` runs under: the stub base plus the identity the daemon
@@ -380,6 +491,27 @@ mod tests {
     use serde_json::json;
     use std::os::unix::net::UnixStream;
     use std::thread;
+
+    #[test]
+    fn heartbeat_beats_only_while_a_tool_runs() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let hb = Heartbeat::start(
+            Box::new(ours),
+            Arc::new(Mutex::new(())),
+            Duration::from_millis(20),
+        );
+        theirs
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        thread::sleep(Duration::from_millis(80));
+        assert!(read_frame(&mut theirs).is_err(), "idle: no heartbeat");
+
+        let busy = hb.busy();
+        let frame = read_frame(&mut theirs).unwrap().unwrap();
+        assert_eq!(frame, Frame::heartbeat());
+        drop(busy);
+        drop(hb);
+    }
 
     fn spec() -> PluginSpec {
         PluginSpec {

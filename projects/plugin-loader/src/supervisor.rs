@@ -34,7 +34,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use plugin_proto::{
-    Frame, PROTOCOL_VERSION, ToolDef, VerifiedCaller, protocol_compatible, read_frame, write_frame,
+    Frame, HEARTBEAT_MSG, PROTOCOL_VERSION, ProtoError, ToolDef, VerifiedCaller,
+    protocol_compatible, read_frame, write_frame,
 };
 use serde_json::Value;
 
@@ -284,6 +285,7 @@ pub fn invoke_on<S: Read + Write>(
                 write_frame(stream, &reply)
                     .with_context(|| format!("answering capability '{cap}'"))?;
             }
+            Frame::Log { msg, .. } if msg == HEARTBEAT_MSG => {}
             Frame::Log { level, msg, .. } => match level.as_str() {
                 "error" => tracing::error!(target: "plugin", "{msg}"),
                 "warn" => tracing::warn!(target: "plugin", "{msg}"),
@@ -333,17 +335,30 @@ pub struct PluginProcess {
     pub schema: Value,
     exe: PathBuf,
     session: Mutex<Session>,
-    io_timeout: Duration,
+    idle_timeout: Duration,
+    drain_grace: Duration,
     next_id: AtomicU64,
 }
 
-/// The live child + its socket. `healthy` goes false when an invoke fails
-/// mid-exchange or panics, since the stream may then hold a partial or stale
-/// frame; the next invoke respawns the child.
+/// How long the next invoke waits for an idle-timed-out call's late `Result`
+/// before giving up on the session.
+const DRAIN_GRACE: Duration = Duration::from_secs(10);
+
+/// The live child + its socket.
 struct Session {
     child: Child,
     stream: std::os::unix::net::UnixStream,
-    healthy: bool,
+    state: SessionState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SessionState {
+    Healthy,
+    /// The invoke with this id went silent past the idle timeout; its `Result`
+    /// may still arrive and is drained before the session is reused.
+    Stale(u64),
+    /// The stream may hold a partial frame (failed exchange, panic): respawn.
+    Broken,
 }
 
 impl Session {
@@ -384,39 +399,52 @@ impl PluginProcess {
             session: Mutex::new(Session {
                 child,
                 stream,
-                healthy: true,
+                state: SessionState::Healthy,
             }),
-            io_timeout: dispatch::plugin_invoke_timeout(),
+            idle_timeout: dispatch::plugin_idle_timeout(),
+            drain_grace: DRAIN_GRACE,
             next_id: AtomicU64::new(1),
         })
     }
 
     /// Invoke a tool. Serialized by the session `Mutex` — one `Invoke` in
     /// flight per plugin, per the serial contract. Each socket read and write is
-    /// bounded by `io_timeout`, so a hung plugin releases the mutex and thread.
-    /// A session left unhealthy (failed exchange, poisoned by a panic) is
-    /// respawned first.
+    /// bounded by `idle_timeout`; any frame (including a heartbeat) resets the
+    /// read wait, so only a silent plugin times out. A stale session is drained
+    /// first, and a broken one (failed exchange, poisoned by a panic) respawned.
     pub fn invoke(&self, tool: &str, args: Value, caller: Option<VerifiedCaller>) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut session = self.session.lock().unwrap_or_else(|poisoned| {
             self.session.clear_poison();
             let mut session = poisoned.into_inner();
-            session.healthy = false;
+            session.state = SessionState::Broken;
             session
         });
-        if !session.healthy {
+        if let SessionState::Stale(stale) = session.state {
+            session.state = match drain(&mut session.stream, stale, self.drain_grace) {
+                Ok(()) => SessionState::Healthy,
+                Err(e) => {
+                    tracing::warn!(plugin = %self.software, "stale invoke never finished: {e:#}");
+                    SessionState::Broken
+                }
+            };
+        }
+        if session.state != SessionState::Healthy {
             self.respawn(&mut session)?;
         }
-        session.stream.set_read_timeout(Some(self.io_timeout))?;
-        session.stream.set_write_timeout(Some(self.io_timeout))?;
-        // Cleared until the exchange completes, so an unwind leaves it false.
-        session.healthy = false;
+        session.stream.set_read_timeout(Some(self.idle_timeout))?;
+        session.stream.set_write_timeout(Some(self.idle_timeout))?;
+        // Broken until the exchange completes, so an unwind leaves it broken.
+        session.state = SessionState::Broken;
         let result = invoke_on(&mut session.stream, id, tool, args, caller, &self.software);
-        // A tool error arrives as a well-formed `Result` frame; anything else
-        // means the stream is mid-frame or the plugin is gone.
-        session.healthy = match &result {
-            Ok(_) => true,
-            Err(e) => e.is::<ToolFailed>(),
+        // A tool error arrives as a well-formed `Result` frame; an idle timeout
+        // may still be followed by one; anything else means the stream is
+        // mid-frame or the plugin is gone.
+        session.state = match &result {
+            Ok(_) => SessionState::Healthy,
+            Err(e) if e.is::<ToolFailed>() => SessionState::Healthy,
+            Err(e) if is_idle_timeout(e) => SessionState::Stale(id),
+            Err(_) => SessionState::Broken,
         };
         result
     }
@@ -424,13 +452,32 @@ impl PluginProcess {
     fn respawn(&self, session: &mut Session) -> Result<()> {
         tracing::warn!(plugin = %self.software, "respawning plugin after a broken session");
         session.stop();
-        let (child, stream, _, _) = start(&self.exe, &self.software)
+        let (child, stream, hs, _) = start(&self.exe, &self.software)
             .with_context(|| format!("respawning plugin '{}'", self.software))?;
-        *session = Session {
+        let mut fresh = Session {
             child,
             stream,
-            healthy: true,
+            state: SessionState::Broken,
         };
+        // The registered tools, roles, and backends describe the binary loaded
+        // at spawn; a different binary on disk must be reloaded, not served.
+        if hs.semver != self.semver || hs.manifest != self.manifest {
+            fresh.stop();
+            tracing::error!(
+                plugin = %self.software,
+                registered = %self.semver,
+                on_disk = %hs.semver,
+                "plugin binary changed since load; reload the plugin"
+            );
+            bail!(
+                "plugin '{}' binary changed since load ({} -> {}); reload the plugin",
+                self.software,
+                self.semver,
+                hs.semver
+            );
+        }
+        fresh.state = SessionState::Healthy;
+        *session = fresh;
         Ok(())
     }
 
@@ -446,6 +493,40 @@ impl PluginProcess {
 impl Drop for PluginProcess {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// Whether `e` is a socket read/write that hit its timeout.
+fn is_idle_timeout(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        let io = match c.downcast_ref::<ProtoError>() {
+            Some(ProtoError::Io(io)) => Some(io),
+            _ => c.downcast_ref::<std::io::Error>(),
+        };
+        io.is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+        })
+    })
+}
+
+/// Read until the `Result` for invoke `stale`, skipping `Log` frames and other
+/// ids, within `grace`. A `Cap` cannot be answered for an abandoned call.
+fn drain(stream: &mut std::os::unix::net::UnixStream, stale: u64, grace: Duration) -> Result<()> {
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            bail!("no Result for invoke {stale} within {grace:?}");
+        }
+        stream.set_read_timeout(Some(left))?;
+        match read_frame(stream)?.ok_or_else(|| anyhow!("plugin closed the socket"))? {
+            Frame::Result { id, .. } if id == stale => return Ok(()),
+            Frame::Cap { cap, .. } => bail!("abandoned invoke {stale} requested '{cap}'"),
+            _ => {}
+        }
     }
 }
 
@@ -1165,7 +1246,8 @@ mod tests {
         let Some(mut proc) = spawn_fake_plugin() else {
             return;
         };
-        proc.io_timeout = Duration::from_millis(200);
+        proc.idle_timeout = Duration::from_millis(200);
+        proc.drain_grace = Duration::from_millis(200);
         let before = child_pid(&proc);
 
         let err = proc
@@ -1184,6 +1266,54 @@ mod tests {
     }
 
     #[test]
+    fn a_long_call_that_heartbeats_outlives_the_idle_timeout() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        proc.idle_timeout = Duration::from_millis(250);
+        let out = proc
+            .invoke("loaderfakeplugin.beat", json!({ "n": 3 }), None)
+            .unwrap();
+        assert_eq!(out, json!({ "n": 3 }));
+    }
+
+    #[test]
+    fn a_late_result_is_drained_and_the_session_kept() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        proc.idle_timeout = Duration::from_millis(150);
+        proc.drain_grace = Duration::from_secs(5);
+        let before = child_pid(&proc);
+        proc.invoke("loaderfakeplugin.late", json!({}), None)
+            .unwrap_err();
+        assert!(matches!(
+            proc.session.lock().unwrap().state,
+            SessionState::Stale(_)
+        ));
+
+        proc.idle_timeout = Duration::from_secs(5);
+        let out = proc
+            .invoke("loaderfakeplugin.ping", json!({ "n": 4 }), None)
+            .unwrap();
+        assert_eq!(out, json!({ "n": 4 }));
+        assert_eq!(child_pid(&proc), before, "drained, not respawned");
+    }
+
+    #[test]
+    fn a_respawn_refuses_a_changed_binary() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        proc.semver = "0.0.0-registered".into();
+        proc.session.lock().unwrap().state = SessionState::Broken;
+        let err = proc
+            .invoke("loaderfakeplugin.ping", json!({}), None)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("reload"), "got: {err:#}");
+    }
+
+    #[test]
     fn a_tool_error_keeps_the_session() {
         let Some(proc) = spawn_fake_plugin() else {
             return;
@@ -1191,7 +1321,7 @@ mod tests {
         let before = child_pid(&proc);
         proc.invoke("loaderfakeplugin.nope", json!({}), None)
             .unwrap_err();
-        assert!(proc.session.lock().unwrap().healthy);
+        assert_eq!(proc.session.lock().unwrap().state, SessionState::Healthy);
         assert_eq!(child_pid(&proc), before);
     }
 }
