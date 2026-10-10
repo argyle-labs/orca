@@ -41,11 +41,10 @@ pub fn is_streaming_cap(cap: &str) -> bool {
     cap == "http.stream"
 }
 
-/// A small dedicated runtime for capability I/O (`http.request`). `handle_cap`
-/// is synchronous and runs on the supervisor's blocking invoke thread (see
-/// `plugin_loader::dispatch`, which drives plugin invokes via `spawn_blocking`),
-/// never on a daemon async worker — so blocking on this runtime is safe and
-/// keeps capability HTTP off the main scheduler.
+/// A small dedicated runtime for capability I/O (`http.request`), keeping
+/// capability HTTP off the main scheduler. `handle_cap` is synchronous and runs
+/// on the supervisor's blocking invoke thread; work reaches this runtime only
+/// through [`run_on_cap_runtime`] / `spawn`, never `block_on`.
 fn cap_runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
@@ -55,6 +54,22 @@ fn cap_runtime() -> &'static tokio::runtime::Runtime {
             .build()
             .expect("build capability I/O runtime")
     })
+}
+
+/// Run `fut` on [`cap_runtime`] and wait for it on a std channel. Unlike
+/// `block_on`, this is sound from inside another runtime's context: a stray
+/// call from an async worker blocks that worker instead of panicking (#798).
+fn run_on_cap_runtime<F>(fut: F) -> Result<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    cap_runtime().spawn(async move {
+        tx.send(fut.await).ok();
+    });
+    rx.recv()
+        .map_err(|_| anyhow!("capability I/O task panicked"))
 }
 
 /// The daemon's shared HTTP client for capability requests.
@@ -333,9 +348,7 @@ fn exec_http(req: HttpRequest) -> Result<HttpResponse> {
     if let Some(ms) = req.timeout_ms {
         builder = builder.timeout(Duration::from_millis(ms));
     }
-    let resp = cap_runtime()
-        .block_on(builder.send_raw())
-        .map_err(|e| anyhow!("http.request: {e}"))?;
+    let resp = run_on_cap_runtime(builder.send_raw())?.map_err(|e| anyhow!("http.request: {e}"))?;
     Ok(HttpResponse {
         status: resp.status,
         headers: resp.headers.into_iter().collect(),
@@ -389,11 +402,19 @@ fn exec_http_stream(
         builder = builder.timeout(Duration::from_millis(ms));
     }
 
-    cap_runtime().block_on(async move {
-        let resp = builder
-            .send_stream()
-            .await
-            .map_err(|e| anyhow!("http.stream: {e}"))?;
+    // `on_chunk` is borrowed and not `Send`, so the stream is driven on the cap
+    // runtime and each chunk is relayed back to run `on_chunk` on this thread.
+    // The bounded channel gives backpressure; a dropped receiver ends the task.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Value>>(16);
+    cap_runtime().spawn(async move {
+        let send = |item: Result<Value>| tokio::task::block_in_place(|| tx.send(item)).is_ok();
+        let resp = match builder.send_stream().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                send(Err(anyhow!("http.stream: {e}")));
+                return;
+            }
+        };
         // seq 0: the head (status + headers), before any body byte.
         let head = HttpStreamChunk::Head {
             status: resp.status(),
@@ -403,24 +424,37 @@ fn exec_http_stream(
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         };
-        on_chunk(0, serde_json::to_value(head)?)?;
-
-        let mut body = Box::pin(resp.bytes_stream());
-        let mut seq = 1u64;
-        while let Some(item) = plugin_toolkit::stream::next(&mut body).await {
-            let bytes = item.map_err(|e| anyhow!("http.stream: body: {e}"))?;
-            let chunk = HttpStreamChunk::Body { bytes };
-            on_chunk(seq, serde_json::to_value(chunk)?)?;
-            seq += 1;
+        if !send(serde_json::to_value(head).map_err(Into::into)) {
+            return;
         }
-        Ok(())
-    })
+        let mut body = Box::pin(resp.bytes_stream());
+        while let Some(item) = plugin_toolkit::stream::next(&mut body).await {
+            let chunk = item
+                .map_err(|e| anyhow!("http.stream: body: {e}"))
+                .and_then(|bytes| {
+                    serde_json::to_value(HttpStreamChunk::Body { bytes }).map_err(Into::into)
+                });
+            let failed = chunk.is_err();
+            if !send(chunk) || failed {
+                return;
+            }
+        }
+    });
+    for (seq, chunk) in (0u64..).zip(rx) {
+        on_chunk(seq, chunk?)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use plugin_toolkit::serde_json::json;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cap_io_is_sound_from_inside_a_runtime() {
+        assert_eq!(run_on_cap_runtime(async { 7 }).unwrap(), 7);
+    }
 
     #[test]
     fn unknown_capability_errors() {

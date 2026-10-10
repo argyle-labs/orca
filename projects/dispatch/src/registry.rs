@@ -125,12 +125,32 @@ pub fn set_dynamic_dispatch(invoke: Box<DynamicInvoker>, defs: Box<DynamicDefs>)
 
 /// Try the installed dynamic fallback for `name`. `None` when no fallback is
 /// installed or no loaded plugin owns the name.
-fn dynamic_dispatch(
+///
+/// The invoker blocks (plugin socket I/O, capability `block_on`), so it runs on
+/// a dedicated thread: called on an async worker it would panic with a nested
+/// runtime (#798). dispatch links no tokio runtime, so `spawn_blocking` is not
+/// available, and `block_in_place` panics on current-thread runtimes.
+async fn dynamic_dispatch(
     name: &str,
     args: &Value,
     caller: Option<&contract::CallerIdentity>,
 ) -> Option<Result<Value>> {
-    DYNAMIC_INVOKER.get().and_then(|f| f(name, args, caller))
+    let invoker = DYNAMIC_INVOKER.get()?;
+    let (name, args, caller) = (name.to_string(), args.clone(), caller.cloned());
+    let (tx, rx) = futures::channel::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("plugin-invoke".into())
+        .spawn(move || {
+            // A dropped receiver means the caller went away; nothing to report.
+            tx.send(invoker(&name, &args, caller.as_ref())).ok();
+        });
+    if let Err(e) = spawned {
+        return Some(Err(anyhow::anyhow!("spawn plugin invoke thread: {e}")));
+    }
+    match rx.await {
+        Ok(result) => result,
+        Err(_) => Some(Err(anyhow::anyhow!("plugin invoke thread panicked"))),
+    }
 }
 
 /// JSON tool defs contributed by loaded cdylib plugins. Empty when no fallback
@@ -305,7 +325,7 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
         // On a static miss, try the dynamic cdylib-plugin fallback, then the
         // live unit surface, before giving up — so loaded plugin tools AND the
         // universal `unit.<kind>.<verb>` surface share this one entrypoint.
-        None => match dynamic_dispatch(name, &args, ctx.verified_caller()) {
+        None => match dynamic_dispatch(name, &args, ctx.verified_caller()).await {
             Some(result) => result,
             None => match crate::unit_surface::unit_dispatch(name, &args, ctx.verified_caller())
                 .await
@@ -1155,6 +1175,13 @@ mod tests {
         ONCE.call_once(|| {
             set_dynamic_dispatch(
                 Box::new(|name, _args, caller| {
+                    if name == NESTED_RUNTIME_TOOL {
+                        // What a plugin's `http.request` capability does.
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .build()
+                            .unwrap();
+                        return Some(Ok(rt.block_on(async { json!({ "nested": true }) })));
+                    }
                     (name == FAKE_PLUGIN_TOOL).then(|| {
                         SEEN.lock()
                             .unwrap()
@@ -1165,6 +1192,19 @@ mod tests {
                 Box::new(|| vec![json!({ "name": FAKE_PLUGIN_TOOL })]),
             );
         });
+    }
+
+    const NESTED_RUNTIME_TOOL: &str = "rest_fallback_test_plugin.nested_block_on";
+
+    /// A plugin invoke that blocks on its own runtime must not run on an async
+    /// worker, where a nested `block_on` panics.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plugin_invoke_that_blocks_on_a_runtime_runs_off_the_async_worker() {
+        install_fake_plugin();
+        let out = dispatch(NESTED_RUNTIME_TOOL, json!({}), &make_ctx())
+            .await
+            .unwrap();
+        assert_eq!(out, json!({ "nested": true }));
     }
 
     fn identity(name: &str) -> contract::CallerIdentity {

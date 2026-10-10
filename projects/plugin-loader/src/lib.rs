@@ -670,8 +670,24 @@ fn make_backend_invoke(backing: Backing, invoke_prefix: String) -> BackendInvoke
     Arc::new(move |op: &str, args: sj::Value| {
         let tool = format!("{invoke_prefix}.{op}");
         // Domain ops are daemon-originated; no request identity rides them.
-        backing.invoke(&tool, args, None)
+        off_async_worker(|| backing.invoke(&tool, args, None))
     })
+}
+
+/// Run a blocking plugin invoke so it is sound even when the caller is a tokio
+/// async worker (#798): `block_in_place` on a multi-thread runtime, a scoped
+/// thread on a current-thread one, inline anywhere else.
+fn off_async_worker<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        Ok(_) => std::thread::scope(|s| {
+            s.spawn(f)
+                .join()
+                .unwrap_or_else(|p| std::panic::resume_unwind(p))
+        }),
+        Err(_) => f(),
+    }
 }
 
 /// Register every backend a plugin declares into its domain registry, routing
@@ -1103,17 +1119,17 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
 /// registry. `caller` must be the request's verified identity, never the host
 /// operator's.
 ///
-/// Prefer async [`dispatch`] from an async context: this runs the invoke inline,
-/// so for a subprocess plugin it blocks the calling thread on socket I/O (and
-/// must NOT be called from a tokio async worker — the capability host would
-/// `block_on` on it).
+/// Prefer async [`dispatch`] from an async context: this blocks the calling
+/// thread on the plugin's socket I/O (moved off a tokio async worker if called
+/// from one).
 pub fn invoke_plugin(
     name: &str,
     args: &sj::Value,
     caller: Option<&contract::CallerIdentity>,
 ) -> Option<Result<sj::Value>> {
     let (backing, software) = backing_for(name)?;
-    let result = backing.invoke(name, args.clone(), caller.map(wire_caller));
+    let caller = caller.map(wire_caller);
+    let result = off_async_worker(|| backing.invoke(name, args.clone(), caller));
     Some(parse_invoke_result(result, name, &software))
 }
 
