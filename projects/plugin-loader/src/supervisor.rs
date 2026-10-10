@@ -285,16 +285,25 @@ pub fn invoke_on<S: Read + Write>(
 /// Resolve the authoritative session principal from the install id (if known)
 /// and the plugin's self-declared handshake id. `Some(id)` validates equality
 /// (a mismatch is a hard error — id mismatch or tampering); `None` is
-/// trust-on-first-use and accepts the declared id.
+/// trust-on-first-use and accepts the declared id. Either way an empty or
+/// reserved ([`crate::is_reserved_plugin_id`]) principal is refused, since a
+/// principal owns every secret named `<id>` / `<id>.…`.
 fn resolve_principal(expected_id: Option<&str>, declared: &str) -> Result<String> {
-    match expected_id {
+    let principal = match expected_id {
         Some(id) if declared != id => bail!(
             "plugin declared id '{declared}' but orca is loading it as '{id}' \
              — refusing (id mismatch or tampering)"
         ),
-        Some(id) => Ok(id.to_string()),
-        None => Ok(declared.to_string()),
+        Some(id) => id,
+        None => declared,
+    };
+    if !crate::is_valid_plugin_id(principal) {
+        bail!("refusing to load plugin as '{principal}': id must match ^[a-z][a-z0-9_-]{{0,63}}$");
     }
+    if crate::is_reserved_plugin_id(principal) {
+        bail!("refusing to load plugin as '{principal}': id is reserved for orca core");
+    }
+    Ok(principal.to_string())
 }
 
 /// A spawned plugin subprocess and its session socket.
@@ -380,13 +389,23 @@ impl PluginProcess {
         // The dir is only needed for the connect rendezvous; remove it now so a
         // crash can't leave a stale socket blocking a respawn.
         drop(rendezvous);
-        let (child, mut stream) = accepted?;
+        let (mut child, mut stream) = accepted?;
 
-        let hs = handshake(&mut stream, CAPABILITIES)?;
         // Authoritative principal: the install id when known (validate the
         // self-declared handshake id against it), else trust-on-first-use.
-        let principal = resolve_principal(expected_id, &hs.software)
-            .with_context(|| format!("plugin binary {exe:?} handshake identity"))?;
+        let bound = handshake(&mut stream, CAPABILITIES).and_then(|hs| {
+            let principal = resolve_principal(expected_id, &hs.software)
+                .with_context(|| format!("plugin binary {exe:?} handshake identity"))?;
+            Ok((hs, principal))
+        });
+        let (hs, principal) = match bound {
+            Ok(b) => b,
+            Err(e) => {
+                _ = child.kill();
+                _ = child.wait();
+                return Err(e);
+            }
+        };
         tracing::info!(
             plugin = %principal,
             version = %hs.semver,
@@ -982,5 +1001,38 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("id mismatch or tampering"), "got: {err}");
+        assert!(resolve_principal(None, "").is_err());
+    }
+
+    #[test]
+    fn resolve_principal_refuses_reserved_ids() {
+        for id in ["orca", "github_token", "secrets", "mesh"] {
+            let err = resolve_principal(Some(id), id).unwrap_err().to_string();
+            assert!(err.contains("reserved"), "{id}: {err}");
+            let err = resolve_principal(None, id).unwrap_err().to_string();
+            assert!(err.contains("reserved"), "{id}: {err}");
+        }
+    }
+
+    #[test]
+    fn resolve_principal_refuses_malformed_ids() {
+        for id in [
+            "model.0190f2c4-7b1e-7c3a-9a8e-1d2c3b4a5f6e",
+            "../x",
+            "Jellyfin",
+        ] {
+            let err = resolve_principal(Some(id), id).unwrap_err().to_string();
+            assert!(err.contains("must match"), "{id}: {err}");
+            let err = resolve_principal(None, id).unwrap_err().to_string();
+            assert!(err.contains("must match"), "{id}: {err}");
+        }
+        assert_eq!(
+            resolve_principal(Some("calibre-web"), "calibre-web").unwrap(),
+            "calibre-web"
+        );
+        assert_eq!(
+            resolve_principal(None, "calibre-web").unwrap(),
+            "calibre-web"
+        );
     }
 }
