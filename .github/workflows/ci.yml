@@ -328,9 +328,17 @@ jobs:
           time cargo llvm-cov report --html --output-dir target/llvm-cov \
             --fail-under-lines "$(cat .coverage-floor)"
 
+      # The HTML report is thousands of small files, and upload-artifact@v3
+      # sends them one by one — the slowest step of a green run. Ship it as one
+      # archive, and only when someone will read it: a failed run, or a
+      # manual/scheduled run.
+      - name: Archive coverage report
+        if: ${{ failure() || (!cancelled() && github.event_name != 'pull_request') }}
+        run: tar -C target -czf target/coverage-html.tgz llvm-cov
+
       - uses: actions/upload-artifact@v3
-        if: ${{ !cancelled() }}
+        if: ${{ failure() || (!cancelled() && github.event_name != 'pull_request') }}
         with:
           name: coverage-html
-          path: target/llvm-cov/
+          path: target/coverage-html.tgz
           retention-days: 14
