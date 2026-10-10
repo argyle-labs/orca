@@ -259,24 +259,23 @@ mod tests {
 
     #[test]
     fn approved_hook_is_composed_and_change_reverts_approval() {
-        register("hook-approved-xyz", "echo approved");
+        // The test home is keyed by pid and outlives the process, so a reused
+        // pid can inherit an earlier run's approvals; a fresh origin can't match.
+        let origin = format!("hook-approved-{}", uuid::Uuid::now_v7().simple());
+        register(&origin, "echo approved");
         let hook = compose_unapproved_hooks()
             .into_iter()
-            .find(|h| h.origin == "hook-approved-xyz")
+            .find(|h| h.origin == origin)
             .unwrap();
         approve(&hook.origin, &hook_hash(&hook)).unwrap();
         assert!(
             compose_hooks()
                 .iter()
-                .any(|h| h.origin == "hook-approved-xyz" && h.command == "echo approved")
+                .any(|h| h.origin == origin && h.command == "echo approved")
         );
 
-        register("hook-approved-xyz", "echo changed");
-        assert!(
-            compose_hooks()
-                .iter()
-                .all(|h| h.origin != "hook-approved-xyz")
-        );
-        deregister_provider("hook-approved-xyz");
+        register(&origin, "echo changed");
+        assert!(compose_hooks().iter().all(|h| h.origin != origin));
+        deregister_provider(&origin);
     }
 }
