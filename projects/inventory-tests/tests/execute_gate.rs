@@ -67,6 +67,36 @@ fn profile_is_a_gated_admin_write_and_privilege_audit_is_a_read() {
     );
 }
 
+/// Crontabs routinely carry secrets, so even reading one is admin-only, and
+/// none of the verbs is a data_mutation, so `can_mutate` never reaches them.
+/// Only `update` applies changes.
+#[test]
+fn cron_verbs_are_admin_and_only_update_is_gated() {
+    let gated = dispatch::execute_gated_names();
+    for tool in ["system.cron.list", "system.cron.diff", "system.cron.update"] {
+        assert_eq!(dispatch::required_role(tool), Some("admin"), "{tool}");
+    }
+    let mutations = dispatch::data_mutation_names();
+    for tool in ["system.cron.list", "system.cron.diff", "system.cron.update"] {
+        assert!(
+            !mutations.contains(&tool),
+            "{tool} must not be a data_mutation"
+        );
+        assert!(
+            !dispatch::tool_roles::authorize(
+                "member",
+                true,
+                dispatch::required_role(tool).unwrap_or("any"),
+                mutations.contains(&tool),
+            ),
+            "{tool}: a non-admin with can_mutate must be refused"
+        );
+    }
+    assert!(gated.contains(&"system.cron.update"));
+    assert!(!gated.contains(&"system.cron.list"));
+    assert!(!gated.contains(&"system.cron.diff"));
+}
+
 /// `model.backends_check` only probes reachability, so it is a read; it needs
 /// the `read` role because it lists every configured backend endpoint.
 #[test]
@@ -89,6 +119,7 @@ const CONTROL_PLANE_WRITES: &[&str] = &[
     "pki.create",
     "secrets.delete",
     "secrets.upsert",
+    "system.cron.update",
 ];
 
 /// Consent without authorization is not a gate: if a verb applies changes, it

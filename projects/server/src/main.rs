@@ -303,6 +303,13 @@ enum AdminAction {
     /// Invoked by the daemon via `sudo -n` — the privileged surface for
     /// `guest write_file`. Never exposed over REST/MCP/peer.
     LxcPush,
+    /// Privileged crontab access: reads a JSON `CronOp` (`read`, or a
+    /// hash-checked `write` of one user's crontab) from stdin, capped in size,
+    /// and runs `crontab -u <user> -l` / `crontab -u <user> -` as root. Only
+    /// users listed in the root-owned `/etc/orca/cron-users` are served; uid 0
+    /// never is. Invoked by the daemon via `sudo -n` for `system.cron.*`.
+    /// Never exposed over REST/MCP/peer.
+    CronApply,
     /// Generic privileged seam for plugins: reads `{plugin, op, payload}` JSON
     /// from stdin, resolves `plugin` only in the installed-plugin dir, checks
     /// its binary against the sha256 recorded at install, and runs it as root
@@ -1011,6 +1018,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::StorageApply => cmd_admin_storage_apply().await,
         AdminAction::LxcExec => cmd_admin_lxc_exec().await,
         AdminAction::LxcPush => cmd_admin_lxc_push().await,
+        AdminAction::CronApply => cmd_admin_cron_apply().await,
         AdminAction::PluginApply => cmd_admin_plugin_apply().await,
         AdminAction::ListUsers => cmd_admin_list_users(),
         AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
@@ -1113,6 +1121,57 @@ async fn cmd_admin_lxc_push() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string(&result).context("serialize LxcPushResult")?
+    );
+    Ok(())
+}
+
+/// Read a `CronOp` (JSON) from stdin, run it as root via `crontab`, and print
+/// the `CronOpResult` (JSON) to stdout. The daemon invokes this via
+/// `sudo -n orca admin cron-apply`; target authorization (allow-list, never
+/// uid 0) happens in the executor. Every invocation is audited (caller uid, op,
+/// target user, outcome); crontab text never is.
+async fn cmd_admin_cron_apply() -> Result<()> {
+    use std::io::Read;
+    use system::cron::{CRON_OP_MAX_BYTES, CronOp, CronOpResult};
+    let caller_uid = std::env::var("SUDO_UID").unwrap_or_else(|_| "direct".into());
+    let mut buf = String::new();
+    std::io::stdin()
+        .take(CRON_OP_MAX_BYTES as u64)
+        .read_to_string(&mut buf)
+        .context("read CronOp from stdin")?;
+    let (op_name, user, result) = if buf.len() >= CRON_OP_MAX_BYTES {
+        (
+            "?".to_string(),
+            "?".to_string(),
+            CronOpResult::refused(format!("request exceeds {CRON_OP_MAX_BYTES} bytes")),
+        )
+    } else {
+        match serde_json::from_str::<CronOp>(&buf) {
+            Ok(op) => {
+                let (name, user) = (op.name().to_string(), op.user().to_string());
+                (name, user, system::cron::execute_privileged_cron(op).await)
+            }
+            Err(e) => (
+                "?".to_string(),
+                "?".to_string(),
+                CronOpResult::refused(format!("parse CronOp JSON: {e}")),
+            ),
+        }
+    };
+    if result.success {
+        tracing::info!(op = %op_name, user = %user, caller_uid = %caller_uid, "cron-apply ran");
+    } else {
+        tracing::warn!(
+            op = %op_name,
+            user = %user,
+            caller_uid = %caller_uid,
+            error = %result.error,
+            "cron-apply refused"
+        );
+    }
+    println!(
+        "{}",
+        serde_json::to_string(&result).context("serialize CronOpResult")?
     );
     Ok(())
 }
