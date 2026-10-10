@@ -418,9 +418,9 @@ impl PluginProcess {
     /// `idle_timeout`; any frame (including a heartbeat) resets the read wait,
     /// so only a silent plugin times out. Every socket read and write is also
     /// capped by `max_invoke`, which heartbeats and streamed chunks don't
-    /// reset; hitting it kills the plugin. A plain `Cap` runs host-side between
-    /// socket operations and is bounded only by its own timeouts, so it can
-    /// overrun `max_invoke` by that much. A stale session is drained first, and
+    /// reset; hitting it kills the plugin. A `Cap` (plain or streaming) runs
+    /// host-side between socket operations and is bounded only by its own
+    /// timeouts, so it can overrun `max_invoke` by that much. A stale session is drained first, and
     /// a broken one (failed exchange, poisoned by a panic) respawned.
     pub fn invoke(&self, tool: &str, args: Value, caller: Option<VerifiedCaller>) -> Result<Value> {
         let mut session = self.lock_session()?;
@@ -455,6 +455,11 @@ impl PluginProcess {
             Err(e) if e.is::<ToolFailed>() => SessionState::Healthy,
             Err(e) if is_ceiling(e) => {
                 tracing::warn!(plugin = %self.software, "invoke hit its ceiling; killing the plugin");
+                // Keep stop()'s Shutdown write from blocking up to `idle`.
+                session
+                    .stream
+                    .set_write_timeout(Some(Duration::from_millis(1)))
+                    .ok();
                 session.stop();
                 SessionState::Broken
             }
