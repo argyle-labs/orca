@@ -73,6 +73,7 @@ fn publish_http_port(port: u16) {
 }
 
 pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()> {
+    install_panic_hook();
     // Prod guard for `--dev`: drops `Secure` cookie, serves plain HTTP, and
     // relaxes SameSite. Safe on a single-user laptop; unsafe the moment a
     // multi-user host adopts it. Refuse if more than one user exists.
@@ -173,6 +174,25 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     Ok(())
 }
 
+/// Route panics through tracing so a crashed task lands in the daemon log.
+/// Until a global subscriber is installed, the default hook prints instead, so
+/// a panic is reported exactly once. The backtrace is always captured, since
+/// panics are rare and the daemon rarely runs with `RUST_BACKTRACE` set.
+pub fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if !tracing::dispatcher::has_been_set() {
+            return default(info);
+        }
+        let thread = std::thread::current();
+        tracing::error!(
+            thread = thread.name().unwrap_or("<unnamed>"),
+            backtrace = %std::backtrace::Backtrace::force_capture(),
+            "panic: {info}"
+        );
+    }));
+}
+
 /// Daemon serve loop with cooperative port handoff via UNIX signals.
 ///
 /// SIGUSR1 → drop listener (release port), write mode=parked, wait.
@@ -183,6 +203,8 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
 /// auto-reclaims the port without waiting for a signal.
 pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
+
+    install_panic_hook();
 
     // If we restarted because of an in-progress update, verify the swap took
     // and clear the marker. `system.update` surfaces the marker on stale

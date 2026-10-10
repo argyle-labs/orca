@@ -520,7 +520,10 @@ async fn main() -> Result<()> {
             run_one_shot(&config, &agent, &prompt).await
         }
         Some(Command::Run { agent, prompt }) => run_one_shot(&config, &agent, &prompt).await,
-        Some(Command::McpServe) => mcp::serve(&config).await,
+        Some(Command::McpServe) => {
+            serve::install_panic_hook();
+            mcp::serve(&config).await
+        }
         // Unset `--port` resolves per-instance (env > persisted DB port > const).
         Some(Command::Serve { dev, port }) => {
             let port = port.unwrap_or_else(db::ports::http_port);

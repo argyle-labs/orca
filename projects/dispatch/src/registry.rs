@@ -35,9 +35,10 @@ use axum::{
 pub const PEER_HEADER: &str = "x-orca-peer";
 use serde_json::{Value, json};
 use std::collections::HashMap;
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "in-process"))]
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::erased::{ErasedTool, value_to_text};
 use crate::inventory_slice::ToolRegistration;
@@ -60,16 +61,11 @@ fn cache() -> &'static ToolCache {
         let mut ordered: Vec<Box<dyn ErasedTool>> = Vec::new();
         let mut by_name: HashMap<&'static str, usize> = HashMap::new();
         for entry in inventory::iter::<ToolRegistration> {
-            // Dedup by name rather than panicking. A `cdylib` built with
-            // `crate-type = ["cdylib", "rlib"]` (the orca plugin artifact shape)
-            // emits the `inventory` link-section entries twice — once from each
-            // crate-type's object set — so a plugin's own `tool_manifest_json()`
-            // would otherwise see every tool twice. This walk runs inside the
-            // plugin's `extern "C"` `manifest()` accessor, where a panic cannot
-            // unwind across FFI and would abort the host process — exactly the
-            // UB-equivalent the abi contract forbids. First registration wins;
-            // genuinely conflicting names are a build-time concern, not a
-            // runtime abort.
+            // Dedup by name rather than panicking: an artifact built with more
+            // than one crate-type (e.g. `["cdylib", "rlib"]`) emits each
+            // `inventory` entry once per crate-type, and a duplicate must not
+            // abort `tool_manifest_json()` while a plugin builds its handshake
+            // manifest. First registration wins.
             if by_name.contains_key(entry.name) {
                 continue;
             }
@@ -86,10 +82,10 @@ fn find(name: &str) -> Option<&'static dyn ErasedTool> {
     c.by_name.get(name).map(|i| c.ordered[*i].as_ref())
 }
 
-// ── Dynamic (cdylib-plugin) fallback hook ──────────────────────────────────────
+// ── Dynamic (loaded-plugin) fallback hook ──────────────────────────────────────
 //
 // `dispatch` knows only the statically-linked `inventory` registry. Runtime
-// cdylib plugins live in `plugin-loader`'s registry, which `dispatch` cannot
+// subprocess plugins live in `plugin-loader`'s registry, which `dispatch` cannot
 // depend on (plugin-loader → dispatch). To keep one tool namespace across REST
 // / MCP / CLI without a dependency cycle, the host installs a *fallback* here
 // at startup: a synchronous `(name, args) -> Option<Result<Value>>` that returns
@@ -110,7 +106,7 @@ type DynamicDefs = dyn Fn() -> Vec<Value> + Send + Sync;
 static DYNAMIC_INVOKER: OnceLock<Box<DynamicInvoker>> = OnceLock::new();
 static DYNAMIC_DEFS: OnceLock<Box<DynamicDefs>> = OnceLock::new();
 
-/// Install the cdylib-plugin fallback. Called once by the host at startup after
+/// Install the loaded-plugin fallback. Called once by the host at startup after
 /// the plugin install-dir scan. `invoke` routes a tool call into the loaded
 /// plugin registry; `defs` reports loaded-plugin tool defs for list surfaces.
 /// Idempotent: a second call is ignored (the `OnceLock` keeps the first).
@@ -125,7 +121,34 @@ pub fn set_dynamic_dispatch(invoke: Box<DynamicInvoker>, defs: Box<DynamicDefs>)
 
 /// Try the installed dynamic fallback for `name`. `None` when no fallback is
 /// installed or no loaded plugin owns the name.
-fn dynamic_dispatch(
+///
+/// This layer owns keeping plugin invokes off async workers: the invoker blocks
+/// on plugin socket I/O, so it runs on a dedicated thread (a nested `block_on`
+/// there would panic, #798). Threads are capped by [`invoke_permits`] and each
+/// call waits at most [`plugin_permit_wait`] for a thread. The plugin loader
+/// bounds the call itself: socket silence by [`plugin_idle_timeout`], total
+/// time by [`plugin_max_invoke`].
+#[cfg(feature = "in-process")]
+async fn dynamic_dispatch(
+    name: &str,
+    args: &Value,
+    caller: Option<&contract::CallerIdentity>,
+) -> Option<Result<Value>> {
+    let invoker = DYNAMIC_INVOKER.get()?;
+    let (owned, args, caller) = (name.to_string(), args.clone(), caller.cloned());
+    let result = run_off_worker(invoke_permits(), plugin_permit_wait(), move || {
+        invoker(&owned, &args, caller.as_ref())
+    })
+    .await;
+    match result {
+        Ok(found) => found,
+        Err(e) => Some(Err(e.context(format!("plugin tool '{name}'")))),
+    }
+}
+
+/// Without `in-process` no host installs an invoker, so nothing to bound.
+#[cfg(not(feature = "in-process"))]
+async fn dynamic_dispatch(
     name: &str,
     args: &Value,
     caller: Option<&contract::CallerIdentity>,
@@ -133,7 +156,85 @@ fn dynamic_dispatch(
     DYNAMIC_INVOKER.get().and_then(|f| f(name, args, caller))
 }
 
-/// JSON tool defs contributed by loaded cdylib plugins. Empty when no fallback
+fn secs_from_env(var: &str, default: u64) -> Duration {
+    let secs = std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(default);
+    Duration::from_secs(secs)
+}
+
+/// How long a plugin invoke waits for a free invoke thread, from
+/// `ORCA_PLUGIN_PERMIT_WAIT_SECS` (default 60s).
+pub fn plugin_permit_wait() -> Duration {
+    static WAIT: OnceLock<Duration> = OnceLock::new();
+    *WAIT.get_or_init(|| secs_from_env("ORCA_PLUGIN_PERMIT_WAIT_SECS", 60))
+}
+
+/// How long a plugin session may go without a frame mid-invoke, from
+/// `ORCA_PLUGIN_IDLE_TIMEOUT_SECS` (default 300s). Plugins heartbeat while a
+/// tool runs, so only a silent plugin hits it.
+pub fn plugin_idle_timeout() -> Duration {
+    static IDLE: OnceLock<Duration> = OnceLock::new();
+    *IDLE.get_or_init(|| secs_from_env("ORCA_PLUGIN_IDLE_TIMEOUT_SECS", 300))
+}
+
+/// Wall-clock ceiling on one plugin invoke, from `ORCA_PLUGIN_MAX_INVOKE_SECS`
+/// (default 3600s). Heartbeats don't extend it, so a plugin that heartbeats
+/// while deadlocked is still cut off.
+pub fn plugin_max_invoke() -> Duration {
+    static MAX: OnceLock<Duration> = OnceLock::new();
+    *MAX.get_or_init(|| secs_from_env("ORCA_PLUGIN_MAX_INVOKE_SECS", 3600))
+}
+
+/// Concurrent plugin-invoke threads, from `ORCA_PLUGIN_INVOKE_THREADS`
+/// (default 32).
+#[cfg(feature = "in-process")]
+fn invoke_permits() -> Arc<tokio::sync::Semaphore> {
+    static PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    PERMITS
+        .get_or_init(|| {
+            let n = std::env::var("ORCA_PLUGIN_INVOKE_THREADS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(32);
+            Arc::new(tokio::sync::Semaphore::new(n))
+        })
+        .clone()
+}
+
+/// Run blocking `f` on its own thread, holding a permit from `permits` for the
+/// thread's whole life so a hung call keeps counting against the cap. Only the
+/// wait for a permit is bounded, by `permit_wait`.
+#[cfg(feature = "in-process")]
+async fn run_off_worker<T: Send + 'static>(
+    permits: Arc<tokio::sync::Semaphore>,
+    permit_wait: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T> {
+    let span = tracing::Span::current();
+    let permit = tokio::time::timeout(permit_wait, permits.acquire_owned())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("timed out after {permit_wait:?} waiting for a plugin invoke thread")
+        })?
+        .map_err(|e| anyhow::anyhow!("plugin invoke pool closed: {e}"))?;
+    let (tx, rx) = futures::channel::oneshot::channel();
+    std::thread::Builder::new()
+        .name("plugin-invoke".into())
+        .spawn(move || {
+            let _permit = permit;
+            // A dropped receiver means the caller went away; nothing to report.
+            tx.send(span.in_scope(f)).ok();
+        })
+        .map_err(|e| anyhow::anyhow!("spawn plugin invoke thread: {e}"))?;
+    rx.await
+        .map_err(|_| anyhow::anyhow!("plugin invoke thread panicked"))
+}
+
+/// JSON tool defs contributed by loaded plugins. Empty when no fallback
 /// is installed.
 pub fn dynamic_tool_defs() -> Vec<Value> {
     DYNAMIC_DEFS.get().map(|f| f()).unwrap_or_default()
@@ -248,7 +349,7 @@ pub fn mcp_definitions() -> Vec<Value> {
             })
         })
         .collect();
-    // Merge dynamically-loaded cdylib plugin tools so `tools/list` surfaces
+    // Merge dynamically-loaded plugin tools so `tools/list` surfaces
     // them alongside the static registry. `dynamic_tool_defs` carries the
     // plugin manifest shape (`input_schema`); remap to MCP's `inputSchema`.
     for d in dynamic_tool_defs() {
@@ -268,14 +369,14 @@ pub fn mcp_definitions() -> Vec<Value> {
     defs
 }
 
-/// Build the cdylib-plugin manifest as a JSON string: an array of objects
+/// Build a plugin's tool manifest as a JSON string: an array of objects
 /// `{ name, description, input_schema, output_schema, role, execute_gated,
 /// data_mutation }`. The daemon installs the last three into [`crate::tool_roles`]
 /// at plugin load so plugin tools are gated like core ones. This is the exact
-/// shape `plugin_toolkit::abi::ToolDef` deserializes, so a cdylib plugin's
-/// ABI `manifest()` entrypoint can return `tool_manifest_json()` directly —
-/// reusing its own internally-linked inventory registry rather than
-/// reimplementing schema emission. Returned as a `String` (not a typed Vec)
+/// shape `plugin_toolkit::abi::ToolDef` deserializes, so a plugin builds its
+/// handshake manifest from `tool_manifest_json()` directly — reusing its own
+/// internally-linked inventory registry rather than reimplementing schema
+/// emission. Returned as a `String` (not a typed Vec)
 /// so dispatch carries no dependency on the toolkit's abi types.
 pub fn tool_manifest_json() -> String {
     let defs: Vec<Value> = cache()
@@ -302,10 +403,10 @@ pub fn tool_manifest_json() -> String {
 pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
     match find(name) {
         Some(tool) => tool.run_json(args, ctx).await,
-        // On a static miss, try the dynamic cdylib-plugin fallback, then the
+        // On a static miss, try the dynamic loaded-plugin fallback, then the
         // live unit surface, before giving up — so loaded plugin tools AND the
         // universal `unit.<kind>.<verb>` surface share this one entrypoint.
-        None => match dynamic_dispatch(name, &args, ctx.verified_caller()) {
+        None => match dynamic_dispatch(name, &args, ctx.verified_caller()).await {
             Some(result) => result,
             None => match crate::unit_surface::unit_dispatch(name, &args, ctx.verified_caller())
                 .await
@@ -579,7 +680,7 @@ pub fn execute_gated_names() -> Vec<&'static str> {
 }
 
 /// Whether a statically-linked (inventory) tool with this name exists. Used by
-/// the runtime cdylib plugin loader to reject a plugin tool that would shadow a
+/// the runtime plugin loader to reject a plugin tool that would shadow a
 /// built-in one.
 pub fn tool_exists(name: &str) -> bool {
     find(name).is_some()
@@ -1150,11 +1251,21 @@ mod tests {
     /// Callers the fake plugin saw, by username (`None` = no caller).
     static SEEN: std::sync::Mutex<Vec<Option<String>>> = std::sync::Mutex::new(Vec::new());
 
+    /// Serializes the tests that clear and read `SEEN`.
+    static SEEN_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn install_fake_plugin() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             set_dynamic_dispatch(
                 Box::new(|name, _args, caller| {
+                    if name == NESTED_RUNTIME_TOOL {
+                        // What a plugin's `http.request` capability does.
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .build()
+                            .unwrap();
+                        return Some(Ok(rt.block_on(async { json!({ "nested": true }) })));
+                    }
                     (name == FAKE_PLUGIN_TOOL).then(|| {
                         SEEN.lock()
                             .unwrap()
@@ -1165,6 +1276,59 @@ mod tests {
                 Box::new(|| vec![json!({ "name": FAKE_PLUGIN_TOOL })]),
             );
         });
+    }
+
+    const NESTED_RUNTIME_TOOL: &str = "rest_fallback_test_plugin.nested_block_on";
+
+    /// A plugin invoke that blocks on its own runtime must not run on an async
+    /// worker, where a nested `block_on` panics.
+    #[cfg(feature = "in-process")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plugin_invoke_that_blocks_on_a_runtime_runs_off_the_async_worker() {
+        install_fake_plugin();
+        let out = dispatch(NESTED_RUNTIME_TOOL, json!({}), &make_ctx())
+            .await
+            .unwrap();
+        assert_eq!(out, json!({ "nested": true }));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_long_plugin_invoke_outlives_the_permit_wait() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let out = run_off_worker(permits, Duration::from_millis(20), || {
+            std::thread::sleep(Duration::from_millis(200));
+            7
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, 7);
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn plugin_invoke_times_out_waiting_for_a_free_permit() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let _held = permits.clone().acquire_owned().await.unwrap();
+        let err = run_off_worker(permits, Duration::from_millis(50), || ())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn plugin_invoke_returns_the_thread_result_and_frees_the_permit() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let out = run_off_worker(permits.clone(), Duration::from_secs(5), || 7)
+            .await
+            .unwrap();
+        assert_eq!(out, 7);
+        // The permit drops with the thread, just after it sends.
+        let _permit = tokio::time::timeout(Duration::from_secs(5), permits.acquire())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     fn identity(name: &str) -> contract::CallerIdentity {
@@ -1181,6 +1345,7 @@ mod tests {
     /// operator never rides an `Invoke`.
     #[tokio::test]
     async fn plugin_invoke_carries_the_verified_caller_never_the_host_operator() {
+        let _serial = SEEN_TESTS.lock().await;
         install_fake_plugin();
         SEEN.lock().unwrap().clear();
         let host = make_ctx().with_auth(identity("host_admin"));
@@ -1202,6 +1367,7 @@ mod tests {
         use axum::http::Request as AxumReq;
         use tower::ServiceExt;
 
+        let _serial = SEEN_TESTS.lock().await;
         install_fake_plugin();
         let router = axum_router(Arc::new(make_ctx().with_auth(identity("host_admin"))));
         let post = || {

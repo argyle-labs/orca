@@ -314,7 +314,6 @@ lto = "thin"
 # 16 parallel rustc codegen tasks. Without this, cargo serializes the final
 # codegen on a single core regardless of -j. Trade: binary ~10% larger.
 codegen-units = 16
-panic = "abort"
 # `strip = "debuginfo"` drops heavy DWARF (small binaries) but KEEPS the ELF
 # symbol table, so jemalloc heap profiles (see the `profiling` feature on
 # tikv-jemallocator) symbolize to function names via jeprof — otherwise a fully

@@ -670,8 +670,27 @@ fn make_backend_invoke(backing: Backing, invoke_prefix: String) -> BackendInvoke
     Arc::new(move |op: &str, args: sj::Value| {
         let tool = format!("{invoke_prefix}.{op}");
         // Domain ops are daemon-originated; no request identity rides them.
-        backing.invoke(&tool, args, None)
+        // Domain registries call this thunk directly, often from async code, so
+        // this layer keeps it off the async worker itself.
+        off_async_worker(|| backing.invoke(&tool, args, None))
     })
+}
+
+/// Run a blocking plugin invoke so it is sound even when the caller is a tokio
+/// async worker (#798): `block_in_place` on a multi-thread runtime, a scoped
+/// thread on a current-thread one (where `block_in_place` panics), inline
+/// anywhere else.
+fn off_async_worker<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        Ok(_) => std::thread::scope(|s| {
+            s.spawn(f)
+                .join()
+                .unwrap_or_else(|p| std::panic::resume_unwind(p))
+        }),
+        Err(_) => f(),
+    }
 }
 
 /// Register every backend a plugin declares into its domain registry, routing
@@ -1082,10 +1101,9 @@ fn parse_invoke_result(
 /// `dispatch::dispatch` directly, so loaded plugins share one tool namespace.
 ///
 /// A plugin invoke runs on a **blocking** thread (`spawn_blocking`): the call is
-/// synchronous and, for a subprocess plugin, does blocking socket I/O and drives
-/// capability round-trips (which may block on their own I/O runtime). Keeping it
-/// off the async worker pool is what makes the capability host's `block_on`
-/// safe and stops one plugin's latency from starving the scheduler.
+/// synchronous and, for a subprocess plugin, does blocking socket I/O and waits
+/// on capability round-trips. Keeping it off the async worker pool stops one
+/// plugin's latency from starving the scheduler.
 pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::Value> {
     if let Some((backing, software)) = backing_for(name) {
         let owned = name.to_string();
@@ -1103,10 +1121,9 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
 /// registry. `caller` must be the request's verified identity, never the host
 /// operator's.
 ///
-/// Prefer async [`dispatch`] from an async context: this runs the invoke inline,
-/// so for a subprocess plugin it blocks the calling thread on socket I/O (and
-/// must NOT be called from a tokio async worker — the capability host would
-/// `block_on` on it).
+/// This blocks the calling thread on the plugin's socket I/O, so it must not
+/// run on an async worker. As the `dispatch` dynamic fallback it is already
+/// moved onto a bounded invoke thread there; prefer async [`dispatch`] elsewhere.
 pub fn invoke_plugin(
     name: &str,
     args: &sj::Value,
@@ -1336,6 +1353,31 @@ mod loader_tests {
             let _outcome = ctor(&def, noop_invoke());
         }
         rollback_domain_backends(&pairs);
+    }
+
+    /// A nested `block_on` panics on an async worker, so running one inside
+    /// `off_async_worker` proves `f` left the worker.
+    fn nested_block_on() -> i32 {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async { 7 })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn off_async_worker_leaves_a_multi_thread_worker() {
+        assert_eq!(off_async_worker(nested_block_on), 7);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn off_async_worker_leaves_a_current_thread_runtime() {
+        assert_eq!(off_async_worker(nested_block_on), 7);
+    }
+
+    #[test]
+    fn off_async_worker_runs_inline_without_a_runtime() {
+        let caller = std::thread::current().id();
+        assert_eq!(off_async_worker(|| std::thread::current().id()), caller);
     }
 
     #[test]
@@ -1810,15 +1852,26 @@ mod loader_tests {
             protocol: plugin_proto::PROTOCOL_VERSION.into(),
             plugin: "loaderfakeplugin".into(),
             version: "9.9.9".into(),
-            manifest: vec![plugin_proto::ToolDef {
-                name: "loaderfakeplugin.ping".into(),
-                description: "echo the args back".into(),
-                input_schema: sj::json!({ "type": "object" }),
-                output_schema: sj::json!({ "type": "object" }),
-                role: Some("admin".into()),
-                execute_gated: Some(false),
-                data_mutation: Some(true),
-            }],
+            manifest: vec![
+                plugin_proto::ToolDef {
+                    name: "loaderfakeplugin.ping".into(),
+                    description: "echo the args back".into(),
+                    input_schema: sj::json!({ "type": "object" }),
+                    output_schema: sj::json!({ "type": "object" }),
+                    role: Some("admin".into()),
+                    execute_gated: Some(false),
+                    data_mutation: Some(true),
+                },
+                plugin_proto::ToolDef {
+                    name: "loaderfakeplugin.fetch".into(),
+                    description: "relay an http.request capability call".into(),
+                    input_schema: sj::json!({ "type": "object" }),
+                    output_schema: sj::json!({ "type": "object" }),
+                    role: None,
+                    execute_gated: None,
+                    data_mutation: None,
+                },
+            ],
             backends: vec![
                 sj::to_value(BackendDef {
                     domain: "agents".into(),
@@ -1832,12 +1885,29 @@ mod loader_tests {
         };
         // Serve until the daemon sends Shutdown (on unload/drop). The tool echoes
         // its args so the driver can assert the round-trip; anything else errors.
-        let _served = plugin_proto::serve(stream, hello, |tool, args, _caps| {
-            if tool == "loaderfakeplugin.ping" {
+        let _served = plugin_proto::serve(stream, hello, |tool, args, caps| match tool {
+            "loaderfakeplugin.ping" => Ok(args),
+            "loaderfakeplugin.fetch" => caps.call("http.request", args),
+            "loaderfakeplugin.hang" => {
+                std::thread::sleep(std::time::Duration::from_secs(30));
                 Ok(args)
-            } else {
-                Err(format!("no such tool: {tool}"))
             }
+            "loaderfakeplugin.beat" => {
+                for _ in 0..5 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    caps.heartbeat()?;
+                }
+                Ok(args)
+            }
+            "loaderfakeplugin.wedge" => loop {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                caps.heartbeat()?;
+            },
+            "loaderfakeplugin.late" => {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                Ok(args)
+            }
+            _ => Err(format!("no such tool: {tool}")),
         });
     }
 
@@ -1848,8 +1918,23 @@ mod loader_tests {
     /// backends are gone. Drives `spawn_plugin`, `register_backends`,
     /// `make_backend_invoke`, `backing_for`, `Backing::invoke`, the loaded-plugin
     /// accessors, and `unload_plugin` — the whole live-plugin surface.
+    /// One-shot loopback HTTP server answering `200 OK`; returns its URL.
+    fn oneshot_http_ok() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                _ = sock.read(&mut buf);
+                _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+            }
+        });
+        format!("http://{addr}/")
+    }
+
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn spawn_plugin_loads_serves_and_unloads() {
         // When this test runs *inside* the spawned child, the socket env is set;
         // act only as the plugin (via `plugin_child_serve_entrypoint`), never
@@ -1924,6 +2009,20 @@ mod loader_tests {
             .expect("a loaded plugin owns the tool")
             .expect("sync invoke succeeds");
         assert_eq!(sync, sj::json!({ "y": 2 }), "sync path echoed the args");
+
+        // The daemon's dynamic fallback: `dispatch::dispatch` → bounded invoke
+        // thread → `invoke_plugin` → the subprocess, whose `http.request`
+        // capability runs on the cap runtime (#798).
+        dispatch::set_dynamic_dispatch(Box::new(invoke_plugin), Box::new(Vec::new));
+        let url = oneshot_http_ok();
+        let fetched = dispatch::dispatch(
+            "loaderfakeplugin.fetch",
+            sj::json!({ "method": "GET", "url": url }),
+            &ctx,
+        )
+        .await
+        .expect("dynamic dispatch with capability I/O succeeds");
+        assert_eq!(fetched["status"], 200, "got: {fetched}");
 
         // Unload drops the tool route and the agents backend.
         let removed = unload_plugin("loaderfakeplugin");

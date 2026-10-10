@@ -170,6 +170,21 @@ pub enum Frame {
     Shutdown,
 }
 
+/// `msg` of the [`Frame::Log`] a plugin sends while a tool runs, so the host's
+/// idle timeout only fires on a silent plugin. A trace-level `Log` keeps it
+/// harmless to hosts that predate it.
+pub const HEARTBEAT_MSG: &str = "orca.heartbeat";
+
+impl Frame {
+    pub fn heartbeat() -> Self {
+        Frame::Log {
+            level: "trace".into(),
+            msg: HEARTBEAT_MSG.into(),
+            fields: Value::Null,
+        }
+    }
+}
+
 /// Whether two protocol version strings interoperate — MAJOR must match.
 /// Missing/malformed versions are treated as incompatible (fail closed).
 pub fn protocol_compatible(a: &str, b: &str) -> bool {

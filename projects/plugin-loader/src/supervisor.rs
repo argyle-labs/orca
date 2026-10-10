@@ -26,14 +26,16 @@
 //! — no per-plugin read multiplexing.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use plugin_proto::{
-    Frame, PROTOCOL_VERSION, ToolDef, VerifiedCaller, protocol_compatible, read_frame, write_frame,
+    Frame, HEARTBEAT_MSG, PROTOCOL_VERSION, ProtoError, ToolDef, VerifiedCaller,
+    protocol_compatible, read_frame, write_frame,
 };
 use serde_json::Value;
 
@@ -156,6 +158,19 @@ pub fn handshake<S: Read + Write>(stream: &mut S, capabilities: &[&str]) -> Resu
     })
 }
 
+/// A tool's own error, delivered in a well-formed `Result` frame — the
+/// session is still in sync, unlike an I/O or protocol failure.
+#[derive(Debug)]
+struct ToolFailed(String);
+
+impl std::fmt::Display for ToolFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ToolFailed {}
+
 /// Drive one tool invocation to completion over `stream`. Writes `Invoke{id}`,
 /// then services `Cap`/`Log` frames until the `Result` with the matching `id`.
 /// A `Cap` is executed via [`capability::handle_cap`] and answered with a
@@ -193,10 +208,11 @@ pub fn invoke_on<S: Read + Write>(
                 return if ok {
                     Ok(value)
                 } else {
-                    Err(anyhow!(
+                    Err(ToolFailed(format!(
                         "plugin tool '{tool}' failed: {}",
                         error.unwrap_or_else(|| "unknown error".into())
                     ))
+                    .into())
                 };
             }
             Frame::Cap {
@@ -221,9 +237,9 @@ pub fn invoke_on<S: Read + Write>(
                             },
                         )
                         .map_err(|e| {
-                            let e = anyhow!("streaming capability '{cap}': write chunk: {e}");
-                            *sink_err = Some(anyhow!("{e}"));
-                            e
+                            let msg = anyhow!("streaming capability '{cap}': write chunk: {e}");
+                            *sink_err = Some(anyhow::Error::from(e).context("write chunk"));
+                            msg
                         })
                     })
                 };
@@ -269,6 +285,7 @@ pub fn invoke_on<S: Read + Write>(
                 write_frame(stream, &reply)
                     .with_context(|| format!("answering capability '{cap}'"))?;
             }
+            Frame::Log { msg, .. } if msg == HEARTBEAT_MSG => {}
             Frame::Log { level, msg, .. } => match level.as_str() {
                 "error" => tracing::error!(target: "plugin", "{msg}"),
                 "warn" => tracing::warn!(target: "plugin", "{msg}"),
@@ -316,9 +333,42 @@ pub struct PluginProcess {
     pub manifest: Vec<ToolDef>,
     pub backends: Vec<Value>,
     pub schema: Value,
-    child: Child,
-    stream: Mutex<std::os::unix::net::UnixStream>,
+    exe: PathBuf,
+    session: Mutex<Session>,
+    idle_timeout: Duration,
+    max_invoke: Duration,
+    session_wait: Duration,
+    drain_grace: Duration,
     next_id: AtomicU64,
+}
+
+/// How long the next invoke waits for an idle-timed-out call's late `Result`
+/// before giving up on the session.
+const DRAIN_GRACE: Duration = Duration::from_secs(10);
+
+/// The live child + its socket.
+struct Session {
+    child: Child,
+    stream: std::os::unix::net::UnixStream,
+    state: SessionState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SessionState {
+    Healthy,
+    /// The invoke with this id went silent past the idle timeout; its `Result`
+    /// may still arrive and is drained before the session is reused.
+    Stale(u64),
+    /// The stream may hold a partial frame (failed exchange, panic): respawn.
+    Broken,
+}
+
+impl Session {
+    fn stop(&mut self) {
+        _ = write_frame(&mut self.stream, &Frame::Shutdown);
+        _ = self.child.kill();
+        _ = self.child.wait();
+    }
 }
 
 impl PluginProcess {
@@ -331,38 +381,7 @@ impl PluginProcess {
     /// and it becomes the session **principal** for capability namespace
     /// scoping — so a plugin cannot widen its reach by lying in `Hello`.
     pub fn spawn(exe: &Path, expected_id: &str) -> Result<Self> {
-        let (mut child, mut stream) = launch(exe, |cmd| {
-            // Tell the plugin which orca binary launched it, so toolkit helpers
-            // that need a privileged round-trip (e.g. `sudo -n <orca> admin
-            // lxc-exec`) can reach it. The daemon's own path is authoritative — a
-            // plugin never guesses it. Best-effort: absent ORCA_BIN, the toolkit
-            // falls back to a direct (non-orca) path where one exists.
-            if let Ok(orca_bin) = std::env::current_exe() {
-                cmd.env(ORCA_BIN_ENV, orca_bin);
-            }
-            // Opt-in instrumentation: when the daemon has enabled profiling for
-            // this plugin, inject MALLOC_CONF + ORCA_PLUGIN_INSTRUMENT so the
-            // respawned process activates jemalloc heap profiling and its
-            // auto-diagnostics provider. Empty (no-op) for every plugin that is
-            // not enabled.
-            for (k, v) in contract::plugin_instrument::env_for(expected_id) {
-                cmd.env(k, v);
-            }
-        })?;
-
-        let bound = handshake(&mut stream, CAPABILITIES).and_then(|hs| {
-            let principal = resolve_principal(expected_id, &hs.software)
-                .with_context(|| format!("plugin binary {exe:?} handshake identity"))?;
-            Ok((hs, principal))
-        });
-        let (hs, principal) = match bound {
-            Ok(b) => b,
-            Err(e) => {
-                _ = child.kill();
-                _ = child.wait();
-                return Err(e);
-            }
-        };
+        let (child, stream, hs, principal) = start(exe, expected_id)?;
         tracing::info!(
             plugin = %principal,
             version = %hs.semver,
@@ -378,30 +397,143 @@ impl PluginProcess {
             manifest: hs.manifest,
             backends: hs.backends,
             schema: hs.schema,
-            child,
-            stream: Mutex::new(stream),
+            exe: exe.to_path_buf(),
+            session: Mutex::new(Session {
+                child,
+                stream,
+                state: SessionState::Healthy,
+            }),
+            idle_timeout: dispatch::plugin_idle_timeout(),
+            max_invoke: dispatch::plugin_max_invoke(),
+            session_wait: dispatch::plugin_permit_wait(),
+            drain_grace: DRAIN_GRACE,
             next_id: AtomicU64::new(1),
         })
     }
 
-    /// Invoke a tool. Serialized by the stream `Mutex` — one `Invoke` in flight
-    /// per plugin, per the serial contract.
+    /// Invoke a tool. Serialized by the session `Mutex` — one `Invoke` in
+    /// flight per plugin, per the serial contract — and a queued call waits at
+    /// most `session_wait` for it, so callers stuck behind a wedged plugin give
+    /// back their invoke threads. Each socket read and write is bounded by
+    /// `idle_timeout`; any frame (including a heartbeat) resets the read wait,
+    /// so only a silent plugin times out. Every socket read and write is also
+    /// capped by `max_invoke`, which heartbeats and streamed chunks don't
+    /// reset; hitting it kills the plugin. A `Cap` (plain or streaming) runs
+    /// host-side between socket operations and is bounded only by its own
+    /// timeouts, so it can overrun `max_invoke` by that much. A stale session is drained first, and
+    /// a broken one (failed exchange, poisoned by a panic) respawned.
     pub fn invoke(&self, tool: &str, args: Value, caller: Option<VerifiedCaller>) -> Result<Value> {
+        let mut session = self.lock_session()?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut stream = self
-            .stream
-            .lock()
-            .map_err(|_| anyhow!("plugin '{}' session mutex poisoned", self.software))?;
-        invoke_on(&mut *stream, id, tool, args, caller, &self.software)
+        if let SessionState::Stale(stale) = session.state {
+            session.state = match drain(&mut session.stream, stale, self.drain_grace) {
+                Ok(()) => SessionState::Healthy,
+                Err(e) => {
+                    tracing::warn!(plugin = %self.software, "stale invoke never finished: {e:#}");
+                    SessionState::Broken
+                }
+            };
+        }
+        if session.state != SessionState::Healthy {
+            self.respawn(&mut session)?;
+        }
+        session.stream.set_read_timeout(Some(self.idle_timeout))?;
+        session.stream.set_write_timeout(Some(self.idle_timeout))?;
+        // Broken until the exchange completes, so an unwind leaves it broken.
+        session.state = SessionState::Broken;
+        let mut stream = Ceiling {
+            stream: &mut session.stream,
+            idle: self.idle_timeout,
+            deadline: Instant::now() + self.max_invoke,
+        };
+        let result = invoke_on(&mut stream, id, tool, args, caller, &self.software);
+        // A tool error arrives as a well-formed `Result` frame; an idle timeout
+        // may still be followed by one; anything else (including the ceiling)
+        // means the stream is mid-frame or the plugin is gone or wedged.
+        session.state = match &result {
+            Ok(_) => SessionState::Healthy,
+            Err(e) if e.is::<ToolFailed>() => SessionState::Healthy,
+            Err(e) if is_ceiling(e) => {
+                tracing::warn!(plugin = %self.software, "invoke hit its ceiling; killing the plugin");
+                // Keep stop()'s Shutdown write from blocking up to `idle`.
+                session
+                    .stream
+                    .set_write_timeout(Some(Duration::from_millis(1)))
+                    .ok();
+                session.stop();
+                SessionState::Broken
+            }
+            Err(e) if is_idle_timeout(e) => SessionState::Stale(id),
+            Err(_) => SessionState::Broken,
+        };
+        result
+    }
+
+    /// Take the session lock, polling for at most `session_wait`. A poisoned
+    /// lock is recovered with the session marked broken.
+    fn lock_session(&self) -> Result<std::sync::MutexGuard<'_, Session>> {
+        let deadline = Instant::now() + self.session_wait;
+        loop {
+            match self.session.try_lock() {
+                Ok(session) => return Ok(session),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    self.session.clear_poison();
+                    let mut session = poisoned.into_inner();
+                    session.state = SessionState::Broken;
+                    return Ok(session);
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        bail!(
+                            "plugin '{}' busy: timed out after {:?} waiting for its session",
+                            self.software,
+                            self.session_wait
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+    }
+
+    fn respawn(&self, session: &mut Session) -> Result<()> {
+        tracing::warn!(plugin = %self.software, "respawning plugin after a broken session");
+        session.stop();
+        let (child, stream, hs, _) = start(&self.exe, &self.software)
+            .with_context(|| format!("respawning plugin '{}'", self.software))?;
+        let mut fresh = Session {
+            child,
+            stream,
+            state: SessionState::Broken,
+        };
+        // The registered tools, roles, and backends describe the binary loaded
+        // at spawn; a different binary on disk must be reloaded, not served.
+        if hs.semver != self.semver || hs.manifest != self.manifest {
+            fresh.stop();
+            tracing::error!(
+                plugin = %self.software,
+                registered = %self.semver,
+                on_disk = %hs.semver,
+                "plugin binary changed since load; reload the plugin"
+            );
+            bail!(
+                "plugin '{}' binary changed since load ({} -> {}); reload the plugin",
+                self.software,
+                self.semver,
+                hs.semver
+            );
+        }
+        fresh.state = SessionState::Healthy;
+        *session = fresh;
+        Ok(())
     }
 
     /// Best-effort graceful shutdown: send `Shutdown`, then terminate + reap.
     pub fn shutdown(&mut self) {
-        if let Ok(mut stream) = self.stream.lock() {
-            _ = write_frame(&mut *stream, &Frame::Shutdown);
-        }
-        _ = self.child.kill();
-        _ = self.child.wait();
+        self.session
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .stop();
     }
 }
 
@@ -409,6 +541,158 @@ impl Drop for PluginProcess {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// The plugin socket with each read and write capped at `idle` and at the time
+/// left before `deadline`, which no frame extends.
+struct Ceiling<'a> {
+    stream: &'a mut std::os::unix::net::UnixStream,
+    idle: Duration,
+    deadline: Instant,
+}
+
+#[derive(Debug)]
+struct CeilingHit;
+
+impl std::fmt::Display for CeilingHit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("plugin invoke exceeded its maximum run time")
+    }
+}
+
+impl std::error::Error for CeilingHit {}
+
+impl Read for Ceiling<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::other(CeilingHit));
+        }
+        self.stream.set_read_timeout(Some(self.idle.min(left)))?;
+        match self.stream.read(buf) {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && Instant::now() >= self.deadline =>
+            {
+                Err(std::io::Error::other(CeilingHit))
+            }
+            r => r,
+        }
+    }
+}
+
+impl Write for Ceiling<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::other(CeilingHit));
+        }
+        self.stream.set_write_timeout(Some(self.idle.min(left)))?;
+        match self.stream.write(buf) {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && Instant::now() >= self.deadline =>
+            {
+                Err(std::io::Error::other(CeilingHit))
+            }
+            r => r,
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+/// Whether `e` came from the invoke ceiling.
+fn is_ceiling(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        let io = match c.downcast_ref::<ProtoError>() {
+            Some(ProtoError::Io(io)) => Some(io),
+            _ => c.downcast_ref::<std::io::Error>(),
+        };
+        io.and_then(|io| io.get_ref())
+            .is_some_and(|inner| inner.is::<CeilingHit>())
+    })
+}
+
+/// Whether `e` is a socket read/write that hit its timeout.
+fn is_idle_timeout(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        let io = match c.downcast_ref::<ProtoError>() {
+            Some(ProtoError::Io(io)) => Some(io),
+            _ => c.downcast_ref::<std::io::Error>(),
+        };
+        io.is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+        })
+    })
+}
+
+/// Read until the `Result` for invoke `stale`, skipping `Log` frames and other
+/// ids, within `grace`. A `Cap` cannot be answered for an abandoned call.
+fn drain(stream: &mut std::os::unix::net::UnixStream, stale: u64, grace: Duration) -> Result<()> {
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            bail!("no Result for invoke {stale} within {grace:?}");
+        }
+        stream.set_read_timeout(Some(left))?;
+        match read_frame(stream)?.ok_or_else(|| anyhow!("plugin closed the socket"))? {
+            Frame::Result { id, .. } if id == stale => return Ok(()),
+            Frame::Cap { cap, .. } => bail!("abandoned invoke {stale} requested '{cap}'"),
+            _ => {}
+        }
+    }
+}
+
+/// Launch `exe` and complete the handshake, returning the child, its socket,
+/// the handshake, and the validated principal.
+fn start(
+    exe: &Path,
+    expected_id: &str,
+) -> Result<(Child, std::os::unix::net::UnixStream, Handshake, String)> {
+    let (mut child, mut stream) = launch(exe, |cmd| {
+        // Tell the plugin which orca binary launched it, so toolkit helpers
+        // that need a privileged round-trip (e.g. `sudo -n <orca> admin
+        // lxc-exec`) can reach it. The daemon's own path is authoritative — a
+        // plugin never guesses it. Best-effort: absent ORCA_BIN, the toolkit
+        // falls back to a direct (non-orca) path where one exists.
+        if let Ok(orca_bin) = std::env::current_exe() {
+            cmd.env(ORCA_BIN_ENV, orca_bin);
+        }
+        // Opt-in instrumentation: when the daemon has enabled profiling for
+        // this plugin, inject MALLOC_CONF + ORCA_PLUGIN_INSTRUMENT so the
+        // respawned process activates jemalloc heap profiling and its
+        // auto-diagnostics provider. Empty (no-op) for every plugin that is
+        // not enabled.
+        for (k, v) in contract::plugin_instrument::env_for(expected_id) {
+            cmd.env(k, v);
+        }
+    })?;
+
+    let bound = handshake(&mut stream, CAPABILITIES).and_then(|hs| {
+        let principal = resolve_principal(expected_id, &hs.software)
+            .with_context(|| format!("plugin binary {exe:?} handshake identity"))?;
+        Ok((hs, principal))
+    });
+    let (hs, principal) = match bound {
+        Ok(b) => b,
+        Err(e) => {
+            _ = child.kill();
+            _ = child.wait();
+            return Err(e);
+        }
+    };
+    Ok((child, stream, hs, principal))
 }
 
 /// Read a plugin binary's declared id + version WITHOUT granting it anything:
@@ -1041,5 +1325,217 @@ mod tests {
             resolve_principal("calibre-web", "calibre-web").unwrap(),
             "calibre-web"
         );
+    }
+
+    /// Spawn this test binary as the `loaderfakeplugin` subprocess (see
+    /// `plugin_child_serve_entrypoint` in lib.rs). `None` inside that child.
+    fn spawn_fake_plugin() -> Option<PluginProcess> {
+        if std::env::var(SOCKET_ENV).is_ok() {
+            return None;
+        }
+        let exe = std::env::current_exe().unwrap();
+        Some(PluginProcess::spawn(&exe, "loaderfakeplugin").unwrap())
+    }
+
+    fn child_pid(proc: &PluginProcess) -> u32 {
+        proc.session.lock().unwrap().child.id()
+    }
+
+    #[test]
+    fn invoke_respawns_after_a_panic_poisons_the_session() {
+        let Some(proc) = spawn_fake_plugin() else {
+            return;
+        };
+        let before = child_pid(&proc);
+        thread::scope(|s| {
+            s.spawn(|| {
+                let _session = proc.session.lock().unwrap();
+                panic!("poison the session");
+            })
+            .join()
+            .unwrap_err();
+        });
+        assert!(proc.session.is_poisoned());
+
+        let out = proc
+            .invoke("loaderfakeplugin.ping", json!({ "n": 1 }), None)
+            .unwrap();
+        assert_eq!(out, json!({ "n": 1 }));
+        assert!(!proc.session.is_poisoned());
+        assert_ne!(child_pid(&proc), before, "a fresh child serves the invoke");
+    }
+
+    #[test]
+    fn invoke_times_out_on_a_hung_plugin_then_respawns() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        proc.idle_timeout = Duration::from_millis(200);
+        proc.drain_grace = Duration::from_millis(200);
+        let before = child_pid(&proc);
+
+        let err = proc
+            .invoke("loaderfakeplugin.hang", json!({}), None)
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("awaiting Result"),
+            "got: {err:#}"
+        );
+
+        let out = proc
+            .invoke("loaderfakeplugin.ping", json!({ "n": 2 }), None)
+            .unwrap();
+        assert_eq!(out, json!({ "n": 2 }));
+        assert_ne!(child_pid(&proc), before);
+    }
+
+    #[test]
+    fn a_long_call_that_heartbeats_outlives_the_idle_timeout() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        proc.idle_timeout = Duration::from_millis(250);
+        let out = proc
+            .invoke("loaderfakeplugin.beat", json!({ "n": 3 }), None)
+            .unwrap();
+        assert_eq!(out, json!({ "n": 3 }));
+    }
+
+    #[test]
+    fn a_heartbeating_wedged_call_hits_the_ceiling_then_respawns() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        proc.idle_timeout = Duration::from_secs(2);
+        proc.max_invoke = Duration::from_millis(600);
+        let before = child_pid(&proc);
+        let started = Instant::now();
+        let err = proc
+            .invoke("loaderfakeplugin.wedge", json!({}), None)
+            .unwrap_err();
+        assert!(is_ceiling(&err), "got: {err:#}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(proc.session.lock().unwrap().state, SessionState::Broken);
+
+        let out = proc
+            .invoke("loaderfakeplugin.ping", json!({ "n": 5 }), None)
+            .unwrap();
+        assert_eq!(out, json!({ "n": 5 }));
+        assert_ne!(child_pid(&proc), before, "respawned after the ceiling");
+    }
+
+    #[test]
+    fn a_streaming_cap_past_the_ceiling_errors() {
+        use std::io::Write as _;
+        let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", http.local_addr().unwrap());
+        thread::spawn(move || {
+            let (mut conn, _) = http.accept().unwrap();
+            let mut req = [0u8; 1024];
+            _ = conn.read(&mut req);
+            _ = conn.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+            while conn.write_all(b"4\r\ndata\r\n").is_ok() {
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let (mut plugin_end, mut orca_end) = UnixStream::pair().unwrap();
+        thread::spawn(move || {
+            read_frame(&mut plugin_end).unwrap();
+            write_frame(
+                &mut plugin_end,
+                &Frame::Cap {
+                    id: 1,
+                    cap: "http.stream".into(),
+                    args: json!({ "method": "GET", "url": url }),
+                },
+            )
+            .unwrap();
+            while let Ok(Some(_)) = read_frame(&mut plugin_end) {}
+        });
+
+        let mut stream = Ceiling {
+            stream: &mut orca_end,
+            idle: Duration::from_secs(5),
+            deadline: Instant::now() + Duration::from_millis(600),
+        };
+        let started = Instant::now();
+        let err = invoke_on(&mut stream, 7, "fake.stream", json!({}), None, "fake").unwrap_err();
+        assert!(is_ceiling(&err), "got: {err:#}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn calls_queued_behind_a_wedged_plugin_give_up_without_blocking_others() {
+        let (Some(mut wedged), Some(other)) = (spawn_fake_plugin(), spawn_fake_plugin()) else {
+            return;
+        };
+        wedged.session_wait = Duration::from_millis(200);
+        let wedged = &wedged;
+        thread::scope(|s| {
+            let _held = wedged.session.lock().unwrap();
+            let queued = s.spawn(|| {
+                let started = Instant::now();
+                let err = wedged
+                    .invoke("loaderfakeplugin.ping", json!({}), None)
+                    .unwrap_err();
+                (err, started.elapsed())
+            });
+            let out = other
+                .invoke("loaderfakeplugin.ping", json!({ "n": 6 }), None)
+                .unwrap();
+            assert_eq!(out, json!({ "n": 6 }));
+            let (err, waited) = queued.join().unwrap();
+            assert!(format!("{err:#}").contains("busy"), "got: {err:#}");
+            assert!(waited < Duration::from_secs(5));
+        });
+    }
+
+    #[test]
+    fn a_late_result_is_drained_and_the_session_kept() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        proc.idle_timeout = Duration::from_millis(150);
+        proc.drain_grace = Duration::from_secs(5);
+        let before = child_pid(&proc);
+        proc.invoke("loaderfakeplugin.late", json!({}), None)
+            .unwrap_err();
+        assert!(matches!(
+            proc.session.lock().unwrap().state,
+            SessionState::Stale(_)
+        ));
+
+        proc.idle_timeout = Duration::from_secs(5);
+        let out = proc
+            .invoke("loaderfakeplugin.ping", json!({ "n": 4 }), None)
+            .unwrap();
+        assert_eq!(out, json!({ "n": 4 }));
+        assert_eq!(child_pid(&proc), before, "drained, not respawned");
+    }
+
+    #[test]
+    fn a_respawn_refuses_a_changed_binary() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        proc.semver = "0.0.0-registered".into();
+        proc.session.lock().unwrap().state = SessionState::Broken;
+        let err = proc
+            .invoke("loaderfakeplugin.ping", json!({}), None)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("reload"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_tool_error_keeps_the_session() {
+        let Some(proc) = spawn_fake_plugin() else {
+            return;
+        };
+        let before = child_pid(&proc);
+        proc.invoke("loaderfakeplugin.nope", json!({}), None)
+            .unwrap_err();
+        assert_eq!(proc.session.lock().unwrap().state, SessionState::Healthy);
+        assert_eq!(child_pid(&proc), before);
     }
 }

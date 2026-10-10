@@ -27,8 +27,9 @@ full = ["in-process"]
 # `futures` crate's `BoxFuture`, not a tokio reactor). `in-process` therefore only
 # needs to keep the profiles coherent — it propagates `contract`'s `in-process`
 # so a toolkit built with `in-process` OFF pulls a fully tokio-free dispatch, and
-# folds into `full`/default so in-daemon builds are unchanged.
-in-process = ["contract/in-process"]
+# folds into `full`/default so in-daemon builds are unchanged. It also pulls the
+# tokio the host's bounded plugin-invoke pool needs.
+in-process = ["contract/in-process", "dep:tokio"]
 server = ["dep:axum", "dep:tower"]
 
 [dependencies]
@@ -43,6 +44,7 @@ serde         = { workspace = true }
 serde_json    = { workspace = true }
 serde_path_to_error = { workspace = true }
 tracing       = { workspace = true }
+tokio         = { workspace = true, optional = true }
 clap          = { workspace = true }
 
 [dev-dependencies]
