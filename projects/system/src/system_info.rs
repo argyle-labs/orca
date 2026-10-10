@@ -598,8 +598,8 @@ fn orca_dir() -> Option<PathBuf> {
 /// Returns `(virtualization, dmi_vendor, dmi_product)`.
 ///
 /// Linux: reads `/sys/class/dmi/id/sys_vendor` + `product_name` (KVM/QEMU
-/// guests under Proxmox/libvirt show `QEMU` + a generic PC product), plus
-/// `/proc/1/cgroup` for container hints. macOS: all `None`.
+/// guests under Proxmox/libvirt show `QEMU` + a generic PC product), plus the
+/// container signals [`classify_virtualization`] weighs. macOS: all `None`.
 fn detect_virtualization() -> (Option<String>, Option<String>, Option<String>) {
     #[cfg(not(target_os = "linux"))]
     {
@@ -607,41 +607,162 @@ fn detect_virtualization() -> (Option<String>, Option<String>, Option<String>) {
     }
     #[cfg(target_os = "linux")]
     {
-        let vendor = std::fs::read_to_string("/sys/class/dmi/id/sys_vendor")
-            .ok()
-            .map(|s| s.trim().to_string())
+        let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
+        let vendor =
+            Some(read("/sys/class/dmi/id/sys_vendor").trim().to_string()).filter(|s| !s.is_empty());
+        let product = Some(read("/sys/class/dmi/id/product_name").trim().to_string())
             .filter(|s| !s.is_empty());
-        let product = std::fs::read_to_string("/sys/class/dmi/id/product_name")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-
-        // Container detection first — DMI inside a container reflects the host.
-        let cgroup = std::fs::read_to_string("/proc/1/cgroup").unwrap_or_default();
-        let virt = if cgroup.contains("/docker/") || cgroup.contains("docker-") {
-            Some("docker".to_string())
-        } else if cgroup.contains("/lxc/") || cgroup.contains("lxc-") {
-            Some("lxc".to_string())
-        } else {
-            match vendor.as_deref() {
-                Some("QEMU") => Some("kvm".to_string()),
-                Some("VMware, Inc.") => Some("vmware".to_string()),
-                Some("Microsoft Corporation") if product.as_deref() == Some("Virtual Machine") => {
-                    Some("hyperv".to_string())
-                }
-                Some("Xen") => Some("xen".to_string()),
-                Some("innotek GmbH") => Some("virtualbox".to_string()),
-                Some(_) => Some("none".to_string()),
-                None => None,
-            }
-        };
+        let virt = classify_virtualization(&ContainerSignals {
+            // Unreadable without root; the other signals cover that case.
+            init_environ: &read("/proc/1/environ"),
+            systemd_container: &read("/run/systemd/container"),
+            cgroup: &read("/proc/1/cgroup"),
+            mountinfo: &read("/proc/self/mountinfo"),
+            dockerenv: std::path::Path::new("/.dockerenv").exists(),
+            vendor: vendor.as_deref(),
+            product: product.as_deref(),
+        });
         (virt, vendor, product)
+    }
+}
+
+/// Raw evidence for [`classify_virtualization`], kept separate from the reads
+/// so the classification is testable.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct ContainerSignals<'a> {
+    /// `/proc/1/environ`: NUL-separated; LXC and most runtimes set `container=`.
+    init_environ: &'a str,
+    /// `/run/systemd/container`, written by systemd inside a container.
+    systemd_container: &'a str,
+    cgroup: &'a str,
+    mountinfo: &'a str,
+    dockerenv: bool,
+    vendor: Option<&'a str>,
+    product: Option<&'a str>,
+}
+
+/// Container signals are checked before DMI: inside a container DMI describes
+/// the host, so a Proxmox LXC would otherwise read as bare metal (`none`).
+/// cgroup v2 namespaces hide the `/lxc/` path, and Alpine (OpenRC) writes no
+/// `/run/systemd/container`, so the lxcfs mounts Proxmox puts over `/proc` are
+/// the signal that survives an unprivileged read.
+/// A Proxmox host mounts lxcfs too (at `/var/lib/lxcfs`); only a container
+/// has it mounted OVER `/proc`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn lxcfs_over_proc(mountinfo_line: &str) -> bool {
+    let mount_point = mountinfo_line.split(' ').nth(4).unwrap_or_default();
+    mount_point.starts_with("/proc/") && mountinfo_line.contains(" lxcfs ")
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn classify_virtualization(s: &ContainerSignals) -> Option<String> {
+    let declared = s
+        .init_environ
+        .split('\0')
+        .filter_map(|kv| kv.strip_prefix("container="))
+        .map(str::trim)
+        .find(|c| !c.is_empty())
+        .or(Some(s.systemd_container.trim()))
+        .filter(|c| !c.is_empty());
+    if let Some(c) = declared {
+        return Some(if c.starts_with("lxc") { "lxc" } else { c }.to_string());
+    }
+    if s.dockerenv || s.cgroup.contains("/docker/") || s.cgroup.contains("docker-") {
+        return Some("docker".to_string());
+    }
+    if s.cgroup.contains("/lxc/")
+        || s.cgroup.contains("lxc-")
+        || s.mountinfo.lines().any(lxcfs_over_proc)
+    {
+        return Some("lxc".to_string());
+    }
+    match s.vendor {
+        Some("QEMU") => Some("kvm".to_string()),
+        Some("VMware, Inc.") => Some("vmware".to_string()),
+        Some("Microsoft Corporation") if s.product == Some("Virtual Machine") => {
+            Some("hyperv".to_string())
+        }
+        Some("Xen") => Some("xen".to_string()),
+        Some("innotek GmbH") => Some("virtualbox".to_string()),
+        Some(_) => Some("none".to_string()),
+        None => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn signals<'a>() -> ContainerSignals<'a> {
+        ContainerSignals {
+            init_environ: "",
+            systemd_container: "",
+            cgroup: "0::/\n",
+            mountinfo: "",
+            dockerenv: false,
+            vendor: Some("Dell Inc."),
+            product: Some("PowerEdge R730"),
+        }
+    }
+
+    #[test]
+    fn an_alpine_lxc_on_cgroup_v2_is_lxc_not_bare_metal() {
+        // Proxmox LXC, cgroup v2, OpenRC, unprivileged read of /proc/1/environ:
+        // the lxcfs mounts are the only evidence, and DMI names the host.
+        let s = ContainerSignals {
+            mountinfo: "120 98 0:52 /proc/meminfo /proc/meminfo rw,nosuid shared:40 - fuse.lxcfs lxcfs rw\n",
+            ..signals()
+        };
+        assert_eq!(classify_virtualization(&s).as_deref(), Some("lxc"));
+    }
+
+    #[test]
+    fn an_empty_container_var_falls_through_to_systemd() {
+        let s = ContainerSignals {
+            init_environ: "container=\0PATH=/bin\0",
+            systemd_container: "docker\n",
+            ..signals()
+        };
+        assert_eq!(classify_virtualization(&s).as_deref(), Some("docker"));
+    }
+
+    #[test]
+    fn a_proxmox_host_running_lxcfs_is_not_an_lxc() {
+        let s = ContainerSignals {
+            mountinfo: "50 25 0:44 / /var/lib/lxcfs rw,nosuid shared:26 - fuse.lxcfs lxcfs rw\n",
+            ..signals()
+        };
+        assert_eq!(classify_virtualization(&s).as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn a_declared_container_wins_over_dmi() {
+        let s = ContainerSignals {
+            init_environ: "PATH=/bin\0container=lxc\0",
+            ..signals()
+        };
+        assert_eq!(classify_virtualization(&s).as_deref(), Some("lxc"));
+        let s = ContainerSignals {
+            systemd_container: "lxc-libvirt\n",
+            ..signals()
+        };
+        assert_eq!(classify_virtualization(&s).as_deref(), Some("lxc"));
+        let s = ContainerSignals {
+            dockerenv: true,
+            ..signals()
+        };
+        assert_eq!(classify_virtualization(&s).as_deref(), Some("docker"));
+    }
+
+    #[test]
+    fn bare_metal_and_vms_still_classify_from_dmi() {
+        assert_eq!(classify_virtualization(&signals()).as_deref(), Some("none"));
+        let s = ContainerSignals {
+            vendor: Some("QEMU"),
+            ..signals()
+        };
+        assert_eq!(classify_virtualization(&s).as_deref(), Some("kvm"));
+    }
 
     #[test]
     fn collect_blocking_populates_hardware_fields() {
