@@ -125,9 +125,9 @@ pub fn set_dynamic_dispatch(invoke: Box<DynamicInvoker>, defs: Box<DynamicDefs>)
 /// This layer owns keeping plugin invokes off async workers: the invoker blocks
 /// on plugin socket I/O, so it runs on a dedicated thread (a nested `block_on`
 /// there would panic, #798). Threads are capped by [`invoke_permits`] and each
-/// call waits at most [`plugin_permit_wait`] for a thread. The call itself has
-/// no wall-clock cap: the plugin loader bounds socket silence instead
-/// ([`plugin_idle_timeout`]), so a long call that keeps sending frames runs on.
+/// call waits at most [`plugin_permit_wait`] for a thread. The plugin loader
+/// bounds the call itself: socket silence by [`plugin_idle_timeout`], total
+/// time by [`plugin_max_invoke`].
 #[cfg(feature = "in-process")]
 async fn dynamic_dispatch(
     name: &str,
@@ -178,6 +178,14 @@ pub fn plugin_permit_wait() -> Duration {
 pub fn plugin_idle_timeout() -> Duration {
     static IDLE: OnceLock<Duration> = OnceLock::new();
     *IDLE.get_or_init(|| secs_from_env("ORCA_PLUGIN_IDLE_TIMEOUT_SECS", 300))
+}
+
+/// Wall-clock ceiling on one plugin invoke, from `ORCA_PLUGIN_MAX_INVOKE_SECS`
+/// (default 3600s). Heartbeats don't extend it, so a plugin that heartbeats
+/// while deadlocked is still cut off.
+pub fn plugin_max_invoke() -> Duration {
+    static MAX: OnceLock<Duration> = OnceLock::new();
+    *MAX.get_or_init(|| secs_from_env("ORCA_PLUGIN_MAX_INVOKE_SECS", 3600))
 }
 
 /// Concurrent plugin-invoke threads, from `ORCA_PLUGIN_INVOKE_THREADS`

@@ -1899,6 +1899,10 @@ mod loader_tests {
                 }
                 Ok(args)
             }
+            "loaderfakeplugin.wedge" => loop {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                caps.heartbeat()?;
+            },
             "loaderfakeplugin.late" => {
                 std::thread::sleep(std::time::Duration::from_millis(400));
                 Ok(args)

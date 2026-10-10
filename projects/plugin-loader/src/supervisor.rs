@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use plugin_proto::{
@@ -336,6 +336,8 @@ pub struct PluginProcess {
     exe: PathBuf,
     session: Mutex<Session>,
     idle_timeout: Duration,
+    max_invoke: Duration,
+    session_wait: Duration,
     drain_grace: Duration,
     next_id: AtomicU64,
 }
@@ -402,24 +404,25 @@ impl PluginProcess {
                 state: SessionState::Healthy,
             }),
             idle_timeout: dispatch::plugin_idle_timeout(),
+            max_invoke: dispatch::plugin_max_invoke(),
+            session_wait: dispatch::plugin_permit_wait(),
             drain_grace: DRAIN_GRACE,
             next_id: AtomicU64::new(1),
         })
     }
 
     /// Invoke a tool. Serialized by the session `Mutex` — one `Invoke` in
-    /// flight per plugin, per the serial contract. Each socket read and write is
-    /// bounded by `idle_timeout`; any frame (including a heartbeat) resets the
-    /// read wait, so only a silent plugin times out. A stale session is drained
-    /// first, and a broken one (failed exchange, poisoned by a panic) respawned.
+    /// flight per plugin, per the serial contract — and a queued call waits at
+    /// most `session_wait` for it, so callers stuck behind a wedged plugin give
+    /// back their invoke threads. Each socket read and write is bounded by
+    /// `idle_timeout`; any frame (including a heartbeat) resets the read wait,
+    /// so only a silent plugin times out. The whole exchange is capped by
+    /// `max_invoke`, which heartbeats don't reset; hitting it respawns the
+    /// plugin. A stale session is drained first, and a broken one (failed
+    /// exchange, poisoned by a panic) respawned.
     pub fn invoke(&self, tool: &str, args: Value, caller: Option<VerifiedCaller>) -> Result<Value> {
+        let mut session = self.lock_session()?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut session = self.session.lock().unwrap_or_else(|poisoned| {
-            self.session.clear_poison();
-            let mut session = poisoned.into_inner();
-            session.state = SessionState::Broken;
-            session
-        });
         if let SessionState::Stale(stale) = session.state {
             session.state = match drain(&mut session.stream, stale, self.drain_grace) {
                 Ok(()) => SessionState::Healthy,
@@ -436,17 +439,50 @@ impl PluginProcess {
         session.stream.set_write_timeout(Some(self.idle_timeout))?;
         // Broken until the exchange completes, so an unwind leaves it broken.
         session.state = SessionState::Broken;
-        let result = invoke_on(&mut session.stream, id, tool, args, caller, &self.software);
+        let mut stream = Ceiling {
+            stream: &mut session.stream,
+            idle: self.idle_timeout,
+            deadline: Instant::now() + self.max_invoke,
+        };
+        let result = invoke_on(&mut stream, id, tool, args, caller, &self.software);
         // A tool error arrives as a well-formed `Result` frame; an idle timeout
-        // may still be followed by one; anything else means the stream is
-        // mid-frame or the plugin is gone.
+        // may still be followed by one; anything else (including the ceiling)
+        // means the stream is mid-frame or the plugin is gone or wedged.
         session.state = match &result {
             Ok(_) => SessionState::Healthy,
             Err(e) if e.is::<ToolFailed>() => SessionState::Healthy,
+            Err(e) if is_ceiling(e) => SessionState::Broken,
             Err(e) if is_idle_timeout(e) => SessionState::Stale(id),
             Err(_) => SessionState::Broken,
         };
         result
+    }
+
+    /// Take the session lock, polling for at most `session_wait`. A poisoned
+    /// lock is recovered with the session marked broken.
+    fn lock_session(&self) -> Result<std::sync::MutexGuard<'_, Session>> {
+        let deadline = Instant::now() + self.session_wait;
+        loop {
+            match self.session.try_lock() {
+                Ok(session) => return Ok(session),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    self.session.clear_poison();
+                    let mut session = poisoned.into_inner();
+                    session.state = SessionState::Broken;
+                    return Ok(session);
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        bail!(
+                            "plugin '{}' busy: timed out after {:?} waiting for its session",
+                            self.software,
+                            self.session_wait
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
     }
 
     fn respawn(&self, session: &mut Session) -> Result<()> {
@@ -494,6 +530,68 @@ impl Drop for PluginProcess {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// The plugin socket with each read capped at `idle` and at the time left
+/// before `deadline`, which no frame extends.
+struct Ceiling<'a> {
+    stream: &'a mut std::os::unix::net::UnixStream,
+    idle: Duration,
+    deadline: Instant,
+}
+
+#[derive(Debug)]
+struct CeilingHit;
+
+impl std::fmt::Display for CeilingHit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("plugin invoke exceeded its maximum run time")
+    }
+}
+
+impl std::error::Error for CeilingHit {}
+
+impl Read for Ceiling<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::other(CeilingHit));
+        }
+        self.stream.set_read_timeout(Some(self.idle.min(left)))?;
+        match self.stream.read(buf) {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && Instant::now() >= self.deadline =>
+            {
+                Err(std::io::Error::other(CeilingHit))
+            }
+            r => r,
+        }
+    }
+}
+
+impl Write for Ceiling<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+/// Whether `e` came from the invoke ceiling.
+fn is_ceiling(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        let io = match c.downcast_ref::<ProtoError>() {
+            Some(ProtoError::Io(io)) => Some(io),
+            _ => c.downcast_ref::<std::io::Error>(),
+        };
+        io.and_then(|io| io.get_ref())
+            .is_some_and(|inner| inner.is::<CeilingHit>())
+    })
 }
 
 /// Whether `e` is a socket read/write that hit its timeout.
@@ -1275,6 +1373,55 @@ mod tests {
             .invoke("loaderfakeplugin.beat", json!({ "n": 3 }), None)
             .unwrap();
         assert_eq!(out, json!({ "n": 3 }));
+    }
+
+    #[test]
+    fn a_heartbeating_wedged_call_hits_the_ceiling_then_respawns() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        proc.idle_timeout = Duration::from_millis(250);
+        proc.max_invoke = Duration::from_millis(600);
+        let before = child_pid(&proc);
+        let started = Instant::now();
+        let err = proc
+            .invoke("loaderfakeplugin.wedge", json!({}), None)
+            .unwrap_err();
+        assert!(is_ceiling(&err), "got: {err:#}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(proc.session.lock().unwrap().state, SessionState::Broken);
+
+        let out = proc
+            .invoke("loaderfakeplugin.ping", json!({ "n": 5 }), None)
+            .unwrap();
+        assert_eq!(out, json!({ "n": 5 }));
+        assert_ne!(child_pid(&proc), before, "respawned after the ceiling");
+    }
+
+    #[test]
+    fn calls_queued_behind_a_wedged_plugin_give_up_without_blocking_others() {
+        let (Some(mut wedged), Some(other)) = (spawn_fake_plugin(), spawn_fake_plugin()) else {
+            return;
+        };
+        wedged.session_wait = Duration::from_millis(200);
+        let wedged = &wedged;
+        thread::scope(|s| {
+            let _held = wedged.session.lock().unwrap();
+            let queued = s.spawn(|| {
+                let started = Instant::now();
+                let err = wedged
+                    .invoke("loaderfakeplugin.ping", json!({}), None)
+                    .unwrap_err();
+                (err, started.elapsed())
+            });
+            let out = other
+                .invoke("loaderfakeplugin.ping", json!({ "n": 6 }), None)
+                .unwrap();
+            assert_eq!(out, json!({ "n": 6 }));
+            let (err, waited) = queued.join().unwrap();
+            assert!(format!("{err:#}").contains("busy"), "got: {err:#}");
+            assert!(waited < Duration::from_secs(5));
+        });
     }
 
     #[test]
