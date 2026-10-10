@@ -44,7 +44,8 @@ jq -Rne '
   | if ($cyc | length) > 0 then error("dependency cycle among: \($cyc | join(" "))") else true end
 ' <<<"$graph" >/dev/null
 
-job_id() { printf 'crate-%s' "${1#orca-}"; }
+# Full package name: stripping orca- would collide with the compat shims.
+job_id() { printf 'crate-%s' "$1"; }
 
 emit() {
   cat <<'EOF'
@@ -132,11 +133,41 @@ jobs:
 
       - name: Workflow matches crate graph
         if: ${{ !cancelled() }}
-        run: diff -u .github/workflows/ci.yml <(scripts/gen-ci-crate-dag.sh)
+        run: |
+          set -o pipefail
+          gen="$(mktemp)"
+          scripts/gen-ci-crate-dag.sh >"$gen"
+          diff -u .github/workflows/ci.yml "$gen"
 
+      # fmt + clippy are workspace-wide, so they key on the whole-workspace
+      # source hash: docs-only changes reuse the recorded pass.
+      - name: Source hash
+        id: src
+        if: ${{ !cancelled() }}
+        uses: argyle-labs/.github/.github/actions/source-hash@main
+        with:
+          image: ci-rust:1.95.0
+          workflow-file: .github/workflows/ci.yml
+      - name: Check pass cache
+        id: pass
+        if: ${{ !cancelled() }}
+        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
+        with:
+          mode: check
+          job: lint
+          hash: ${{ steps.src.outputs.hash }}
+          force: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
+          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      - name: Reuse recorded pass
+        if: ${{ !cancelled() && steps.pass.outputs.hit == 'true' }}
+        env:
+          SHA: ${{ steps.pass.outputs.sha }}
+        run: echo "Unchanged — reusing lint pass from ${SHA:-unknown}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Set up Rust
         uses: argyle-labs/.github/.github/actions/rust-setup@main
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
         with:
           drop-cargo-config: 'false'
           wrap-cc: 'true'
@@ -145,12 +176,22 @@ jobs:
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
       - name: Format
         uses: argyle-labs/.github/.github/actions/cargo-fmt@main
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
       - name: Clippy
         uses: argyle-labs/.github/.github/actions/cargo-clippy@main
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
         with:
           args: --workspace --tests
+      - name: Record pass
+        if: ${{ success() && steps.pass.outputs.hit != 'true' }}
+        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
+        with:
+          mode: record
+          job: lint
+          hash: ${{ steps.src.outputs.hash }}
+          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
       # Last: it deletes .cargo/config.toml, which the cargo steps above need.
       - name: Lock file check
         uses: argyle-labs/.github/.github/actions/cargo-lock-check@main
@@ -159,11 +200,11 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  # Hashes every crate once and lists those without a recorded pass. Crates
+  # Hashes every crate once; each crate job checks its own pass marker. Crates
   # whose tests read repo paths outside their directory hash those paths too:
-  # docs/ (orca-files, inherited by its dependents), docs/plugin-authoring
-  # (orca-plugin-toolkit) and the whole tree (orca-inventory-tests, which has
-  # no dependents, so it simply runs every time).
+  # docs/ (orca-files, inherited by its dependents) and the whole tree
+  # (orca-inventory-tests, so any tracked change reruns it; an unchanged tree
+  # reuses its pass).
   plan:
     name: plan
     runs-on: ci-large
@@ -177,7 +218,6 @@ jobs:
         shell: bash
     outputs:
       hashes: ${{ steps.src.outputs.hashes }}
-      missing: ${{ steps.pass.outputs.missing }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -189,19 +229,7 @@ jobs:
           workflow-file: .github/workflows/ci.yml
           extra-paths: |
             orca-files: docs
-            orca-plugin-toolkit: docs/plugin-authoring
             orca-inventory-tests: .
-      - name: Check pass cache per crate
-        id: pass
-        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
-        with:
-          mode: check-batch
-          job: build
-          hashes: ${{ steps.src.outputs.hashes }}
-          force: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
-          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
-          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
-          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 EOF
 
   local crate_tpl
@@ -268,6 +296,7 @@ EOF
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -@NAME@
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -306,7 +335,7 @@ EOF
     name: test
     needs:
 ${all_needs}
-    if: \${{ !cancelled() }}
+    if: \${{ always() }}
     runs-on: ci-large
     container:
       image: \${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
@@ -328,13 +357,14 @@ ${all_needs}
           fi
           echo "all crates passed"
 
-  # Merges the per-crate lcov files; report-only. Crates reusing a recorded
-  # pass upload none, so the total covers only crates that ran.
+  # Summarises line coverage across the per-crate lcov files; report-only.
+  # Crates reusing a recorded pass upload none, so the total covers only crates
+  # that ran.
   coverage:
     name: coverage
     needs:
 $(printf '      - %s\n' "${all[@]}")
-    if: \${{ !cancelled() }}
+    if: \${{ always() }}
     runs-on: ci-large
     container:
       image: \${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
@@ -350,7 +380,7 @@ $(printf '      - %s\n' "${all[@]}")
         with:
           pattern: lcov-*
           path: lcov
-      - name: Merge coverage
+      - name: Line coverage
         run: |
           shopt -s nullglob globstar
           files=(lcov/**/lcov.info)
@@ -364,15 +394,17 @@ $(printf '      - %s\n' "${all[@]}")
             /^DA:/ { k = sf SUBSEP \$2; if (!(k in hit)) hit[k] = 0; if (\$3 > 0) hit[k] = 1 }
             END {
               for (k in hit) { total++; covered += hit[k] }
-              printf "### Coverage (merged)\n\n%d / %d lines (%.2f%%)\n", covered, total, total ? 100 * covered / total : 0
+              printf "### Line coverage (all crates)\n\n%d / %d lines (%.2f%%)\n", covered, total, total ? 100 * covered / total : 0
             }' "\${files[@]}" | tee -a "\$GITHUB_STEP_SUMMARY"
-          cat "\${files[@]}" > lcov-merged.info
-      - name: Upload merged lcov
+          # Concatenated, not merged: a file covered by several crates appears
+          # once per crate.
+          cat "\${files[@]}" > lcov-per-crate-concat.info
+      - name: Upload concatenated lcov
         uses: actions/upload-artifact@v4
-        if: \${{ hashFiles('lcov-merged.info') != '' }}
+        if: \${{ hashFiles('lcov-per-crate-concat.info') != '' }}
         with:
-          name: lcov-merged
-          path: lcov-merged.info
+          name: lcov-per-crate-concat
+          path: lcov-per-crate-concat.info
           retention-days: 7
 EOF
 }

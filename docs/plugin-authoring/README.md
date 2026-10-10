@@ -49,7 +49,8 @@ removed symbol **fails orca CI**:
   imports the `serve_*_plugin!` family, and coerces every cited toolkit function
   to its documented type. `cargo nextest` compiles it in CI; a rename/removal
   breaks the build.
-- **Path check** — the same file's `doc_paths_resolve` test asserts every
+- **Path check** — `doc_paths_resolve` in
+  [`../../projects/inventory-tests/tests/plugin_authoring_doc_paths.rs`](../../projects/inventory-tests/tests/plugin_authoring_doc_paths.rs) asserts every
   `projects/…` path (and `:line`) these pages cite still exists.
 
 Cross-repo links to sibling plugins (`argyle-labs/jellyfin`, `…/docker`,

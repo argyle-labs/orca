@@ -82,11 +82,41 @@ jobs:
 
       - name: Workflow matches crate graph
         if: ${{ !cancelled() }}
-        run: diff -u .github/workflows/ci.yml <(scripts/gen-ci-crate-dag.sh)
+        run: |
+          set -o pipefail
+          gen="$(mktemp)"
+          scripts/gen-ci-crate-dag.sh >"$gen"
+          diff -u .github/workflows/ci.yml "$gen"
 
+      # fmt + clippy are workspace-wide, so they key on the whole-workspace
+      # source hash: docs-only changes reuse the recorded pass.
+      - name: Source hash
+        id: src
+        if: ${{ !cancelled() }}
+        uses: argyle-labs/.github/.github/actions/source-hash@main
+        with:
+          image: ci-rust:1.95.0
+          workflow-file: .github/workflows/ci.yml
+      - name: Check pass cache
+        id: pass
+        if: ${{ !cancelled() }}
+        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
+        with:
+          mode: check
+          job: lint
+          hash: ${{ steps.src.outputs.hash }}
+          force: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
+          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      - name: Reuse recorded pass
+        if: ${{ !cancelled() && steps.pass.outputs.hit == 'true' }}
+        env:
+          SHA: ${{ steps.pass.outputs.sha }}
+        run: echo "Unchanged — reusing lint pass from ${SHA:-unknown}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Set up Rust
         uses: argyle-labs/.github/.github/actions/rust-setup@main
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
         with:
           drop-cargo-config: 'false'
           wrap-cc: 'true'
@@ -95,12 +125,22 @@ jobs:
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
       - name: Format
         uses: argyle-labs/.github/.github/actions/cargo-fmt@main
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
       - name: Clippy
         uses: argyle-labs/.github/.github/actions/cargo-clippy@main
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
         with:
           args: --workspace --tests
+      - name: Record pass
+        if: ${{ success() && steps.pass.outputs.hit != 'true' }}
+        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
+        with:
+          mode: record
+          job: lint
+          hash: ${{ steps.src.outputs.hash }}
+          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
       # Last: it deletes .cargo/config.toml, which the cargo steps above need.
       - name: Lock file check
         uses: argyle-labs/.github/.github/actions/cargo-lock-check@main
@@ -109,11 +149,11 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  # Hashes every crate once and lists those without a recorded pass. Crates
+  # Hashes every crate once; each crate job checks its own pass marker. Crates
   # whose tests read repo paths outside their directory hash those paths too:
-  # docs/ (orca-files, inherited by its dependents), docs/plugin-authoring
-  # (orca-plugin-toolkit) and the whole tree (orca-inventory-tests, which has
-  # no dependents, so it simply runs every time).
+  # docs/ (orca-files, inherited by its dependents) and the whole tree
+  # (orca-inventory-tests, so any tracked change reruns it; an unchanged tree
+  # reuses its pass).
   plan:
     name: plan
     runs-on: ci-large
@@ -127,7 +167,6 @@ jobs:
         shell: bash
     outputs:
       hashes: ${{ steps.src.outputs.hashes }}
-      missing: ${{ steps.pass.outputs.missing }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -139,23 +178,11 @@ jobs:
           workflow-file: .github/workflows/ci.yml
           extra-paths: |
             orca-files: docs
-            orca-plugin-toolkit: docs/plugin-authoring
             orca-inventory-tests: .
-      - name: Check pass cache per crate
-        id: pass
-        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
-        with:
-          mode: check-batch
-          job: build
-          hashes: ${{ steps.src.outputs.hashes }}
-          force: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
-          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
-          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
-          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 
-  crate-agents:
+  crate-orca-agents:
     name: build (orca-agents)
-    needs: [plan, crate-contract, crate-db, crate-derive, crate-namespace, crate-plugin-toolkit]
+    needs: [plan, crate-orca-contract, crate-orca-db, crate-orca-derive, crate-orca-namespace, crate-orca-plugin-toolkit]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -214,6 +241,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-agents
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -228,9 +256,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-app-kit:
+  crate-orca-app-kit:
     name: build (orca-app-kit)
-    needs: [plan, crate-agents, crate-auth, crate-contract, crate-dispatch, crate-plugins, crate-system]
+    needs: [plan, crate-orca-agents, crate-orca-auth, crate-orca-contract, crate-orca-dispatch, crate-orca-plugins, crate-orca-system]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -289,6 +317,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-app-kit
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -303,9 +332,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-auth:
+  crate-orca-auth:
     name: build (orca-auth)
-    needs: [plan, crate-contract, crate-db, crate-derive, crate-files, crate-identities, crate-macro-runtime, crate-model, crate-plugin-toolkit, crate-secrets, crate-utils]
+    needs: [plan, crate-orca-contract, crate-orca-db, crate-orca-derive, crate-orca-files, crate-orca-identities, crate-orca-macro-runtime, crate-orca-model, crate-orca-plugin-toolkit, crate-orca-secrets, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -364,6 +393,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-auth
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -378,9 +408,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-config-source:
+  crate-orca-config-source:
     name: build (orca-config-source)
-    needs: [plan, crate-contract, crate-db, crate-derive, crate-dispatch, crate-plugin-toolkit]
+    needs: [plan, crate-orca-contract, crate-orca-db, crate-orca-derive, crate-orca-dispatch, crate-orca-plugin-toolkit]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -439,6 +469,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-config-source
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -453,9 +484,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-containers:
+  crate-orca-containers:
     name: build (orca-containers)
-    needs: [plan, crate-contract, crate-derive, crate-macro-runtime, crate-notifications, crate-utils]
+    needs: [plan, crate-orca-contract, crate-orca-derive, crate-orca-macro-runtime, crate-orca-notifications, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -514,6 +545,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-containers
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -528,9 +560,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-contract:
+  crate-orca-contract:
     name: build (orca-contract)
-    needs: [plan, crate-derive, crate-utils]
+    needs: [plan, crate-orca-derive, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -589,6 +621,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-contract
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -603,9 +636,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-conversation:
+  crate-orca-conversation:
     name: build (orca-conversation)
-    needs: [plan, crate-agents, crate-contract, crate-db, crate-derive, crate-model, crate-namespace, crate-plugin-toolkit, crate-utils]
+    needs: [plan, crate-orca-agents, crate-orca-contract, crate-orca-db, crate-orca-derive, crate-orca-model, crate-orca-namespace, crate-orca-plugin-toolkit, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -664,6 +697,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-conversation
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -678,9 +712,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-db:
+  crate-orca-db:
     name: build (orca-db)
-    needs: [plan, crate-contract, crate-derive, crate-macro-runtime, crate-plugin-abi, crate-utils]
+    needs: [plan, crate-orca-contract, crate-orca-derive, crate-orca-macro-runtime, crate-orca-plugin-abi, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -739,6 +773,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-db
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -753,9 +788,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-deploy-target:
+  crate-orca-deploy-target:
     name: build (orca-deploy-target)
-    needs: [plan, crate-plugin-abi]
+    needs: [plan, crate-orca-plugin-abi]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -814,6 +849,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-deploy-target
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -828,7 +864,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-derive:
+  crate-orca-derive:
     name: build (orca-derive)
     needs: [plan]
     if: ${{ !cancelled() && !failure() }}
@@ -889,6 +925,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-derive
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -903,9 +940,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-dev:
+  crate-orca-dev:
     name: build (orca-dev)
-    needs: [plan, crate-contract, crate-files, crate-utils]
+    needs: [plan, crate-orca-contract, crate-orca-files, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -964,6 +1001,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-dev
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -978,9 +1016,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-dispatch:
+  crate-orca-dispatch:
     name: build (orca-dispatch)
-    needs: [plan, crate-contract]
+    needs: [plan, crate-orca-contract]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1039,6 +1077,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-dispatch
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1053,9 +1092,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-files:
+  crate-orca-files:
     name: build (orca-files)
-    needs: [plan, crate-contract, crate-db, crate-derive, crate-plugin-toolkit, crate-utils]
+    needs: [plan, crate-orca-contract, crate-orca-db, crate-orca-derive, crate-orca-plugin-toolkit, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1114,6 +1153,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-files
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1128,9 +1168,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-graphql:
+  crate-orca-graphql:
     name: build (orca-graphql)
-    needs: [plan, crate-utils]
+    needs: [plan, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1189,6 +1229,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-graphql
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1203,9 +1244,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-hosts:
+  crate-orca-hosts:
     name: build (orca-hosts)
-    needs: [plan, crate-db, crate-utils]
+    needs: [plan, crate-orca-db, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1264,6 +1305,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-hosts
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1278,9 +1320,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-identities:
+  crate-orca-identities:
     name: build (orca-identities)
-    needs: [plan, crate-db, crate-derive, crate-macro-runtime, crate-utils]
+    needs: [plan, crate-orca-db, crate-orca-derive, crate-orca-macro-runtime, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1339,6 +1381,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-identities
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1353,9 +1396,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-inventory:
+  crate-orca-inventory:
     name: build (orca-inventory)
-    needs: [plan, crate-contract, crate-derive, crate-plugin-toolkit, crate-system]
+    needs: [plan, crate-orca-contract, crate-orca-derive, crate-orca-plugin-toolkit, crate-orca-system]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1414,6 +1457,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-inventory
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1428,9 +1472,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-inventory-tests:
+  crate-orca-inventory-tests:
     name: build (orca-inventory-tests)
-    needs: [plan, crate-agents, crate-auth, crate-config-source, crate-containers, crate-contract, crate-conversation, crate-db, crate-dev, crate-dispatch, crate-files, crate-inventory, crate-mcp, crate-model, crate-namespace, crate-notifications, crate-plugin-toolkit, crate-plugins, crate-server, crate-spec, crate-system]
+    needs: [plan, crate-orca-agents, crate-orca-auth, crate-orca-config-source, crate-orca-containers, crate-orca-contract, crate-orca-conversation, crate-orca-db, crate-orca-dev, crate-orca-dispatch, crate-orca-files, crate-orca-inventory, crate-orca-mcp, crate-orca-model, crate-orca-namespace, crate-orca-notifications, crate-orca-plugin-toolkit, crate-orca-plugins, crate-orca-server, crate-orca-spec, crate-orca-system]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1489,6 +1533,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-inventory-tests
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1503,9 +1548,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-macro-runtime:
+  crate-orca-macro-runtime:
     name: build (orca-macro-runtime)
-    needs: [plan, crate-contract, crate-derive, crate-dispatch, crate-utils]
+    needs: [plan, crate-orca-contract, crate-orca-derive, crate-orca-dispatch, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1564,6 +1609,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-macro-runtime
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1578,9 +1624,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-mcp:
+  crate-orca-mcp:
     name: build (orca-mcp)
-    needs: [plan, crate-contract, crate-db, crate-utils]
+    needs: [plan, crate-orca-contract, crate-orca-db, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1639,6 +1685,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-mcp
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1653,9 +1700,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-media:
+  crate-orca-media:
     name: build (orca-media)
-    needs: [plan, crate-derive]
+    needs: [plan, crate-orca-derive]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1714,6 +1761,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-media
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1728,9 +1776,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-model:
+  crate-orca-model:
     name: build (orca-model)
-    needs: [plan, crate-contract, crate-db, crate-derive, crate-files, crate-plugin-toolkit, crate-utils]
+    needs: [plan, crate-orca-contract, crate-orca-db, crate-orca-derive, crate-orca-files, crate-orca-plugin-toolkit, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1789,6 +1837,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-model
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1803,9 +1852,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-namespace:
+  crate-orca-namespace:
     name: build (orca-namespace)
-    needs: [plan, crate-contract, crate-db, crate-derive, crate-plugin-toolkit, crate-utils]
+    needs: [plan, crate-orca-contract, crate-orca-db, crate-orca-derive, crate-orca-plugin-toolkit, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1864,6 +1913,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-namespace
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1878,9 +1928,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-notifications:
+  crate-orca-notifications:
     name: build (orca-notifications)
-    needs: [plan, crate-db, crate-derive, crate-macro-runtime, crate-utils]
+    needs: [plan, crate-orca-db, crate-orca-derive, crate-orca-macro-runtime, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -1939,6 +1989,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-notifications
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -1953,9 +2004,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-openapi:
+  crate-orca-openapi:
     name: build (orca-openapi)
-    needs: [plan, crate-utils]
+    needs: [plan, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -2014,6 +2065,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-openapi
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2028,7 +2080,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-plugin-abi:
+  crate-orca-plugin-abi:
     name: build (orca-plugin-abi)
     needs: [plan]
     if: ${{ !cancelled() && !failure() }}
@@ -2089,6 +2141,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-plugin-abi
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2103,9 +2156,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-plugin-loader:
+  crate-orca-plugin-loader:
     name: build (orca-plugin-loader)
-    needs: [plan, crate-agents, crate-contract, crate-db, crate-dispatch, crate-plugin-proto, crate-plugin-toolkit, crate-secrets, crate-utils]
+    needs: [plan, crate-orca-agents, crate-orca-contract, crate-orca-db, crate-orca-dispatch, crate-orca-plugin-proto, crate-orca-plugin-toolkit, crate-orca-secrets, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -2164,6 +2217,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-plugin-loader
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2178,7 +2232,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-plugin-proto:
+  crate-orca-plugin-proto:
     name: build (orca-plugin-proto)
     needs: [plan]
     if: ${{ !cancelled() && !failure() }}
@@ -2239,6 +2293,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-plugin-proto
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2253,9 +2308,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-plugin-toolkit:
+  crate-orca-plugin-toolkit:
     name: build (orca-plugin-toolkit)
-    needs: [plan, crate-containers, crate-contract, crate-db, crate-deploy-target, crate-derive, crate-dispatch, crate-graphql, crate-macro-runtime, crate-media, crate-notifications, crate-openapi, crate-plugin-abi, crate-plugin-proto, crate-secrets, crate-service, crate-storage, crate-utils]
+    needs: [plan, crate-orca-containers, crate-orca-contract, crate-orca-db, crate-orca-deploy-target, crate-orca-derive, crate-orca-dispatch, crate-orca-graphql, crate-orca-macro-runtime, crate-orca-media, crate-orca-notifications, crate-orca-openapi, crate-orca-plugin-abi, crate-orca-plugin-proto, crate-orca-secrets, crate-orca-service, crate-orca-storage, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -2314,6 +2369,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-plugin-toolkit
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2328,9 +2384,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-plugin-toolkit-build:
+  crate-orca-plugin-toolkit-build:
     name: build (orca-plugin-toolkit-build)
-    needs: [plan, crate-openapi, crate-utils]
+    needs: [plan, crate-orca-openapi, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -2389,6 +2445,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-plugin-toolkit-build
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2403,9 +2460,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-plugins:
+  crate-orca-plugins:
     name: build (orca-plugins)
-    needs: [plan, crate-contract, crate-db, crate-derive, crate-files, crate-plugin-toolkit]
+    needs: [plan, crate-orca-contract, crate-orca-db, crate-orca-derive, crate-orca-files, crate-orca-plugin-toolkit]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -2464,6 +2521,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-plugins
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2478,9 +2536,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-route:
+  crate-orca-route:
     name: build (orca-route)
-    needs: [plan, crate-contract, crate-utils]
+    needs: [plan, crate-orca-contract, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -2539,6 +2597,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-route
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2553,9 +2612,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-secrets:
+  crate-orca-secrets:
     name: build (orca-secrets)
-    needs: [plan, crate-db, crate-plugin-abi]
+    needs: [plan, crate-orca-db, crate-orca-plugin-abi]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -2614,6 +2673,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-secrets
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2628,9 +2688,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-server:
+  crate-orca-server:
     name: build (orca-server)
-    needs: [plan, crate-agents, crate-auth, crate-config-source, crate-contract, crate-conversation, crate-db, crate-derive, crate-dev, crate-dispatch, crate-files, crate-identities, crate-inventory, crate-mcp, crate-model, crate-namespace, crate-notifications, crate-plugin-loader, crate-plugin-toolkit, crate-plugins, crate-spec, crate-system, crate-utils]
+    needs: [plan, crate-orca-agents, crate-orca-auth, crate-orca-config-source, crate-orca-contract, crate-orca-conversation, crate-orca-db, crate-orca-derive, crate-orca-dev, crate-orca-dispatch, crate-orca-files, crate-orca-identities, crate-orca-inventory, crate-orca-mcp, crate-orca-model, crate-orca-namespace, crate-orca-notifications, crate-orca-plugin-loader, crate-orca-plugin-toolkit, crate-orca-plugins, crate-orca-spec, crate-orca-system, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -2689,6 +2749,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-server
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2703,9 +2764,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-service:
+  crate-orca-service:
     name: build (orca-service)
-    needs: [plan, crate-contract, crate-deploy-target, crate-derive, crate-utils]
+    needs: [plan, crate-orca-contract, crate-orca-deploy-target, crate-orca-derive, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -2764,6 +2825,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-service
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2778,9 +2840,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-spec:
+  crate-orca-spec:
     name: build (orca-spec)
-    needs: [plan, crate-contract, crate-db, crate-derive, crate-graphql, crate-mcp, crate-plugin-toolkit, crate-utils]
+    needs: [plan, crate-orca-contract, crate-orca-db, crate-orca-derive, crate-orca-graphql, crate-orca-mcp, crate-orca-plugin-toolkit, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -2839,6 +2901,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-spec
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2853,9 +2916,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-storage:
+  crate-orca-storage:
     name: build (orca-storage)
-    needs: [plan, crate-derive]
+    needs: [plan, crate-orca-derive]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -2914,6 +2977,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-storage
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -2928,9 +2992,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-system:
+  crate-orca-system:
     name: build (orca-system)
-    needs: [plan, crate-agents, crate-auth, crate-containers, crate-contract, crate-db, crate-derive, crate-dev, crate-dispatch, crate-files, crate-hosts, crate-identities, crate-notifications, crate-plugin-loader, crate-plugin-toolkit, crate-secrets, crate-utils]
+    needs: [plan, crate-orca-agents, crate-orca-auth, crate-orca-containers, crate-orca-contract, crate-orca-db, crate-orca-derive, crate-orca-dev, crate-orca-dispatch, crate-orca-files, crate-orca-hosts, crate-orca-identities, crate-orca-notifications, crate-orca-plugin-loader, crate-orca-plugin-toolkit, crate-orca-secrets, crate-orca-utils]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -2989,6 +3053,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-system
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -3003,9 +3068,9 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  crate-utils:
+  crate-orca-utils:
     name: build (orca-utils)
-    needs: [plan, crate-derive]
+    needs: [plan, crate-orca-derive]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ci-large
     container:
@@ -3064,6 +3129,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           name-suffix: -orca-utils
+          nextest-args: --no-fail-fast --no-tests=pass
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -3078,52 +3144,206 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
+  crate-plugin-toolkit:
+    name: build (plugin-toolkit)
+    needs: [plan, crate-orca-plugin-toolkit]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ci-large
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Check pass cache
+        id: pass
+        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
+        with:
+          mode: check
+          job: build/crate/plugin-toolkit
+          hash: ${{ fromJSON(needs.plan.outputs.hashes)['plugin-toolkit'] }}
+          force: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
+          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      - name: Reuse recorded pass
+        if: ${{ steps.pass.outputs.hit == 'true' }}
+        env:
+          SHA: ${{ steps.pass.outputs.sha }}
+        run: echo "Unchanged — reusing pass from ${SHA:-unknown}" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Set up Rust
+        if: ${{ steps.pass.outputs.hit != 'true' }}
+        uses: argyle-labs/.github/.github/actions/rust-setup@main
+        with:
+          drop-cargo-config: 'false'
+          wrap-cc: 'true'
+          sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      # server/system build scripts derive ORCA_VERSION from git; a fixed
+      # version keeps them cached. The -dev suffix keeps dev-build behaviour.
+      - name: Pin orca version
+        if: ${{ steps.pass.outputs.hit != 'true' }}
+        run: |
+          v="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          [ -n "$v" ] || exit 1
+          echo "ORCA_RELEASE_VERSION=${v}-dev+gci" >> "$GITHUB_ENV"
+      # The coverage-instrumented test binaries are the build: a separate
+      # uninstrumented `cargo build` would compile everything a second time.
+      - name: Build (coverage-instrumented test archive)
+        if: ${{ steps.pass.outputs.hit != 'true' }}
+        run: |
+          cargo fetch --locked
+          cargo llvm-cov nextest-archive --locked -p plugin-toolkit --archive-file nextest-archive.tar.zst
+      - name: Test + coverage
+        if: ${{ steps.pass.outputs.hit != 'true' }}
+        uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
+        with:
+          name-suffix: -plugin-toolkit
+          nextest-args: --no-fail-fast --no-tests=pass
+      - name: Record pass
+        if: ${{ success() && steps.pass.outputs.hit != 'true' }}
+        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
+        with:
+          mode: record
+          job: build/crate/plugin-toolkit
+          hash: ${{ fromJSON(needs.plan.outputs.hashes)['plugin-toolkit'] }}
+          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      - name: CI summary
+        uses: argyle-labs/.github/.github/actions/ci-summary@main
+        if: ${{ !cancelled() }}
+
+  crate-plugin-toolkit-build:
+    name: build (plugin-toolkit-build)
+    needs: [plan, crate-orca-plugin-toolkit-build]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ci-large
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Check pass cache
+        id: pass
+        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
+        with:
+          mode: check
+          job: build/crate/plugin-toolkit-build
+          hash: ${{ fromJSON(needs.plan.outputs.hashes)['plugin-toolkit-build'] }}
+          force: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
+          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      - name: Reuse recorded pass
+        if: ${{ steps.pass.outputs.hit == 'true' }}
+        env:
+          SHA: ${{ steps.pass.outputs.sha }}
+        run: echo "Unchanged — reusing pass from ${SHA:-unknown}" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Set up Rust
+        if: ${{ steps.pass.outputs.hit != 'true' }}
+        uses: argyle-labs/.github/.github/actions/rust-setup@main
+        with:
+          drop-cargo-config: 'false'
+          wrap-cc: 'true'
+          sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      # server/system build scripts derive ORCA_VERSION from git; a fixed
+      # version keeps them cached. The -dev suffix keeps dev-build behaviour.
+      - name: Pin orca version
+        if: ${{ steps.pass.outputs.hit != 'true' }}
+        run: |
+          v="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          [ -n "$v" ] || exit 1
+          echo "ORCA_RELEASE_VERSION=${v}-dev+gci" >> "$GITHUB_ENV"
+      # The coverage-instrumented test binaries are the build: a separate
+      # uninstrumented `cargo build` would compile everything a second time.
+      - name: Build (coverage-instrumented test archive)
+        if: ${{ steps.pass.outputs.hit != 'true' }}
+        run: |
+          cargo fetch --locked
+          cargo llvm-cov nextest-archive --locked -p plugin-toolkit-build --archive-file nextest-archive.tar.zst
+      - name: Test + coverage
+        if: ${{ steps.pass.outputs.hit != 'true' }}
+        uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
+        with:
+          name-suffix: -plugin-toolkit-build
+          nextest-args: --no-fail-fast --no-tests=pass
+      - name: Record pass
+        if: ${{ success() && steps.pass.outputs.hit != 'true' }}
+        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
+        with:
+          mode: record
+          job: build/crate/plugin-toolkit-build
+          hash: ${{ fromJSON(needs.plan.outputs.hashes)['plugin-toolkit-build'] }}
+          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      - name: CI summary
+        uses: argyle-labs/.github/.github/actions/ci-summary@main
+        if: ${{ !cancelled() }}
+
   # The required `test*` check: crate jobs are named `build (…)` and test
   # their crate too, so this fails unless every one of them succeeded.
   test:
     name: test
     needs:
       - plan
-      - crate-agents
-      - crate-app-kit
-      - crate-auth
-      - crate-config-source
-      - crate-containers
-      - crate-contract
-      - crate-conversation
-      - crate-db
-      - crate-deploy-target
-      - crate-derive
-      - crate-dev
-      - crate-dispatch
-      - crate-files
-      - crate-graphql
-      - crate-hosts
-      - crate-identities
-      - crate-inventory
-      - crate-inventory-tests
-      - crate-macro-runtime
-      - crate-mcp
-      - crate-media
-      - crate-model
-      - crate-namespace
-      - crate-notifications
-      - crate-openapi
-      - crate-plugin-abi
-      - crate-plugin-loader
-      - crate-plugin-proto
+      - crate-orca-agents
+      - crate-orca-app-kit
+      - crate-orca-auth
+      - crate-orca-config-source
+      - crate-orca-containers
+      - crate-orca-contract
+      - crate-orca-conversation
+      - crate-orca-db
+      - crate-orca-deploy-target
+      - crate-orca-derive
+      - crate-orca-dev
+      - crate-orca-dispatch
+      - crate-orca-files
+      - crate-orca-graphql
+      - crate-orca-hosts
+      - crate-orca-identities
+      - crate-orca-inventory
+      - crate-orca-inventory-tests
+      - crate-orca-macro-runtime
+      - crate-orca-mcp
+      - crate-orca-media
+      - crate-orca-model
+      - crate-orca-namespace
+      - crate-orca-notifications
+      - crate-orca-openapi
+      - crate-orca-plugin-abi
+      - crate-orca-plugin-loader
+      - crate-orca-plugin-proto
+      - crate-orca-plugin-toolkit
+      - crate-orca-plugin-toolkit-build
+      - crate-orca-plugins
+      - crate-orca-route
+      - crate-orca-secrets
+      - crate-orca-server
+      - crate-orca-service
+      - crate-orca-spec
+      - crate-orca-storage
+      - crate-orca-system
+      - crate-orca-utils
       - crate-plugin-toolkit
       - crate-plugin-toolkit-build
-      - crate-plugins
-      - crate-route
-      - crate-secrets
-      - crate-server
-      - crate-service
-      - crate-spec
-      - crate-storage
-      - crate-system
-      - crate-utils
-    if: ${{ !cancelled() }}
+    if: ${{ always() }}
     runs-on: ci-large
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
@@ -3145,51 +3365,54 @@ jobs:
           fi
           echo "all crates passed"
 
-  # Merges the per-crate lcov files; report-only. Crates reusing a recorded
-  # pass upload none, so the total covers only crates that ran.
+  # Summarises line coverage across the per-crate lcov files; report-only.
+  # Crates reusing a recorded pass upload none, so the total covers only crates
+  # that ran.
   coverage:
     name: coverage
     needs:
-      - crate-agents
-      - crate-app-kit
-      - crate-auth
-      - crate-config-source
-      - crate-containers
-      - crate-contract
-      - crate-conversation
-      - crate-db
-      - crate-deploy-target
-      - crate-derive
-      - crate-dev
-      - crate-dispatch
-      - crate-files
-      - crate-graphql
-      - crate-hosts
-      - crate-identities
-      - crate-inventory
-      - crate-inventory-tests
-      - crate-macro-runtime
-      - crate-mcp
-      - crate-media
-      - crate-model
-      - crate-namespace
-      - crate-notifications
-      - crate-openapi
-      - crate-plugin-abi
-      - crate-plugin-loader
-      - crate-plugin-proto
+      - crate-orca-agents
+      - crate-orca-app-kit
+      - crate-orca-auth
+      - crate-orca-config-source
+      - crate-orca-containers
+      - crate-orca-contract
+      - crate-orca-conversation
+      - crate-orca-db
+      - crate-orca-deploy-target
+      - crate-orca-derive
+      - crate-orca-dev
+      - crate-orca-dispatch
+      - crate-orca-files
+      - crate-orca-graphql
+      - crate-orca-hosts
+      - crate-orca-identities
+      - crate-orca-inventory
+      - crate-orca-inventory-tests
+      - crate-orca-macro-runtime
+      - crate-orca-mcp
+      - crate-orca-media
+      - crate-orca-model
+      - crate-orca-namespace
+      - crate-orca-notifications
+      - crate-orca-openapi
+      - crate-orca-plugin-abi
+      - crate-orca-plugin-loader
+      - crate-orca-plugin-proto
+      - crate-orca-plugin-toolkit
+      - crate-orca-plugin-toolkit-build
+      - crate-orca-plugins
+      - crate-orca-route
+      - crate-orca-secrets
+      - crate-orca-server
+      - crate-orca-service
+      - crate-orca-spec
+      - crate-orca-storage
+      - crate-orca-system
+      - crate-orca-utils
       - crate-plugin-toolkit
       - crate-plugin-toolkit-build
-      - crate-plugins
-      - crate-route
-      - crate-secrets
-      - crate-server
-      - crate-service
-      - crate-spec
-      - crate-storage
-      - crate-system
-      - crate-utils
-    if: ${{ !cancelled() }}
+    if: ${{ always() }}
     runs-on: ci-large
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
@@ -3205,7 +3428,7 @@ jobs:
         with:
           pattern: lcov-*
           path: lcov
-      - name: Merge coverage
+      - name: Line coverage
         run: |
           shopt -s nullglob globstar
           files=(lcov/**/lcov.info)
@@ -3219,13 +3442,15 @@ jobs:
             /^DA:/ { k = sf SUBSEP $2; if (!(k in hit)) hit[k] = 0; if ($3 > 0) hit[k] = 1 }
             END {
               for (k in hit) { total++; covered += hit[k] }
-              printf "### Coverage (merged)\n\n%d / %d lines (%.2f%%)\n", covered, total, total ? 100 * covered / total : 0
+              printf "### Line coverage (all crates)\n\n%d / %d lines (%.2f%%)\n", covered, total, total ? 100 * covered / total : 0
             }' "${files[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
-          cat "${files[@]}" > lcov-merged.info
-      - name: Upload merged lcov
+          # Concatenated, not merged: a file covered by several crates appears
+          # once per crate.
+          cat "${files[@]}" > lcov-per-crate-concat.info
+      - name: Upload concatenated lcov
         uses: actions/upload-artifact@v4
-        if: ${{ hashFiles('lcov-merged.info') != '' }}
+        if: ${{ hashFiles('lcov-per-crate-concat.info') != '' }}
         with:
-          name: lcov-merged
-          path: lcov-merged.info
+          name: lcov-per-crate-concat
+          path: lcov-per-crate-concat.info
           retention-days: 7
