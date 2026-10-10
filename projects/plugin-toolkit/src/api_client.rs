@@ -178,7 +178,12 @@ pub async fn exec_with_unwrapper<F>(
 where
     F: FnOnce(serde_json::Value) -> Option<serde_json::Value>,
 {
-    let resp = client.execute(request).await?;
+    // Strip the URL from transport errors: generated clients may carry API keys
+    // in the query string, and reqwest's error Display prints the full URL.
+    let resp = client
+        .execute(request)
+        .await
+        .map_err(reqwest::Error::without_url)?;
 
     let is_json = resp
         .headers()
@@ -191,7 +196,7 @@ where
 
     let status = resp.status();
     let mut headers = resp.headers().clone();
-    let body = resp.bytes().await?;
+    let body = resp.bytes().await.map_err(reqwest::Error::without_url)?;
 
     let unwrapped: Option<Vec<u8>> = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
