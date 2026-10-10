@@ -23,6 +23,7 @@ contract   = { path = "../contract" }
 db         = { path = "../db" }
 secrets = { path = "../secrets" }
 dispatch   = { path = "../dispatch" }
+futures    = { workspace = true }
 plugin-proto = { path = "../plugin-proto" }
 plugin-toolkit = { path = "../plugin-toolkit" }
 rusqlite   = { workspace = true }
