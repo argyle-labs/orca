@@ -173,6 +173,21 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     Ok(())
 }
 
+/// Route panics through tracing so a crashed task leaves a backtrace in the
+/// daemon log, then defer to the default hook (stderr).
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        tracing::error!(
+            thread = thread.name().unwrap_or("<unnamed>"),
+            backtrace = %std::backtrace::Backtrace::force_capture(),
+            "panic: {info}"
+        );
+        default(info);
+    }));
+}
+
 /// Daemon serve loop with cooperative port handoff via UNIX signals.
 ///
 /// SIGUSR1 → drop listener (release port), write mode=parked, wait.
@@ -183,6 +198,8 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
 /// auto-reclaims the port without waiting for a signal.
 pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
+
+    install_panic_hook();
 
     // If we restarted because of an in-progress update, verify the swap took
     // and clear the marker. `system.update` surfaces the marker on stale
