@@ -82,10 +82,10 @@ fn find(name: &str) -> Option<&'static dyn ErasedTool> {
     c.by_name.get(name).map(|i| c.ordered[*i].as_ref())
 }
 
-// ── Dynamic (cdylib-plugin) fallback hook ──────────────────────────────────────
+// ── Dynamic (loaded-plugin) fallback hook ──────────────────────────────────────
 //
 // `dispatch` knows only the statically-linked `inventory` registry. Runtime
-// cdylib plugins live in `plugin-loader`'s registry, which `dispatch` cannot
+// subprocess plugins live in `plugin-loader`'s registry, which `dispatch` cannot
 // depend on (plugin-loader → dispatch). To keep one tool namespace across REST
 // / MCP / CLI without a dependency cycle, the host installs a *fallback* here
 // at startup: a synchronous `(name, args) -> Option<Result<Value>>` that returns
@@ -106,7 +106,7 @@ type DynamicDefs = dyn Fn() -> Vec<Value> + Send + Sync;
 static DYNAMIC_INVOKER: OnceLock<Box<DynamicInvoker>> = OnceLock::new();
 static DYNAMIC_DEFS: OnceLock<Box<DynamicDefs>> = OnceLock::new();
 
-/// Install the cdylib-plugin fallback. Called once by the host at startup after
+/// Install the loaded-plugin fallback. Called once by the host at startup after
 /// the plugin install-dir scan. `invoke` routes a tool call into the loaded
 /// plugin registry; `defs` reports loaded-plugin tool defs for list surfaces.
 /// Idempotent: a second call is ignored (the `OnceLock` keeps the first).
@@ -218,7 +218,7 @@ async fn run_off_worker<T: Send + 'static>(
         .map_err(|_| anyhow::anyhow!("plugin invoke timed out after {timeout:?}"))?
 }
 
-/// JSON tool defs contributed by loaded cdylib plugins. Empty when no fallback
+/// JSON tool defs contributed by loaded plugins. Empty when no fallback
 /// is installed.
 pub fn dynamic_tool_defs() -> Vec<Value> {
     DYNAMIC_DEFS.get().map(|f| f()).unwrap_or_default()
@@ -333,7 +333,7 @@ pub fn mcp_definitions() -> Vec<Value> {
             })
         })
         .collect();
-    // Merge dynamically-loaded cdylib plugin tools so `tools/list` surfaces
+    // Merge dynamically-loaded plugin tools so `tools/list` surfaces
     // them alongside the static registry. `dynamic_tool_defs` carries the
     // plugin manifest shape (`input_schema`); remap to MCP's `inputSchema`.
     for d in dynamic_tool_defs() {
@@ -353,13 +353,12 @@ pub fn mcp_definitions() -> Vec<Value> {
     defs
 }
 
-/// Build the cdylib-plugin manifest as a JSON string: an array of objects
+/// Build a plugin's tool manifest as a JSON string: an array of objects
 /// `{ name, description, input_schema, output_schema, role, execute_gated,
 /// data_mutation }`. The daemon installs the last three into [`crate::tool_roles`]
 /// at plugin load so plugin tools are gated like core ones. This is the exact
-/// shape `plugin_toolkit::abi::ToolDef` deserializes, so a cdylib plugin's
-/// ABI `manifest()` entrypoint can return `tool_manifest_json()` directly —
-/// reusing its own internally-linked inventory registry rather than
+/// shape `plugin_toolkit::abi::ToolDef` deserializes, so a plugin builds its
+/// handshake manifest from `tool_manifest_json()` directly — reusing its own internally-linked inventory registry rather than
 /// reimplementing schema emission. Returned as a `String` (not a typed Vec)
 /// so dispatch carries no dependency on the toolkit's abi types.
 pub fn tool_manifest_json() -> String {
@@ -387,7 +386,7 @@ pub fn tool_manifest_json() -> String {
 pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
     match find(name) {
         Some(tool) => tool.run_json(args, ctx).await,
-        // On a static miss, try the dynamic cdylib-plugin fallback, then the
+        // On a static miss, try the dynamic loaded-plugin fallback, then the
         // live unit surface, before giving up — so loaded plugin tools AND the
         // universal `unit.<kind>.<verb>` surface share this one entrypoint.
         None => match dynamic_dispatch(name, &args, ctx.verified_caller()).await {
@@ -664,7 +663,7 @@ pub fn execute_gated_names() -> Vec<&'static str> {
 }
 
 /// Whether a statically-linked (inventory) tool with this name exists. Used by
-/// the runtime cdylib plugin loader to reject a plugin tool that would shadow a
+/// the runtime plugin loader to reject a plugin tool that would shadow a
 /// built-in one.
 pub fn tool_exists(name: &str) -> bool {
     find(name).is_some()
