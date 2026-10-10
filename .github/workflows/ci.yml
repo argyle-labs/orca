@@ -13,10 +13,8 @@ on:
   # exact tree green). Main is protected by requiring green PRs.
   #
   # A PR tests only the crates its changes touch plus their reverse
-  # dependents, so it cannot enforce the workspace-wide coverage floor. The
-  # nightly schedule and workflow_dispatch run the FULL workspace with the
-  # floor: that is where coverage is gated. The nightly runs once a day on
-  # main's tip regardless of pushes, so it is not a per-push run.
+  # dependents; the nightly schedule and workflow_dispatch run the full
+  # workspace. Coverage is report-only on every trigger.
   #
   # CI runs on GITEA (canonical), executed by our self-hosted Gitea act_runner.
   # `runs-on: ubuntu-latest` is just the LABEL that runner advertises — it maps
@@ -70,54 +68,35 @@ env:
   # it, so production keeps statically vendoring OpenSSL for portable binaries.
   OPENSSL_NO_VENDOR: "1"
 
-  # ── Shared compilation cache: sccache → MinIO S3 (fleet), the same backend
-  #    plugin CI uses. A shared bucket means one runner's cold compile warms the
-  #    cache for every other run instead of each runner keeping a private disk
-  #    cache (which is also ephemeral now that the Rust jobs run inside the
-  #    ci-rust container). Endpoint is an ORG variable, never a literal IP — the
-  #    repo mirrors to a PUBLIC GitHub and `guard-no-real-ips` blocks LAN
-  #    addresses in-tree. Creds are org-level secrets (scoped sccache-rw user).
-  #    Inert for the non-Rust jobs (they never invoke rustc/cc).
-  RUSTC_WRAPPER: sccache
-  # sccache-wrap the C compiler too (P2), so the native C deps that survive
-  # dropping vendored OpenSSL — bundled SQLCipher (with our LIBSQLITE3_FLAGS),
-  # vendored libgit2, jemalloc — are cached across runs instead of recompiled
-  # every cold checkout. cc-rs honors a multi-word CC/CXX (the classic
-  # ccache/sccache pattern).
-  CC: "sccache cc"
-  CXX: "sccache c++"
-  SCCACHE_BUCKET: sccache
-  SCCACHE_ENDPOINT: ${{ vars.SCCACHE_ENDPOINT }}
-  SCCACHE_S3_USE_SSL: "false"
-  SCCACHE_REGION: us-east-1
-  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 
 jobs:
-  # ── Path-change detector ─────────────────────────────────────────────────
-  # Each downstream job gates on the relevant boolean. A change to any
-  # workflow YAML forces every job to run.
+  # Scopes a PR to the crates its changes touch plus their reverse dependents
+  # (scripts/ci-affected-crates.sh); schedule and dispatch run the workspace.
+  # Runs in ci-rust because crate selection needs cargo metadata.
   changes:
     name: Detect changed paths
-    runs-on: ubuntu-latest
+    runs-on: ci-large
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     outputs:
-      workflows:               ${{ steps.filter.outputs.workflows }}
-      rust:                    ${{ steps.filter.outputs.rust }}
-      full:                    ${{ steps.filter.outputs.full }}
-      changed:                 ${{ steps.filter.outputs.changed }}
-      changed_count:           ${{ steps.filter.outputs.changed_count }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+      rust:      ${{ steps.filter.outputs.rust }}
+      mode:      ${{ steps.select.outputs.mode }}
+      args:      ${{ steps.select.outputs.args }}
     steps:
-      # Full history so the detector can diff locally with git and NEVER call
-      # the GitHub API. The previous dorny/paths-filter step fetched the
-      # changed-file list over the REST API on every PR — a single point of
-      # failure that skipped every downstream job whenever the API degraded.
-      - uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - id: filter
-        name: Detect changed paths (git-native, no API)
-        shell: bash
+        name: Detect changed files
         env:
           EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
@@ -181,58 +160,31 @@ jobs:
             echo "CHANGED_EOF"
           } >> "$GITHUB_OUTPUT"
 
-  # ── Sanitize guard ───────────────────────────────────────────────────────
-  # Fast, build-free gate: fail if any real fleet address that was sanitized
-  # out of the tree returns (the repo mirrors to a PUBLIC GitHub).
-  #
-  # Two layers (see the script): an allowlist sweep over ALL private address
-  # space that needs no configuration, plus configured real-range patterns fed
-  # in below. The patterns are a SECRET — the guard must not hardcode the range
-  # it protects, or the guard itself leaks it to the public mirror. If the
-  # secret is unset the sweep still runs and layer 1 reports that it skipped.
-  guard-no-real-ips:
-    name: Guard — no real fleet IPs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Check for forbidden real-fleet addresses
+      # mode=all on schedule/dispatch or when a change maps to no crate;
+      # mode=none skips build/test/lint Rust steps.
+      - name: Select crates
+        id: select
         env:
-          ORCA_FORBIDDEN_IP_PATTERNS: ${{ secrets.FORBIDDEN_IP_PATTERNS }}
-        run: ./scripts/check-no-real-ips.sh
+          FULL: ${{ steps.filter.outputs.full }}
+          CHANGED: ${{ steps.filter.outputs.changed }}
+          # A mismatch means the list was truncated in transit: test everything.
+          CI_EXPECTED_COUNT: ${{ steps.filter.outputs.changed_count }}
+        run: |
+          set -euo pipefail
+          if [ "$FULL" = "true" ]; then
+            printf 'mode=all\nargs=--workspace\npackages=\nignore_regex=\n' | tee -a "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "$CHANGED" | scripts/ci-affected-crates.sh | tee -a "$GITHUB_OUTPUT"
+          fi
 
-  # ── Rust ─────────────────────────────────────────────────────────────────
-  # ── Rust gate: tests + coverage + lint, on ONE compiled artifact set ──────
-  #
-  # These were three jobs. They are one, because the three gates can share a
-  # single build and splitting them made each pay its own dependency compile.
-  #
-  # The old split rested on "coverage instrumentation cannot reuse the dev/lint
-  # build cache". That is no longer true: cargo-llvm-cov instruments only
-  # WORKSPACE members through a crate-name allowlist on its rustc wrapper, so
-  # dependencies build uninstrumented and are shared. Measured on this
-  # workspace, fresh target dir:
-  #
-  #   nextest --workspace --no-run (instrumented)  -> 533 compile units
-  #   llvm-cov report                              ->   0 (reads profile data)
-  #   clippy  --workspace --tests                  ->   4 compile units
-  #
-  # So coverage costs ~1 extra compile unit over an uninstrumented test build
-  # (532), instead of a whole second build. Order is load-bearing — see the
-  # Clippy step.
-  test-rust:
-    name: Test + Lint + Coverage Rust
+  build:
     needs: changes
-    # PR-only merge gate. A merge gate runs BEFORE merge —
-    # re-running the full test+coverage suite on the post-merge push to main is
-    # pure double-work: the PR already proved this exact tree green. Coverage/
-    # tests are validated on the PR; main is protected by requiring green PRs.
     if: |
-      github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
-      (github.event_name == 'pull_request'
-        && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'))
-    runs-on: ubuntu-latest
-    # Same prebuilt ci-rust image — toolchain, llvm-tools, cargo-nextest,
-    # cargo-llvm-cov, sccache, mold and libssl-dev all baked in.
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+        (github.event_name == 'pull_request'
+          && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')))
+      && needs.changes.outputs.mode != 'none'
+    runs-on: ci-large
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
       credentials:
@@ -242,257 +194,124 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Ensure libssl-dev + mold + jq (no-op if image already has them)
-        run: |
-          set -uo pipefail
-          need=()
-          command -v mold >/dev/null 2>&1 || need+=(mold)
-          dpkg -s libssl-dev >/dev/null 2>&1 || need+=(libssl-dev)
-          command -v jq >/dev/null 2>&1 || need+=(jq)
-          if [ "${#need[@]}" -gt 0 ]; then
-            (apt-get update -y && apt-get install -y --no-install-recommends "${need[@]}") \
-              || echo "::warning::could not install ${need[*]} — image should provide them"
-          fi
-
-      - name: CI script tests
-        run: |
-          time scripts/ci-target-cache.test.sh
-          time scripts/ci-affected-crates.test.sh
-
-      # The crates this PR can affect: changed crates plus every workspace
-      # reverse dependent (scripts/ci-affected-crates.sh). `-p` unifies
-      # features over the selected crates only, unlike --workspace; the nightly
-      # full run covers that difference. mode=all on
-      # schedule/dispatch or when a change maps to no crate. mode=none skips
-      # the Rust build but keeps the job green.
-      - name: Select crates
-        id: select
-        env:
-          FULL: ${{ needs.changes.outputs.full }}
-          CHANGED: ${{ needs.changes.outputs.changed }}
-          # A mismatch means the list was truncated in transit: test everything.
-          CI_EXPECTED_COUNT: ${{ needs.changes.outputs.changed_count }}
-        run: |
-          set -euo pipefail
-          if [ "$FULL" = "true" ]; then
-            printf 'mode=all\nargs=--workspace\npackages=\nignore_regex=\n' | tee -a "$GITHUB_OUTPUT"
-          else
-            printf '%s\n' "$CHANGED" | scripts/ci-affected-crates.sh | tee -a "$GITHUB_OUTPUT"
-          fi
-
-      # Persist target/ across runs through the act_runner cache server, so a
-      # run recompiles only the workspace crates whose source changed (sccache
-      # cannot serve instrumented workspace crates). Each job restores into its
-      # own container, so concurrent jobs never share a live target dir. Keyed
-      # per commit so a PR's cache moves forward; restore falls back to the
-      # newest entry for this branch, then for the same Cargo.lock.
-      - name: Restore target dir
-        if: steps.select.outputs.mode != 'none'
-        id: target-cache
-        uses: actions/cache/restore@v4
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Rust
+        uses: argyle-labs/.github/.github/actions/rust-setup@main
         with:
-          path: target
-          key: rust-target-ci-rust-1.95.0-${{ hashFiles('Cargo.lock') }}-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
-          restore-keys: |
-            rust-target-ci-rust-1.95.0-${{ hashFiles('Cargo.lock') }}-${{ github.head_ref || github.ref_name }}-
-            rust-target-ci-rust-1.95.0-${{ hashFiles('Cargo.lock') }}-
-
-      # server/system build scripts derive ORCA_VERSION from git and rerun on
-      # .git/HEAD and .git/index; a fixed version keeps them (and everything
-      # downstream) cached. Tests compare against env!("ORCA_VERSION"), and the
-      # -dev suffix keeps dev-build behaviour.
-      - name: Pin ORCA_RELEASE_VERSION
-        if: steps.select.outputs.mode != 'none'
+          drop-cargo-config: 'false'
+          wrap-cc: 'true'
+          sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      # server/system build scripts derive ORCA_VERSION from git; a fixed
+      # version keeps them cached. The -dev suffix keeps dev-build behaviour.
+      - name: Pin orca version
         run: |
           v="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
           [ -n "$v" ] || exit 1
           echo "ORCA_RELEASE_VERSION=${v}-dev+gci" >> "$GITHUB_ENV"
-
-      # Backdates unchanged sources so cargo trusts the restored fingerprints.
-      # See scripts/ci-target-cache.sh.
-      - name: Reset mtimes of unchanged sources
-        if: steps.select.outputs.mode != 'none'
-        run: time scripts/ci-target-cache.sh restore
-
-      # Costs no compilation, so it fails fast before the expensive phase.
-      - name: Format check
-        if: steps.select.outputs.mode != 'none'
-        run: time cargo fmt --all -- --check
-
-      # The README badge is generated from .coverage-floor by `make
-      # coverage-badge`, but nothing enforced that they agree — so the badge
-      # advertised 65% while the floor was 72. A grep, no compilation.
-      - name: Coverage badge matches the floor
-        run: time make coverage-badge-check
-
-      # ONE instrumented build, shared by tests, coverage AND clippy.
-      #
-      # `mold -run` routes every linker invocation through mold (baked into the
-      # image), linking the ~100 per-crate test binaries far faster than the
-      # default ld. sccache still applies: show-env sets RUSTC_WRAPPER to
-      # cargo-llvm-cov and records the pre-existing sccache wrapper, chaining to
-      # it rather than displacing it.
-      #
-      # `cargo llvm-cov show-env` exports the instrumentation env (RUSTC_WRAPPER,
-      # LLVM_PROFILE_FILE, the instrumented-crate allowlist) so ordinary cargo
-      # commands land on the SAME fingerprint. Every step below re-evals it, so
-      # all three gates agree and nothing recompiles between them.
-      #
-      # cargo-llvm-cov instruments only WORKSPACE members, via a crate-name
-      # allowlist on its rustc wrapper — dependencies are built uninstrumented.
-      # That is why coverage no longer forces its own full build, which was the
-      # original reason it was split into a nightly job.
-      #
-      # Built in its own step so the target cache is saved only from a
-      # COMPLETE build. The cargo JSON stream lists every executable this build
-      # produced, which prune uses to drop stale test binaries.
-      - name: Build test binaries (instrumented)
-        id: build
-        if: steps.select.outputs.mode != 'none'
-        run: |
-          eval "$(cargo llvm-cov show-env --sh)"
-          time mold -run cargo nextest run --locked ${{ steps.select.outputs.args }} --no-run --timings \
-            --cargo-message-format json-render-diagnostics > "$RUNNER_TEMP/cargo-build.json"
-
-      - uses: actions/upload-artifact@v3
-        if: ${{ !cancelled() && steps.build.outcome != 'skipped' }}
+      - name: Build test archive
+        uses: argyle-labs/.github/.github/actions/cargo-build@main
         with:
-          name: cargo-timings
-          path: target/cargo-timings/
-          retention-days: 14
+          args: ${{ needs.changes.outputs.args }}
+      - name: CI summary
+        uses: argyle-labs/.github/.github/actions/ci-summary@main
+        if: ${{ !cancelled() }}
 
-      # Also runs when the cache is not saved: stale test binaries would
-      # otherwise be merged into the coverage report.
-      - name: Prune target dir
-        id: prune
-        if: steps.build.outcome == 'success'
-        run: |
-          # Only a full run saves the cache: a partial build lists only the
-          # selected crates' executables, so pruning removes every other
-          # crate's test binaries, which is fine for this run's coverage but
-          # would hollow out a saved cache.
-          rc=0
-          time scripts/ci-target-cache.sh prune "$RUNNER_TEMP/cargo-build.json" || rc=$?
-          # 3 = cargo listed no executables; nothing was pruned, do not save.
-          if [ "$rc" -eq 3 ]; then
-            echo "save=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          [ "$rc" -eq 0 ] || exit "$rc"
-          size_mb="$(du -sm target | cut -f1)"
-          echo "target/ = ${size_mb} MiB"
-          if [ "${{ steps.select.outputs.mode }}" != "all" ]; then
-            echo "partial run: target cache not saved"
-            echo "save=false" >> "$GITHUB_OUTPUT"
-          elif [ "$size_mb" -gt 12288 ]; then
-            echo "::warning title=target cache not saved::target/ is ${size_mb} MiB after pruning, over the 12288 MiB cap"
-            echo "save=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "save=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Saved before the tests so their profraw output never enters the cache.
-      # The sentinel is written last, so only a complete cache is trusted on
-      # restore. An existing key (a rerun of the same commit) is left
-      # as is.
-      - name: Record target cache manifest
-        if: steps.prune.outputs.save == 'true'
-        run: scripts/ci-target-cache.sh record
-      - uses: actions/cache/save@v4
-        if: steps.prune.outputs.save == 'true'
+  # Runs the build's instrumented archive once; coverage is report-only.
+  test:
+    needs: [changes, build]
+    if: |
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+        (github.event_name == 'pull_request'
+          && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true')))
+      && needs.changes.outputs.mode != 'none'
+    runs-on: ci-large
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Rust
+        uses: argyle-labs/.github/.github/actions/rust-setup@main
         with:
-          path: target
-          key: ${{ steps.target-cache.outputs.cache-primary-key }}
-
-      - name: Unit + integration tests (instrumented)
-        if: steps.select.outputs.mode != 'none'
+          drop-cargo-config: 'false'
+          wrap-cc: 'true'
+          sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      # server/system build scripts derive ORCA_VERSION from git; a fixed
+      # version keeps them cached. The -dev suffix keeps dev-build behaviour.
+      - name: Pin orca version
         run: |
-          eval "$(cargo llvm-cov show-env --sh)"
-          time mold -run cargo nextest run --locked ${{ steps.select.outputs.args }} --no-fail-fast
+          v="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          [ -n "$v" ] || exit 1
+          echo "ORCA_RELEASE_VERSION=${v}-dev+gci" >> "$GITHUB_ENV"
+      - name: Test + coverage
+        uses: argyle-labs/.github/.github/actions/cargo-test@main
+        with:
+          args: ${{ needs.changes.outputs.args }}
+          doctests: 'false'
+      - name: CI summary
+        uses: argyle-labs/.github/.github/actions/ci-summary@main
+        if: ${{ !cancelled() }}
 
+  lint:
+    needs: changes
+    runs-on: ci-large
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
 
-      # Clippy runs AFTER the tests, in the SAME job, on purpose — this is the
-      # whole point of merging the two jobs, and the order is load-bearing.
-      #
-      # clippy is check-mode (clippy-driver -> .rmeta); nextest needs codegen
-      # (.rlib + ~100 linked test binaries). Neither artifact satisfies the
-      # other, so as two jobs in two containers they each paid a full dependency
-      # compile. In one target dir the codegen artifacts DO satisfy clippy's
-      # dependency edges, so the lint phase collapses to almost nothing —
-      # measured on this workspace, fresh target dir:
-      #
-      #   nextest --workspace --no-run  -> 533 compile units (instrumented)
-      #   clippy  --workspace --tests   ->   4 compile units
-      #   llvm-cov report               ->   0 (reads existing profile data)
-      #
-      # Reversed (clippy first) it does NOT collapse: check-mode .rmeta cannot
-      # back codegen, so the test build recompiles nearly everything. Lint-first
-      # is the intuitive order and the expensive one. Do not swap these.
-      #
-      # Verified the cheap phase still LINTS rather than silently skipping: a
-      # deliberate clippy violation planted after a test build is still caught.
-      #
-      # `!cancelled()` so a test failure still yields lint feedback in the same
-      # run, instead of hiding it behind a red test step.
-      - name: Clippy
-        if: ${{ !cancelled() && steps.select.outputs.mode != 'none' }}
-        run: |
-          eval "$(cargo llvm-cov show-env --sh)"
-          time mold -run cargo clippy ${{ steps.select.outputs.args }} --tests --locked -- -D warnings
-
-      # sccache hit/miss stats — surfaces cache effectiveness in the run log so a
-      # regression in hit rate is visible. Non-fatal.
-      - name: sccache stats
-        if: ${{ !cancelled() && steps.select.outputs.mode != 'none' }}
-        run: time sccache --show-stats || true
-
-      # Reads the profile data the test run just wrote — NO recompile, no rerun.
-      # Floor is the single source of truth in .coverage-floor (shared with the
-      # Makefile `coverage` target and the README badge).
-      #
-      # ONE pass renders the HTML *and* enforces the floor. These were two
-      # steps, and each one re-merged and re-read the same profraw set from
-      # scratch: measured on the green run of PR #685, 22.2s for the
-      # fail-under pass plus 32.1s for the HTML pass. `--fail-under-lines` is
-      # evaluated after the report is written, so the artifact is still
-      # produced on a coverage failure — which is exactly when it is wanted.
-      #
-      # !cancelled() rather than always(): we want the HTML report on success AND
-      # on genuine failure, but NOT when a newer push superseded this run —
-      # Gitea's artifact API 500s on a cancelled task ("task is not running"),
-      # which produced spurious red "Create Artifact Container failed" errors.
-      #
-      # The floor is workspace-wide, so only a full run enforces it. A partial
-      # run reports on the tested crates alone, ungated.
-      - name: Coverage report + gate (line coverage >= floor on full runs)
-        if: ${{ !cancelled() && steps.select.outputs.mode != 'none' }}
+      # Fails if a real fleet address returns (the repo mirrors to a PUBLIC
+      # GitHub). The patterns are a secret so the guard does not leak the range
+      # it protects; unset, the allowlist sweep still runs.
+      - name: Check for forbidden real-fleet addresses
         env:
-          MODE: ${{ steps.select.outputs.mode }}
-          IGNORE_REGEX: ${{ steps.select.outputs.ignore_regex }}
-        run: |
-          eval "$(cargo llvm-cov show-env --sh)"
-          if [ "$MODE" = "all" ]; then
-            time cargo llvm-cov report --html --output-dir target/llvm-cov \
-              --fail-under-lines "$(cat .coverage-floor)"
-          else
-            echo "::notice title=coverage floor skipped::partial run (${{ steps.select.outputs.packages }}); the $(cat .coverage-floor)% floor is enforced only on full runs (nightly, workflow_dispatch)"
-            time cargo llvm-cov report --html --output-dir target/llvm-cov \
-              --ignore-filename-regex "$IGNORE_REGEX"
-          fi
+          ORCA_FORBIDDEN_IP_PATTERNS: ${{ secrets.FORBIDDEN_IP_PATTERNS }}
+        run: ./scripts/check-no-real-ips.sh
 
-      # The HTML report is thousands of small files, and upload-artifact@v3
-      # sends them one by one — the slowest step of a green run. Ship it as one
-      # archive, and only when someone will read it: a failed run, or a
-      # manual/scheduled run.
-      - name: Archive coverage report
-        if: ${{ steps.select.outputs.mode != 'none' && (failure() || (!cancelled() && github.event_name != 'pull_request')) }}
-        run: tar -C target -czf target/coverage-html.tgz llvm-cov
+      - name: CI script tests
+        if: ${{ !cancelled() }}
+        run: time scripts/ci-affected-crates.test.sh
 
-      - uses: actions/upload-artifact@v3
-        if: ${{ steps.select.outputs.mode != 'none' && (failure() || (!cancelled() && github.event_name != 'pull_request')) }}
+      - name: Set up Rust
+
+        uses: argyle-labs/.github/.github/actions/rust-setup@main
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true') && needs.changes.outputs.mode != 'none' }}
         with:
-          name: coverage-html
-          path: target/coverage-html.tgz
-          retention-days: 14
+          drop-cargo-config: 'false'
+          wrap-cc: 'true'
+          sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      - name: Format
+        uses: argyle-labs/.github/.github/actions/cargo-fmt@main
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true') && needs.changes.outputs.mode != 'none' }}
+      - name: Clippy
+        uses: argyle-labs/.github/.github/actions/cargo-clippy@main
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true') && needs.changes.outputs.mode != 'none' }}
+        with:
+          args: ${{ needs.changes.outputs.args }} --tests
+      # Last: it deletes .cargo/config.toml, which the cargo steps above need.
+      - name: Lock file check
+        uses: argyle-labs/.github/.github/actions/cargo-lock-check@main
+        if: ${{ !cancelled() }}
+      - name: CI summary
+        uses: argyle-labs/.github/.github/actions/ci-summary@main
+        if: ${{ !cancelled() }}

@@ -8,6 +8,13 @@
 #[cfg(unix)]
 #[cfg(test)]
 mod daemon_signal_tests {
+    /// nextest remaps this var when running from an archive extracted elsewhere;
+    /// the compile-time path is only valid where the binary was built.
+    fn orca_bin() -> std::ffi::OsString {
+        std::env::var_os("NEXTEST_BIN_EXE_orca")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_orca").into())
+    }
+
     use std::path::Path;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
@@ -106,7 +113,7 @@ mod daemon_signal_tests {
         let home = tmpdir.path().to_str().unwrap();
         let state_path = tmpdir.path().join(".orca/state.json");
 
-        let child = std::process::Command::new(env!("CARGO_BIN_EXE_orca"))
+        let child = std::process::Command::new(orca_bin())
             .env("HOME", home)
             // Pin the canonical state resolver to the tempdir. Setting HOME
             // alone is NOT enough: `$ORCA_HOME` takes precedence over `$HOME`
