@@ -297,6 +297,9 @@ members = [
     "projects/openapi",
     "projects/plugin-toolkit",
     "projects/plugin-toolkit-build",
+    # Old-name shims for plugins pinned to `plugin-toolkit` by git.
+    "projects/compat/plugin-toolkit",
+    "projects/compat/plugin-toolkit-build",
 ]
 default-members = [
     "projects/db",

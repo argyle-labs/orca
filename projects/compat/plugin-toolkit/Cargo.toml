@@ -1,0 +1,33 @@
+[package]
+name = "plugin-toolkit"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# Compatibility re-export for plugins still resolving `plugin-toolkit` by git;
+# remove once every plugin depends on `orca-plugin-toolkit`.
+
+[lib]
+name = "plugin_toolkit"
+path = "src/lib.rs"
+
+[features]
+default = ["full"]
+full = ["orca_plugin_toolkit/full"]
+in-process = ["orca_plugin_toolkit/in-process"]
+descriptor = ["orca_plugin_toolkit/descriptor"]
+tools = ["orca_plugin_toolkit/tools"]
+db = ["orca_plugin_toolkit/db"]
+db-incore = ["orca_plugin_toolkit/db-incore"]
+containers = ["orca_plugin_toolkit/containers"]
+notify = ["orca_plugin_toolkit/notify"]
+graphql = ["orca_plugin_toolkit/graphql"]
+openapi = ["orca_plugin_toolkit/openapi"]
+http = ["orca_plugin_toolkit/http"]
+socketio = ["orca_plugin_toolkit/socketio"]
+delegated-http = ["orca_plugin_toolkit/delegated-http"]
+openapi-plugin = ["orca_plugin_toolkit/openapi-plugin"]
+jemalloc-stats = ["orca_plugin_toolkit/jemalloc-stats"]
+
+[dependencies]
+orca_plugin_toolkit = { path = "../../plugin-toolkit", package = "orca-plugin-toolkit", default-features = false }
