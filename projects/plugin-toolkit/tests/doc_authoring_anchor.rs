@@ -7,10 +7,9 @@
 //! (CI) compiles and runs it; doctests are not run by nextest, which is why this
 //! is a real integration test rather than a `rust,ignore` block.
 //!
-//! Two guards:
-//!   1. `documented_symbols_exist` — signature/type-pins for every cited symbol.
-//!   2. `doc_paths_resolve` — every `projects/…` path (and `:line`) the docs
-//!      cite still exists on disk.
+//! `documented_symbols_exist` signature/type-pins every cited symbol. The
+//! docs' `projects/…` path citations are checked by
+//! `projects/inventory-tests/tests/plugin_authoring_doc_paths.rs`.
 #![allow(clippy::disallowed_types)]
 #![allow(unused_imports)]
 
@@ -66,66 +65,4 @@ fn documented_symbols_exist() {
 
     // HTTP client seam used in the tool + capabilities pages.
     let _client = plugin_toolkit::client::Client::new();
-}
-
-/// Every in-repo `projects/…` path (optionally `:line`) the plugin-authoring
-/// docs cite must resolve. Cross-repo `argyle-labs/*` references are
-/// illustrative and intentionally not checked.
-#[test]
-fn doc_paths_resolve() {
-    use std::path::PathBuf;
-
-    // CARGO_MANIFEST_DIR = <root>/projects/plugin-toolkit
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("repo root is two levels above the crate manifest")
-        .to_path_buf();
-
-    let docs_dir = repo_root.join("docs/plugin-authoring");
-    let mut checked = 0usize;
-
-    for entry in std::fs::read_dir(&docs_dir).expect("docs/plugin-authoring must exist") {
-        let path = entry.unwrap().path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let body = std::fs::read_to_string(&path).unwrap();
-        for raw in body.split(|c: char| c.is_whitespace() || "()[]`\"'<>".contains(c)) {
-            let tok = raw.trim_start_matches("../").trim_start_matches("../");
-            if !tok.starts_with("projects/") {
-                continue;
-            }
-            // Split a trailing `:<line>` if present.
-            let (rel, line) = match tok.rsplit_once(':') {
-                Some((p, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
-                    (p, Some(n.parse::<usize>().unwrap()))
-                }
-                _ => (tok, None),
-            };
-            if !(rel.ends_with(".rs") || rel.ends_with(".md")) {
-                continue;
-            }
-            let full = repo_root.join(rel);
-            assert!(
-                full.exists(),
-                "{}: cites missing path `{rel}`",
-                path.display()
-            );
-            if let Some(n) = line {
-                let count = std::fs::read_to_string(&full).unwrap().lines().count();
-                assert!(
-                    count >= n,
-                    "{}: cites `{rel}:{n}` but that file has only {count} lines",
-                    path.display()
-                );
-            }
-            checked += 1;
-        }
-    }
-
-    assert!(
-        checked > 0,
-        "expected to path-check at least one projects/ citation"
-    );
 }
