@@ -92,7 +92,7 @@ fn rewrite_async_sig(sig: &mut Signature) -> bool {
                     }
                 }
             }
-            FnArg::Typed(pt) => assign_ref_lifetimes(&mut pt.ty, &mut counter, &mut fresh),
+            FnArg::Typed(pt) => assign_ref_lifetimes(&mut pt.ty, &mut counter, &mut fresh, false),
         }
     }
 
@@ -129,15 +129,23 @@ fn rewrite_async_sig(sig: &mut Signature) -> bool {
 }
 
 /// Give every elided reference in `ty` a fresh lifetime, recursing through nested
-/// references (`&&T`) and generic type args (`Option<&str>`). Explicit lifetime
-/// args (e.g. `Cow<'a, str>`) are the caller's responsibility.
-fn assign_ref_lifetimes(ty: &mut Type, counter: &mut usize, out: &mut Vec<Lifetime>) {
+/// references (`&&T`) and generic type args (`Option<&str>`). An explicit
+/// lifetime inside generic args (`Option<&'a str>`, `Cow<'a, str>`) is the
+/// caller's to declare and is not collected. References in other positions
+/// (tuples, arrays, slices, `impl Trait<&T>`, `dyn Trait<&T>`) are not rewritten
+/// and fail to compile with a missing-lifetime error.
+fn assign_ref_lifetimes(
+    ty: &mut Type,
+    counter: &mut usize,
+    out: &mut Vec<Lifetime>,
+    in_generic: bool,
+) {
     if let Type::Path(tp) = ty {
         for seg in tp.path.segments.iter_mut() {
             if let syn::PathArguments::AngleBracketed(ab) = &mut seg.arguments {
                 for arg in ab.args.iter_mut() {
                     if let syn::GenericArgument::Type(t) = arg {
-                        assign_ref_lifetimes(t, counter, out);
+                        assign_ref_lifetimes(t, counter, out, true);
                     }
                 }
             }
@@ -146,6 +154,7 @@ fn assign_ref_lifetimes(ty: &mut Type, counter: &mut usize, out: &mut Vec<Lifeti
     }
     if let Type::Reference(r) = ty {
         match &r.lifetime {
+            Some(_) if in_generic => {}
             Some(existing) => out.push(existing.clone()),
             None => {
                 let l = new_lt(*counter);
@@ -154,7 +163,7 @@ fn assign_ref_lifetimes(ty: &mut Type, counter: &mut usize, out: &mut Vec<Lifeti
                 *counter += 1;
             }
         }
-        assign_ref_lifetimes(&mut r.elem, counter, out);
+        assign_ref_lifetimes(&mut r.elem, counter, out, in_generic);
     }
 }
 

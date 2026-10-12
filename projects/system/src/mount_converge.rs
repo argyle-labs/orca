@@ -149,6 +149,16 @@ pub fn desired_for_host(this_host: &str) -> anyhow::Result<Vec<DesiredMount>> {
 pub fn desired_guest_mounts_for_host(
     this_host: &str,
 ) -> anyhow::Result<Vec<plugin_toolkit::storage::GuestMountSpec>> {
+    Ok(desired_guest_mounts()?
+        .into_iter()
+        .filter(|(host, _)| host == this_host)
+        .map(|(_, spec)| spec)
+        .collect())
+}
+
+/// Every enabled guest placement on any host, paired with its host.
+fn desired_guest_mounts() -> anyhow::Result<Vec<(String, plugin_toolkit::storage::GuestMountSpec)>>
+{
     let by_id: HashMap<String, shares::EndpointRow> = shares::endpoint_db::list()?
         .into_iter()
         .filter(|s| s.enabled)
@@ -160,7 +170,7 @@ pub fn desired_guest_mounts_for_host(
         let Some(guest) = m.guest.as_deref().map(str::trim).filter(|g| !g.is_empty()) else {
             continue;
         };
-        if !m.enabled || m.host != this_host {
+        if !m.enabled {
             continue;
         }
         let Some(share) = by_id.get(&m.share_id) else {
@@ -175,7 +185,7 @@ pub fn desired_guest_mounts_for_host(
         if sources.is_empty() {
             continue;
         }
-        out.push(plugin_toolkit::storage::GuestMountSpec {
+        let spec = plugin_toolkit::storage::GuestMountSpec {
             guest: guest.to_string(),
             target: m.target,
             backend: share.backend.clone(),
@@ -183,7 +193,8 @@ pub fn desired_guest_mounts_for_host(
             sources,
             options: share.options_rendered.clone(),
             credential: share.credential.clone(),
-        });
+        };
+        out.push((m.host, spec));
     }
     Ok(out)
 }
@@ -1330,14 +1341,21 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One guest mount orca has applied, keyed by `(guest, target)`. `source` is kept
-/// because a deleted/disabled row no longer carries it, yet `remove` needs it.
+/// One guest mount orca has applied, keyed by `(guest, target, applier)`. Only
+/// the applier that applied it is asked to remove it. `source` is kept because a
+/// deleted/disabled row no longer carries it, and is set only for a host-path
+/// (bind) source; network sources are staged by the applier and need none.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 struct GuestLedgerEntry {
     guest: String,
     target: String,
+    applier: String,
     source: Option<String>,
 }
+
+/// Serializes the guest ledger's load-modify-save across overlapping ticks and
+/// manual converges.
+static GUEST_LEDGER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn guest_ledger_file() -> Option<PathBuf> {
     contract::config::state_dir()
@@ -1345,11 +1363,28 @@ fn guest_ledger_file() -> Option<PathBuf> {
         .map(|d| d.join("managed_guest_mounts.json"))
 }
 
+/// An unparseable ledger is moved aside to `<name>.corrupt` rather than silently
+/// overwritten, so the entries it held can still be recovered by hand.
 fn load_guest_ledger_at(path: &Path) -> Vec<GuestLedgerEntry> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(l) => l,
+        Err(e) => {
+            let mut aside = path.as_os_str().to_owned();
+            aside.push(".corrupt");
+            warn!(
+                "[converge] guest-mount ledger {} is corrupt ({e}); moving it to {}",
+                path.display(),
+                Path::new(&aside).display()
+            );
+            if let Err(e) = std::fs::rename(path, &aside) {
+                warn!("[converge] could not move corrupt guest-mount ledger aside: {e}");
+            }
+            Vec::new()
+        }
+    }
 }
 
 fn save_guest_ledger_at(path: &Path, ledger: &[GuestLedgerEntry]) -> std::io::Result<()> {
@@ -1368,11 +1403,12 @@ fn save_guest_ledger_at(path: &Path, ledger: &[GuestLedgerEntry]) -> std::io::Re
 /// `apply` is idempotent (the applier writes the guest's config only when it
 /// diverges), so this runs unconditionally each tick. Best-effort: a build or
 /// apply failure is logged, never fatal to the tick. No-op when no applier is
-/// registered or no guest rows target this host.
+/// registered.
 ///
-/// A ledger entry whose placement is no longer desired (row deleted, disabled, or
-/// its share gone) is `remove`d from the guest and dropped only once every applier
-/// returns `Ok`, so a failed unbind retries on the next tick.
+/// A ledger entry whose `(guest, target)` is no longer desired on any host is
+/// `remove`d by the applier that applied it and dropped once that returns `Ok`,
+/// so a failed unbind retries next tick. An entry still desired on another host
+/// (placement moved) is dropped without a remove: the guest still wants it.
 async fn reconcile_guest_mounts(this_host: &str) {
     reconcile_guest_mounts_at(this_host, guest_ledger_file().as_deref()).await;
 }
@@ -1382,26 +1418,38 @@ async fn reconcile_guest_mounts_at(this_host: &str, ledger_path: Option<&Path>) 
     if appliers.is_empty() {
         return;
     }
-    let specs = match desired_guest_mounts_for_host(this_host) {
+    let all = match desired_guest_mounts() {
         Ok(s) => s,
         Err(e) => {
             warn!("[converge] guest desired-state build failed: {e}");
             return;
         }
     };
+    let _guard = GUEST_LEDGER_LOCK.lock().await;
     let mut ledger = ledger_path.map(load_guest_ledger_at).unwrap_or_default();
-    for spec in &specs {
-        let mut applied = false;
+    for (_, spec) in all.iter().filter(|(host, _)| host == this_host) {
+        // Proxmox validates a remove source as an absolute host path.
+        let source = spec.sources.first().filter(|s| s.starts_with('/')).cloned();
         for applier in &appliers {
             match applier.apply(spec).await {
                 Ok(()) => {
-                    applied = true;
                     debug!(
                         "[converge] guest applier '{}' reconciled {} in {}",
                         applier.name(),
                         spec.target,
                         spec.guest
-                    )
+                    );
+                    ledger.retain(|e| {
+                        !(e.guest == spec.guest
+                            && e.target == spec.target
+                            && e.applier == applier.name())
+                    });
+                    ledger.push(GuestLedgerEntry {
+                        guest: spec.guest.clone(),
+                        target: spec.target.clone(),
+                        applier: applier.name().to_string(),
+                        source: source.clone(),
+                    });
                 }
                 Err(e) => warn!(
                     "[converge] guest applier '{}' failed to apply {} in {}: {e}",
@@ -1411,47 +1459,56 @@ async fn reconcile_guest_mounts_at(this_host: &str, ledger_path: Option<&Path>) 
                 ),
             }
         }
-        if applied {
-            ledger.retain(|e| !(e.guest == spec.guest && e.target == spec.target));
-            ledger.push(GuestLedgerEntry {
-                guest: spec.guest.clone(),
-                target: spec.target.clone(),
-                source: spec.sources.first().cloned(),
-            });
-        }
     }
-    let desired: HashSet<(&str, &str)> = specs
+    let here: HashSet<(&str, &str)> = all
         .iter()
-        .map(|s| (s.guest.as_str(), s.target.as_str()))
+        .filter(|(host, _)| host == this_host)
+        .map(|(_, s)| (s.guest.as_str(), s.target.as_str()))
+        .collect();
+    let elsewhere: HashSet<(&str, &str)> = all
+        .iter()
+        .filter(|(host, _)| host != this_host)
+        .map(|(_, s)| (s.guest.as_str(), s.target.as_str()))
         .collect();
     let mut kept = Vec::with_capacity(ledger.len());
     for entry in ledger {
-        if desired.contains(&(entry.guest.as_str(), entry.target.as_str())) {
+        let key = (entry.guest.as_str(), entry.target.as_str());
+        if here.contains(&key) {
             kept.push(entry);
             continue;
         }
-        let mut removed = true;
-        for applier in &appliers {
-            if let Err(e) = applier
-                .remove(&entry.guest, &entry.target, entry.source.as_deref())
-                .await
-            {
-                removed = false;
+        if elsewhere.contains(&key) {
+            info!(
+                "[converge] guest mount {} in {} moved to another host; releasing ledger entry",
+                entry.target, entry.guest
+            );
+            continue;
+        }
+        let Some(applier) = appliers.iter().find(|a| a.name() == entry.applier) else {
+            warn!(
+                "[converge] guest applier '{}' that applied {} in {} is not registered; keeping for retry",
+                entry.applier, entry.target, entry.guest
+            );
+            kept.push(entry);
+            continue;
+        };
+        match applier
+            .remove(&entry.guest, &entry.target, entry.source.as_deref())
+            .await
+        {
+            Ok(()) => info!(
+                "[converge] removed guest mount {} from {}",
+                entry.target, entry.guest
+            ),
+            Err(e) => {
                 warn!(
                     "[converge] guest applier '{}' failed to remove {} from {}: {e}",
                     applier.name(),
                     entry.target,
                     entry.guest
                 );
+                kept.push(entry);
             }
-        }
-        if removed {
-            info!(
-                "[converge] removed guest mount {} from {}",
-                entry.target, entry.guest
-            );
-        } else {
-            kept.push(entry);
         }
     }
     if let Some(p) = ledger_path
@@ -3335,22 +3392,148 @@ mod tests {
     }
 
     fn removed_backups() -> (String, String, Option<String>) {
-        (
-            "110".to_string(),
-            "/mnt/backups".to_string(),
-            Some("10.0.0.1:/export".to_string()),
-        )
+        ("110".to_string(), "/mnt/backups".to_string(), None)
+    }
+
+    fn guest_row() -> mounts::EndpointRow {
+        mounts::endpoint_db::list()
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == "m-guest")
+            .unwrap()
+    }
+
+    /// A share whose single route is a bare absolute host path (a bind source).
+    fn insert_bind_share(id: &str, path: &str) {
+        let row = shares::EndpointRow {
+            id: id.to_string(),
+            name: format!("share-{id}"),
+            backend: "bind".into(),
+            fstype: "none".into(),
+            options: "{}".into(),
+            options_rendered: String::new(),
+            credential: None,
+            replication: None,
+            routes: plugin_toolkit::route::Routes::from(vec![Route::new(
+                "local", "bind", path, None,
+            )]),
+            enabled: true,
+        };
+        shares::endpoint_db::insert(&row).expect("insert bind share");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn disabled_share_removes_guest_placement() {
+        let h = guest_remove_harness("guest-remove-share-off").await;
+        let mut share = shares::endpoint_db::list()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == "sh-1")
+            .unwrap();
+        share.enabled = false;
+        shares::endpoint_db::update(&share).unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert_eq!(*h.removed.lock().unwrap(), vec![removed_backups()]);
+        assert!(load_guest_ledger_at(&h.ledger).is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn remove_only_reaches_the_owning_applier() {
+        let h = guest_remove_harness("guest-remove-owner").await;
+        let other_log: RemoveLog = Default::default();
+        plugin_toolkit::storage::register_guest_applier(std::sync::Arc::new(
+            RemovingGuestApplier {
+                name: "guest-remove-bystander".to_string(),
+                removed: other_log.clone(),
+                fail_remove: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+        ));
+        mounts::endpoint_db::remove("m-guest").unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        plugin_toolkit::storage::deregister_guest_applier("guest-remove-bystander");
+        assert_eq!(*h.removed.lock().unwrap(), vec![removed_backups()]);
+        assert!(other_log.lock().unwrap().is_empty());
+        assert!(load_guest_ledger_at(&h.ledger).is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn unregistered_owner_keeps_entry() {
+        let h = guest_remove_harness("guest-remove-gone-owner").await;
+        let ledger = load_guest_ledger_at(&h.ledger);
+        let mut orphaned = ledger[0].clone();
+        orphaned.applier = "uninstalled-plugin".into();
+        save_guest_ledger_at(&h.ledger, &[orphaned.clone()]).unwrap();
+        mounts::endpoint_db::remove("m-guest").unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert!(h.removed.lock().unwrap().is_empty());
+        assert_eq!(load_guest_ledger_at(&h.ledger), vec![orphaned]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn no_appliers_registered_leaves_ledger_intact() {
+        let h = guest_remove_harness("guest-remove-none").await;
+        plugin_toolkit::storage::deregister_guest_applier(&h.name);
+        mounts::endpoint_db::remove("m-guest").unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert_eq!(load_guest_ledger_at(&h.ledger).len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn moved_placement_is_released_not_removed() {
+        let h = guest_remove_harness("guest-remove-moved").await;
+        let mut row = guest_row();
+        row.host = "h2".into();
+        mounts::endpoint_db::update(&row).unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert!(h.removed.lock().unwrap().is_empty());
+        assert!(load_guest_ledger_at(&h.ledger).is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn readd_with_new_bind_source_updates_entry() {
+        let h = guest_remove_harness("guest-remove-resource").await;
+        insert_bind_share("sh-a", "/srv/a");
+        insert_bind_share("sh-b", "/srv/b");
+        let mut row = guest_row();
+        row.share_id = "sh-a".into();
+        mounts::endpoint_db::update(&row).unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        let l = load_guest_ledger_at(&h.ledger);
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].source.as_deref(), Some("/srv/a"));
+        row.share_id = "sh-b".into();
+        mounts::endpoint_db::update(&row).unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        let l = load_guest_ledger_at(&h.ledger);
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].source.as_deref(), Some("/srv/b"));
+        assert_eq!(l[0].applier, h.name);
+    }
+
+    #[test]
+    fn corrupt_guest_ledger_is_moved_aside() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("managed_guest_mounts.json");
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(load_guest_ledger_at(&path).is_empty());
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read(dir.path().join("managed_guest_mounts.json.corrupt")).unwrap(),
+            b"{not json"
+        );
     }
 
     #[tokio::test]
     #[serial_test::serial(storage_registry)]
     async fn disabled_guest_placement_is_removed_with_source() {
         let h = guest_remove_harness("guest-remove-disabled").await;
-        let mut row = mounts::endpoint_db::list()
-            .unwrap()
-            .into_iter()
-            .find(|m| m.id == "m-guest")
-            .unwrap();
+        let mut row = guest_row();
         row.enabled = false;
         mounts::endpoint_db::update(&row).unwrap();
         reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
