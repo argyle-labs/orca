@@ -1211,7 +1211,7 @@ async fn cmd_admin_plugin_apply() -> Result<()> {
             &home,
             &store,
             &req,
-            plugin_apply::invoking_uid(),
+            plugin_apply::invoking_uid()?,
             plugin_apply::PLUGIN_APPLY_TIMEOUT,
         )
         .await;
@@ -1261,7 +1261,7 @@ fn cmd_admin_plugin_trust(name: &str) -> Result<()> {
         &home,
         &plugin_apply::TrustStore::system(),
         name,
-        plugin_apply::invoking_uid(),
+        plugin_apply::invoking_uid()?,
     )?;
     let caller_uid = std::env::var("SUDO_UID").unwrap_or_else(|_| "direct".into());
     tracing::info!(plugin = %name, sha256 = %hex, caller_uid = %caller_uid, "plugin-trust recorded");

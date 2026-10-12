@@ -34,6 +34,8 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use plugin_toolkit::privileged::CALLER_UID_ENV;
+
 /// Argument that puts a plugin binary into one-shot privileged mode.
 pub const PRIVILEGED_FLAG: &str = "--privileged-op";
 
@@ -151,11 +153,17 @@ fn sudo_uid() -> Option<u32> {
     std::env::var("SUDO_UID").ok().and_then(|u| u.parse().ok())
 }
 
-/// The uid that must own the installed plugin binary: the `sudo` caller, or
-/// this process's own uid outside sudo.
-pub fn invoking_uid() -> u32 {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    sudo_uid().unwrap_or_else(|| unsafe { libc::geteuid() })
+/// The invoking user's uid: `SUDO_UID` under sudo, else this process's own
+/// euid (0 when root runs it directly). A present but non-numeric `SUDO_UID`
+/// is refused rather than falling back.
+pub fn invoking_uid() -> Result<u32> {
+    match std::env::var("SUDO_UID") {
+        Ok(raw) => raw
+            .parse()
+            .with_context(|| format!("SUDO_UID {raw:?} is not a uid")),
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        Err(_) => Ok(unsafe { libc::geteuid() }),
+    }
 }
 
 /// Root-owned directory of expected plugin hashes, one `<name>.sha256` each.
@@ -407,14 +415,15 @@ pub fn trust(orca_home: &Path, store: &TrustStore, name: &str, owner_uid: u32) -
     Ok(hex)
 }
 
-/// Run one request: verify, stage, execute, relay. `binary_owner` is the uid
-/// that must own the installed binary. `timeout` bounds the whole run,
-/// including reading the binary.
+/// Run one request: verify, stage, execute, relay. `caller_uid` is the
+/// invoking user: it must own the installed binary and is passed to the
+/// plugin as [`CALLER_UID_ENV`]. `timeout` bounds the whole run, including
+/// reading the binary.
 pub async fn apply(
     orca_home: &Path,
     store: &TrustStore,
     req: &PluginApplyRequest,
-    binary_owner: u32,
+    caller_uid: u32,
     timeout: Duration,
 ) -> Result<ApplyOutcome> {
     apply_staged_in(
@@ -422,7 +431,7 @@ pub async fn apply(
         store,
         &TrustStore::staging(),
         req,
-        binary_owner,
+        caller_uid,
         timeout,
     )
     .await
@@ -433,7 +442,7 @@ async fn apply_staged_in(
     store: &TrustStore,
     stage_dir: &TrustStore,
     req: &PluginApplyRequest,
-    binary_owner: u32,
+    caller_uid: u32,
     timeout: Duration,
 ) -> Result<ApplyOutcome> {
     validate_plugin_name(&req.plugin)?;
@@ -450,12 +459,12 @@ async fn apply_staged_in(
     );
     let run = async move {
         let stage = tokio::task::spawn_blocking(move || {
-            let bytes = verified_binary(&home, &store, &name, binary_owner)?;
+            let bytes = verified_binary(&home, &store, &name, caller_uid)?;
             Stage::new(&stage_dir, &name, &bytes)
         })
         .await
         .context("verify plugin")??;
-        run_staged(&stage, &input).await
+        run_staged(&stage, &input, caller_uid).await
     };
     match tokio::time::timeout(timeout, run).await {
         Ok(out) => out,
@@ -463,13 +472,14 @@ async fn apply_staged_in(
     }
 }
 
-async fn run_staged(stage: &Stage, input: &[u8]) -> Result<ApplyOutcome> {
+async fn run_staged(stage: &Stage, input: &[u8], caller_uid: u32) -> Result<ApplyOutcome> {
     use tokio::io::AsyncWriteExt;
     let bin = stage.exec_path();
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.arg(PRIVILEGED_FLAG)
         .env_clear()
         .env("PATH", SAFE_PATH)
+        .env(CALLER_UID_ENV, caller_uid.to_string())
         .current_dir("/")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -651,7 +661,7 @@ mod tests {
 [ "$1" = "--privileged-op" ] || { echo "not privileged mode" >&2; exit 9; }
 read -r line
 case "$line" in
-  *'"op":"ping"'*) echo "$line" >&2; echo "{\"ok\":true,\"detail\":\"$PATH|${HOME:-unset}\"}" ;;
+  *'"op":"ping"'*) echo "$line" >&2; echo "{\"ok\":true,\"detail\":\"$PATH|${HOME:-unset}|$ORCA_CALLER_UID\"}" ;;
   *'"op":"sleep"'*) sleep 30 ;;
   *) echo '{"ok":false,"error":"unknown op"}'; exit 1 ;;
 esac
@@ -762,7 +772,7 @@ esac
         assert_eq!(out.exit_code, 0, "{}", String::from_utf8_lossy(&out.stderr));
         let reply: SeamReply = serde_json::from_slice(&out.stdout).unwrap();
         assert!(reply.ok);
-        assert_eq!(reply.detail.unwrap(), format!("{SAFE_PATH}|unset"));
+        assert_eq!(reply.detail.unwrap(), format!("{SAFE_PATH}|unset|{}", me()));
         assert_eq!(
             String::from_utf8_lossy(&out.stderr).trim(),
             r#"{"op":"ping"}"#

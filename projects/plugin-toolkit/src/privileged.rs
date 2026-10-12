@@ -12,6 +12,11 @@
 //!   closed set of named handlers, each validating its own payload. Any other
 //!   op is refused.
 //!
+//! The seam runs the plugin with a cleared environment except `PATH` and
+//! [`CALLER_UID_ENV`], the uid of the user who invoked `sudo` (0 for root
+//! itself). [`caller_uid`] is the only caller identity a handler may authorize
+//! against; treat `None` as unauthorized.
+//!
 //! The reply is one `{ok, detail | error}` JSON line ([`PrivilegedReply`]) on
 //! stdout, and success needs both exit 0 and `ok: true`.
 //!
@@ -44,6 +49,19 @@ pub use crate::lxc_exec::ORCA_BIN_ENV;
 
 /// Argument that puts a plugin binary into one-shot privileged mode.
 pub const PRIVILEGED_FLAG: &str = "--privileged-op";
+
+/// Set by the seam to the invoking user's uid.
+pub const CALLER_UID_ENV: &str = "ORCA_CALLER_UID";
+
+/// The uid that invoked the privileged seam, or `None` when absent or
+/// malformed. Fail closed on `None`.
+pub fn caller_uid() -> Option<u32> {
+    parse_caller_uid(std::env::var(CALLER_UID_ENV).ok().as_deref())
+}
+
+fn parse_caller_uid(raw: Option<&str>) -> Option<u32> {
+    raw?.parse().ok()
+}
 
 /// The one reply line of a privileged op, from the plugin or from the seam.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -284,6 +302,16 @@ mod tests {
             .await;
         assert_eq!(r.error.as_deref(), Some("bad name"));
         assert!(!ops.dispatch("not json").await.ok);
+    }
+
+    #[test]
+    fn the_caller_uid_is_numeric_or_none() {
+        assert_eq!(CALLER_UID_ENV, "ORCA_CALLER_UID");
+        assert_eq!(parse_caller_uid(Some("0")), Some(0));
+        assert_eq!(parse_caller_uid(Some("1000")), Some(1000));
+        for bad in [None, Some(""), Some("-1"), Some("root"), Some("10 ")] {
+            assert_eq!(parse_caller_uid(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
