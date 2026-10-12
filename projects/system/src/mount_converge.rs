@@ -1512,7 +1512,7 @@ async fn reconcile_guest_mounts_at(this_host: &str, ledger_path: Option<&Path>) 
             warn!("[converge] could not persist guest-mount ledger: {e}");
             return;
         }
-        // Mounts were just applied: losing their entries would strand the binds.
+        // Entries just applied would be stranded if un-desired before the next save.
         if let Err(e2) = save_guest_ledger_at(p, &kept) {
             error!(
                 "[converge] could not persist guest-mount ledger after apply ({e}; retry: {e2}); applied mounts are untracked until the next save"
