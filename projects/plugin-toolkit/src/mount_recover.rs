@@ -14,6 +14,7 @@
 //! (guest) half. A backend calls [`recover_consumers_multi`] with its detected
 //! runtimes and a `host_healthy` closure computed from its own mount table.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use derive::{orca_async, orca_error};
@@ -172,6 +173,26 @@ pub trait ContainerRuntime: Send + Sync {
     ) -> Vec<String> {
         Vec::new()
     }
+
+    /// Stable runtime label keying [`StoppedConsumer`] records.
+    fn name(&self) -> &'static str {
+        ""
+    }
+
+    /// Current state of consumer `id`; `None` when the runtime cannot tell, in
+    /// which case nothing is recorded for it.
+    async fn state(&self, _id: &str) -> Result<Option<ConsumerState>, RecoverError> {
+        Ok(None)
+    }
+
+    /// Start stopped consumer `id`.
+    async fn start(&self, _id: &str) -> Result<(), RecoverError> {
+        Err(RecoverError::ToolFailed {
+            tool: "start",
+            code: None,
+            stderr: "unsupported by this runtime".into(),
+        })
+    }
 }
 
 /// Is `bin` on `PATH`? Used to pick which container runtimes to sweep — a host
@@ -212,6 +233,28 @@ pub async fn recover_stale_consumers<F>(
 where
     F: Fn(&str) -> bool,
 {
+    sweep_runtime(
+        runtime,
+        watch,
+        health_timeout,
+        host_healthy,
+        &mut Vec::new(),
+    )
+    .await
+}
+
+/// [`recover_stale_consumers`], additionally recording into `stopped` every
+/// consumer the restart left stopped.
+async fn sweep_runtime<F>(
+    runtime: &dyn ContainerRuntime,
+    watch: &[String],
+    health_timeout: Duration,
+    host_healthy: F,
+    stopped: &mut Vec<StoppedConsumer>,
+) -> ConsumerRecoverResult
+where
+    F: Fn(&str) -> bool,
+{
     let mut result = ConsumerRecoverResult::default();
 
     let binds = match runtime.binds_under(watch).await {
@@ -241,7 +284,22 @@ where
                     result.skipped_host_stale.push(bind.container_name.clone());
                     continue;
                 }
-                match runtime.restart(&bind.container_id).await {
+                let restarted = runtime.restart(&bind.container_id).await;
+                // `docker restart` stops before it starts; a start refused by a
+                // vanished bind source leaves the consumer down for good.
+                if let Ok(Some(ConsumerState::Stopped { finished_at })) =
+                    runtime.state(&bind.container_id).await
+                {
+                    stopped.push(StoppedConsumer {
+                        runtime: runtime.name().to_string(),
+                        container_id: bind.container_id.clone(),
+                        container_name: bind.container_name.clone(),
+                        host_source: bind.host_source.clone(),
+                        finished_at,
+                        healthy_sweeps: 0,
+                    });
+                }
+                match restarted {
                     Ok(()) => match runtime
                         .probe_path(&bind.container_id, &bind.container_target, health_timeout)
                         .await
@@ -289,12 +347,47 @@ pub async fn recover_consumers_multi<F>(
 where
     F: Fn(&str) -> bool + Sync,
 {
+    recover_consumers_multi_at(
+        runtimes,
+        watch,
+        health_timeout,
+        host_healthy,
+        stopped_ledger_file().as_deref(),
+    )
+    .await
+}
+
+async fn recover_consumers_multi_at<F>(
+    runtimes: &[Box<dyn ContainerRuntime>],
+    watch: &[String],
+    health_timeout: Duration,
+    host_healthy: F,
+    ledger_path: Option<&Path>,
+) -> ConsumerRecoverResult
+where
+    F: Fn(&str) -> bool + Sync,
+{
     let mut merged = ConsumerRecoverResult {
         no_consumers_found: true,
         ..Default::default()
     };
+    let mut ledger = ledger_path.map(load_stopped_at).unwrap_or_default();
+    let before = ledger.clone();
     for rt in runtimes {
-        let c = recover_stale_consumers(rt.as_ref(), watch, health_timeout, &host_healthy).await;
+        restore_stopped(rt.as_ref(), &mut ledger, &host_healthy, &mut merged).await;
+        let mut stopped = Vec::new();
+        let c = sweep_runtime(
+            rt.as_ref(),
+            watch,
+            health_timeout,
+            &host_healthy,
+            &mut stopped,
+        )
+        .await;
+        for s in stopped {
+            ledger.retain(|e| !(e.runtime == s.runtime && e.container_id == s.container_id));
+            ledger.push(s);
+        }
         if !c.no_consumers_found {
             merged.no_consumers_found = false;
         }
@@ -314,7 +407,119 @@ where
                 .extend(started.into_iter().map(|n| format!("started:{n}")));
         }
     }
+    if let Some(path) = ledger_path
+        && ledger != before
+        && let Err(e) = save_stopped_at(path, &ledger)
+    {
+        merged
+            .errors
+            .push(format!("persist stopped-consumer ledger: {e}"));
+    }
     merged
+}
+
+/// Consecutive sweeps a recorded consumer's host source must probe healthy
+/// before it is started again, so a flapping mount never bounces it.
+pub const RESTORE_CONFIRM_SWEEPS: u32 = 3;
+
+/// A consumer this sweep's restart left stopped, pending a start once its host
+/// source recovers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoppedConsumer {
+    pub runtime: String,
+    pub container_id: String,
+    pub container_name: String,
+    pub host_source: String,
+    /// The runtime's stop timestamp when recorded; a different value later means
+    /// someone else started and stopped it since, so it is no longer ours.
+    pub finished_at: String,
+    pub healthy_sweeps: u32,
+}
+
+/// Live state of a consumer, as far as a runtime can tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsumerState {
+    Gone,
+    Running,
+    Stopped { finished_at: String },
+}
+
+fn stopped_ledger_file() -> Option<PathBuf> {
+    let home = std::env::var_os("ORCA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))?;
+    Some(home.join("state").join("mount_recover_stopped.json"))
+}
+
+fn load_stopped_at(path: &Path) -> Vec<StoppedConsumer> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_stopped_at(path: &Path, ledger: &[StoppedConsumer]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(ledger)?)?;
+    std::fs::rename(tmp, path)
+}
+
+/// Start `rt`'s recorded consumers whose host source has stayed healthy for
+/// [`RESTORE_CONFIRM_SWEEPS`]; drop any that were started, stopped again, or
+/// removed by someone else. Reported as `restored:<name>` in `recovered`.
+async fn restore_stopped(
+    rt: &dyn ContainerRuntime,
+    ledger: &mut Vec<StoppedConsumer>,
+    host_healthy: &(dyn Fn(&str) -> bool + Sync),
+    result: &mut ConsumerRecoverResult,
+) {
+    let mut keep = Vec::with_capacity(ledger.len());
+    for mut e in std::mem::take(ledger) {
+        if e.runtime != rt.name() {
+            keep.push(e);
+            continue;
+        }
+        match rt.state(&e.container_id).await {
+            Ok(Some(ConsumerState::Stopped { finished_at })) if finished_at == e.finished_at => {}
+            Ok(Some(_)) => continue,
+            Ok(None) => {
+                keep.push(e);
+                continue;
+            }
+            Err(err) => {
+                result
+                    .errors
+                    .push(format!("state {}: {err}", e.container_name));
+                keep.push(e);
+                continue;
+            }
+        }
+        if !host_healthy(&e.host_source) {
+            e.healthy_sweeps = 0;
+            keep.push(e);
+            continue;
+        }
+        e.healthy_sweeps += 1;
+        if e.healthy_sweeps < RESTORE_CONFIRM_SWEEPS {
+            keep.push(e);
+            continue;
+        }
+        match rt.start(&e.container_id).await {
+            Ok(()) => result
+                .recovered
+                .push(format!("restored:{}", e.container_name)),
+            Err(err) => {
+                result
+                    .errors
+                    .push(format!("start {}: {err}", e.container_name));
+                keep.push(e);
+            }
+        }
+    }
+    *ledger = keep;
 }
 
 /// Production [`ContainerRuntime`] that shells `docker`. All docker shell-outs
@@ -411,6 +616,59 @@ impl ContainerRuntime for DockerCli {
                 code: e.code,
                 stderr: e.stderr,
             })
+    }
+
+    fn name(&self) -> &'static str {
+        "docker"
+    }
+
+    async fn state(&self, id: &str) -> Result<Option<ConsumerState>, RecoverError> {
+        let out = Command::new("docker")
+            .arg("inspect")
+            .arg("--format")
+            .arg("{{.State.Running}}\t{{.State.FinishedAt}}")
+            .arg(id)
+            .output()
+            .await?;
+        if !out.status.success {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("No such") {
+                return Ok(Some(ConsumerState::Gone));
+            }
+            return Err(RecoverError::ToolFailed {
+                tool: "docker inspect",
+                code: out.status.code,
+                stderr: stderr.into_owned(),
+            });
+        }
+        Ok(Some(parse_docker_state(&String::from_utf8_lossy(
+            &out.stdout,
+        ))))
+    }
+
+    async fn start(&self, id: &str) -> Result<(), RecoverError> {
+        Command::new("docker")
+            .arg("start")
+            .arg(id)
+            .run_checked()
+            .await
+            .map(|_stdout| ())
+            .map_err(|e| RecoverError::ToolFailed {
+                tool: "docker start",
+                code: e.code,
+                stderr: e.stderr,
+            })
+    }
+}
+
+/// Parse `running\tfinished_at` from [`DockerCli::state`]'s inspect format.
+fn parse_docker_state(raw: &str) -> ConsumerState {
+    let mut f = raw.trim().splitn(2, '\t');
+    match (f.next(), f.next()) {
+        (Some("true"), _) => ConsumerState::Running,
+        (_, finished_at) => ConsumerState::Stopped {
+            finished_at: finished_at.unwrap_or_default().to_string(),
+        },
     }
 }
 
@@ -884,5 +1142,213 @@ mod tests {
         )
         .await;
         assert!(res.no_consumers_found);
+    }
+
+    // ── stopped-consumer ledger ─────────────────────────────────────────────
+
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    /// Runtime whose first `restart` of each `fail_start` container leaves it
+    /// stopped, as a docker restart does when the bind source has vanished.
+    #[derive(Default)]
+    struct StatefulRuntime {
+        binds: Vec<ConsumerBind>,
+        fail_start: Mutex<Vec<String>>,
+        states: Mutex<HashMap<String, ConsumerState>>,
+        started: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[orca_async]
+    impl ContainerRuntime for StatefulRuntime {
+        async fn binds_under(&self, _watch: &[String]) -> Result<Vec<ConsumerBind>, RecoverError> {
+            let states = self.states.lock().unwrap();
+            Ok(self
+                .binds
+                .iter()
+                .filter(|b| states.get(&b.container_id) == Some(&ConsumerState::Running))
+                .cloned()
+                .collect())
+        }
+        async fn probe_path(
+            &self,
+            _id: &str,
+            _path: &str,
+            _timeout: Duration,
+        ) -> Result<ConsumerProbe, RecoverError> {
+            Ok(ConsumerProbe::Stale)
+        }
+        async fn restart(&self, id: &str) -> Result<(), RecoverError> {
+            let mut fail = self.fail_start.lock().unwrap();
+            if let Some(i) = fail.iter().position(|f| f == id) {
+                fail.remove(i);
+                self.set(id, stopped("t1"));
+                return Err(RecoverError::Io(std::io::Error::other(
+                    "bind source missing",
+                )));
+            }
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        async fn state(&self, id: &str) -> Result<Option<ConsumerState>, RecoverError> {
+            Ok(Some(
+                self.states
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .cloned()
+                    .unwrap_or(ConsumerState::Gone),
+            ))
+        }
+        async fn start(&self, id: &str) -> Result<(), RecoverError> {
+            self.started.lock().unwrap().push(id.to_string());
+            self.set(id, ConsumerState::Running);
+            Ok(())
+        }
+    }
+
+    impl StatefulRuntime {
+        fn set(&self, id: &str, st: ConsumerState) {
+            self.states.lock().unwrap().insert(id.to_string(), st);
+        }
+    }
+
+    fn stopped(at: &str) -> ConsumerState {
+        ConsumerState::Stopped {
+            finished_at: at.to_string(),
+        }
+    }
+
+    type Started = Arc<Mutex<Vec<String>>>;
+
+    fn boxed(rt: StatefulRuntime) -> (Vec<Box<dyn ContainerRuntime>>, Started) {
+        let started = rt.started.clone();
+        (vec![Box::new(rt)], started)
+    }
+
+    fn two_consumers_one_breaks() -> (Vec<Box<dyn ContainerRuntime>>, Started) {
+        let rt = StatefulRuntime {
+            binds: vec![bind("c1", "/data"), bind("c2", "/data")],
+            fail_start: Mutex::new(vec!["c1".to_string()]),
+            ..Default::default()
+        };
+        rt.set("c1", ConsumerState::Running);
+        rt.set("c2", ConsumerState::Running);
+        boxed(rt)
+    }
+
+    async fn sweep(
+        rts: &[Box<dyn ContainerRuntime>],
+        healthy: bool,
+        ledger: &Path,
+    ) -> ConsumerRecoverResult {
+        recover_consumers_multi_at(
+            rts,
+            &["/mnt/data".to_string()],
+            Duration::from_secs(1),
+            |_| healthy,
+            Some(ledger),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn restart_that_leaves_consumer_stopped_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("l.json");
+        let (rts, _) = two_consumers_one_breaks();
+        sweep(&rts, true, &path).await;
+        let ledger = load_stopped_at(&path);
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].container_id, "c1");
+        assert_eq!(ledger[0].finished_at, "t1");
+    }
+
+    #[tokio::test]
+    async fn recovery_restarts_exactly_recorded_after_confirmed_health() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("l.json");
+        let (rts, started) = two_consumers_one_breaks();
+        sweep(&rts, true, &path).await;
+        for _ in 1..RESTORE_CONFIRM_SWEEPS {
+            sweep(&rts, true, &path).await;
+            assert!(
+                started.lock().unwrap().is_empty(),
+                "not before confirm streak"
+            );
+        }
+        let res = sweep(&rts, true, &path).await;
+        assert_eq!(started.lock().unwrap().as_slice(), ["c1"]);
+        assert!(res.recovered.contains(&"restored:c1".to_string()));
+        assert!(load_stopped_at(&path).is_empty());
+    }
+
+    #[tokio::test]
+    async fn flapping_mount_never_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("l.json");
+        let (rts, started) = two_consumers_one_breaks();
+        sweep(&rts, true, &path).await;
+        for i in 0..(RESTORE_CONFIRM_SWEEPS * 4) {
+            sweep(&rts, i % 2 == 0, &path).await;
+        }
+        assert!(started.lock().unwrap().is_empty());
+        assert_eq!(load_stopped_at(&path).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn operator_started_restopped_or_removed_consumers_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("l.json");
+        let rt = StatefulRuntime::default();
+        let mk = |id: &str| StoppedConsumer {
+            runtime: "fake".into(),
+            container_id: id.into(),
+            container_name: id.into(),
+            host_source: "/mnt/data".into(),
+            finished_at: "t1".into(),
+            healthy_sweeps: RESTORE_CONFIRM_SWEEPS,
+        };
+        rt.set("running", ConsumerState::Running);
+        rt.set("restopped", stopped("t2"));
+        save_stopped_at(&path, &[mk("running"), mk("restopped"), mk("removed")]).unwrap();
+        let (rts, started) = boxed(rt);
+        sweep(&rts, true, &path).await;
+        assert!(started.lock().unwrap().is_empty());
+        assert!(load_stopped_at(&path).is_empty());
+    }
+
+    #[tokio::test]
+    async fn record_survives_restart_via_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("l.json");
+        let (first, _) = two_consumers_one_breaks();
+        sweep(&first, true, &path).await;
+        sweep(&first, true, &path).await;
+        assert_eq!(load_stopped_at(&path)[0].healthy_sweeps, 1);
+        drop(first);
+
+        // A fresh process: only the on-disk record knows c1 was ours.
+        let rt = StatefulRuntime::default();
+        rt.set("c1", stopped("t1"));
+        let (rts, started) = boxed(rt);
+        for _ in 1..RESTORE_CONFIRM_SWEEPS {
+            sweep(&rts, true, &path).await;
+        }
+        assert_eq!(started.lock().unwrap().as_slice(), ["c1"]);
+    }
+
+    #[test]
+    fn parse_docker_state_shapes() {
+        assert_eq!(
+            parse_docker_state("true\t0001-01-01T00:00:00Z\n"),
+            ConsumerState::Running
+        );
+        assert_eq!(
+            parse_docker_state("false\t2026-10-12T01:02:03Z\n"),
+            stopped("2026-10-12T01:02:03Z")
+        );
     }
 }
