@@ -312,11 +312,21 @@ enum AdminAction {
     CronApply,
     /// Generic privileged seam for plugins: reads `{plugin, op, payload}` JSON
     /// from stdin, resolves `plugin` only in the installed-plugin dir, checks
-    /// its binary against the sha256 recorded at install, and runs it as root
+    /// its binary against the sha256 in the root-owned trust store written by
+    /// `admin plugin-trust`, and runs it as root
     /// as `<plugin> --privileged-op` with `{op, payload}` on stdin, a clean env
     /// and a timeout. Relays the plugin's JSON reply and exit status. Invoked
     /// via `sudo -n`; never exposed over REST/MCP/peer.
     PluginApply,
+    /// Record the invoking user's installed `<name>` plugin binary as trusted
+    /// for `plugin-apply`, in the root-owned store under
+    /// `/etc/orca/plugin-trust`. Must run as root, and is deliberately absent
+    /// from the daemon's sudoers grant: approving a binary to run as root is an
+    /// administrator's decision. Re-run after every plugin update.
+    PluginTrust {
+        /// Installed plugin name (the file under `~/.orca/plugins`).
+        name: String,
+    },
     /// List all users (id, username, role, updated_at). Local-only; requires
     /// shell + DB access. Used to diagnose replicated user-id divergence.
     ListUsers,
@@ -1023,6 +1033,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::LxcPush => cmd_admin_lxc_push().await,
         AdminAction::CronApply => cmd_admin_cron_apply().await,
         AdminAction::PluginApply => cmd_admin_plugin_apply().await,
+        AdminAction::PluginTrust { name } => cmd_admin_plugin_trust(&name),
         AdminAction::ListUsers => cmd_admin_list_users(),
         AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
     }
@@ -1195,7 +1206,9 @@ async fn cmd_admin_plugin_apply() -> Result<()> {
         let req = plugin_apply::parse_request(&buf)?;
         let home = plugin_apply::invoking_orca_home()
             .context("cannot resolve the invoking user's orca home")?;
-        let out = plugin_apply::apply(&home, &req, plugin_apply::PLUGIN_APPLY_TIMEOUT).await;
+        let store = plugin_apply::TrustStore::system();
+        let out =
+            plugin_apply::apply(&home, &store, &req, plugin_apply::PLUGIN_APPLY_TIMEOUT).await;
         Ok::<_, anyhow::Error>((req, out?))
     };
     match run.await {
@@ -1228,6 +1241,21 @@ async fn cmd_admin_plugin_apply() -> Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+fn cmd_admin_plugin_trust(name: &str) -> Result<()> {
+    use system::plugin_apply;
+    anyhow::ensure!(
+        plugin_apply::is_root(),
+        "plugin-trust must run as root (sudo orca admin plugin-trust {name})"
+    );
+    let home = plugin_apply::invoking_orca_home()
+        .context("cannot resolve the invoking user's orca home")?;
+    let hex = plugin_apply::trust(&home, &plugin_apply::TrustStore::system(), name)?;
+    let caller_uid = std::env::var("SUDO_UID").unwrap_or_else(|_| "direct".into());
+    tracing::info!(plugin = %name, sha256 = %hex, caller_uid = %caller_uid, "plugin-trust recorded");
+    println!("trusted {name} sha256={hex}");
+    Ok(())
 }
 
 fn cmd_admin_reset_password(username: &str, revoke_sessions: bool) -> Result<()> {
