@@ -92,7 +92,9 @@ Replace autofs entirely.
   the lifecycle owner): every tick, for the mounts assigned to *this* host —
   ensure present + healthy. Missing → mount. Stale/unreachable → remount,
   advancing through `sources[]` (primary → failover). Disabled/removed →
-  unmount. This is the single owner of on-host mount state.
+  unmount. Unmount (remount or removal) applies only to mounts orca performed
+  or adopted after verifying the live source is a desired network source;
+  binds and foreign mounts are never released.
 - **Native mount**, root side only. The existing privilege boundary stays:
   unprivileged daemon plans, `sudo -n orca admin storage-apply` executes. The
   root helper's action changes from "write auto.orca + restart autofs" to
