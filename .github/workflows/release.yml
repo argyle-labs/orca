@@ -8,8 +8,7 @@ name: Release
 #   dispatch rc-publish     → cut vX.Y.Z-rc.N → Gitea Releases (canonical) → mirror GitHub
 #   dispatch promote-stable → cut vX.Y.Z stable → Gitea → mirror GitHub
 #
-# The rolling rc-draft-on-push pipeline was removed in favor of simpler
-# pipelines; releases are cut only via the operator dispatch stages above.
+# Releases are cut only via the operator dispatch stages above.
 #
 # Gates = the operator dispatch itself (Gitea has no environment: reviewers).
 

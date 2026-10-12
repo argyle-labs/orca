@@ -61,16 +61,16 @@ index_path() {
 published() {
   local name="$1" version="$2" body code
   body="$(mktemp)"
+  trap 'rm -f "$body"; trap - RETURN' RETURN
   # Header on stdin keeps the token out of the process list.
   code="$(printf '%s\n' "${CARGO_REGISTRIES_GITEA_TOKEN:+Authorization: $CARGO_REGISTRIES_GITEA_TOKEN}" \
     | curl -sS -o "$body" -w '%{http_code}' -H @- \
     "${index%/}/$(index_path "$name")")"
   case "$code" in
-    200) jq -e --arg v "$version" 'select(.vers == $v)' "$body" >/dev/null && { rm -f "$body"; return 0; } ;;
+    200) jq -e --arg v "$version" 'select(.vers == $v)' "$body" >/dev/null && return 0 ;;
     404) ;;
-    *) echo "index lookup for $name returned HTTP $code" >&2; rm -f "$body"; exit 1 ;;
+    *) echo "index lookup for $name returned HTTP $code" >&2; exit 1 ;;
   esac
-  rm -f "$body"
   return 1
 }
 

@@ -141,6 +141,8 @@ jobs:
           set -o pipefail
           mapfile -t pkgs < <(cargo metadata --format-version 1 --no-deps --locked \
             | jq -r '.packages[] | select(.publish | index("gitea")) | "-p", .name')
+          # pipefail can't see into the process substitution; empty means it failed.
+          [ "${#pkgs[@]}" -gt 0 ] || { echo "no publishable crates found" >&2; exit 1; }
           cargo package --no-verify --locked --registry gitea "${pkgs[@]}"
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
