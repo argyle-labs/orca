@@ -11,7 +11,7 @@
 //!
 //! The host-mount sweep itself (probe → force-release → remount) stays in each
 //! backend, which owns its own fstype grammar; this module is only the consumer
-//! (guest) half. A backend calls [`recover_consumers_multi`] with its detected
+//! (guest) half. A backend calls [`recover_consumers_for_owner`] with its detected
 //! runtimes and a `host_healthy` closure computed from its own mount table.
 //!
 //! A restart that leaves a consumer stopped (its bind source vanished) is
@@ -22,6 +22,8 @@
 //! state a start cannot fix (`dead`/`created`), after [`MAX_START_FAILURES`]
 //! failed starts, or when it carries the opt-out label
 //! [`NO_RESTORE_LABEL`]`=true`.
+//! Its sibling `.json.lock` file is permanent by design: deleting it would race
+//! a concurrent sweep that already holds the old inode's lock.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -354,7 +356,9 @@ where
 /// backends sharing a host never touch each other's records. `host_healthy`
 /// answers `None` for a source the owner does not manage: nothing is restarted,
 /// started, or counted for it.
-pub async fn recover_consumers_multi<F>(
+///
+/// `owner` must match `[a-z0-9_-]{1,32}`; anything else is rejected with an error.
+pub async fn recover_consumers_for_owner<F>(
     owner: &str,
     runtimes: &[Box<dyn ContainerRuntime>],
     watch: &[String],
@@ -365,7 +369,7 @@ where
     F: Fn(&str) -> Option<bool> + Sync,
 {
     let home = utils::home::orca_home();
-    recover_consumers_multi_at(
+    recover_consumers_for_owner_at(
         owner,
         runtimes,
         watch,
@@ -376,7 +380,33 @@ where
     .await
 }
 
-async fn recover_consumers_multi_at<F>(
+/// Single-ledger form of [`recover_consumers_for_owner`] under owner `"legacy"`.
+#[deprecated(note = "use recover_consumers_for_owner")]
+pub async fn recover_consumers_multi<F>(
+    runtimes: &[Box<dyn ContainerRuntime>],
+    watch: &[String],
+    health_timeout: Duration,
+    host_healthy: F,
+) -> ConsumerRecoverResult
+where
+    F: Fn(&str) -> bool + Sync,
+{
+    recover_consumers_for_owner(LEGACY_OWNER, runtimes, watch, health_timeout, |s| {
+        Some(host_healthy(s))
+    })
+    .await
+}
+
+const LEGACY_OWNER: &str = "legacy";
+
+fn valid_owner(owner: &str) -> bool {
+    (1..=32).contains(&owner.len())
+        && owner
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+async fn recover_consumers_for_owner_at<F>(
     owner: &str,
     runtimes: &[Box<dyn ContainerRuntime>],
     watch: &[String],
@@ -391,6 +421,12 @@ where
         no_consumers_found: true,
         ..Default::default()
     };
+    if !valid_owner(owner) {
+        merged.errors.push(format!(
+            "invalid owner {owner:?}: must match [a-z0-9_-]{{1,32}}"
+        ));
+        return merged;
+    }
     let ledger_path = home.map(|h| stopped_ledger_file(h, owner));
     if ledger_path.is_none() {
         merged
@@ -400,6 +436,12 @@ where
     // Held across load→save so a concurrent sweep of the same owner cannot
     // drop this run's records.
     let _lock = match ledger_path.as_deref().map(lock_ledger).transpose() {
+        Ok(Some(None)) => {
+            merged.errors.push(format!(
+                "mount recovery sweep already in progress for {owner}"
+            ));
+            return merged;
+        }
         Ok(l) => l,
         Err(e) => {
             merged
@@ -508,7 +550,8 @@ fn stopped_ledger_file(home: &Path, owner: &str) -> PathBuf {
         .join(format!("mount_recover_stopped.{owner}.json"))
 }
 
-fn lock_ledger(path: &Path) -> std::io::Result<std::fs::File> {
+/// `Ok(None)` when another sweep holds the lock; never blocks the caller's thread.
+fn lock_ledger(path: &Path) -> std::io::Result<Option<std::fs::File>> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -517,8 +560,11 @@ fn lock_ledger(path: &Path) -> std::io::Result<std::fs::File> {
         .truncate(false)
         .write(true)
         .open(path.with_extension("json.lock"))?;
-    f.lock()?;
-    Ok(f)
+    match f.try_lock() {
+        Ok(()) => Ok(Some(f)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    }
 }
 
 /// Missing → empty. Unreadable/corrupt → an error in `errors`, the file moved
@@ -559,6 +605,7 @@ fn load_stopped_at(path: &Path, errors: &mut Vec<String>) -> Vec<StoppedConsumer
 fn save_stopped_at(path: &Path, ledger: &[StoppedConsumer]) -> anyhow::Result<()> {
     utils::atomic::write_mkdir(path, &serde_json::to_vec_pretty(ledger)?)?;
     // The rename is durable only once the directory entry is.
+    #[cfg(unix)]
     if let Some(dir) = path.parent() {
         std::fs::File::open(dir)?.sync_all()?;
     }
@@ -1406,7 +1453,7 @@ mod tests {
         healthy: Option<bool>,
         home: &Path,
     ) -> ConsumerRecoverResult {
-        recover_consumers_multi_at(
+        recover_consumers_for_owner_at(
             owner,
             rts,
             &["/mnt/data".to_string()],
@@ -1655,7 +1702,7 @@ mod tests {
     #[tokio::test]
     async fn no_home_is_reported() {
         let (rts, _) = boxed(StatefulRuntime::default());
-        let res = recover_consumers_multi_at(
+        let res = recover_consumers_for_owner_at(
             OWNER,
             &rts,
             &["/mnt/data".to_string()],
@@ -1665,6 +1712,47 @@ mod tests {
         )
         .await;
         assert!(res.errors.iter().any(|e| e.contains("no orca home")));
+    }
+
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn deprecated_multi_wrapper_still_runs() {
+        let (rts, _) = boxed(StatefulRuntime::default());
+        let res = recover_consumers_multi(
+            &rts,
+            &["/mnt/data".to_string()],
+            Duration::from_secs(1),
+            |_| true,
+        )
+        .await;
+        assert!(!res.errors.iter().any(|e| e.contains("invalid owner")));
+    }
+
+    #[tokio::test]
+    async fn invalid_owner_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rts, _) = boxed(StatefulRuntime::default());
+        for bad in ["", "NFS", "a/b", &"x".repeat(33)] {
+            let res = sweep_as(bad, &rts, Some(true), dir.path()).await;
+            assert!(
+                res.errors.iter().any(|e| e.contains("invalid owner")),
+                "{bad}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn held_lock_skips_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = lock_ledger(&stopped_ledger_file(dir.path(), OWNER))
+            .unwrap()
+            .unwrap();
+        let (rts, _) = boxed(StatefulRuntime::default());
+        let res = sweep(&rts, true, dir.path()).await;
+        assert!(res.errors.iter().any(|e| e.contains(&format!(
+            "mount recovery sweep already in progress for {OWNER}"
+        ))));
+        drop(held);
     }
 
     #[tokio::test]

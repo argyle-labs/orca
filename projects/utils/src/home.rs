@@ -8,8 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-const ENV_ORCA_HOME: &str = "ORCA_HOME";
-const APP_STATE_DIR: &str = ".orca";
+/// Environment variable naming the orca state directory root.
+pub const ENV_ORCA_HOME: &str = "ORCA_HOME";
+/// State dir name under `$HOME`.
+pub const APP_STATE_DIR: &str = ".orca";
 
 /// Resolve orca's state dir. `None` only when no home can be resolved.
 pub fn orca_home() -> Option<PathBuf> {

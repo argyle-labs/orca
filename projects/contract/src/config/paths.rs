@@ -32,9 +32,8 @@ use std::path::PathBuf;
 
 use super::consts;
 
-/// Environment variable naming the orca state directory root. When set it
-/// overrides `$HOME/.orca` for EVERY path this module resolves.
-pub const ENV_ORCA_HOME: &str = "ORCA_HOME";
+/// When set, overrides `$HOME/.orca` for EVERY path this module resolves.
+pub use utils::home::ENV_ORCA_HOME;
 
 /// Environment variable naming an explicit DB file path, overriding the
 /// `<state_dir>/orca.db` default. Used for test isolation and unusual layouts.
