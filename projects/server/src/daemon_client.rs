@@ -134,8 +134,13 @@ impl DaemonClient for HttpDaemonClient {
 
 /// The local daemon never redirects; following one could replay args off-box.
 fn local_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap_or_default()
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("local daemon reqwest client")
+        })
+        .clone()
 }

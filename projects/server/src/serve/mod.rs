@@ -1571,6 +1571,17 @@ async fn proxy_http(req: axum::extract::Request, origin: String) -> axum::respon
                 if is_hop_by_hop(k.as_str()) {
                     continue;
                 }
+                // An absolute Location at the upstream would take the browser
+                // off orca's origin; keep it relative.
+                if k == reqwest::header::LOCATION
+                    && let Some(rel) = v
+                        .to_str()
+                        .ok()
+                        .and_then(|l| l.strip_prefix(origin.as_str()))
+                {
+                    builder = builder.header(k.as_str(), if rel.is_empty() { "/" } else { rel });
+                    continue;
+                }
                 builder = builder.header(k.as_str(), v);
             }
             let bytes = resp.bytes().await.unwrap_or_default();
