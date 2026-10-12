@@ -47,6 +47,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Mirror of the rest plugin's 8 MiB response cap. Larger responses are
 /// rejected with `HttpError::ResponseTooLarge`.
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REDIRECTS: usize = 10;
+/// Default-deny: the only request headers carried to a different origin on a
+/// redirect. Anything else may be a credential.
+const CROSS_ORIGIN_SAFE_HEADERS: &[&str] =
+    &["accept", "accept-language", "user-agent", "content-type"];
 
 #[derive(Debug, Error)]
 pub enum HttpError {
@@ -56,6 +61,8 @@ pub enum HttpError {
     Request(reqwest::Error),
     #[error("decode response: {0}")]
     Decode(String),
+    #[error("redirect: {0}")]
+    Redirect(String),
     #[error("response body exceeded {MAX_RESPONSE_BYTES} bytes")]
     ResponseTooLarge,
     #[error("http {status}: {summary}")]
@@ -244,6 +251,8 @@ impl Client {
             // regardless of init order.
             ensure_crypto_provider();
             let mut b = reqwest::Client::builder()
+                // Redirects are followed in `RequestBuilder::dispatch`.
+                .redirect(reqwest::redirect::Policy::none())
                 // Idle-pool bounds keep a daemon that fans out to many distinct
                 // hostnames (mesh peers, plugin upstreams) from accumulating
                 // unbounded idle pools.
@@ -340,26 +349,23 @@ impl RequestBuilder {
         self
     }
 
-    /// Assemble the underlying `reqwest` request shared by every terminal
-    /// (`send`, `send_bytes`, `send_stream`): url parse, pooled client, query,
-    /// headers, and body. `apply_timeout` is the only axis that differs — the
-    /// buffered terminals cap total request time; the streaming terminal must
-    /// not, or it would abort a long-lived token stream mid-flight.
+    /// Assemble one hop's `reqwest` request: pooled client, headers, body.
+    /// `timeout` is the hop's share of the total deadline; `None` for the
+    /// streaming terminal, which must not abort a long-lived token stream.
     async fn build_request(
         &self,
-        apply_timeout: bool,
+        method: &reqwest::Method,
+        url: &url::Url,
+        headers: &HashMap<String, String>,
+        with_body: bool,
+        timeout: Option<Duration>,
     ) -> Result<reqwest::RequestBuilder, HttpError> {
-        let parsed =
-            url::Url::parse(&self.url).map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
         let client = self.client.pool(self.insecure).await?;
-        let mut req = client.request(self.method.clone(), parsed);
-        if !self.query.is_empty() {
-            req = req.query(&self.query);
-        }
-        for (k, v) in &self.headers {
+        let mut req = client.request(method.clone(), url.clone());
+        for (k, v) in headers {
             req = req.header(k, v);
         }
-        match &self.body {
+        match self.body.as_ref().filter(|_| with_body) {
             Some(Body::Json(v)) => {
                 req = req.header("Content-Type", "application/json").json(v);
             }
@@ -374,10 +380,97 @@ impl RequestBuilder {
             }
             None => {}
         }
-        if apply_timeout {
-            req = req.timeout(self.timeout);
+        if let Some(t) = timeout {
+            req = req.timeout(t);
         }
         Ok(req)
+    }
+
+    /// Send, following redirects here rather than in reqwest: reqwest strips
+    /// only Authorization/Cookie cross-host, so custom credential headers
+    /// (`x-api-key`, `x-csrf-token`, ...) would leak to whatever host a 30x
+    /// names (orca#738). Cross-origin hops keep only [`CROSS_ORIGIN_SAFE_HEADERS`];
+    /// https→http hops are refused.
+    async fn dispatch(
+        &self,
+        extra_headers: &[(&str, &str)],
+        apply_timeout: bool,
+    ) -> Result<reqwest::Response, HttpError> {
+        let mut url =
+            url::Url::parse(&self.url).map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
+        if !self.query.is_empty() {
+            url.query_pairs_mut().extend_pairs(&self.query);
+        }
+        let mut headers = self.headers.clone();
+        for (k, v) in extra_headers {
+            headers.insert((*k).to_string(), (*v).to_string());
+        }
+        let mut method = self.method.clone();
+        let mut with_body = true;
+        // One deadline for the whole chain, so redirects can't multiply it.
+        let deadline = apply_timeout.then(|| std::time::Instant::now() + self.timeout);
+        for _ in 0..=MAX_REDIRECTS {
+            let hop_timeout = match deadline {
+                Some(d) => {
+                    let left = d.saturating_duration_since(std::time::Instant::now());
+                    if left.is_zero() {
+                        return Err(HttpError::Redirect(format!(
+                            "timeout of {:?} exhausted while following redirects",
+                            self.timeout
+                        )));
+                    }
+                    Some(left)
+                }
+                None => None,
+            };
+            let resp = self
+                .build_request(&method, &url, &headers, with_body, hop_timeout)
+                .await?
+                .send()
+                .await?;
+            let status = resp.status().as_u16();
+            if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+                return Ok(resp);
+            }
+            let Some(next) = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|l| l.to_str().ok())
+                .and_then(|l| url.join(l).ok())
+            else {
+                return Ok(resp);
+            };
+            check_redirect_scheme(&url, &next)?;
+            // 307/308 replay method and body; 303 (and 301/302 after a POST,
+            // per browser practice) become a bodyless GET.
+            if status == 303 && method != reqwest::Method::HEAD
+                || matches!(status, 301 | 302) && method == reqwest::Method::POST
+            {
+                method = reqwest::Method::GET;
+                with_body = false;
+            }
+            if !with_body {
+                headers.retain(|k, _| !BODY_HEADERS.iter().any(|h| k.eq_ignore_ascii_case(h)));
+            }
+            let cross_origin = !same_origin(&url, &next);
+            if cross_origin && with_body && self.body.is_some() {
+                return Err(HttpError::Redirect(format!(
+                    "refused {status} redirect to {}: would replay the request body cross-origin",
+                    next.origin().ascii_serialization()
+                )));
+            }
+            if cross_origin {
+                headers.retain(|k, _| {
+                    CROSS_ORIGIN_SAFE_HEADERS
+                        .iter()
+                        .any(|s| k.eq_ignore_ascii_case(s))
+                });
+            }
+            url = next;
+        }
+        Err(HttpError::Redirect(format!(
+            "more than {MAX_REDIRECTS} redirects"
+        )))
     }
 
     /// Stream the response body unbuffered. Unlike [`send`](Self::send) /
@@ -386,8 +479,7 @@ impl RequestBuilder {
     /// upstreams (model token streams, log tails). The caller checks
     /// [`StreamResponse::status`] and drains [`StreamResponse::bytes_stream`].
     pub async fn send_stream(self) -> Result<StreamResponse, HttpError> {
-        let req = self.build_request(false).await?;
-        let resp = req.send().await?;
+        let resp = self.dispatch(&[], false).await?;
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
         Ok(StreamResponse {
@@ -401,8 +493,7 @@ impl RequestBuilder {
     /// (release assets, checksums, archives). Status / headers / size cap
     /// behavior mirror [`send`](Self::send).
     pub async fn send_bytes(self) -> Result<BytesResponse, HttpError> {
-        let req = self.build_request(true).await?;
-        let resp = req.send().await?;
+        let resp = self.dispatch(&[], true).await?;
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
         let bytes = resp.bytes().await?.to_vec();
@@ -437,8 +528,7 @@ impl RequestBuilder {
     /// still applies.
     pub async fn send_raw(self) -> Result<BytesResponse, HttpError> {
         let max = self.max_body.unwrap_or(MAX_RESPONSE_BYTES);
-        let req = self.build_request(true).await?;
-        let resp = req.send().await?;
+        let resp = self.dispatch(&[], true).await?;
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
         let bytes = resp.bytes().await?.to_vec();
@@ -455,11 +545,12 @@ impl RequestBuilder {
     pub async fn send(self) -> Result<Response, HttpError> {
         let default_accept =
             !self.headers.contains_key("Accept") && !self.headers.contains_key("accept");
-        let mut req = self.build_request(true).await?;
-        if default_accept {
-            req = req.header("Accept", "application/json");
-        }
-        let resp = req.send().await?;
+        let accept: &[(&str, &str)] = if default_accept {
+            &[("Accept", "application/json")]
+        } else {
+            &[]
+        };
+        let resp = self.dispatch(accept, true).await?;
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
 
@@ -582,6 +673,31 @@ impl Response {
             format!("{}…", &s[..256])
         }
     }
+}
+
+const BODY_HEADERS: &[&str] = &[
+    "content-length",
+    "content-encoding",
+    "transfer-encoding",
+    "content-type",
+];
+
+/// Scheme, host and effective port; `https://h` and `https://h:443` match.
+fn same_origin(a: &url::Url, b: &url::Url) -> bool {
+    a.origin() == b.origin()
+}
+
+fn check_redirect_scheme(from: &url::Url, to: &url::Url) -> Result<(), HttpError> {
+    if !matches!(to.scheme(), "http" | "https") {
+        return Err(HttpError::Redirect(format!(
+            "refused redirect to scheme '{}'",
+            to.scheme()
+        )));
+    }
+    if from.scheme() == "https" && to.scheme() == "http" {
+        return Err(HttpError::Redirect("refused https→http redirect".into()));
+    }
+    Ok(())
 }
 
 fn flatten_headers(h: &reqwest::header::HeaderMap) -> HashMap<String, String> {
@@ -923,5 +1039,198 @@ mod tests {
             .unwrap();
         assert!(matches!(r.body, ResponseBody::Text { .. }));
         assert_eq!(r.text(), "hello");
+    }
+
+    async fn redirect_to(from: &MockServer, to: String, code: u16) {
+        Mock::given(path("/start"))
+            .respond_with(ResponseTemplate::new(code).insert_header("Location", to))
+            .mount(from)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn cross_origin_redirect_strips_credential_headers() {
+        let a = MockServer::start().await;
+        let b = MockServer::start().await;
+        redirect_to(&a, format!("{}/land", b.uri()), 302).await;
+        Mock::given(path("/land"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&b)
+            .await;
+        let r = Client::new()
+            .get(format!("{}/start", a.uri()))
+            .header("x-api-key", "k")
+            .header("X-CSRF-Token", "c")
+            .header("x-auth-token", "t")
+            .header("Proxy-Authorization", "p")
+            .bearer("abc")
+            .header("User-Agent", "orca-test")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        let reqs = b.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1);
+        let h = &reqs[0].headers;
+        for k in [
+            "x-api-key",
+            "x-csrf-token",
+            "x-auth-token",
+            "proxy-authorization",
+            "authorization",
+        ] {
+            assert!(h.get(k).is_none(), "{k} leaked cross-origin");
+        }
+        assert_eq!(h.get("user-agent").unwrap(), "orca-test");
+        assert_eq!(h.get("accept").unwrap(), "application/json");
+    }
+
+    #[tokio::test]
+    async fn same_origin_redirect_keeps_headers() {
+        let a = MockServer::start().await;
+        redirect_to(&a, "/land".into(), 307).await;
+        Mock::given(method("POST"))
+            .and(path("/land"))
+            .and(header("x-api-key", "k"))
+            .and(wiremock::matchers::body_string("payload"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&a)
+            .await;
+        let r = Client::new()
+            .post(format!("{}/start", a.uri()))
+            .header("x-api-key", "k")
+            .bytes(b"payload".to_vec(), "text/plain")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+    }
+
+    #[tokio::test]
+    async fn redirect_loop_is_capped() {
+        let a = MockServer::start().await;
+        redirect_to(&a, "/start".into(), 302).await;
+        let err = Client::new()
+            .get(format!("{}/start", a.uri()))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::Redirect(_)), "{err}");
+        assert_eq!(
+            a.received_requests().await.unwrap().len(),
+            MAX_REDIRECTS + 1
+        );
+    }
+
+    #[test]
+    fn https_to_http_redirect_refused() {
+        let u = |s: &str| url::Url::parse(s).unwrap();
+        assert!(check_redirect_scheme(&u("https://a/x"), &u("http://a/y")).is_err());
+        assert!(check_redirect_scheme(&u("http://a/x"), &u("file:///etc/passwd")).is_err());
+        assert!(check_redirect_scheme(&u("http://a/x"), &u("https://b/y")).is_ok());
+        assert!(check_redirect_scheme(&u("https://a/x"), &u("https://b/y")).is_ok());
+    }
+
+    #[test]
+    fn default_port_is_same_origin() {
+        let u = |s: &str| url::Url::parse(s).unwrap();
+        assert!(same_origin(&u("https://h/a"), &u("https://h:443/b")));
+        assert!(same_origin(&u("http://h/a"), &u("http://h:80/b")));
+        assert!(!same_origin(&u("http://h/a"), &u("http://h:81/b")));
+        assert!(!same_origin(&u("http://h/a"), &u("https://h/b")));
+        assert!(!same_origin(&u("https://h/a"), &u("https://g/b")));
+    }
+
+    async fn assert_rewritten_to_bare_get(code: u16) {
+        let a = MockServer::start().await;
+        redirect_to(&a, "/land".into(), code).await;
+        Mock::given(method("GET"))
+            .and(path("/land"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&a)
+            .await;
+        let r = Client::new()
+            .post(format!("{}/start", a.uri()))
+            .header("Content-Encoding", "gzip")
+            .bytes(b"payload".to_vec(), "text/plain")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        let reqs = a.received_requests().await.unwrap();
+        let land = &reqs[1];
+        assert!(land.body.is_empty());
+        for k in ["content-type", "content-encoding", "transfer-encoding"] {
+            assert!(land.headers.get(k).is_none(), "{k} kept on {code} GET");
+        }
+        assert!(land.headers.get("content-length").is_none_or(|v| v == "0"));
+    }
+
+    #[tokio::test]
+    async fn see_other_rewrites_to_get_without_body() {
+        assert_rewritten_to_bare_get(303).await;
+    }
+
+    #[tokio::test]
+    async fn post_302_rewrites_to_get_without_body() {
+        assert_rewritten_to_bare_get(302).await;
+    }
+
+    #[tokio::test]
+    async fn relative_cross_port_location_strips_credentials() {
+        let a = MockServer::start().await;
+        let b = MockServer::start().await;
+        let port = b.address().port();
+        redirect_to(&a, format!("//127.0.0.1:{port}/land"), 302).await;
+        Mock::given(path("/land"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&b)
+            .await;
+        Client::new()
+            .get(format!("{}/start", a.uri()))
+            .header("x-api-key", "k")
+            .send()
+            .await
+            .unwrap();
+        let reqs = b.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs[0].headers.get("x-api-key").is_none());
+    }
+
+    #[tokio::test]
+    async fn timeout_is_total_across_redirect_hops() {
+        let a = MockServer::start().await;
+        Mock::given(path("/start"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", "/start")
+                    .set_delay(Duration::from_millis(150)),
+            )
+            .mount(&a)
+            .await;
+        let started = std::time::Instant::now();
+        let err = Client::new()
+            .get(format!("{}/start", a.uri()))
+            .timeout(Duration::from_millis(400))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_millis(900), "{err}");
+        assert!(a.received_requests().await.unwrap().len() < MAX_REDIRECTS + 1);
+    }
+
+    #[tokio::test]
+    async fn cross_origin_307_with_body_refused() {
+        let a = MockServer::start().await;
+        let b = MockServer::start().await;
+        redirect_to(&a, format!("{}/land", b.uri()), 307).await;
+        let err = Client::new()
+            .post(format!("{}/start", a.uri()))
+            .bytes(b"payload".to_vec(), "text/plain")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::Redirect(_)), "{err}");
+        assert!(b.received_requests().await.unwrap().is_empty());
     }
 }

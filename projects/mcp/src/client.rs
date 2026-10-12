@@ -237,6 +237,8 @@ impl McpClient {
             .default_headers(headers)
             .connect_timeout(std::time::Duration::from_secs(2))
             .timeout(std::time::Duration::from_secs(60))
+            // A 307 would replay the JSON-RPC body to wherever the server points.
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
         // Probe with a health check before attempting handshake.
