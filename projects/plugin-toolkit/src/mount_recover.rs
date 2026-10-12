@@ -13,6 +13,15 @@
 //! backend, which owns its own fstype grammar; this module is only the consumer
 //! (guest) half. A backend calls [`recover_consumers_multi`] with its detected
 //! runtimes and a `host_healthy` closure computed from its own mount table.
+//!
+//! A restart that leaves a consumer stopped (its bind source vanished) is
+//! recorded in a per-owner ledger, `<orca home>/state/mount_recover_stopped.<owner>.json`,
+//! and started again once its host source has probed healthy for
+//! [`RESTORE_CONFIRM_SWEEPS`] consecutive sweeps. An entry is dropped when the
+//! consumer is started, restopped, or removed by someone else, when it is in a
+//! state a start cannot fix (`dead`/`created`), after [`MAX_START_FAILURES`]
+//! failed starts, or when it carries the opt-out label
+//! [`NO_RESTORE_LABEL`]`=true`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -36,6 +45,9 @@ pub enum RecoverError {
     /// Spawning / awaiting the runtime process failed.
     #[orca(display = "io: {0}", from)]
     Io(std::io::Error),
+    /// The runtime does not implement this operation.
+    #[orca(display = "{0} unsupported by this runtime")]
+    Unsupported(&'static str),
 }
 
 /// Classify a `stat` failure's stderr as `"stale"` (the bind's underlying
@@ -187,11 +199,7 @@ pub trait ContainerRuntime: Send + Sync {
 
     /// Start stopped consumer `id`.
     async fn start(&self, _id: &str) -> Result<(), RecoverError> {
-        Err(RecoverError::ToolFailed {
-            tool: "start",
-            code: None,
-            stderr: "unsupported by this runtime".into(),
-        })
+        Err(RecoverError::Unsupported("start"))
     }
 }
 
@@ -286,8 +294,10 @@ where
                 }
                 let restarted = runtime.restart(&bind.container_id).await;
                 // `docker restart` stops before it starts; a start refused by a
-                // vanished bind source leaves the consumer down for good.
-                if let Ok(Some(ConsumerState::Stopped { finished_at })) =
+                // vanished bind source leaves the consumer down for good. Checked
+                // after every restart because the exit status alone does not say
+                // whether the consumer ended up running (e.g. a stop timeout).
+                if let Ok(Some(ConsumerState::Stopped { finished_at, .. })) =
                     runtime.state(&bind.container_id).await
                 {
                     stopped.push(StoppedConsumer {
@@ -297,6 +307,7 @@ where
                         host_source: bind.host_source.clone(),
                         finished_at,
                         healthy_sweeps: 0,
+                        start_failures: 0,
                     });
                 }
                 match restarted {
@@ -338,41 +349,71 @@ where
 /// one [`ConsumerRecoverResult`]. A backend runs its own host-mount sweep first,
 /// then calls this with `detect_runtimes()` and a `host_healthy` closure computed
 /// from its post-recovery mount table.
+///
+/// `owner` names the calling backend (e.g. `"nfs"`) and keys its own ledger, so
+/// backends sharing a host never touch each other's records. `host_healthy`
+/// answers `None` for a source the owner does not manage: nothing is restarted,
+/// started, or counted for it.
 pub async fn recover_consumers_multi<F>(
+    owner: &str,
     runtimes: &[Box<dyn ContainerRuntime>],
     watch: &[String],
     health_timeout: Duration,
     host_healthy: F,
 ) -> ConsumerRecoverResult
 where
-    F: Fn(&str) -> bool + Sync,
+    F: Fn(&str) -> Option<bool> + Sync,
 {
+    let home = utils::home::orca_home();
     recover_consumers_multi_at(
+        owner,
         runtimes,
         watch,
         health_timeout,
         host_healthy,
-        stopped_ledger_file().as_deref(),
+        home.as_deref(),
     )
     .await
 }
 
 async fn recover_consumers_multi_at<F>(
+    owner: &str,
     runtimes: &[Box<dyn ContainerRuntime>],
     watch: &[String],
     health_timeout: Duration,
     host_healthy: F,
-    ledger_path: Option<&Path>,
+    home: Option<&Path>,
 ) -> ConsumerRecoverResult
 where
-    F: Fn(&str) -> bool + Sync,
+    F: Fn(&str) -> Option<bool> + Sync,
 {
     let mut merged = ConsumerRecoverResult {
         no_consumers_found: true,
         ..Default::default()
     };
-    let mut ledger = ledger_path.map(load_stopped_at).unwrap_or_default();
+    let ledger_path = home.map(|h| stopped_ledger_file(h, owner));
+    if ledger_path.is_none() {
+        merged
+            .errors
+            .push("no orca home resolved: stopped consumers are not tracked or restored".into());
+    }
+    // Held across load→save so a concurrent sweep of the same owner cannot
+    // drop this run's records.
+    let _lock = match ledger_path.as_deref().map(lock_ledger).transpose() {
+        Ok(l) => l,
+        Err(e) => {
+            merged
+                .errors
+                .push(format!("lock stopped-consumer ledger: {e}"));
+            return merged;
+        }
+    };
+    let mut ledger = ledger_path
+        .as_deref()
+        .map(|p| load_stopped_at(p, &mut merged.errors))
+        .unwrap_or_default();
     let before = ledger.clone();
+    let healthy_bool = |s: &str| host_healthy(s) == Some(true);
     for rt in runtimes {
         restore_stopped(rt.as_ref(), &mut ledger, &host_healthy, &mut merged).await;
         let mut stopped = Vec::new();
@@ -380,7 +421,7 @@ where
             rt.as_ref(),
             watch,
             health_timeout,
-            &host_healthy,
+            healthy_bool,
             &mut stopped,
         )
         .await;
@@ -399,7 +440,7 @@ where
 
         // Hook replacement: start stopped guests whose managed bind's host mount
         // is now healthy. Reported as `started:<name>` in `recovered`.
-        let started = rt.start_gated(watch, &host_healthy).await;
+        let started = rt.start_gated(watch, &healthy_bool).await;
         if !started.is_empty() {
             merged.no_consumers_found = false;
             merged
@@ -407,7 +448,7 @@ where
                 .extend(started.into_iter().map(|n| format!("started:{n}")));
         }
     }
-    if let Some(path) = ledger_path
+    if let Some(path) = ledger_path.as_deref()
         && ledger != before
         && let Err(e) = save_stopped_at(path, &ledger)
     {
@@ -422,6 +463,13 @@ where
 /// before it is started again, so a flapping mount never bounces it.
 pub const RESTORE_CONFIRM_SWEEPS: u32 = 3;
 
+/// Failed starts after which a recorded consumer is given up on.
+pub const MAX_START_FAILURES: u32 = 5;
+
+/// Container label that opts a consumer out of being restored; checked before
+/// every start.
+pub const NO_RESTORE_LABEL: &str = "orca.mount_recover.no-restore";
+
 /// A consumer this sweep's restart left stopped, pending a start once its host
 /// source recovers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -430,41 +478,91 @@ pub struct StoppedConsumer {
     pub container_id: String,
     pub container_name: String,
     pub host_source: String,
-    /// The runtime's stop timestamp when recorded; a different value later means
-    /// someone else started and stopped it since, so it is no longer ours.
+    /// The runtime's last-stop timestamp when recorded. It identifies this
+    /// particular stop: a different value later means someone else started and
+    /// stopped it since, so it is no longer ours.
     pub finished_at: String,
     pub healthy_sweeps: u32,
+    #[serde(default)]
+    pub start_failures: u32,
 }
 
 /// Live state of a consumer, as far as a runtime can tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsumerState {
     Gone,
+    /// Running, or in a transition (paused/restarting/removing) someone else owns.
     Running,
-    Stopped { finished_at: String },
+    Stopped {
+        finished_at: String,
+        no_restore: bool,
+    },
+    /// Present but in a state a start cannot fix (e.g. `dead`, `created`).
+    Unrestorable {
+        status: String,
+    },
 }
 
-fn stopped_ledger_file() -> Option<PathBuf> {
-    let home = std::env::var_os("ORCA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))?;
-    Some(home.join("state").join("mount_recover_stopped.json"))
+fn stopped_ledger_file(home: &Path, owner: &str) -> PathBuf {
+    home.join("state")
+        .join(format!("mount_recover_stopped.{owner}.json"))
 }
 
-fn load_stopped_at(path: &Path) -> Vec<StoppedConsumer> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
-}
-
-fn save_stopped_at(path: &Path, ledger: &[StoppedConsumer]) -> std::io::Result<()> {
+fn lock_ledger(path: &Path) -> std::io::Result<std::fs::File> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(ledger)?)?;
-    std::fs::rename(tmp, path)
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("json.lock"))?;
+    f.lock()?;
+    Ok(f)
+}
+
+/// Missing → empty. Unreadable/corrupt → an error in `errors`, the file moved
+/// aside to `.corrupt.<nanos>` for inspection, and an empty ledger.
+fn load_stopped_at(path: &Path, errors: &mut Vec<String>) -> Vec<StoppedConsumer> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            errors.push(format!(
+                "read stopped-consumer ledger {}: {e}",
+                path.display()
+            ));
+            return Vec::new();
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(l) => l,
+        Err(e) => {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            let mut aside = path.as_os_str().to_owned();
+            aside.push(format!(".corrupt.{nanos}"));
+            let moved = std::fs::rename(path, &aside)
+                .map(|()| format!("moved to {}", Path::new(&aside).display()))
+                .unwrap_or_else(|re| format!("could not move aside: {re}"));
+            errors.push(format!(
+                "corrupt stopped-consumer ledger {}: {e}; {moved}",
+                path.display()
+            ));
+            Vec::new()
+        }
+    }
+}
+
+fn save_stopped_at(path: &Path, ledger: &[StoppedConsumer]) -> anyhow::Result<()> {
+    utils::atomic::write_mkdir(path, &serde_json::to_vec_pretty(ledger)?)?;
+    // The rename is durable only once the directory entry is.
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Start `rt`'s recorded consumers whose host source has stayed healthy for
@@ -473,7 +571,7 @@ fn save_stopped_at(path: &Path, ledger: &[StoppedConsumer]) -> std::io::Result<(
 async fn restore_stopped(
     rt: &dyn ContainerRuntime,
     ledger: &mut Vec<StoppedConsumer>,
-    host_healthy: &(dyn Fn(&str) -> bool + Sync),
+    host_healthy: &(dyn Fn(&str) -> Option<bool> + Sync),
     result: &mut ConsumerRecoverResult,
 ) {
     let mut keep = Vec::with_capacity(ledger.len());
@@ -483,7 +581,25 @@ async fn restore_stopped(
             continue;
         }
         match rt.state(&e.container_id).await {
-            Ok(Some(ConsumerState::Stopped { finished_at })) if finished_at == e.finished_at => {}
+            Ok(Some(ConsumerState::Stopped {
+                finished_at,
+                no_restore,
+            })) if finished_at == e.finished_at => {
+                if no_restore {
+                    result.errors.push(format!(
+                        "{}: {NO_RESTORE_LABEL}=true, not restoring",
+                        e.container_name
+                    ));
+                    continue;
+                }
+            }
+            Ok(Some(ConsumerState::Unrestorable { status })) => {
+                result.errors.push(format!(
+                    "{} is {status}, not restorable; dropped",
+                    e.container_name
+                ));
+                continue;
+            }
             Ok(Some(_)) => continue,
             Ok(None) => {
                 keep.push(e);
@@ -497,10 +613,17 @@ async fn restore_stopped(
                 continue;
             }
         }
-        if !host_healthy(&e.host_source) {
-            e.healthy_sweeps = 0;
-            keep.push(e);
-            continue;
+        match host_healthy(&e.host_source) {
+            None => {
+                keep.push(e);
+                continue;
+            }
+            Some(false) => {
+                e.healthy_sweeps = 0;
+                keep.push(e);
+                continue;
+            }
+            Some(true) => {}
         }
         e.healthy_sweeps += 1;
         if e.healthy_sweeps < RESTORE_CONFIRM_SWEEPS {
@@ -512,10 +635,18 @@ async fn restore_stopped(
                 .recovered
                 .push(format!("restored:{}", e.container_name)),
             Err(err) => {
-                result
-                    .errors
-                    .push(format!("start {}: {err}", e.container_name));
-                keep.push(e);
+                e.start_failures += 1;
+                if e.start_failures >= MAX_START_FAILURES {
+                    result.errors.push(format!(
+                        "giving up on {} after {MAX_START_FAILURES} failed starts: {err}",
+                        e.container_name
+                    ));
+                } else {
+                    result
+                        .errors
+                        .push(format!("start {}: {err}", e.container_name));
+                    keep.push(e);
+                }
             }
         }
     }
@@ -626,7 +757,7 @@ impl ContainerRuntime for DockerCli {
         let out = Command::new("docker")
             .arg("inspect")
             .arg("--format")
-            .arg("{{.State.Running}}\t{{.State.FinishedAt}}")
+            .arg(DOCKER_STATE_FORMAT)
             .arg(id)
             .output()
             .await?;
@@ -641,9 +772,7 @@ impl ContainerRuntime for DockerCli {
                 stderr: stderr.into_owned(),
             });
         }
-        Ok(Some(parse_docker_state(&String::from_utf8_lossy(
-            &out.stdout,
-        ))))
+        Ok(parse_docker_state(&String::from_utf8_lossy(&out.stdout)))
     }
 
     async fn start(&self, id: &str) -> Result<(), RecoverError> {
@@ -661,15 +790,26 @@ impl ContainerRuntime for DockerCli {
     }
 }
 
-/// Parse `running\tfinished_at` from [`DockerCli::state`]'s inspect format.
-fn parse_docker_state(raw: &str) -> ConsumerState {
-    let mut f = raw.trim().splitn(2, '\t');
-    match (f.next(), f.next()) {
-        (Some("true"), _) => ConsumerState::Running,
-        (_, finished_at) => ConsumerState::Stopped {
-            finished_at: finished_at.unwrap_or_default().to_string(),
+/// `status\tfinished_at\tno_restore_label` for [`DockerCli::state`]; `index` of
+/// a missing label yields an empty field.
+const DOCKER_STATE_FORMAT: &str = "{{.State.Status}}\t{{.State.FinishedAt}}\t{{index .Config.Labels \"orca.mount_recover.no-restore\"}}";
+
+/// Parse [`DOCKER_STATE_FORMAT`] output; `None` when it is not that shape.
+fn parse_docker_state(raw: &str) -> Option<ConsumerState> {
+    let mut f = raw.trim_end_matches(['\r', '\n']).split('\t');
+    let status = f.next().filter(|s| !s.is_empty())?;
+    let finished_at = f.next().filter(|s| !s.is_empty())?;
+    let no_restore = f.next().is_some_and(|l| l.trim() == "true");
+    Some(match status {
+        "exited" => ConsumerState::Stopped {
+            finished_at: finished_at.to_string(),
+            no_restore,
         },
-    }
+        "running" | "paused" | "restarting" | "removing" => ConsumerState::Running,
+        other => ConsumerState::Unrestorable {
+            status: other.to_string(),
+        },
+    })
 }
 
 /// Parse the `id\tname\tsource\tdestination` lines emitted by
@@ -1155,6 +1295,8 @@ mod tests {
     struct StatefulRuntime {
         binds: Vec<ConsumerBind>,
         fail_start: Mutex<Vec<String>>,
+        start_errors: bool,
+        state_answer: Option<Result<Option<ConsumerState>, ()>>,
         states: Mutex<HashMap<String, ConsumerState>>,
         started: Arc<Mutex<Vec<String>>>,
     }
@@ -1193,6 +1335,11 @@ mod tests {
             "fake"
         }
         async fn state(&self, id: &str) -> Result<Option<ConsumerState>, RecoverError> {
+            match &self.state_answer {
+                Some(Ok(a)) => return Ok(a.clone()),
+                Some(Err(())) => return Err(RecoverError::Unsupported("state")),
+                None => {}
+            }
             Ok(Some(
                 self.states
                     .lock()
@@ -1204,6 +1351,9 @@ mod tests {
         }
         async fn start(&self, id: &str) -> Result<(), RecoverError> {
             self.started.lock().unwrap().push(id.to_string());
+            if self.start_errors {
+                return Err(RecoverError::Io(std::io::Error::other("no such source")));
+            }
             self.set(id, ConsumerState::Running);
             Ok(())
         }
@@ -1218,6 +1368,7 @@ mod tests {
     fn stopped(at: &str) -> ConsumerState {
         ConsumerState::Stopped {
             finished_at: at.to_string(),
+            no_restore: false,
         }
     }
 
@@ -1239,28 +1390,47 @@ mod tests {
         boxed(rt)
     }
 
+    const OWNER: &str = "test";
+
     async fn sweep(
         rts: &[Box<dyn ContainerRuntime>],
         healthy: bool,
-        ledger: &Path,
+        home: &Path,
+    ) -> ConsumerRecoverResult {
+        sweep_as(OWNER, rts, Some(healthy), home).await
+    }
+
+    async fn sweep_as(
+        owner: &str,
+        rts: &[Box<dyn ContainerRuntime>],
+        healthy: Option<bool>,
+        home: &Path,
     ) -> ConsumerRecoverResult {
         recover_consumers_multi_at(
+            owner,
             rts,
             &["/mnt/data".to_string()],
             Duration::from_secs(1),
             |_| healthy,
-            Some(ledger),
+            Some(home),
         )
         .await
+    }
+
+    fn load(home: &Path, owner: &str) -> Vec<StoppedConsumer> {
+        let mut errors = Vec::new();
+        let l = load_stopped_at(&stopped_ledger_file(home, owner), &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        l
     }
 
     #[tokio::test]
     async fn restart_that_leaves_consumer_stopped_is_recorded() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("l.json");
+        let path = dir.path();
         let (rts, _) = two_consumers_one_breaks();
-        sweep(&rts, true, &path).await;
-        let ledger = load_stopped_at(&path);
+        sweep(&rts, true, path).await;
+        let ledger = load(path, OWNER);
         assert_eq!(ledger.len(), 1);
         assert_eq!(ledger[0].container_id, "c1");
         assert_eq!(ledger[0].finished_at, "t1");
@@ -1269,39 +1439,39 @@ mod tests {
     #[tokio::test]
     async fn recovery_restarts_exactly_recorded_after_confirmed_health() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("l.json");
+        let path = dir.path();
         let (rts, started) = two_consumers_one_breaks();
-        sweep(&rts, true, &path).await;
+        sweep(&rts, true, path).await;
         for _ in 1..RESTORE_CONFIRM_SWEEPS {
-            sweep(&rts, true, &path).await;
+            sweep(&rts, true, path).await;
             assert!(
                 started.lock().unwrap().is_empty(),
                 "not before confirm streak"
             );
         }
-        let res = sweep(&rts, true, &path).await;
+        let res = sweep(&rts, true, path).await;
         assert_eq!(started.lock().unwrap().as_slice(), ["c1"]);
         assert!(res.recovered.contains(&"restored:c1".to_string()));
-        assert!(load_stopped_at(&path).is_empty());
+        assert!(load(path, OWNER).is_empty());
     }
 
     #[tokio::test]
     async fn flapping_mount_never_restarts() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("l.json");
+        let path = dir.path();
         let (rts, started) = two_consumers_one_breaks();
-        sweep(&rts, true, &path).await;
+        sweep(&rts, true, path).await;
         for i in 0..(RESTORE_CONFIRM_SWEEPS * 4) {
-            sweep(&rts, i % 2 == 0, &path).await;
+            sweep(&rts, i % 2 == 0, path).await;
         }
         assert!(started.lock().unwrap().is_empty());
-        assert_eq!(load_stopped_at(&path).len(), 1);
+        assert_eq!(load(path, OWNER).len(), 1);
     }
 
     #[tokio::test]
     async fn operator_started_restopped_or_removed_consumers_are_dropped() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("l.json");
+        let path = dir.path();
         let rt = StatefulRuntime::default();
         let mk = |id: &str| StoppedConsumer {
             runtime: "fake".into(),
@@ -1310,24 +1480,29 @@ mod tests {
             host_source: "/mnt/data".into(),
             finished_at: "t1".into(),
             healthy_sweeps: RESTORE_CONFIRM_SWEEPS,
+            start_failures: 0,
         };
         rt.set("running", ConsumerState::Running);
         rt.set("restopped", stopped("t2"));
-        save_stopped_at(&path, &[mk("running"), mk("restopped"), mk("removed")]).unwrap();
+        save_stopped_at(
+            &stopped_ledger_file(path, OWNER),
+            &[mk("running"), mk("restopped"), mk("removed")],
+        )
+        .unwrap();
         let (rts, started) = boxed(rt);
-        sweep(&rts, true, &path).await;
+        sweep(&rts, true, path).await;
         assert!(started.lock().unwrap().is_empty());
-        assert!(load_stopped_at(&path).is_empty());
+        assert!(load(path, OWNER).is_empty());
     }
 
     #[tokio::test]
     async fn record_survives_restart_via_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("l.json");
+        let path = dir.path();
         let (first, _) = two_consumers_one_breaks();
-        sweep(&first, true, &path).await;
-        sweep(&first, true, &path).await;
-        assert_eq!(load_stopped_at(&path)[0].healthy_sweeps, 1);
+        sweep(&first, true, path).await;
+        sweep(&first, true, path).await;
+        assert_eq!(load(path, OWNER)[0].healthy_sweeps, 1);
         drop(first);
 
         // A fresh process: only the on-disk record knows c1 was ours.
@@ -1335,20 +1510,200 @@ mod tests {
         rt.set("c1", stopped("t1"));
         let (rts, started) = boxed(rt);
         for _ in 1..RESTORE_CONFIRM_SWEEPS {
-            sweep(&rts, true, &path).await;
+            sweep(&rts, true, path).await;
         }
         assert_eq!(started.lock().unwrap().as_slice(), ["c1"]);
+    }
+
+    fn recorded(id: &str) -> StoppedConsumer {
+        StoppedConsumer {
+            runtime: "fake".into(),
+            container_id: id.into(),
+            container_name: id.into(),
+            host_source: "/mnt/data".into(),
+            finished_at: "t1".into(),
+            healthy_sweeps: RESTORE_CONFIRM_SWEEPS,
+            start_failures: 0,
+        }
+    }
+
+    fn seed(home: &Path, owner: &str, entries: &[StoppedConsumer]) {
+        save_stopped_at(&stopped_ledger_file(home, owner), entries).unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_owners_sharing_a_home_do_not_interfere() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        seed(home, "nfs", &[recorded("c1")]);
+        seed(home, "smb", &[recorded("c2")]);
+        let rt = StatefulRuntime::default();
+        rt.set("c1", stopped("t1"));
+        rt.set("c2", stopped("t1"));
+        let (rts, started) = boxed(rt);
+
+        // smb's sources are not nfs's: None leaves smb's ledger untouched.
+        sweep_as("smb", &rts, None, home).await;
+        sweep_as("nfs", &rts, Some(true), home).await;
+        assert_eq!(started.lock().unwrap().as_slice(), ["c1"]);
+        assert!(load(home, "nfs").is_empty());
+        assert_eq!(load(home, "smb"), vec![recorded("c2")]);
+    }
+
+    #[tokio::test]
+    async fn not_mine_keeps_healthy_streak() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = recorded("c1");
+        e.healthy_sweeps = 1;
+        seed(dir.path(), OWNER, &[e.clone()]);
+        let rt = StatefulRuntime::default();
+        rt.set("c1", stopped("t1"));
+        let (rts, started) = boxed(rt);
+        sweep_as(OWNER, &rts, None, dir.path()).await;
+        assert!(started.lock().unwrap().is_empty());
+        assert_eq!(load(dir.path(), OWNER), vec![e]);
+    }
+
+    #[tokio::test]
+    async fn state_unknown_or_error_keeps_record() {
+        for answer in [Ok(None), Err(())] {
+            let dir = tempfile::tempdir().unwrap();
+            seed(dir.path(), OWNER, &[recorded("c1")]);
+            let is_err = answer.is_err();
+            let rt = StatefulRuntime {
+                state_answer: Some(answer),
+                ..Default::default()
+            };
+            let (rts, started) = boxed(rt);
+            let res = sweep(&rts, true, dir.path()).await;
+            assert!(started.lock().unwrap().is_empty());
+            assert_eq!(load(dir.path(), OWNER), vec![recorded("c1")]);
+            assert_eq!(res.errors.iter().any(|e| e.starts_with("state c1")), is_err);
+        }
+    }
+
+    #[tokio::test]
+    async fn failing_start_is_retried_then_given_up() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path(), OWNER, &[recorded("c1")]);
+        let rt = StatefulRuntime {
+            start_errors: true,
+            ..Default::default()
+        };
+        rt.set("c1", stopped("t1"));
+        let (rts, started) = boxed(rt);
+        for n in 1..MAX_START_FAILURES {
+            sweep(&rts, true, dir.path()).await;
+            assert_eq!(load(dir.path(), OWNER)[0].start_failures, n);
+        }
+        let res = sweep(&rts, true, dir.path()).await;
+        assert!(load(dir.path(), OWNER).is_empty());
+        assert_eq!(
+            res.errors
+                .iter()
+                .filter(|e| e.starts_with("giving up"))
+                .count(),
+            1
+        );
+        let res = sweep(&rts, true, dir.path()).await;
+        assert!(res.errors.is_empty());
+        assert_eq!(started.lock().unwrap().len() as u32, MAX_START_FAILURES);
+    }
+
+    #[tokio::test]
+    async fn opt_out_label_and_unrestorable_are_dropped_unstarted() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path(), OWNER, &[recorded("optout"), recorded("dead")]);
+        let rt = StatefulRuntime::default();
+        rt.set(
+            "optout",
+            ConsumerState::Stopped {
+                finished_at: "t1".into(),
+                no_restore: true,
+            },
+        );
+        rt.set(
+            "dead",
+            ConsumerState::Unrestorable {
+                status: "dead".into(),
+            },
+        );
+        let (rts, started) = boxed(rt);
+        let res = sweep(&rts, true, dir.path()).await;
+        assert!(started.lock().unwrap().is_empty());
+        assert!(load(dir.path(), OWNER).is_empty());
+        assert_eq!(res.errors.len(), 2, "{:?}", res.errors);
+    }
+
+    #[tokio::test]
+    async fn corrupt_ledger_is_reported_and_moved_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = stopped_ledger_file(dir.path(), OWNER);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{not json").unwrap();
+        let (rts, _) = boxed(StatefulRuntime::default());
+        let res = sweep(&rts, true, dir.path()).await;
+        assert!(res.errors.iter().any(|e| e.starts_with("corrupt")));
+        assert!(!path.exists());
+        let aside = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".corrupt."));
+        assert!(aside);
+    }
+
+    #[tokio::test]
+    async fn no_home_is_reported() {
+        let (rts, _) = boxed(StatefulRuntime::default());
+        let res = recover_consumers_multi_at(
+            OWNER,
+            &rts,
+            &["/mnt/data".to_string()],
+            Duration::from_secs(1),
+            |_| Some(true),
+            None,
+        )
+        .await;
+        assert!(res.errors.iter().any(|e| e.contains("no orca home")));
+    }
+
+    #[tokio::test]
+    async fn default_start_is_unsupported() {
+        let rt = FakeRuntime {
+            binds: vec![],
+            probes: std::sync::Mutex::new(HashMap::new()),
+            restarted: std::sync::Mutex::new(Vec::new()),
+        };
+        assert!(matches!(
+            rt.start("x").await,
+            Err(RecoverError::Unsupported("start"))
+        ));
     }
 
     #[test]
     fn parse_docker_state_shapes() {
         assert_eq!(
-            parse_docker_state("true\t0001-01-01T00:00:00Z\n"),
-            ConsumerState::Running
+            parse_docker_state("running\t0001-01-01T00:00:00Z\t\n"),
+            Some(ConsumerState::Running)
         );
         assert_eq!(
-            parse_docker_state("false\t2026-10-12T01:02:03Z\n"),
-            stopped("2026-10-12T01:02:03Z")
+            parse_docker_state("exited\t2026-10-12T01:02:03Z\t\n"),
+            Some(stopped("2026-10-12T01:02:03Z"))
         );
+        assert_eq!(
+            parse_docker_state("exited\tt1\ttrue\n"),
+            Some(ConsumerState::Stopped {
+                finished_at: "t1".into(),
+                no_restore: true,
+            })
+        );
+        assert_eq!(
+            parse_docker_state("dead\tt1\t\n"),
+            Some(ConsumerState::Unrestorable {
+                status: "dead".into()
+            })
+        );
+        assert_eq!(parse_docker_state(""), None);
+        assert_eq!(parse_docker_state("exited\n"), None);
     }
 }
