@@ -102,6 +102,8 @@ pub fn loopback_only_reqwest_client(url: &str) -> anyhow::Result<reqwest::Client
     );
     Ok(reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        // A redirect would carry the loopback bearer and body off-box.
+        .redirect(reqwest::redirect::Policy::none())
         .build()?)
 }
 

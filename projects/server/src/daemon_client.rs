@@ -76,7 +76,7 @@ impl DaemonClient for HttpDaemonClient {
         Box::pin(async move {
             let url = format!("{}/api/v1/{}", local_daemon_url(), name);
             ensure_crypto_provider();
-            let mut req = reqwest::Client::new().post(&url).json(&args);
+            let mut req = local_client().post(&url).json(&args);
             if let Some(sid) = read_session_id() {
                 // Daemon middleware accepts cookie or bearer for the same session
                 // row. Cookie form keeps us bit-for-bit identical to the UI.
@@ -109,7 +109,7 @@ impl DaemonClient for HttpDaemonClient {
         Box::pin(async move {
             let url = format!("{}{}", local_daemon_url(), path);
             ensure_crypto_provider();
-            let mut req = reqwest::Client::new().get(&url);
+            let mut req = local_client().get(&url);
             if let Some(sid) = read_session_id() {
                 req = req.header("cookie", format!("orca_session={sid}"));
             } else if let Some(tok) = read_loopback_token() {
@@ -130,4 +130,17 @@ impl DaemonClient for HttpDaemonClient {
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("decode GET {path} body: {e}"))
         })
     }
+}
+
+/// The local daemon never redirects; following one could replay args off-box.
+fn local_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("local daemon reqwest client")
+        })
+        .clone()
 }
