@@ -80,14 +80,6 @@ jobs:
           ORCA_FORBIDDEN_IP_PATTERNS: ${{ secrets.FORBIDDEN_IP_PATTERNS }}
         run: ./scripts/check-no-real-ips.sh
 
-      - name: Workflow matches crate graph
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          gen="$(mktemp)"
-          scripts/gen-ci-crate-dag.sh >"$gen"
-          diff -u .github/workflows/ci.yml "$gen"
-
       # fmt + clippy are workspace-wide, so they key on the whole-workspace
       # source hash: docs-only changes reuse the recorded pass.
       - name: Source hash
@@ -123,6 +115,14 @@ jobs:
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      # Needs cargo, so it runs after Set up Rust regardless of the pass cache.
+      - name: Workflow matches crate graph
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          gen="$(mktemp)"
+          scripts/gen-ci-crate-dag.sh >"$gen"
+          diff -u .github/workflows/ci.yml "$gen"
       - name: Format
         uses: argyle-labs/.github/.github/actions/cargo-fmt@main
         if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
@@ -194,6 +194,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-agents'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-agents from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -270,6 +275,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-app-kit'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-app-kit from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -346,6 +356,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-auth'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-auth from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -422,6 +437,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-config-source'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-config-source from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -498,6 +518,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-containers'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-containers from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -574,6 +599,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-contract'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-contract from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -650,6 +680,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-conversation'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-conversation from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -726,6 +761,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-db'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-db from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -802,6 +842,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-deploy-target'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-deploy-target from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -878,6 +923,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-derive'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-derive from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -954,6 +1004,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-dev'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-dev from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1030,6 +1085,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-dispatch'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-dispatch from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1106,6 +1166,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-files'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-files from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1182,6 +1247,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-graphql'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-graphql from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1258,6 +1328,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-hosts'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-hosts from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1334,6 +1409,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-identities'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-identities from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1410,6 +1490,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-inventory'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-inventory from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1486,6 +1571,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-inventory-tests'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-inventory-tests from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1562,6 +1652,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-macro-runtime'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-macro-runtime from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1638,6 +1733,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-mcp'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-mcp from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1714,6 +1814,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-media'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-media from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1790,6 +1895,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-model'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-model from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1866,6 +1976,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-namespace'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-namespace from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -1942,6 +2057,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-notifications'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-notifications from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2018,6 +2138,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-openapi'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-openapi from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2094,6 +2219,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-plugin-abi'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-plugin-abi from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2170,6 +2300,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-plugin-loader'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-plugin-loader from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2246,6 +2381,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-plugin-proto'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-plugin-proto from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2322,6 +2462,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-plugin-toolkit'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-plugin-toolkit from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2398,6 +2543,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-plugin-toolkit-build'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-plugin-toolkit-build from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2474,6 +2624,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-plugins'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-plugins from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2550,6 +2705,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-route'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-route from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2626,6 +2786,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-secrets'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-secrets from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2702,6 +2867,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-server'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-server from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2778,6 +2948,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-service'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-service from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2854,6 +3029,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-spec'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-spec from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -2930,6 +3110,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-storage'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-storage from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -3006,6 +3191,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-system'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-system from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -3082,6 +3272,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['orca-utils'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for orca-utils from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -3158,6 +3353,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['plugin-toolkit'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for plugin-toolkit from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -3234,6 +3434,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['plugin-toolkit-build'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for plugin-toolkit-build from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -3344,25 +3549,21 @@ jobs:
       - crate-plugin-toolkit
       - crate-plugin-toolkit-build
     if: ${{ always() }}
-    runs-on: ci-large
-    container:
-      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
-      credentials:
-        username: ${{ secrets.CI_REGISTRY_USER }}
-        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash
     steps:
       - name: Every crate built and tested
         env:
-          RESULTS: ${{ toJSON(needs) }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          failed="$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key): \(.value.result)"' <<<"$RESULTS")"
-          if [ -n "$failed" ]; then
-            echo "$failed"
-            exit 1
-          fi
+          for r in $RESULTS; do
+            if [ "$r" != success ]; then
+              echo "a needed job ended $r: $RESULTS"
+              exit 1
+            fi
+          done
           echo "all crates passed"
 
   # Summarises line coverage across the per-crate lcov files; report-only.

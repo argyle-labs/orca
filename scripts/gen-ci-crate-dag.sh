@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Generates .github/workflows/ci.yml: one build+test job per workspace crate,
-# each needing exactly the crates it depends on (normal, build AND dev edges:
-# a crate's tests compile its dev-deps, so waiting for them keeps sccache warm
-# and matches crate-hashes, which also closes over dev edges). A dependency
-# cycle fails generation.
+# each needing the crates it depends on, so crates build in dependency order.
+# Normal and build edges must be acyclic (a cycle fails generation); dev edges
+# are added on top unless they would close a cycle, in which case they are
+# dropped (cargo allows dev-dep cycles; job ordering cannot).
 #
 # Prints the workflow to stdout; `--write` writes it in place. The lint job's
 # "Workflow matches crate graph" step diffs stdout against the committed file.
@@ -26,12 +26,29 @@ graph="$(jq -r '
   .workspace_members as $m
   | [.packages[] | select(.id as $id | $m | index($id))] as $ws
   | ($ws | map(.name)) as $names
-  | $ws | sort_by(.name)[]
-  | [.name, ([.dependencies[] | select(.path != null) | .name
-              | select(. as $d | $names | index($d))] - [.name] | unique | join(" "))]
+  | def edges($dev):
+      [$ws[] | .name as $n | .dependencies[]
+       | select(.path != null and ((.kind == "dev") == $dev))
+       | select(.name != $n and (.name as $d | $names | index($d)))
+       | [$n, .name]] | unique;
+    def reaches($g; $from; $to):
+      def walk($seen; $q):
+        if ($q | length) == 0 then false
+        elif $q[0] == $to then true
+        elif ($seen | index([$q[0]])) then walk($seen; $q[1:])
+        else walk($seen + [$q[0]]; $q[1:] + ($g[$q[0]] // []))
+        end;
+      walk([]; [$from]);
+  ($ws | map({key: .name, value: []}) | from_entries) as $empty
+  | (reduce edges(false)[] as $e ($empty; .[$e[0]] += [$e[1]])) as $g
+  | (reduce edges(true)[] as $e ($g;
+      if (.[$e[0]] | index($e[1])) or reaches(.; $e[1]; $e[0]) then . else .[$e[0]] += [$e[1]] end)) as $full
+  | $full | to_entries | sort_by(.key)[]
+  | [.key, (.value | unique | join(" "))]
   | @tsv' <<<"$meta")"
 
-# Kahn's algorithm: anything left unplaced is on a cycle.
+# Kahn's algorithm: anything left unplaced is on a cycle (only normal/build
+# edges can form one; dev edges that would were dropped above).
 jq -Rne '
   [inputs | split("\t") | {key: .[0], value: (.[1] | split(" ") | map(select(. != "")))}]
   | from_entries as $g
@@ -131,14 +148,6 @@ jobs:
           ORCA_FORBIDDEN_IP_PATTERNS: ${{ secrets.FORBIDDEN_IP_PATTERNS }}
         run: ./scripts/check-no-real-ips.sh
 
-      - name: Workflow matches crate graph
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          gen="$(mktemp)"
-          scripts/gen-ci-crate-dag.sh >"$gen"
-          diff -u .github/workflows/ci.yml "$gen"
-
       # fmt + clippy are workspace-wide, so they key on the whole-workspace
       # source hash: docs-only changes reuse the recorded pass.
       - name: Source hash
@@ -174,6 +183,14 @@ jobs:
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      # Needs cargo, so it runs after Set up Rust regardless of the pass cache.
+      - name: Workflow matches crate graph
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          gen="$(mktemp)"
+          scripts/gen-ci-crate-dag.sh >"$gen"
+          diff -u .github/workflows/ci.yml "$gen"
       - name: Format
         uses: argyle-labs/.github/.github/actions/cargo-fmt@main
         if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
@@ -249,6 +266,11 @@ EOF
       run:
         shell: bash
     steps:
+      # An empty key would let the pass cache reuse an unrelated run.
+      - name: Require crate hash
+        env:
+          HASH: ${{ fromJSON(needs.plan.outputs.hashes)['@NAME@'] }}
+        run: '[ -n "$HASH" ] || { echo "no crate hash for @NAME@ from plan"; exit 1; }'
       - name: Checkout
         uses: actions/checkout@v5
       - name: Check pass cache
@@ -336,25 +358,21 @@ EOF
     needs:
 ${all_needs}
     if: \${{ always() }}
-    runs-on: ci-large
-    container:
-      image: \${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
-      credentials:
-        username: \${{ secrets.CI_REGISTRY_USER }}
-        password: \${{ secrets.CI_REGISTRY_TOKEN }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash
     steps:
       - name: Every crate built and tested
         env:
-          RESULTS: \${{ toJSON(needs) }}
+          RESULTS: \${{ join(needs.*.result, ' ') }}
         run: |
-          failed="\$(jq -r 'to_entries[] | select(.value.result != "success") | "\\(.key): \\(.value.result)"' <<<"\$RESULTS")"
-          if [ -n "\$failed" ]; then
-            echo "\$failed"
-            exit 1
-          fi
+          for r in \$RESULTS; do
+            if [ "\$r" != success ]; then
+              echo "a needed job ended \$r: \$RESULTS"
+              exit 1
+            fi
+          done
           echo "all crates passed"
 
   # Summarises line coverage across the per-crate lcov files; report-only.
