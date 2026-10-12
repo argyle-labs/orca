@@ -203,10 +203,6 @@ fn restore_incumbent(backup: Option<&Path>, dest: &Path, software: &str) -> Stri
             backup.display()
         );
     }
-    #[cfg(unix)]
-    if let Err(e) = record_install_hash(dest) {
-        tracing::warn!(plugin = %software, error = %format!("{e:#}"), "restored plugin has no install hash");
-    }
     match plugin_loader::spawn_plugin(dest, software) {
         Ok(report) => {
             apply_plugin_schema(&report);
@@ -230,18 +226,6 @@ fn restore_incumbent(backup: Option<&Path>, dest: &Path, software: &str) -> Stri
             )
         }
     }
-}
-
-/// Record the installed binary's sha256 beside it; `orca admin plugin-apply`
-/// refuses to run a plugin whose bytes no longer match.
-#[cfg(unix)]
-fn record_install_hash(dest: &Path) -> Result<()> {
-    let (Some(dir), Some(name)) = (dest.parent(), dest.file_name().and_then(|n| n.to_str())) else {
-        bail!("plugin path {} has no install dir", dest.display());
-    };
-    crate::plugin_apply::record_install_hash(dir, name)
-        .with_context(|| format!("record install hash for {}", dest.display()))?;
-    Ok(())
 }
 
 /// Set the owner-executable bit on a freshly-written plugin file so the startup
@@ -886,7 +870,6 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
         }
         make_executable(&dest)
             .with_context(|| format!("failed to mark {} executable", dest.display()))?;
-        record_install_hash(&dest)?;
 
         tracing::info!(
             plugin = %report.software,
@@ -1033,7 +1016,6 @@ pub(crate) async fn install_from_catalog(
     {
         make_executable(&dest)
             .with_context(|| format!("failed to mark {} executable", dest.display()))?;
-        record_install_hash(&dest)?;
 
         // Spawn + handshake from the installed path. On a failure remove the
         // rejected file so the next startup scan doesn't trip on it, then put the
@@ -1491,8 +1473,6 @@ async fn plugin_uninstall(
         if path.is_file() {
             std::fs::remove_file(&path)
                 .with_context(|| format!("failed to remove {}", path.display()))?;
-            #[cfg(unix)]
-            let _sidecar = std::fs::remove_file(crate::plugin_apply::hash_sidecar(&dir, software));
             true
         } else {
             false
