@@ -183,12 +183,14 @@ jobs:
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-      # Needs cargo, so it runs after Set up Rust regardless of the pass cache.
+      # Runs regardless of the pass cache; on a hit it relies on the ci-rust
+      # image's cargo and jq and fails closed if they are missing.
       - name: Workflow matches crate graph
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
           gen="$(mktemp)"
+          trap 'rm -f "$gen"' EXIT
           scripts/gen-ci-crate-dag.sh >"$gen"
           diff -u .github/workflows/ci.yml "$gen"
       - name: Format
@@ -363,17 +365,23 @@ ${all_needs}
       run:
         shell: bash
     steps:
-      - name: Every crate built and tested
+      - name: Fail unless every crate job succeeded
         env:
-          RESULTS: \${{ join(needs.*.result, ' ') }}
+          NEEDS: \${{ toJSON(needs) }}
         run: |
-          for r in \$RESULTS; do
-            if [ "\$r" != success ]; then
-              echo "a needed job ended \$r: \$RESULTS"
-              exit 1
-            fi
-          done
-          echo "all crates passed"
+          python3 - <<'EOF'
+          import json, os, sys
+          needs = json.loads(os.environ.get("NEEDS") or "{}")
+          if not needs:
+              print("NEEDS is empty; refusing to pass")
+              sys.exit(1)
+          bad = {k: v.get("result") for k, v in needs.items() if v.get("result") != "success"}
+          for k, r in sorted(bad.items()):
+              print(f"{k}={r}")
+          if bad:
+              sys.exit(1)
+          print(f"all {len(needs)} crate jobs passed")
+          EOF
 
   # Summarises line coverage across the per-crate lcov files; report-only.
   # Crates reusing a recorded pass upload none, so the total covers only crates
