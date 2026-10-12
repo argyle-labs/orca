@@ -245,7 +245,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-clippy@main
         if: ${{ !cancelled() }}
         with:
-          args: --workspace --tests
+          args: --workspace --all-targets
       # Checks each publishable crate's manifest and file list. The full
       # build-from-tarball verify runs once, at release, in `cargo publish`.
       - name: Package publishable crates
