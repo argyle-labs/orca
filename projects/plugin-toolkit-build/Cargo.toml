@@ -1,6 +1,7 @@
 [package]
 name = "orca-plugin-toolkit-build"
 version.workspace = true
+publish = ["gitea"]
 edition.workspace = true
 
 [lib]

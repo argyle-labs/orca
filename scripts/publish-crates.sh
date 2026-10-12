@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Publishes every publishable workspace crate to the `gitea` registry in
-# dependency order (normal + build edges; dev deps are stripped on publish).
-# A version already in the registry's sparse index counts as published, so a
-# rerun after a partial failure resumes where it stopped.
+# Publishes every publishable workspace crate to the `gitea` registry (defined
+# in .cargo/config.toml) in dependency order (normal + build edges; dev deps
+# are stripped on publish). Exists instead of `cargo publish --workspace`
+# because that aborts on a version already in the registry; here an existing
+# version is skipped, so a rerun after a partial failure resumes where it
+# stopped.
 #
 # Requires CARGO_REGISTRIES_GITEA_TOKEN ("Bearer <token>"). `--dry-run` prints
 # the order and each crate's index state without publishing.
@@ -22,11 +24,18 @@ meta="$(cargo metadata --format-version 1 --no-deps --locked)"
 order="$(jq -r '
   .workspace_members as $m
   | [.packages[] | select(.id as $id | $m | index($id))
-     | select(.publish == null or (.publish | index("gitea")))] as $ws
+     ] as $all
+  | ($all | map(.name)) as $members
+  | [$all[] | select(.publish | index("gitea"))] as $ws
   | ($ws | map(.name)) as $names
   | ($ws | map({key: .name, value: [.dependencies[]
        | select(.path != null and .kind != "dev")
-       | .name | select(. as $d | $names | index($d))] | unique}) | from_entries) as $g
+       | .name | select(. as $d | $members | index($d))] | unique}) | from_entries) as $g
+  | ([$g | to_entries[] | .key as $k | .value[]
+       | select(. as $d | $names | index($d) | not) | "\($k) -> \(.)"]) as $bad
+  | if ($bad | length) > 0
+    then error("publishable crates depend on unpublishable members: \($bad | join(", "))")
+    else . end
   | ($ws | map({key: .name, value: .version}) | from_entries) as $ver
   | def drain($done):
       ([$g | to_entries[] | select((.key as $k | $done | index($k)) | not)
@@ -52,8 +61,9 @@ index_path() {
 published() {
   local name="$1" version="$2" body code
   body="$(mktemp)"
-  code="$(curl -sS -o "$body" -w '%{http_code}' \
-    ${CARGO_REGISTRIES_GITEA_TOKEN:+-H "Authorization: $CARGO_REGISTRIES_GITEA_TOKEN"} \
+  # Header on stdin keeps the token out of the process list.
+  code="$(printf '%s\n' "${CARGO_REGISTRIES_GITEA_TOKEN:+Authorization: $CARGO_REGISTRIES_GITEA_TOKEN}" \
+    | curl -sS -o "$body" -w '%{http_code}' -H @- \
     "${index%/}/$(index_path "$name")")"
   case "$code" in
     200) jq -e --arg v "$version" 'select(.vers == $v)' "$body" >/dev/null && { rm -f "$body"; return 0; } ;;
@@ -73,5 +83,11 @@ while IFS=$'\t' read -r name version; do
     echo "publish $name $version"
     # CI built and tested this commit; skip cargo's rebuild of each package.
     cargo publish --locked --no-verify --registry gitea -p "$name"
+    # Dependents resolve against the index; wait until this version is visible.
+    for attempt in $(seq 1 30); do
+      published "$name" "$version" && break
+      [ "$attempt" -eq 30 ] && { echo "$name $version not in index after publish" >&2; exit 1; }
+      sleep 10
+    done
   fi
 done <<<"$order"

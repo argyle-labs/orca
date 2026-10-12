@@ -1,6 +1,7 @@
 [package]
 name = "orca-storage"
 version.workspace = true
+publish = ["gitea"]
 edition.workspace = true
 
 [lib]

@@ -48,9 +48,9 @@ jobs:
       targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl"]'
     secrets: inherit
 
-  # Publishes the orca-* crates to the Gitea cargo registry once the release has
-  # committed its version bump. Checks out the branch tip (the release commit),
-  # not the dispatch sha, so the published versions match the tag.
+  # Publishes the orca-* crates to the Gitea cargo registry from the release
+  # tag. The branch tip carries the version bump; the tag pins the exact commit
+  # released, so a later push to the branch can't change what gets published.
   publish-crates:
     name: Publish crates to Gitea registry
     needs: [release]
@@ -64,10 +64,20 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Check out release commit
+      - name: Check out release branch
         uses: actions/checkout@v5
         with:
           ref: ${{ github.ref }}
+          fetch-depth: 0
+      - name: Check out release tag
+        run: |
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          tag="v$version"
+          [ -n "$version" ] || { echo "no [workspace.package] version in Cargo.toml" >&2; exit 1; }
+          git rev-parse -q --verify "refs/tags/$tag" >/dev/null || { echo "tag $tag not found" >&2; exit 1; }
+          git checkout -q "$tag"
+          [ "$(git rev-parse HEAD)" = "$(git rev-parse "$tag^{commit}")" ] || { echo "HEAD is not $tag" >&2; exit 1; }
+          echo "Publishing from $tag ($(git rev-parse HEAD))"
       - name: Fetch dependencies
         run: cargo fetch --locked
       - name: Publish crates in dependency order
