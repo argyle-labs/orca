@@ -8,8 +8,7 @@ name: Release
 #   dispatch rc-publish     → cut vX.Y.Z-rc.N → Gitea Releases (canonical) → mirror GitHub
 #   dispatch promote-stable → cut vX.Y.Z stable → Gitea → mirror GitHub
 #
-# The rolling rc-draft-on-push pipeline was removed in favor of simpler
-# pipelines; releases are cut only via the operator dispatch stages above.
+# Releases are cut only via the operator dispatch stages above.
 #
 # Gates = the operator dispatch itself (Gitea has no environment: reviewers).
 
@@ -47,3 +46,40 @@ jobs:
       # a duplicate-libiconv Mach-O that macOS dyld refuses to load.
       targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl"]'
     secrets: inherit
+
+  # Publishes the orca-* crates to the Gitea cargo registry from the release
+  # tag. The branch tip carries the version bump; the tag pins the exact commit
+  # released, so a later push to the branch can't change what gets published.
+  publish-crates:
+    name: Publish crates to Gitea registry
+    needs: [release]
+    runs-on: ci-large
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out release branch
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - name: Check out release tag
+        run: |
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          tag="v$version"
+          [ -n "$version" ] || { echo "no [workspace.package] version in Cargo.toml" >&2; exit 1; }
+          git rev-parse -q --verify "refs/tags/$tag" >/dev/null || { echo "tag $tag not found" >&2; exit 1; }
+          git checkout -q "$tag"
+          [ "$(git rev-parse HEAD)" = "$(git rev-parse "$tag^{commit}")" ] || { echo "HEAD is not $tag" >&2; exit 1; }
+          echo "Publishing from $tag ($(git rev-parse HEAD))"
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRIES_GITEA_TOKEN: Bearer ${{ secrets.CI_REGISTRY_TOKEN }}
+        run: scripts/publish-crates.sh

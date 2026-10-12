@@ -133,6 +133,17 @@ jobs:
         if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
         with:
           args: --workspace --tests
+      # Checks each publishable crate's manifest and file list. The full
+      # build-from-tarball verify runs once, at release, in `cargo publish`.
+      - name: Package publishable crates
+        if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
+        run: |
+          set -o pipefail
+          mapfile -t pkgs < <(cargo metadata --format-version 1 --no-deps --locked \
+            | jq -r '.packages[] | select(.publish | index("gitea")) | "-p", .name')
+          # pipefail can't see into the process substitution; empty means it failed.
+          [ "${#pkgs[@]}" -gt 0 ] || { echo "no publishable crates found" >&2; exit 1; }
+          cargo package --no-verify --locked --registry gitea "${pkgs[@]}"
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main

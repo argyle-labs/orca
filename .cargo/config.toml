@@ -76,3 +76,9 @@ LIBSQLITE3_FLAGS = """
 # that lacks the binary: CI runners, the release build matrix + composite,
 # fresh clones, and other developers. (`~/.cargo/config.toml` merges with this
 # file, so a personal `[build] rustc-wrapper` there still applies locally.)
+
+# ── Package registry ───────────────────────────────────────────────────────
+# Internal workspace deps carry `registry = "gitea"` so published crates
+# depend on their siblings here, not on crates.io.
+[registries.gitea]
+index = "sparse+https://gitea.scottkey.me/api/packages/argyle-labs/cargo/"

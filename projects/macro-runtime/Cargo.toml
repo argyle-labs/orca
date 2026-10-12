@@ -1,6 +1,7 @@
 [package]
 name = "orca-macro-runtime"
 version.workspace = true
+publish = ["gitea"]
 edition.workspace = true
 
 [lib]

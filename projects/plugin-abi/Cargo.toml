@@ -9,6 +9,7 @@ name = "orca-plugin-abi"
 # pinned documents that the type contract is a deliberate, hand-managed
 # flag-day, not something an orca release bumps.
 version = "0.1.0"
+publish = ["gitea"]
 edition.workspace = true
 
 [lib]

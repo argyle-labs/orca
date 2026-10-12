@@ -1,6 +1,7 @@
 [package]
 name = "orca-notifications"
 version.workspace = true
+publish = ["gitea"]
 edition.workspace = true
 
 [lib]

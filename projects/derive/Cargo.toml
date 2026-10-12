@@ -1,6 +1,7 @@
 [package]
 name = "orca-derive"
 version.workspace = true
+publish = ["gitea"]
 edition.workspace = true
 
 # Proc-macro for the `#[orca_tool]` attribute. Emits the four-surface impls

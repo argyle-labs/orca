@@ -1,6 +1,7 @@
 [package]
 name = "orca-graphql"
 version.workspace = true
+publish = ["gitea"]
 edition.workspace = true
 
 # Generic GraphQL client integration. Stateless: every call carries the
