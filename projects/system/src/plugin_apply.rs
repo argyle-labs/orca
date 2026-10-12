@@ -10,11 +10,13 @@
 //! 2. The binary's sha256 must equal the hash recorded in the root-owned
 //!    [`TrustStore`] by `orca admin plugin-trust`, a root step the daemon's
 //!    sudoers grant does not cover, so the caller can neither supply nor
-//!    influence the expected hash. The binary is read through one
-//!    `O_NOFOLLOW` fd and those verified bytes are staged into a root-only
-//!    directory and run, so the file cannot change between check and exec.
+//!    influence the expected hash. The binary, owned by the invoking user, is
+//!    read through one `O_NOFOLLOW` fd and those verified bytes are staged in
+//!    a sealed memfd (or a fixed root-only directory where memfd is
+//!    unavailable) and run, so the file cannot change between check and exec.
 //! 3. The staged copy runs as `<plugin> --privileged-op` with `{op, payload}`
-//!    on stdin, a cleared environment, a fixed `PATH`, and a timeout. The
+//!    on stdin, a cleared environment, a fixed `PATH`, its own process group,
+//!    and a timeout covering the whole apply. The
 //!    plugin owns the op set and refuses anything outside it.
 //!
 //! The plugin's stdout and exit status are relayed unchanged; the plugin side
@@ -138,19 +140,43 @@ pub fn home_for_uid(passwd: &str, uid: u32) -> Option<PathBuf> {
 /// `ORCA_HOME`, so the passwd entry is the source of truth. Outside sudo this
 /// is the current process's own orca home.
 pub fn invoking_orca_home() -> Option<PathBuf> {
-    if let Some(uid) = std::env::var("SUDO_UID").ok().and_then(|u| u.parse().ok()) {
+    if let Some(uid) = sudo_uid() {
         let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
         return home_for_uid(&passwd, uid).map(|h| h.join(contract::config::APP_STATE_DIR));
     }
     files::ops::orca_home()
 }
 
+fn sudo_uid() -> Option<u32> {
+    std::env::var("SUDO_UID").ok().and_then(|u| u.parse().ok())
+}
+
+/// The uid that must own the installed plugin binary: the `sudo` caller, or
+/// this process's own uid outside sudo.
+pub fn invoking_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    sudo_uid().unwrap_or_else(|| unsafe { libc::geteuid() })
+}
+
 /// Root-owned directory of expected plugin hashes, one `<name>.sha256` each.
 pub const PLUGIN_TRUST_DIR: &str = "/etc/orca/plugin-trust";
 
-/// Where expected plugin hashes live. Every directory from `dir` up to and
-/// including `anchor`, and each record, must be owned by `owner_uid` and not
-/// group/world-writable, or nothing in it is trusted.
+/// Fallback staging root when a sealed memfd is unavailable. Fixed, never
+/// taken from the environment.
+#[cfg(target_os = "linux")]
+const STAGE_DIR: &str = "/run/orca/plugin-apply";
+#[cfg(target_os = "linux")]
+const STAGE_ANCHOR: &str = "/run";
+// macOS `/var/run` is group-writable by `daemon`, so the checked chain stops
+// at the orca-created dir below it.
+#[cfg(not(target_os = "linux"))]
+const STAGE_DIR: &str = "/var/run/orca/plugin-apply";
+#[cfg(not(target_os = "linux"))]
+const STAGE_ANCHOR: &str = "/var/run/orca";
+
+/// A directory trusted only if it and every ancestor up to and including
+/// `anchor`, and each file read from it, are owned by `owner_uid` and not
+/// group/world-writable.
 #[derive(Debug, Clone)]
 pub struct TrustStore {
     pub dir: PathBuf,
@@ -167,44 +193,54 @@ impl TrustStore {
         }
     }
 
+    fn staging() -> Self {
+        Self {
+            dir: PathBuf::from(STAGE_DIR),
+            anchor: PathBuf::from(STAGE_ANCHOR),
+            owner_uid: 0,
+        }
+    }
+
+    #[cfg(test)]
     fn record_path(&self, name: &str) -> PathBuf {
         self.dir.join(format!("{name}.sha256"))
     }
 
     fn check_owner(&self, path: &Path, uid: u32, mode: u32) -> Result<()> {
-        ensure!(
-            uid == self.owner_uid,
-            "{} is owned by uid {uid}, not {}; refusing to trust it",
-            path.display(),
-            self.owner_uid
-        );
-        ensure!(
-            mode & 0o022 == 0,
-            "{} is group/world-writable (mode {:o}); refusing to trust it",
-            path.display(),
-            mode & 0o7777
-        );
-        Ok(())
+        check_owner(path, uid, mode, self.owner_uid)
     }
 
-    fn check_dirs(&self) -> Result<()> {
+    /// Checks the chain and returns `dir` with the anchor resolved. Only the
+    /// anchor is canonicalized (macOS `/etc` is a symlink to `/private/etc`);
+    /// every component below it must be a real directory.
+    fn check_dirs(&self) -> Result<PathBuf> {
         use std::os::unix::fs::MetadataExt;
+        let rel = self.dir.strip_prefix(&self.anchor).with_context(|| {
+            format!(
+                "trust dir {} is outside {}",
+                self.dir.display(),
+                self.anchor.display()
+            )
+        })?;
         ensure!(
-            self.dir.starts_with(&self.anchor),
-            "trust dir {} is outside {}",
-            self.dir.display(),
-            self.anchor.display()
+            rel.components()
+                .all(|c| matches!(c, std::path::Component::Normal(_))),
+            "trust dir {} is not a plain path",
+            self.dir.display()
         );
-        for dir in self.dir.ancestors() {
+        let anchor = std::fs::canonicalize(&self.anchor)
+            .with_context(|| format!("resolve {}", self.anchor.display()))?;
+        let real = anchor.join(rel);
+        for dir in real.ancestors() {
             let meta = std::fs::symlink_metadata(dir)
                 .with_context(|| format!("stat {}", dir.display()))?;
             ensure!(meta.is_dir(), "{} is not a directory", dir.display());
             self.check_owner(dir, meta.uid(), meta.mode())?;
-            if dir == self.anchor {
+            if dir == anchor {
                 break;
             }
         }
-        Ok(())
+        Ok(real)
     }
 
     /// The recorded sha256 for `name`, read through one fd whose owner and mode
@@ -222,9 +258,9 @@ impl TrustStore {
         if !self.dir.exists() {
             bail!(untrusted());
         }
-        self.check_dirs()?;
-        let path = self.record_path(name);
-        let file = open_nofollow(&path).with_context(untrusted)?;
+        let dir = self.check_dirs()?;
+        let path = dir.join(format!("{name}.sha256"));
+        let file = open_nofollow(&path, 0).with_context(untrusted)?;
         let meta = file.metadata().context("fstat trust record")?;
         ensure!(meta.is_file(), "{} is not a regular file", path.display());
         self.check_owner(&path, meta.uid(), meta.mode())?;
@@ -252,9 +288,9 @@ impl TrustStore {
             .mode(0o755)
             .create(&self.dir)
             .with_context(|| format!("create {}", self.dir.display()))?;
-        self.check_dirs()?;
-        let dest = self.record_path(name);
-        let tmp = self.dir.join(format!(".{name}.sha256.incoming"));
+        let dir = self.check_dirs()?;
+        let dest = dir.join(format!("{name}.sha256"));
+        let tmp = dir.join(format!(".{name}.sha256.incoming"));
         _ = std::fs::remove_file(&tmp);
         let mut f = std::fs::OpenOptions::new()
             .write(true)
@@ -270,21 +306,40 @@ impl TrustStore {
     }
 }
 
-fn open_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+fn check_owner(path: &Path, uid: u32, mode: u32, owner_uid: u32) -> Result<()> {
+    ensure!(
+        uid == owner_uid,
+        "{} is owned by uid {uid}, not {owner_uid}; refusing to trust it",
+        path.display()
+    );
+    ensure!(
+        mode & 0o022 == 0,
+        "{} is group/world-writable (mode {:o}); refusing to trust it",
+        path.display(),
+        mode & 0o7777
+    );
+    Ok(())
+}
+
+fn open_nofollow(path: &Path, extra_flags: i32) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | extra_flags)
         .open(path)
 }
 
 /// The installed binary for `name` under `orca_home`, read through a single
-/// `O_NOFOLLOW` fd so the bytes hashed are the bytes returned.
-fn read_installed(orca_home: &Path, name: &str) -> Result<Vec<u8>> {
+/// `O_NOFOLLOW` fd so the bytes hashed are the bytes returned. The file must
+/// be owned by `owner_uid` and not group/world-writable.
+fn read_installed(orca_home: &Path, name: &str, owner_uid: u32) -> Result<Vec<u8>> {
     use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
     validate_plugin_name(name)?;
     let path = orca_home.join("plugins").join(name);
-    let file = match open_nofollow(&path) {
+    // O_NONBLOCK so a FIFO planted at the path cannot block the open.
+    let file = match open_nofollow(&path, libc::O_NONBLOCK) {
         Ok(f) => f,
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
             bail!(
@@ -302,6 +357,14 @@ fn read_installed(orca_home: &Path, name: &str) -> Result<Vec<u8>> {
         "plugin '{name}' is not a regular file at {}",
         path.display()
     );
+    check_owner(&path, meta.uid(), meta.mode(), owner_uid)?;
+    let fd = file.as_raw_fd();
+    // SAFETY: fd is a valid open descriptor owned by `file`.
+    let cleared = unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) >= 0
+    };
+    ensure!(cleared, "clear O_NONBLOCK on {}", path.display());
     let mut bytes = Vec::new();
     file.take(MAX_PLUGIN_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -313,11 +376,16 @@ fn read_installed(orca_home: &Path, name: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Read the installed binary for `name` and check it against the hash in
-/// `store`. Returns the verified bytes.
-pub fn verified_binary(orca_home: &Path, store: &TrustStore, name: &str) -> Result<Vec<u8>> {
+/// Read the installed binary for `name`, owned by `owner_uid`, and check it
+/// against the hash in `store`. Returns the verified bytes.
+pub fn verified_binary(
+    orca_home: &Path,
+    store: &TrustStore,
+    name: &str,
+    owner_uid: u32,
+) -> Result<Vec<u8>> {
     let expected = store.expected_hash(name)?;
-    let bytes = read_installed(orca_home, name)?;
+    let bytes = read_installed(orca_home, name, owner_uid)?;
     ensure!(
         utils::hash::sha256_hex(&bytes) == expected,
         "plugin '{name}' binary does not match its trusted hash; an administrator must \
@@ -331,53 +399,110 @@ pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Record the currently installed binary for `name` as trusted. Only a root
-/// caller can write the system store.
-pub fn trust(orca_home: &Path, store: &TrustStore, name: &str) -> Result<String> {
-    let hex = utils::hash::sha256_hex(&read_installed(orca_home, name)?);
+/// Record the currently installed binary for `name`, owned by `owner_uid`, as
+/// trusted. Only a root caller can write the system store.
+pub fn trust(orca_home: &Path, store: &TrustStore, name: &str, owner_uid: u32) -> Result<String> {
+    let hex = utils::hash::sha256_hex(&read_installed(orca_home, name, owner_uid)?);
     store.record(name, &hex)?;
     Ok(hex)
 }
 
-/// Run one request: verify, stage, execute, relay.
+/// Run one request: verify, stage, execute, relay. `binary_owner` is the uid
+/// that must own the installed binary. `timeout` bounds the whole run,
+/// including reading the binary.
 pub async fn apply(
     orca_home: &Path,
     store: &TrustStore,
     req: &PluginApplyRequest,
+    binary_owner: u32,
+    timeout: Duration,
+) -> Result<ApplyOutcome> {
+    apply_staged_in(
+        orca_home,
+        store,
+        &TrustStore::staging(),
+        req,
+        binary_owner,
+        timeout,
+    )
+    .await
+}
+
+async fn apply_staged_in(
+    orca_home: &Path,
+    store: &TrustStore,
+    stage_dir: &TrustStore,
+    req: &PluginApplyRequest,
+    binary_owner: u32,
     timeout: Duration,
 ) -> Result<ApplyOutcome> {
     validate_plugin_name(&req.plugin)?;
     validate_op_name(&req.op)?;
-    let bytes = verified_binary(orca_home, store, &req.plugin)?;
-    let stage = StagedBinary::new(&req.plugin, &bytes)?;
     let input = serde_json::to_vec(&PluginOp {
         op: &req.op,
         payload: req.payload.as_ref(),
     })?;
-    run_staged(&stage.path, &input, timeout).await
+    let (home, store, stage_dir, name) = (
+        orca_home.to_path_buf(),
+        store.clone(),
+        stage_dir.clone(),
+        req.plugin.clone(),
+    );
+    let run = async move {
+        let stage = tokio::task::spawn_blocking(move || {
+            let bytes = verified_binary(&home, &store, &name, binary_owner)?;
+            Stage::new(&stage_dir, &name, &bytes)
+        })
+        .await
+        .context("verify plugin")??;
+        run_staged(&stage, &input).await
+    };
+    match tokio::time::timeout(timeout, run).await {
+        Ok(out) => out,
+        Err(_) => bail!("plugin did not finish within {}s", timeout.as_secs_f32()),
+    }
 }
 
-async fn run_staged(bin: &Path, input: &[u8], timeout: Duration) -> Result<ApplyOutcome> {
+async fn run_staged(stage: &Stage, input: &[u8]) -> Result<ApplyOutcome> {
     use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new(bin)
-        .arg(PRIVILEGED_FLAG)
+    let bin = stage.exec_path();
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.arg(PRIVILEGED_FLAG)
         .env_clear()
         .env("PATH", SAFE_PATH)
         .current_dir("/")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
+        .process_group(0)
+        .kill_on_drop(true);
+    #[cfg(target_os = "linux")]
+    if let Stage::Memfd(fd) = stage {
+        use std::os::fd::AsRawFd;
+        let fd = fd.as_raw_fd();
+        // The memfd must survive exec: a `#!` plugin's interpreter reopens
+        // `/proc/self/fd/N` after the exec. fcntl is async-signal-safe.
+        // SAFETY: the closure only calls fcntl on an fd this process owns.
+        unsafe {
+            cmd.pre_exec(move || {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn {}", bin.display()))?;
+    let mut group = GroupKill(child.id().and_then(|p| i32::try_from(p).ok()));
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(input).await.context("write op to plugin")?;
         stdin.shutdown().await.context("close plugin stdin")?;
     }
-    let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(out) => out.context("wait for plugin")?,
-        Err(_) => bail!("plugin did not finish within {}s", timeout.as_secs_f32()),
-    };
+    let out = child.wait_with_output().await.context("wait for plugin")?;
+    group.0 = None;
     Ok(ApplyOutcome {
         exit_code: out.status.code().unwrap_or(1),
         stdout: out.stdout,
@@ -385,48 +510,135 @@ async fn run_staged(bin: &Path, input: &[u8], timeout: Duration) -> Result<Apply
     })
 }
 
-/// The verified bytes, written into a fresh root-only directory and removed on
-/// drop. Fresh `create` (never reuse) means a pre-planted path fails instead
-/// of being followed.
-struct StagedBinary {
-    dir: PathBuf,
-    path: PathBuf,
+/// SIGKILLs the plugin's whole process group on drop (timeout or error), so
+/// a child it forked cannot keep running as root.
+struct GroupKill(Option<i32>);
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0 {
+            // SAFETY: kill has no memory-safety preconditions.
+            unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        }
+    }
 }
 
-impl StagedBinary {
-    fn new(name: &str, bytes: &[u8]) -> Result<Self> {
+/// The verified bytes, staged where only root can change them.
+enum Stage {
+    /// A sealed, read-only memfd: no filesystem path an attacker can reach.
+    #[cfg(target_os = "linux")]
+    Memfd(std::os::fd::OwnedFd),
+    /// A file in a fresh `mkdtemp` dir under the checked staging root,
+    /// removed on drop.
+    Dir { dir: PathBuf, path: PathBuf },
+}
+
+impl Stage {
+    fn new(root: &TrustStore, name: &str, bytes: &[u8]) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        if let Ok(fd) = sealed_memfd(bytes) {
+            return Ok(Self::Memfd(fd));
+        }
+        Self::in_dir(root, name, bytes)
+    }
+
+    fn in_dir(root: &TrustStore, name: &str, bytes: &[u8]) -> Result<Self> {
         use std::io::Write;
+        use std::os::unix::ffi::OsStringExt;
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or_default();
-        let dir =
-            std::env::temp_dir().join(format!("orca-plugin-apply-{}-{nanos}", std::process::id()));
         std::fs::DirBuilder::new()
+            .recursive(true)
             .mode(0o700)
-            .create(&dir)
-            .with_context(|| format!("create {}", dir.display()))?;
-        let staged = Self {
-            path: dir.join(name),
+            .create(&root.dir)
+            .with_context(|| format!("create {}", root.dir.display()))?;
+        let base = root.check_dirs()?;
+        let template = std::ffi::CString::new(base.join("run-XXXXXX").into_os_string().into_vec())
+            .context("staging path contains NUL")?;
+        let raw = template.into_raw();
+        // SAFETY: raw is a NUL-terminated buffer we own; mkdtemp rewrites the
+        // X's in place and from_raw reclaims it.
+        let made = unsafe { !libc::mkdtemp(raw).is_null() };
+        let template = unsafe { std::ffi::CString::from_raw(raw) };
+        ensure!(
+            made,
+            "mkdtemp in {}: {}",
+            base.display(),
+            std::io::Error::last_os_error()
+        );
+        let dir = PathBuf::from(std::ffi::OsString::from_vec(template.into_bytes()));
+        let path = dir.join(name);
+        let staged = Self::Dir {
+            path: path.clone(),
             dir,
         };
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o700)
-            .open(&staged.path)
-            .with_context(|| format!("stage {}", staged.path.display()))?;
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+            .with_context(|| format!("stage {}", path.display()))?;
         f.write_all(bytes).context("write staged plugin")?;
         f.sync_all().ok();
         Ok(staged)
     }
+
+    fn exec_path(&self) -> PathBuf {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Memfd(fd) => {
+                use std::os::fd::AsRawFd;
+                PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+            }
+            Self::Dir { path, .. } => path.clone(),
+        }
+    }
 }
 
-impl Drop for StagedBinary {
+impl Drop for Stage {
     fn drop(&mut self) {
-        _ = std::fs::remove_dir_all(&self.dir);
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Memfd(_) => {}
+            Self::Dir { dir, .. } => _ = std::fs::remove_dir_all(dir),
+        }
     }
+}
+
+/// `bytes` in a memfd sealed against any change, returned as a read-only fd.
+/// The writable fd is closed before return: exec refuses a file with a
+/// writer open (ETXTBSY).
+#[cfg(target_os = "linux")]
+fn sealed_memfd(bytes: &[u8]) -> Result<std::os::fd::OwnedFd> {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::fs::OpenOptionsExt;
+    // SAFETY: the name is a valid C string; the result is checked.
+    let raw = unsafe {
+        libc::memfd_create(
+            c"orca-plugin".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    };
+    ensure!(
+        raw >= 0,
+        "memfd_create: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: raw is a fresh fd owned by nothing else.
+    let mut f = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(raw) });
+    f.write_all(bytes).context("write memfd")?;
+    let seals = libc::F_SEAL_WRITE | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+    // SAFETY: fcntl on an fd owned by `f`.
+    let sealed = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_ADD_SEALS, seals) } >= 0;
+    ensure!(sealed, "seal memfd: {}", std::io::Error::last_os_error());
+    let ro = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(format!("/proc/self/fd/{raw}"))
+        .context("reopen memfd read-only")?;
+    drop(f);
+    Ok(ro.into())
 }
 
 #[cfg(test)]
@@ -462,12 +674,25 @@ esac
         let bin = dir.join(name);
         std::fs::write(&bin, script).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        trust(home.path(), &store_in(home.path()), name).unwrap();
+        trust(home.path(), &store_in(home.path()), name, me()).unwrap();
         home
     }
 
+    fn me() -> u32 {
+        unsafe { libc::geteuid() }
+    }
+
+    /// A staging root owned by the test user stands in for the root-owned one.
+    fn stage_in(home: &Path) -> TrustStore {
+        TrustStore {
+            dir: home.join("stage"),
+            anchor: home.to_path_buf(),
+            owner_uid: me(),
+        }
+    }
+
     async fn apply_in(home: &Path, r: &PluginApplyRequest, t: Duration) -> Result<ApplyOutcome> {
-        apply(home, &store_in(home), r, t).await
+        apply_staged_in(home, &store_in(home), &stage_in(home), r, me(), t).await
     }
 
     fn req(plugin: &str, op: &str) -> PluginApplyRequest {
@@ -650,7 +875,7 @@ esac
             owner_uid: store_in(home.path()).owner_uid.wrapping_add(1),
             ..store_in(home.path())
         };
-        let err = verified_binary(home.path(), &store, "fakeplug").unwrap_err();
+        let err = verified_binary(home.path(), &store, "fakeplug", me()).unwrap_err();
         assert!(err.to_string().contains("refusing to trust"), "{err:#}");
     }
 
@@ -667,16 +892,16 @@ esac
         ] {
             let mode = if target == home.path() { 0o700 } else { 0o755 };
             set(&target, 0o777).unwrap();
-            let err = verified_binary(home.path(), &store, "fakeplug").unwrap_err();
+            let err = verified_binary(home.path(), &store, "fakeplug", me()).unwrap_err();
             assert!(err.to_string().contains("group/world-writable"), "{err:#}");
             set(&target, mode).unwrap();
         }
         let record = store.record_path("fakeplug");
         set(&record, 0o666).unwrap();
-        let err = verified_binary(home.path(), &store, "fakeplug").unwrap_err();
+        let err = verified_binary(home.path(), &store, "fakeplug", me()).unwrap_err();
         assert!(err.to_string().contains("group/world-writable"), "{err:#}");
         set(&record, 0o644).unwrap();
-        verified_binary(home.path(), &store, "fakeplug").unwrap();
+        verified_binary(home.path(), &store, "fakeplug", me()).unwrap();
     }
 
     #[test]
@@ -687,7 +912,7 @@ esac
         let elsewhere = home.path().join("planted.sha256");
         std::fs::rename(&record, &elsewhere).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &record).unwrap();
-        assert!(verified_binary(home.path(), &store, "fakeplug").is_err());
+        assert!(verified_binary(home.path(), &store, "fakeplug", me()).is_err());
     }
 
     #[test]
@@ -697,9 +922,9 @@ esac
         let store = store_in(home.path());
         let bin = home.path().join("plugins/fakeplug");
         std::fs::write(&bin, format!("{FAKE_PLUGIN}\n# v2\n")).unwrap();
-        assert!(verified_binary(home.path(), &store, "fakeplug").is_err());
-        trust(home.path(), &store, "fakeplug").unwrap();
-        verified_binary(home.path(), &store, "fakeplug").unwrap();
+        assert!(verified_binary(home.path(), &store, "fakeplug", me()).is_err());
+        trust(home.path(), &store, "fakeplug", me()).unwrap();
+        verified_binary(home.path(), &store, "fakeplug", me()).unwrap();
         let mode = std::fs::metadata(store.record_path("fakeplug"))
             .unwrap()
             .permissions()
@@ -709,10 +934,94 @@ esac
 
     #[test]
     fn the_staged_copy_is_removed_after_use() {
-        let staged = StagedBinary::new("fakeplug", b"x").unwrap();
-        let dir = staged.dir.clone();
-        assert!(staged.path.is_file());
+        let home = tempfile::tempdir().unwrap();
+        let root = stage_in(home.path());
+        let staged = Stage::in_dir(&root, "fakeplug", b"x").unwrap();
+        let (dir, path) = match &staged {
+            Stage::Dir { dir, path } => (dir.clone(), path.clone()),
+            #[cfg(target_os = "linux")]
+            Stage::Memfd(_) => unreachable!(),
+        };
+        assert!(path.is_file());
+        assert!(dir.starts_with(std::fs::canonicalize(home.path()).unwrap()));
         drop(staged);
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn staging_never_uses_the_temp_dir() {
+        let tmp = std::env::temp_dir();
+        assert!(!Path::new(STAGE_DIR).starts_with(&tmp));
+        assert!(Path::new(STAGE_DIR).starts_with(STAGE_ANCHOR));
+        #[cfg(target_os = "linux")]
+        {
+            let home = tempfile::tempdir().unwrap();
+            let staged = Stage::new(&stage_in(home.path()), "fakeplug", b"x").unwrap();
+            assert!(matches!(staged, Stage::Memfd(_)));
+            assert!(staged.exec_path().starts_with("/proc/self/fd"));
+        }
+    }
+
+    #[test]
+    fn a_fifo_plugin_is_refused_without_blocking() {
+        let home = orca_home_with("fakeplug", FAKE_PLUGIN);
+        let fifo = home.path().join("plugins/fifoplug");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+        let store = store_in(home.path());
+        store.record("fifoplug", &"0".repeat(64)).unwrap();
+        let err = verified_binary(home.path(), &store, "fifoplug", me()).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err:#}");
+    }
+
+    #[test]
+    fn a_binary_owned_by_another_user_or_group_writable_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = orca_home_with("fakeplug", FAKE_PLUGIN);
+        let store = store_in(home.path());
+        let err =
+            verified_binary(home.path(), &store, "fakeplug", me().wrapping_add(1)).unwrap_err();
+        assert!(err.to_string().contains("refusing to trust"), "{err:#}");
+        let bin = home.path().join("plugins/fakeplug");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let err = verified_binary(home.path(), &store, "fakeplug", me()).unwrap_err();
+        assert!(err.to_string().contains("group/world-writable"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_timeout_kills_the_plugins_whole_process_group() {
+        let home = tempfile::tempdir().unwrap();
+        let pidfile = home.path().join("child.pid");
+        let script = format!(
+            "#!/bin/sh\nsleep 60 &\necho $! > {}\nwait\n",
+            pidfile.display()
+        );
+        let home = {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = home.path().join("plugins");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("forker"), &script).unwrap();
+            std::fs::set_permissions(dir.join("forker"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            trust(home.path(), &store_in(home.path()), "forker", me()).unwrap();
+            home
+        };
+        let err = apply_in(home.path(), &req("forker", "ping"), Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("did not finish"), "{err:#}");
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background child {pid} survived"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }

@@ -312,11 +312,11 @@ enum AdminAction {
     CronApply,
     /// Generic privileged seam for plugins: reads `{plugin, op, payload}` JSON
     /// from stdin, resolves `plugin` only in the installed-plugin dir, checks
-    /// its binary against the sha256 in the root-owned trust store written by
-    /// `admin plugin-trust`, and runs it as root
-    /// as `<plugin> --privileged-op` with `{op, payload}` on stdin, a clean env
-    /// and a timeout. Relays the plugin's JSON reply and exit status. Invoked
-    /// via `sudo -n`; never exposed over REST/MCP/peer.
+    /// its binary (owned by the invoking user) against the sha256 in the
+    /// root-owned trust store written by `admin plugin-trust`, and runs it as
+    /// root as `<plugin> --privileged-op` with `{op, payload}` on stdin, a clean
+    /// env, its own process group and a timeout. Relays the plugin's JSON reply
+    /// and exit status. Invoked via `sudo -n`; never exposed over REST/MCP/peer.
     PluginApply,
     /// Record the invoking user's installed `<name>` plugin binary as trusted
     /// for `plugin-apply`, in the root-owned store under
@@ -1207,8 +1207,14 @@ async fn cmd_admin_plugin_apply() -> Result<()> {
         let home = plugin_apply::invoking_orca_home()
             .context("cannot resolve the invoking user's orca home")?;
         let store = plugin_apply::TrustStore::system();
-        let out =
-            plugin_apply::apply(&home, &store, &req, plugin_apply::PLUGIN_APPLY_TIMEOUT).await;
+        let out = plugin_apply::apply(
+            &home,
+            &store,
+            &req,
+            plugin_apply::invoking_uid(),
+            plugin_apply::PLUGIN_APPLY_TIMEOUT,
+        )
+        .await;
         Ok::<_, anyhow::Error>((req, out?))
     };
     match run.await {
@@ -1251,7 +1257,12 @@ fn cmd_admin_plugin_trust(name: &str) -> Result<()> {
     );
     let home = plugin_apply::invoking_orca_home()
         .context("cannot resolve the invoking user's orca home")?;
-    let hex = plugin_apply::trust(&home, &plugin_apply::TrustStore::system(), name)?;
+    let hex = plugin_apply::trust(
+        &home,
+        &plugin_apply::TrustStore::system(),
+        name,
+        plugin_apply::invoking_uid(),
+    )?;
     let caller_uid = std::env::var("SUDO_UID").unwrap_or_else(|_| "direct".into());
     tracing::info!(plugin = %name, sha256 = %hex, caller_uid = %caller_uid, "plugin-trust recorded");
     println!("trusted {name} sha256={hex}");
