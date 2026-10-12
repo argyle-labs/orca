@@ -1540,6 +1540,9 @@ async fn proxy_http(req: axum::extract::Request, origin: String) -> axum::respon
         reqwest::Client::builder()
             .pool_max_idle_per_host(8)
             .pool_idle_timeout(Duration::from_secs(30))
+            // Relay 30x to the browser; following would forward its cookies
+            // and custom headers to whatever host the upstream names.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("dev proxy reqwest client")
     });
