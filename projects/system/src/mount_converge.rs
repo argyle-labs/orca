@@ -21,7 +21,7 @@ use crate::mount_exec::MountReq;
 use crate::remediation::{self, RemediationPolicy};
 use crate::source_election::{self, Election};
 use crate::{host_identity, mounts, periodic, replication, shares};
-use notifications::dismissable::{Fix, RaiseInput, Severity};
+use notifications::dismissable::{Fix, RaiseInput, Severity, State};
 use plugin_toolkit::route::Route;
 use plugin_toolkit::storage::{
     MountHealth, RemountAggression, RemountPolicy, SourceProbe, probe_source, probe_source_nfs,
@@ -717,6 +717,54 @@ fn adopt_owns(active_source: &str, active_fstype: &str, desired: &[String]) -> b
         && desired.iter().any(|s| same_source(s, active_source))
 }
 
+/// End-of-tick ownership pass: own every desired target mounted from one of its
+/// desired network sources but missing from the ledger. The mount loop only
+/// adopts on a bare Mount, which a healthy target never plans, so without this a
+/// pre-upgrade mount would stay unowned and survive its placement's removal.
+fn adopt_desired_owned(
+    ledger: &mut Ledger,
+    desired: &[DesiredMount],
+    active_by_norm: &HashMap<String, &str>,
+    fstype_by_norm: &HashMap<String, String>,
+) {
+    for d in desired {
+        let nt = norm_target(&d.target);
+        if ledger.contains_key(&nt) {
+            continue;
+        }
+        if let Some(active) = active_by_norm.get(&nt).copied()
+            && adopt_owns(
+                active,
+                fstype_by_norm.get(&nt).map_or("", String::as_str),
+                &d.sources,
+            )
+        {
+            ledger.insert(nt, active.to_string());
+        }
+    }
+}
+
+fn stale_unowned_key(target: &str) -> String {
+    format!("converge:stale-unowned:{target}")
+}
+
+/// Stale-unowned notification keys whose condition has cleared: the target is
+/// now owned or probed healthy.
+fn stale_unowned_resolved(
+    desired: &[DesiredMount],
+    ledger: &Ledger,
+    health_by_target: &HashMap<String, MountHealth>,
+) -> Vec<String> {
+    desired
+        .iter()
+        .filter(|d| {
+            ledger.contains_key(&norm_target(&d.target))
+                || health_by_target.get(&d.target) == Some(&MountHealth::Ok)
+        })
+        .map(|d| stale_unowned_key(&d.target))
+        .collect()
+}
+
 /// Target → source of a mount batch, keyed by [`norm_target`] so the applier's
 /// spelling of a changed target cannot miss the request's.
 fn mounted_sources(reqs: &[MountReq]) -> HashMap<String, String> {
@@ -1386,25 +1434,21 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         }
     }
 
-    // Backend consumer-stale recovery sweep — the one heal the host-mount
-    // lifecycle above cannot perform: a container pinning a stale NFS superblock
-    // (ESTALE inside the guest) while the host mount itself reads healthy. Ported
-    // from the retired autofs self-heal loop and driven off the desired
-    // (shares⋈mounts⋈routes) set, NEVER the legacy managed_mounts table. Gated by
-    // the host remediation policy exactly as the self-heal loop gated it: the
-    // sweep both detects AND repairs (the plugin restarts consumers behind its own
-    // host-healthy + consumer-stale guard), so under a non-acting policy there is
-    // no read-only probe to run and it is skipped entirely. Core never restarts
-    // containers itself — it only calls the backend. Runs every tick (healthy
-    // hosts included), which is exactly where consumer-stale surfaces.
-    // A confirmed-stale desired target orca does not own can never be remounted
-    // by converge; it needs an operator, so surface it beyond the log.
+    adopt_desired_owned(&mut ledger, &desired, &active_by_norm, &fstype_by_norm);
+
+    // An unowned confirmed-stale target can never be remounted by converge, so
+    // surface it to an operator. Confirmation resets the streak, so this re-raises
+    // every CONFIRM_TICKS ticks while it stays stale; the upsert keeps one row.
     for t in &confirmed_stale {
-        if !ledger.contains_key(&norm_target(t)) {
-            let active = active_by_target.get(t).cloned().unwrap_or_default();
+        let nt = norm_target(t);
+        if !ledger.contains_key(&nt) {
+            let active = active_by_norm
+                .get(&nt)
+                .copied()
+                .unwrap_or("an unknown source");
             warn!("[converge] {t} is stale but held by unowned mount {active}; not remounting");
             raise_notification(
-                format!("converge:stale-unowned:{t}"),
+                stale_unowned_key(t),
                 Severity::Warn,
                 false,
                 format!("Stale mount at {t} is not managed by orca"),
@@ -1416,7 +1460,21 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
             );
         }
     }
+    for key in stale_unowned_resolved(&desired, &ledger, &health_by_target) {
+        resolve_notification(&key);
+    }
 
+    // Backend consumer-stale recovery sweep — the one heal the host-mount
+    // lifecycle above cannot perform: a container pinning a stale NFS superblock
+    // (ESTALE inside the guest) while the host mount itself reads healthy. Ported
+    // from the retired autofs self-heal loop and driven off the desired
+    // (shares⋈mounts⋈routes) set, NEVER the legacy managed_mounts table. Gated by
+    // the host remediation policy exactly as the self-heal loop gated it: the
+    // sweep both detects AND repairs (the plugin restarts consumers behind its own
+    // host-healthy + consumer-stale guard), so under a non-acting policy there is
+    // no read-only probe to run and it is skipped entirely. Core never restarts
+    // containers itself — it only calls the backend. Runs every tick (healthy
+    // hosts included), which is exactly where consumer-stale surfaces.
     let policy = remediation_policy();
     if policy.acts() {
         let merged = crate::storage_tools::recover_backends_only(
@@ -1782,6 +1840,20 @@ fn raise_notification(
     };
     if let Err(e) = notifications::dismissable::raise(input) {
         warn!("[converge] notify: raise: {e}");
+    }
+}
+
+/// Dismiss `key` if it is active. Read first so the common no-row case costs no
+/// write each tick. Best-effort, like [`raise_notification`].
+fn resolve_notification(key: &str) {
+    match notifications::dismissable::get(key) {
+        Ok(Some(n)) if n.state == State::Active => {
+            if let Err(e) = notifications::dismissable::dismiss(key) {
+                warn!("[converge] notify: dismiss: {e}");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => warn!("[converge] notify: get: {e}"),
     }
 }
 
@@ -2317,6 +2389,67 @@ mod tests {
                     target: "/mnt/data".into()
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn healthy_unowned_desired_mount_is_owned_then_removed_once() {
+        let desired = vec![d("/mnt/data")];
+        let mut ledger = Ledger::new();
+        let active: HashMap<String, &str> = [("/mnt/data".to_string(), "10.0.0.1:/e")].into();
+        let fstype: HashMap<String, String> =
+            [("/mnt/data".to_string(), "nfs4".to_string())].into();
+        // Healthy: plan emits nothing, so only the end-of-tick pass can own it.
+        assert!(
+            plan(
+                &desired,
+                &set(&["/mnt/data"]),
+                &set(&["/mnt/data"]),
+                &no_failover(),
+                &no_drift(),
+            )
+            .is_empty()
+        );
+        adopt_desired_owned(&mut ledger, &desired, &active, &fstype);
+        assert_eq!(
+            ledger.get("/mnt/data").map(String::as_str),
+            Some("10.0.0.1:/e")
+        );
+        // Placement removed: one unmount, then the ledger forgets it.
+        let orphans = orphan_targets(&ledger, &HashSet::new());
+        assert_eq!(orphans, vec!["/mnt/data".to_string()]);
+        assert_eq!(
+            orphan_action(&ledger["/mnt/data"], Some("10.0.0.1:/e")),
+            OrphanAction::Unmount
+        );
+        ledger.remove("/mnt/data");
+        adopt_desired_owned(&mut ledger, &[], &active, &fstype);
+        assert!(orphan_targets(&ledger, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn bind_at_desired_target_stays_unowned_through_ownership_pass() {
+        let desired = d("/mnt/data");
+        let mut ledger = Ledger::new();
+        let active: HashMap<String, &str> = [("/mnt/data".to_string(), "10.0.0.1:/e")].into();
+        let fstype: HashMap<String, String> =
+            [("/mnt/data".to_string(), "none".to_string())].into();
+        adopt_desired_owned(&mut ledger, &[desired], &active, &fstype);
+        assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn stale_unowned_notification_resolves_when_owned_or_healthy() {
+        let desired = vec![d("/mnt/a"), d("/mnt/b"), d("/mnt/c")];
+        let ledger = led(&["/mnt/a"]);
+        let health: HashMap<String, MountHealth> = [
+            ("/mnt/b".to_string(), MountHealth::Ok),
+            ("/mnt/c".to_string(), MountHealth::Stale),
+        ]
+        .into();
+        assert_eq!(
+            stale_unowned_resolved(&desired, &ledger, &health),
+            vec![stale_unowned_key("/mnt/a"), stale_unowned_key("/mnt/b")]
         );
     }
 
