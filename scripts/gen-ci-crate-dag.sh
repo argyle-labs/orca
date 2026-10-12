@@ -201,16 +201,15 @@ jobs:
         if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
         with:
           args: --workspace --tests
-      # Builds each publishable crate from its .crate tarball, so a file the
-      # tarball omits fails here instead of at release. Unpublished siblings
-      # resolve from the local package overlay.
+      # Checks each publishable crate's manifest and file list. The full
+      # build-from-tarball verify runs once, at release, in `cargo publish`.
       - name: Package publishable crates
         if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
         run: |
           set -o pipefail
           mapfile -t pkgs < <(cargo metadata --format-version 1 --no-deps --locked \
             | jq -r '.packages[] | select(.publish | index("gitea")) | "-p", .name')
-          cargo package --locked --registry gitea "${pkgs[@]}"
+          cargo package --no-verify --locked --registry gitea "${pkgs[@]}"
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
