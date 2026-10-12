@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// `source` all convergence dismissable notifications carry, for scoping.
 const NOTIFY_SOURCE: &str = "remediation:storage.converge";
@@ -175,7 +175,7 @@ pub fn desired_guest_mounts_for_host(
         if sources.is_empty() {
             continue;
         }
-        out.push(plugin_toolkit::storage::GuestMountSpec {
+        let spec = plugin_toolkit::storage::GuestMountSpec {
             guest: guest.to_string(),
             target: m.target,
             backend: share.backend.clone(),
@@ -183,7 +183,8 @@ pub fn desired_guest_mounts_for_host(
             sources,
             options: share.options_rendered.clone(),
             credential: share.credential.clone(),
-        });
+        };
+        out.push(spec);
     }
     Ok(out)
 }
@@ -1330,34 +1331,130 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One guest mount orca has applied, keyed by `(guest, target, applier)`. Only
+/// the applier that applied it is asked to remove it. `source` is kept because a
+/// deleted/disabled row no longer carries it, and is set only for a host-path
+/// (bind) source; network sources are staged by the applier and need none.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+struct GuestLedgerEntry {
+    guest: String,
+    target: String,
+    applier: String,
+    source: Option<String>,
+}
+
+/// Serializes the guest ledger's load-modify-save across overlapping ticks and
+/// manual converges.
+static GUEST_LEDGER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn guest_ledger_file() -> Option<PathBuf> {
+    contract::config::state_dir()
+        .ok()
+        .map(|d| d.join("managed_guest_mounts.json"))
+}
+
+/// An unparseable ledger is moved aside to `<name>.corrupt.<unix-nanos>` rather
+/// than silently overwritten, so the entries it held can still be recovered by
+/// hand; the timestamp keeps an earlier corrupt copy from being clobbered.
+fn load_guest_ledger_at(path: &Path) -> Vec<GuestLedgerEntry> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(l) => l,
+        Err(e) => {
+            let mut aside = path.as_os_str().to_owned();
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            aside.push(format!(".corrupt.{stamp}"));
+            warn!(
+                "[converge] guest-mount ledger {} ({} bytes) is corrupt ({e}); moving it to {}",
+                path.display(),
+                bytes.len(),
+                Path::new(&aside).display()
+            );
+            if let Err(e) = std::fs::rename(path, &aside) {
+                warn!("[converge] could not move corrupt guest-mount ledger aside: {e}");
+            }
+            Vec::new()
+        }
+    }
+}
+
+fn save_guest_ledger_at(path: &Path, ledger: &[GuestLedgerEntry]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let bytes = serde_json::to_vec(ledger).unwrap_or_else(|_| b"[]".to_vec());
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// Reconcile every guest-targeted placement for `this_host` by dispatching its
 /// rendered [`GuestMountSpec`](plugin_toolkit::storage::GuestMountSpec) to each
 /// registered [`GuestMountApplier`](plugin_toolkit::storage::GuestMountApplier).
 /// `apply` is idempotent (the applier writes the guest's config only when it
 /// diverges), so this runs unconditionally each tick. Best-effort: a build or
 /// apply failure is logged, never fatal to the tick. No-op when no applier is
-/// registered or no guest rows target this host.
+/// registered.
+///
+/// A ledger entry no longer desired on THIS host is `remove`d by the applier that
+/// applied it and dropped once that returns `Ok`, so a failed unbind retries next
+/// tick. Guest ids are per-hypervisor vmids, so a placement on another host is
+/// never treated as the same guest: a moved placement is unbound here and
+/// re-applied by its new host.
+///
+/// Ledger entries are keyed by applier name, so applier names must stay stable
+/// across releases or entries they applied can no longer be removed.
 async fn reconcile_guest_mounts(this_host: &str) {
+    reconcile_guest_mounts_at(this_host, guest_ledger_file().as_deref()).await;
+}
+
+async fn reconcile_guest_mounts_at(this_host: &str, ledger_path: Option<&Path>) {
     let appliers = plugin_toolkit::storage::guest_appliers();
     if appliers.is_empty() {
         return;
     }
-    let specs = match desired_guest_mounts_for_host(this_host) {
+    // Held across the desired-state read so an overlapping converge cannot act on
+    // an older snapshot after a newer one has saved.
+    let _guard = GUEST_LEDGER_LOCK.lock().await;
+    let desired = match desired_guest_mounts_for_host(this_host) {
         Ok(s) => s,
         Err(e) => {
             warn!("[converge] guest desired-state build failed: {e}");
             return;
         }
     };
-    for spec in &specs {
+    let mut ledger = ledger_path.map(load_guest_ledger_at).unwrap_or_default();
+    let mut applied = false;
+    for spec in &desired {
+        // Proxmox validates a remove source as an absolute host path.
+        let source = spec.sources.first().filter(|s| s.starts_with('/')).cloned();
         for applier in &appliers {
             match applier.apply(spec).await {
-                Ok(()) => debug!(
-                    "[converge] guest applier '{}' reconciled {} in {}",
-                    applier.name(),
-                    spec.target,
-                    spec.guest
-                ),
+                Ok(()) => {
+                    debug!(
+                        "[converge] guest applier '{}' reconciled {} in {}",
+                        applier.name(),
+                        spec.target,
+                        spec.guest
+                    );
+                    applied = true;
+                    ledger.retain(|e| {
+                        !(e.guest == spec.guest
+                            && e.target == spec.target
+                            && e.applier == applier.name())
+                    });
+                    ledger.push(GuestLedgerEntry {
+                        guest: spec.guest.clone(),
+                        target: spec.target.clone(),
+                        applier: applier.name().to_string(),
+                        source: source.clone(),
+                    });
+                }
                 Err(e) => warn!(
                     "[converge] guest applier '{}' failed to apply {} in {}: {e}",
                     applier.name(),
@@ -1367,6 +1464,71 @@ async fn reconcile_guest_mounts(this_host: &str) {
             }
         }
     }
+    let here: HashSet<(&str, &str)> = desired
+        .iter()
+        .map(|s| (s.guest.as_str(), s.target.as_str()))
+        .collect();
+    let mut kept = Vec::with_capacity(ledger.len());
+    for entry in ledger {
+        let key = (entry.guest.as_str(), entry.target.as_str());
+        if here.contains(&key) {
+            kept.push(entry);
+            continue;
+        }
+        let Some(applier) = appliers.iter().find(|a| a.name() == entry.applier) else {
+            if warn_unregistered_once(&entry.applier) {
+                warn!(
+                    "[converge] guest applier '{}' that applied {} in {} is not registered; keeping for retry",
+                    entry.applier, entry.target, entry.guest
+                );
+            }
+            kept.push(entry);
+            continue;
+        };
+        match applier
+            .remove(&entry.guest, &entry.target, entry.source.as_deref())
+            .await
+        {
+            Ok(()) => info!(
+                "[converge] removed guest mount {} from {}",
+                entry.target, entry.guest
+            ),
+            Err(e) => {
+                warn!(
+                    "[converge] guest applier '{}' failed to remove {} from {}: {e}",
+                    applier.name(),
+                    entry.target,
+                    entry.guest
+                );
+                kept.push(entry);
+            }
+        }
+    }
+    let Some(p) = ledger_path else {
+        return;
+    };
+    if let Err(e) = save_guest_ledger_at(p, &kept) {
+        if !applied {
+            warn!("[converge] could not persist guest-mount ledger: {e}");
+            return;
+        }
+        // Entries just applied would be stranded if un-desired before the next save.
+        if let Err(e2) = save_guest_ledger_at(p, &kept) {
+            error!(
+                "[converge] could not persist guest-mount ledger after apply ({e}; retry: {e2}); applied mounts are untracked until the next save"
+            );
+        }
+    }
+}
+
+/// True the first time `applier` is seen unregistered in this process, so a
+/// missing plugin warns once rather than every tick.
+fn warn_unregistered_once(applier: &str) -> bool {
+    static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+    SEEN.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get_or_insert_with(HashSet::new)
+        .insert(applier.to_string())
 }
 
 /// Write each of this host's mount rows' last-known `health`, `active_route`
@@ -3154,6 +3316,284 @@ mod tests {
         applied: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
     }
 
+    type RemoveLog = std::sync::Arc<std::sync::Mutex<Vec<(String, String, Option<String>)>>>;
+
+    /// Records every `remove`; fails while `fail_remove` is set.
+    struct RemovingGuestApplier {
+        name: String,
+        removed: RemoveLog,
+        fail_remove: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[derive::orca_async]
+    impl plugin_toolkit::storage::GuestMountApplier for RemovingGuestApplier {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        async fn apply(
+            &self,
+            _spec: &plugin_toolkit::storage::GuestMountSpec,
+        ) -> Result<(), plugin_toolkit::storage::StorageError> {
+            Ok(())
+        }
+        async fn remove(
+            &self,
+            guest: &str,
+            target: &str,
+            source: Option<&str>,
+        ) -> Result<(), plugin_toolkit::storage::StorageError> {
+            self.removed.lock().expect("removed log poisoned").push((
+                guest.to_string(),
+                target.to_string(),
+                source.map(str::to_string),
+            ));
+            if self.fail_remove.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(plugin_toolkit::storage::StorageError::Other(
+                    "guest offline".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    struct GuestRemoveHarness {
+        name: String,
+        removed: RemoveLog,
+        fail_remove: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        _dir: tempfile::TempDir,
+        ledger: PathBuf,
+    }
+
+    /// Register a [`RemovingGuestApplier`], pin a temp DB on this thread, seed one
+    /// enabled guest placement `m-guest` (guest 110, /mnt/backups), and run one
+    /// reconcile so it lands in the ledger.
+    async fn guest_remove_harness(name: &str) -> GuestRemoveHarness {
+        let removed: RemoveLog = Default::default();
+        let fail_remove = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        plugin_toolkit::storage::register_guest_applier(std::sync::Arc::new(
+            RemovingGuestApplier {
+                name: name.to_string(),
+                removed: removed.clone(),
+                fail_remove: fail_remove.clone(),
+            },
+        ));
+        let dir = tempfile::tempdir().expect("tempdir");
+        db::set_thread_db_path(Some(&dir.path().join("guest_remove.db").to_string_lossy()));
+        let conn = db::open_default().expect("open temp db");
+        db::schema_fragments::apply_fragments(&conn).expect("apply fragments");
+        drop(conn);
+        insert_share("sh-1", true, true);
+        insert_guest_mount("m-guest", "sh-1", "h1", "/mnt/backups", "110");
+        let ledger = dir.path().join("managed_guest_mounts.json");
+        reconcile_guest_mounts_at("h1", Some(&ledger)).await;
+        assert_eq!(load_guest_ledger_at(&ledger).len(), 1);
+        assert!(removed.lock().unwrap().is_empty());
+        GuestRemoveHarness {
+            name: name.to_string(),
+            removed,
+            fail_remove,
+            _dir: dir,
+            ledger,
+        }
+    }
+
+    impl Drop for GuestRemoveHarness {
+        fn drop(&mut self) {
+            db::set_thread_db_path(None);
+            plugin_toolkit::storage::deregister_guest_applier(&self.name);
+        }
+    }
+
+    fn removed_backups() -> (String, String, Option<String>) {
+        ("110".to_string(), "/mnt/backups".to_string(), None)
+    }
+
+    fn guest_row() -> mounts::EndpointRow {
+        mounts::endpoint_db::list()
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == "m-guest")
+            .unwrap()
+    }
+
+    /// A share whose single route is a bare absolute host path (a bind source).
+    fn insert_bind_share(id: &str, path: &str) {
+        let row = shares::EndpointRow {
+            id: id.to_string(),
+            name: format!("share-{id}"),
+            backend: "bind".into(),
+            fstype: "none".into(),
+            options: "{}".into(),
+            options_rendered: String::new(),
+            credential: None,
+            replication: None,
+            routes: plugin_toolkit::route::Routes::from(vec![Route::new(
+                "local", "bind", path, None,
+            )]),
+            enabled: true,
+        };
+        shares::endpoint_db::insert(&row).expect("insert bind share");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn disabled_share_removes_guest_placement() {
+        let h = guest_remove_harness("guest-remove-share-off").await;
+        let mut share = shares::endpoint_db::list()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == "sh-1")
+            .unwrap();
+        share.enabled = false;
+        shares::endpoint_db::update(&share).unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert_eq!(*h.removed.lock().unwrap(), vec![removed_backups()]);
+        assert!(load_guest_ledger_at(&h.ledger).is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn remove_only_reaches_the_owning_applier() {
+        let h = guest_remove_harness("guest-remove-owner").await;
+        let other_log: RemoveLog = Default::default();
+        plugin_toolkit::storage::register_guest_applier(std::sync::Arc::new(
+            RemovingGuestApplier {
+                name: "guest-remove-bystander".to_string(),
+                removed: other_log.clone(),
+                fail_remove: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+        ));
+        mounts::endpoint_db::remove("m-guest").unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        plugin_toolkit::storage::deregister_guest_applier("guest-remove-bystander");
+        assert_eq!(*h.removed.lock().unwrap(), vec![removed_backups()]);
+        assert!(other_log.lock().unwrap().is_empty());
+        assert!(load_guest_ledger_at(&h.ledger).is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn unregistered_owner_keeps_entry() {
+        let h = guest_remove_harness("guest-remove-gone-owner").await;
+        let ledger = load_guest_ledger_at(&h.ledger);
+        let mut orphaned = ledger[0].clone();
+        orphaned.applier = "uninstalled-plugin".into();
+        save_guest_ledger_at(&h.ledger, &[orphaned.clone()]).unwrap();
+        mounts::endpoint_db::remove("m-guest").unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert!(h.removed.lock().unwrap().is_empty());
+        assert_eq!(load_guest_ledger_at(&h.ledger), vec![orphaned]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn no_appliers_registered_leaves_ledger_intact() {
+        let h = guest_remove_harness("guest-remove-none").await;
+        plugin_toolkit::storage::deregister_guest_applier(&h.name);
+        mounts::endpoint_db::remove("m-guest").unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert_eq!(load_guest_ledger_at(&h.ledger).len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn moved_placement_is_removed_here() {
+        let h = guest_remove_harness("guest-remove-moved").await;
+        let mut row = guest_row();
+        row.host = "h2".into();
+        mounts::endpoint_db::update(&row).unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert_eq!(*h.removed.lock().unwrap(), vec![removed_backups()]);
+        assert!(load_guest_ledger_at(&h.ledger).is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn readd_with_new_bind_source_updates_entry() {
+        let h = guest_remove_harness("guest-remove-resource").await;
+        insert_bind_share("sh-a", "/srv/a");
+        insert_bind_share("sh-b", "/srv/b");
+        let mut row = guest_row();
+        row.share_id = "sh-a".into();
+        mounts::endpoint_db::update(&row).unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        let l = load_guest_ledger_at(&h.ledger);
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].source.as_deref(), Some("/srv/a"));
+        row.share_id = "sh-b".into();
+        mounts::endpoint_db::update(&row).unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        let l = load_guest_ledger_at(&h.ledger);
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].source.as_deref(), Some("/srv/b"));
+        assert_eq!(l[0].applier, h.name);
+    }
+
+    #[test]
+    fn corrupt_guest_ledger_is_moved_aside() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("managed_guest_mounts.json");
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(load_guest_ledger_at(&path).is_empty());
+        assert!(!path.exists());
+        std::fs::write(&path, b"{also bad").unwrap();
+        assert!(load_guest_ledger_at(&path).is_empty());
+        let mut aside: Vec<Vec<u8>> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("managed_guest_mounts.json.corrupt.")
+            })
+            .map(|p| std::fs::read(p).unwrap())
+            .collect();
+        aside.sort();
+        assert_eq!(aside, vec![b"{also bad".to_vec(), b"{not json".to_vec()]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn disabled_guest_placement_is_removed_with_source() {
+        let h = guest_remove_harness("guest-remove-disabled").await;
+        let mut row = guest_row();
+        row.enabled = false;
+        mounts::endpoint_db::update(&row).unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert_eq!(*h.removed.lock().unwrap(), vec![removed_backups()]);
+        assert!(load_guest_ledger_at(&h.ledger).is_empty());
+        // Already unbound: a further tick does not remove again.
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert_eq!(h.removed.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn deleted_guest_placement_is_removed() {
+        let h = guest_remove_harness("guest-remove-deleted").await;
+        mounts::endpoint_db::remove("m-guest").unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert_eq!(*h.removed.lock().unwrap(), vec![removed_backups()]);
+        assert!(load_guest_ledger_at(&h.ledger).is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(storage_registry)]
+    async fn failed_guest_remove_is_retried_until_ok() {
+        let h = guest_remove_harness("guest-remove-retry").await;
+        h.fail_remove
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        mounts::endpoint_db::remove("m-guest").unwrap();
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert_eq!(load_guest_ledger_at(&h.ledger).len(), 1, "kept for retry");
+        h.fail_remove
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
+        assert_eq!(h.removed.lock().unwrap().len(), 2);
+        assert!(load_guest_ledger_at(&h.ledger).is_empty());
+    }
+
     #[derive::orca_async]
     impl plugin_toolkit::storage::GuestMountApplier for RecordingGuestApplier {
         fn name(&self) -> &str {
@@ -3173,6 +3613,7 @@ mod tests {
             &self,
             _guest: &str,
             _target: &str,
+            _source: Option<&str>,
         ) -> Result<(), plugin_toolkit::storage::StorageError> {
             Ok(())
         }
@@ -3205,7 +3646,7 @@ mod tests {
             // A host-targeted placement on the same host must NOT reach the applier.
             insert_mount("m-host", "sh-1", "h1", "/mnt/data", true);
         }
-        reconcile_guest_mounts("h1").await;
+        reconcile_guest_mounts_at("h1", None).await;
         db::set_thread_db_path(None);
         plugin_toolkit::storage::deregister_guest_applier(name);
 

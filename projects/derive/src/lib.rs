@@ -1297,6 +1297,23 @@ mod tests {
     }
 
     #[test]
+    fn orca_async_threads_elided_refs_in_generic_args_only() {
+        let out = orca_async::expand(quote! {
+            impl<'a> Backend for B<'a> {
+                async fn rm(&self, src: Option<&str>, named: Option<&'a str>) -> bool { true }
+            }
+        })
+        .to_string();
+        assert!(out.contains("Option < & 'life1 str >"));
+        assert!(out.contains("Option < & 'a str >"));
+        assert!(!out.contains("'a : 'async_trait"), "{out}");
+        assert!(
+            out.contains("fn rm < 'life0 , 'life1 , 'async_trait >"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn orca_async_rejects_non_trait_non_impl() {
         let out = orca_async::expand(quote! {
             struct S;
