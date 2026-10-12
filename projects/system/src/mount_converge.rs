@@ -4,7 +4,9 @@
 //! Each tick this host reads the replicated desired state (its `mounts`
 //! placements joined to their `shares`) and makes local reality match: a missing
 //! mount is mounted, a stale/unreachable one is remounted onto the next live
-//! ordered source, a removed placement is unmounted. Source election, health
+//! ordered source, a removed placement is unmounted. Unmount (remount or
+//! removal) only ever applies to a mount orca performed or adopted after
+//! verifying its source; any other occupant is left alone. Source election, health
 //! probing, and the mount itself are all orca's — there is no automounter.
 //!
 //! The mount/unmount execution goes through the existing root/`sudo` privilege
@@ -83,7 +85,8 @@ pub enum Action {
     /// Mount `target` — the async layer elects a live source from `sources`.
     Mount { target: String },
     /// Release `target` (`umount -lf`): stale-and-remounting, or a removed
-    /// placement.
+    /// placement. Executed only for a target in the ownership ledger (mounted by
+    /// orca, or adopted after source verification).
     Unmount { target: String },
 }
 
@@ -462,6 +465,11 @@ fn norm_source(s: &str) -> String {
             Some((host, path)) => format!("//{}/{}", host.to_ascii_lowercase(), trim(path)),
             None => format!("//{}", rest.to_ascii_lowercase()),
         }
+    } else if s.starts_with('[')
+        && let Some((host, path)) = s.split_once("]:")
+    {
+        // NFS `[v6addr]:/export` — the address itself contains ':'.
+        format!("{}]:{}", host.to_ascii_lowercase(), trim(path))
     } else if let Some((host, path)) = s.split_once(':') {
         // NFS `host:/export`
         format!("{}:{}", host.to_ascii_lowercase(), trim(path))
@@ -627,7 +635,9 @@ fn mount_execution(elected: &str, desired: &[String], active: Option<&str>) -> M
         None => MountExec::Proceed,
         // Already mounted from a source we want (the elected one, or any other
         // enabled desired source) — satisfied, do not remount/stack.
-        Some(a) if a == elected || desired.iter().any(|s| s == a) => MountExec::Adopt,
+        Some(a) if same_source(a, elected) || desired.iter().any(|s| same_source(s, a)) => {
+            MountExec::Adopt
+        }
         // Occupied by something outside the desired set — refuse to stack.
         Some(a) => MountExec::Foreign(a.to_string()),
     }
@@ -636,9 +646,10 @@ fn mount_execution(elected: &str, desired: &[String], active: Option<&str>) -> M
 /// Target → source of every mount THIS host's converge itself performed,
 /// persisted so a placement removed while the daemon was down is still
 /// reconciled on the next boot. Per-host materialized state, never replicated.
-/// Only a successful `PrivilegedOp::Mount` inserts: a mount merely found at a
-/// desired target (hypervisor bind, fstab, autofs, another tool) is never owned,
-/// so removal can never release it.
+/// A successful `PrivilegedOp::Mount` inserts, as does adopting a network mount
+/// whose live source is a desired source ([`adopt_owns`]). Anything else found at
+/// a desired target (hypervisor bind, local fs, a foreign export) is never owned,
+/// so neither remount nor removal can release it.
 type Ledger = BTreeMap<String, String>;
 
 /// Mountpoint key shared by the ledger, desired targets and the mount table, so
@@ -694,6 +705,37 @@ fn save_ledger(ledger: &Ledger) {
         && let Err(e) = save_ledger_at(&p, ledger)
     {
         warn!("[converge] could not persist managed-mount ledger: {e}");
+    }
+}
+
+/// Whether an adopted occupant becomes owned: a network filesystem mounted from
+/// one of the desired sources. This re-owns mounts orca made before the ledger
+/// recorded sources, so stale-remount and failover still work on them. A bind
+/// never qualifies, even if its source string happens to match.
+fn adopt_owns(active_source: &str, active_fstype: &str, desired: &[String]) -> bool {
+    matches!(active_fstype, "nfs" | "nfs4" | "cifs" | "smb3")
+        && desired.iter().any(|s| same_source(s, active_source))
+}
+
+/// Target → source of a mount batch, keyed by [`norm_target`] so the applier's
+/// spelling of a changed target cannot miss the request's.
+fn mounted_sources(reqs: &[MountReq]) -> HashMap<String, String> {
+    reqs.iter()
+        .map(|r| (norm_target(&r.target), r.source.clone()))
+        .collect()
+}
+
+/// Record every target the privileged applier reported mounted.
+fn record_mounted_sources(
+    ledger: &mut Ledger,
+    source_by_target: &HashMap<String, String>,
+    changed: &[String],
+) {
+    for t in changed {
+        let t = norm_target(t);
+        if let Some(src) = source_by_target.get(&t) {
+            ledger.insert(t, src.clone());
+        }
     }
 }
 
@@ -892,9 +934,10 @@ pub fn spawn() -> JoinHandle<()> {
 
 /// One convergence pass for this host: resolve desired placements, probe each,
 /// apply the confirm-ticks blip filter to staleness, plan, and execute the
-/// resulting mounts/remounts through the privileged applier. Only ever touches
-/// targets that are desired placements — never an NFS mount orca did not declare
-/// (so it is safe to run alongside the legacy autofs path during migration).
+/// resulting mounts/remounts through the privileged applier, then release owned
+/// orphans (removed placements). Only ever unmounts a target in the ownership
+/// ledger whose live source still matches; a mount orca neither performed nor
+/// source-verified adopted is never touched.
 async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     let this_host = host_identity::machine_id();
     let desired = desired_for_host(this_host)?;
@@ -916,6 +959,10 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
             .entry(e.mountpoint.clone())
             .or_insert(0) += 1;
     }
+    let fstype_by_norm: HashMap<String, String> = mount_table
+        .iter()
+        .map(|e| (norm_target(&e.mountpoint), e.fstype.clone()))
+        .collect();
     let active_by_target: HashMap<String, String> = mount_table
         .iter()
         .map(|e| (e.mountpoint.clone(), e.source.clone()))
@@ -925,15 +972,25 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         .map(|e| (e.mountpoint, e.options))
         .collect();
 
+    // No lock needed: `periodic::spawn` awaits each tick before the next, and
+    // this loop is the ledger's only writer.
     let mut ledger = load_ledger();
 
     // Removal reconcile: an owned target no longer desired is released only if
-    // the source orca mounted is still what occupies it. Never probe-only: a
-    // hypervisor bind at a former placement's path stats healthy too.
+    // the live source matches the recorded one.
     let active_by_norm: HashMap<String, &str> = active_by_target
         .iter()
         .map(|(t, s)| (norm_target(t), s.as_str()))
         .collect();
+    for (t, n) in &mount_count_by_target {
+        let t = norm_target(t);
+        if *n > 1 && ledger.contains_key(&t) {
+            warn!(
+                "[converge] {t} is owned by orca but {n} mounts are stacked there; \
+                 the top one may be foreign — ownership checks see only the top"
+            );
+        }
+    }
     let mut orphan_unmounts: Vec<String> = Vec::new();
     for t in orphan_targets(&ledger, &desired_targets) {
         let recorded = ledger.get(&t).cloned().unwrap_or_default();
@@ -1243,6 +1300,17 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
                                 active_by_target.get(target.as_str()).map(String::as_str),
                             ) {
                                 MountExec::Adopt => {
+                                    let nt = norm_target(target);
+                                    if let Some(active) = active_by_norm.get(&nt).copied()
+                                        && !ledger.contains_key(&nt)
+                                        && adopt_owns(
+                                            active,
+                                            fstype_by_norm.get(&nt).map_or("", String::as_str),
+                                            &d.sources,
+                                        )
+                                    {
+                                        ledger.insert(nt, active.to_string());
+                                    }
                                     info!(
                                         "[converge] {target} already mounted from a desired \
                                          source; adopting (no remount)"
@@ -1303,19 +1371,14 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
             .iter()
             .filter_map(|r| r.secret_file.as_ref().map(|sf| sf.path.clone()))
             .collect();
-        let source_by_target: HashMap<String, String> = reqs
-            .iter()
-            .map(|r| (r.target.clone(), r.source.clone()))
-            .collect();
+        let source_by_target = mounted_sources(&reqs);
         let r = run_privileged(&PrivilegedOp::Mount {
             mounts: reqs,
             keep_secret_files,
         })
         .await;
+        record_mounted_sources(&mut ledger, &source_by_target, &r.changed);
         for t in &r.changed {
-            if let Some(src) = source_by_target.get(t) {
-                ledger.insert(norm_target(t), src.clone());
-            }
             info!("[converge] mounted {t}");
         }
         for e in &r.errors {
@@ -1334,6 +1397,26 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     // no read-only probe to run and it is skipped entirely. Core never restarts
     // containers itself — it only calls the backend. Runs every tick (healthy
     // hosts included), which is exactly where consumer-stale surfaces.
+    // A confirmed-stale desired target orca does not own can never be remounted
+    // by converge; it needs an operator, so surface it beyond the log.
+    for t in &confirmed_stale {
+        if !ledger.contains_key(&norm_target(t)) {
+            let active = active_by_target.get(t).cloned().unwrap_or_default();
+            warn!("[converge] {t} is stale but held by unowned mount {active}; not remounting");
+            raise_notification(
+                format!("converge:stale-unowned:{t}"),
+                Severity::Warn,
+                false,
+                format!("Stale mount at {t} is not managed by orca"),
+                format!(
+                    "{t} is stale but occupied by {active}, which orca did not mount; \
+                     release it manually so orca can remount the placement."
+                ),
+                None,
+            );
+        }
+    }
+
     let policy = remediation_policy();
     if policy.acts() {
         let merged = crate::storage_tools::recover_backends_only(
@@ -1744,7 +1827,12 @@ mod tests {
     fn led(targets: &[&str]) -> Ledger {
         targets
             .iter()
-            .map(|t| (t.to_string(), format!("nas:/{}", t.trim_start_matches('/'))))
+            .map(|t| {
+                (
+                    norm_target(t),
+                    format!("nas:/{}", norm_target(t).trim_start_matches('/')),
+                )
+            })
             .collect()
     }
     fn set(items: &[&str]) -> HashSet<String> {
@@ -2190,6 +2278,94 @@ mod tests {
     }
 
     #[test]
+    fn stale_unowned_desired_source_is_adopted_then_remounted() {
+        // Pre-upgrade nfs mount from a desired source, empty ledger, confirmed stale.
+        let desired = d("/mnt/data");
+        let mut ledger = Ledger::new();
+        let stale_plan = || {
+            plan(
+                std::slice::from_ref(&desired),
+                &set(&["/mnt/data"]),
+                &HashSet::new(),
+                &no_failover(),
+                &no_drift(),
+            )
+        };
+        // Tick 1: the Unmount is dropped (not owned); the bare Mount adopts.
+        let actions = retain_owned_unmounts(stale_plan(), &ledger);
+        assert_eq!(
+            actions,
+            vec![Action::Mount {
+                target: "/mnt/data".into()
+            }]
+        );
+        let active = "10.0.0.1:/e/";
+        assert_eq!(
+            mount_execution("10.0.0.2:/e", &desired.sources, Some(active)),
+            MountExec::Adopt
+        );
+        assert!(adopt_owns(active, "nfs4", &desired.sources));
+        ledger.insert(norm_target("/mnt/data/"), active.to_string());
+        // Tick 2: now owned, the stale remount goes through.
+        assert_eq!(
+            retain_owned_unmounts(stale_plan(), &ledger),
+            vec![
+                Action::Unmount {
+                    target: "/mnt/data".into()
+                },
+                Action::Mount {
+                    target: "/mnt/data".into()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn bind_at_desired_target_is_never_owned() {
+        let desired = vec!["10.0.0.1:/e".to_string()];
+        assert!(!adopt_owns("10.0.0.1:/e", "none", &desired));
+        assert!(!adopt_owns("/dev/sda1", "ext4", &desired));
+        assert!(!adopt_owns("10.0.0.9:/e", "nfs", &desired));
+        assert!(adopt_owns("//NAS/e", "cifs", &["//nas/e".to_string()]));
+    }
+
+    #[test]
+    fn post_mount_ledger_update_matches_across_target_spelling() {
+        let req = |target: &str, source: &str| MountReq {
+            source: source.into(),
+            target: target.into(),
+            fstype: "nfs4".into(),
+            options: String::new(),
+            secret_file: None,
+        };
+        let reqs = vec![req("/mnt/a/", "nas:/a"), req("/mnt/b", "nas:/b")];
+        let mut ledger = Ledger::new();
+        record_mounted_sources(
+            &mut ledger,
+            &mounted_sources(&reqs),
+            &[
+                "/mnt/a".to_string(),
+                "/mnt/b/".to_string(),
+                "/mnt/x".to_string(),
+            ],
+        );
+        assert_eq!(
+            ledger,
+            Ledger::from([
+                ("/mnt/a".to_string(), "nas:/a".to_string()),
+                ("/mnt/b".to_string(), "nas:/b".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn same_source_bracketed_ipv6_ignores_case() {
+        assert!(same_source("[FE80::1]:/x", "[fe80::1]:/x"));
+        assert!(same_source("[FE80::1]:/x/", "[fe80::1]:/x"));
+        assert!(!same_source("[fe80::1]:/x", "[fe80::2]:/x"));
+    }
+
+    #[test]
     fn mount_execution_refuses_to_stack_on_foreign_source() {
         // maple stacked under willow, live: the target already carries a source
         // outside the desired set → never stack, surface it as Foreign.
@@ -2300,10 +2476,6 @@ mod tests {
     #[test]
     fn owned_mount_no_longer_desired_is_unmounted_once() {
         let ledger = led(&["/mnt/old/"]);
-        let ledger: Ledger = ledger
-            .into_iter()
-            .map(|(t, s)| (norm_target(&t), s))
-            .collect();
         let orphans = orphan_targets(&ledger, &HashSet::new());
         assert_eq!(orphans, vec!["/mnt/old".to_string()]);
         assert_eq!(
