@@ -44,7 +44,7 @@ pub const PRIVILEGED_FLAG: &str = "--privileged-op";
 pub const PLUGIN_APPLY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// The only `PATH` a privileged plugin sees.
-pub const SAFE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+pub const SAFE_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// Refuse to stage anything larger; plugin binaries are tens of MiB.
 const MAX_PLUGIN_BYTES: u64 = 512 * 1024 * 1024;
@@ -139,18 +139,18 @@ pub fn home_for_uid(passwd: &str, uid: u32) -> Option<PathBuf> {
 
 /// The orca home of the user who invoked `sudo`: their passwd home plus the
 /// state dir. `SUDO_UID` is set by sudo itself, and sudo strips a caller's
-/// `ORCA_HOME`, so the passwd entry is the source of truth. Outside sudo this
-/// is the current process's own orca home.
-pub fn invoking_orca_home() -> Option<PathBuf> {
-    if let Some(uid) = sudo_uid() {
-        let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
-        return home_for_uid(&passwd, uid).map(|h| h.join(contract::config::APP_STATE_DIR));
+/// `ORCA_HOME`, so the passwd entry is the source of truth; a malformed
+/// `SUDO_UID` or a uid with no passwd entry is an error. Outside sudo this is
+/// the current process's own orca home.
+pub fn invoking_orca_home() -> Result<PathBuf> {
+    if std::env::var_os("SUDO_UID").is_some() {
+        let uid = invoking_uid()?;
+        let passwd = std::fs::read_to_string("/etc/passwd").context("read /etc/passwd")?;
+        return home_for_uid(&passwd, uid)
+            .map(|h| h.join(contract::config::APP_STATE_DIR))
+            .with_context(|| format!("no passwd entry for SUDO_UID {uid}"));
     }
-    files::ops::orca_home()
-}
-
-fn sudo_uid() -> Option<u32> {
-    std::env::var("SUDO_UID").ok().and_then(|u| u.parse().ok())
+    files::ops::orca_home().context("no orca home for this process")
 }
 
 /// The invoking user's uid: `SUDO_UID` under sudo, else this process's own
@@ -329,6 +329,16 @@ fn check_owner(path: &Path, uid: u32, mode: u32, owner_uid: u32) -> Result<()> {
     Ok(())
 }
 
+fn check_private(path: &Path, uid: u32, mode: u32, owner_uid: u32, allowed: &[u32]) -> Result<()> {
+    ensure!(
+        uid == owner_uid && allowed.contains(&(mode & 0o7777)),
+        "{} changed after staging (uid {uid}, mode {:o}); refusing to run it",
+        path.display(),
+        mode & 0o7777
+    );
+    Ok(())
+}
+
 fn open_nofollow(path: &Path, extra_flags: i32) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
@@ -474,6 +484,7 @@ async fn apply_staged_in(
 
 async fn run_staged(stage: &Stage, input: &[u8], caller_uid: u32) -> Result<ApplyOutcome> {
     use tokio::io::AsyncWriteExt;
+    stage.verify()?;
     let bin = stage.exec_path();
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.arg(PRIVILEGED_FLAG)
@@ -503,30 +514,49 @@ async fn run_staged(stage: &Stage, input: &[u8], caller_uid: u32) -> Result<Appl
             });
         }
     }
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .with_context(|| format!("spawn {}", bin.display()))?;
-    let mut group = GroupKill(child.id().and_then(|p| i32::try_from(p).ok()));
-    if let Some(mut stdin) = child.stdin.take() {
+    let mut running = GroupKill {
+        pgid: child.id().and_then(|p| i32::try_from(p).ok()),
+        child,
+    };
+    let child = &mut running.child;
+    let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+    if let Some(mut stdin) = stdin {
         stdin.write_all(input).await.context("write op to plugin")?;
         stdin.shutdown().await.context("close plugin stdin")?;
     }
-    let out = child.wait_with_output().await.context("wait for plugin")?;
-    group.0 = None;
+    let (status, stdout, stderr) =
+        tokio::try_join!(child.wait(), read_all(stdout), read_all(stderr))
+            .context("wait for plugin")?;
     Ok(ApplyOutcome {
-        exit_code: out.status.code().unwrap_or(1),
-        stdout: out.stdout,
-        stderr: out.stderr,
+        exit_code: status.code().unwrap_or(1),
+        stdout,
+        stderr,
     })
 }
 
-/// SIGKILLs the plugin's whole process group on drop (timeout or error), so
-/// a child it forked cannot keep running as root.
-struct GroupKill(Option<i32>);
+async fn read_all(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    if let Some(mut p) = pipe {
+        p.read_to_end(&mut buf).await?;
+    }
+    Ok(buf)
+}
+
+/// Owns the plugin child and SIGKILLs its whole process group on drop, after
+/// a normal exit too, so nothing it forked keeps running as root. `drop`
+/// runs before the `child` field drops, so the group kill always comes first.
+struct GroupKill {
+    pgid: Option<i32>,
+    child: tokio::process::Child,
+}
 
 impl Drop for GroupKill {
     fn drop(&mut self) {
-        if let Some(pgid) = self.0 {
+        if let Some(pgid) = self.pgid {
             // SAFETY: kill has no memory-safety preconditions.
             unsafe { libc::kill(-pgid, libc::SIGKILL) };
         }
@@ -540,7 +570,11 @@ enum Stage {
     Memfd(std::os::fd::OwnedFd),
     /// A file in a fresh `mkdtemp` dir under the checked staging root,
     /// removed on drop.
-    Dir { dir: PathBuf, path: PathBuf },
+    Dir {
+        root: TrustStore,
+        dir: PathBuf,
+        path: PathBuf,
+    },
 }
 
 impl Stage {
@@ -578,6 +612,7 @@ impl Stage {
         let dir = PathBuf::from(std::ffi::OsString::from_vec(template.into_bytes()));
         let path = dir.join(name);
         let staged = Self::Dir {
+            root: root.clone(),
             path: path.clone(),
             dir,
         };
@@ -591,6 +626,40 @@ impl Stage {
         f.write_all(bytes).context("write staged plugin")?;
         f.sync_all().ok();
         Ok(staged)
+    }
+
+    /// Re-checks a directory stage right before exec: the staging chain, the
+    /// per-run dir, and the staged file must still be owned by the root's
+    /// owner with no group/world access.
+    fn verify(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let (root, dir, path) = match self {
+            #[cfg(target_os = "linux")]
+            Self::Memfd(_) => return Ok(()),
+            Self::Dir { root, dir, path } => (root, dir, path),
+        };
+        let base = root.check_dirs()?;
+        ensure!(
+            dir.parent() == Some(base.as_path()),
+            "staging dir {} moved out of {}",
+            dir.display(),
+            base.display()
+        );
+        let meta =
+            std::fs::symlink_metadata(dir).with_context(|| format!("stat {}", dir.display()))?;
+        ensure!(meta.is_dir(), "{} is not a directory", dir.display());
+        check_private(dir, meta.uid(), meta.mode(), root.owner_uid, &[0o700])?;
+        let file = open_nofollow(path, libc::O_NONBLOCK)
+            .with_context(|| format!("reopen staged {}", path.display()))?;
+        let meta = file.metadata().context("fstat staged plugin")?;
+        ensure!(meta.is_file(), "{} is not a regular file", path.display());
+        check_private(
+            path,
+            meta.uid(),
+            meta.mode(),
+            root.owner_uid,
+            &[0o700, 0o500],
+        )
     }
 
     fn exec_path(&self) -> PathBuf {
@@ -746,6 +815,74 @@ esac
         .unwrap();
         assert_eq!(r.payload.unwrap()["name"], "pbs");
         assert!(parse_request(r#"{"plugin":"unraid","op":"ping","path":"/x"}"#).is_err());
+    }
+
+    #[test]
+    fn the_safe_path_holds_only_root_owned_system_dirs() {
+        assert_eq!(SAFE_PATH, "/usr/sbin:/usr/bin:/sbin:/bin");
+    }
+
+    #[test]
+    fn a_staged_copy_altered_before_exec_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let set = |p: &Path, m| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m));
+        let home = tempfile::tempdir().unwrap();
+        let staged = Stage::in_dir(&stage_in(home.path()), "fakeplug", b"x").unwrap();
+        staged.verify().unwrap();
+        let (root, dir, path) = match &staged {
+            Stage::Dir { root, dir, path } => (root, dir, path),
+            #[cfg(target_os = "linux")]
+            Stage::Memfd(_) => unreachable!(),
+        };
+        set(path, 0o755).unwrap();
+        assert!(staged.verify().is_err());
+        set(path, 0o500).unwrap();
+        staged.verify().unwrap();
+        set(dir, 0o755).unwrap();
+        assert!(staged.verify().is_err());
+        set(dir, 0o700).unwrap();
+        set(&root.dir, 0o777).unwrap();
+        assert!(staged.verify().is_err());
+        set(&root.dir, 0o700).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", path).unwrap();
+        assert!(staged.verify().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_normal_exit_kills_the_plugins_leftover_process_group() {
+        let home = tempfile::tempdir().unwrap();
+        let pidfile = home.path().join("child.pid");
+        let script = format!(
+            "#!/bin/sh\nsleep 60 >/dev/null 2>&1 &\necho $! > {}\nexit 0\n",
+            pidfile.display()
+        );
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = home.path().join("plugins");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("leaver"), &script).unwrap();
+            std::fs::set_permissions(dir.join("leaver"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            trust(home.path(), &store_in(home.path()), "leaver", me()).unwrap();
+        }
+        let out = apply_in(home.path(), &req("leaver", "ping"), Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 0);
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background child {pid} survived"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     #[test]
@@ -948,7 +1085,7 @@ esac
         let root = stage_in(home.path());
         let staged = Stage::in_dir(&root, "fakeplug", b"x").unwrap();
         let (dir, path) = match &staged {
-            Stage::Dir { dir, path } => (dir.clone(), path.clone()),
+            Stage::Dir { dir, path, .. } => (dir.clone(), path.clone()),
             #[cfg(target_os = "linux")]
             Stage::Memfd(_) => unreachable!(),
         };
