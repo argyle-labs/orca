@@ -47,3 +47,30 @@ jobs:
       # a duplicate-libiconv Mach-O that macOS dyld refuses to load.
       targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl"]'
     secrets: inherit
+
+  # Publishes the orca-* crates to the Gitea cargo registry once the release has
+  # committed its version bump. Checks out the branch tip (the release commit),
+  # not the dispatch sha, so the published versions match the tag.
+  publish-crates:
+    name: Publish crates to Gitea registry
+    needs: [release]
+    runs-on: ci-large
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref }}
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRIES_GITEA_TOKEN: Bearer ${{ secrets.CI_REGISTRY_TOKEN }}
+        run: scripts/publish-crates.sh
