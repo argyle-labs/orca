@@ -1540,6 +1540,9 @@ async fn proxy_http(req: axum::extract::Request, origin: String) -> axum::respon
         reqwest::Client::builder()
             .pool_max_idle_per_host(8)
             .pool_idle_timeout(Duration::from_secs(30))
+            // Relay 30x to the browser; following would forward its cookies
+            // and custom headers to whatever host the upstream names.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("dev proxy reqwest client")
     });
@@ -1566,6 +1569,17 @@ async fn proxy_http(req: axum::extract::Request, origin: String) -> axum::respon
             let mut builder = Response::builder().status(status);
             for (k, v) in resp.headers() {
                 if is_hop_by_hop(k.as_str()) {
+                    continue;
+                }
+                // An absolute Location at the upstream would take the browser
+                // off orca's origin; keep it relative.
+                if k == reqwest::header::LOCATION
+                    && let Some(rel) = v
+                        .to_str()
+                        .ok()
+                        .and_then(|l| l.strip_prefix(origin.as_str()))
+                {
+                    builder = builder.header(k.as_str(), if rel.is_empty() { "/" } else { rel });
                     continue;
                 }
                 builder = builder.header(k.as_str(), v);
