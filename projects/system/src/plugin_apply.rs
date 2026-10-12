@@ -849,6 +849,19 @@ esac
         assert!(staged.verify().is_err());
     }
 
+    /// A killed child stays a zombie where nothing reaps orphans (containers
+    /// without an init), and `kill(pid, 0)` still succeeds on it.
+    fn alive(pid: i32) -> bool {
+        let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| {
+                s.rsplit_once(')')
+                    .map(|(_, rest)| rest.trim_start().starts_with('Z'))
+            })
+            .unwrap_or(false);
+        !zombie && unsafe { libc::kill(pid, 0) } == 0
+    }
+
     #[tokio::test]
     async fn a_normal_exit_kills_the_plugins_leftover_process_group() {
         let home = tempfile::tempdir().unwrap();
@@ -876,7 +889,7 @@ esac
             .parse()
             .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while unsafe { libc::kill(pid, 0) } == 0 {
+        while alive(pid) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "background child {pid} survived"
@@ -1163,7 +1176,7 @@ esac
             .parse()
             .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while unsafe { libc::kill(pid, 0) } == 0 {
+        while alive(pid) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "background child {pid} survived"
