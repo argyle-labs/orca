@@ -208,7 +208,6 @@ jobs:
 
   lint:
     name: lint
-    needs: build
     runs-on: ci-large
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
