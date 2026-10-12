@@ -5,7 +5,7 @@ pub const APP_MCP_SERVER: &str = "orca";
 /// Prior name, pruned from client configs on install/update (#538).
 pub const APP_MCP_SERVER_LEGACY: &str = "orca-local";
 pub const APP_DB_FILE: &str = "orca.db";
-pub const APP_STATE_DIR: &str = ".orca";
+pub use utils::home::APP_STATE_DIR;
 pub const APP_PLIST_LABEL: &str = "com.orca.daemon";
 /// Subdirectory inside APP_STATE_DIR for file-backed daemon logs.
 pub const APP_LOGS_SUBDIR: &str = "logs";

@@ -19,6 +19,7 @@ pub mod atomic;
 pub mod encoding;
 pub mod hash;
 /// Time-ordered unique ID generation. orca-owned; the UUID lib is hidden.
+pub mod home;
 pub mod id;
 pub mod json_schema;
 pub mod jsonrpc;

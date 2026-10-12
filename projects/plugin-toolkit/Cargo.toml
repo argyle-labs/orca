@@ -215,5 +215,10 @@ tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock = { workspace = true }
 rustls   = { workspace = true }
 
+# Pins the full plugin-facing surface (`#[orca_tool]`, ToolCtx, …).
+[[test]]
+name = "doc_authoring_anchor"
+required-features = ["full"]
+
 [lints]
 workspace = true

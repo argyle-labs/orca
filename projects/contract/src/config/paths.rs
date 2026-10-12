@@ -28,105 +28,21 @@
 //! the child is a real binary, so the sandbox does not cover it.
 
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::consts;
 
-/// Environment variable naming the orca state directory root. When set it
-/// overrides `$HOME/.orca` for EVERY path this module resolves.
-pub const ENV_ORCA_HOME: &str = "ORCA_HOME";
+/// When set, overrides `$HOME/.orca` for EVERY path this module resolves.
+pub use utils::home::ENV_ORCA_HOME;
 
 /// Environment variable naming an explicit DB file path, overriding the
 /// `<state_dir>/orca.db` default. Used for test isolation and unusual layouts.
 pub const ENV_ORCA_DB_PATH: &str = "ORCA_DB_PATH";
 
-/// Resolve orca's state dir: `$ORCA_HOME` if set, else a per-process sandbox
-/// under `cargo test`, else `$HOME/.orca`.
-/// Returns `None` only when no home can be resolved (sealed CI, sandboxes).
-/// Prefer [`state_dir`] when you want an error instead of `None`.
-pub fn orca_home() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os(ENV_ORCA_HOME) {
-        let explicit = PathBuf::from(explicit);
-        // An ambient `$ORCA_HOME` from the developer's shell points at the LIVE
-        // state dir, and it is checked before `$HOME` — so it silently defeats
-        // every harness that isolates by setting `$HOME`. That is how a test run
-        // reaches the daemon's real DB (#583).
-        if diverts_to_sandbox(&explicit) {
-            return Some(test_sandbox_home());
-        }
-        return Some(explicit);
-    }
-    // Only divert when there is a real home to protect: a test that clears both
-    // vars is asserting the no-home path and still gets `None`.
-    if is_cargo_test_binary() && home_state_dir().is_some() {
-        return Some(test_sandbox_home());
-    }
-    home_state_dir()
-}
-
-/// True when an explicitly-requested path must be redirected to the per-process
-/// sandbox because this is a test binary and the path is not one a test owns.
-///
-/// Test-owned means "under the system temp dir" — where both `tempfile` and the
-/// sandbox live — so a harness that isolates with a tempdir keeps the directory
-/// it asked for, and only a path pointing at real state is diverted. Without a
-/// resolvable home there is nothing to protect, so the request stands.
-fn diverts_to_sandbox(requested: &Path) -> bool {
-    is_cargo_test_binary()
-        && !requested.starts_with(std::env::temp_dir())
-        && home_state_dir().is_some()
-}
-
-/// `$HOME/.orca` — what a real orca process resolves to with no `$ORCA_HOME`.
-///
-/// Public so a test can assert this resolution directly: under `cargo test`
-/// [`orca_home`] deliberately answers with a sandbox instead.
-#[doc(hidden)]
-pub fn home_state_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(consts::APP_STATE_DIR))
-}
-
-/// True when this process is a `cargo test` binary.
-///
-/// Cargo sets `CARGO_MANIFEST_DIR` for the processes it runs, and test binaries
-/// live in `target/<profile>/deps/` while `cargo run` executes the profile root —
-/// so both signals together separate a test run from a real one.
-fn is_cargo_test_binary() -> bool {
-    if std::env::var_os("CARGO_MANIFEST_DIR").is_none() {
-        return false;
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| {
-            exe.parent()
-                .and_then(|dir| dir.file_name())
-                .map(|name| name == std::ffi::OsStr::new("deps"))
-        })
-        .unwrap_or(false)
-}
-
-/// Per-process state dir for a test run, so a suite never opens — or migrates —
-/// the developer's live `~/.orca/orca.db`. One directory per process, shared by
-/// every path this module resolves, so a test that writes the DB and one that
-/// reads it still agree.
-///
-/// It keeps the `.orca` leaf a real state dir has, so assertions about the
-/// resolved shape (`…/.orca/pki`) hold here too.
-fn test_sandbox_home() -> PathBuf {
-    static SANDBOX: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    SANDBOX
-        .get_or_init(|| {
-            let dir = std::env::temp_dir()
-                .join(format!("orca-test-home-{}", std::process::id()))
-                .join(consts::APP_STATE_DIR);
-            // A failure here surfaces at the first real read, which reports the path.
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                eprintln!("could not create test state dir {}: {e}", dir.display());
-            }
-            dir
-        })
-        .clone()
-}
+use utils::home::diverts_to_sandbox;
+pub use utils::home::{home_state_dir, orca_home};
+#[cfg(test)]
+use utils::home::{is_cargo_test_binary, test_sandbox_home};
 
 /// Like [`orca_home`] but errors (with context) when no home can be resolved.
 pub fn state_dir() -> Result<PathBuf> {
