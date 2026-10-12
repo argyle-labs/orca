@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// `source` all convergence dismissable notifications carry, for scoping.
 const NOTIFY_SOURCE: &str = "remediation:storage.converge";
@@ -149,16 +149,6 @@ pub fn desired_for_host(this_host: &str) -> anyhow::Result<Vec<DesiredMount>> {
 pub fn desired_guest_mounts_for_host(
     this_host: &str,
 ) -> anyhow::Result<Vec<plugin_toolkit::storage::GuestMountSpec>> {
-    Ok(desired_guest_mounts()?
-        .into_iter()
-        .filter(|(host, _)| host == this_host)
-        .map(|(_, spec)| spec)
-        .collect())
-}
-
-/// Every enabled guest placement on any host, paired with its host.
-fn desired_guest_mounts() -> anyhow::Result<Vec<(String, plugin_toolkit::storage::GuestMountSpec)>>
-{
     let by_id: HashMap<String, shares::EndpointRow> = shares::endpoint_db::list()?
         .into_iter()
         .filter(|s| s.enabled)
@@ -170,7 +160,7 @@ fn desired_guest_mounts() -> anyhow::Result<Vec<(String, plugin_toolkit::storage
         let Some(guest) = m.guest.as_deref().map(str::trim).filter(|g| !g.is_empty()) else {
             continue;
         };
-        if !m.enabled {
+        if !m.enabled || m.host != this_host {
             continue;
         }
         let Some(share) = by_id.get(&m.share_id) else {
@@ -194,7 +184,7 @@ fn desired_guest_mounts() -> anyhow::Result<Vec<(String, plugin_toolkit::storage
             options: share.options_rendered.clone(),
             credential: share.credential.clone(),
         };
-        out.push((m.host, spec));
+        out.push(spec);
     }
     Ok(out)
 }
@@ -1363,8 +1353,9 @@ fn guest_ledger_file() -> Option<PathBuf> {
         .map(|d| d.join("managed_guest_mounts.json"))
 }
 
-/// An unparseable ledger is moved aside to `<name>.corrupt` rather than silently
-/// overwritten, so the entries it held can still be recovered by hand.
+/// An unparseable ledger is moved aside to `<name>.corrupt.<unix-nanos>` rather
+/// than silently overwritten, so the entries it held can still be recovered by
+/// hand; the timestamp keeps an earlier corrupt copy from being clobbered.
 fn load_guest_ledger_at(path: &Path) -> Vec<GuestLedgerEntry> {
     let Ok(bytes) = std::fs::read(path) else {
         return Vec::new();
@@ -1373,10 +1364,15 @@ fn load_guest_ledger_at(path: &Path) -> Vec<GuestLedgerEntry> {
         Ok(l) => l,
         Err(e) => {
             let mut aside = path.as_os_str().to_owned();
-            aside.push(".corrupt");
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            aside.push(format!(".corrupt.{stamp}"));
             warn!(
-                "[converge] guest-mount ledger {} is corrupt ({e}); moving it to {}",
+                "[converge] guest-mount ledger {} ({} bytes) is corrupt ({e}); moving it to {}",
                 path.display(),
+                bytes.len(),
                 Path::new(&aside).display()
             );
             if let Err(e) = std::fs::rename(path, &aside) {
@@ -1405,10 +1401,14 @@ fn save_guest_ledger_at(path: &Path, ledger: &[GuestLedgerEntry]) -> std::io::Re
 /// apply failure is logged, never fatal to the tick. No-op when no applier is
 /// registered.
 ///
-/// A ledger entry whose `(guest, target)` is no longer desired on any host is
-/// `remove`d by the applier that applied it and dropped once that returns `Ok`,
-/// so a failed unbind retries next tick. An entry still desired on another host
-/// (placement moved) is dropped without a remove: the guest still wants it.
+/// A ledger entry no longer desired on THIS host is `remove`d by the applier that
+/// applied it and dropped once that returns `Ok`, so a failed unbind retries next
+/// tick. Guest ids are per-hypervisor vmids, so a placement on another host is
+/// never treated as the same guest: a moved placement is unbound here and
+/// re-applied by its new host.
+///
+/// Ledger entries are keyed by applier name, so applier names must stay stable
+/// across releases or entries they applied can no longer be removed.
 async fn reconcile_guest_mounts(this_host: &str) {
     reconcile_guest_mounts_at(this_host, guest_ledger_file().as_deref()).await;
 }
@@ -1418,16 +1418,19 @@ async fn reconcile_guest_mounts_at(this_host: &str, ledger_path: Option<&Path>) 
     if appliers.is_empty() {
         return;
     }
-    let all = match desired_guest_mounts() {
+    // Held across the desired-state read so an overlapping converge cannot act on
+    // an older snapshot after a newer one has saved.
+    let _guard = GUEST_LEDGER_LOCK.lock().await;
+    let desired = match desired_guest_mounts_for_host(this_host) {
         Ok(s) => s,
         Err(e) => {
             warn!("[converge] guest desired-state build failed: {e}");
             return;
         }
     };
-    let _guard = GUEST_LEDGER_LOCK.lock().await;
     let mut ledger = ledger_path.map(load_guest_ledger_at).unwrap_or_default();
-    for (_, spec) in all.iter().filter(|(host, _)| host == this_host) {
+    let mut applied = false;
+    for spec in &desired {
         // Proxmox validates a remove source as an absolute host path.
         let source = spec.sources.first().filter(|s| s.starts_with('/')).cloned();
         for applier in &appliers {
@@ -1439,6 +1442,7 @@ async fn reconcile_guest_mounts_at(this_host: &str, ledger_path: Option<&Path>) 
                         spec.target,
                         spec.guest
                     );
+                    applied = true;
                     ledger.retain(|e| {
                         !(e.guest == spec.guest
                             && e.target == spec.target
@@ -1460,15 +1464,9 @@ async fn reconcile_guest_mounts_at(this_host: &str, ledger_path: Option<&Path>) 
             }
         }
     }
-    let here: HashSet<(&str, &str)> = all
+    let here: HashSet<(&str, &str)> = desired
         .iter()
-        .filter(|(host, _)| host == this_host)
-        .map(|(_, s)| (s.guest.as_str(), s.target.as_str()))
-        .collect();
-    let elsewhere: HashSet<(&str, &str)> = all
-        .iter()
-        .filter(|(host, _)| host != this_host)
-        .map(|(_, s)| (s.guest.as_str(), s.target.as_str()))
+        .map(|s| (s.guest.as_str(), s.target.as_str()))
         .collect();
     let mut kept = Vec::with_capacity(ledger.len());
     for entry in ledger {
@@ -1477,18 +1475,13 @@ async fn reconcile_guest_mounts_at(this_host: &str, ledger_path: Option<&Path>) 
             kept.push(entry);
             continue;
         }
-        if elsewhere.contains(&key) {
-            info!(
-                "[converge] guest mount {} in {} moved to another host; releasing ledger entry",
-                entry.target, entry.guest
-            );
-            continue;
-        }
         let Some(applier) = appliers.iter().find(|a| a.name() == entry.applier) else {
-            warn!(
-                "[converge] guest applier '{}' that applied {} in {} is not registered; keeping for retry",
-                entry.applier, entry.target, entry.guest
-            );
+            if warn_unregistered_once(&entry.applier) {
+                warn!(
+                    "[converge] guest applier '{}' that applied {} in {} is not registered; keeping for retry",
+                    entry.applier, entry.target, entry.guest
+                );
+            }
             kept.push(entry);
             continue;
         };
@@ -1511,11 +1504,31 @@ async fn reconcile_guest_mounts_at(this_host: &str, ledger_path: Option<&Path>) 
             }
         }
     }
-    if let Some(p) = ledger_path
-        && let Err(e) = save_guest_ledger_at(p, &kept)
-    {
-        warn!("[converge] could not persist guest-mount ledger: {e}");
+    let Some(p) = ledger_path else {
+        return;
+    };
+    if let Err(e) = save_guest_ledger_at(p, &kept) {
+        if !applied {
+            warn!("[converge] could not persist guest-mount ledger: {e}");
+            return;
+        }
+        // Mounts were just applied: losing their entries would strand the binds.
+        if let Err(e2) = save_guest_ledger_at(p, &kept) {
+            error!(
+                "[converge] could not persist guest-mount ledger after apply ({e}; retry: {e2}); applied mounts are untracked until the next save"
+            );
+        }
     }
+}
+
+/// True the first time `applier` is seen unregistered in this process, so a
+/// missing plugin warns once rather than every tick.
+fn warn_unregistered_once(applier: &str) -> bool {
+    static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+    SEEN.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get_or_insert_with(HashSet::new)
+        .insert(applier.to_string())
 }
 
 /// Write each of this host's mount rows' last-known `health`, `active_route`
@@ -3484,13 +3497,13 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(storage_registry)]
-    async fn moved_placement_is_released_not_removed() {
+    async fn moved_placement_is_removed_here() {
         let h = guest_remove_harness("guest-remove-moved").await;
         let mut row = guest_row();
         row.host = "h2".into();
         mounts::endpoint_db::update(&row).unwrap();
         reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
-        assert!(h.removed.lock().unwrap().is_empty());
+        assert_eq!(*h.removed.lock().unwrap(), vec![removed_backups()]);
         assert!(load_guest_ledger_at(&h.ledger).is_empty());
     }
 
@@ -3523,10 +3536,21 @@ mod tests {
         std::fs::write(&path, b"{not json").unwrap();
         assert!(load_guest_ledger_at(&path).is_empty());
         assert!(!path.exists());
-        assert_eq!(
-            std::fs::read(dir.path().join("managed_guest_mounts.json.corrupt")).unwrap(),
-            b"{not json"
-        );
+        std::fs::write(&path, b"{also bad").unwrap();
+        assert!(load_guest_ledger_at(&path).is_empty());
+        let mut aside: Vec<Vec<u8>> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("managed_guest_mounts.json.corrupt.")
+            })
+            .map(|p| std::fs::read(p).unwrap())
+            .collect();
+        aside.sort();
+        assert_eq!(aside, vec![b"{also bad".to_vec(), b"{not json".to_vec()]);
     }
 
     #[tokio::test]
