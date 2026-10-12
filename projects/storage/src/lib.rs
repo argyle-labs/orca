@@ -700,8 +700,14 @@ pub trait GuestMountApplier: Send + Sync {
     async fn apply(&self, spec: &GuestMountSpec) -> Result<(), StorageError>;
 
     /// Remove the mount at `target` inside `guest` — the counterpart to a deleted
-    /// or disabled placement. Idempotent: absent ⇒ `Ok`.
-    async fn remove(&self, guest: &str, target: &str) -> Result<(), StorageError>;
+    /// or disabled placement. Idempotent: absent ⇒ `Ok`. `source` is the
+    /// placement's last-applied primary source, when known.
+    async fn remove(
+        &self,
+        guest: &str,
+        target: &str,
+        source: Option<&str>,
+    ) -> Result<(), StorageError>;
 }
 
 static GUEST_APPLIERS: LazyLock<RwLock<Vec<Arc<dyn GuestMountApplier>>>> =
@@ -753,6 +759,7 @@ struct GuestApplyArgs {
 struct GuestRemoveArgs {
     guest: String,
     target: String,
+    source: Option<String>,
 }
 
 /// Host-side proxy driving a loaded plugin's guest-mount applier over the
@@ -795,12 +802,18 @@ impl GuestMountApplier for GuestApplierProxy {
             .await
     }
 
-    async fn remove(&self, guest: &str, target: &str) -> Result<(), StorageError> {
+    async fn remove(
+        &self,
+        guest: &str,
+        target: &str,
+        source: Option<&str>,
+    ) -> Result<(), StorageError> {
         self.call(
             "guest_mount_remove",
             GuestRemoveArgs {
                 guest: guest.to_string(),
                 target: target.to_string(),
+                source: source.map(str::to_string),
             },
         )
         .await

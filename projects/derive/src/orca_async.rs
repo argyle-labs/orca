@@ -128,11 +128,22 @@ fn rewrite_async_sig(sig: &mut Signature) -> bool {
     true
 }
 
-/// Give the outer reference of `ty` a fresh lifetime if it lacks one, recursing
-/// through nested references (`&&T`). Non-reference types are left as-is; their
-/// own lifetime args (e.g. `Cow<'a, str>`) are the caller's responsibility and
-/// none of the orca traits use them.
+/// Give every elided reference in `ty` a fresh lifetime, recursing through nested
+/// references (`&&T`) and generic type args (`Option<&str>`). Explicit lifetime
+/// args (e.g. `Cow<'a, str>`) are the caller's responsibility.
 fn assign_ref_lifetimes(ty: &mut Type, counter: &mut usize, out: &mut Vec<Lifetime>) {
+    if let Type::Path(tp) = ty {
+        for seg in tp.path.segments.iter_mut() {
+            if let syn::PathArguments::AngleBracketed(ab) = &mut seg.arguments {
+                for arg in ab.args.iter_mut() {
+                    if let syn::GenericArgument::Type(t) = arg {
+                        assign_ref_lifetimes(t, counter, out);
+                    }
+                }
+            }
+        }
+        return;
+    }
     if let Type::Reference(r) = ty {
         match &r.lifetime {
             Some(existing) => out.push(existing.clone()),
