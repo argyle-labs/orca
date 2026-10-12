@@ -106,9 +106,20 @@ jobs:
           v="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
           [ -n "$v" ] || exit 1
           echo "ORCA_RELEASE_VERSION=${v}-dev+gci" >> "$GITHUB_ENV"
-      - name: Build
+      # One coverage-instrumented compile; `test` runs this archive instead of
+      # rebuilding. Covers lib/bin/test targets, not examples or benches.
+      - name: Build (coverage-instrumented test archive)
         if: ${{ steps.pass.outputs.hit != 'true' }}
-        run: cargo build --workspace --locked --all-targets
+        run: |
+          cargo fetch --locked
+          cargo llvm-cov nextest-archive --locked --workspace --archive-file nextest-archive.tar.zst
+      - name: Upload test archive
+        if: ${{ steps.pass.outputs.hit != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-archive
+          path: nextest-archive.tar.zst
+          retention-days: 1
       - name: Record pass
         if: ${{ success() && steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -169,19 +180,13 @@ jobs:
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-      # server/system build scripts derive ORCA_VERSION from git; a fixed
-      # version keeps them cached. The -dev suffix keeps dev-build behaviour.
-      - name: Pin orca version
+      # Build only uploads on a pass-cache miss; its check also requires a
+      # recorded test pass, so a miss here always has a fresh archive.
+      - name: Download test archive
         if: ${{ steps.pass.outputs.hit != 'true' }}
-        run: |
-          v="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
-          [ -n "$v" ] || exit 1
-          echo "ORCA_RELEASE_VERSION=${v}-dev+gci" >> "$GITHUB_ENV"
-      - name: Build (coverage-instrumented test archive)
-        if: ${{ steps.pass.outputs.hit != 'true' }}
-        run: |
-          cargo fetch --locked
-          cargo llvm-cov nextest-archive --locked --workspace --archive-file nextest-archive.tar.zst
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-archive
       - name: Test + coverage
         if: ${{ steps.pass.outputs.hit != 'true' }}
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
