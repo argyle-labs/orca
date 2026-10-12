@@ -25,7 +25,7 @@ use plugin_toolkit::storage::{
     MountHealth, RemountAggression, RemountPolicy, SourceProbe, probe_source, probe_source_nfs,
     resolve_replication_status,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -633,43 +633,63 @@ fn mount_execution(elected: &str, desired: &[String], active: Option<&str>) -> M
     }
 }
 
-/// The ledger of targets THIS host has natively mounted, persisted so a
-/// placement removed while the daemon was down is still reconciled on the next
-/// boot. It is per-host materialized state — never replicated — and holds only
-/// targets orca itself mounted, so an autofs/foreign mount can never land in it.
+/// Target → source of every mount THIS host's converge itself performed,
+/// persisted so a placement removed while the daemon was down is still
+/// reconciled on the next boot. Per-host materialized state, never replicated.
+/// Only a successful `PrivilegedOp::Mount` inserts: a mount merely found at a
+/// desired target (hypervisor bind, fstab, autofs, another tool) is never owned,
+/// so removal can never release it.
+type Ledger = BTreeMap<String, String>;
+
+/// Mountpoint key shared by the ledger, desired targets and the mount table, so
+/// `/mnt/data/` and `/mnt/data` are one target.
+fn norm_target(t: &str) -> String {
+    let trimmed = t.trim_end_matches('/');
+    if trimmed.is_empty() && t.starts_with('/') {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn ledger_file() -> Option<PathBuf> {
     contract::config::state_dir()
         .ok()
         .map(|d| d.join("managed_mounts.json"))
 }
 
-fn load_ledger_at(path: &Path) -> HashSet<String> {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(_) => HashSet::new(), // absent/unreadable → empty (first run)
-    }
+/// Absent, unreadable or unparseable → empty. The legacy bare-target array also
+/// reads as empty: it recorded adopted (foreign) mounts too, so none of its
+/// entries prove ownership.
+fn load_ledger_at(path: &Path) -> Ledger {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Ledger::new();
+    };
+    serde_json::from_slice::<Ledger>(&bytes)
+        .map(|l| l.into_iter().map(|(t, s)| (norm_target(&t), s)).collect())
+        .unwrap_or_default()
 }
 
 /// Atomic ledger write (temp + rename) so a concurrent reader never sees a
 /// half-written file. Best-effort: a failure to persist is logged, not fatal —
 /// the loop stays correct, it just re-derives on the next tick.
-fn save_ledger_at(path: &Path, ledger: &HashSet<String>) -> std::io::Result<()> {
+fn save_ledger_at(path: &Path, ledger: &Ledger) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let bytes = serde_json::to_vec(ledger).unwrap_or_else(|_| b"[]".to_vec());
+    let bytes = serde_json::to_vec(ledger).unwrap_or_else(|_| b"{}".to_vec());
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
 }
 
-fn load_ledger() -> HashSet<String> {
+fn load_ledger() -> Ledger {
     ledger_file()
         .map(|p| load_ledger_at(&p))
         .unwrap_or_default()
 }
 
-fn save_ledger(ledger: &HashSet<String>) {
+fn save_ledger(ledger: &Ledger) {
     if let Some(p) = ledger_file()
         && let Err(e) = save_ledger_at(&p, ledger)
     {
@@ -679,11 +699,45 @@ fn save_ledger(ledger: &HashSet<String>) {
 
 /// Targets orca has mounted that are no longer a desired placement — the removal
 /// set. Pure so it is unit-tested independent of the filesystem/probe.
-fn orphan_targets(ledger: &HashSet<String>, desired_targets: &HashSet<String>) -> Vec<String> {
+fn orphan_targets(ledger: &Ledger, desired_targets: &HashSet<String>) -> Vec<String> {
+    let desired: HashSet<String> = desired_targets.iter().map(|t| norm_target(t)).collect();
     ledger
-        .iter()
-        .filter(|t| !desired_targets.contains(*t))
+        .keys()
+        .filter(|t| !desired.contains(*t))
         .cloned()
+        .collect()
+}
+
+/// What removal does with an owned orphan given what the mount table shows at
+/// its target now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OrphanAction {
+    /// Still mounted from the source orca mounted — release it.
+    Unmount,
+    /// Nothing mounted there any more — drop it from the ledger.
+    Forget,
+    /// Something else now occupies the target — drop it, never unmount it.
+    ForgetForeign(String),
+}
+
+fn orphan_action(recorded_source: &str, active: Option<&str>) -> OrphanAction {
+    match active {
+        None => OrphanAction::Forget,
+        Some(a) if same_source(a, recorded_source) => OrphanAction::Unmount,
+        Some(a) => OrphanAction::ForgetForeign(a.to_string()),
+    }
+}
+
+/// Drop every `Unmount` (stale-remount / swap / re-option) of a target orca does
+/// not own. Its paired `Mount` then hits the non-stacking guard in the tick and
+/// adopts or refuses, so a foreign mount at a desired target is never released.
+fn retain_owned_unmounts(actions: Vec<Action>, ledger: &Ledger) -> Vec<Action> {
+    actions
+        .into_iter()
+        .filter(|a| match a {
+            Action::Unmount { target } => ledger.contains_key(&norm_target(target)),
+            Action::Mount { .. } => true,
+        })
         .collect()
 }
 
@@ -847,25 +901,6 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     let desired_targets: HashSet<String> = desired.iter().map(|d| d.target.clone()).collect();
     let timeout = Duration::from_secs(PROBE_TIMEOUT_SECS);
 
-    // Ledger of targets orca has natively mounted here. Drives removal
-    // reconciliation: a placement deleted from the replicated `mounts` table
-    // leaves its target in the ledger but out of `desired`, so we release it.
-    let mut ledger = load_ledger();
-
-    // Removal reconcile: probe each orphan (ledger − desired) first, so we only
-    // `umount` one that is still mounted — a target already gone is simply
-    // forgotten. Only ledger targets are ever considered, so an autofs/foreign
-    // mount is never touched (coexistence stays safe).
-    let mut orphan_unmounts: Vec<String> = Vec::new();
-    for t in orphan_targets(&ledger, &desired_targets) {
-        match autofs::probe(&t, timeout).await {
-            MountHealth::Missing => {
-                ledger.remove(&t);
-            }
-            _ => orphan_unmounts.push(t),
-        }
-    }
-
     // The kernel mount table, read once: maps each desired target to the source
     // it is currently mounted from (`active`) so election can classify a
     // fail-back / degrade transition without a second probe, and to the live `-o`
@@ -889,6 +924,33 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         .into_iter()
         .map(|e| (e.mountpoint, e.options))
         .collect();
+
+    let mut ledger = load_ledger();
+
+    // Removal reconcile: an owned target no longer desired is released only if
+    // the source orca mounted is still what occupies it. Never probe-only: a
+    // hypervisor bind at a former placement's path stats healthy too.
+    let active_by_norm: HashMap<String, &str> = active_by_target
+        .iter()
+        .map(|(t, s)| (norm_target(t), s.as_str()))
+        .collect();
+    let mut orphan_unmounts: Vec<String> = Vec::new();
+    for t in orphan_targets(&ledger, &desired_targets) {
+        let recorded = ledger.get(&t).cloned().unwrap_or_default();
+        match orphan_action(&recorded, active_by_norm.get(&t).copied()) {
+            OrphanAction::Unmount => orphan_unmounts.push(t),
+            OrphanAction::Forget => {
+                ledger.remove(&t);
+            }
+            OrphanAction::ForgetForeign(active) => {
+                warn!(
+                    "[converge] removed placement {t} is now occupied by {active} \
+                     (orca mounted {recorded}); not releasing a mount orca does not own"
+                );
+                ledger.remove(&t);
+            }
+        }
+    }
 
     // Probe each desired target: mounted+Ok, mounted+stale, or missing. Record
     // the classification as a stored `MountHealth` (written to the row at tick end so
@@ -1118,12 +1180,15 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
 
     // Plan the desired set (mount / stale-remount / failover swap / re-option),
     // then append the orphan releases (removed placements orca still holds mounted).
-    let mut actions = plan(
-        &desired,
-        &mounted_any,
-        &healthy,
-        &failover,
-        &option_drift_remount,
+    let mut actions = retain_owned_unmounts(
+        plan(
+            &desired,
+            &mounted_any,
+            &healthy,
+            &failover,
+            &option_drift_remount,
+        ),
+        &ledger,
     );
     for t in &orphan_unmounts {
         actions.push(Action::Unmount { target: t.clone() });
@@ -1182,7 +1247,6 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
                                         "[converge] {target} already mounted from a desired \
                                          source; adopting (no remount)"
                                     );
-                                    ledger.insert(target.clone());
                                     continue;
                                 }
                                 MountExec::Foreign(active) => {
@@ -1223,7 +1287,7 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         // (its Mount re-adds it below).
         for t in &r.changed {
             if orphan_set.contains(t.as_str()) {
-                ledger.remove(t);
+                ledger.remove(&norm_target(t));
                 info!("[converge] unmounted removed placement {t}");
             } else {
                 info!("[converge] released {t} (remounting)");
@@ -1239,13 +1303,19 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
             .iter()
             .filter_map(|r| r.secret_file.as_ref().map(|sf| sf.path.clone()))
             .collect();
+        let source_by_target: HashMap<String, String> = reqs
+            .iter()
+            .map(|r| (r.target.clone(), r.source.clone()))
+            .collect();
         let r = run_privileged(&PrivilegedOp::Mount {
             mounts: reqs,
             keep_secret_files,
         })
         .await;
         for t in &r.changed {
-            ledger.insert(t.clone());
+            if let Some(src) = source_by_target.get(t) {
+                ledger.insert(norm_target(t), src.clone());
+            }
             info!("[converge] mounted {t}");
         }
         for e in &r.errors {
@@ -1311,14 +1381,6 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     // reconcile. Hosts with no applier registered (no guest rows target them) skip.
     reconcile_guest_mounts(this_host).await;
 
-    // Adopt desired targets orca already holds mounted (e.g. mounted in a prior
-    // tick, or still Ok after a restart) so a later removal is reconciled even if
-    // this process never performed the mount itself this run.
-    for d in &desired {
-        if mounted_any.contains(&d.target) {
-            ledger.insert(d.target.clone());
-        }
-    }
     save_ledger(&ledger);
     persist_mount_state(
         this_host,
@@ -1678,6 +1740,12 @@ mod tests {
             replication: Some("rep-0000".to_string()),
             ..d_with(target, remount_policy)
         }
+    }
+    fn led(targets: &[&str]) -> Ledger {
+        targets
+            .iter()
+            .map(|t| (t.to_string(), format!("nas:/{}", t.trim_start_matches('/'))))
+            .collect()
     }
     fn set(items: &[&str]) -> HashSet<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -2134,7 +2202,7 @@ mod tests {
 
     #[test]
     fn orphan_targets_are_ledger_minus_desired() {
-        let ledger = set(&["/mnt/data", "/mnt/old", "/mnt/gone"]);
+        let ledger = led(&["/mnt/data", "/mnt/old", "/mnt/gone"]);
         let desired = set(&["/mnt/data"]);
         let mut orphans = orphan_targets(&ledger, &desired);
         orphans.sort();
@@ -2145,8 +2213,124 @@ mod tests {
     }
 
     #[test]
+    fn norm_target_trims_trailing_slashes_but_keeps_root() {
+        assert_eq!(norm_target("/mnt/data/"), "/mnt/data");
+        assert_eq!(norm_target("/mnt/data//"), "/mnt/data");
+        assert_eq!(norm_target("/mnt/data"), "/mnt/data");
+        assert_eq!(norm_target("/"), "/");
+    }
+
+    #[test]
+    fn orphan_targets_match_desired_across_trailing_slash() {
+        assert!(orphan_targets(&led(&["/mnt/data"]), &set(&["/mnt/data/"])).is_empty());
+    }
+
+    #[test]
+    fn load_ledger_at_normalizes_keys() {
+        let path =
+            std::env::temp_dir().join(format!("orca-ledger-norm-{}.json", std::process::id()));
+        std::fs::write(&path, br#"{"/mnt/x/":"nas:/x"}"#).expect("write ledger");
+        assert_eq!(
+            load_ledger_at(&path),
+            Ledger::from([("/mnt/x".to_string(), "nas:/x".to_string())])
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn orphan_still_on_recorded_source_is_unmounted() {
+        assert_eq!(
+            orphan_action("//nas/data", Some("//NAS/data/")),
+            OrphanAction::Unmount
+        );
+    }
+
+    #[test]
+    fn orphan_no_longer_mounted_is_forgotten() {
+        assert_eq!(orphan_action("//nas/data", None), OrphanAction::Forget);
+    }
+
+    #[test]
+    fn orphan_occupied_by_another_source_is_never_unmounted() {
+        assert_eq!(
+            orphan_action("nas:/data", Some("/dev/sdb1")),
+            OrphanAction::ForgetForeign("/dev/sdb1".to_string())
+        );
+    }
+
+    // #784: a hypervisor bind at a former placement path is in the mount table
+    // but was never mounted by converge, so neither removal nor plan releases it.
+    #[test]
+    fn foreign_mount_not_in_ledger_is_never_unmounted() {
+        let ledger = Ledger::new();
+        assert!(orphan_targets(&ledger, &HashSet::new()).is_empty());
+        let actions = retain_owned_unmounts(
+            plan(
+                &[],
+                &set(&["/mnt/data", "/mnt/backups"]),
+                &HashSet::new(),
+                &no_failover(),
+                &no_drift(),
+            ),
+            &ledger,
+        );
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn stale_foreign_mount_at_desired_target_keeps_mount_drops_unmount() {
+        let actions = retain_owned_unmounts(
+            plan(
+                &[d("/mnt/data")],
+                &set(&["/mnt/data"]),
+                &HashSet::new(),
+                &no_failover(),
+                &no_drift(),
+            ),
+            &Ledger::new(),
+        );
+        assert_eq!(
+            actions,
+            vec![Action::Mount {
+                target: "/mnt/data".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn owned_mount_no_longer_desired_is_unmounted_once() {
+        let ledger = led(&["/mnt/old/"]);
+        let ledger: Ledger = ledger
+            .into_iter()
+            .map(|(t, s)| (norm_target(&t), s))
+            .collect();
+        let orphans = orphan_targets(&ledger, &HashSet::new());
+        assert_eq!(orphans, vec!["/mnt/old".to_string()]);
+        assert_eq!(
+            orphan_action(&ledger["/mnt/old"], Some("nas:/mnt/old")),
+            OrphanAction::Unmount
+        );
+        let actions = retain_owned_unmounts(
+            plan(
+                &[],
+                &set(&["/mnt/old"]),
+                &HashSet::new(),
+                &no_failover(),
+                &no_drift(),
+            ),
+            &ledger,
+        );
+        assert_eq!(
+            actions,
+            vec![Action::Unmount {
+                target: "/mnt/old".into()
+            }]
+        );
+    }
+
+    #[test]
     fn orphan_targets_empty_when_all_desired() {
-        let ledger = set(&["/mnt/data", "/mnt/media"]);
+        let ledger = led(&["/mnt/data", "/mnt/media"]);
         let desired = set(&["/mnt/data", "/mnt/media"]);
         assert!(orphan_targets(&ledger, &desired).is_empty());
     }
@@ -2362,12 +2546,12 @@ mod tests {
             "absent ledger must be empty"
         );
 
-        let want = set(&["/mnt/a", "/mnt/b"]);
+        let want = led(&["/mnt/a", "/mnt/b"]);
         save_ledger_at(&path, &want).expect("save ledger");
         assert_eq!(load_ledger_at(&path), want);
 
         // Overwrite (atomic rename) with a smaller set.
-        let want2 = set(&["/mnt/a"]);
+        let want2 = led(&["/mnt/a"]);
         save_ledger_at(&path, &want2).expect("save ledger 2");
         assert_eq!(load_ledger_at(&path), want2);
 
@@ -2552,7 +2736,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orca-ledger-nested-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let path = dir.join("sub").join("managed_mounts.json");
-        let want = set(&["/mnt/x"]);
+        let want = led(&["/mnt/x"]);
         save_ledger_at(&path, &want).expect("save creates parent dirs");
         assert_eq!(load_ledger_at(&path), want);
         std::fs::remove_dir_all(&dir).ok();
@@ -2860,40 +3044,38 @@ mod tests {
     #[test]
     fn orphan_targets_empty_ledger_is_empty() {
         let desired = set(&["/mnt/data"]);
-        assert!(orphan_targets(&HashSet::new(), &desired).is_empty());
+        assert!(orphan_targets(&Ledger::new(), &desired).is_empty());
     }
 
     // ── ledger serialization: on-disk JSON shape ─────────────────────────
 
     #[test]
-    fn save_ledger_at_writes_json_array() {
-        // Assert on the serialized string (not a parsed Value): the ledger is a
-        // flat JSON array of the mounted targets.
+    fn save_ledger_at_writes_target_to_source_object() {
         let path =
             std::env::temp_dir().join(format!("orca-ledger-shape-{}.json", std::process::id()));
         std::fs::remove_file(&path).ok();
-        save_ledger_at(&path, &set(&["/mnt/only"])).expect("save ledger");
+        save_ledger_at(&path, &led(&["/mnt/only"])).expect("save ledger");
         let raw = std::fs::read_to_string(&path).expect("read ledger");
-        assert_eq!(raw, "[\"/mnt/only\"]");
+        assert_eq!(raw, "{\"/mnt/only\":\"nas:/mnt/only\"}");
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn load_ledger_at_reads_hand_written_json_array() {
+    fn legacy_array_ledger_reads_as_empty_so_adopted_mounts_are_not_owned() {
         let path =
             std::env::temp_dir().join(format!("orca-ledger-read-{}.json", std::process::id()));
         std::fs::write(&path, b"[\"/mnt/x\",\"/mnt/y\"]").expect("write ledger");
-        assert_eq!(load_ledger_at(&path), set(&["/mnt/x", "/mnt/y"]));
+        assert!(load_ledger_at(&path).is_empty());
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn save_ledger_at_empty_set_is_empty_array() {
+    fn save_ledger_at_empty_is_empty_object() {
         let path =
             std::env::temp_dir().join(format!("orca-ledger-empty-{}.json", std::process::id()));
         std::fs::remove_file(&path).ok();
-        save_ledger_at(&path, &HashSet::new()).expect("save empty ledger");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]");
+        save_ledger_at(&path, &Ledger::new()).expect("save empty ledger");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
         assert!(load_ledger_at(&path).is_empty());
         std::fs::remove_file(&path).ok();
     }
@@ -3989,7 +4171,7 @@ mod tests {
             load_ledger().is_empty(),
             "absent ledger under a fresh $ORCA_HOME is empty"
         );
-        let want = set(&["/mnt/one", "/mnt/two"]);
+        let want = led(&["/mnt/one", "/mnt/two"]);
         save_ledger(&want);
         // The wrapper wrote it to the resolved path, and the read wrapper reads it back.
         assert_eq!(load_ledger(), want);
