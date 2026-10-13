@@ -1300,24 +1300,39 @@ mod tests {
     // The hook fns read process stdin and env directly, and several terminate the
     // process through block() -> std::process::exit(2). Each test re-runs the
     // test binary filtered to itself with stdin pointed at the hook JSON, then
-    // inspects the exit status (0 = returned Ok, 2 = block()). A re-exec rather
-    // than fork(): forking libtest's multithreaded process can deadlock the child
-    // on locks (env, malloc) held by other test threads.
+    // checks the exit status. A re-exec rather than fork(): forking libtest's
+    // multithreaded process can deadlock the child on locks (env, malloc) held by
+    // other test threads.
     const HOOK_CHILD_ENV: &str = "ORCA_HOOK_TEST_CHILD";
+    // Exit code the child uses when body() returns. libtest never exits 42, so a
+    // filter that matches no test (exit 0) can't pass as "body returned".
+    const BODY_RETURNED: i32 = 42;
+    const BLOCKED: i32 = 2;
+
+    // Takes the test fn's own ident so the child filter is derived from it and
+    // can't drift from the test's real name.
+    macro_rules! run_hook {
+        ($test:ident, $stdin:expr, $setup:expr, $body:expr, $expect:expr $(,)?) => {{
+            let _: fn() = $test;
+            run_hook(stringify!($test), $stdin, $setup, $body, $expect)
+        }};
+    }
 
     fn run_hook(
         test: &str,
         stdin_json: &str,
         setup: impl FnOnce(&mut std::process::Command),
         body: fn(),
-    ) -> i32 {
+        expect: i32,
+    ) {
         if std::env::var(HOOK_CHILD_ENV).as_deref() == Ok(test) {
             body();
-            std::process::exit(0);
+            std::process::exit(BODY_RETURNED);
         }
         let mut tf = tempfile::NamedTempFile::new().unwrap();
         tf.write_all(stdin_json.as_bytes()).unwrap();
         tf.flush().unwrap();
+        let orca_home = tempfile::tempdir().unwrap();
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
         cmd.args([
             &format!("hook::tests::{test}"),
@@ -1325,14 +1340,19 @@ mod tests {
             "--test-threads=1",
         ])
         .env(HOOK_CHILD_ENV, test)
+        .env("ORCA_HOME", orca_home.path())
         .stdin(std::fs::File::open(tf.path()).unwrap())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::piped());
         setup(&mut cmd);
-        cmd.status()
-            .unwrap()
-            .code()
-            .expect("hook child killed by signal")
+        let out = cmd.output().unwrap();
+        let code = out.status.code().expect("hook child killed by signal");
+        assert_eq!(
+            code,
+            expect,
+            "hook child {test} exited {code}, expected {expect}; stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]
@@ -1345,8 +1365,8 @@ mod tests {
             "prompt": "hello world prompt"
         })
         .to_string();
-        let code = run_hook(
-            "session_start_writes_prompt_record",
+        run_hook!(
+            session_start_writes_prompt_record,
             &input,
             |c| {
                 c.env("HOME", &hp);
@@ -1354,8 +1374,8 @@ mod tests {
             || {
                 session_start().ok();
             },
+            BODY_RETURNED,
         );
-        assert_eq!(code, 0);
         let dir = home.path().join(".orca/logs/sessions");
         let entries: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -1387,8 +1407,8 @@ mod tests {
             "prompt": long
         })
         .to_string();
-        let code = run_hook(
-            "session_start_truncates_long_prompt_to_800",
+        run_hook!(
+            session_start_truncates_long_prompt_to_800,
             &input,
             |c| {
                 c.env("HOME", &hp);
@@ -1396,8 +1416,8 @@ mod tests {
             || {
                 session_start().ok();
             },
+            BODY_RETURNED,
         );
-        assert_eq!(code, 0);
         let dir = home.path().join(".orca/logs/sessions");
         let entry = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap();
         let body = std::fs::read_to_string(entry.path()).unwrap();
@@ -1422,8 +1442,8 @@ mod tests {
             "cwd": "/x/y/coolproj"
         })
         .to_string();
-        let code = run_hook(
-            "session_stop_writes_assistant_record",
+        run_hook!(
+            session_stop_writes_assistant_record,
             &input,
             |c| {
                 c.env("HOME", &hp);
@@ -1431,8 +1451,8 @@ mod tests {
             || {
                 session_stop().ok();
             },
+            BODY_RETURNED,
         );
-        assert_eq!(code, 0);
         let dir = home.path().join(".orca/logs/sessions");
         let entry = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap();
         let body = std::fs::read_to_string(entry.path()).unwrap();
@@ -1461,8 +1481,8 @@ mod tests {
             "cwd": "/a/b/proj"
         })
         .to_string();
-        let code = run_hook(
-            "session_stop_no_assistant_text_writes_nothing",
+        run_hook!(
+            session_stop_no_assistant_text_writes_nothing,
             &input,
             |c| {
                 c.env("HOME", &hp);
@@ -1470,8 +1490,8 @@ mod tests {
             || {
                 session_stop().ok();
             },
+            BODY_RETURNED,
         );
-        assert_eq!(code, 0);
         let dir = home.path().join(".orca/logs/sessions");
         assert!(!dir.exists() || std::fs::read_dir(&dir).unwrap().next().is_none());
     }
@@ -1485,15 +1505,15 @@ mod tests {
             "tool_input": {"file_path": tf.path().to_str().unwrap()}
         })
         .to_string();
-        let code = run_hook(
-            "pii_scan_clean_file_is_ok_no_block",
+        run_hook!(
+            pii_scan_clean_file_is_ok_no_block,
             &input,
             |_| {},
             || {
                 pii_scan().ok();
             },
+            BODY_RETURNED,
         );
-        assert_eq!(code, 0);
     }
 
     #[test]
@@ -1506,15 +1526,15 @@ mod tests {
             "tool_input": {"file_path": tf.path().to_str().unwrap()}
         })
         .to_string();
-        let code = run_hook(
-            "pii_scan_blocks_on_detected_pii",
+        run_hook!(
+            pii_scan_blocks_on_detected_pii,
             &input,
             |_| {},
             || {
                 pii_scan().ok();
             },
+            BLOCKED,
         );
-        assert_eq!(code, 2);
     }
 
     #[test]
@@ -1523,15 +1543,15 @@ mod tests {
             "tool_input": {"file_path": "/no/such/file/xyz123.txt"}
         })
         .to_string();
-        let code = run_hook(
-            "pii_scan_nonexistent_file_is_ok",
+        run_hook!(
+            pii_scan_nonexistent_file_is_ok,
             &input,
             |_| {},
             || {
                 pii_scan().ok();
             },
+            BODY_RETURNED,
         );
-        assert_eq!(code, 0);
     }
 
     #[test]
@@ -1540,15 +1560,15 @@ mod tests {
             "tool_input": {"command": "rm -rf /important/data"}
         })
         .to_string();
-        let code = run_hook(
-            "bash_guard_blocks_destructive_command",
+        run_hook!(
+            bash_guard_blocks_destructive_command,
             &input,
             |_| {},
             || {
                 bash_guard().ok();
             },
+            BLOCKED,
         );
-        assert_eq!(code, 2);
     }
 
     #[test]
@@ -1557,15 +1577,15 @@ mod tests {
             "tool_input": {"command": "ls -la /tmp"}
         })
         .to_string();
-        let code = run_hook(
-            "bash_guard_allows_safe_command",
+        run_hook!(
+            bash_guard_allows_safe_command,
             &input,
             |_| {},
             || {
                 bash_guard().ok();
             },
+            BODY_RETURNED,
         );
-        assert_eq!(code, 0);
     }
 
     #[test]
@@ -1574,15 +1594,17 @@ mod tests {
             "tool_input": {"command": "ssh root@opnsense uptime"}
         })
         .to_string();
-        let code = run_hook(
-            "opnsense_guard_blocks_named_host",
+        run_hook!(
+            opnsense_guard_blocks_named_host,
             &input,
-            |_| {},
+            |c| {
+                c.env_remove("ORCA_ROUTER_GUARD_IP");
+            },
             || {
                 opnsense_guard().ok();
             },
+            BLOCKED,
         );
-        assert_eq!(code, 2);
     }
 
     #[test]
@@ -1591,8 +1613,8 @@ mod tests {
             "tool_input": {"command": "ls -la /tmp"}
         })
         .to_string();
-        let code = run_hook(
-            "opnsense_guard_allows_unrelated_command",
+        run_hook!(
+            opnsense_guard_allows_unrelated_command,
             &input,
             |c| {
                 c.env_remove("ORCA_ROUTER_GUARD_IP");
@@ -1600,8 +1622,8 @@ mod tests {
             || {
                 opnsense_guard().ok();
             },
+            BODY_RETURNED,
         );
-        assert_eq!(code, 0);
     }
 
     #[test]
@@ -1615,8 +1637,8 @@ mod tests {
             "tool_input": {"command": "git commit -m wip"}
         })
         .to_string();
-        let code = run_hook(
-            "secrets_scan_git_commit_command_runs_and_returns_ok",
+        run_hook!(
+            secrets_scan_git_commit_command_runs_and_returns_ok,
             &input,
             |c| {
                 c.current_dir(&dp);
@@ -1624,7 +1646,7 @@ mod tests {
             || {
                 secrets_scan().ok();
             },
+            BODY_RETURNED,
         );
-        assert_eq!(code, 0);
     }
 }
