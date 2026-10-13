@@ -1153,7 +1153,8 @@ esac
         let home = tempfile::tempdir().unwrap();
         let pidfile = home.path().join("child.pid");
         let script = format!(
-            "#!/bin/sh\nsleep 60 &\necho $! > {}\nwait\n",
+            // Rename so the pidfile never appears empty if the kill lands mid-write.
+            "#!/bin/sh\nsleep 60 &\necho $! > {0}.tmp\nmv {0}.tmp {0}\nwait\n",
             pidfile.display()
         );
         let home = {
@@ -1166,12 +1167,23 @@ esac
             trust(home.path(), &store_in(home.path()), "forker", me()).unwrap();
             home
         };
-        let err = apply_in(home.path(), &req("forker", "ping"), Duration::from_secs(2))
+        // Under load the timeout can fire before the script forks and writes the
+        // pidfile; rerun with a longer budget until the child exists to be checked.
+        for secs in [2, 4, 8, 16] {
+            let err = apply_in(
+                home.path(),
+                &req("forker", "ping"),
+                Duration::from_secs(secs),
+            )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("did not finish"), "{err:#}");
+            assert!(err.to_string().contains("did not finish"), "{err:#}");
+            if pidfile.exists() {
+                break;
+            }
+        }
         let pid: i32 = std::fs::read_to_string(&pidfile)
-            .unwrap()
+            .expect("pidfile never written within the 16s budget")
             .trim()
             .parse()
             .unwrap();

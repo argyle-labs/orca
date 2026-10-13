@@ -3847,6 +3847,7 @@ mod tests {
         name: String,
         removed: RemoveLog,
         fail_remove: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        _applier: crate::test_storage::RegisteredGuestApplier,
         _dir: tempfile::TempDir,
         ledger: PathBuf,
     }
@@ -3857,7 +3858,7 @@ mod tests {
     async fn guest_remove_harness(name: &str) -> GuestRemoveHarness {
         let removed: RemoveLog = Default::default();
         let fail_remove = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        plugin_toolkit::storage::register_guest_applier(std::sync::Arc::new(
+        let applier = crate::test_storage::RegisteredGuestApplier::new(std::sync::Arc::new(
             RemovingGuestApplier {
                 name: name.to_string(),
                 removed: removed.clone(),
@@ -3879,6 +3880,7 @@ mod tests {
             name: name.to_string(),
             removed,
             fail_remove,
+            _applier: applier,
             _dir: dir,
             ledger,
         }
@@ -3887,7 +3889,6 @@ mod tests {
     impl Drop for GuestRemoveHarness {
         fn drop(&mut self) {
             db::set_thread_db_path(None);
-            plugin_toolkit::storage::deregister_guest_applier(&self.name);
         }
     }
 
@@ -3975,6 +3976,7 @@ mod tests {
     #[serial_test::serial(storage_registry)]
     async fn no_appliers_registered_leaves_ledger_intact() {
         let h = guest_remove_harness("guest-remove-none").await;
+        // The harness registers an applier; this case needs the registry empty.
         plugin_toolkit::storage::deregister_guest_applier(&h.name);
         mounts::endpoint_db::remove("m-guest").unwrap();
         reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
@@ -4112,7 +4114,7 @@ mod tests {
     async fn reconcile_guest_mounts_routes_guest_placement_to_applier() {
         let applied = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let name = "proxmox-guest-fake";
-        plugin_toolkit::storage::register_guest_applier(std::sync::Arc::new(
+        let _applier = crate::test_storage::RegisteredGuestApplier::new(std::sync::Arc::new(
             RecordingGuestApplier {
                 name: name.to_string(),
                 applied: applied.clone(),
@@ -4136,7 +4138,6 @@ mod tests {
         }
         reconcile_guest_mounts_at("h1", None).await;
         db::set_thread_db_path(None);
-        plugin_toolkit::storage::deregister_guest_applier(name);
 
         let log = applied.lock().expect("applied log poisoned").clone();
         assert_eq!(log, vec![("110".to_string(), "/mnt/backups".to_string())]);
@@ -4168,7 +4169,7 @@ mod tests {
     #[serial_test::serial(storage_registry)]
     async fn resolve_secret_file_none_when_backend_validate_errs_fails_closed() {
         let name = "smb-erroring-fake";
-        plugin_toolkit::storage::register_backend(std::sync::Arc::new(SecretFileBackend {
+        let _reg = crate::test_storage::Registered::new(std::sync::Arc::new(SecretFileBackend {
             name: name.to_string(),
             render_secret: None, // validate_spec returns Err → fail closed
         }));
@@ -4178,7 +4179,6 @@ mod tests {
             ..d("/mnt/data")
         };
         let got = resolve_secret_file(&dm).await;
-        plugin_toolkit::storage::deregister_backend(name);
         assert!(
             got.is_none(),
             "a validate_spec error must fail closed to None"
