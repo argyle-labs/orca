@@ -4422,7 +4422,9 @@ mod tests {
     #[test]
     fn discover_live_shares_no_backends_is_empty() {
         with_db("discover_empty.db", || {
-            let out = rt().block_on(discover_live_shares(None));
+            // The backend registry is process-global and other tests register
+            // fakes into it, so scope to a provider nothing registers.
+            let out = rt().block_on(discover_live_shares(Some("discover-empty-none")));
             assert!(out.shares.is_empty());
             assert!(out.errors.is_empty());
         });

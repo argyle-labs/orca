@@ -1712,10 +1712,8 @@ mod tests {
     // (no mesh material exists there, so the mesh-PKI removal is a safe no-op and
     // the developer's real `~/.orca` is never touched).
     //
-    // Returns a guard that holds the CRATE-WIDE HOME lock and restores the prior
-    // HOME on drop, so under the threaded `cargo test` harness this test cannot
-    // race a cert_rotation / roster_sync test that also repoints HOME. Bind it for
-    // the whole test body: `let _home = set_home(dir);`.
+    // Returns a guard that restores the prior HOME on drop. Bind it for the whole
+    // test body: `let _home = set_home(dir);`.
     #[must_use]
     fn set_home(dir: &std::path::Path) -> crate::mesh::HomeEnvGuard {
         crate::mesh::pin_home(dir)
@@ -1724,6 +1722,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_leave_no_flags_wipes_membership_only() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         let tmp = tmp_db();
@@ -1759,6 +1758,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_leave_wipe_all_clears_secrets_and_plugin_tables() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         let tmp = tmp_db();
@@ -1788,6 +1788,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[test]
     fn cmd_mesh_cert_status_not_a_member_returns_ok() {
+        let _env = crate::test_env::snapshot();
         // HOME points at an empty tempdir → no mesh CA cert on disk → the
         // "(not a mesh member …)" early-return branch, without touching PKI.
         let home = tempfile::tempdir().unwrap();
@@ -1801,6 +1802,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn ca_rotate_bails_without_mesh_ca_key() {
+        let _env = crate::test_env::snapshot();
         // Valid overlap passes the range check, then the `has_mesh_ca_key` guard
         // fires because the tempdir HOME holds no mesh key.
         let home = tempfile::tempdir().unwrap();
@@ -1850,6 +1852,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_accept_active_offer_without_ca_cert_errors() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         let tmp = tmp_db();
@@ -1891,6 +1894,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn push_pairing_offer_bails_when_not_a_member() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         let tmp = tmp_db();
@@ -1907,6 +1911,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_offer_bails_when_not_a_member() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         let tmp = tmp_db();
@@ -1924,6 +1929,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_leave_wipe_secrets_only_clears_secrets_keeps_plugin_data() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         let tmp = tmp_db();
@@ -1971,6 +1977,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_trust_mutual_secure_attempts_replication_and_soft_warns() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         let tmp = tmp_db();
@@ -2033,6 +2040,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn mesh_join_core_dead_port_fails_at_connect() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         // machine_id() (called before the dial) requires a one-time global init.
@@ -2047,6 +2055,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_connect_dead_port_fails_at_connect() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         drop(crate::host_identity::init(home.path()));
@@ -2061,6 +2070,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_join_dead_port_fails_at_connect() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         drop(crate::host_identity::init(home.path()));
@@ -2079,6 +2089,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn call_mesh_method_pub_bails_without_mesh_client_bundle() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         let err = call_mesh_method_pub("127.0.0.1", 1, "mesh/notify-trust", serde_json::json!({}))
@@ -2098,6 +2109,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn replicate_ca_key_if_needed_pub_bails_without_bundle() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         let peer = pdb::PeerRow {
@@ -2147,6 +2159,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn cmd_mesh_pair_bails_when_not_a_member() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         let tmp = tmp_db();

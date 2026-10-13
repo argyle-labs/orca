@@ -555,8 +555,6 @@ mod tests {
         home: &std::path::Path,
         body: impl FnOnce(&tokio::runtime::Runtime) -> T,
     ) -> T {
-        // Serialize behind the CRATE-WIDE HOME lock so this cannot race a
-        // cert_rotation or cli test that also repoints HOME. Poison-tolerant.
         let _guard = crate::mesh::pin_home(home);
         let pki = pki_dir();
         std::fs::create_dir_all(utils::pki::mesh_dir(&pki)).unwrap();
@@ -575,7 +573,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn ingest_learns_new_active_peers_and_persists_them() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         with_prepared_home(home.path(), |rt| {
             let db_file = tempfile::NamedTempFile::new().unwrap();
@@ -593,7 +593,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn ingest_is_idempotent_on_second_pass() {
+        let _env = crate::test_env::snapshot();
         // Re-ingesting an already-known peer adds nothing (prior_fp is Some).
         let home = tempfile::tempdir().unwrap();
         with_prepared_home(home.path(), |rt| {
@@ -612,7 +614,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn ingest_drops_non_uuidv7_and_filtered_entries() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         with_prepared_home(home.path(), |rt| {
             let db_file = tempfile::NamedTempFile::new().unwrap();
@@ -643,7 +647,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn ingest_skips_forgotten_peer_tombstone() {
+        let _env = crate::test_env::snapshot();
         // A peer with an active forget-tombstone must not be resurrected even if
         // a straggler still lists it as active (issue #232).
         let home = tempfile::tempdir().unwrap();
@@ -672,7 +678,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn ingest_transitive_pin_skips_when_fp_absent() {
+        let _env = crate::test_env::snapshot();
         // A peer we already track with a pinned fp must not be re-processed when
         // the incoming roster entry carries no fp — the local pin stays intact.
         let home = tempfile::tempdir().unwrap();
@@ -708,7 +716,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn ingest_backfills_pubkey_fp_for_known_peer() {
+        let _env = crate::test_env::snapshot();
         // A peer known without a fp gets its pin backfilled when the roster entry
         // now carries one; it is not counted as newly learned.
         let home = tempfile::tempdir().unwrap();

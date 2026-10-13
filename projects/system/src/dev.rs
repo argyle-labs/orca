@@ -158,6 +158,7 @@ mod tests {
     #[test]
     #[serial(env)]
     fn dev_source_round_trips() {
+        let _env = crate::test_env::snapshot();
         let _dir = isolated_orca_home("dev_src");
         assert!(read_dev_source().is_none());
         write_dev_source("http://localhost:9999").unwrap();
@@ -169,6 +170,7 @@ mod tests {
     #[test]
     #[serial(env)]
     fn dev_source_clear_is_noop_when_absent() {
+        let _env = crate::test_env::snapshot();
         let _dir = isolated_orca_home("dev_src_noop");
         clear_dev_source().unwrap();
     }

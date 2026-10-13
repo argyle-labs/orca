@@ -1142,16 +1142,20 @@ mod tests {
         ]);
     }
 
-    #[tokio::test]
-    async fn exec_refuses_an_admin_plugin_tool_without_a_caller_token() {
-        install_fake_plugin();
-        let params = serde_json::json!({ "tool": PLUGIN_ADMIN_TOOL, "args": {} });
-        let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
-            .await
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("no signed caller"), "got: {msg}");
-        assert!(msg.contains("'admin'"), "got: {msg}");
+    #[test]
+    fn exec_refuses_an_admin_plugin_tool_without_a_caller_token() {
+        // An ephemeral DB, so the role check never opens the shared default db
+        // other tests are migrating.
+        with_db(async {
+            install_fake_plugin();
+            let params = serde_json::json!({ "tool": PLUGIN_ADMIN_TOOL, "args": {} });
+            let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
+                .await
+                .unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("no signed caller"), "got: {msg}");
+            assert!(msg.contains("'admin'"), "got: {msg}");
+        });
     }
 
     #[tokio::test]
@@ -1506,9 +1510,10 @@ mod tests {
     #[serial_test::serial(env)]
     #[test]
     fn refresh_cert_cn_mismatch_rejected_with_ca_key_present() {
+        let _env = crate::test_env::snapshot();
         // With the mesh CA key present but the joiner_hostname param not matching
         // the authenticated CN, the handler must refuse on the CN check rather
-        // than sign anything. Uses the crate HOME lock so pki_dir points at temp.
+        // than sign anything.
         let dir = tempfile::tempdir().unwrap();
         let _guard = crate::mesh::pin_home(dir.path());
         let pki = pki_dir();
@@ -1538,6 +1543,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[test]
     fn refresh_cert_signs_for_matching_cn_with_ca_key() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         let _guard = crate::mesh::pin_home(dir.path());
         db::with_thread_db_path(&dir.path().join("refresh-ok.db"), || {
@@ -1566,6 +1572,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[test]
     fn refresh_cert_refuses_departed_or_unknown_cn() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         let _guard = crate::mesh::pin_home(dir.path());
         db::with_thread_db_path(&dir.path().join("refresh-refused.db"), || {
@@ -1593,6 +1600,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[test]
     fn forgotten_peer_cannot_notify_trust_its_way_into_a_refresh() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         let _guard = crate::mesh::pin_home(dir.path());
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1637,6 +1645,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[test]
     fn refresh_cert_refuses_tombstoned_cn_even_with_a_peer_row() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         let _guard = crate::mesh::pin_home(dir.path());
         db::with_thread_db_path(&dir.path().join("refresh-tombstoned.db"), || {

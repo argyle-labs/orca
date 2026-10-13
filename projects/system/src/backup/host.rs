@@ -348,6 +348,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn default_includes_filters_to_existing() {
+        let _env = crate::test_env::snapshot();
         // Point ORCA_HOME at a temp state dir with only some of the expected entries.
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
@@ -377,6 +378,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn default_excludes_skip_mesh_leaf_certs_but_keep_ca() {
+        let _env = crate::test_env::snapshot();
         // A pki tree under a temp state dir: mesh CA + server/client leaf pairs.
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");

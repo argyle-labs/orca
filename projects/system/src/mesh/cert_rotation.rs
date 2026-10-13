@@ -573,10 +573,9 @@ mod tests {
     const TEST_CN: &str = "24647a14a251e863cdf8dcee692f2915";
 
     // `tick()` reads `pki_dir()`, which is derived from the process-global
-    /// Run `body` with HOME repointed at `dir`, serialized behind the crate-wide
-    /// HOME lock and restored afterwards. `body` gets a live current-thread runtime
-    /// handle so `tick()` executes while HOME (hence `pki_dir()`) points at the temp
-    /// dir. The lock is crate-wide so this can't race a roster_sync or cli HOME test.
+    /// Run `body` with HOME repointed at `dir` and restored afterwards. `body` gets
+    /// a live current-thread runtime handle so `tick()` executes while HOME (hence
+    /// `pki_dir()`) points at the temp dir.
     fn with_home<T>(dir: &std::path::Path, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
         let _guard = crate::mesh::pin_home(dir);
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -589,6 +588,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[test]
     fn tick_is_noop_for_non_member_host() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home(dir.path(), |rt| {
             let pki = pki_dir();
@@ -602,6 +602,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[test]
     fn tick_leaves_fresh_certs_untouched() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home(dir.path(), |rt| {
             let pki = pki_dir();
@@ -623,6 +624,7 @@ mod tests {
     #[serial_test::serial(env)]
     #[test]
     fn tick_reissues_corrupt_leaves_via_local_ca() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home(dir.path(), |rt| {
             crate::host_identity::init(dir.path()).unwrap();
@@ -655,7 +657,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn refresh_via_peer_mtls_bails_without_any_peers() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -669,7 +673,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn refresh_via_peer_mtls_tries_peers_without_trust_flags() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -699,7 +705,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn refresh_via_peer_mtls_excludes_self_and_departed() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -729,7 +737,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn refresh_via_peer_bootstrap_excludes_self() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -747,7 +757,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn refresh_via_peer_falls_back_to_bootstrap_when_mtls_fails() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -779,7 +791,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn refresh_via_peer_mtls_attempts_dial_then_bails_when_unreachable() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -810,7 +824,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn refresh_via_peer_bootstrap_bails_without_pinned_fp_peers() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -825,7 +841,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn refresh_via_peer_dispatches_to_bootstrap_when_client_cert_absent() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -841,7 +859,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn refresh_via_peer_dispatches_to_mtls_when_client_cert_valid() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -858,7 +878,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn refresh_via_peer_bootstrap_attempts_dial_then_bails_when_unreachable() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -888,7 +910,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn tick_drops_previous_ca_when_overlap_expired() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             let pki = pki_dir();
@@ -911,7 +935,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn tick_keeps_previous_ca_while_overlap_active() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             let pki = pki_dir();
@@ -956,7 +982,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn tick_raises_renewal_notification_when_refresh_fails() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -984,7 +1012,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn tick_dismisses_renewal_notification_on_success() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -1150,7 +1180,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn stalled_peer_times_out_instead_of_wedging_refresh() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -1188,7 +1220,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn mtls_refused_then_bootstrap_signs_and_installs() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -1295,7 +1329,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn tick_dismisses_stale_notification_when_certs_are_fresh() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -1313,7 +1349,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn tick_leaves_suppressed_notification_suppressed() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -1332,7 +1370,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn tick_raises_notification_when_a_leaf_is_unreadable() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();

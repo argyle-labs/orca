@@ -536,7 +536,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn real_host_fs_which_finds_sh() {
+        let _env = crate::test_env::snapshot();
         // Hermetic: don't depend on the runner's ambient PATH/filesystem layout
         // (a restricted harness PATH without `/bin` made this fail). Point PATH
         // at a temp dir holding a known file and assert `which` resolves it.

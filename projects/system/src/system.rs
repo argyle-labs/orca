@@ -857,6 +857,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn naming_this_system_answers_locally() {
+        let _env = crate::test_env::snapshot();
         let ctx = empty_ctx();
         let id = utils::id::new();
         std::fs::write(ctx.config.app_dir.join("machine_id"), &id).expect("write machine_id");
@@ -877,6 +878,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn system_detail_returns_report() {
+        let _env = crate::test_env::snapshot();
         let ctx = empty_ctx();
         // The fn calls real filesystem/env helpers — it must succeed even in
         // hermetic test environments (HOME is set in CI/dev shells).
@@ -908,11 +910,8 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    // `pin_home` holds the crate HOME lock across the awaits on purpose: mesh
-    // tests repoint ORCA_HOME under that lock, not under `serial(env)`. Safe on
-    // the current-thread runtime: nothing awaited here takes the lock.
-    #[allow(clippy::await_holding_lock)]
     async fn system_health_is_lean() {
+        let _env = crate::test_env::snapshot();
         // (state file pid, expected running): absent, our own live pid, dead pid.
         for (pid, running) in [
             (None, false),
@@ -950,6 +949,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn system_health_populates_disk() {
+        let _env = crate::test_env::snapshot();
         let ctx = empty_ctx();
         let h = local_row(
             system_health(SystemHealthArgs::default(), &ctx)

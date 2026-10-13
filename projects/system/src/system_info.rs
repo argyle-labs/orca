@@ -982,7 +982,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn rss_ceiling_mb_honors_env_override() {
+        let _env = crate::test_env::snapshot();
         // `ORCA_RSS_CEILING_MB` is used only by this function, so mutating it
         // in one serial test is safe. Save/restore to leave the env pristine.
         let saved = std::env::var_os("ORCA_RSS_CEILING_MB");

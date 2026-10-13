@@ -1508,8 +1508,7 @@ mod tests {
     // `handle_join_confirm`, `handle_request_offer`, and
     // `handle_refresh_cert_bootstrap` all resolve `pki_dir()` from `$HOME` and
     // sign/read against the mesh CA. We repoint HOME at a tempdir holding a real
-    // CA (serialized behind the crate-wide HOME lock so we can't race the cli /
-    // roster_sync / cert_rotation HOME tests), then drive each handler end to end
+    // CA, then drive each handler end to end
     // against an ephemeral DB via a current-thread runtime.
 
     // A canonical uuidv7 — `upsert_peer` rejects any non-uuidv7 peer id, so the
@@ -1517,14 +1516,11 @@ mod tests {
     const JOINER_UUID: &str = "019e7105-0000-7000-8000-0000000abc07";
 
     fn run_with_home<T>(with_ca: bool, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
-        let _guard = crate::mesh::HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let prev = std::env::var("HOME").ok();
         let prev_orca_home = std::env::var(contract::config::paths::ENV_ORCA_HOME).ok();
         // SAFETY: both vars are set for the closure's duration and restored
-        // right after; access is serialized behind HOME_ENV_LOCK.
+        // right after; callers are serialized via #[serial(env)].
         //
         // `$ORCA_HOME` is checked BEFORE `$HOME`, so isolating by `$HOME` alone
         // left an ambient `$ORCA_HOME` pointing every one of these tests at the
@@ -1561,7 +1557,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn handle_request_offer_success_persists_outbound_offer() {
+        let _env = crate::test_env::snapshot();
         run_with_home(true, |rt| {
             let dir = tempfile::tempdir().unwrap();
             let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
@@ -1600,7 +1598,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn handle_request_offer_rejects_duplicate_outbound_offer() {
+        let _env = crate::test_env::snapshot();
         run_with_home(true, |rt| {
             let dir = tempfile::tempdir().unwrap();
             let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
@@ -1628,7 +1628,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn handle_request_offer_without_mesh_ca_errors() {
+        let _env = crate::test_env::snapshot();
         run_with_home(false, |rt| {
             let dir = tempfile::tempdir().unwrap();
             let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
@@ -1650,7 +1652,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn handle_join_confirm_signs_csrs_trusts_peer_and_consumes_offer() {
+        let _env = crate::test_env::snapshot();
         run_with_home(true, |rt| {
             let dir = tempfile::tempdir().unwrap();
             let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
@@ -1715,7 +1719,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn handle_join_confirm_clears_stale_forget_tombstone() {
+        let _env = crate::test_env::snapshot();
         // A host re-joins under its stable machine_id after a prior mesh-forget.
         // The 30-day delete-tombstone on that id must be superseded by the
         // authenticated join-confirm, or the resurrection guard reaps the
@@ -1786,7 +1792,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn handle_join_confirm_without_matching_offer_errors() {
+        let _env = crate::test_env::snapshot();
         run_with_home(true, |rt| {
             let dir = tempfile::tempdir().unwrap();
             let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
@@ -1814,7 +1822,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn handle_refresh_cert_bootstrap_signs_for_known_active_peer() {
+        let _env = crate::test_env::snapshot();
         run_with_home(true, |rt| {
             let dir = tempfile::tempdir().unwrap();
             let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
@@ -1856,7 +1866,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn handle_refresh_cert_bootstrap_without_ca_key_errors() {
+        let _env = crate::test_env::snapshot();
         run_with_home(false, |rt| {
             let dir = tempfile::tempdir().unwrap();
             let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
@@ -1878,7 +1890,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn handle_refresh_cert_bootstrap_rejects_unknown_signer() {
+        let _env = crate::test_env::snapshot();
         run_with_home(true, |rt| {
             let dir = tempfile::tempdir().unwrap();
             let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
@@ -1907,7 +1921,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn handle_refresh_cert_bootstrap_rejects_peer_id_mismatch() {
+        let _env = crate::test_env::snapshot();
         run_with_home(true, |rt| {
             let dir = tempfile::tempdir().unwrap();
             let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();

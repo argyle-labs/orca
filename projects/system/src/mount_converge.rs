@@ -4017,7 +4017,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn corrupt_guest_ledger_is_moved_aside() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("managed_guest_mounts.json");
         std::fs::write(&path, b"{not json").unwrap();
@@ -4460,6 +4462,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn ledger_file_resolves_managed_mounts_under_orca_home() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().expect("tempdir");
         unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
         let path = ledger_file().expect("ledger path resolves from $ORCA_HOME");
@@ -4469,6 +4472,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn save_ledger_then_load_ledger_round_trips_via_orca_home() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().expect("tempdir");
         unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
         // A fresh state dir with no ledger file yet loads as empty.
@@ -4523,6 +4527,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn tick_no_desired_placements_is_ok_noop_and_persists_empty_ledger() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().expect("tempdir");
         unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
         crate::host_identity::init(dir.path()).ok();
@@ -4549,6 +4554,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn tick_under_acting_policy_runs_backend_sweep_still_noop() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().expect("tempdir");
         unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
         crate::host_identity::init(dir.path()).ok();

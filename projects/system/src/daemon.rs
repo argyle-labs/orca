@@ -805,6 +805,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn collect_runtime_status_defaults_when_no_state_file() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -824,6 +825,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn collect_runtime_status_reports_running_for_live_pid() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -845,6 +847,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn stop_park_reclaim_error_without_state_file() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -867,6 +870,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn park_rejects_non_daemon_mode() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -888,6 +892,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn reclaim_is_noop_when_already_daemon_mode() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -906,6 +911,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn collect_runtime_status_reports_not_running_for_dead_pid() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {

@@ -301,6 +301,7 @@ mod tests {
     #[test]
     #[serial(env)]
     fn read_channel_marker_returns_none_when_missing() {
+        let _env = crate::test_env::snapshot();
         let _dir = isolated_orca_home("missing");
         assert!(read_channel_marker().is_none());
     }
@@ -308,6 +309,7 @@ mod tests {
     #[test]
     #[serial(env)]
     fn read_channel_marker_accepts_legacy_prerelease() {
+        let _env = crate::test_env::snapshot();
         let dir = isolated_orca_home("legacy");
         std::fs::write(dir.path().join("channel"), "prerelease\n").unwrap();
         assert_eq!(read_channel_marker(), Some(Channel::Beta));
@@ -316,6 +318,7 @@ mod tests {
     #[test]
     #[serial(env)]
     fn read_channel_marker_empty_file_returns_none() {
+        let _env = crate::test_env::snapshot();
         let dir = isolated_orca_home("marker_empty");
         std::fs::write(dir.path().join("channel"), "\n").unwrap();
         assert!(read_channel_marker().is_none());
@@ -324,6 +327,7 @@ mod tests {
     #[test]
     #[serial(env)]
     fn read_channel_marker_reads_written_value() {
+        let _env = crate::test_env::snapshot();
         let dir = isolated_orca_home("marker_read");
         std::fs::write(dir.path().join("channel"), "rc\n").unwrap();
         assert_eq!(read_channel_marker(), Some(Channel::Beta));
@@ -334,6 +338,7 @@ mod tests {
     #[test]
     #[serial(env)]
     fn pin_path_uses_orca_home() {
+        let _env = crate::test_env::snapshot();
         let dir = isolated_orca_home("pin_path");
         let p = pin_path().expect("pin_path");
         assert_eq!(p, dir.path().join("version-pin"));
@@ -342,6 +347,7 @@ mod tests {
     #[test]
     #[serial(env)]
     fn channel_marker_path_uses_orca_home() {
+        let _env = crate::test_env::snapshot();
         let dir = isolated_orca_home("ch_path");
         let p = channel_marker_path().expect("channel_marker_path");
         assert_eq!(p, dir.path().join("channel"));
@@ -420,6 +426,7 @@ mod tests {
         #[test]
         #[serial(env)]
         fn write_then_read_channel_marker_round_trips() {
+            let _env = crate::test_env::snapshot();
             let _dir = isolated_orca_home("write");
             write_channel_marker(&Channel::Beta).unwrap();
             assert_eq!(read_channel_marker(), Some(Channel::Beta));
@@ -430,6 +437,7 @@ mod tests {
         #[test]
         #[serial(env)]
         fn resolve_channel_explicit_wins_over_marker() {
+            let _env = crate::test_env::snapshot();
             let _dir = isolated_orca_home("explicit");
             write_channel_marker(&Channel::Stable).unwrap();
             assert_eq!(resolve_channel("rc"), Channel::Beta);
@@ -438,6 +446,7 @@ mod tests {
         #[test]
         #[serial(env)]
         fn resolve_channel_empty_reads_marker() {
+            let _env = crate::test_env::snapshot();
             let _dir = isolated_orca_home("empty");
             write_channel_marker(&Channel::Beta).unwrap();
             assert_eq!(resolve_channel(""), Channel::Beta);
@@ -447,6 +456,7 @@ mod tests {
         #[test]
         #[serial(env)]
         fn resolve_channel_empty_falls_back_to_stable() {
+            let _env = crate::test_env::snapshot();
             let _dir = isolated_orca_home("fallback");
             assert_eq!(resolve_channel(""), Channel::Stable);
         }
@@ -454,6 +464,7 @@ mod tests {
         #[test]
         #[serial(env)]
         fn write_channel_marker_noop_when_same() {
+            let _env = crate::test_env::snapshot();
             let _dir = isolated_orca_home("marker_noop");
             write_channel_marker(&Channel::Beta).unwrap();
             write_channel_marker(&Channel::Beta).unwrap();
@@ -463,6 +474,7 @@ mod tests {
         #[test]
         #[serial(env)]
         fn clear_version_pin_removes_stale_file() {
+            let _env = crate::test_env::snapshot();
             // Migration path: a leftover pin file from an older build is
             // cleared at startup so the host resumes latest-tracking.
             let dir = isolated_orca_home("pin_clear");

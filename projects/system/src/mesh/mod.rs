@@ -20,40 +20,22 @@ pub mod topology_infer;
 
 pub use db::replicate_engine::PeerSyncReport;
 
-/// Crate-wide serialization lock for tests that repoint the process-global
-/// `HOME` (and thus `pki_dir()` / `~/.orca`). Every module previously kept its
-/// own module-private `ENV_LOCK`, which does NOT serialize across modules — a
-/// `roster_sync` test could race a `cert_rotation` or `cli` test under the
-/// threaded `cargo test` harness (nextest isolates per process and is immune).
-/// All HOME-mutating tests in this crate must hold THIS single lock.
-#[cfg(test)]
-pub(crate) static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Pin BOTH state-dir env vars at `dir` for the caller's lifetime.
+/// Pin BOTH state-dir env vars at `dir` for the guard's lifetime, restoring
+/// them on drop. `$ORCA_HOME` is checked before `$HOME`, so pinning `$HOME`
+/// alone isolates nothing.
 ///
-/// `$ORCA_HOME` is checked BEFORE `$HOME`, so a test that isolates by `$HOME`
-/// alone is not isolated at all: any concurrent test that sets `$ORCA_HOME`
-/// (the `update` suite does, under `#[serial(env)]` — a DIFFERENT lock) silently
-/// repoints it at that test's directory. Two mutual-exclusion schemes over one
-/// global exclude nothing, and the mesh suite flaked accordingly: a different
-/// "not a member" test failed on roughly one run in three, each time because
-/// the membership guard resolved to someone else's populated state dir.
-///
-/// Holding the lock inside the guard is what makes this honest — the pin and
-/// the exclusion have the same lifetime, so they cannot come apart.
+/// Callers must be `#[serial_test::serial(env)]` — the crate's one guard for
+/// every test that mutates process env.
 #[cfg(test)]
 pub(crate) fn pin_home(dir: &std::path::Path) -> HomeEnvGuard {
-    let lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prev_home = std::env::var("HOME").ok();
     let prev_orca = std::env::var(contract::config::paths::ENV_ORCA_HOME).ok();
-    // SAFETY: serialized behind HOME_ENV_LOCK, which the returned guard holds;
-    // both vars are restored when it drops.
+    // SAFETY: callers are serialized via #[serial(env)]; restored on drop.
     unsafe {
         std::env::set_var("HOME", dir);
         std::env::set_var(contract::config::paths::ENV_ORCA_HOME, dir.join(".orca"));
     }
     HomeEnvGuard {
-        _lock: lock,
         prev_home,
         prev_orca,
     }
@@ -61,7 +43,6 @@ pub(crate) fn pin_home(dir: &std::path::Path) -> HomeEnvGuard {
 
 #[cfg(test)]
 pub(crate) struct HomeEnvGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
     prev_home: Option<String>,
     prev_orca: Option<String>,
 }
@@ -69,8 +50,7 @@ pub(crate) struct HomeEnvGuard {
 #[cfg(test)]
 impl Drop for HomeEnvGuard {
     fn drop(&mut self) {
-        // SAFETY: the lock is still held (dropped after this) so no other test
-        // is reading these vars.
+        // SAFETY: callers are serialized via #[serial(env)].
         unsafe {
             match &self.prev_home {
                 Some(v) => std::env::set_var("HOME", v),
@@ -3924,6 +3904,7 @@ mod added_coverage {
     #[serial_test::serial(env)]
     #[test]
     fn pki_dir_is_the_state_dir_pki_child() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let _g = crate::mesh::pin_home(tmp.path());
         assert_eq!(pki_dir(), tmp.path().join(".orca").join(APP_PKI_DIR));
@@ -4860,9 +4841,7 @@ mod handler_dispatch_tests {
     // ── exec / ping: mTLS dial fails fast without on-disk mesh identity ────────
     //
     // Repoints HOME to an empty tempdir (so `pki_dir()` has no client bundle),
-    // driving the future on a same-thread runtime while HOME_ENV_LOCK is held —
-    // the guard is never carried across an `.await`, mirroring cert_rotation's
-    // `with_home`.
+    // driving the future on a same-thread runtime while the pin is held.
     fn with_home<T>(dir: &std::path::Path, body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> T {
         let _guard = crate::mesh::pin_home(dir);
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -4875,6 +4854,7 @@ mod handler_dispatch_tests {
     #[serial_test::serial(env)]
     #[test]
     fn exec_without_mesh_client_bundle_errors_on_load() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home(dir.path(), |rt| {
             let err =
@@ -4891,6 +4871,7 @@ mod handler_dispatch_tests {
     #[serial_test::serial(env)]
     #[test]
     fn ping_without_mesh_client_bundle_errors_on_load() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home(dir.path(), |rt| {
             let err = expect_err(rt.block_on(ping("10.0.255.1")));

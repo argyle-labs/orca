@@ -1451,6 +1451,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn pending_restart_marker_round_trips() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -1474,6 +1475,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn read_pending_restart_none_on_malformed_marker() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -1494,6 +1496,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn versions_cache_round_trips_within_ttl() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -1564,6 +1567,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn write_cached_sha256_creates_file_at_expected_path() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -1728,6 +1732,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn read_pending_restart_none_when_marker_absent() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -1742,6 +1747,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn read_pending_restart_computes_age_from_past_timestamp() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -1768,6 +1774,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn read_pending_restart_none_on_non_numeric_timestamp() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -1783,6 +1790,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn write_pending_restart_marker_body_shape() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -1804,6 +1812,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn prune_check_cache_keeps_fresh_and_drops_stale() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: tests touching ORCA_HOME are serialized via #[serial(env)].
         unsafe {
@@ -1838,6 +1847,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn prune_check_cache_no_dir_is_noop() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: tests touching ORCA_HOME are serialized via #[serial(env)].
         unsafe {
@@ -1855,6 +1865,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn cached_sha256_path_uses_version_filename() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: tests touching ORCA_HOME are serialized via #[serial(env)].
         unsafe {
@@ -1878,6 +1889,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn prune_check_cache_removes_future_mtime_past_ttl() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: tests touching ORCA_HOME are serialized via #[serial(env)].
         unsafe {
@@ -1967,6 +1979,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn is_dev_true_when_orca_dev_env_set() {
+        let _env = crate::test_env::snapshot();
         // SAFETY: ORCA_DEV-touching test serialized via #[serial(env)].
         unsafe {
             std::env::set_var("ORCA_DEV", "1");
@@ -1984,6 +1997,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn is_dev_env_flag_ignores_disabled_values() {
+        let _env = crate::test_env::snapshot();
         // "0" / "false" / empty do NOT set the env flag; the result then falls
         // through to the compiled-version / daemon-mode signals, which we don't
         // assert on here — we only assert the env branch itself is disabled by
@@ -2131,6 +2145,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn write_cached_sha256_overwrites_existing_entry() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -2150,6 +2165,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn read_pending_restart_ignores_extra_trailing_lines() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
         unsafe {
@@ -2198,6 +2214,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn resolve_github_token_prefers_db_secret_over_env() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let dbp = tmp.path().join("orca.db");
         // SAFETY: env-touching test serialized via #[serial(env)].
@@ -2226,6 +2243,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn resolve_github_token_falls_back_to_env_when_no_secret() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let dbp = tmp.path().join("orca.db");
         // SAFETY: env-touching test serialized via #[serial(env)].
@@ -2249,6 +2267,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn resolve_github_token_empty_when_neither_present() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let dbp = tmp.path().join("orca.db");
         // SAFETY: env-touching test serialized via #[serial(env)].
@@ -2270,6 +2289,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn resolve_github_token_ignores_empty_db_secret_and_uses_env() {
+        let _env = crate::test_env::snapshot();
         // An inline secret row whose value is the empty string must NOT satisfy
         // the `!v.is_empty()` guard — the resolver falls through to the env var.
         let tmp = tempfile::TempDir::new().expect("tempdir");
