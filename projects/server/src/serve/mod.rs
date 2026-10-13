@@ -928,6 +928,10 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
             "plugin install-dir scan complete"
         );
     }
+    // Re-record trust for plugins this daemon installed: an orca upgrade or a
+    // RAM-backed /etc (Unraid) leaves the root-owned store stale or empty.
+    #[cfg(unix)]
+    tokio::spawn(system::plugin_trust::reconcile_on_start());
     // Replay the user's persisted web-route ownership choices now that every web
     // provider has registered. Contested paths otherwise default to the incumbent
     // (first registered); this promotes the provider the user selected.

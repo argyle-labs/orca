@@ -118,6 +118,9 @@ pub mod logs_tui;
 pub mod plugin_apply;
 pub mod plugin_fetch;
 pub mod plugin_manager;
+/// Daemon side of plugin trust: an admin install records it (orca#864).
+#[cfg(unix)]
+pub mod plugin_trust;
 /// `identity.privilege.audit` — who can escalate on this host and how (orca#681).
 /// Read-only sudoers/doas parsing; flags dangling grants and lockout-inducing
 /// sole grants.

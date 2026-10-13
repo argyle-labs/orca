@@ -789,6 +789,14 @@ pub struct PluginInstallOutput {
     pub installed_path: String,
     /// True — sideload registers tools immediately, no restart needed.
     pub loaded_live: bool,
+    /// True when the install recorded the binary as trusted for the plugin's
+    /// privileged ops.
+    #[serde(default)]
+    pub trust_recorded: bool,
+    /// Set when the plugin installed but its trust could not be recorded, so
+    /// its privileged ops will be refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_warning: Option<String>,
 }
 
 /// Install a plugin. Two modes:
@@ -880,13 +888,41 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
             "sideloaded plugin (handshake passed, registered live)"
         );
 
+        let trust = record_trust(&report.software, &dest).await;
         Ok(PluginInstallOutput {
             software: report.software,
             version: report.semver,
             tools: report.tools,
             installed_path: dest.display().to_string(),
             loaded_live: true,
+            trust_recorded: trust.recorded,
+            trust_warning: trust.warning,
         })
+    }
+}
+
+/// Record the freshly installed binary at `dest` as trusted for `software`'s
+/// privileged ops: the admin install is the trust exchange.
+#[cfg(unix)]
+async fn record_trust(software: &str, dest: &Path) -> crate::plugin_trust::TrustOutcome {
+    use crate::plugin_trust::{Seam, TrustOutcome, after_install};
+    let seam = Seam::for_daemon();
+    match (seam, files::ops::orca_home()) {
+        (Ok(seam), Some(home)) => after_install(&seam, &home, software, dest).await,
+        (Err(e), _) => TrustOutcome {
+            recorded: false,
+            warning: Some(format!(
+                "plugin '{software}' is installed, but its trust could not be recorded, so its \
+                 privileged ops will be refused: {e:#}"
+            )),
+        },
+        (_, None) => TrustOutcome {
+            recorded: false,
+            warning: Some(format!(
+                "plugin '{software}' is installed, but there is no orca home to record its \
+                 trust in, so its privileged ops will be refused"
+            )),
+        },
     }
 }
 
@@ -1055,12 +1091,15 @@ pub(crate) async fn install_from_catalog(
             "installed plugin from catalog (handshake passed, registered live)"
         );
 
+        let trust = record_trust(&report.software, &dest).await;
         Ok(PluginInstallOutput {
             software: report.software,
             version: report.semver,
             tools: report.tools,
             installed_path: dest.display().to_string(),
             loaded_live: true,
+            trust_recorded: trust.recorded,
+            trust_warning: trust.warning,
         })
     }
 }
@@ -1242,12 +1281,16 @@ async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUp
     // omitted installs newest; a pinned `--version` installs that tag.
     let installed =
         install_from_catalog(&entry.name, args.version.as_deref(), args.prerelease, ctx).await?;
-    let note = format!(
+    let mut note = format!(
         "installed {} {} (was {})",
         entry.target_software,
         installed.version,
         installed_version.as_deref().unwrap_or("<none>")
     );
+    if let Some(w) = &installed.trust_warning {
+        note.push_str("; WARNING: ");
+        note.push_str(w);
+    }
     Ok(PluginUpdateOutput {
         name: entry.target_software,
         installed_version,
@@ -1459,6 +1502,9 @@ pub struct PluginUninstallOutput {
     pub removed_from_disk: bool,
     /// True if the plugin was unregistered from the live tool registry.
     pub unloaded: bool,
+    /// Set when the plugin's trust record could not be removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_warning: Option<String>,
 }
 
 /// [MUTATES STATE] Remove a plugin: delete its executable from the install dir and unregister
@@ -1496,10 +1542,29 @@ async fn plugin_uninstall(
 
     tracing::info!(plugin = %software, removed_from_disk, unloaded, "uninstalled plugin");
 
+    #[cfg(unix)]
+    let trust_warning = match (
+        crate::plugin_trust::Seam::for_daemon(),
+        files::ops::orca_home(),
+    ) {
+        (Ok(seam), Some(home)) => {
+            crate::plugin_trust::after_uninstall(&seam, &home, software)
+                .await
+                .warning
+        }
+        (Err(e), _) => Some(format!(
+            "plugin '{software}' is uninstalled, but its trust record could not be removed: {e:#}"
+        )),
+        (_, None) => None,
+    };
+    #[cfg(not(unix))]
+    let trust_warning = None;
+
     Ok(PluginUninstallOutput {
         software: software.to_string(),
         removed_from_disk,
         unloaded,
+        trust_warning,
     })
 }
 
@@ -2431,6 +2496,8 @@ mod tests {
             tools: vec!["jellyfin.list".to_string()],
             installed_path: "/root/.orca/plugins/jellyfin".to_string(),
             loaded_live: true,
+            trust_recorded: false,
+            trust_warning: None,
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(json.contains("\"software\":\"jellyfin\""), "{json}");
@@ -2451,6 +2518,7 @@ mod tests {
             software: "plex".to_string(),
             removed_from_disk: true,
             unloaded: false,
+            trust_warning: None,
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(json.contains("\"software\":\"plex\""), "{json}");
@@ -2482,6 +2550,8 @@ mod tests {
             tools: Vec::new(),
             installed_path: "/p".to_string(),
             loaded_live: true,
+            trust_recorded: false,
+            trust_warning: None,
         });
         let ijson = serde_json::to_string(&install).unwrap();
         assert!(ijson.contains("\"software\":\"s\""), "{ijson}");
