@@ -1030,14 +1030,8 @@ mod tests {
     #[serial_test::serial(env)]
     fn home_dir_reads_home_env() {
         let _env = crate::test_env::snapshot();
-        // SAFETY: single-threaded test; restore afterward.
-        let prev = std::env::var("HOME").ok();
         unsafe { std::env::set_var("HOME", "/tmp/some-home") };
         assert_eq!(home_dir().unwrap(), PathBuf::from("/tmp/some-home"));
-        match prev {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
     }
 
     // ── is_symlink ────────────────────────────────────────────────────────
@@ -2231,12 +2225,8 @@ mod tests {
     #[serial_test::serial(env)]
     fn cmd_install_report_errors_without_home() {
         let _env = crate::test_env::snapshot();
-        let prev = std::env::var("HOME").ok();
         unsafe { std::env::remove_var("HOME") };
         let r = cmd_install_report();
-        if let Some(v) = prev {
-            unsafe { std::env::set_var("HOME", v) }
-        }
         assert!(!r.success());
         assert!(r.done.is_empty());
         assert!(
@@ -2250,12 +2240,8 @@ mod tests {
     #[serial_test::serial(env)]
     fn cmd_uninstall_report_errors_without_home() {
         let _env = crate::test_env::snapshot();
-        let prev = std::env::var("HOME").ok();
         unsafe { std::env::remove_var("HOME") };
         let r = cmd_uninstall_report();
-        if let Some(v) = prev {
-            unsafe { std::env::set_var("HOME", v) }
-        }
         assert!(!r.success());
         assert!(
             r.errors
@@ -2444,13 +2430,8 @@ mod tests {
         // cleared so the `claude mcp list` probe deterministically reports
         // "not registered" instead of touching the real machine.
         let home = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var("HOME").ok();
         unsafe { std::env::set_var("HOME", home.path()) };
         let report = with_empty_path(cmd_uninstall_report);
-        match prev_home {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
 
         assert!(
             report.success(),

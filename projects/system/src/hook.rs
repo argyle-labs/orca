@@ -1272,8 +1272,9 @@ mod tests {
         ])
         .env(HOOK_CHILD_ENV, test)
         .env("ORCA_HOME", orca_home.path())
+        .env_remove("ORCA_DB_PATH")
         .stdin(std::fs::File::open(tf.path()).unwrap())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
         setup(&mut cmd);
         let out = cmd.output().unwrap();
@@ -1281,7 +1282,8 @@ mod tests {
         assert_eq!(
             code,
             expect,
-            "hook child {test} exited {code}, expected {expect}; stderr:\n{}",
+            "hook child {test} exited {code}, expected {expect}; stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
     }

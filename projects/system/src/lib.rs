@@ -52,6 +52,8 @@ pub mod system_id;
 pub mod system_info_types;
 #[cfg(test)]
 pub(crate) mod test_env;
+#[cfg(test)]
+pub(crate) mod test_storage;
 pub mod topology;
 pub mod unit_identity;
 pub mod update_state;

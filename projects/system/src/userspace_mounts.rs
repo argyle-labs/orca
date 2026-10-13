@@ -188,9 +188,9 @@ pub async fn teardown(pairs: &[(String, String)]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_storage::Registered;
     use plugin_toolkit::storage::{
         Share, StorageBackend, StorageError, StorageKind, StorageProvider, Usage,
-        deregister_backend, register_backend,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -315,24 +315,6 @@ mod tests {
                 recovered: false,
                 detail: None,
             })
-        }
-    }
-
-    /// Registers a fake backend for one test and deregisters it on drop, so it
-    /// never leaks into registry-listing tests sharing the `cargo test` process.
-    struct Registered(String);
-
-    impl Registered {
-        fn new(backend: Arc<dyn StorageBackend>) -> Self {
-            let name = backend.name().to_string();
-            register_backend(backend);
-            Registered(name)
-        }
-    }
-
-    impl Drop for Registered {
-        fn drop(&mut self) {
-            deregister_backend(&self.0);
         }
     }
 

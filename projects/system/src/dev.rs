@@ -147,7 +147,7 @@ mod tests {
 
     fn isolated_orca_home(scenario: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
-        // SAFETY: tests touching ORCA_HOME are serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", dir.path());
             std::env::set_var("ORCA_TEST_SCENARIO", scenario);

@@ -356,14 +356,9 @@ mod tests {
         fs::write(state.join("orca.toml"), "x=1").unwrap();
         // no profiles/, no memory/, no orca.db
 
-        // SAFETY: single-threaded test env mutation; scoped and restored.
-        let prev = std::env::var_os("ORCA_HOME");
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe { std::env::set_var("ORCA_HOME", &state) };
         let inc = default_includes();
-        match prev {
-            Some(v) => unsafe { std::env::set_var("ORCA_HOME", v) },
-            None => unsafe { std::env::remove_var("ORCA_HOME") },
-        }
 
         let names: Vec<String> = inc
             .iter()
@@ -392,19 +387,13 @@ mod tests {
         fs::write(mesh.join("client").join("node.cert.pem"), "cc").unwrap();
         fs::write(mesh.join("client").join("node.key.pem"), "ck").unwrap();
 
-        // SAFETY: single-threaded test env mutation; scoped and restored.
-        let prev = std::env::var_os("ORCA_HOME");
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe { std::env::set_var("ORCA_HOME", &state) };
         let excludes = default_excludes();
 
         let payload = tmp.path().join("payload");
         fs::create_dir_all(&payload).unwrap();
         do_backup(std::slice::from_ref(&pki), &excludes, &payload).unwrap();
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("ORCA_HOME", v) },
-            None => unsafe { std::env::remove_var("ORCA_HOME") },
-        }
 
         let mirrored = payload.join(pki.strip_prefix("/").unwrap());
         // CA is kept — the root of trust is portable config.

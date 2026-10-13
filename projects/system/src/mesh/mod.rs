@@ -30,7 +30,7 @@ pub use db::replicate_engine::PeerSyncReport;
 pub(crate) fn pin_home(dir: &std::path::Path) -> HomeEnvGuard {
     let prev_home = std::env::var("HOME").ok();
     let prev_orca = std::env::var(contract::config::paths::ENV_ORCA_HOME).ok();
-    // SAFETY: callers are serialized via #[serial(env)]; restored on drop.
+    // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
     unsafe {
         std::env::set_var("HOME", dir);
         std::env::set_var(contract::config::paths::ENV_ORCA_HOME, dir.join(".orca"));
@@ -50,7 +50,7 @@ pub(crate) struct HomeEnvGuard {
 #[cfg(test)]
 impl Drop for HomeEnvGuard {
     fn drop(&mut self) {
-        // SAFETY: callers are serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             match &self.prev_home {
                 Some(v) => std::env::set_var("HOME", v),

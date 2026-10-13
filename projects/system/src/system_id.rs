@@ -415,7 +415,7 @@ mod tests {
             .into_iter()
             .map(|k| (k, std::env::var_os(k)))
             .collect();
-        // SAFETY: env-touching tests are serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", home.path());
             std::env::set_var("ORCA_DB_PATH", home.path().join("orca.db"));

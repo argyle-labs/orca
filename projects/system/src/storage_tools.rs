@@ -4889,21 +4889,17 @@ mod tests {
         }
     }
 
-    /// Register a fake backend with the given capabilities, run `f`, then always
-    /// deregister it (even on assertion panic, since panics propagate after the
-    /// closure returns its value — we compute-then-assert in each test body).
+    /// Register a fake backend with the given capabilities for the duration of `f`.
     fn with_backend<T>(
         name: &str,
         caps: &[plugin_toolkit::storage::StorageCapability],
         f: impl FnOnce() -> T,
     ) -> T {
-        plugin_toolkit::storage::register_backend(std::sync::Arc::new(FakeBackend {
+        let _reg = crate::test_storage::Registered::new(std::sync::Arc::new(FakeBackend {
             name: name.to_string(),
             caps: caps.to_vec(),
         }));
-        let out = f();
-        plugin_toolkit::storage::deregister_backend(name);
-        out
+        f()
     }
 
     #[test]

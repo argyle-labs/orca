@@ -851,6 +851,7 @@ mod tests {
     // serialization it can open the same fresh sqlite file a concurrent
     // `#[serial(env)]` test just pointed ORCA_DB_PATH at, racing the journal-mode
     // conversion (nextest isolates per process and is immune).
+    //
     // #647: the system is the RESOURCE. Naming this system must answer locally
     // — it is the termination point, there is nothing further to reach — so the
     // id is an address, not a request to run somewhere.

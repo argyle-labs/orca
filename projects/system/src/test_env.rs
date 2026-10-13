@@ -14,7 +14,7 @@ pub(crate) fn snapshot() -> EnvSnapshot {
 
 impl Drop for EnvSnapshot {
     fn drop(&mut self) {
-        // SAFETY: callers are serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             for (k, _) in std::env::vars_os() {
                 if !self.0.iter().any(|(sk, _)| *sk == k) {

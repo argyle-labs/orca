@@ -546,7 +546,7 @@ mod tests {
         // process PATH here can't race sibling tests.
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(dir.path().join("orca-fake-bin"), b"").expect("write fake bin");
-        // SAFETY: single-threaded per-process test (see comment above).
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("PATH", dir.path());
         }

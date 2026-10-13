@@ -1746,15 +1746,12 @@ mod tests {
     fn install_dir_derives_from_orca_home() {
         let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
         let dir = install_dir().expect("orca_home set");
         assert_eq!(dir, tmp.path().join("plugins"));
-        unsafe {
-            std::env::remove_var("ORCA_HOME");
-        }
     }
 
     #[test]
@@ -1763,7 +1760,7 @@ mod tests {
     fn installed_software_on_disk_scans_executables_only() {
         let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -1791,7 +1788,7 @@ mod tests {
     fn installed_software_on_disk_empty_when_no_dir() {
         let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -1807,7 +1804,7 @@ mod tests {
     fn scan_and_load_empty_when_dir_absent() {
         let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -2010,7 +2007,7 @@ mod tests {
     // ── async guard branches (no side effects reached) ────────────────────────
 
     fn guard_ctx(tmp: &tempfile::TempDir) -> ToolCtx {
-        // SAFETY: env-touching guard tests are serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
             std::env::set_var("HOME", tmp.path());
@@ -2972,7 +2969,7 @@ mod tests {
         // README). `scan_and_load` must read the dir, skip the non-plugin file,
         // and return empty lists without ever attempting a spawn.
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }

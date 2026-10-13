@@ -3943,7 +3943,7 @@ mod tests {
     async fn remove_only_reaches_the_owning_applier() {
         let h = guest_remove_harness("guest-remove-owner").await;
         let other_log: RemoveLog = Default::default();
-        plugin_toolkit::storage::register_guest_applier(std::sync::Arc::new(
+        let _bystander = crate::test_storage::RegisteredGuestApplier::new(std::sync::Arc::new(
             RemovingGuestApplier {
                 name: "guest-remove-bystander".to_string(),
                 removed: other_log.clone(),
@@ -3952,7 +3952,6 @@ mod tests {
         ));
         mounts::endpoint_db::remove("m-guest").unwrap();
         reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
-        plugin_toolkit::storage::deregister_guest_applier("guest-remove-bystander");
         assert_eq!(*h.removed.lock().unwrap(), vec![removed_backups()]);
         assert!(other_log.lock().unwrap().is_empty());
         assert!(load_guest_ledger_at(&h.ledger).is_empty());
@@ -4147,7 +4146,7 @@ mod tests {
     #[serial_test::serial(storage_registry)]
     async fn resolve_secret_file_threads_rendered_secret_from_backend() {
         let name = "smb-secret-fake";
-        plugin_toolkit::storage::register_backend(std::sync::Arc::new(SecretFileBackend {
+        let _reg = crate::test_storage::Registered::new(std::sync::Arc::new(SecretFileBackend {
             name: name.to_string(),
             render_secret: Some((
                 "/run/orca/secret-files/mnt-data".to_string(),
@@ -4160,7 +4159,6 @@ mod tests {
             ..d("/mnt/data")
         };
         let got = resolve_secret_file(&dm).await;
-        plugin_toolkit::storage::deregister_backend(name);
         let sf = got.expect("registered backend renders the secret-file");
         assert_eq!(sf.path, "/run/orca/secret-files/mnt-data");
         assert_eq!(sf.contents, "username=alice\npassword=hunter2");
