@@ -4771,6 +4771,7 @@ mod tests {
     // ── discover_live_shares: managed_mounts join key building ─────────────
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn discover_live_shares_builds_configured_by_target_from_store() {
         with_db("discover_configured.db", || {
             // A managed mount declares a target with a primary + failover source.

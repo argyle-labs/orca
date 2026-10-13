@@ -1217,75 +1217,6 @@ mod tests {
         }
     }
 
-    // ── top-level hook fns: empty-stdin early-return paths ────────────────────
-    // Under nextest each test runs in its own process with stdin at /dev/null,
-    // so read_stdin() yields Value::Null and the guards take their early-return
-    // (empty command / empty session) branches without ever calling block().
-
-    #[test]
-    fn bash_guard_empty_stdin_is_ok() {
-        assert!(bash_guard().is_ok());
-    }
-
-    #[test]
-    fn opnsense_guard_empty_stdin_is_ok() {
-        assert!(opnsense_guard().is_ok());
-    }
-
-    #[test]
-    fn session_start_empty_stdin_is_ok() {
-        // Empty session_id -> early return before any file is written.
-        assert!(session_start().is_ok());
-    }
-
-    #[test]
-    fn session_stop_empty_stdin_is_ok() {
-        // Empty session_id/transcript_path -> early return.
-        assert!(session_stop().is_ok());
-    }
-
-    #[test]
-    fn pii_scan_empty_stdin_is_ok() {
-        // Empty file_path -> early return before any read.
-        assert!(pii_scan().is_ok());
-    }
-
-    #[test]
-    fn secrets_scan_empty_stdin_is_ok() {
-        // Command lacks "git"/"commit" -> early return, no scanner invoked.
-        assert!(secrets_scan().is_ok());
-    }
-
-    #[test]
-    fn cmd_hook_dispatches_bash_guard_empty_stdin() {
-        assert!(cmd_hook(HookAction::BashGuard).is_ok());
-    }
-
-    #[test]
-    fn cmd_hook_dispatches_opnsense_guard_empty_stdin() {
-        assert!(cmd_hook(HookAction::OpnsenseGuard).is_ok());
-    }
-
-    #[test]
-    fn cmd_hook_dispatches_session_start_empty_stdin() {
-        assert!(cmd_hook(HookAction::SessionStart).is_ok());
-    }
-
-    #[test]
-    fn cmd_hook_dispatches_session_stop_empty_stdin() {
-        assert!(cmd_hook(HookAction::SessionStop).is_ok());
-    }
-
-    #[test]
-    fn cmd_hook_dispatches_pii_scan_empty_stdin() {
-        assert!(cmd_hook(HookAction::PiiScan).is_ok());
-    }
-
-    #[test]
-    fn cmd_hook_dispatches_secrets_scan_empty_stdin() {
-        assert!(cmd_hook(HookAction::SecretsScan).is_ok());
-    }
-
     #[test]
     fn pii_detects_bearer_and_stripe_labels() {
         assert_eq!(pii_label(r"sk_live_[A-Za-z0-9]+"), "Stripe secret key");
@@ -1352,6 +1283,147 @@ mod tests {
             expect,
             "hook child {test} exited {code}, expected {expect}; stderr:\n{}",
             String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // ── top-level hook fns: empty-stdin early-return paths ────────────────────
+    // Each runs in a re-exec'd child fed empty stdin (never the test process's
+    // own stdin, which may be an open terminal), so read_stdin() yields
+    // Value::Null and the guards take their early-return branches.
+
+    #[test]
+    fn bash_guard_empty_stdin_is_ok() {
+        run_hook!(
+            bash_guard_empty_stdin_is_ok,
+            "",
+            |_| {},
+            || assert!(bash_guard().is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn opnsense_guard_empty_stdin_is_ok() {
+        run_hook!(
+            opnsense_guard_empty_stdin_is_ok,
+            "",
+            |_| {},
+            || assert!(opnsense_guard().is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn session_start_empty_stdin_is_ok() {
+        // Empty session_id -> early return before any file is written.
+        run_hook!(
+            session_start_empty_stdin_is_ok,
+            "",
+            |_| {},
+            || assert!(session_start().is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn session_stop_empty_stdin_is_ok() {
+        // Empty session_id/transcript_path -> early return.
+        run_hook!(
+            session_stop_empty_stdin_is_ok,
+            "",
+            |_| {},
+            || assert!(session_stop().is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn pii_scan_empty_stdin_is_ok() {
+        // Empty file_path -> early return before any read.
+        run_hook!(
+            pii_scan_empty_stdin_is_ok,
+            "",
+            |_| {},
+            || assert!(pii_scan().is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn secrets_scan_empty_stdin_is_ok() {
+        // Command lacks "git"/"commit" -> early return, no scanner invoked.
+        run_hook!(
+            secrets_scan_empty_stdin_is_ok,
+            "",
+            |_| {},
+            || assert!(secrets_scan().is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_bash_guard_empty_stdin() {
+        run_hook!(
+            cmd_hook_dispatches_bash_guard_empty_stdin,
+            "",
+            |_| {},
+            || assert!(cmd_hook(HookAction::BashGuard).is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_opnsense_guard_empty_stdin() {
+        run_hook!(
+            cmd_hook_dispatches_opnsense_guard_empty_stdin,
+            "",
+            |_| {},
+            || assert!(cmd_hook(HookAction::OpnsenseGuard).is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_session_start_empty_stdin() {
+        run_hook!(
+            cmd_hook_dispatches_session_start_empty_stdin,
+            "",
+            |_| {},
+            || assert!(cmd_hook(HookAction::SessionStart).is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_session_stop_empty_stdin() {
+        run_hook!(
+            cmd_hook_dispatches_session_stop_empty_stdin,
+            "",
+            |_| {},
+            || assert!(cmd_hook(HookAction::SessionStop).is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_pii_scan_empty_stdin() {
+        run_hook!(
+            cmd_hook_dispatches_pii_scan_empty_stdin,
+            "",
+            |_| {},
+            || assert!(cmd_hook(HookAction::PiiScan).is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_secrets_scan_empty_stdin() {
+        run_hook!(
+            cmd_hook_dispatches_secrets_scan_empty_stdin,
+            "",
+            |_| {},
+            || assert!(cmd_hook(HookAction::SecretsScan).is_ok()),
+            BODY_RETURNED,
         );
     }
 
