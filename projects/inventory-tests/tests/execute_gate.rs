@@ -97,6 +97,27 @@ fn cron_verbs_are_admin_and_only_update_is_gated() {
     assert!(!gated.contains(&"system.cron.diff"));
 }
 
+/// Installing a plugin records it as trusted to run as root, so install,
+/// update and uninstall are admin-only, dry run included, and `can_mutate`
+/// never reaches them.
+#[test]
+fn plugin_install_verbs_are_admin_only() {
+    let mutations = dispatch::data_mutation_names();
+    for tool in ["plugin.create", "plugin.update", "plugin.delete"] {
+        assert_eq!(dispatch::required_role(tool), Some("admin"), "{tool}");
+        assert!(
+            !mutations.contains(&tool),
+            "{tool} must not be a data_mutation"
+        );
+        for role in ["member", "read"] {
+            assert!(
+                !dispatch::tool_roles::authorize(role, true, "admin", mutations.contains(&tool)),
+                "{tool}: {role} with can_mutate must be refused"
+            );
+        }
+    }
+}
+
 /// `model.backends_check` only probes reachability, so it is a read; it needs
 /// the `read` role because it lists every configured backend endpoint.
 #[test]
@@ -117,6 +138,8 @@ const CONTROL_PLANE_WRITES: &[&str] = &[
     "auth.token.create",
     "auth.token.delete",
     "pki.create",
+    "plugin.create",
+    "plugin.delete",
     "secrets.delete",
     "secrets.upsert",
     "system.cron.update",

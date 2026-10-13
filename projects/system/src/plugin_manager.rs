@@ -653,7 +653,9 @@ pub enum PluginCreateOutput {
 /// over the mesh: call it with `peer: <host>` and the universal peer-dispatch
 /// stanza relays it to the peer, which dispatches the named verb through its own
 /// loaded-plugin registry. Discover verb names with `plugin.detail`/`plugin.list`.
-#[orca_tool(domain = "plugin", verb = "create")]
+// Installing records the plugin as trusted to run as root, so it is admin-only:
+// `data_mutation = false` keeps the `can_mutate` opt-in from reaching it.
+#[orca_tool(domain = "plugin", verb = "create", data_mutation = false)]
 async fn plugin_create(args: PluginCreateArgs, ctx: &ToolCtx) -> Result<PluginCreateOutput> {
     match args.action {
         PluginCreateAction::Install => {
@@ -1143,7 +1145,12 @@ fn plugin_update_skip(installed: Option<&str>, target: &str, pinned: bool) -> Op
 // which is the single fleet-wide name (#636). Migrating it to return a typed
 // `ExecutionPlan` is the follow-up; that needs the body to run in plan mode,
 // which the intercept-before-body gate cannot express.
-#[orca_tool(domain = "plugin", verb = "update", execute_gated = false)]
+#[orca_tool(
+    domain = "plugin",
+    verb = "update",
+    execute_gated = false,
+    data_mutation = false
+)]
 async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUpdateOutput> {
     let entry = catalog_resolved()
         .await
@@ -1457,7 +1464,7 @@ pub struct PluginUninstallOutput {
 /// [MUTATES STATE] Remove a plugin: delete its executable from the install dir and unregister
 /// its tools from the live registry. Idempotent — reports what it actually
 /// removed.
-#[orca_tool(domain = "plugin", verb = "delete")]
+#[orca_tool(domain = "plugin", verb = "delete", data_mutation = false)]
 async fn plugin_uninstall(
     args: PluginUninstallArgs,
     _ctx: &ToolCtx,
