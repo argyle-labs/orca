@@ -193,7 +193,8 @@ pub(crate) fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str
 }
 
 /// Install `/etc/sudoers.d/orca`: NOPASSWD grants letting the service user run
-/// exactly `<orca> admin storage-apply` and `<orca> admin plugin-apply` (plus
+/// exactly `<orca> admin storage-apply` and the `admin plugin-apply` /
+/// `plugin-trust` / `plugin-untrust` seam (plus
 /// the LXC helpers on Proxmox, and `admin cron-apply` when the
 /// `/etc/orca/cron-users` allow-list exists) as root, where `<orca>` is this binary's real
 /// path, the same one the daemon invokes. No argument wildcards: payloads ride
@@ -236,7 +237,7 @@ fn install_autofs_sudoers(user: &str) -> Result<()> {
     }
 
     println!(
-        "{} sudoers: {user} may run '{binary} admin storage-apply' + 'admin plugin-apply'{}{}",
+        "{} sudoers: {user} may run '{binary} admin storage-apply' + 'admin plugin-apply|plugin-trust|plugin-untrust'{}{}",
         "✓".green(),
         if cron { " + 'admin cron-apply'" } else { "" },
         if is_proxmox {
@@ -271,7 +272,10 @@ fn sudoers_contents(user: &str, binary: &str, is_proxmox: bool, cron: bool) -> S
          # Autofs config (write /etc/auto.* + restart autofs).\n\
          {user} ALL=(root) NOPASSWD: {binary} admin storage-apply\n\
          # Plugin privileged ops: verified installed plugins, closed op sets.\n\
-         {user} ALL=(root) NOPASSWD: {binary} admin plugin-apply\n"
+         {user} ALL=(root) NOPASSWD: {binary} admin plugin-apply\n\
+         # Trust records for plugins an admin installed or uninstalled.\n\
+         {user} ALL=(root) NOPASSWD: {binary} admin plugin-trust\n\
+         {user} ALL=(root) NOPASSWD: {binary} admin plugin-untrust\n"
     );
     if cron {
         contents.push_str(&format!(
@@ -600,9 +604,9 @@ mod sudoers_tests {
         assert!(c.contains(&format!(
             "orca ALL=(root) NOPASSWD: {bin} admin storage-apply\n"
         )));
-        assert!(c.contains(&format!(
-            "orca ALL=(root) NOPASSWD: {bin} admin plugin-apply\n"
-        )));
+        for verb in ["plugin-apply", "plugin-trust", "plugin-untrust"] {
+            assert!(c.contains(&format!("orca ALL=(root) NOPASSWD: {bin} admin {verb}\n")));
+        }
         assert!(!c.contains("cron-apply"), "no allow-list, no cron grant");
         let cron = sudoers_contents("orca", bin, false, true);
         assert!(cron.contains(&format!(

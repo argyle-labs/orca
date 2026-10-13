@@ -8,9 +8,9 @@
 //! 1. `plugin` is a bare name resolved only inside the installed-plugin dir;
 //!    anything path-shaped is refused before touching the filesystem.
 //! 2. The binary's sha256 must equal the hash recorded in the root-owned
-//!    [`TrustStore`] by `orca admin plugin-trust`, a root step the daemon's
-//!    sudoers grant does not cover, so the caller can neither supply nor
-//!    influence the expected hash. The binary, owned by the invoking user, is
+//!    [`TrustStore`] by `orca admin plugin-trust`, which the daemon runs after
+//!    an admin installs the plugin. A request names only the plugin, so it
+//!    cannot supply or influence the expected hash. The binary, owned by the invoking user, is
 //!    read through one `O_NOFOLLOW` fd and those verified bytes are staged in
 //!    a sealed memfd (or a fixed root-only directory where memfd is
 //!    unavailable) and run, so the file cannot change between check and exec.
@@ -259,8 +259,8 @@ impl TrustStore {
         validate_plugin_name(name)?;
         let untrusted = || {
             format!(
-                "plugin '{name}' is not trusted on this host; an administrator must run \
-                 `sudo orca admin plugin-trust {name}`"
+                "plugin '{name}' is not trusted on this host; an admin must (re)install it \
+                 with `orca plugin create --action install`"
             )
         };
         if !self.dir.exists() {
@@ -312,6 +312,40 @@ impl TrustStore {
         std::fs::rename(&tmp, &dest).with_context(|| format!("install {}", dest.display()))?;
         Ok(())
     }
+
+    /// Drop the record for `name`. Absent already is success.
+    pub fn remove(&self, name: &str) -> Result<()> {
+        validate_plugin_name(name)?;
+        if !self.dir.exists() {
+            return Ok(());
+        }
+        let path = self.check_dirs()?.join(format!("{name}.sha256"));
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(anyhow::Error::new(e).context(format!("remove {}", path.display())))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// One `admin plugin-trust` / `admin plugin-untrust` request on stdin.
+/// `sha256` is the hash the daemon installed; trust refuses a binary that no
+/// longer matches it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustRequest {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+/// Parse a stdin [`TrustRequest`], validating the name.
+pub fn parse_trust_request(input: &str) -> Result<TrustRequest> {
+    let req: TrustRequest =
+        serde_json::from_str(input).context("parse {name, sha256} trust request")?;
+    validate_plugin_name(&req.name)?;
+    Ok(req)
 }
 
 fn check_owner(path: &Path, uid: u32, mode: u32, owner_uid: u32) -> Result<()> {
@@ -406,8 +440,8 @@ pub fn verified_binary(
     let bytes = read_installed(orca_home, name, owner_uid)?;
     ensure!(
         utils::hash::sha256_hex(&bytes) == expected,
-        "plugin '{name}' binary does not match its trusted hash; an administrator must \
-         re-run `sudo orca admin plugin-trust {name}` after reviewing the update"
+        "plugin '{name}' binary does not match its trusted hash; an admin must (re)install it \
+         with `orca plugin create --action install`"
     );
     Ok(bytes)
 }
@@ -418,9 +452,20 @@ pub fn is_root() -> bool {
 }
 
 /// Record the currently installed binary for `name`, owned by `owner_uid`, as
-/// trusted. Only a root caller can write the system store.
-pub fn trust(orca_home: &Path, store: &TrustStore, name: &str, owner_uid: u32) -> Result<String> {
+/// trusted, provided it still hashes to `expected`. Only a root caller can
+/// write the system store.
+pub fn trust(
+    orca_home: &Path,
+    store: &TrustStore,
+    name: &str,
+    owner_uid: u32,
+    expected: &str,
+) -> Result<String> {
     let hex = utils::hash::sha256_hex(&read_installed(orca_home, name, owner_uid)?);
+    ensure!(
+        hex == expected.trim().to_ascii_lowercase(),
+        "plugin '{name}' binary (sha256 {hex}) is not the one orca installed; refusing to trust it"
+    );
     store.record(name, &hex)?;
     Ok(hex)
 }
@@ -753,12 +798,58 @@ esac
         let bin = dir.join(name);
         std::fs::write(&bin, script).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        trust(home.path(), &store_in(home.path()), name, me()).unwrap();
+        trust_current(home.path(), &store_in(home.path()), name).unwrap();
         home
     }
 
     fn me() -> u32 {
         unsafe { libc::geteuid() }
+    }
+
+    fn trust_current(home: &Path, store: &TrustStore, name: &str) -> Result<String> {
+        let hex = utils::hash::sha256_hex(&std::fs::read(home.join("plugins").join(name))?);
+        trust(home, store, name, me(), &hex)
+    }
+
+    #[test]
+    fn trust_refuses_a_binary_other_than_the_one_installed() {
+        let home = orca_home_with("fakeplug", FAKE_PLUGIN);
+        let store = store_in(home.path());
+        let installed = utils::hash::sha256_hex(FAKE_PLUGIN.as_bytes());
+        std::fs::write(home.path().join("plugins/fakeplug"), "#!/bin/sh\nswapped\n").unwrap();
+        let err = trust(home.path(), &store, "fakeplug", me(), &installed).unwrap_err();
+        assert!(
+            err.to_string().contains("not the one orca installed"),
+            "{err:#}"
+        );
+        assert_eq!(store.expected_hash("fakeplug").unwrap(), installed);
+    }
+
+    #[test]
+    fn untrust_removes_the_record_and_is_idempotent() {
+        let home = orca_home_with("fakeplug", FAKE_PLUGIN);
+        let store = store_in(home.path());
+        store.remove("fakeplug").unwrap();
+        assert!(!store.record_path("fakeplug").exists());
+        store.remove("fakeplug").unwrap();
+        assert!(store.remove("../x").is_err());
+    }
+
+    #[test]
+    fn trust_requests_take_a_bare_name_and_nothing_else() {
+        let r = parse_trust_request(r#"{"name":"unraid","sha256":"ab"}"#).unwrap();
+        assert_eq!(
+            (r.name.as_str(), r.sha256.as_deref()),
+            ("unraid", Some("ab"))
+        );
+        assert!(
+            parse_trust_request(r#"{"name":"unraid"}"#)
+                .unwrap()
+                .sha256
+                .is_none()
+        );
+        assert!(parse_trust_request(r#"{"name":"../unraid"}"#).is_err());
+        assert!(parse_trust_request(r#"{"name":"unraid","path":"/x"}"#).is_err());
     }
 
     /// A staging root owned by the test user stands in for the root-owned one.
@@ -877,7 +968,7 @@ esac
             std::fs::write(dir.join("leaver"), &script).unwrap();
             std::fs::set_permissions(dir.join("leaver"), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
-            trust(home.path(), &store_in(home.path()), "leaver", me()).unwrap();
+            trust_current(home.path(), &store_in(home.path()), "leaver").unwrap();
         }
         let out = apply_in(home.path(), &req("leaver", "ping"), Duration::from_secs(10))
             .await
@@ -1083,7 +1174,7 @@ esac
         let bin = home.path().join("plugins/fakeplug");
         std::fs::write(&bin, format!("{FAKE_PLUGIN}\n# v2\n")).unwrap();
         assert!(verified_binary(home.path(), &store, "fakeplug", me()).is_err());
-        trust(home.path(), &store, "fakeplug", me()).unwrap();
+        trust_current(home.path(), &store, "fakeplug").unwrap();
         verified_binary(home.path(), &store, "fakeplug", me()).unwrap();
         let mode = std::fs::metadata(store.record_path("fakeplug"))
             .unwrap()
@@ -1163,7 +1254,7 @@ esac
             std::fs::write(dir.join("forker"), &script).unwrap();
             std::fs::set_permissions(dir.join("forker"), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
-            trust(home.path(), &store_in(home.path()), "forker", me()).unwrap();
+            trust_current(home.path(), &store_in(home.path()), "forker").unwrap();
             home
         };
         let err = apply_in(home.path(), &req("forker", "ping"), Duration::from_secs(2))

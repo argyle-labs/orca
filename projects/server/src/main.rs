@@ -318,15 +318,16 @@ enum AdminAction {
     /// env, its own process group and a timeout. Relays the plugin's JSON reply
     /// and exit status. Invoked via `sudo -n`; never exposed over REST/MCP/peer.
     PluginApply,
-    /// Record the invoking user's installed `<name>` plugin binary as trusted
-    /// for `plugin-apply`, in the root-owned store under
-    /// `/etc/orca/plugin-trust`. Must run as root, and is deliberately absent
-    /// from the daemon's sudoers grant: approving a binary to run as root is an
-    /// administrator's decision. Re-run after every plugin update.
-    PluginTrust {
-        /// Installed plugin name (the file under `~/.orca/plugins`).
-        name: String,
-    },
+    /// Record the invoking user's installed plugin binary as trusted for
+    /// `plugin-apply`, in the root-owned store under `/etc/orca/plugin-trust`.
+    /// Reads `{name, sha256}` from stdin and refuses unless the installed
+    /// binary still hashes to `sha256`. Run as root by the daemon via `sudo -n`
+    /// after an admin installs or updates a plugin, and on daemon start. Never
+    /// exposed over REST/MCP/peer.
+    PluginTrust,
+    /// Remove the trust record for `{name}` read from stdin. Run as root by the
+    /// daemon via `sudo -n` when an admin uninstalls a plugin.
+    PluginUntrust,
     /// List all users (id, username, role, updated_at). Local-only; requires
     /// shell + DB access. Used to diagnose replicated user-id divergence.
     ListUsers,
@@ -1033,7 +1034,8 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::LxcPush => cmd_admin_lxc_push().await,
         AdminAction::CronApply => cmd_admin_cron_apply().await,
         AdminAction::PluginApply => cmd_admin_plugin_apply().await,
-        AdminAction::PluginTrust { name } => cmd_admin_plugin_trust(&name),
+        AdminAction::PluginTrust => cmd_admin_plugin_trust(),
+        AdminAction::PluginUntrust => cmd_admin_plugin_untrust(),
         AdminAction::ListUsers => cmd_admin_list_users(),
         AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
     }
@@ -1249,23 +1251,46 @@ async fn cmd_admin_plugin_apply() -> Result<()> {
     }
 }
 
-fn cmd_admin_plugin_trust(name: &str) -> Result<()> {
+fn read_trust_request(verb: &str) -> Result<system::plugin_apply::TrustRequest> {
+    use std::io::Read;
     use system::plugin_apply;
-    anyhow::ensure!(
-        plugin_apply::is_root(),
-        "plugin-trust must run as root (sudo orca admin plugin-trust {name})"
-    );
+    anyhow::ensure!(plugin_apply::is_root(), "{verb} must run as root");
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .with_context(|| format!("read {verb} request from stdin"))?;
+    plugin_apply::parse_trust_request(&buf)
+}
+
+fn cmd_admin_plugin_trust() -> Result<()> {
+    use system::plugin_apply;
+    let req = read_trust_request("plugin-trust")?;
+    let expected = req
+        .sha256
+        .as_deref()
+        .context("plugin-trust needs the installed sha256")?;
     let home = plugin_apply::invoking_orca_home()
         .context("cannot resolve the invoking user's orca home")?;
     let hex = plugin_apply::trust(
         &home,
         &plugin_apply::TrustStore::system(),
-        name,
+        &req.name,
         plugin_apply::invoking_uid()?,
+        expected,
     )?;
     let caller_uid = std::env::var("SUDO_UID").unwrap_or_else(|_| "direct".into());
-    tracing::info!(plugin = %name, sha256 = %hex, caller_uid = %caller_uid, "plugin-trust recorded");
-    println!("trusted {name} sha256={hex}");
+    tracing::info!(plugin = %req.name, sha256 = %hex, caller_uid = %caller_uid, "plugin-trust recorded");
+    println!("trusted {} sha256={hex}", req.name);
+    Ok(())
+}
+
+fn cmd_admin_plugin_untrust() -> Result<()> {
+    use system::plugin_apply;
+    let req = read_trust_request("plugin-untrust")?;
+    plugin_apply::TrustStore::system().remove(&req.name)?;
+    let caller_uid = std::env::var("SUDO_UID").unwrap_or_else(|_| "direct".into());
+    tracing::info!(plugin = %req.name, caller_uid = %caller_uid, "plugin-trust removed");
+    println!("untrusted {}", req.name);
     Ok(())
 }
 
