@@ -1217,75 +1217,6 @@ mod tests {
         }
     }
 
-    // ── top-level hook fns: empty-stdin early-return paths ────────────────────
-    // Under nextest each test runs in its own process with stdin at /dev/null,
-    // so read_stdin() yields Value::Null and the guards take their early-return
-    // (empty command / empty session) branches without ever calling block().
-
-    #[test]
-    fn bash_guard_empty_stdin_is_ok() {
-        assert!(bash_guard().is_ok());
-    }
-
-    #[test]
-    fn opnsense_guard_empty_stdin_is_ok() {
-        assert!(opnsense_guard().is_ok());
-    }
-
-    #[test]
-    fn session_start_empty_stdin_is_ok() {
-        // Empty session_id -> early return before any file is written.
-        assert!(session_start().is_ok());
-    }
-
-    #[test]
-    fn session_stop_empty_stdin_is_ok() {
-        // Empty session_id/transcript_path -> early return.
-        assert!(session_stop().is_ok());
-    }
-
-    #[test]
-    fn pii_scan_empty_stdin_is_ok() {
-        // Empty file_path -> early return before any read.
-        assert!(pii_scan().is_ok());
-    }
-
-    #[test]
-    fn secrets_scan_empty_stdin_is_ok() {
-        // Command lacks "git"/"commit" -> early return, no scanner invoked.
-        assert!(secrets_scan().is_ok());
-    }
-
-    #[test]
-    fn cmd_hook_dispatches_bash_guard_empty_stdin() {
-        assert!(cmd_hook(HookAction::BashGuard).is_ok());
-    }
-
-    #[test]
-    fn cmd_hook_dispatches_opnsense_guard_empty_stdin() {
-        assert!(cmd_hook(HookAction::OpnsenseGuard).is_ok());
-    }
-
-    #[test]
-    fn cmd_hook_dispatches_session_start_empty_stdin() {
-        assert!(cmd_hook(HookAction::SessionStart).is_ok());
-    }
-
-    #[test]
-    fn cmd_hook_dispatches_session_stop_empty_stdin() {
-        assert!(cmd_hook(HookAction::SessionStop).is_ok());
-    }
-
-    #[test]
-    fn cmd_hook_dispatches_pii_scan_empty_stdin() {
-        assert!(cmd_hook(HookAction::PiiScan).is_ok());
-    }
-
-    #[test]
-    fn cmd_hook_dispatches_secrets_scan_empty_stdin() {
-        assert!(cmd_hook(HookAction::SecretsScan).is_ok());
-    }
-
     #[test]
     fn pii_detects_bearer_and_stripe_labels() {
         assert_eq!(pii_label(r"sk_live_[A-Za-z0-9]+"), "Stripe secret key");
@@ -1296,34 +1227,206 @@ mod tests {
         );
     }
 
-    // ── Full-body coverage via a forked child with redirected stdin ────────────
-    // The hook fns read process stdin directly, and several terminate the process
-    // through block() -> std::process::exit(2). To exercise their real bodies we
-    // fork, point the child's fd 0 at a file holding the hook JSON, run the fn,
-    // and inspect the child's exit status (0 = returned Ok, 2 = block()). Under
-    // nextest each test is its own single-threaded process, so the fork and the
-    // post-fork env/cwd mutations below are race-free.
-    use std::os::unix::io::AsRawFd;
+    // ── Full-body coverage via a re-exec'd child with redirected stdin ─────────
+    // The hook fns read process stdin and env directly, and several terminate the
+    // process through block() -> std::process::exit(2). Each test re-runs the
+    // test binary filtered to itself with stdin pointed at the hook JSON, then
+    // checks the exit status. A re-exec rather than fork(): forking libtest's
+    // multithreaded process can deadlock the child on locks (env, malloc) held by
+    // other test threads.
+    const HOOK_CHILD_ENV: &str = "ORCA_HOOK_TEST_CHILD";
+    // Exit code the child uses when body() returns. libtest never exits 42, so a
+    // filter that matches no test (exit 0) can't pass as "body returned".
+    const BODY_RETURNED: i32 = 42;
+    const BLOCKED: i32 = 2;
 
-    fn fork_hook<F: FnOnce()>(stdin_json: &str, child: F) -> i32 {
+    // Takes the test fn's own ident so the child filter is derived from it and
+    // can't drift from the test's real name.
+    macro_rules! run_hook {
+        ($test:ident, $stdin:expr, $setup:expr, $body:expr, $expect:expr $(,)?) => {{
+            let _: fn() = $test;
+            run_hook(stringify!($test), $stdin, $setup, $body, $expect)
+        }};
+    }
+
+    fn run_hook(
+        test: &str,
+        stdin_json: &str,
+        setup: impl FnOnce(&mut std::process::Command),
+        body: fn(),
+        expect: i32,
+    ) {
+        if std::env::var(HOOK_CHILD_ENV).as_deref() == Ok(test) {
+            body();
+            std::process::exit(BODY_RETURNED);
+        }
         let mut tf = tempfile::NamedTempFile::new().unwrap();
         tf.write_all(stdin_json.as_bytes()).unwrap();
         tf.flush().unwrap();
-        let file = std::fs::File::open(tf.path()).unwrap();
-        // SAFETY: post-fork the child is single-threaded and only performs the
-        // hook's own work before exiting; the parent merely waits on it.
-        unsafe {
-            let pid = libc::fork();
-            assert!(pid >= 0, "fork failed");
-            if pid == 0 {
-                libc::dup2(file.as_raw_fd(), 0);
-                child();
-                std::process::exit(0);
-            }
-            let mut status: i32 = 0;
-            libc::waitpid(pid, &mut status, 0);
-            libc::WEXITSTATUS(status)
-        }
+        let orca_home = tempfile::tempdir().unwrap();
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            &format!("hook::tests::{test}"),
+            "--exact",
+            "--test-threads=1",
+        ])
+        .env(HOOK_CHILD_ENV, test)
+        .env("ORCA_HOME", orca_home.path())
+        .env_remove("ORCA_DB_PATH")
+        .stdin(std::fs::File::open(tf.path()).unwrap())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+        setup(&mut cmd);
+        let out = cmd.output().unwrap();
+        let code = out.status.code().expect("hook child killed by signal");
+        assert_eq!(
+            code,
+            expect,
+            "hook child {test} exited {code}, expected {expect}; stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // ── top-level hook fns: empty-stdin early-return paths ────────────────────
+    // Each runs in a re-exec'd child fed empty stdin (never the test process's
+    // own stdin, which may be an open terminal), so read_stdin() yields
+    // Value::Null and the guards take their early-return branches.
+
+    #[test]
+    fn bash_guard_empty_stdin_is_ok() {
+        run_hook!(
+            bash_guard_empty_stdin_is_ok,
+            "",
+            |_| {},
+            || assert!(bash_guard().is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn opnsense_guard_empty_stdin_is_ok() {
+        run_hook!(
+            opnsense_guard_empty_stdin_is_ok,
+            "",
+            |_| {},
+            || assert!(opnsense_guard().is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn session_start_empty_stdin_is_ok() {
+        // Empty session_id -> early return before any file is written.
+        run_hook!(
+            session_start_empty_stdin_is_ok,
+            "",
+            |_| {},
+            || assert!(session_start().is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn session_stop_empty_stdin_is_ok() {
+        // Empty session_id/transcript_path -> early return.
+        run_hook!(
+            session_stop_empty_stdin_is_ok,
+            "",
+            |_| {},
+            || assert!(session_stop().is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn pii_scan_empty_stdin_is_ok() {
+        // Empty file_path -> early return before any read.
+        run_hook!(
+            pii_scan_empty_stdin_is_ok,
+            "",
+            |_| {},
+            || assert!(pii_scan().is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn secrets_scan_empty_stdin_is_ok() {
+        // Command lacks "git"/"commit" -> early return, no scanner invoked.
+        run_hook!(
+            secrets_scan_empty_stdin_is_ok,
+            "",
+            |_| {},
+            || assert!(secrets_scan().is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_bash_guard_empty_stdin() {
+        run_hook!(
+            cmd_hook_dispatches_bash_guard_empty_stdin,
+            "",
+            |_| {},
+            || assert!(cmd_hook(HookAction::BashGuard).is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_opnsense_guard_empty_stdin() {
+        run_hook!(
+            cmd_hook_dispatches_opnsense_guard_empty_stdin,
+            "",
+            |_| {},
+            || assert!(cmd_hook(HookAction::OpnsenseGuard).is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_session_start_empty_stdin() {
+        run_hook!(
+            cmd_hook_dispatches_session_start_empty_stdin,
+            "",
+            |_| {},
+            || assert!(cmd_hook(HookAction::SessionStart).is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_session_stop_empty_stdin() {
+        run_hook!(
+            cmd_hook_dispatches_session_stop_empty_stdin,
+            "",
+            |_| {},
+            || assert!(cmd_hook(HookAction::SessionStop).is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_pii_scan_empty_stdin() {
+        run_hook!(
+            cmd_hook_dispatches_pii_scan_empty_stdin,
+            "",
+            |_| {},
+            || assert!(cmd_hook(HookAction::PiiScan).is_ok()),
+            BODY_RETURNED,
+        );
+    }
+
+    #[test]
+    fn cmd_hook_dispatches_secrets_scan_empty_stdin() {
+        run_hook!(
+            cmd_hook_dispatches_secrets_scan_empty_stdin,
+            "",
+            |_| {},
+            || assert!(cmd_hook(HookAction::SecretsScan).is_ok()),
+            BODY_RETURNED,
+        );
     }
 
     #[test]
@@ -1336,12 +1439,17 @@ mod tests {
             "prompt": "hello world prompt"
         })
         .to_string();
-        let code = fork_hook(&input, move || {
-            // SAFETY: child process only; no other threads read HOME.
-            unsafe { std::env::set_var("HOME", &hp) };
-            session_start().ok();
-        });
-        assert_eq!(code, 0);
+        run_hook!(
+            session_start_writes_prompt_record,
+            &input,
+            |c| {
+                c.env("HOME", &hp);
+            },
+            || {
+                session_start().ok();
+            },
+            BODY_RETURNED,
+        );
         let dir = home.path().join(".orca/logs/sessions");
         let entries: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -1373,11 +1481,17 @@ mod tests {
             "prompt": long
         })
         .to_string();
-        let code = fork_hook(&input, move || {
-            unsafe { std::env::set_var("HOME", &hp) };
-            session_start().ok();
-        });
-        assert_eq!(code, 0);
+        run_hook!(
+            session_start_truncates_long_prompt_to_800,
+            &input,
+            |c| {
+                c.env("HOME", &hp);
+            },
+            || {
+                session_start().ok();
+            },
+            BODY_RETURNED,
+        );
         let dir = home.path().join(".orca/logs/sessions");
         let entry = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap();
         let body = std::fs::read_to_string(entry.path()).unwrap();
@@ -1402,11 +1516,17 @@ mod tests {
             "cwd": "/x/y/coolproj"
         })
         .to_string();
-        let code = fork_hook(&input, move || {
-            unsafe { std::env::set_var("HOME", &hp) };
-            session_stop().ok();
-        });
-        assert_eq!(code, 0);
+        run_hook!(
+            session_stop_writes_assistant_record,
+            &input,
+            |c| {
+                c.env("HOME", &hp);
+            },
+            || {
+                session_stop().ok();
+            },
+            BODY_RETURNED,
+        );
         let dir = home.path().join(".orca/logs/sessions");
         let entry = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap();
         let body = std::fs::read_to_string(entry.path()).unwrap();
@@ -1435,11 +1555,17 @@ mod tests {
             "cwd": "/a/b/proj"
         })
         .to_string();
-        let code = fork_hook(&input, move || {
-            unsafe { std::env::set_var("HOME", &hp) };
-            session_stop().ok();
-        });
-        assert_eq!(code, 0);
+        run_hook!(
+            session_stop_no_assistant_text_writes_nothing,
+            &input,
+            |c| {
+                c.env("HOME", &hp);
+            },
+            || {
+                session_stop().ok();
+            },
+            BODY_RETURNED,
+        );
         let dir = home.path().join(".orca/logs/sessions");
         assert!(!dir.exists() || std::fs::read_dir(&dir).unwrap().next().is_none());
     }
@@ -1453,10 +1579,15 @@ mod tests {
             "tool_input": {"file_path": tf.path().to_str().unwrap()}
         })
         .to_string();
-        let code = fork_hook(&input, || {
-            pii_scan().ok();
-        });
-        assert_eq!(code, 0);
+        run_hook!(
+            pii_scan_clean_file_is_ok_no_block,
+            &input,
+            |_| {},
+            || {
+                pii_scan().ok();
+            },
+            BODY_RETURNED,
+        );
     }
 
     #[test]
@@ -1469,10 +1600,15 @@ mod tests {
             "tool_input": {"file_path": tf.path().to_str().unwrap()}
         })
         .to_string();
-        let code = fork_hook(&input, || {
-            pii_scan().ok();
-        });
-        assert_eq!(code, 2);
+        run_hook!(
+            pii_scan_blocks_on_detected_pii,
+            &input,
+            |_| {},
+            || {
+                pii_scan().ok();
+            },
+            BLOCKED,
+        );
     }
 
     #[test]
@@ -1481,10 +1617,15 @@ mod tests {
             "tool_input": {"file_path": "/no/such/file/xyz123.txt"}
         })
         .to_string();
-        let code = fork_hook(&input, || {
-            pii_scan().ok();
-        });
-        assert_eq!(code, 0);
+        run_hook!(
+            pii_scan_nonexistent_file_is_ok,
+            &input,
+            |_| {},
+            || {
+                pii_scan().ok();
+            },
+            BODY_RETURNED,
+        );
     }
 
     #[test]
@@ -1493,10 +1634,15 @@ mod tests {
             "tool_input": {"command": "rm -rf /important/data"}
         })
         .to_string();
-        let code = fork_hook(&input, || {
-            bash_guard().ok();
-        });
-        assert_eq!(code, 2);
+        run_hook!(
+            bash_guard_blocks_destructive_command,
+            &input,
+            |_| {},
+            || {
+                bash_guard().ok();
+            },
+            BLOCKED,
+        );
     }
 
     #[test]
@@ -1505,10 +1651,15 @@ mod tests {
             "tool_input": {"command": "ls -la /tmp"}
         })
         .to_string();
-        let code = fork_hook(&input, || {
-            bash_guard().ok();
-        });
-        assert_eq!(code, 0);
+        run_hook!(
+            bash_guard_allows_safe_command,
+            &input,
+            |_| {},
+            || {
+                bash_guard().ok();
+            },
+            BODY_RETURNED,
+        );
     }
 
     #[test]
@@ -1517,10 +1668,17 @@ mod tests {
             "tool_input": {"command": "ssh root@opnsense uptime"}
         })
         .to_string();
-        let code = fork_hook(&input, || {
-            opnsense_guard().ok();
-        });
-        assert_eq!(code, 2);
+        run_hook!(
+            opnsense_guard_blocks_named_host,
+            &input,
+            |c| {
+                c.env_remove("ORCA_ROUTER_GUARD_IP");
+            },
+            || {
+                opnsense_guard().ok();
+            },
+            BLOCKED,
+        );
     }
 
     #[test]
@@ -1529,12 +1687,17 @@ mod tests {
             "tool_input": {"command": "ls -la /tmp"}
         })
         .to_string();
-        let code = fork_hook(&input, || {
-            // Ensure no configured router IP influences the match.
-            unsafe { std::env::remove_var("ORCA_ROUTER_GUARD_IP") };
-            opnsense_guard().ok();
-        });
-        assert_eq!(code, 0);
+        run_hook!(
+            opnsense_guard_allows_unrelated_command,
+            &input,
+            |c| {
+                c.env_remove("ORCA_ROUTER_GUARD_IP");
+            },
+            || {
+                opnsense_guard().ok();
+            },
+            BODY_RETURNED,
+        );
     }
 
     #[test]
@@ -1548,10 +1711,16 @@ mod tests {
             "tool_input": {"command": "git commit -m wip"}
         })
         .to_string();
-        let code = fork_hook(&input, move || {
-            std::env::set_current_dir(&dp).unwrap();
-            secrets_scan().ok();
-        });
-        assert_eq!(code, 0);
+        run_hook!(
+            secrets_scan_git_commit_command_runs_and_returns_ok,
+            &input,
+            |c| {
+                c.current_dir(&dp);
+            },
+            || {
+                secrets_scan().ok();
+            },
+            BODY_RETURNED,
+        );
     }
 }

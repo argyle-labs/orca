@@ -1744,24 +1744,23 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn install_dir_derives_from_orca_home() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
         let dir = install_dir().expect("orca_home set");
         assert_eq!(dir, tmp.path().join("plugins"));
-        unsafe {
-            std::env::remove_var("ORCA_HOME");
-        }
     }
 
     #[test]
     #[cfg(unix)]
     #[serial_test::serial(env)]
     fn installed_software_on_disk_scans_executables_only() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -1787,8 +1786,9 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn installed_software_on_disk_empty_when_no_dir() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -1802,8 +1802,9 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn scan_and_load_empty_when_dir_absent() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -2006,7 +2007,7 @@ mod tests {
     // ── async guard branches (no side effects reached) ────────────────────────
 
     fn guard_ctx(tmp: &tempfile::TempDir) -> ToolCtx {
-        // SAFETY: env-touching guard tests are serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
             std::env::set_var("HOME", tmp.path());
@@ -2018,6 +2019,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn sideload_refuses_reserved_name() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let bin = tmp.path().join("komga-main.bin");
@@ -2037,6 +2039,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn sideload_refuses_malformed_name_before_probe_or_copy() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         // An empty file: reaching a probe/spawn would fail differently.
@@ -2067,6 +2070,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn sideload_refuses_installed_name_without_replace() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let dir = install_dir().unwrap();
@@ -2091,6 +2095,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn install_file_and_name_takes_the_sideload_path() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let args = PluginInstallArgs {
@@ -2110,6 +2115,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn install_requires_file_or_name() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let args = PluginInstallArgs::default();
@@ -2123,6 +2129,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn install_rejects_missing_file() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let missing = tmp.path().join("does-not-exist");
@@ -2143,6 +2150,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn create_invoke_requires_tool() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let args = PluginCreateArgs {
@@ -2165,6 +2173,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn invoke_unknown_verb_is_refused() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         // No loaded plugin owns this verb, so dispatch is refused before any
@@ -2183,6 +2192,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn uninstall_requires_nonempty_name() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let args = PluginUninstallArgs {
@@ -2199,6 +2209,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn uninstall_reports_not_installed_for_unknown_plugin() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         // Fresh temp ORCA_HOME: nothing on disk, nothing loaded, so an unknown
@@ -2220,6 +2231,7 @@ mod tests {
     #[cfg(unix)]
     #[serial_test::serial(env)]
     async fn uninstall_removes_on_disk_artifact() {
+        let _env = crate::test_env::snapshot();
         // A plugin file present in the install dir (but never loaded live) is
         // removed from disk and the tool reports removed_from_disk=true /
         // unloaded=false. No subprocess is spawned — pure filesystem side effect.
@@ -2250,6 +2262,7 @@ mod tests {
     #[cfg(unix)]
     #[serial_test::serial(env)]
     async fn uninstall_trims_name_before_lookup() {
+        let _env = crate::test_env::snapshot();
         // The name is trimmed: a padded, on-disk plugin name still resolves and
         // is removed (guards the `.trim()` + install_filename join path).
         let tmp = tempfile::tempdir().unwrap();
@@ -2279,6 +2292,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn create_install_file_and_name_takes_the_sideload_path() {
+        let _env = crate::test_env::snapshot();
         // action=install forwards to plugin_install; --file plus --name is a
         // sideload, so a missing file bails before any fetch or subprocess.
         let tmp = tempfile::tempdir().unwrap();
@@ -2303,6 +2317,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn create_install_requires_file_or_name() {
+        let _env = crate::test_env::snapshot();
         // action=install with neither --file nor --name bails before touching
         // the install dir or the network.
         let tmp = tempfile::tempdir().unwrap();
@@ -2327,6 +2342,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn create_install_rejects_missing_file() {
+        let _env = crate::test_env::snapshot();
         // action=install --file <missing> bails at the is_file() guard, before
         // any spawn/handshake.
         let tmp = tempfile::tempdir().unwrap();
@@ -2352,6 +2368,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn create_invoke_unknown_verb_is_refused() {
+        let _env = crate::test_env::snapshot();
         // action=invoke with a tool no loaded plugin owns is refused before any
         // dispatch to a plugin subprocess.
         let tmp = tempfile::tempdir().unwrap();
@@ -2682,6 +2699,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn catalog_resolved_returns_fresh_cache_without_network() {
+        let _env = crate::test_env::snapshot();
         seed_catalog(vec![entry("cached-only-xyz", "available")]);
         let got = catalog_resolved().await;
         assert!(
@@ -2693,6 +2711,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn plugin_list_projects_cached_catalog_to_rows() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         seed_catalog(vec![
@@ -2716,6 +2735,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn plugin_detail_finds_cached_entry() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         seed_catalog(vec![entry("gamma", "planned")]);
@@ -2738,6 +2758,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn plugin_detail_errors_for_unknown_name() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         seed_catalog(vec![entry("gamma", "planned")]);
@@ -2759,6 +2780,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn install_by_name_unknown_catalog_is_refused() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         seed_catalog(vec![entry("known", "available")]);
@@ -2784,6 +2806,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn install_by_name_is_release_derived_not_status_gated() {
+        let _env = crate::test_env::snapshot();
         // Installability is release-derived: the catalog `status` (here
         // "unreleased") is NOT consulted. Install proceeds to resolve the repo's
         // actual release and fails only because "wip" publishes none — proven by
@@ -2818,6 +2841,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn update_is_release_derived_not_status_gated() {
+        let _env = crate::test_env::snapshot();
         // Mirrors `install_by_name_is_release_derived_not_status_gated`: update must
         // not consult the catalog `status` hint either.
         //
@@ -2857,6 +2881,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn update_sideloaded_plugin_not_in_catalog_skips_cleanly() {
+        let _env = crate::test_env::snapshot();
         // A plugin absent from the catalog is sideloaded: no release source to
         // resolve. `plugin.update` must skip cleanly rather than 404 or error out.
         let tmp = tempfile::tempdir().unwrap();
@@ -2887,6 +2912,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn update_available_plugin_takes_resolve_path() {
+        let _env = crate::test_env::snapshot();
         // An `available` entry is NOT short-circuited: it proceeds to resolve the
         // repo's release and fails only because the fake repo publishes none —
         // proven by the error naming the resolve of that repo, not a skip note.
@@ -2914,6 +2940,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn delegate_plugin_fetch_bails_when_no_paired_peers() {
+        let _env = crate::test_env::snapshot();
         // With a fresh temp ORCA_HOME the peer db is empty, so delegate-on-miss
         // has no secure peer (and no peers at all) to relay the fetch to. It must
         // fail with the actionable "no paired peers at all" guidance rather than
@@ -2937,11 +2964,12 @@ mod tests {
     #[cfg(unix)]
     #[serial_test::serial(env)]
     fn scan_and_load_ignores_non_executable_dir_contents() {
+        let _env = crate::test_env::snapshot();
         // The install dir exists but holds only a non-executable file (a stray
         // README). `scan_and_load` must read the dir, skip the non-plugin file,
         // and return empty lists without ever attempting a spawn.
         let tmp = tempfile::TempDir::new().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -2963,6 +2991,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn delegate_plugin_fetch_lists_insecure_candidates_when_none_secure() {
+        let _env = crate::test_env::snapshot();
         // A paired but NOT-secure peer is present. Delegate-on-miss has no secure
         // candidate to relay to, so it must bail with the "Trust a candidate peer"
         // guidance that names the insecure peer — the branch distinct from the
@@ -3004,6 +3033,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn delegate_plugin_fetch_bails_when_no_remote_exec_transport() {
+        let _env = crate::test_env::snapshot();
         // A paired SECURE peer exists, so it survives the candidate filter and
         // delegate-on-miss gets past both the no-peers and no-secure-peer guards.
         // The guard_ctx has no RemoteExec service registered, so the function must
@@ -3084,6 +3114,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn apply_plugin_schema_materializes_declared_table() {
+        let _env = crate::test_env::snapshot();
         // A plugin that declares a table has it materialized as a real SQL table
         // in its namespace (`plug__<ns>__<table>`), reachable via the typed db-op
         // surface — a List on the fresh table returns cleanly with no rows.
@@ -3117,6 +3148,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn apply_plugin_schema_is_noop_for_empty_declaration() {
+        let _env = crate::test_env::snapshot();
         // A plugin that declares no tables is a clean no-op: apply touches the db
         // for nothing, so no `plug__%` table is ever created.
         let tmp = tempfile::tempdir().unwrap();
@@ -3146,6 +3178,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(env)]
     async fn install_by_name_matches_on_target_software_alias() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         seed_catalog(vec![CatalogEntry {

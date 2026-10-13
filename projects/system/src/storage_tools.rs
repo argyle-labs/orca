@@ -4422,7 +4422,9 @@ mod tests {
     #[test]
     fn discover_live_shares_no_backends_is_empty() {
         with_db("discover_empty.db", || {
-            let out = rt().block_on(discover_live_shares(None));
+            // The backend registry is process-global and other tests register
+            // fakes into it, so scope to a provider nothing registers.
+            let out = rt().block_on(discover_live_shares(Some("discover-empty-none")));
             assert!(out.shares.is_empty());
             assert!(out.errors.is_empty());
         });
@@ -4769,6 +4771,7 @@ mod tests {
     // ── discover_live_shares: managed_mounts join key building ─────────────
 
     #[test]
+    #[serial_test::serial(storage_registry)]
     fn discover_live_shares_builds_configured_by_target_from_store() {
         with_db("discover_configured.db", || {
             // A managed mount declares a target with a primary + failover source.
@@ -4886,21 +4889,17 @@ mod tests {
         }
     }
 
-    /// Register a fake backend with the given capabilities, run `f`, then always
-    /// deregister it (even on assertion panic, since panics propagate after the
-    /// closure returns its value — we compute-then-assert in each test body).
+    /// Register a fake backend with the given capabilities for the duration of `f`.
     fn with_backend<T>(
         name: &str,
         caps: &[plugin_toolkit::storage::StorageCapability],
         f: impl FnOnce() -> T,
     ) -> T {
-        plugin_toolkit::storage::register_backend(std::sync::Arc::new(FakeBackend {
+        let _reg = crate::test_storage::Registered::new(std::sync::Arc::new(FakeBackend {
             name: name.to_string(),
             caps: caps.to_vec(),
         }));
-        let out = f();
-        plugin_toolkit::storage::deregister_backend(name);
-        out
+        f()
     }
 
     #[test]

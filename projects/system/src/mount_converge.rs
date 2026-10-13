@@ -3943,7 +3943,7 @@ mod tests {
     async fn remove_only_reaches_the_owning_applier() {
         let h = guest_remove_harness("guest-remove-owner").await;
         let other_log: RemoveLog = Default::default();
-        plugin_toolkit::storage::register_guest_applier(std::sync::Arc::new(
+        let _bystander = crate::test_storage::RegisteredGuestApplier::new(std::sync::Arc::new(
             RemovingGuestApplier {
                 name: "guest-remove-bystander".to_string(),
                 removed: other_log.clone(),
@@ -3952,7 +3952,6 @@ mod tests {
         ));
         mounts::endpoint_db::remove("m-guest").unwrap();
         reconcile_guest_mounts_at("h1", Some(&h.ledger)).await;
-        plugin_toolkit::storage::deregister_guest_applier("guest-remove-bystander");
         assert_eq!(*h.removed.lock().unwrap(), vec![removed_backups()]);
         assert!(other_log.lock().unwrap().is_empty());
         assert!(load_guest_ledger_at(&h.ledger).is_empty());
@@ -4017,7 +4016,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn corrupt_guest_ledger_is_moved_aside() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("managed_guest_mounts.json");
         std::fs::write(&path, b"{not json").unwrap();
@@ -4145,7 +4146,7 @@ mod tests {
     #[serial_test::serial(storage_registry)]
     async fn resolve_secret_file_threads_rendered_secret_from_backend() {
         let name = "smb-secret-fake";
-        plugin_toolkit::storage::register_backend(std::sync::Arc::new(SecretFileBackend {
+        let _reg = crate::test_storage::Registered::new(std::sync::Arc::new(SecretFileBackend {
             name: name.to_string(),
             render_secret: Some((
                 "/run/orca/secret-files/mnt-data".to_string(),
@@ -4158,7 +4159,6 @@ mod tests {
             ..d("/mnt/data")
         };
         let got = resolve_secret_file(&dm).await;
-        plugin_toolkit::storage::deregister_backend(name);
         let sf = got.expect("registered backend renders the secret-file");
         assert_eq!(sf.path, "/run/orca/secret-files/mnt-data");
         assert_eq!(sf.contents, "username=alice\npassword=hunter2");
@@ -4460,6 +4460,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn ledger_file_resolves_managed_mounts_under_orca_home() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().expect("tempdir");
         unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
         let path = ledger_file().expect("ledger path resolves from $ORCA_HOME");
@@ -4469,6 +4470,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn save_ledger_then_load_ledger_round_trips_via_orca_home() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().expect("tempdir");
         unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
         // A fresh state dir with no ledger file yet loads as empty.
@@ -4523,6 +4525,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn tick_no_desired_placements_is_ok_noop_and_persists_empty_ledger() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().expect("tempdir");
         unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
         crate::host_identity::init(dir.path()).ok();
@@ -4549,6 +4552,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn tick_under_acting_policy_runs_backend_sweep_still_noop() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().expect("tempdir");
         unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
         crate::host_identity::init(dir.path()).ok();

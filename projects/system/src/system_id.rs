@@ -415,7 +415,7 @@ mod tests {
             .into_iter()
             .map(|k| (k, std::env::var_os(k)))
             .collect();
-        // SAFETY: env-touching tests are serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", home.path());
             std::env::set_var("ORCA_DB_PATH", home.path().join("orca.db"));
@@ -440,6 +440,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn a_failed_parse_never_opens_a_database() {
+        let _env = crate::test_env::snapshot();
         let entries = files_left_in_an_empty_home(|| {
             assert!("mint".parse::<SystemId>().is_err());
             assert!(serde_json::from_str::<Args>(r#"{"id":"mint"}"#).is_err());
@@ -450,6 +451,7 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn the_hint_opens_no_database_without_a_process_pool() {
+        let _env = crate::test_env::snapshot();
         assert!(!db::pool::Db::is_process_initialized());
         let err = "freyr".parse::<SystemId>().unwrap_err();
         let message = format!("invalid args for system.health: id: {err}");

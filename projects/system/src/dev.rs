@@ -147,7 +147,7 @@ mod tests {
 
     fn isolated_orca_home(scenario: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
-        // SAFETY: tests touching ORCA_HOME are serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", dir.path());
             std::env::set_var("ORCA_TEST_SCENARIO", scenario);
@@ -158,6 +158,7 @@ mod tests {
     #[test]
     #[serial(env)]
     fn dev_source_round_trips() {
+        let _env = crate::test_env::snapshot();
         let _dir = isolated_orca_home("dev_src");
         assert!(read_dev_source().is_none());
         write_dev_source("http://localhost:9999").unwrap();
@@ -169,6 +170,7 @@ mod tests {
     #[test]
     #[serial(env)]
     fn dev_source_clear_is_noop_when_absent() {
+        let _env = crate::test_env::snapshot();
         let _dir = isolated_orca_home("dev_src_noop");
         clear_dev_source().unwrap();
     }

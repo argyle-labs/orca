@@ -188,8 +188,9 @@ pub async fn teardown(pairs: &[(String, String)]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_storage::Registered;
     use plugin_toolkit::storage::{
-        Share, StorageBackend, StorageError, StorageKind, StorageProvider, Usage, register_backend,
+        Share, StorageBackend, StorageError, StorageKind, StorageProvider, Usage,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -318,9 +319,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(storage_registry)]
     async fn userspace_mount_dispatches_to_backend_not_autofs() {
         let calls = Arc::new(AtomicUsize::new(0));
-        register_backend(Arc::new(FakeObject {
+        let _reg = Registered::new(Arc::new(FakeObject {
             name: "obj-dispatch".into(),
             mount_calls: calls.clone(),
             ..Default::default()
@@ -335,9 +337,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(storage_registry)]
     async fn kernel_mount_is_not_a_userspace_mount() {
         let calls = Arc::new(AtomicUsize::new(0));
-        register_backend(Arc::new(FakeNas {
+        let _reg = Registered::new(Arc::new(FakeNas {
             name: "nas-guard".into(),
             mount_calls: calls.clone(),
         }));
@@ -351,10 +354,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(storage_registry)]
     async fn disabled_userspace_mount_is_torn_down() {
         let mounts = Arc::new(AtomicUsize::new(0));
         let unmounts = Arc::new(AtomicUsize::new(0));
-        register_backend(Arc::new(FakeObject {
+        let _reg = Registered::new(Arc::new(FakeObject {
             name: "obj-teardown".into(),
             mount_calls: mounts.clone(),
             unmount_calls: unmounts.clone(),
@@ -370,9 +374,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(storage_registry)]
     async fn teardown_kills_the_process_for_removed_mounts() {
         let unmounts = Arc::new(AtomicUsize::new(0));
-        register_backend(Arc::new(FakeObject {
+        let _reg = Registered::new(Arc::new(FakeObject {
             name: "obj-removed".into(),
             unmount_calls: unmounts.clone(),
             ..Default::default()
@@ -383,12 +388,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(storage_registry)]
     async fn credential_is_resolved_before_mount_and_never_logged() {
         // A userspace mount carrying a SecretRef that does NOT resolve must fail
         // closed: no mount() call, and the error string carries no secret name or
         // value — only the target.
         let calls = Arc::new(AtomicUsize::new(0));
-        register_backend(Arc::new(FakeObject {
+        let _reg = Registered::new(Arc::new(FakeObject {
             name: "obj-cred".into(),
             mount_calls: calls.clone(),
             ..Default::default()
@@ -414,9 +420,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(storage_registry)]
     async fn mount_receives_the_declared_source_as_share_id() {
         let last = Arc::new(std::sync::Mutex::new(None));
-        register_backend(Arc::new(FakeObject {
+        let _reg = Registered::new(Arc::new(FakeObject {
             name: "obj-id".into(),
             last_id: last.clone(),
             ..Default::default()

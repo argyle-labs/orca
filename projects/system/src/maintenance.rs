@@ -1660,15 +1660,10 @@ mod tests {
     // `with_pooled_or_open` finds no process pool in tests and falls through to
     // `open_default()`, which honors `$ORCA_DB_PATH`. Pointing it at a fresh
     // temp file gives each pass a fully-migrated database to work on. The env
-    // var is process-global; nextest isolates each test in its own process, and
-    // the mutex serializes the fallback under a threaded `cargo test` harness.
-    use std::sync::Mutex;
-    static DB_ENV_LOCK: Mutex<()> = Mutex::new(());
+    // var is process-global, so every caller is `#[serial(env)]`.
 
-    /// Point `ORCA_DB_PATH` at a fresh temp db and run `f`, holding the env lock
-    /// for the duration so concurrent tests don't clobber each other's path.
+    /// Point `ORCA_DB_PATH` at a fresh temp db and run `f`.
     fn with_temp_db<R>(f: impl FnOnce() -> R) -> R {
-        let _guard = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("orca.db");
         let prev = std::env::var_os("ORCA_DB_PATH");
@@ -1684,7 +1679,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn db_size_pass_on_fresh_db_stays_under_warn_threshold() {
+        let _env = crate::test_env::snapshot();
         // A freshly-migrated database is a few pages — well under the 100 MiB
         // default warn threshold, so the pass completes with no warnings.
         let pass = with_temp_db(db_size_pass);
@@ -1696,7 +1693,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn db_size_pass_warns_when_over_configured_warn_bytes() {
+        let _env = crate::test_env::snapshot();
         // Drop the warn threshold to 1 byte via the settings override so the
         // (small, non-empty) fresh db trips the size warning. Exercises the
         // warn-Event construction path.
@@ -1719,18 +1718,12 @@ mod tests {
         assert!(matches!(ev.severity, Severity::Warn));
     }
 
-    /// Async variant of [`with_temp_db`]: holds the env lock across the awaited
-    /// future so the tick sees a stable `ORCA_DB_PATH`.
-    // Serializing env access requires holding the std mutex across the awaited
-    // future; that is the point of the guard, so silence the lock-across-await
-    // lint for this test-only helper.
-    #[allow(clippy::await_holding_lock)]
+    /// Async variant of [`with_temp_db`].
     async fn with_temp_db_async<F, Fut, R>(f: F) -> R
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = R>,
     {
-        let _guard = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("orca.db");
         let prev = std::env::var_os("ORCA_DB_PATH");
@@ -1746,7 +1739,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn sweep_tick_completes_on_migrated_db() {
+        let _env = crate::test_env::snapshot();
         // Drives the full retention sweep (session events, mesh offers,
         // replication-op reap) against a real migrated db; every table exists,
         // so the pass must complete without error.
@@ -1755,7 +1750,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(env)]
     async fn db_size_tick_completes_on_migrated_db() {
+        let _env = crate::test_env::snapshot();
         // Lower the warn threshold first so the tick also walks the
         // notification fan-out branch, then confirm the tick returns Ok.
         let res = with_temp_db_async(|| async {

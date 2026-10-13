@@ -1027,15 +1027,11 @@ mod tests {
     // ── home_dir ──────────────────────────────────────────────────────────
 
     #[test]
+    #[serial_test::serial(env)]
     fn home_dir_reads_home_env() {
-        // SAFETY: single-threaded test; restore afterward.
-        let prev = std::env::var("HOME").ok();
+        let _env = crate::test_env::snapshot();
         unsafe { std::env::set_var("HOME", "/tmp/some-home") };
         assert_eq!(home_dir().unwrap(), PathBuf::from("/tmp/some-home"));
-        match prev {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
     }
 
     // ── is_symlink ────────────────────────────────────────────────────────
@@ -2226,13 +2222,11 @@ mod tests {
     // not leak into sibling tests; we restore it regardless.
 
     #[test]
+    #[serial_test::serial(env)]
     fn cmd_install_report_errors_without_home() {
-        let prev = std::env::var("HOME").ok();
+        let _env = crate::test_env::snapshot();
         unsafe { std::env::remove_var("HOME") };
         let r = cmd_install_report();
-        if let Some(v) = prev {
-            unsafe { std::env::set_var("HOME", v) }
-        }
         assert!(!r.success());
         assert!(r.done.is_empty());
         assert!(
@@ -2243,13 +2237,11 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn cmd_uninstall_report_errors_without_home() {
-        let prev = std::env::var("HOME").ok();
+        let _env = crate::test_env::snapshot();
         unsafe { std::env::remove_var("HOME") };
         let r = cmd_uninstall_report();
-        if let Some(v) = prev {
-            unsafe { std::env::set_var("HOME", v) }
-        }
         assert!(!r.success());
         assert!(
             r.errors
@@ -2302,9 +2294,8 @@ mod tests {
     }
 
     // ── PATH-cleared subprocess arms ──────────────────────────────────────
-    // These functions shell out to `claude` / `hostname`. nextest runs each
-    // test in its own process, so clearing PATH here cannot leak into sibling
-    // tests; we restore it regardless. With PATH empty the commands fail to
+    // These functions shell out to `claude` / `hostname`. Callers are
+    // `#[serial(env)]`, so clearing PATH cannot leak into sibling tests. With PATH empty the commands fail to
     // spawn (ENOENT), deterministically driving the not-found / fallback arms
     // WITHOUT mutating any real machine state (no config is written because the
     // spawn never succeeds).
@@ -2321,7 +2312,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn local_hostname_falls_back_when_hostname_absent() {
+        let _env = crate::test_env::snapshot();
         // `hostname` cannot be spawned with an empty PATH → "unknown" fallback.
         assert_eq!(with_empty_path(local_hostname), "unknown");
     }
@@ -2429,19 +2422,16 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn cmd_uninstall_report_happy_path_on_clean_home() {
+        let _env = crate::test_env::snapshot();
         // A pristine temp HOME with nothing installed: every uninstall step
         // takes its no-op / skip arm and the report is a success. PATH is
         // cleared so the `claude mcp list` probe deterministically reports
         // "not registered" instead of touching the real machine.
         let home = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var("HOME").ok();
         unsafe { std::env::set_var("HOME", home.path()) };
         let report = with_empty_path(cmd_uninstall_report);
-        match prev_home {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
 
         assert!(
             report.success(),
@@ -2496,7 +2486,9 @@ mod tests {
     // HOME's default hooks dir.
 
     #[test]
+    #[serial_test::serial(env)]
     fn global_commit_guard_materializes_hooks_then_errors_on_git_absent() {
+        let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let mut report = InstallReport::new();
         with_empty_path(|| step_global_commit_guard(home.path(), &mut report));
@@ -2545,7 +2537,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn global_commit_guard_leaves_foreign_commit_msg_untouched() {
+        let _env = crate::test_env::snapshot();
         // A pre-existing, non-orca commit-msg hook in the default dir must be
         // left verbatim and reported as a skip (the guard never clobbers an
         // operator's own hook).
@@ -2581,7 +2575,9 @@ mod tests {
     // host takes, it must produce exactly one outcome and never a success.
 
     #[test]
+    #[serial_test::serial(env)]
     fn git_hooks_produces_single_outcome_without_mutating_repo() {
+        let _env = crate::test_env::snapshot();
         let mut report = InstallReport::new();
         with_empty_path(|| step_git_hooks(&mut report));
         let total = report.done.len() + report.skipped.len() + report.errors.len();

@@ -396,7 +396,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn tick_is_noop_without_ca_key() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             // No mesh CA key on disk → the CA gate returns early. An unclaimed
@@ -423,7 +425,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn tick_does_not_offer_when_not_self_secure() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             let pki = pki_dir();
@@ -452,7 +456,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn tick_inserts_outbound_offer_for_unclaimed_peer() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
@@ -489,7 +495,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn tick_skips_peer_with_existing_open_offer() {
+        let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();

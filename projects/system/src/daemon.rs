@@ -805,8 +805,9 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn collect_runtime_status_defaults_when_no_state_file() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -816,16 +817,14 @@ mod tests {
         assert!(status.pid.is_none());
         assert!(status.port.is_none());
         assert!(status.uptime_seconds.is_none());
-        unsafe {
-            std::env::remove_var("ORCA_HOME");
-        }
     }
 
     #[test]
     #[serial_test::serial(env)]
     fn collect_runtime_status_reports_running_for_live_pid() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -837,16 +836,14 @@ mod tests {
         assert_eq!(status.pid, Some(std::process::id()));
         assert_eq!(status.port, Some(12002));
         assert!(status.uptime_seconds.unwrap() >= 0);
-        unsafe {
-            std::env::remove_var("ORCA_HOME");
-        }
     }
 
     #[test]
     #[serial_test::serial(env)]
     fn stop_park_reclaim_error_without_state_file() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -859,16 +856,14 @@ mod tests {
                 "unexpected: {err}"
             );
         }
-        unsafe {
-            std::env::remove_var("ORCA_HOME");
-        }
     }
 
     #[test]
     #[serial_test::serial(env)]
     fn park_rejects_non_daemon_mode() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -880,16 +875,14 @@ mod tests {
             err.to_string().contains("not in running mode"),
             "unexpected: {err}"
         );
-        unsafe {
-            std::env::remove_var("ORCA_HOME");
-        }
     }
 
     #[test]
     #[serial_test::serial(env)]
     fn reclaim_is_noop_when_already_daemon_mode() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -898,16 +891,14 @@ mod tests {
         let pid = std::process::id();
         write_state(pid, DaemonMode::Daemon);
         assert_eq!(reclaim().unwrap(), pid);
-        unsafe {
-            std::env::remove_var("ORCA_HOME");
-        }
     }
 
     #[test]
     #[serial_test::serial(env)]
     fn collect_runtime_status_reports_not_running_for_dead_pid() {
+        let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: ORCA_HOME-touching tests serialized via #[serial(env)].
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
         unsafe {
             std::env::set_var("ORCA_HOME", tmp.path());
         }
@@ -919,9 +910,6 @@ mod tests {
         assert!(!status.running, "impossible pid must read as not running");
         assert_eq!(status.pid, Some(99_999_999));
         assert_eq!(status.port, Some(12002));
-        unsafe {
-            std::env::remove_var("ORCA_HOME");
-        }
     }
 
     #[test]
