@@ -270,6 +270,10 @@ pub fn dynamic_owns(name: &str) -> bool {
 /// Reserved MCP `arguments` key carrying a remote peer hostname. Mirrors the
 /// REST `X-Orca-Peer` header and the CLI `--peer` flag.
 pub const AMBIENT_PEER_KEY: &str = "peer";
+/// Optional target-system argument on plugin and unit ops: the system's UUID.
+/// Resolved and routed by [`dispatch`]; stripped before the op runs unless the
+/// op's own schema declares it.
+pub const SYSTEM_ID_KEY: &str = "systemId";
 /// Reserved MCP `arguments` key carrying a correlation id. Mirrors the REST
 /// `x-correlation-id` header.
 pub const AMBIENT_CORRELATION_KEY: &str = "correlation_id";
@@ -341,6 +345,93 @@ fn advertise_ambient(mut schema: Value, remote_ok: bool) -> Value {
     schema
 }
 
+/// Advertise the optional [`SYSTEM_ID_KEY`] target on a plugin/unit op schema.
+/// Never overrides an op's own field of that name.
+pub fn advertise_system(mut schema: Value) -> Value {
+    let Some(obj) = schema.as_object_mut() else {
+        return schema;
+    };
+    let props = obj.entry("properties").or_insert_with(|| json!({}));
+    if let Some(props) = props.as_object_mut() {
+        props.entry(SYSTEM_ID_KEY).or_insert_with(|| {
+            json!({
+                "type": "string",
+                "description": "Optional. UUID of the system to run this on. Omit to run on this system."
+            })
+        });
+    }
+    schema
+}
+
+/// True when an op's own input schema has a `systemId` field, so the value is
+/// the op's argument rather than a routing target.
+pub(crate) fn declares_system(name: &str) -> bool {
+    let has = |schema: Option<&Value>| {
+        schema
+            .and_then(|s| s.get("properties"))
+            .and_then(|p| p.get(SYSTEM_ID_KEY))
+            .is_some()
+    };
+    if let Some(tool) = find(name) {
+        return has(Some(&tool.input_schema()));
+    }
+    dynamic_tool_defs()
+        .iter()
+        .find(|d| d.get("name").and_then(|n| n.as_str()) == Some(name))
+        .is_some_and(|d| has(d.get("input_schema")))
+        || crate::unit_surface::unit_ops()
+            .iter()
+            .find(|op| op.name == name)
+            .is_some_and(|op| has(Some(&op.input_schema)))
+}
+
+/// Pull a `systemId` target out of `args` and resolve it against the mesh
+/// roster. `Ok(None)` means run here (absent, or names this system);
+/// `Ok(Some(id))` is the remote system's machine id to forward to.
+async fn take_system_target(name: &str, args: &mut Value, ctx: &ToolCtx) -> Result<Option<String>> {
+    if args.get(SYSTEM_ID_KEY).is_none() || declares_system(name) {
+        return Ok(None);
+    }
+    if find(name).is_some() {
+        anyhow::bail!("{name} does not take {SYSTEM_ID_KEY}; it runs only on this system");
+    }
+    if ctx.peer().is_some() {
+        anyhow::bail!("conflicting routing target: use {SYSTEM_ID_KEY} alone");
+    }
+    let raw = args
+        .as_object_mut()
+        .and_then(|o| o.remove(SYSTEM_ID_KEY))
+        .unwrap_or(Value::Null);
+    let Some(sel) = raw
+        .as_str()
+        .map(str::trim)
+        .filter(|s| uuid::Uuid::parse_str(s).is_ok())
+    else {
+        anyhow::bail!("{SYSTEM_ID_KEY}: must be a system UUID; omit it to run here, got {raw}");
+    };
+    let svc = ctx
+        .service::<std::sync::Arc<dyn contract::RemoteExec>>()
+        .map_err(|_| anyhow::anyhow!("unknown system `{sel}`: no mesh transport to resolve it"))?;
+    let peers = svc.peers().await?;
+    match peers.iter().find(|p| p.id.eq_ignore_ascii_case(sel)) {
+        None => anyhow::bail!("unknown system `{sel}`"),
+        Some(p) if p.is_local => Ok(None),
+        Some(p) => Ok(Some(p.id.clone())),
+    }
+}
+
+/// True when [`dispatch`] can run or route `name` on this host: a static tool,
+/// a loaded plugin, unit/diagnostics/UPS op, or any call carrying a
+/// [`SYSTEM_ID_KEY`] target (the op may be loaded only on that system).
+pub fn dispatchable(name: &str, args: &Value) -> bool {
+    find(name).is_some()
+        || dynamic_owns(name)
+        || crate::unit_surface::unit_owns(name)
+        || crate::diagnostics_surface::diagnostics_owns(name)
+        || crate::ups_surface::ups_owns(name)
+        || args.get(SYSTEM_ID_KEY).is_some()
+}
+
 // ── MCP ──────────────────────────────────────────────────────────────────────
 
 /// Build the JSON array for `tools/list`.
@@ -363,7 +454,7 @@ pub fn mcp_definitions() -> Vec<Value> {
         defs.push(json!({
             "name": d.get("name").cloned().unwrap_or(Value::Null),
             "description": d.get("description").cloned().unwrap_or(Value::Null),
-            "inputSchema": d.get("input_schema").cloned().unwrap_or(json!({ "type": "object" })),
+            "inputSchema": advertise_system(d.get("input_schema").cloned().unwrap_or(json!({ "type": "object" }))),
         }));
     }
     // Merge the live, plugin-driven unit surface (unit.<kind>.<verb|action>),
@@ -408,6 +499,20 @@ pub fn tool_manifest_json() -> String {
 /// Dispatch a `tools/call` by name, returning a structured JSON value.
 /// Returns `Err` for unknown tool names.
 pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Value> {
+    if let Some(system) = take_system_target(name, &mut args, ctx).await? {
+        // Same rule as an ambient-peer forward: nothing proves the target
+        // honours `dryRun`, so only an execute-gated tool may dry-run remotely.
+        if crate::erased::dry_run_requested(&args)?
+            && !crate::tool_roles::plugin_execute_gated(name)
+        {
+            return Err(contract::OrcaError::invalid(format!(
+                "{name}: a dry run can't be verified on system {system}; run it without dryRun"
+            ))
+            .with_code("args.invalid")
+            .into());
+        }
+        return forward_to_peer(&system, name, args, ctx).await;
+    }
     if let Some(tool) = find(name) {
         return tool.run_json(args, ctx).await;
     }
@@ -484,25 +589,35 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
 /// fires when `ctx.peer()` names an explicit peer; otherwise the call is a
 /// genuine unknown-tool error. Strips the ambient `peer` key from the forwarded
 /// args so the recipient runs the tool LOCALLY instead of bouncing it onward.
-async fn forward_unknown_to_peer(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Value> {
+async fn forward_unknown_to_peer(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(peer) = ctx.peer().map(str::to_string) else {
         anyhow::bail!("unknown tool: {name}");
     };
+    forward_to_peer(&peer, name, args, ctx).await
+}
+
+async fn forward_to_peer(peer: &str, name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Value> {
     let svc = ctx
         .service::<std::sync::Arc<dyn contract::RemoteExec>>()
         .map_err(|_| {
             anyhow::anyhow!("unknown tool: {name} (no mesh transport to reach peer {peer})")
         })?;
+    let dry_run = crate::erased::dry_run_requested(&args)?;
     if let Some(obj) = args.as_object_mut() {
         obj.remove(AMBIENT_PEER_KEY);
         // Only a tool this host knows as execute-gated gets the explicit
         // opt-in; a gated plugin loaded solely on the peer plans unless told.
+        // A dry run must never carry `execute`, or an older gate applies it.
         if crate::tool_roles::plugin_execute_gated(name) {
-            obj.insert(contract::plan::EXECUTE_FIELD.into(), Value::Bool(true));
+            obj.remove(contract::plan::EXECUTE_FIELD);
+            if !dry_run {
+                obj.remove(contract::plan::DRY_RUN_FIELD);
+                obj.insert(contract::plan::EXECUTE_FIELD.into(), Value::Bool(true));
+            }
         }
     }
     svc.exec(
-        &peer,
+        peer,
         name,
         args,
         ctx.caller(),
@@ -606,13 +721,7 @@ async fn http_dispatch(
         .map(String::from);
     // Unknown-tool guard, deferred until after peer resolution: a peer-only
     // tool forwards over the mesh; a genuinely unknown local call 404s.
-    if peer.is_none()
-        && find(&name).is_none()
-        && !dynamic_owns(&name)
-        && !crate::unit_surface::unit_owns(&name)
-        && !crate::diagnostics_surface::diagnostics_owns(&name)
-        && !crate::ups_surface::ups_owns(&name)
-    {
+    if peer.is_none() && !dispatchable(&name, &args) {
         let oe = contract::OrcaError::not_found(format!("unknown tool: {name}"))
             .with_code("tool.unknown");
         return Err(orca_error_response(oe));
@@ -1055,6 +1164,117 @@ mod tests {
         );
     }
 
+    const LOCAL_ID: &str = "0190a1b2-0000-7000-8000-000000000001";
+    const REMOTE_ID: &str = "0190a1b2-0000-7000-8000-000000000002";
+
+    struct RosterExec;
+    #[async_trait]
+    impl contract::RemoteExec for RosterExec {
+        async fn peers(&self) -> Result<Vec<contract::PeerRef>> {
+            Ok(vec![
+                contract::PeerRef {
+                    id: LOCAL_ID.into(),
+                    name: "here".into(),
+                    is_local: true,
+                },
+                contract::PeerRef {
+                    id: REMOTE_ID.into(),
+                    name: "there".into(),
+                    is_local: false,
+                },
+            ])
+        }
+        async fn exec(
+            &self,
+            peer: &str,
+            tool: &str,
+            args: Value,
+            _caller: Option<contract::CallerIdentity>,
+            _cid: Option<String>,
+        ) -> Result<Value> {
+            Ok(serde_json::json!({ "peer": peer, "tool": tool, "args": args }))
+        }
+    }
+
+    fn roster_ctx() -> ToolCtx {
+        let mut ctx = make_ctx();
+        let exec: Arc<dyn contract::RemoteExec> = Arc::new(RosterExec);
+        ctx.register_service(exec);
+        ctx
+    }
+
+    #[tokio::test]
+    async fn dispatch_system_id_remote_forwards_and_strips_it() {
+        let out = dispatch(
+            "docker.ps",
+            serde_json::json!({ "systemId": REMOTE_ID, "all": true }),
+            &roster_ctx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["peer"], REMOTE_ID);
+        assert_eq!(out["tool"], "docker.ps");
+        assert_eq!(out["args"], serde_json::json!({ "all": true }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_system_id_local_runs_here() {
+        // Local target → not forwarded; no local owner, so it is unknown here.
+        let err = dispatch(
+            "docker.ps",
+            serde_json::json!({ "systemId": LOCAL_ID }),
+            &roster_ctx(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown tool"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_system_id_unknown_errors() {
+        let id = "0190a1b2-0000-7000-8000-0000000000ff";
+        let err = dispatch(
+            "docker.ps",
+            serde_json::json!({ "systemId": id }),
+            &roster_ctx(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), format!("unknown system `{id}`"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_system_id_rejects_non_uuid() {
+        for bad in [
+            serde_json::json!("there"),
+            serde_json::json!(""),
+            serde_json::json!(7),
+        ] {
+            let err = dispatch(
+                "docker.ps",
+                serde_json::json!({ "systemId": bad }),
+                &roster_ctx(),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("must be a system UUID"),
+                "got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn advertise_system_adds_system_id_without_overriding() {
+        let out = advertise_system(serde_json::json!({ "type": "object" }));
+        assert_eq!(out["properties"]["systemId"]["type"], "string");
+        let own = serde_json::json!({ "properties": { "systemId": { "type": "integer" } } });
+        assert_eq!(
+            advertise_system(own)["properties"]["systemId"]["type"],
+            "integer"
+        );
+    }
+
     #[tokio::test]
     async fn dry_run_is_refused_on_paths_that_bypass_the_gate() {
         let _serial = SEEN_TESTS.lock().await;
@@ -1449,6 +1669,9 @@ mod tests {
                         GATED_SEEN.lock().unwrap().push(args.clone());
                         return Some(Ok(json!({})));
                     }
+                    if name == OWN_SYSTEM_TOOL {
+                        return Some(Ok(args.clone()));
+                    }
                     (name == FAKE_PLUGIN_TOOL).then(|| {
                         SEEN.lock()
                             .unwrap()
@@ -1460,6 +1683,10 @@ mod tests {
                     vec![
                         json!({ "name": FAKE_PLUGIN_TOOL }),
                         json!({ "name": GATED_PLUGIN_TOOL }),
+                        json!({
+                            "name": OWN_SYSTEM_TOOL,
+                            "input_schema": { "properties": { "systemId": { "type": "string" } } }
+                        }),
                     ]
                 }),
             );
@@ -1669,6 +1896,106 @@ mod tests {
             let oe = find_orca_error(&err).unwrap_or_else(|| panic!("{err}"));
             assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{oe}");
         }
+    }
+
+    const OWN_SYSTEM_TOOL: &str = "rest_fallback_test_plugin.own_system";
+
+    #[tokio::test]
+    async fn dispatch_system_id_declared_by_op_passes_through() {
+        install_fake_plugin();
+        let args = json!({ "systemId": "not-a-uuid" });
+        let out = dispatch(OWN_SYSTEM_TOOL, args.clone(), &roster_ctx())
+            .await
+            .unwrap();
+        assert_eq!(out, args);
+    }
+
+    #[tokio::test]
+    async fn dispatch_system_id_dry_run_of_gated_tool_forwards_without_execute() {
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        let out = dispatch(
+            GATED_PLUGIN_TOOL,
+            json!({ "systemId": REMOTE_ID, "id": "a", "dryRun": true, "execute": true }),
+            &roster_ctx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["peer"], REMOTE_ID);
+        assert_eq!(out["args"], json!({ "id": "a", "dryRun": true }));
+        let out = dispatch(
+            GATED_PLUGIN_TOOL,
+            json!({ "systemId": REMOTE_ID, "id": "a", "dryRun": false }),
+            &roster_ctx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["args"], json!({ "id": "a", "execute": true }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_system_id_dry_run_of_ungated_tool_is_refused() {
+        let err = dispatch(
+            "docker.ps",
+            json!({ "systemId": REMOTE_ID, "dryRun": true }),
+            &roster_ctx(),
+        )
+        .await
+        .unwrap_err();
+        let oe = find_orca_error(&err).unwrap_or_else(|| panic!("{err}"));
+        assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{oe}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_system_id_with_peer_errors() {
+        let mut ctx = roster_ctx();
+        ctx.set_peer(Some("there".into()));
+        let err = dispatch("docker.ps", json!({ "systemId": REMOTE_ID }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("conflicting routing target"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_system_id_without_transport_errors() {
+        let err = dispatch("docker.ps", json!({ "systemId": REMOTE_ID }), &make_ctx())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no mesh transport"), "got: {err}");
+    }
+
+    #[test]
+    fn dispatchable_waives_unknown_name_when_system_id_present() {
+        assert!(!dispatchable("ghost.tool", &json!({})));
+        assert!(dispatchable(
+            "ghost.tool",
+            &json!({ "systemId": REMOTE_ID })
+        ));
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn http_dispatch_forwards_unknown_tool_with_system_id() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request as AxumReq;
+        use tower::ServiceExt;
+
+        let router = axum_router(Arc::new(roster_ctx()));
+        let req = AxumReq::builder()
+            .method("POST")
+            .uri("/ghost.tool")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "systemId": REMOTE_ID }).to_string()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let out: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(out["peer"], REMOTE_ID);
+        assert_eq!(out["tool"], "ghost.tool");
     }
 
     const NESTED_RUNTIME_TOOL: &str = "rest_fallback_test_plugin.nested_block_on";
