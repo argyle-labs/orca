@@ -196,12 +196,20 @@ pub fn mesh_identity_san(host_cn: &str) -> String {
 }
 
 /// The system id a mesh server cert is bound to, or `None` for a cert issued
-/// without an identity name.
-pub fn mesh_server_identity(cert_der: &[u8]) -> Option<String> {
+/// without an identity name. More than one identity name is an error: the
+/// cert would vouch for several systems at once.
+pub fn mesh_server_identity(cert_der: &[u8]) -> Result<Option<String>> {
     let suffix = format!(".{MESH_SERVER_SAN}");
-    cert_dns_names_der(cert_der)?
+    let mut ids = cert_dns_names_der(cert_der)
+        .unwrap_or_default()
         .into_iter()
-        .find_map(|d| d.strip_suffix(&suffix).map(str::to_string))
+        .filter_map(|d| d.strip_suffix(&suffix).map(str::to_string));
+    let id = ids.next();
+    anyhow::ensure!(
+        ids.next().is_none(),
+        "mesh server cert names more than one system"
+    );
+    Ok(id)
 }
 
 /// Per-host DNS names a mesh CLIENT cert is issued for.
@@ -2481,7 +2489,10 @@ mod tests {
         let (cert, _) = sign_peer_csr(dir.path(), &csr, "joiner", PeerRole::Server).unwrap();
         assert_eq!(sorted_dns_names(&cert), sorted(mesh_server_sans("joiner")));
         let der = first_cert_der(&cert).unwrap();
-        assert_eq!(mesh_server_identity(&der).as_deref(), Some("joiner"));
+        assert_eq!(
+            mesh_server_identity(&der).unwrap().as_deref(),
+            Some("joiner")
+        );
     }
 
     #[test]
@@ -2493,7 +2504,22 @@ mod tests {
         let csr = params.serialize_request(&key).unwrap().pem().unwrap();
         let (cert, _) = sign_peer_csr(dir.path(), &csr, "joiner", PeerRole::Server).unwrap();
         assert_eq!(sorted_dns_names(&cert), sorted(mesh_shared_server_sans()));
-        assert_eq!(mesh_server_identity(&first_cert_der(&cert).unwrap()), None);
+        assert_eq!(
+            mesh_server_identity(&first_cert_der(&cert).unwrap()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn mesh_server_identity_refuses_two_identity_names() {
+        let key = gen_keypair().unwrap();
+        let params = CertificateParams::new(vec![
+            mesh_identity_san("system-x"),
+            mesh_identity_san("system-y"),
+        ])
+        .unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        assert!(mesh_server_identity(cert.der()).is_err());
     }
 
     #[test]
@@ -2502,7 +2528,10 @@ mod tests {
         init_mesh_ca(dir.path(), "founder").unwrap();
         let (csr, _) = build_peer_csr("someone-else", PeerRole::Server).unwrap();
         let (cert, _) = sign_peer_csr(dir.path(), &csr, "joiner", PeerRole::Server).unwrap();
-        assert_eq!(mesh_server_identity(&first_cert_der(&cert).unwrap()), None);
+        assert_eq!(
+            mesh_server_identity(&first_cert_der(&cert).unwrap()).unwrap(),
+            None
+        );
     }
 
     #[test]

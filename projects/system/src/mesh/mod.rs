@@ -2611,7 +2611,7 @@ tokio::task_local! {
 /// answered at `host`. A cert without an identity name is from a build that
 /// predates it and is accepted until it rotates.
 fn check_peer_identity(host: &str, expected: &str, leaf_der: &[u8]) -> Result<()> {
-    match utils::pki::mesh_server_identity(leaf_der) {
+    match utils::pki::mesh_server_identity(leaf_der)? {
         Some(id) if id == expected => Ok(()),
         Some(id) => anyhow::bail!("{host} answered as peer {id}, not {expected}; refusing"),
         None => {
