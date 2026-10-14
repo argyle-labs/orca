@@ -71,14 +71,73 @@ pub struct FetchedPlugin {
     pub sha256: String,
     /// The release's `<asset>.minisig`, already verified against
     /// [`crate::plugin_sig::trusted_keys`]. `None` only for an install that
-    /// explicitly allowed an unsigned release.
+    /// accepted an unsigned release.
     pub minisig: Option<String>,
 }
 
-/// Verify a fetched plugin's signature, or accept its absence only when
-/// `allow_unsigned`. Run on every host that installs the bytes, since a
-/// peer-served fetch carries the signature across the mesh.
+/// Settings key for the fleet's plugin signature policy; see [`SignaturePolicy`].
+/// Set through `system.update --plugin-signatures` (admin-only).
+pub const SIGNATURE_POLICY_KEY: &str = "plugin_signature_policy";
+
+/// What an install does with a release published without a `.minisig`. A
+/// signature that is present but does not verify is refused under both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignaturePolicy {
+    /// Refuse the release.
+    Enforce,
+    /// Install it, warn, and leave it untrusted for privileged ops. The default
+    /// until every plugin release is published signed; flip to `enforce` then.
+    Warn,
+}
+
+impl SignaturePolicy {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "enforce" => Some(Self::Enforce),
+            "warn" => Some(Self::Warn),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforce => "enforce",
+            Self::Warn => "warn",
+        }
+    }
+
+    /// The stored policy; unset or unreadable falls back to [`Self::Warn`].
+    pub fn current() -> Self {
+        db::pool::Db::process()
+            .read(|conn| db::settings::get(conn, SIGNATURE_POLICY_KEY))
+            .ok()
+            .flatten()
+            .and_then(|v| Self::parse(&v))
+            .unwrap_or(Self::Warn)
+    }
+}
+
+/// Verify a fetched plugin's signature, or accept its absence when
+/// `allow_unsigned` or the fleet [`SignaturePolicy`] is `warn`. Run on every
+/// host that installs the bytes, since a peer-served fetch carries the
+/// signature across the mesh.
 pub fn check_signature(
+    name: &str,
+    bytes: &[u8],
+    minisig: Option<&str>,
+    allow_unsigned: bool,
+) -> Result<()> {
+    check_signature_under(
+        SignaturePolicy::current(),
+        name,
+        bytes,
+        minisig,
+        allow_unsigned,
+    )
+}
+
+fn check_signature_under(
+    policy: SignaturePolicy,
     name: &str,
     bytes: &[u8],
     minisig: Option<&str>,
@@ -91,9 +150,15 @@ pub fn check_signature(
         None if allow_unsigned => {
             tracing::warn!(plugin = %name, "installing an unsigned plugin release (allow-unsigned)");
         }
+        None if policy == SignaturePolicy::Warn => {
+            tracing::warn!(
+                plugin = %name,
+                "installing an unsigned plugin release (signature policy: warn); it stays untrusted for privileged ops"
+            );
+        }
         None => bail!(
             "plugin '{name}' release has no .minisig signature; refusing to install it \
-             (pass --allow-unsigned only for a development build)"
+             (signature policy: enforce; pass --allow-unsigned only for a development build)"
         ),
     }
     Ok(())
@@ -732,15 +797,42 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_signature_is_refused_unless_unsigned_is_allowed() {
-        let err = check_signature("demo", b"x", None, false).unwrap_err();
+    fn enforce_refuses_a_missing_signature_unless_unsigned_is_allowed() {
+        let enforce = SignaturePolicy::Enforce;
+        let err = check_signature_under(enforce, "demo", b"x", None, false).unwrap_err();
         assert!(err.to_string().contains("no .minisig"), "{err:#}");
-        check_signature("demo", b"x", None, true).unwrap();
+        check_signature_under(enforce, "demo", b"x", None, true).unwrap();
     }
 
     #[test]
-    fn a_bad_signature_is_refused_even_when_unsigned_is_allowed() {
-        assert!(check_signature("demo", b"x", Some("garbage"), true).is_err());
+    fn warn_installs_a_missing_signature() {
+        check_signature_under(SignaturePolicy::Warn, "demo", b"x", None, false).unwrap();
+    }
+
+    #[test]
+    fn a_bad_signature_is_refused_under_every_policy() {
+        for policy in [SignaturePolicy::Enforce, SignaturePolicy::Warn] {
+            for allow_unsigned in [false, true] {
+                assert!(
+                    check_signature_under(policy, "demo", b"x", Some("garbage"), allow_unsigned)
+                        .is_err(),
+                    "{policy:?} allow_unsigned={allow_unsigned}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn signature_policy_parses_and_defaults_to_warn() {
+        assert_eq!(
+            SignaturePolicy::parse(" Enforce "),
+            Some(SignaturePolicy::Enforce)
+        );
+        assert_eq!(SignaturePolicy::parse("warn"), Some(SignaturePolicy::Warn));
+        assert_eq!(SignaturePolicy::parse("off"), None);
+        for p in [SignaturePolicy::Enforce, SignaturePolicy::Warn] {
+            assert_eq!(SignaturePolicy::parse(p.as_str()), Some(p));
+        }
     }
 
     #[tokio::test]

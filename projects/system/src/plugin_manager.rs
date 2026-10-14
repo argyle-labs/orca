@@ -867,6 +867,10 @@ pub struct PluginInstallOutput {
     pub installed_path: String,
     /// True — sideload registers tools immediately, no restart needed.
     pub loaded_live: bool,
+    /// Whether the installed release carried a verified signature. An
+    /// unsigned one is not trusted for privileged ops.
+    #[serde(default)]
+    pub signed: bool,
 }
 
 /// Install a plugin. Two modes:
@@ -971,6 +975,7 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
             tools: report.tools,
             installed_path: dest.display().to_string(),
             loaded_live: true,
+            signed: false,
         })
     }
 }
@@ -1156,6 +1161,7 @@ pub(crate) async fn install_from_catalog(
             tools: report.tools,
             installed_path: dest.display().to_string(),
             loaded_live: true,
+            signed: fetched.minisig.is_some(),
         })
     }
 }
@@ -2599,6 +2605,7 @@ mod tests {
             tools: vec!["jellyfin.list".to_string()],
             installed_path: "/root/.orca/plugins/jellyfin".to_string(),
             loaded_live: true,
+            signed: false,
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(json.contains("\"software\":\"jellyfin\""), "{json}");
@@ -2650,6 +2657,7 @@ mod tests {
             tools: Vec::new(),
             installed_path: "/p".to_string(),
             loaded_live: true,
+            signed: false,
         });
         let ijson = serde_json::to_string(&install).unwrap();
         assert!(ijson.contains("\"software\":\"s\""), "{ijson}");
