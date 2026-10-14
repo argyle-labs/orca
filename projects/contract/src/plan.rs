@@ -1,8 +1,8 @@
-//! The dry-run plan every execute-gated tool returns when invoked without an
-//! explicit `execute` opt-in.
+//! The dry-run plan an execute-gated tool returns when invoked with
+//! `dryRun: true`.
 //!
-//! Mutating verbs are dry-run by DEFAULT: calling one with no opt-in must
-//! describe what it would change and change nothing. This is the shape that
+//! A dry run must describe what the verb would change and change nothing. This
+//! is the shape that
 //! description takes, so every surface (REST, MCP, CLI, peacock) renders one
 //! thing rather than each verb inventing its own "would have" payload.
 
@@ -42,7 +42,7 @@ impl PlannedChange {
 }
 
 /// What a gated verb WOULD do. Returned in place of the tool's own output when
-/// the caller did not opt in to `execute`.
+/// the caller asked for a dry run.
 ///
 /// `dryRun` is always `true` here — it exists so a caller that cannot tell the
 /// two response shapes apart structurally still has one unambiguous field to
@@ -94,7 +94,7 @@ impl ExecutionPlan {
             changes: Vec::new(),
             detailed: false,
             inputs: utils::scrub::redact_json(inputs.0).into(),
-            how_to_execute: format!("re-invoke {tool} with `execute: true` to apply"),
+            how_to_execute: format!("re-invoke {tool} without `dryRun` to apply"),
         }
     }
 
@@ -107,10 +107,13 @@ impl ExecutionPlan {
     }
 }
 
-/// Field name of the universal execute opt-in, in wire (camelCase) form. One
-/// spelling fleet-wide — `apply`, `force` and `reconcile_dry` are legacy
-/// spellings of this same concept and migrate onto it.
+/// Legacy execute opt-in field. Accepted and ignored once gated verbs execute
+/// by default; superseded by [`DRY_RUN_FIELD`].
 pub const EXECUTE_FIELD: &str = "execute";
+
+/// Field name of the universal dry-run opt-in, in wire (camelCase) form. Gated
+/// verbs execute by default; `dryRun: true` returns an [`ExecutionPlan`].
+pub const DRY_RUN_FIELD: &str = "dryRun";
 
 #[cfg(test)]
 mod tests {
@@ -125,7 +128,8 @@ mod tests {
             p.changes.is_empty(),
             "generic plan must not invent changes it cannot know"
         );
-        assert!(p.how_to_execute.contains("execute"));
+        assert!(p.how_to_execute.contains(DRY_RUN_FIELD));
+        assert!(!p.how_to_execute.contains("execute: true"));
     }
 
     /// The measured defect: `printf 'CANARY-VALUE-12345' | orca secrets upsert
