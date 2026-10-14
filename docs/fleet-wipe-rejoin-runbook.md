@@ -32,7 +32,7 @@ Two facts from the leave/join/recover paths make a rolling re-key unsafe:
    id, other hosts do not automatically retire its old `mesh_peers` row — there
    is no "same machine, new id" reconciliation (the old id is, by definition, a
    different key). A rolling re-key therefore leaves a **ghost row** on every
-   other peer, cleaned only by an explicit `orca system mesh delete --action forget --peer-id <old_id>` fan-out.
+   other peer, cleaned only by an explicit `orca system mesh delete --action forget --id <old_id>` fan-out.
 
 Collapsing the whole mesh at once sidesteps both: every host wipes its identity
 and roster together, so there are no ghost rows to chase.
@@ -94,8 +94,8 @@ on Linux service installs; `system.certs.list` / logs show the resolved path).
 ## Restore / resiliency notes
 
 - **Single-host loss (not a collapse):** if one host is rebuilt and rejoins with
-  a fresh id, the others keep its old row. Run `orca system mesh delete --action forget --peer-id <old_id>` (fan-out) to
-  purge it, or `orca system mesh update --action recover --peer-id <id>` if a live peer was wrongly marked departed.
+  a fresh id, the others keep its old row. Run `orca system mesh delete --action forget --id <old_id>` (fan-out) to
+  purge it, or `orca system mesh update --action recover --id <id>` if a live peer was wrongly marked departed.
 - **Identity is the source of truth on disk:** `<app_dir>/machine_id` is the only
   thing that pins a host's id across restarts. Back it up if you want a host to
   keep its UUIDv7 across an OS reinstall; delete it to intentionally re-key.

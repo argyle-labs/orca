@@ -206,12 +206,13 @@ fn dial_targets(conn: &rusqlite::Connection, peer: &pdb::PeerRow) -> Vec<String>
 // the file-level allow in listener.rs / bootstrap.rs.
 #[allow(clippy::disallowed_types)]
 async fn notify_targets(
+    peer_id: &str,
     targets: &[String],
     port: u16,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    crate::mesh::dialer::try_targets(targets, |t| {
+    crate::mesh::dialer::try_targets_tracked(Some(peer_id), targets, |t| {
         let method = method.to_string();
         let params = params.clone();
         async move { crate::mesh::cli::call_mesh_method_pub(&t, port, &method, params).await }
@@ -231,6 +232,7 @@ pub async fn trust(peer_id: &str, on: bool) -> Result<MeshTrustOutput> {
     })?;
 
     let notify_result = match notify_targets(
+        peer_id,
         &targets,
         peer.peer_port,
         "mesh/notify-trust",
@@ -491,6 +493,7 @@ pub async fn leave_peer(peer_id: &str) -> Result<MeshLeaveOutput> {
     })?;
 
     let notify_result = match notify_targets(
+        peer_id,
         &targets,
         peer.peer_port,
         "mesh/peer-removed",
@@ -587,6 +590,14 @@ pub fn recover(peer_id: &str) -> Result<crate::mesh::MeshRecoverOutput> {
     })
 }
 
+pub fn unpin(peer_id: &str) -> Result<crate::mesh::MeshUnpinOutput> {
+    let cleared = db::pool::with_pooled_or_open(|conn| pdb::unpin_peer_identity(conn, peer_id))?;
+    Ok(crate::mesh::MeshUnpinOutput {
+        id: peer_id.to_string(),
+        cleared,
+    })
+}
+
 /// Mesh-wide forget: hard-delete a stale/orphan peer_id locally AND tell every
 /// live member to drop it too. Unlike `kick` (targets one live peer) or
 /// `recover` (purely local), forget fans a one-way `mesh/peer-forget` notice to
@@ -608,6 +619,7 @@ pub async fn forget(peer_id: &str) -> Result<crate::mesh::MeshForgetOutput> {
     let mut notified = Vec::new();
     for (member_id, port, targets) in &plans {
         let result = match notify_targets(
+            member_id,
             targets,
             *port,
             "mesh/peer-forget",
