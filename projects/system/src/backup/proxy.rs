@@ -30,9 +30,8 @@
 // boundary, scoped here, mirroring `containers::ffi` and `contract::diagnostics`.
 #![allow(clippy::disallowed_types)]
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use contract::backup::wire::{
@@ -58,55 +57,31 @@ pub fn install() {
         DOMAIN_KIND,
         register_kind_from_def,
         deregister_kind,
+        plugin_loader::NameScope::Claimed,
     );
     plugin_loader::register_domain_constructor(
         DOMAIN_TARGET,
         register_target_from_def,
         deregister_target_by_kind,
+        plugin_loader::NameScope::Claimed,
     );
 }
 
-// ── Ownership guard (collision protection) ──────────────────────────────────
+// ── Collision guard ─────────────────────────────────────────────────────────
 //
-// The KIND/TARGET registries replace by kind, so two DIFFERENT plugins declaring
-// the same kind would collapse to one entry — and either unloading would
-// deregister it for both. These maps record which plugin owns each kind (by its
-// `invoke_prefix`, the plugin identity), so the same plugin reloading replaces
-// while a different plugin — or a built-in already holding that kind — is
-// rejected loudly.
-static KIND_OWNERS: LazyLock<RwLock<HashMap<String, String>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-static TARGET_OWNERS: LazyLock<RwLock<HashMap<String, String>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+// The KIND/TARGET registries replace by kind, so a second registration of a
+// kind would silently displace the first. Plugin-to-plugin ownership (and
+// owner-only teardown) is enforced by the loader, which binds each claimed
+// `(domain, name)` to the registering plugin id and deregisters only names that
+// plugin registered. What the loader cannot see is a built-in provider holding
+// the kind, so any kind already present is refused here.
 
-/// Claim `kind` for `owner` (the plugin's `invoke_prefix`) in `owners`, or error
-/// on collision: a different plugin already owns it, or — when unowned but
-/// `builtin_present` — a built-in provider holds the kind. On success records
-/// ownership. `domain` names the axis for the error message (`kind`/`target`).
-fn claim_owner(
-    owners: &RwLock<HashMap<String, String>>,
-    domain: &str,
-    kind: &str,
-    owner: &str,
-    builtin_present: bool,
-) -> Result<()> {
-    let mut g = owners.write().expect("backup owner registry poisoned");
-    match g.get(kind) {
-        // Same plugin re-registering (reload) → replace is fine.
-        Some(existing) if existing == owner => {}
-        Some(existing) => {
-            return Err(anyhow!(
-                "backup {domain} '{kind}' already registered by plugin '{existing}'"
-            ));
-        }
-        None if builtin_present => {
-            return Err(anyhow!(
-                "backup {domain} '{kind}' collides with a built-in provider"
-            ));
-        }
-        None => {}
+/// Refuse to register `kind` on the `domain` axis (`kind`/`target`) when a
+/// provider — built-in or plugin — already holds it.
+fn refuse_taken(domain: &str, kind: &str, taken: bool) -> Result<()> {
+    if taken {
+        return Err(anyhow!("backup {domain} '{kind}' is already registered"));
     }
-    g.insert(kind.to_string(), owner.to_string());
     Ok(())
 }
 
@@ -144,15 +119,7 @@ pub fn register_kind_from_def(def: &BackendDef, invoke: BackendInvoke) -> Result
             def.kind
         ));
     }
-    // Reject a collision before mutating the registry: a different plugin, or a
-    // built-in kind (host/service), already owning this kind.
-    claim_owner(
-        &KIND_OWNERS,
-        "kind",
-        &def.kind,
-        &def.invoke_prefix,
-        provider::provider(&def.kind).is_some(),
-    )?;
+    refuse_taken("kind", &def.kind, provider::provider(&def.kind).is_some())?;
     let title = fetch_title(&invoke, &def.kind);
     provider::register_provider(Arc::new(BackupKindProxy {
         kind: def.kind.clone(),
@@ -165,10 +132,6 @@ pub fn register_kind_from_def(def: &BackendDef, invoke: BackendInvoke) -> Result
 
 fn deregister_kind(kind: &str) {
     provider::deregister_provider(kind);
-    KIND_OWNERS
-        .write()
-        .expect("backup owner registry poisoned")
-        .remove(kind);
 }
 
 /// A [`BackupProvider`] backed by a subprocess plugin over the JSON-proxy seam.
@@ -324,13 +287,7 @@ pub fn register_target_from_def(def: &BackendDef, invoke: BackendInvoke) -> Resu
             def.kind
         ));
     }
-    claim_owner(
-        &TARGET_OWNERS,
-        "target",
-        &def.kind,
-        &def.invoke_prefix,
-        target::target(&def.kind).is_some(),
-    )?;
+    refuse_taken("target", &def.kind, target::target(&def.kind).is_some())?;
     let title = fetch_title(&invoke, &def.kind);
     target::register_target(Arc::new(BackupTargetProxy {
         kind: def.kind.clone(),
@@ -342,10 +299,6 @@ pub fn register_target_from_def(def: &BackendDef, invoke: BackendInvoke) -> Resu
 
 fn deregister_target_by_kind(kind: &str) {
     target::deregister_target(kind);
-    TARGET_OWNERS
-        .write()
-        .expect("backup owner registry poisoned")
-        .remove(kind);
 }
 
 /// A [`BackupTargetProvider`] backed by a subprocess plugin over the JSON-proxy
@@ -687,9 +640,9 @@ mod tests {
     }
 
     #[test]
-    fn register_kind_rejects_second_plugin_claiming_same_kind() {
-        // Plugin A registers kind "dupvm"; a DIFFERENT plugin B claiming the same
-        // kind is rejected, so B's load can't silently replace A's provider.
+    fn register_kind_rejects_a_second_registration_of_a_kind() {
+        // A second registration of "dupvm" is rejected rather than silently
+        // replacing the first provider.
         let a = kind_def("dupvm", "pluginA.backup");
         register_kind_from_def(
             &a,
@@ -702,18 +655,8 @@ mod tests {
             &b,
             thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
         )
-        .expect_err("second plugin on same kind must be rejected");
-        assert!(
-            err.to_string().contains("already registered by plugin"),
-            "{err}"
-        );
-
-        // Same plugin A re-registering (reload) is allowed.
-        register_kind_from_def(
-            &a,
-            thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
-        )
-        .expect("same plugin reload replaces");
+        .expect_err("second registration of the same kind must be rejected");
+        assert!(err.to_string().contains("already registered"), "{err}");
 
         deregister_kind("dupvm");
     }
@@ -729,7 +672,7 @@ mod tests {
             thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
         )
         .expect_err("must not override a built-in kind");
-        assert!(err.to_string().contains("built-in"), "{err}");
+        assert!(err.to_string().contains("already registered"), "{err}");
         provider::deregister_provider("host");
     }
 
@@ -1078,40 +1021,11 @@ mod tests {
         assert!(p2.backing_key("default", &ctx()).await.is_err());
     }
 
-    // ── claim_owner unit tests (isolated registries) ────────────────────────
-
     #[test]
-    fn claim_owner_records_and_allows_same_owner_reload() {
-        let owners = RwLock::new(HashMap::new());
-        claim_owner(&owners, "kind", "k1", "pluginA", false).expect("first claim");
-        // Same owner re-claiming (reload) succeeds.
-        claim_owner(&owners, "kind", "k1", "pluginA", false).expect("reload");
-        assert_eq!(
-            owners.read().unwrap().get("k1").map(String::as_str),
-            Some("pluginA")
-        );
-    }
-
-    #[test]
-    fn claim_owner_rejects_different_owner() {
-        let owners = RwLock::new(HashMap::new());
-        claim_owner(&owners, "target", "k1", "pluginA", false).unwrap();
-        let err = claim_owner(&owners, "target", "k1", "pluginB", false)
-            .expect_err("different owner rejected");
-        assert!(
-            err.to_string().contains("already registered by plugin"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn claim_owner_rejects_unowned_when_builtin_present() {
-        let owners = RwLock::new(HashMap::new());
-        let err = claim_owner(&owners, "kind", "host", "evil", true)
-            .expect_err("builtin collision rejected");
-        assert!(err.to_string().contains("built-in"), "{err}");
-        // Registry unchanged after a rejected claim.
-        assert!(owners.read().unwrap().is_empty());
+    fn refuse_taken_rejects_a_held_kind() {
+        refuse_taken("kind", "k1", false).expect("free kind accepted");
+        let err = refuse_taken("kind", "host", true).expect_err("held kind rejected");
+        assert!(err.to_string().contains("already registered"), "{err}");
     }
 
     // ── target registration lifecycle ───────────────────────────────────────
@@ -1141,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn register_target_accepts_and_deregister_clears_owner() {
+    fn register_target_accepts_and_deregister_clears_it() {
         let def = target_def("acc-target", "acc.target.plugin");
         register_target_from_def(
             &def,
@@ -1149,21 +1063,12 @@ mod tests {
         )
         .expect("name == kind accepted");
         assert!(target::target("acc-target").is_some());
-        assert_eq!(
-            TARGET_OWNERS
-                .read()
-                .unwrap()
-                .get("acc-target")
-                .map(String::as_str),
-            Some("acc.target.plugin")
-        );
         deregister_target_by_kind("acc-target");
         assert!(target::target("acc-target").is_none());
-        assert!(!TARGET_OWNERS.read().unwrap().contains_key("acc-target"));
     }
 
     #[test]
-    fn register_target_rejects_second_plugin_claiming_same_kind() {
+    fn register_target_rejects_a_second_registration_of_a_kind() {
         let a = target_def("duptgt", "tgtA.backup");
         register_target_from_def(
             &a,
@@ -1177,10 +1082,7 @@ mod tests {
             thunk(Default::default(), Arc::new(Mutex::new(Vec::new()))),
         )
         .expect_err("second plugin on same kind rejected");
-        assert!(
-            err.to_string().contains("already registered by plugin"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("already registered"), "{err}");
 
         deregister_target_by_kind("duptgt");
     }

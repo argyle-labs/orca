@@ -24,14 +24,13 @@
 //! SPA catch-all: serves JS/CSS assets, client-routed URLs, index.html).
 //! Non-root registrations are literal exact paths only.
 //!
-//! ## Conflict → user chooses the owner (non-fatal)
+//! ## One owner per path; a taken path is refused
 //!
-//! Each exact path has at most one ACTIVE owner. When a second plugin claims an
-//! already-owned exact path (e.g. two UI plugins both want `/`), the claim is
-//! recorded as a **contender** — never fatal. The incumbent (first registered)
-//! keeps serving; the conflict is surfaced (WARN log by the loader, observable
-//! via [`conflicts`]). The user picks the owner with [`set_owner`], and the
-//! server persists that choice and replays it at boot via [`set_owner`] again.
+//! A plugin may only register paths under `/plugins/<its id>` ([`path_in_scope`]);
+//! `/` is reserved for the ids in [`ROOT_PATH_PLUGINS`]. Each exact path has
+//! exactly one owner: a different provider claiming an owned path is refused
+//! with [`WebRegistryError::PathTaken`] (the loader fails that plugin's load).
+//! When the owner deregisters the path is empty — nothing is promoted.
 //! No `panic!`/`.expect()`/`.unwrap()` on the registration or dispatch path — a
 //! poisoned lock surfaces as a typed error and the daemon stays up.
 //!
@@ -78,6 +77,16 @@ pub enum WebRegistryError {
         /// The provider name that was requested but is not a candidate.
         provider: String,
     },
+    /// [`register_provider`] was asked to mount `provider` at `path`, which a
+    /// different provider already owns.
+    PathTaken {
+        /// The contested exact path.
+        path: String,
+        /// The provider that tried to register.
+        provider: String,
+        /// The provider that owns `path`.
+        owner: String,
+    },
 }
 
 impl fmt::Display for WebRegistryError {
@@ -90,6 +99,14 @@ impl fmt::Display for WebRegistryError {
                 f,
                 "cannot assign path '{path}' to provider '{provider}': \
                  no provider by that name is registered for that path"
+            ),
+            WebRegistryError::PathTaken {
+                path,
+                provider,
+                owner,
+            } => write!(
+                f,
+                "web provider '{provider}' cannot register path '{path}': already owned by '{owner}'"
             ),
         }
     }
@@ -202,8 +219,8 @@ impl WebResponse {
 /// Registered into the process-global registry so the server's fallback router
 /// can dispatch plugin-agnostically.
 pub trait WebProvider: Send + Sync {
-    /// Provider/registry name (e.g. `"peacock"`). Identifies a candidate within
-    /// a contested path and is the key deregistered on plugin unload.
+    /// Provider/registry name (e.g. `"peacock"`): the path's owner and the key
+    /// deregistered on plugin unload.
     fn name(&self) -> &str;
 
     /// The exact path this provider is mounted at, and how it handles misses.
@@ -213,153 +230,105 @@ pub trait WebProvider: Send + Sync {
     fn render(&self, req: WebRequest) -> BoxFuture<'_, Result<WebResponse>>;
 }
 
-/// All providers that have claimed one exact path. `providers[0]` is the
-/// incumbent (first registered). `active` names the currently-serving provider —
-/// the incumbent by default, or the user's chosen owner once [`set_owner`] runs.
-struct PathEntry {
-    path: String,
-    providers: Vec<Arc<dyn WebProvider>>,
-    active: String,
-}
+/// Plugin ids allowed to own `/` (the SPA catch-all).
+pub const ROOT_PATH_PLUGINS: &[&str] = &["peacock"];
 
-impl PathEntry {
-    fn active_provider(&self) -> Option<Arc<dyn WebProvider>> {
-        self.providers
-            .iter()
-            .find(|p| p.name() == self.active)
-            .cloned()
-            // Defensive: if the active name somehow references a departed
-            // provider, fall back to the incumbent rather than serving nothing.
-            .or_else(|| self.providers.first().cloned())
+/// Whether plugin `plugin` may register the exact web `path`: `/plugins/<plugin>`
+/// or anything beneath it, or `/` for an id in [`ROOT_PATH_PLUGINS`].
+pub fn path_in_scope(plugin: &str, path: &str) -> bool {
+    if path == "/" {
+        return ROOT_PATH_PLUGINS.contains(&plugin);
     }
+    let base = format!("/plugins/{plugin}");
+    let in_base = path == base
+        || path
+            .strip_prefix(&base)
+            .is_some_and(|rest| rest.starts_with('/'));
+    in_base && !path.split('/').any(|seg| seg == "." || seg == "..")
 }
 
-static GLOBAL: LazyLock<RwLock<Vec<PathEntry>>> = LazyLock::new(|| RwLock::new(Vec::new()));
+static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn WebProvider>>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
 
 /// Register a web provider at its exact path.
 ///
-/// - First claimant of a path becomes the active owner.
-/// - Re-registering the same `name()` at the same path replaces that candidate
-///   in place (a dev rebuild / reload never duplicates it) and keeps it active
-///   if it already was.
-/// - A different-named provider claiming an already-owned path is recorded as a
-///   **contender**: the incumbent keeps serving (non-fatal), the conflict is
-///   surfaced via [`conflicts`]. Returns `Ok(())` — a conflict is not an error;
-///   it is a state the user resolves with [`set_owner`].
-///
-/// A poisoned lock is the only failure and is returned typed, never panicked.
+/// - First claimant of a path owns it.
+/// - Re-registering the same `name()` at the same path replaces it in place (a
+///   dev rebuild / reload never duplicates it).
+/// - A different-named provider claiming an owned path is refused with
+///   [`WebRegistryError::PathTaken`].
 pub fn register_provider(
     provider: Arc<dyn WebProvider>,
 ) -> std::result::Result<(), WebRegistryError> {
     let mut g = GLOBAL
         .write()
         .map_err(|_| WebRegistryError::RegistryPoisoned)?;
-    let path = provider.route().prefix.clone();
-    let name = provider.name().to_string();
-
-    if let Some(entry) = g.iter_mut().find(|e| e.path == path) {
-        if let Some(slot) = entry.providers.iter_mut().find(|p| p.name() == name) {
-            // Same provider re-registering: replace in place, preserve active.
-            *slot = provider;
-        } else {
-            // New contender on an already-owned path. Incumbent holds.
-            entry.providers.push(provider);
+    let path = &provider.route().prefix;
+    match g.iter_mut().find(|p| &p.route().prefix == path) {
+        Some(slot) if slot.name() == provider.name() => *slot = provider,
+        Some(slot) => {
+            return Err(WebRegistryError::PathTaken {
+                path: path.clone(),
+                provider: provider.name().to_string(),
+                owner: slot.name().to_string(),
+            });
         }
-    } else {
-        g.push(PathEntry {
-            path,
-            active: name,
-            providers: vec![provider],
-        });
+        None => g.push(provider),
     }
     Ok(())
 }
 
-/// Snapshot of the active provider for every registered exact path.
+/// Snapshot of the owner of every registered exact path.
 pub fn providers() -> Vec<Arc<dyn WebProvider>> {
     let Ok(g) = GLOBAL.read() else {
         tracing::warn!("web registry poisoned; treating as empty");
         return Vec::new();
     };
-    g.iter().filter_map(|e| e.active_provider()).collect()
+    g.clone()
 }
 
-/// Every currently-contested path, for surfacing in plugin / route status.
-/// Empty when no path has more than one claimant.
+/// Every currently-contested path. Always empty: a taken path is refused at
+/// registration, so no path has more than one claimant.
 pub fn conflicts() -> Vec<WebConflict> {
-    let Ok(g) = GLOBAL.read() else {
-        tracing::warn!("web registry poisoned; reporting no conflicts");
-        return Vec::new();
-    };
-    g.iter()
-        .filter(|e| e.providers.len() > 1)
-        .map(|e| WebConflict {
-            path: e.path.clone(),
-            active_owner: e.active.clone(),
-            contenders: e
-                .providers
-                .iter()
-                .map(|p| p.name().to_string())
-                .filter(|n| n != &e.active)
-                .collect(),
-        })
-        .collect()
+    Vec::new()
 }
 
-/// Make `provider` the active owner of the exact `path`. This is the user's
-/// choice, replayed at boot from the persisted assignment. The displaced
-/// incumbent is set aside non-fatally (kept as a contender, still deregisterable
-/// on unload). Fails typed if `provider` never claimed `path`.
+/// Confirm `provider` as the owner of the exact `path` (the persisted choice
+/// replayed at boot). Fails typed unless `provider` is the path's owner.
 pub fn set_owner(path: &str, provider: &str) -> std::result::Result<(), WebRegistryError> {
-    let mut g = GLOBAL
-        .write()
+    let g = GLOBAL
+        .read()
         .map_err(|_| WebRegistryError::RegistryPoisoned)?;
-    let Some(entry) = g.iter_mut().find(|e| e.path == path) else {
-        return Err(WebRegistryError::NoSuchOwner {
+    if g.iter()
+        .any(|p| p.route().prefix == path && p.name() == provider)
+    {
+        Ok(())
+    } else {
+        Err(WebRegistryError::NoSuchOwner {
             path: path.to_string(),
             provider: provider.to_string(),
-        });
-    };
-    if !entry.providers.iter().any(|p| p.name() == provider) {
-        return Err(WebRegistryError::NoSuchOwner {
-            path: path.to_string(),
-            provider: provider.to_string(),
-        });
+        })
     }
-    entry.active = provider.to_string();
-    Ok(())
 }
 
-/// The provider name currently active for `path`, if any is registered there.
+/// The provider name that owns `path`, if any is registered there.
 pub fn active_owner(path: &str) -> Option<String> {
     let g = GLOBAL.read().ok()?;
-    g.iter().find(|e| e.path == path).map(|e| e.active.clone())
+    g.iter()
+        .find(|p| p.route().prefix == path)
+        .map(|p| p.name().to_string())
 }
 
-/// Deregister the provider named `name` wherever it appears. When it was a
-/// path's sole owner the path entry is dropped; when it was the active owner of
-/// a contested path, the incumbent-most surviving candidate takes over so the
-/// path stays served. Returns `true` if anything was removed.
+/// Deregister the provider named `name` wherever it appears; its paths become
+/// empty. Returns `true` if anything was removed.
 pub fn deregister_provider(name: &str) -> bool {
     let Ok(mut g) = GLOBAL.write() else {
         tracing::warn!("web registry poisoned; deregister of '{name}' skipped");
         return false;
     };
-    let mut removed = false;
-    for entry in g.iter_mut() {
-        let before = entry.providers.len();
-        entry.providers.retain(|p| p.name() != name);
-        if entry.providers.len() != before {
-            removed = true;
-            if entry.active == name
-                && let Some(next) = entry.providers.first()
-            {
-                entry.active = next.name().to_string();
-            }
-        }
-    }
-    g.retain(|e| !e.providers.is_empty());
-    removed
+    let before = g.len();
+    g.retain(|p| p.name() != name);
+    g.len() != before
 }
 
 /// The provider that owns `"/"` (the SPA / catch-all fallback), if any. The
@@ -367,9 +336,7 @@ pub fn deregister_provider(name: &str) -> bool {
 /// `frontend` field ("which provider owns `/`").
 pub fn root_owner() -> Option<Arc<dyn WebProvider>> {
     let g = GLOBAL.read().ok()?;
-    g.iter()
-        .find(|e| e.path == "/")
-        .and_then(|e| e.active_provider())
+    g.iter().find(|p| p.route().prefix == "/").cloned()
 }
 
 /// Dispatch a request to the provider that owns the **exact** `path`. On a miss,
@@ -383,16 +350,13 @@ pub fn resolve(path: &str) -> Option<Arc<dyn WebProvider>> {
         return None;
     };
     // Exact match first — literal key, no prefix subsumption.
-    if let Some(entry) = g.iter().find(|e| e.path == path)
-        && let Some(p) = entry.active_provider()
-    {
-        return Some(p);
+    if let Some(p) = g.iter().find(|p| p.route().prefix == path) {
+        return Some(p.clone());
     }
     // Miss → root SPA catch-all, but only if it opted into spa_fallback.
     g.iter()
-        .find(|e| e.path == "/")
-        .and_then(|e| e.active_provider())
-        .filter(|p| p.route().spa_fallback)
+        .find(|p| p.route().prefix == "/" && p.route().spa_fallback)
+        .cloned()
 }
 
 // ── Host-side loaded-plugin proxy ─────────────────────────────────────────────
@@ -420,9 +384,8 @@ pub const RENDER_OP: &str = "render";
 /// for `domain = "web"`, threading the route it read off the `BackendDef`
 /// (`endpoint` → prefix, `capabilities` → `spa_fallback` / `dev_upstream`).
 ///
-/// Registration is non-fatal: a conflict (a second plugin on an owned exact
-/// path) is recorded and surfaced, not returned as an error. The only error is a
-/// poisoned registry lock, which the loader logs and continues past.
+/// Fails with [`WebRegistryError::PathTaken`] when another provider owns the
+/// path, or on a poisoned registry lock.
 ///
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
@@ -515,10 +478,6 @@ mod tests {
 
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         let g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Drain GLOBAL wholesale — `providers()` returns only active owners, so
-        // deregistering those would leave non-active contenders from a prior
-        // test behind (e.g. an `otherui` contender on `/`), contaminating the
-        // next test's registration.
         if let Ok(mut reg) = GLOBAL.write() {
             reg.clear();
         }
@@ -561,80 +520,67 @@ mod tests {
     }
 
     #[test]
-    fn conflict_is_non_fatal_incumbent_holds_and_is_surfaced() {
+    fn taken_path_is_refused_and_owner_holds() {
         let _g = guard();
         register_provider(Arc::new(Fake {
             name: "peacock",
             route: route("/", true),
         }))
         .unwrap();
-        // Second claimant of the same exact path: NON-FATAL, incumbent holds.
-        register_provider(Arc::new(Fake {
-            name: "otherui",
-            route: route("/", true),
-        }))
-        .unwrap();
-
-        // Incumbent still active — the UI never went offline.
-        assert_eq!(resolve("/").unwrap().name(), "peacock");
-        assert_eq!(root_owner().unwrap().name(), "peacock");
-
-        // Conflict is observable for the user.
-        let c = conflicts();
-        assert_eq!(c.len(), 1);
-        assert_eq!(c[0].path, "/");
-        assert_eq!(c[0].active_owner, "peacock");
-        assert_eq!(c[0].contenders, vec!["otherui".to_string()]);
-    }
-
-    #[test]
-    fn user_can_choose_the_owner_and_choice_takes_effect() {
-        let _g = guard();
-        register_provider(Arc::new(Fake {
-            name: "peacock",
-            route: route("/", true),
-        }))
-        .unwrap();
-        register_provider(Arc::new(Fake {
-            name: "otherui",
-            route: route("/", true),
-        }))
-        .unwrap();
-
-        // User selects the other UI for `/`.
-        set_owner("/", "otherui").unwrap();
-        assert_eq!(resolve("/").unwrap().name(), "otherui");
-        assert_eq!(active_owner("/").as_deref(), Some("otherui"));
-
-        // Choosing an unregistered provider is a typed error, not a panic.
         assert_eq!(
-            set_owner("/", "ghost"),
+            register_provider(Arc::new(Fake {
+                name: "otherui",
+                route: route("/", true),
+            })),
+            Err(WebRegistryError::PathTaken {
+                path: "/".to_string(),
+                provider: "otherui".to_string(),
+                owner: "peacock".to_string(),
+            })
+        );
+        assert_eq!(resolve("/").unwrap().name(), "peacock");
+        assert!(conflicts().is_empty());
+        set_owner("/", "peacock").unwrap();
+        assert_eq!(
+            set_owner("/", "otherui"),
             Err(WebRegistryError::NoSuchOwner {
                 path: "/".to_string(),
-                provider: "ghost".to_string(),
+                provider: "otherui".to_string(),
             })
         );
     }
 
     #[test]
-    fn deregister_active_owner_promotes_survivor() {
+    fn deregister_owner_empties_the_path() {
         let _g = guard();
         register_provider(Arc::new(Fake {
             name: "peacock",
             route: route("/", true),
         }))
         .unwrap();
+        assert!(deregister_provider("peacock"));
+        assert!(resolve("/").is_none());
+        assert!(active_owner("/").is_none());
+        // The emptied path is free for a new owner.
         register_provider(Arc::new(Fake {
             name: "otherui",
             route: route("/", true),
         }))
         .unwrap();
-        set_owner("/", "otherui").unwrap();
+        assert_eq!(resolve("/").unwrap().name(), "otherui");
+    }
 
-        // The active owner unloads; the surviving candidate takes over so `/`
-        // keeps serving.
-        assert!(deregister_provider("otherui"));
-        assert_eq!(resolve("/").unwrap().name(), "peacock");
+    #[test]
+    fn path_scope_is_the_plugins_namespace_or_allow_listed_root() {
+        assert!(path_in_scope("peacock", "/"));
+        assert!(!path_in_scope("evil", "/"));
+        assert!(path_in_scope("gitea", "/plugins/gitea"));
+        assert!(path_in_scope("gitea", "/plugins/gitea/ui"));
+        assert!(!path_in_scope("gitea", "/plugins/giteax"));
+        assert!(!path_in_scope("gitea", "/plugins/other/x"));
+        assert!(!path_in_scope("gitea", "/plugins/gitea/../other"));
+        assert!(!path_in_scope("gitea", "/api/v1"));
+        assert!(!path_in_scope("gitea", ""));
     }
 
     #[test]
@@ -681,32 +627,17 @@ mod tests {
     }
 
     #[test]
-    fn reregister_same_name_replaces_in_place_and_keeps_active() {
+    fn reregister_same_name_replaces_in_place() {
         let _g = guard();
-        register_provider(Arc::new(Fake {
-            name: "peacock",
-            route: route("/", true),
-        }))
-        .unwrap();
-        register_provider(Arc::new(Fake {
-            name: "otherui",
-            route: route("/", true),
-        }))
-        .unwrap();
-        set_owner("/", "otherui").unwrap();
-
-        // A dev rebuild re-registers the same name: no duplicate contender,
-        // active choice preserved.
-        register_provider(Arc::new(Fake {
-            name: "otherui",
-            route: route("/", true),
-        }))
-        .unwrap();
-        assert_eq!(active_owner("/").as_deref(), Some("otherui"));
-        let c = conflicts();
-        assert_eq!(c.len(), 1);
-        // Still exactly one contender ("peacock"), not two "otherui" copies.
-        assert_eq!(c[0].contenders, vec!["peacock".to_string()]);
+        for _ in 0..2 {
+            register_provider(Arc::new(Fake {
+                name: "peacock",
+                route: route("/", true),
+            }))
+            .unwrap();
+        }
+        assert_eq!(providers().len(), 1);
+        assert_eq!(active_owner("/").as_deref(), Some("peacock"));
     }
 
     #[test]
@@ -718,11 +649,6 @@ mod tests {
         }))
         .unwrap();
         register_provider(Arc::new(Fake {
-            name: "contender",
-            route: route("/", true),
-        }))
-        .unwrap();
-        register_provider(Arc::new(Fake {
             name: "assets",
             route: route("/assets", false),
         }))
@@ -730,7 +656,6 @@ mod tests {
 
         let mut names: Vec<String> = providers().iter().map(|p| p.name().to_string()).collect();
         names.sort();
-        // Two paths → two active providers; the contender is not listed.
         assert_eq!(names, vec!["assets".to_string(), "root".to_string()]);
     }
 
@@ -811,6 +736,14 @@ mod tests {
         assert!(msg.contains("provider 'ghost'"));
 
         // Usable as a boxed std::error::Error.
+        let taken = WebRegistryError::PathTaken {
+            path: "/".to_string(),
+            provider: "evil".to_string(),
+            owner: "peacock".to_string(),
+        }
+        .to_string();
+        assert!(taken.contains("'evil'") && taken.contains("'/'") && taken.contains("'peacock'"));
+
         let boxed: Box<dyn std::error::Error> = Box::new(no_owner);
         assert!(boxed.source().is_none());
     }
