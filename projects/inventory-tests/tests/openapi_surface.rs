@@ -462,3 +462,29 @@ fn every_output_renamed_since_rc11_is_an_accepted_controller_limit() {
         "unlisted renamed outputs: {unlisted:?}; stale RC11_CONTROLLER_LIMITS entries: {stale:?}"
     );
 }
+
+/// Every tool that honours `dryRun` documents the `?dryRun=` query opt-in, and
+/// no other tool advertises one it would refuse.
+#[test]
+fn dry_run_query_parameter_is_documented_exactly_where_it_is_honoured() {
+    let mut spec = serde_json::json!({});
+    dispatch::openapi::inject_tool_paths(&mut spec);
+    let honoured: BTreeSet<&str> = dispatch::execute_gated_names()
+        .into_iter()
+        .chain(dispatch::dry_run_aware_names())
+        .collect();
+    assert!(!honoured.is_empty());
+    for entry in inventory::iter::<OpenApiToolRegistration> {
+        let op = &spec["paths"][format!("/api/v1/{}", entry.name)]["post"];
+        let documented = op["parameters"].as_array().is_some_and(|ps| {
+            ps.iter()
+                .any(|p| p["name"] == "dryRun" && p["in"] == "query")
+        });
+        assert_eq!(
+            documented,
+            honoured.contains(entry.name),
+            "{}: ?dryRun documented={documented}",
+            entry.name
+        );
+    }
+}
