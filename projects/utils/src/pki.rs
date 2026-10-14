@@ -944,8 +944,20 @@ pub fn verify_refreshed_peer_certs(
         "orca-mesh-server",
         mesh_server_sans(host_cn),
     )
-    // A signer that predates identity names issues without one.
+    // A signer that predates identity names issues without one. Once this
+    // host holds an identity name, peers pin it and would refuse a cert
+    // without one, so that downgrade is refused here instead.
     .or_else(|e| {
+        let current = std::fs::read_to_string(mesh_server_cert_path(pki_dir))
+            .ok()
+            .and_then(|p| first_cert_der(&p).ok())
+            .and_then(|d| mesh_server_identity(&d).ok().flatten());
+        if current.is_some() {
+            return Err(e.context(
+                "refreshed server cert has no identity name but the current one has; \
+                 the signer predates identity names; keeping the current cert",
+            ));
+        }
         check_refreshed_leaf(
             "server",
             server_cert_pem,
@@ -2439,6 +2451,35 @@ mod tests {
         params.distinguished_name = dn;
         let cert = params.signed_by(&key, &issuer).unwrap().pem();
         assert_install_refused(&f, &cert, &f.cert_s, "SANs");
+    }
+
+    fn server_cert_without_identity(f: &RefreshFixture) -> String {
+        let key = KeyPair::from_pem(&f.key_s).unwrap();
+        let csr = CertificateParams::new(mesh_shared_server_sans())
+            .unwrap()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap();
+        sign_peer_csr(f.dir.path(), &csr, "host-r", PeerRole::Server)
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn install_refreshed_refuses_identity_downgrade() {
+        let f = refresh_fixture("host-r");
+        let bare = server_cert_without_identity(&f);
+        assert_install_refused(&f, &f.cert_c, &bare, "keeping the current cert");
+    }
+
+    #[test]
+    fn install_refreshed_accepts_no_identity_when_current_has_none() {
+        let f = refresh_fixture("host-r");
+        let bare = server_cert_without_identity(&f);
+        std::fs::write(mesh_server_cert_path(f.dir.path()), &bare).unwrap();
+        install_refreshed_peer_certs(f.dir.path(), "host-r", &f.cert_c, &f.key_c, &bare, &f.key_s)
+            .unwrap();
     }
 
     #[test]

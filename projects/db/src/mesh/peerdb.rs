@@ -948,6 +948,17 @@ pub fn pin_peer_identity(conn: &Connection, peer_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Drop the pin so `peer_id` is accepted without an identity name again, e.g.
+/// after it was renewed by a signer that predates identity names. `true` when
+/// a pin was cleared.
+pub fn unpin_peer_identity(conn: &Connection, peer_id: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE mesh_peers SET identity_pinned_at = NULL WHERE peer_id = ? AND identity_pinned_at IS NOT NULL",
+        params![peer_id],
+    )?;
+    Ok(n > 0)
+}
+
 pub fn is_peer_identity_pinned(conn: &Connection, peer_id: &str) -> Result<bool> {
     let v: Option<i64> = conn
         .query_row(
@@ -2391,6 +2402,17 @@ mod tests {
         assert!(is_peer_identity_pinned(&conn, &id).unwrap());
         upsert_peer(&conn, &id, "h", "10.0.0.2", 12002, None, "").unwrap();
         assert!(is_peer_identity_pinned(&conn, &id).unwrap());
+    }
+
+    #[test]
+    fn unpin_peer_identity_clears_only_a_set_pin() {
+        let (_d, conn) = test_conn();
+        let id = utils::id::new();
+        upsert_peer(&conn, &id, "h", "10.0.0.2", 12002, None, "").unwrap();
+        assert!(!unpin_peer_identity(&conn, &id).unwrap());
+        pin_peer_identity(&conn, &id).unwrap();
+        assert!(unpin_peer_identity(&conn, &id).unwrap());
+        assert!(!is_peer_identity_pinned(&conn, &id).unwrap());
     }
 
     #[test]

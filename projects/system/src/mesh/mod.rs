@@ -1070,6 +1070,15 @@ pub struct MeshRecoverOutput {
     pub cleared: bool,
 }
 
+#[derive::snake_aliases]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshUnpinOutput {
+    pub peer_id: String,
+    /// `false` when the peer was not pinned or is not on this host's roster.
+    pub cleared: bool,
+}
+
 // ── mesh.forget ───────────────────────────────────────────────────────────────
 
 #[derive::snake_aliases]
@@ -1130,6 +1139,8 @@ pub enum MeshUpdateAction {
     Recover,
     /// Clear stuck outbound pairing offer(s) for `addr`.
     CancelOffer,
+    /// Drop this host's identity pin for a peer (needs `peer_id`).
+    Unpin,
 }
 
 /// Union of args across the mesh-update operations; required fields are
@@ -1137,14 +1148,15 @@ pub enum MeshUpdateAction {
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MeshUpdateArgs {
-    /// `settings` (default), `trust`, `sync`, `recover`, or `cancel_offer`.
+    /// `settings` (default), `trust`, `sync`, `recover`, `cancel_offer`, or
+    /// `unpin`.
     #[arg(long, default_value = "settings")]
     pub action: MeshUpdateAction,
     /// (settings) Toggle Tier-2 secrets-storage permission. `None` leaves the
     /// current value unchanged.
     #[arg(long)]
     pub self_secure: Option<bool>,
-    /// (trust/recover) Target peer.
+    /// (trust/recover/unpin) Target peer.
     #[arg(long)]
     pub peer_id: Option<crate::system_id::SystemId>,
     /// (trust) New trust value.
@@ -1177,6 +1189,7 @@ pub enum MeshUpdateOutput {
     Sync(MeshSyncOutput),
     Recover(MeshRecoverOutput),
     CancelOffer(MeshCancelOfferOutput),
+    Unpin(MeshUnpinOutput),
 }
 
 // ── DTO conversions + wire-dispatch types ───────────────────────────────────
@@ -1574,6 +1587,8 @@ async fn mesh_create(
 ///   - `recover`      — clear a stale `departed_at` flag on THIS host (needs
 ///     `peer_id`). LOCAL-ONLY: rejected for remote callers by the mesh listener.
 ///   - `cancel_offer` — clear stuck outbound pairing offer(s) for `addr`.
+///   - `unpin`        — drop this host's identity pin for `peer_id`, so it
+///     is accepted again with a cert that carries no identity name.
 #[orca_tool(domain = "system.mesh", verb = "update", role = "admin")]
 async fn mesh_update(
     args: MeshUpdateArgs,
@@ -1622,6 +1637,12 @@ async fn mesh_update(
                 addr,
                 rows_removed,
             }))
+        }
+        MeshUpdateAction::Unpin => {
+            let peer_id = args.peer_id.ok_or_else(|| {
+                anyhow::anyhow!("system.mesh.update action=unpin requires `peer_id`")
+            })?;
+            Ok(MeshUpdateOutput::Unpin(exec::unpin(&peer_id)?))
         }
     }
 }
@@ -4615,6 +4636,37 @@ mod handler_dispatch_tests {
                 }
                 _ => panic!("expected Recover variant"),
             }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mesh_update_unpin_clears_identity_pin() {
+        let tmp = tmp_db();
+        let ctx = empty_ctx();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            db::mesh::upsert_peer(&conn, &pid, "host-u", "10.0.0.1", 12002, Some("fp"), "ca")
+                .unwrap();
+            db::mesh::pin_peer_identity(&conn, &pid).unwrap();
+            drop(conn);
+            let out = mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::Unpin,
+                    peer_id: Some(pid.parse().unwrap()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            match out {
+                MeshUpdateOutput::Unpin(u) => assert!(u.cleared),
+                _ => panic!("expected Unpin variant"),
+            }
+            let conn = db::open_default().unwrap();
+            assert!(!db::mesh::is_peer_identity_pinned(&conn, &pid).unwrap());
         })
         .await;
     }
