@@ -167,7 +167,12 @@ where
 {
     let mut last_err: Option<anyhow::Error> = None;
     for t in targets {
-        match f(t.clone()).await {
+        let attempt = f(t.clone());
+        let outcome = match peer_id {
+            Some(pid) => crate::mesh::DIAL_PEER.scope(pid.to_string(), attempt).await,
+            None => attempt.await,
+        };
+        match outcome {
             Ok(r) => {
                 if let Some(pid) = peer_id {
                     crate::mesh::route_health::record_success(pid, t);
