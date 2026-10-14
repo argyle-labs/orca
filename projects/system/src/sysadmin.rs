@@ -236,7 +236,7 @@ fn install_autofs_sudoers(user: &str) -> Result<()> {
     }
 
     println!(
-        "{} sudoers: {user} may run '{binary} admin storage-apply' + 'admin plugin-apply'{}{}",
+        "{} sudoers: {user} may run '{binary} admin storage-apply' + 'admin plugin-apply' + 'admin plugin-trust-signed'{}{}",
         "✓".green(),
         if cron { " + 'admin cron-apply'" } else { "" },
         if is_proxmox {
@@ -271,7 +271,10 @@ fn sudoers_contents(user: &str, binary: &str, is_proxmox: bool, cron: bool) -> S
          # Autofs config (write /etc/auto.* + restart autofs).\n\
          {user} ALL=(root) NOPASSWD: {binary} admin storage-apply\n\
          # Plugin privileged ops: verified installed plugins, closed op sets.\n\
-         {user} ALL=(root) NOPASSWD: {binary} admin plugin-apply\n"
+         {user} ALL=(root) NOPASSWD: {binary} admin plugin-apply\n\
+         # Record a just-installed plugin as trusted once its signature verifies.\n\
+         # The name arrives on stdin: sudo `*` would also match `--unsigned`.\n\
+         {user} ALL=(root) NOPASSWD: {binary} admin plugin-trust-signed\n"
     );
     if cron {
         contents.push_str(&format!(
@@ -603,6 +606,9 @@ mod sudoers_tests {
         assert!(c.contains(&format!(
             "orca ALL=(root) NOPASSWD: {bin} admin plugin-apply\n"
         )));
+        assert!(c.contains(&format!(
+            "orca ALL=(root) NOPASSWD: {bin} admin plugin-trust-signed\n"
+        )));
         assert!(!c.contains("cron-apply"), "no allow-list, no cron grant");
         let cron = sudoers_contents("orca", bin, false, true);
         assert!(cron.contains(&format!(
@@ -618,6 +624,29 @@ mod sudoers_tests {
                 .filter(|l| !l.starts_with('#'))
                 .all(|l| !l.contains('*')),
             "no argument wildcards"
+        );
+    }
+
+    /// sudo matches a grant's argv exactly when it lists arguments, so the only
+    /// trust command the daemon can run is the bare `plugin-trust-signed`; the
+    /// `plugin-trust` verb (which has `--unsigned`) is never granted.
+    #[test]
+    fn the_trust_grant_cannot_reach_the_unsigned_override() {
+        let bin = "/usr/local/bin/orca";
+        let c = sudoers_contents("orca", bin, true, true);
+        let grants: Vec<&str> = c.lines().filter(|l| !l.starts_with('#')).collect();
+        let trust: Vec<&&str> = grants
+            .iter()
+            .filter(|l| l.contains("plugin-trust"))
+            .collect();
+        assert_eq!(
+            trust,
+            [&format!("orca ALL=(root) NOPASSWD: {bin} admin plugin-trust-signed").as_str()]
+        );
+        assert!(
+            grants
+                .iter()
+                .all(|l| !l.contains('*') && !l.contains("unsigned"))
         );
     }
 

@@ -236,6 +236,76 @@ fn make_executable(path: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
 }
 
+/// Install-dir filename of a plugin's release signature.
+fn signature_filename(software: &str) -> String {
+    format!("{}.minisig", install_filename(software))
+}
+
+/// Atomically write `<software>.minisig` (0644) beside the installed binary,
+/// or remove a stale one when the release was unsigned.
+fn save_signature(dir: &Path, software: &str, minisig: Option<&str>) -> Result<()> {
+    let dest = dir.join(signature_filename(software));
+    let Some(sig) = minisig else {
+        match std::fs::remove_file(&dest) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("remove stale signature {}", dest.display())));
+            }
+            _ => return Ok(()),
+        }
+    };
+    let tmp = dir.join(format!(".{}.incoming", signature_filename(software)));
+    _ = std::fs::remove_file(&tmp);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o644);
+    }
+    let mut f = opts
+        .open(&tmp)
+        .with_context(|| format!("create {}", tmp.display()))?;
+    std::io::Write::write_all(&mut f, sig.as_bytes())
+        .and_then(|()| f.sync_all())
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &dest).with_context(|| format!("install {}", dest.display()))
+}
+
+/// Record the just-installed `software` as trusted for `plugin-apply` through
+/// `sudo -n <self> admin plugin-trust-signed`, which re-verifies the saved
+/// signature as root. Installing is the trust decision, so no admin step.
+#[cfg(unix)]
+async fn request_trust(software: &str) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let exe = std::env::current_exe().context("resolve current exe")?;
+    let mut child = tokio::process::Command::new("sudo")
+        .arg("-n")
+        .arg(&exe)
+        .args(["admin", "plugin-trust-signed"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("spawn sudo plugin-trust-signed")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(software.as_bytes()).await?;
+        stdin.shutdown().await?;
+    }
+    let out = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+        .await
+        .context("plugin-trust-signed timed out")??;
+    if !out.status.success() {
+        bail!(
+            "plugin-trust-signed exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 // ── Startup scan ──────────────────────────────────────────────────────────────
 
 /// Scan the install dir and spawn every executable plugin found. Called once on
@@ -626,6 +696,11 @@ pub struct PluginCreateArgs {
     #[arg(long, default_value_t = false)]
     #[serde(default)]
     pub replace: bool,
+    /// `install` with `--name`: accept a release published without a
+    /// `.minisig` signature. Development builds only.
+    #[arg(long, default_value_t = false)]
+    #[serde(default)]
+    pub allow_unsigned: bool,
     /// `invoke`: fully-qualified verb of a loaded plugin, e.g.
     /// `proxmox.put_set_timezone`.
     #[arg(long)]
@@ -636,6 +711,12 @@ pub struct PluginCreateArgs {
     #[serde(default)]
     #[arg(long, default_value = "{}", value_parser = parse_json_object)]
     pub args: serde_json::Value,
+    /// `install`: apply it. Omitted or false returns an ExecutionPlan and
+    /// installs nothing. Ignored by `invoke`: the plugin verb gates itself, so
+    /// pass its own opt-in inside `args`.
+    #[arg(long, default_value_t = false)]
+    #[serde(default)]
+    pub execute: bool,
 }
 
 /// `plugin.create` payload — one variant per `action`.
@@ -644,6 +725,7 @@ pub struct PluginCreateArgs {
 pub enum PluginCreateOutput {
     Install(PluginInstallOutput),
     Invoke(PluginInvokeOutput),
+    Plan(contract::plan::ExecutionPlan),
 }
 
 /// [MUTATES STATE] Create a plugin artifact. `action=install` sideloads (`--file`) or
@@ -653,9 +735,18 @@ pub enum PluginCreateOutput {
 /// over the mesh: call it with `peer: <host>` and the universal peer-dispatch
 /// stanza relays it to the peer, which dispatches the named verb through its own
 /// loaded-plugin registry. Discover verb names with `plugin.detail`/`plugin.list`.
-#[orca_tool(domain = "plugin", verb = "create")]
+// Not intercepted by the generic gate: `invoke` reaches plugin verbs that are
+// reads or gate themselves, so an outer gate would plan a `docker.list` and hide
+// the plugin's own plan. Only `install` is gated, here.
+#[orca_tool(domain = "plugin", verb = "create", execute_gated = false)]
 async fn plugin_create(args: PluginCreateArgs, ctx: &ToolCtx) -> Result<PluginCreateOutput> {
     match args.action {
+        PluginCreateAction::Install if !args.execute => {
+            let inputs = serde_json::to_value(&args)?;
+            Ok(PluginCreateOutput::Plan(
+                contract::plan::ExecutionPlan::generic("plugin.create", inputs.into()),
+            ))
+        }
         PluginCreateAction::Install => {
             let install = PluginInstallArgs {
                 file: args.file,
@@ -663,6 +754,7 @@ async fn plugin_create(args: PluginCreateArgs, ctx: &ToolCtx) -> Result<PluginCr
                 version: args.version,
                 prerelease: args.prerelease,
                 replace: args.replace,
+                allow_unsigned: args.allow_unsigned,
             };
             Ok(PluginCreateOutput::Install(
                 plugin_install(install, ctx).await?,
@@ -772,6 +864,10 @@ pub struct PluginInstallArgs {
     /// same name.
     #[arg(long, default_value_t = false)]
     pub replace: bool,
+    /// With `--name`: accept a release published without a `.minisig`
+    /// signature. Development builds only.
+    #[arg(long, default_value_t = false)]
+    pub allow_unsigned: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -787,6 +883,10 @@ pub struct PluginInstallOutput {
     pub installed_path: String,
     /// True — sideload registers tools immediately, no restart needed.
     pub loaded_live: bool,
+    /// Whether the installed release carried a verified signature. An
+    /// unsigned one is not trusted for privileged ops.
+    #[serde(default)]
+    pub signed: bool,
 }
 
 /// Install a plugin. Two modes:
@@ -801,7 +901,14 @@ pub struct PluginInstallOutput {
 /// * `--name <catalog-name>` alone — auto-download from the catalog and install.
 async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<PluginInstallOutput> {
     if let (None, Some(name)) = (&args.file, &args.name) {
-        return install_from_catalog(name, args.version.as_deref(), args.prerelease, _ctx).await;
+        return install_from_catalog(
+            name,
+            args.version.as_deref(),
+            args.prerelease,
+            args.allow_unsigned,
+            _ctx,
+        )
+        .await;
     }
 
     let Some(file) = &args.file else {
@@ -884,6 +991,7 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
             tools: report.tools,
             installed_path: dest.display().to_string(),
             loaded_live: true,
+            signed: false,
         })
     }
 }
@@ -914,6 +1022,7 @@ pub(crate) async fn install_from_catalog(
     name: &str,
     version: Option<&str>,
     prerelease: bool,
+    allow_unsigned: bool,
     ctx: &ToolCtx,
 ) -> Result<PluginInstallOutput> {
     let entry = catalog_resolved()
@@ -941,12 +1050,13 @@ pub(crate) async fn install_from_catalog(
         &entry.repo_url,
         version,
         prerelease,
+        allow_unsigned,
     )
     .await
     {
         Ok(f) => f,
         Err(e) if crate::update::resolve_github_token().is_empty() => {
-            delegate_plugin_fetch(&entry, version, prerelease, ctx)
+            delegate_plugin_fetch(&entry, version, prerelease, allow_unsigned, ctx)
                 .await
                 .with_context(|| format!("direct plugin fetch failed ({e}); delegate"))?
         }
@@ -1037,6 +1147,14 @@ pub(crate) async fn install_from_catalog(
                 )));
             }
         };
+        // The signature must sit beside the binary it signs, so it is written
+        // only once the candidate is live; root's `plugin-trust` reads it.
+        save_signature(&dir, &entry.target_software, fetched.minisig.as_deref())?;
+        if fetched.minisig.is_some()
+            && let Err(e) = request_trust(&entry.target_software).await
+        {
+            tracing::warn!(plugin = %entry.target_software, error = %e, "plugin installed but not recorded as trusted for privileged ops");
+        }
         // Candidate is live — the incumbent is no longer needed.
         if let Some(prev) = incumbent.as_deref()
             && let Err(rm) = std::fs::remove_file(prev)
@@ -1059,6 +1177,7 @@ pub(crate) async fn install_from_catalog(
             tools: report.tools,
             installed_path: dest.display().to_string(),
             loaded_live: true,
+            signed: fetched.minisig.is_some(),
         })
     }
 }
@@ -1083,6 +1202,10 @@ pub struct PluginUpdateArgs {
     /// default (stable only), mirroring `plugin.install`.
     #[arg(long, default_value_t = false)]
     pub prerelease: bool,
+    /// Accept a release published without a `.minisig` signature. Development
+    /// builds only.
+    #[arg(long, default_value_t = false)]
+    pub allow_unsigned: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -1246,8 +1369,14 @@ async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUp
 
     // Execute: run the same catalog install path `plugin.install` uses. A version
     // omitted installs newest; a pinned `--version` installs that tag.
-    let installed =
-        install_from_catalog(&entry.name, args.version.as_deref(), args.prerelease, ctx).await?;
+    let installed = install_from_catalog(
+        &entry.name,
+        args.version.as_deref(),
+        args.prerelease,
+        args.allow_unsigned,
+        ctx,
+    )
+    .await?;
     let note = format!(
         "installed {} {} (was {})",
         entry.target_software,
@@ -1313,6 +1442,10 @@ pub struct PluginServeAssetOutput {
     pub asset_b64: String,
     pub sha256: String,
     pub version: String,
+    /// The release's `<asset>.minisig`, unchecked by the holder; the caller
+    /// verifies it before installing. Absent from older holders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minisig: Option<String>,
 }
 
 /// Serve a plugin release asset from GitHub on behalf of a peer that lacks the
@@ -1335,6 +1468,7 @@ async fn plugin_serve_asset(
         asset_b64: utils::encoding::base64_encode(&fetched.bytes),
         sha256: fetched.sha256,
         version: fetched.version,
+        minisig: fetched.minisig,
     })
 }
 
@@ -1346,6 +1480,7 @@ async fn delegate_plugin_fetch(
     entry: &CatalogEntry,
     version: Option<&str>,
     prerelease: bool,
+    allow_unsigned: bool,
     ctx: &ToolCtx,
 ) -> Result<crate::plugin_fetch::FetchedPlugin> {
     let target = crate::update::build_target().to_string();
@@ -1405,6 +1540,15 @@ async fn delegate_plugin_fetch(
             errs.push(format!("{}: sha256 verify: {e}", peer.peer_hostname));
             continue;
         }
+        if let Err(e) = crate::plugin_fetch::check_signature(
+            &entry.target_software,
+            &bytes,
+            out.minisig.as_deref(),
+            allow_unsigned,
+        ) {
+            errs.push(format!("{}: signature: {e:#}", peer.peer_hostname));
+            continue;
+        }
         tracing::info!(
             plugin = %entry.target_software,
             peer = %peer.peer_hostname,
@@ -1416,6 +1560,7 @@ async fn delegate_plugin_fetch(
             version: out.version,
             asset: asset_label(&entry.target_software, &target),
             sha256: out.sha256,
+            minisig: out.minisig,
         });
     }
     bail!(
@@ -1486,6 +1631,12 @@ async fn plugin_uninstall(
         if path.is_file() {
             std::fs::remove_file(&path)
                 .with_context(|| format!("failed to remove {}", path.display()))?;
+            let sig = dir.join(signature_filename(software));
+            if let Err(e) = std::fs::remove_file(&sig)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(path = %sig.display(), error = %e, "could not remove plugin signature");
+            }
             true
         } else {
             false
@@ -1636,6 +1787,28 @@ mod tests {
     }
 
     // ── install_filename ──────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn a_signature_is_saved_0644_beside_the_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        save_signature(dir.path(), "demo", Some("sig")).unwrap();
+        let path = dir.path().join("demo.minisig");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "sig");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+        assert!(!dir.path().join(".demo.minisig.incoming").exists());
+    }
+
+    #[test]
+    fn an_unsigned_install_removes_a_stale_signature() {
+        let dir = tempfile::TempDir::new().unwrap();
+        save_signature(dir.path(), "demo", Some("old")).unwrap();
+        save_signature(dir.path(), "demo", None).unwrap();
+        assert!(!dir.path().join("demo.minisig").exists());
+        save_signature(dir.path(), "demo", None).unwrap();
+    }
 
     #[test]
     fn install_filename_is_the_bare_software_name() {
@@ -2112,6 +2285,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let args = PluginInstallArgs {
+            allow_unsigned: false,
             file: Some("/tmp/x".to_string()),
             name: Some("jellyfin".to_string()),
             version: None,
@@ -2147,6 +2321,7 @@ mod tests {
         let ctx = guard_ctx(&tmp);
         let missing = tmp.path().join("does-not-exist");
         let args = PluginInstallArgs {
+            allow_unsigned: false,
             file: Some(missing.display().to_string()),
             name: None,
             version: None,
@@ -2167,6 +2342,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let args = PluginCreateArgs {
+            allow_unsigned: false,
             action: PluginCreateAction::Invoke,
             file: None,
             name: None,
@@ -2175,6 +2351,7 @@ mod tests {
             replace: false,
             tool: None,
             args: serde_json::json!({}),
+            execute: false,
         };
         let err = plugin_create(args, &ctx).await.unwrap_err();
         assert!(
@@ -2311,6 +2488,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let args = PluginCreateArgs {
+            allow_unsigned: false,
             action: PluginCreateAction::Install,
             file: Some("/tmp/x".to_string()),
             name: Some("jellyfin".to_string()),
@@ -2319,6 +2497,7 @@ mod tests {
             replace: false,
             tool: None,
             args: serde_json::json!({}),
+            execute: true,
         };
         let err = plugin_create(args, &ctx).await.unwrap_err();
         assert!(
@@ -2336,6 +2515,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let args = PluginCreateArgs {
+            allow_unsigned: false,
             action: PluginCreateAction::Install,
             file: None,
             name: None,
@@ -2344,6 +2524,7 @@ mod tests {
             replace: false,
             tool: None,
             args: serde_json::json!({}),
+            execute: true,
         };
         let err = plugin_create(args, &ctx).await.unwrap_err();
         assert!(
@@ -2362,6 +2543,7 @@ mod tests {
         let ctx = guard_ctx(&tmp);
         let missing = tmp.path().join("nope-binary");
         let args = PluginCreateArgs {
+            allow_unsigned: false,
             action: PluginCreateAction::Install,
             file: Some(missing.display().to_string()),
             name: None,
@@ -2370,6 +2552,7 @@ mod tests {
             replace: false,
             tool: None,
             args: serde_json::json!({}),
+            execute: true,
         };
         let err = plugin_create(args, &ctx).await.unwrap_err();
         assert!(
@@ -2387,6 +2570,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let args = PluginCreateArgs {
+            allow_unsigned: false,
             action: PluginCreateAction::Invoke,
             file: None,
             name: None,
@@ -2395,6 +2579,7 @@ mod tests {
             replace: false,
             tool: Some("nope-plugin.nope".to_string()),
             args: serde_json::json!({}),
+            execute: false,
         };
         let err = plugin_create(args, &ctx).await.unwrap_err();
         assert!(
@@ -2454,6 +2639,7 @@ mod tests {
             tools: vec!["jellyfin.list".to_string()],
             installed_path: "/root/.orca/plugins/jellyfin".to_string(),
             loaded_live: true,
+            signed: false,
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(json.contains("\"software\":\"jellyfin\""), "{json}");
@@ -2505,6 +2691,7 @@ mod tests {
             tools: Vec::new(),
             installed_path: "/p".to_string(),
             loaded_live: true,
+            signed: false,
         });
         let ijson = serde_json::to_string(&install).unwrap();
         assert!(ijson.contains("\"software\":\"s\""), "{ijson}");
@@ -2595,6 +2782,7 @@ mod tests {
         assert!(def.version.is_empty());
 
         let out = PluginServeAssetOutput {
+            minisig: None,
             asset_b64: "YWJj".to_string(),
             sha256: "deadbeef".to_string(),
             version: "0.2.0".to_string(),
@@ -2621,6 +2809,7 @@ mod tests {
             "{v}"
         );
         let out = PluginServeAssetOutput {
+            minisig: None,
             asset_b64: "YWJj".into(),
             sha256: "x".into(),
             version: "1".into(),
@@ -2800,6 +2989,7 @@ mod tests {
 
         let err = plugin_install(
             PluginInstallArgs {
+                allow_unsigned: false,
                 file: None,
                 name: Some("totally-unknown-plugin".to_string()),
                 version: None,
@@ -2830,6 +3020,7 @@ mod tests {
 
         let err = plugin_install(
             PluginInstallArgs {
+                allow_unsigned: false,
                 file: None,
                 name: Some("wip".to_string()),
                 version: None,
@@ -2871,6 +3062,7 @@ mod tests {
 
         let err = plugin_update(
             PluginUpdateArgs {
+                allow_unsigned: false,
                 name: "wip".to_string(),
                 execute: false,
                 version: None,
@@ -2903,6 +3095,7 @@ mod tests {
 
         let out = plugin_update(
             PluginUpdateArgs {
+                allow_unsigned: false,
                 name: "sideloaded-xyz".to_string(),
                 execute: false,
                 version: None,
@@ -2935,6 +3128,7 @@ mod tests {
 
         let err = plugin_update(
             PluginUpdateArgs {
+                allow_unsigned: false,
                 name: "released-xyz".to_string(),
                 execute: false,
                 version: None,
@@ -2961,7 +3155,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         let entry = entry("sonarr", "available");
-        let err = match delegate_plugin_fetch(&entry, None, false, &ctx).await {
+        let err = match delegate_plugin_fetch(&entry, None, false, false, &ctx).await {
             Ok(_) => panic!("expected delegate fetch to fail with no paired peers"),
             Err(e) => e,
         };
@@ -3028,7 +3222,7 @@ mod tests {
         }
 
         let entry = entry("sonarr", "available");
-        let err = match delegate_plugin_fetch(&entry, None, false, &ctx).await {
+        let err = match delegate_plugin_fetch(&entry, None, false, false, &ctx).await {
             Ok(_) => panic!("expected delegate fetch to fail with no secure peer"),
             Err(e) => e,
         };
@@ -3074,7 +3268,7 @@ mod tests {
         }
 
         let entry = entry("sonarr", "available");
-        let err = match delegate_plugin_fetch(&entry, Some("0.1.0"), false, &ctx).await {
+        let err = match delegate_plugin_fetch(&entry, Some("0.1.0"), false, false, &ctx).await {
             Ok(_) => panic!("expected delegate fetch to bail with no transport"),
             Err(e) => e,
         };
@@ -3204,6 +3398,7 @@ mod tests {
 
         let err = plugin_install(
             PluginInstallArgs {
+                allow_unsigned: false,
                 file: None,
                 name: Some("svc-daemon".to_string()),
                 version: None,

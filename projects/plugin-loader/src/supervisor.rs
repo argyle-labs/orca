@@ -451,7 +451,10 @@ impl PluginProcess {
             idle: self.idle_timeout,
             deadline: Instant::now() + self.max_invoke,
         };
-        let result = invoke_on(&mut stream, id, tool, args, caller, &self.software);
+        let deadline = stream.deadline;
+        let result = crate::ws::with_invoke_deadline(deadline, || {
+            invoke_on(&mut stream, id, tool, args, caller, &self.software)
+        });
         // A tool error arrives as a well-formed `Result` frame; an idle timeout
         // may still be followed by one; anything else (including the ceiling)
         // means the stream is mid-frame or the plugin is gone or wedged.
@@ -466,6 +469,7 @@ impl PluginProcess {
                     .set_write_timeout(Some(Duration::from_millis(1)))
                     .ok();
                 session.stop();
+                crate::ws::drop_sessions(&self.software);
                 SessionState::Broken
             }
             Err(e) if is_idle_timeout(e) => SessionState::Stale(id),
@@ -504,6 +508,7 @@ impl PluginProcess {
     fn respawn(&self, session: &mut Session) -> Result<()> {
         tracing::warn!(plugin = %self.software, "respawning plugin after a broken session");
         session.stop();
+        crate::ws::drop_sessions(&self.software);
         let (child, stream, hs, _) = start(&self.exe, &self.software)
             .with_context(|| format!("respawning plugin '{}'", self.software))?;
         let mut fresh = Session {
@@ -521,6 +526,13 @@ impl PluginProcess {
                 on_disk = %hs.semver,
                 "plugin binary changed since load; reload the plugin"
             );
+            // Every later invoke would fail the same way: unload so the plugin's
+            // backend names and claims are released. On its own thread because
+            // this invoke can run under the registry lock (a backend constructor
+            // calling into the plugin during load).
+            let software = self.software.clone();
+            let addr = std::ptr::from_ref(self) as usize;
+            std::thread::spawn(move || crate::unload_if_backed_by(&software, addr));
             bail!(
                 "plugin '{}' binary changed since load ({} -> {}); reload the plugin",
                 self.software,
@@ -539,6 +551,7 @@ impl PluginProcess {
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .stop();
+        crate::ws::drop_sessions(&self.software);
     }
 }
 
@@ -1355,6 +1368,7 @@ mod tests {
             return;
         };
         let before = child_pid(&proc);
+        let mut ws = crate::ws::insert_idle_session("loaderfakeplugin");
         thread::scope(|s| {
             s.spawn(|| {
                 let _session = proc.session.lock().unwrap();
@@ -1371,6 +1385,17 @@ mod tests {
         assert_eq!(out, json!({ "n": 1 }));
         assert!(!proc.session.is_poisoned());
         assert_ne!(child_pid(&proc), before, "a fresh child serves the invoke");
+        assert!(ws.dropped(), "ws sessions dropped");
+    }
+
+    #[test]
+    fn shutdown_drops_the_plugins_ws_sessions() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        let mut ws = crate::ws::insert_idle_session("loaderfakeplugin");
+        proc.shutdown();
+        assert!(ws.dropped(), "ws sessions dropped");
     }
 
     #[test]
@@ -1417,11 +1442,13 @@ mod tests {
         proc.idle_timeout = Duration::from_secs(2);
         proc.max_invoke = Duration::from_millis(600);
         let before = child_pid(&proc);
+        let mut ws = crate::ws::insert_idle_session("loaderfakeplugin");
         let started = Instant::now();
         let err = proc
             .invoke("loaderfakeplugin.wedge", json!({}), None)
             .unwrap_err();
         assert!(is_ceiling(&err), "got: {err:#}");
+        assert!(ws.dropped(), "ws sessions dropped");
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(proc.session.lock().unwrap().state, SessionState::Broken);
 
@@ -1533,6 +1560,45 @@ mod tests {
             .invoke("loaderfakeplugin.ping", json!({}), None)
             .unwrap_err();
         assert!(format!("{err:#}").contains("reload"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_changed_binary_unloads_the_plugin() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        let _g = crate::FAKE_PLUGIN_LOCK.blocking_lock();
+        crate::unload_plugin("loaderfakeplugin");
+        proc.semver = "0.0.0-registered".into();
+        let proc = std::sync::Arc::new(proc);
+        {
+            let mut reg = crate::registry().write().unwrap_or_else(|e| e.into_inner());
+            let backing = crate::Backing::Process(proc.clone());
+            crate::attach_plugin(
+                &mut reg,
+                crate::LoadedPlugin {
+                    software: "loaderfakeplugin".into(),
+                    semver: proc.semver.clone(),
+                    target_compat: String::new(),
+                    orca_compat: String::new(),
+                    backing,
+                    tools: std::collections::HashMap::new(),
+                    domain_backends: Vec::new(),
+                    backend_defs: Vec::new(),
+                },
+            );
+        }
+        proc.session.lock().unwrap().state = SessionState::Broken;
+        proc.invoke("loaderfakeplugin.ping", json!({}), None)
+            .unwrap_err();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while crate::is_loaded("loaderfakeplugin") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !crate::is_loaded("loaderfakeplugin"),
+            "unloaded after a permanent respawn failure"
+        );
     }
 
     #[test]

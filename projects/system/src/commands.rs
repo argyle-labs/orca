@@ -431,6 +431,14 @@ pub struct SystemUpdateArgs {
     #[arg(long)]
     pub release_source: Option<String>,
 
+    /// Set the fleet plugin signature policy: `enforce` refuses a plugin
+    /// release published without a `.minisig`; `warn` (the default) installs it
+    /// with a warning, untrusted for privileged ops. A signature that does not
+    /// verify is refused under both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    pub plugin_signatures: Option<String>,
+
     /// Zero-based page of the version list to return in `available_versions`.
     /// The list is channel-scoped and ordered most-recent-first; page 0 is the
     /// newest `versions_per_page` releases. `versions_total` reports the full
@@ -571,6 +579,7 @@ fn fleet_incompatible_arg(args: &SystemUpdateArgs) -> Option<&'static str> {
         ("dev_source", args.dev_source.is_some()),
         ("clear_dev_source", args.clear_dev_source),
         ("release_source", args.release_source.is_some()),
+        ("plugin_signatures", args.plugin_signatures.is_some()),
     ]
     .into_iter()
     .find_map(|(name, present)| present.then_some(name))
@@ -920,6 +929,21 @@ async fn run_system_update(
                 }),
                 Err(e) => errors.push(format!("write release source: {e}")),
             }
+        }
+    }
+
+    if let Some(raw) = args.plugin_signatures.as_deref() {
+        use crate::plugin_fetch::{SIGNATURE_POLICY_KEY, SignaturePolicy};
+        match SignaturePolicy::parse(raw) {
+            None => errors.push(format!(
+                "plugin_signatures must be `enforce` or `warn`, got `{raw}`"
+            )),
+            Some(p) => match db::pool::Db::process()
+                .write(|c| db::settings::set(c, SIGNATURE_POLICY_KEY, p.as_str()))
+            {
+                Ok(()) => notes.push(format!("plugin signature policy set to {}", p.as_str())),
+                Err(e) => errors.push(format!("write plugin signature policy: {e}")),
+            },
         }
     }
 

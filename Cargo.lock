@@ -3471,6 +3471,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "minisign-verify"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871285dc19d8d0ebe0eef3d0e99a205f2a71363b122632cbbfa4a6c370a960ce"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4225,6 +4231,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4233,6 +4240,7 @@ version = "0.2.1-rc.16"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "notify",
  "orca-contract",
  "orca-db",
@@ -4482,6 +4490,7 @@ version = "0.1.0"
 dependencies = [
  "schemars 1.2.2",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4499,10 +4508,15 @@ dependencies = [
  "orca-plugin-toolkit",
  "orca-secrets",
  "orca-utils",
+ "rcgen",
  "rusqlite",
+ "rustls",
+ "rustls-platform-verifier",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite 0.29.0",
  "tracing",
 ]
 
@@ -4744,6 +4758,7 @@ dependencies = [
  "libc",
  "md-5 0.10.6",
  "mdns-sd",
+ "minisign-verify",
  "orca-agents",
  "orca-auth",
  "orca-containers",

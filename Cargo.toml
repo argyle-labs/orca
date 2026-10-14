@@ -65,6 +65,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = [
     "ring",
 ] }
 rustls-pki-types = "1"
+rustls-platform-verifier = "0.7"
 rustls-pemfile = "2"
 # Email/SMTP transport for the notifications `smtp` backend. rustls (NOT
 # native-tls/openssl) so it cross-compiles to musl (Alpine) hosts; async
@@ -105,6 +106,8 @@ graphql_client_codegen = "0.14"
 
 # Hashing & RNG
 sha2 = "0.11"
+# Plugin release signatures (`system::plugin_sig`).
+minisign-verify = "0.3"
 rand = "0.10"
 
 # Per-host bootstrap signing key for the pre-join channel (mesh/offer +
