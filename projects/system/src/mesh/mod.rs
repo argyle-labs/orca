@@ -1002,12 +1002,12 @@ pub struct MeshOfferOutput {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum MeshDeleteAction {
-    /// Evict a paired peer (needs `peer_id`).
+    /// Evict a paired peer (needs `id`).
     #[default]
     Kick,
     /// Voluntary self exit. LOCAL-ONLY.
     Leave,
-    /// Hard-delete a stale/orphan peer mesh-wide (needs `peer_id`).
+    /// Hard-delete a stale/orphan peer mesh-wide (needs `id`).
     Forget,
 }
 
@@ -1017,9 +1017,11 @@ pub struct MeshDeleteArgs {
     /// `kick` (default), `leave`, or `forget`.
     #[arg(long, default_value = "kick")]
     pub action: MeshDeleteAction,
-    /// (kick/forget) Peer to remove.
+    /// (kick/forget) System to remove.
+    // Aliases: pre-rename daemons send `peer_id` over the mesh.
     #[arg(long)]
-    pub peer_id: Option<crate::system_id::SystemId>,
+    #[serde(alias = "peerId", alias = "peer_id")]
+    pub id: Option<crate::system_id::SystemId>,
 }
 
 /// Tagged result of `system.mesh.delete`.
@@ -1067,6 +1069,15 @@ pub struct MeshRecoverOutput {
     pub peer_id: String,
     /// `true` if a `departed_at` flag was actually cleared. `false` means the
     /// peer either wasn't departed or doesn't exist locally.
+    pub cleared: bool,
+}
+
+#[derive::snake_aliases]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshUnpinOutput {
+    pub id: String,
+    /// `false` when the peer was not pinned or is not on this host's roster.
     pub cleared: bool,
 }
 
@@ -1121,15 +1132,17 @@ pub enum MeshUpdateAction {
     /// Toggle `self_secure` (Tier-2 secrets-storage). Default.
     #[default]
     Settings,
-    /// Set trust for a paired peer (needs `peer_id` + `on`).
+    /// Set trust for a paired peer (needs `id` + `on`).
     Trust,
     /// Force a one-shot replication tick (optional `peer` filter).
     Sync,
-    /// Clear a stale `departed_at` flag on THIS host (needs `peer_id`).
+    /// Clear a stale `departed_at` flag on THIS host (needs `id`).
     /// LOCAL-ONLY.
     Recover,
     /// Clear stuck outbound pairing offer(s) for `addr`.
     CancelOffer,
+    /// Drop this host's identity pin for a peer (needs `id`).
+    Unpin,
 }
 
 /// Union of args across the mesh-update operations; required fields are
@@ -1137,16 +1150,19 @@ pub enum MeshUpdateAction {
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MeshUpdateArgs {
-    /// `settings` (default), `trust`, `sync`, `recover`, or `cancel_offer`.
+    /// `settings` (default), `trust`, `sync`, `recover`, `cancel_offer`, or
+    /// `unpin`.
     #[arg(long, default_value = "settings")]
     pub action: MeshUpdateAction,
     /// (settings) Toggle Tier-2 secrets-storage permission. `None` leaves the
     /// current value unchanged.
     #[arg(long)]
     pub self_secure: Option<bool>,
-    /// (trust/recover) Target peer.
+    /// (trust/recover/unpin) Target system.
+    // Aliases: pre-rename daemons send `peer_id` over the mesh.
     #[arg(long)]
-    pub peer_id: Option<crate::system_id::SystemId>,
+    #[serde(alias = "peerId", alias = "peer_id")]
+    pub id: Option<crate::system_id::SystemId>,
     /// (trust) New trust value.
     #[arg(long, action = clap::ArgAction::Set)]
     pub on: Option<bool>,
@@ -1177,6 +1193,7 @@ pub enum MeshUpdateOutput {
     Sync(MeshSyncOutput),
     Recover(MeshRecoverOutput),
     CancelOffer(MeshCancelOfferOutput),
+    Unpin(MeshUnpinOutput),
 }
 
 // ── DTO conversions + wire-dispatch types ───────────────────────────────────
@@ -1567,13 +1584,15 @@ async fn mesh_create(
 /// [MUTATES STATE] Mutate mesh membership state on this host (or a `--peer` target). `action`
 /// selects the operation:
 ///   - `settings`     — toggle `self_secure` (Tier-2 secrets-storage). Default.
-///   - `trust`        — set trust for a paired peer (needs `peer_id` + `on`;
+///   - `trust`        — set trust for a paired peer (needs `id` + `on`;
 ///     `push` flips THEIR trust of us over mTLS).
 ///   - `sync`         — force a one-shot replication tick (optional `peer`
 ///     source filter).
 ///   - `recover`      — clear a stale `departed_at` flag on THIS host (needs
 ///     `peer_id`). LOCAL-ONLY: rejected for remote callers by the mesh listener.
 ///   - `cancel_offer` — clear stuck outbound pairing offer(s) for `addr`.
+///   - `unpin`        — drop this host's identity pin for `peer_id`, so it
+///     is accepted again with a cert that carries no identity name.
 #[orca_tool(domain = "system.mesh", verb = "update", role = "admin")]
 async fn mesh_update(
     args: MeshUpdateArgs,
@@ -1590,9 +1609,9 @@ async fn mesh_update(
             }))
         }
         MeshUpdateAction::Trust => {
-            let peer_id = args.peer_id.ok_or_else(|| {
-                anyhow::anyhow!("system.mesh.update action=trust requires `peer_id`")
-            })?;
+            let peer_id = args
+                .id
+                .ok_or_else(|| anyhow::anyhow!("system.mesh.update action=trust requires `id`"))?;
             let on = args
                 .on
                 .ok_or_else(|| anyhow::anyhow!("system.mesh.update action=trust requires `on`"))?;
@@ -1608,8 +1627,8 @@ async fn mesh_update(
             Ok(MeshUpdateOutput::Sync(MeshSyncOutput { peers: reports }))
         }
         MeshUpdateAction::Recover => {
-            let peer_id = args.peer_id.ok_or_else(|| {
-                anyhow::anyhow!("system.mesh.update action=recover requires `peer_id`")
+            let peer_id = args.id.ok_or_else(|| {
+                anyhow::anyhow!("system.mesh.update action=recover requires `id`")
             })?;
             Ok(MeshUpdateOutput::Recover(exec::recover(&peer_id)?))
         }
@@ -1623,17 +1642,23 @@ async fn mesh_update(
                 rows_removed,
             }))
         }
+        MeshUpdateAction::Unpin => {
+            let peer_id = args
+                .id
+                .ok_or_else(|| anyhow::anyhow!("system.mesh.update action=unpin requires `id`"))?;
+            Ok(MeshUpdateOutput::Unpin(exec::unpin(&peer_id)?))
+        }
     }
 }
 
 /// [MUTATES STATE] Remove mesh membership. `action` selects the target:
 ///   - `kick`   — evict a paired peer: best-effort notify, then drop its
-///     `mesh_peers` + `mesh_trust` rows (needs `peer_id`). Default.
+///     `mesh_peers` + `mesh_trust` rows (needs `id`). Default.
 ///   - `leave`  — voluntary self exit: notify every paired peer, then drop all
 ///     `mesh_peers` + `mesh_trust` rows on this host. LOCAL-ONLY: rejected for
 ///     remote callers by the mesh listener.
 ///   - `forget` — hard-delete a stale/orphan `peer_id` here AND fan a one-way
-///     forget notice to every live member (needs `peer_id`).
+///     forget notice to every live member (needs `id`).
 #[orca_tool(domain = "system.mesh", verb = "delete", role = "admin")]
 async fn mesh_delete(
     args: MeshDeleteArgs,
@@ -1641,16 +1666,16 @@ async fn mesh_delete(
 ) -> anyhow::Result<MeshDeleteOutput> {
     match args.action {
         MeshDeleteAction::Kick => {
-            let peer_id = args.peer_id.ok_or_else(|| {
-                anyhow::anyhow!("system.mesh.delete action=kick requires `peer_id`")
-            })?;
+            let peer_id = args
+                .id
+                .ok_or_else(|| anyhow::anyhow!("system.mesh.delete action=kick requires `id`"))?;
             Ok(MeshDeleteOutput::Kick(exec::leave_peer(&peer_id).await?))
         }
         MeshDeleteAction::Leave => Ok(MeshDeleteOutput::Leave(exec::leave_self().await?)),
         MeshDeleteAction::Forget => {
-            let peer_id = args.peer_id.ok_or_else(|| {
-                anyhow::anyhow!("system.mesh.delete action=forget requires `peer_id`")
-            })?;
+            let peer_id = args
+                .id
+                .ok_or_else(|| anyhow::anyhow!("system.mesh.delete action=forget requires `id`"))?;
             Ok(MeshDeleteOutput::Forget(exec::forget(&peer_id).await?))
         }
     }
@@ -2200,7 +2225,7 @@ pub fn reconcile_mesh_leaf_identity(
                  (mesh membership preserved)."
             );
         }
-        utils::pki::reissue_mesh_server_cert(pki_dir)
+        utils::pki::reissue_mesh_server_cert(pki_dir, expected_cn)
             .context("migrate mesh leaf: re-issue server cert")?;
         utils::pki::reissue_mesh_client_cert(pki_dir, expected_cn)
             .context("migrate mesh leaf: re-issue client cert")?;
@@ -2571,8 +2596,8 @@ pub(crate) async fn connect_mesh_tls(
         }
     };
 
-    match dial(utils::pki::MESH_SERVER_SAN).await {
-        Ok(tls) => Ok(tls),
+    let tls = match dial(utils::pki::MESH_SERVER_SAN).await {
+        Ok(tls) => tls,
         // A peer that has not been upgraded yet answers only the pre-rename
         // SNI and refuses this one at the TLS layer. Retry under the old name
         // rather than reporting an unreachable host: without this an upgraded
@@ -2584,9 +2609,71 @@ pub(crate) async fn connect_mesh_tls(
                 host,
                 "current mesh SNI refused; retrying as a pre-rename peer"
             );
-            dial(utils::mesh_compat::server_sni_fallback()).await
+            dial(utils::mesh_compat::server_sni_fallback()).await?
         }
-        Err(e) => Err(e),
+        Err(e) => return Err(e),
+    };
+    verify_dialled_peer(host, &tls).await?;
+    Ok(tls)
+}
+
+tokio::task_local! {
+    /// The peer id a dial is meant to reach. Set by
+    /// [`dialer::try_targets_tracked`]; unset for pairing, bootstrap, and other
+    /// dials made before the peer's id is known.
+    pub(crate) static DIAL_PEER: String;
+}
+
+/// When the dial is for a known peer id, refuse a server cert bound to another
+/// system and pin the peer once it presents its own name: any mesh member
+/// chains to the CA, so the chain alone does not show which one answered.
+pub(crate) async fn verify_dialled_peer(
+    host: &str,
+    tls: &tokio_rustls::client::TlsStream<TcpStream>,
+) -> Result<()> {
+    let Ok(expected) = DIAL_PEER.try_with(Clone::clone) else {
+        return Ok(());
+    };
+    let leaf = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|c| c.first())
+        .context("peer presented no server cert")?
+        .to_vec();
+    let id = expected.clone();
+    let pinned = ::db::pool::Db::process()
+        .read_async(move |c| ::db::mesh::is_peer_identity_pinned(c, &id))
+        .await?;
+    if check_peer_identity(host, &expected, &leaf, pinned)? && !pinned {
+        let id = expected.clone();
+        if let Err(e) = ::db::pool::Db::process()
+            .write_async(move |c| ::db::mesh::pin_peer_identity(c, &id))
+            .await
+        {
+            tracing::warn!(host, expected, "pin peer identity: {e:#}");
+        }
+    }
+    Ok(())
+}
+
+/// `Ok(true)` when the cert names `expected`. A cert without an identity name
+/// is refused only for a peer already pinned; refusing it for every peer is a
+/// later phase, once the whole fleet carries identity names.
+fn check_peer_identity(host: &str, expected: &str, leaf_der: &[u8], pinned: bool) -> Result<bool> {
+    match utils::pki::mesh_server_identity(leaf_der)? {
+        Some(id) if id == expected => Ok(true),
+        Some(id) => anyhow::bail!(
+            "{host} answered as system {id}, but the roster expects {expected} there; \
+             the roster id may be stale, or another system holds that address; refusing"
+        ),
+        None if pinned => anyhow::bail!(
+            "{host} presented no identity name, but {expected} has presented one before; refusing"
+        ),
+        None => {
+            tracing::debug!(host, expected, "peer cert carries no identity name");
+            Ok(false)
+        }
     }
 }
 
@@ -2715,6 +2802,90 @@ where
 #[cfg(test)]
 mod mesh_tests {
     use super::*;
+
+    fn server_leaf_der(host_cn: &str) -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(dir.path(), "founder").unwrap();
+        let (csr, _) = utils::pki::build_peer_csr(host_cn, utils::pki::PeerRole::Server).unwrap();
+        let (pem, _) =
+            utils::pki::sign_peer_csr(dir.path(), &csr, host_cn, utils::pki::PeerRole::Server)
+                .unwrap();
+        rustls_pemfile::certs(&mut pem.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap()
+            .to_vec()
+    }
+
+    #[test]
+    fn dialling_x_refuses_y_answering() {
+        let y = server_leaf_der("system-y");
+        let err = check_peer_identity("10.0.0.5", "system-x", &y, false).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("answered as system system-y"), "got: {msg}");
+        assert!(msg.contains("expects system-x"), "got: {msg}");
+        assert!(msg.contains("may be stale"), "got: {msg}");
+    }
+
+    #[test]
+    fn dialling_x_accepts_x() {
+        let x = server_leaf_der("system-x");
+        assert!(check_peer_identity("10.0.0.5", "system-x", &x, false).unwrap());
+        assert!(check_peer_identity("10.0.0.5", "system-x", &x, true).unwrap());
+    }
+
+    fn identityless_server_leaf_der() -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(dir.path(), "founder").unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let csr = rcgen::CertificateParams::new(vec![utils::pki::MESH_SERVER_SAN.to_string()])
+            .unwrap()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap();
+        let (pem, _) =
+            utils::pki::sign_peer_csr(dir.path(), &csr, "system-x", utils::pki::PeerRole::Server)
+                .unwrap();
+        rustls_pemfile::certs(&mut pem.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap()
+            .to_vec()
+    }
+
+    #[test]
+    fn pinned_peer_without_identity_name_is_refused() {
+        let leaf = identityless_server_leaf_der();
+        let err = check_peer_identity("10.0.0.5", "system-x", &leaf, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("presented no identity name"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn unpinned_peer_without_identity_name_is_accepted() {
+        let leaf = identityless_server_leaf_der();
+        assert!(!check_peer_identity("10.0.0.5", "system-x", &leaf, false).unwrap());
+    }
+
+    #[tokio::test]
+    async fn tracked_dial_scopes_the_expected_peer() {
+        let targets = vec!["10.0.0.5".to_string()];
+        let seen = dialer::try_targets_tracked(Some("system-x"), &targets, |_| async {
+            Ok(DIAL_PEER.try_with(Clone::clone).ok())
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen.as_deref(), Some("system-x"));
+        let unset = dialer::try_targets(&targets, |_| async {
+            Ok(DIAL_PEER.try_with(Clone::clone).ok())
+        })
+        .await
+        .unwrap();
+        assert_eq!(unset, None);
+    }
 
     fn classified(kind: &str, code: &str, message: &str) -> utils::jsonrpc::ErrorObject {
         utils::jsonrpc::ErrorObject {
@@ -3690,11 +3861,24 @@ mod added_coverage {
                 .unwrap();
         assert_eq!(a.action, MeshUpdateAction::Trust);
         assert_eq!(
-            a.peer_id.as_deref(),
+            a.id.as_deref(),
             Some("019f0000-0000-7000-8000-000000000000")
         );
         assert_eq!(a.on, Some(true));
         assert!(a.push);
+    }
+
+    #[test]
+    fn mesh_target_args_take_id_and_accept_legacy_peer_id() {
+        let id = "019f0000-0000-7000-8000-000000000000";
+        for key in ["id", "peerId", "peer_id"] {
+            let u: MeshUpdateArgs =
+                serde_json::from_value(serde_json::json!({ "action": "unpin", key: id })).unwrap();
+            assert_eq!(u.id.as_deref(), Some(id), "update via {key}");
+            let d: MeshDeleteArgs =
+                serde_json::from_value(serde_json::json!({ "action": "forget", key: id })).unwrap();
+            assert_eq!(d.id.as_deref(), Some(id), "delete via {key}");
+        }
     }
 
     // ── serde: skip_serializing_if on rollup rows ────────────────────────────
@@ -4341,7 +4525,7 @@ mod handler_dispatch_tests {
             .await,
         );
         assert!(
-            format!("{err:#}").contains("action=trust requires `peer_id`"),
+            format!("{err:#}").contains("action=trust requires `id`"),
             "got: {err:#}"
         );
     }
@@ -4353,7 +4537,7 @@ mod handler_dispatch_tests {
             mesh_update(
                 MeshUpdateArgs {
                     action: MeshUpdateAction::Trust,
-                    peer_id: Some(GHOST.parse().unwrap()),
+                    id: Some(GHOST.parse().unwrap()),
                     ..Default::default()
                 },
                 &ctx,
@@ -4380,7 +4564,7 @@ mod handler_dispatch_tests {
             .await,
         );
         assert!(
-            format!("{err:#}").contains("action=recover requires `peer_id`"),
+            format!("{err:#}").contains("action=recover requires `id`"),
             "got: {err:#}"
         );
     }
@@ -4460,7 +4644,7 @@ mod handler_dispatch_tests {
             let out = mesh_update(
                 MeshUpdateArgs {
                     action: MeshUpdateAction::Recover,
-                    peer_id: Some(pid.parse().unwrap()),
+                    id: Some(pid.parse().unwrap()),
                     ..Default::default()
                 },
                 &ctx,
@@ -4474,6 +4658,37 @@ mod handler_dispatch_tests {
                 }
                 _ => panic!("expected Recover variant"),
             }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mesh_update_unpin_clears_identity_pin() {
+        let tmp = tmp_db();
+        let ctx = empty_ctx();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pid = utils::id::new();
+            let conn = db::open_default().unwrap();
+            db::mesh::upsert_peer(&conn, &pid, "host-u", "10.0.0.1", 12002, Some("fp"), "ca")
+                .unwrap();
+            db::mesh::pin_peer_identity(&conn, &pid).unwrap();
+            drop(conn);
+            let out = mesh_update(
+                MeshUpdateArgs {
+                    action: MeshUpdateAction::Unpin,
+                    id: Some(pid.parse().unwrap()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            match out {
+                MeshUpdateOutput::Unpin(u) => assert!(u.cleared),
+                _ => panic!("expected Unpin variant"),
+            }
+            let conn = db::open_default().unwrap();
+            assert!(!db::mesh::is_peer_identity_pinned(&conn, &pid).unwrap());
         })
         .await;
     }
@@ -4539,7 +4754,7 @@ mod handler_dispatch_tests {
             .await,
         );
         assert!(
-            format!("{err:#}").contains("action=kick requires `peer_id`"),
+            format!("{err:#}").contains("action=kick requires `id`"),
             "got: {err:#}"
         );
     }
@@ -4558,7 +4773,7 @@ mod handler_dispatch_tests {
             .await,
         );
         assert!(
-            format!("{err:#}").contains("action=forget requires `peer_id`"),
+            format!("{err:#}").contains("action=forget requires `id`"),
             "got: {err:#}"
         );
     }
@@ -4571,7 +4786,7 @@ mod handler_dispatch_tests {
             let out = mesh_delete(
                 MeshDeleteArgs {
                     action: MeshDeleteAction::Forget,
-                    peer_id: Some(GHOST.parse().unwrap()),
+                    id: Some(GHOST.parse().unwrap()),
                 },
                 &ctx,
             )
@@ -4670,7 +4885,7 @@ mod handler_dispatch_tests {
             let out = mesh_update(
                 MeshUpdateArgs {
                     action: MeshUpdateAction::Trust,
-                    peer_id: Some(pid.parse().unwrap()),
+                    id: Some(pid.parse().unwrap()),
                     on: Some(true),
                     ..Default::default()
                 },
@@ -4699,7 +4914,7 @@ mod handler_dispatch_tests {
             let out = mesh_update(
                 MeshUpdateArgs {
                     action: MeshUpdateAction::Trust,
-                    peer_id: Some(pid.parse().unwrap()),
+                    id: Some(pid.parse().unwrap()),
                     on: Some(false),
                     ..Default::default()
                 },
@@ -4726,7 +4941,7 @@ mod handler_dispatch_tests {
                 mesh_update(
                     MeshUpdateArgs {
                         action: MeshUpdateAction::Trust,
-                        peer_id: Some(GHOST.parse().unwrap()),
+                        id: Some(GHOST.parse().unwrap()),
                         on: Some(true),
                         ..Default::default()
                     },
@@ -4780,7 +4995,7 @@ mod handler_dispatch_tests {
             let out = mesh_delete(
                 MeshDeleteArgs {
                     action: MeshDeleteAction::Kick,
-                    peer_id: Some(pid.parse().unwrap()),
+                    id: Some(pid.parse().unwrap()),
                 },
                 &ctx,
             )
@@ -4809,7 +5024,7 @@ mod handler_dispatch_tests {
                 mesh_delete(
                     MeshDeleteArgs {
                         action: MeshDeleteAction::Kick,
-                        peer_id: Some(GHOST.parse().unwrap()),
+                        id: Some(GHOST.parse().unwrap()),
                     },
                     &ctx,
                 )

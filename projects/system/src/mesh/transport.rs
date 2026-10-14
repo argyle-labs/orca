@@ -51,7 +51,7 @@ impl ReplicationTransport for MeshTransport {
     async fn push(&self, peer: &TransportPeer, bundle: &BTreeMap<String, Value>) -> Result<usize> {
         let envelope = sign_bundle(bundle.clone())?;
         let targets = dial_targets(peer);
-        crate::mesh::dialer::try_targets(&targets, |t| {
+        crate::mesh::dialer::try_targets_tracked(Some(&peer.peer_id), &targets, |t| {
             let envelope = envelope.clone();
             async move { push_replicate_bundle(&t, &envelope).await }
         })
@@ -64,18 +64,22 @@ impl ReplicationTransport for MeshTransport {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("peer {} has no pinned fp", peer.hostname))?;
         let targets = dial_targets(peer);
-        let envelope = crate::mesh::dialer::try_targets(&targets, |t| async move {
-            fetch_replicate_bundle(&t).await
-        })
+        let envelope = crate::mesh::dialer::try_targets_tracked(
+            Some(&peer.peer_id),
+            &targets,
+            |t| async move { fetch_replicate_bundle(&t).await },
+        )
         .await?;
         verify_envelope(&envelope, pinned_fp)
     }
 
     async fn fetch_roots(&self, peer: &TransportPeer) -> Result<BTreeMap<String, String>> {
         let targets = dial_targets(peer);
-        let r = crate::mesh::dialer::try_targets(&targets, |t| async move {
-            fetch_replicate_roots(&t).await
-        })
+        let r = crate::mesh::dialer::try_targets_tracked(
+            Some(&peer.peer_id),
+            &targets,
+            |t| async move { fetch_replicate_roots(&t).await },
+        )
         .await?;
         Ok(r.roots)
     }
