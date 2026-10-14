@@ -137,6 +137,9 @@ impl DescriptorTable {
                     "name": d.name,
                     "description": d.description,
                     "input_schema": parse_schema_or_open(d.input_schema, &defs),
+                    "role": d.required_role,
+                    "data_mutation": d.data_mutation,
+                    "local_only": !d.remote_ok,
                 })
             })
             .collect();
@@ -557,6 +560,44 @@ fn kind_of(value: &Value) -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn manifest_carries_policy_flags() {
+        static DESCRIPTORS: [EndpointDescriptor; 2] = [
+            EndpointDescriptor {
+                name: "fake.update",
+                description: "",
+                method: "POST",
+                path_template: "/update",
+                params: &[],
+                input_schema: "{}",
+                output_schema: "{}",
+                remote_ok: false,
+                required_role: "admin",
+                data_mutation: true,
+            },
+            EndpointDescriptor {
+                name: "fake.status",
+                description: "",
+                method: "GET",
+                path_template: "/status",
+                params: &[],
+                input_schema: "{}",
+                output_schema: "{}",
+                remote_ok: true,
+                required_role: "read",
+                data_mutation: false,
+            },
+        ];
+        let table = DescriptorTable::new(&DESCRIPTORS, "");
+        let tools: Value = serde_json::from_str(&table.manifest_json()).unwrap();
+        assert_eq!(tools[0]["role"], "admin");
+        assert_eq!(tools[0]["data_mutation"], true);
+        assert_eq!(tools[0]["local_only"], true);
+        assert_eq!(tools[1]["role"], "read");
+        assert_eq!(tools[1]["data_mutation"], false);
+        assert_eq!(tools[1]["local_only"], false);
+    }
 
     fn no_defs() -> Value {
         json!({})
