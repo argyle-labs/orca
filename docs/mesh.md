@@ -16,7 +16,7 @@ leave, and the security model.
 | See incoming pairing offers on this host | `orca system list --pending` |
 | Accept an offer | `orca system join --action accept <6-char-code>` |
 | List mesh members | `orca system list` |
-| Promote a peer to mutually-trusted | `orca system mesh update --action trust --peer-id <system-id> --on true` |
+| Promote a peer to mutually-trusted | `orca system mesh update --action trust --id <system-id> --on true` |
 | Enable secrets storage on this host | `orca system mesh update --action settings --self-secure true` |
 | Verify a peer end-to-end | `orca system health --id <system-id>` |
 | Show cert expiry / rotation status | `orca system certs list` |
@@ -105,10 +105,10 @@ flag each other secure:
 
 ```
 # On hotel (foxtrot's id from `orca system list`):
-orca system mesh update --action trust --peer-id 019f9f7b-2222-7e40-9e30-4987d8d12dcb --on true
+orca system mesh update --action trust --id 019f9f7b-2222-7e40-9e30-4987d8d12dcb --on true
 
 # On foxtrot (hotel's id):
-orca system mesh update --action trust --peer-id 019f9f7b-1176-7e40-9e30-4987d8d12dcb --on true
+orca system mesh update --action trust --id 019f9f7b-1176-7e40-9e30-4987d8d12dcb --on true
 ```
 
 The moment both bits are true, the host that already has the mesh CA
@@ -116,7 +116,7 @@ private key pushes it to the peer via `mesh/push-ca-key` over the existing
 mTLS channel. From that point, the newly-trusted host can extend its own
 offers (`can_invite=1` in its mDNS advertisement).
 
-`orca system mesh update --action trust --peer-id <system-id> --on false` reverses the local flag and notifies the
+`orca system mesh update --action trust --id <system-id> --on false` reverses the local flag and notifies the
 peer; mutual-trust falls back to false on both sides.
 
 ## self-secure (secrets gate)

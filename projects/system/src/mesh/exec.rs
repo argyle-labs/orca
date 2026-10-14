@@ -593,7 +593,7 @@ pub fn recover(peer_id: &str) -> Result<crate::mesh::MeshRecoverOutput> {
 pub fn unpin(peer_id: &str) -> Result<crate::mesh::MeshUnpinOutput> {
     let cleared = db::pool::with_pooled_or_open(|conn| pdb::unpin_peer_identity(conn, peer_id))?;
     Ok(crate::mesh::MeshUnpinOutput {
-        peer_id: peer_id.to_string(),
+        id: peer_id.to_string(),
         cleared,
     })
 }

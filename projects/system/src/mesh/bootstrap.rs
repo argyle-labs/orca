@@ -465,7 +465,7 @@ fn refuse_taken_joiner_id(
         anyhow::ensure!(
             fp.as_deref() == Some(signer_fp),
             "join refused: {joiner_id} already belongs to another mesh member; if that \
-             member is gone, run `orca system mesh delete --action forget --peer-id \
+             member is gone, run `orca system mesh delete --action forget --id \
              {joiner_id}` on this system, then re-join"
         );
     }
