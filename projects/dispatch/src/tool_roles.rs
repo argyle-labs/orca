@@ -70,6 +70,12 @@ fn plugin_policy(tool: &str) -> Option<PluginToolPolicy> {
         .and_then(|m| m.get(tool).copied())
 }
 
+/// Whether a loaded plugin declared `tool` execute-gated, i.e. its own gate
+/// plans on `dryRun` instead of applying.
+pub fn plugin_execute_gated(tool: &str) -> bool {
+    plugin_policy(tool).is_some_and(|p| p.execute_gated)
+}
+
 /// Install the lookup. Idempotent — first call wins; subsequent calls are
 /// no-ops. Matches the registry's single-instance lifecycle.
 pub fn install(pairs: impl IntoIterator<Item = (&'static str, &'static str)>) {

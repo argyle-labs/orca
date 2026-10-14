@@ -403,6 +403,21 @@ pub fn tool_manifest_json() -> String {
 pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
     match find(name) {
         Some(tool) => tool.run_json(args, ctx).await,
+        // The surfaces below bypass the `run_json` gate, so a `dryRun` they
+        // cannot honour would apply. A plugin tool declared execute-gated
+        // plans in its own gate.
+        None if args
+            .get(contract::plan::DRY_RUN_FIELD)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && !crate::tool_roles::plugin_execute_gated(name) =>
+        {
+            Err(
+                contract::OrcaError::invalid(format!("{name} does not support dryRun"))
+                    .with_code("args.invalid")
+                    .into(),
+            )
+        }
         // On a static miss, try the dynamic loaded-plugin fallback, then the
         // live unit surface, before giving up — so loaded plugin tools AND the
         // universal `unit.<kind>.<verb>` surface share this one entrypoint.
@@ -923,6 +938,53 @@ mod tests {
         assert!(
             out["args"].get("peer").is_none(),
             "peer key must be stripped"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_is_refused_on_paths_that_bypass_the_gate() {
+        use contract::{CallerIdentity, RemoteExec};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountingExec(AtomicUsize);
+        #[async_trait]
+        impl RemoteExec for CountingExec {
+            async fn exec(
+                &self,
+                _peer: &str,
+                _tool: &str,
+                _args: Value,
+                _caller: Option<CallerIdentity>,
+                _cid: Option<String>,
+            ) -> Result<Value> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Value::Null)
+            }
+        }
+        let mut ctx = make_ctx();
+        let spy = Arc::new(CountingExec(AtomicUsize::new(0)));
+        let svc: Arc<dyn RemoteExec> = spy.clone();
+        ctx.register_service(svc);
+        ctx.set_peer(Some("thor".into()));
+
+        for name in ["unit.container.delete", "proxmox.vm_delete"] {
+            let err = dispatch(name, serde_json::json!({"id": "u-1", "dryRun": true}), &ctx)
+                .await
+                .unwrap_err();
+            let oe = err
+                .downcast_ref::<contract::OrcaError>()
+                .expect("OrcaError");
+            assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{name}: {err}");
+            assert_eq!(oe.kind, contract::ErrorKind::Invalid, "{name}: {err}");
+            assert!(
+                err.to_string()
+                    .contains(&format!("{name} does not support dryRun")),
+                "{name}: {err}"
+            );
+        }
+        assert_eq!(
+            spy.0.load(Ordering::SeqCst),
+            0,
+            "a refused dry run reached a peer"
         );
     }
 
