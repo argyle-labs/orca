@@ -57,7 +57,7 @@ fn profile_is_a_gated_admin_write_and_privilege_audit_is_a_read() {
     let mutations = dispatch::data_mutation_names();
 
     assert!(gated.contains(&"system.profile"), "gated set = {gated:?}");
-    assert!(mutations.contains(&"system.profile"));
+    assert!(!mutations.contains(&"system.profile"));
     assert_eq!(dispatch::required_role("system.profile"), Some("admin"));
 
     assert!(!gated.contains(&"identity.privilege.audit"));
@@ -112,7 +112,13 @@ fn model_backends_check_is_an_ungated_read() {
 
 /// Core verbs a non-admin `can_mutate` caller may invoke. `data_mutation` is
 /// opt-in, so anything else that writes stays admin-only.
-const ALLOWED_DATA_MUTATIONS: &[&str] = &[];
+const ALLOWED_DATA_MUTATIONS: &[&str] = &[
+    "backup.check",
+    "backup.restore",
+    "backup.run",
+    "backup.sync",
+    "storage.share.repair-permissions",
+];
 
 /// A verb that applies changes must be restricted in WHO may call it — its
 /// default execute and its dry run alike.

@@ -214,7 +214,7 @@ pub struct GuestExecArgs {
 /// stdout/stderr/exit code. Routes to the LXC seam or the VM guest-agent backend
 /// by the guest's kind. Admin-only and side-effecting — mirrors the `orca admin
 /// lxc-exec` privilege boundary.
-#[orca_tool(domain = "guest", verb = "exec", data_mutation = true, role = "admin")]
+#[orca_tool(domain = "guest", verb = "exec", role = "admin")]
 async fn guest_exec_run(args: GuestExecArgs, _ctx: &ToolCtx) -> Result<ExecOutput> {
     let provider = provider_for(&args.id).await;
     let scope = resolve_scope(&args.id, args.scope).await;
@@ -287,12 +287,7 @@ fn check_contents_parse(path: &str, contents: &[u8], allow_unparseable: bool) ->
 /// [MUTATES STATE] Write a file into a guest — the confined `pct push` seam for an LXC, the
 /// guest-agent `file-write` for a VM. Admin-only and side-effecting — mirrors the
 /// `orca admin lxc-push` privilege boundary; the payload never rides argv.
-#[orca_tool(
-    domain = "guest",
-    verb = "write_file",
-    data_mutation = true,
-    role = "admin"
-)]
+#[orca_tool(domain = "guest", verb = "write_file", role = "admin")]
 async fn guest_write_file(args: GuestWriteFileArgs, _ctx: &ToolCtx) -> Result<()> {
     check_contents_parse(&args.path, args.contents.as_bytes(), args.allow_unparseable)?;
     let provider = provider_for(&args.id).await;

@@ -36,12 +36,7 @@ const MARKER: &str = "[MUTATES STATE] ";
 /// Each entry needs a written reason. The list is not a parking lot for verbs
 /// nobody got around to documenting — that is the defect this test exists to
 /// catch.
-const ALLOWLIST: &[(&str, &str)] = &[
-    // `auth.login` writes a session row, but the marker is addressed to an
-    // operator deciding whether a call is safe to make, and refusing to sign
-    // in is not the decision it is meant to provoke.
-    ("auth.login", "signing in is not an operator-visible change"),
-];
+const ALLOWLIST: &[(&str, &str)] = &[];
 
 /// The marker is the only signal in the tool description that a verb applies
 /// changes — the OpenAPI renderer strips it into the "mutates" affordance and
