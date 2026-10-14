@@ -162,7 +162,8 @@ fn control_plane_writes_list_has_no_stale_entries() {
 /// deliberately NOT `execute_gated`: each already implements dry-run by default
 /// and returns a richer answer than `ExecutionPlan::generic` could, so gating
 /// them would replace a real plan with an empty one. They still spell the
-/// opt-in `execute`. `storage.mount.create`'s `force` is NOT a dry-run gate at
+/// opt-in `execute`. `plugin.create` gates only `action=install` itself, since
+/// `invoke` reaches plugin reads and plugins that gate their own verbs. `storage.mount.create`'s `force` is NOT a dry-run gate at
 /// all — it overrides the multi-mount collision guard, a different concept that
 /// must not be folded into this one.
 #[test]
