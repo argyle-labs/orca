@@ -423,6 +423,18 @@ fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
         "mesh/exec refused: '{tool}' action '{}' is local-only and cannot be invoked by a remote peer",
         action.unwrap_or_default()
     );
+    // `plugin.create action=invoke` names a plugin verb in its args; without
+    // this a local-only plugin verb is reachable through the remote-OK seam.
+    if tool == "plugin.create" && action == Some("invoke") {
+        let inner = args
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        anyhow::ensure!(
+            dispatch::remote_ok::is_allowed(inner),
+            "mesh/exec refused: plugin verb '{inner}' is local_only on this peer"
+        );
+    }
     Ok(())
 }
 
@@ -1131,6 +1143,7 @@ mod tests {
 
     const PLUGIN_ADMIN_TOOL: &str = "listener_test_plugin.adopt";
     const PLUGIN_ANY_TOOL: &str = "listener_test_plugin.status";
+    const PLUGIN_LOCAL_TOOL: &str = "listener_test_plugin.engine_update";
 
     /// Callers the fake plugin saw, by username (`None` = no caller).
     static SEEN_CALLERS: std::sync::Mutex<Vec<Option<String>>> = std::sync::Mutex::new(Vec::new());
@@ -1162,7 +1175,42 @@ mod tests {
                 PLUGIN_ANY_TOOL.to_string(),
                 dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("any"), None, None),
             ),
+            (
+                PLUGIN_LOCAL_TOOL.to_string(),
+                dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("any"), None, None)
+                    .local_only(Some(true)),
+            ),
         ]);
+    }
+
+    #[tokio::test]
+    async fn exec_refuses_a_local_only_plugin_tool() {
+        install_fake_plugin();
+        let params = serde_json::json!({ "tool": PLUGIN_LOCAL_TOOL, "args": {} });
+        let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("local_only"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn exec_refuses_a_local_only_plugin_tool_through_plugin_create_invoke() {
+        install_fake_plugin();
+        let params = serde_json::json!({
+            "tool": "plugin.create",
+            "args": { "action": "invoke", "tool": PLUGIN_LOCAL_TOOL, "args": {} },
+        });
+        let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("local_only"), "got: {err}");
+    }
+
+    #[test]
+    fn plugin_create_invoke_of_a_remote_ok_verb_passes_the_local_only_guard() {
+        install_fake_plugin();
+        let args = serde_json::json!({ "action": "invoke", "tool": PLUGIN_ANY_TOOL });
+        assert!(reject_remote_local_only_action("plugin.create", &args).is_ok());
     }
 
     #[test]

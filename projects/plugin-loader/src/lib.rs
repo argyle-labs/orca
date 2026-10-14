@@ -1008,7 +1008,8 @@ fn install_tool_policies(software: &str, tools: &HashMap<String, ToolDef>) {
                 d.role.as_deref(),
                 d.execute_gated,
                 d.data_mutation,
-            ),
+            )
+            .local_only(d.local_only),
         )
     }));
 }
@@ -2104,6 +2105,7 @@ mod loader_tests {
                     role: Some("admin".into()),
                     execute_gated: Some(false),
                     data_mutation: Some(true),
+                    local_only: Some(true),
                 },
                 plugin_proto::ToolDef {
                     name: "loaderfakeplugin.fetch".into(),
@@ -2113,6 +2115,7 @@ mod loader_tests {
                     role: None,
                     execute_gated: None,
                     data_mutation: None,
+                    local_only: None,
                 },
             ],
             backends: vec![
@@ -2223,6 +2226,10 @@ mod loader_tests {
         assert!(dispatch::tool_roles::is_data_mutation(
             "loaderfakeplugin.ping"
         ));
+        // A manifest `local_only` reaches the mesh denylist; an undeclared one
+        // stays remote-callable.
+        assert!(!dispatch::remote_ok::is_allowed("loaderfakeplugin.ping"));
+        assert!(dispatch::remote_ok::is_allowed("loaderfakeplugin.fetch"));
 
         // Registry accessors now see the live plugin.
         assert!(is_loaded("loaderfakeplugin"));
@@ -2281,6 +2288,7 @@ mod loader_tests {
             "any",
             "role policy removed with the plugin"
         );
+        assert!(dispatch::remote_ok::is_allowed("loaderfakeplugin.ping"));
         assert!(
             !loaded_tool_defs()
                 .iter()
