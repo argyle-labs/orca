@@ -406,13 +406,28 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
     }
     // The surfaces below bypass the `run_json` gate, so a `dryRun` they
     // cannot honour would apply. A plugin tool declared execute-gated plans in
-    // its own gate.
+    // its own gate. A tool this host does not have is checked by the peer it
+    // is forwarded to, which knows whether it honours `dryRun`.
     if crate::erased::dry_run_requested(&args)? && !crate::tool_roles::plugin_execute_gated(name) {
-        return Err(
-            contract::OrcaError::invalid(format!("{name} does not support dryRun"))
-                .with_code("args.invalid")
-                .into(),
-        );
+        let known_here = dynamic_owns(name)
+            || crate::unit_surface::unit_owns(name)
+            || crate::diagnostics_surface::diagnostics_owns(name)
+            || crate::ups_surface::ups_owns(name);
+        if known_here {
+            return Err(
+                contract::OrcaError::invalid(format!("{name} does not support dryRun"))
+                    .with_code("args.invalid")
+                    .into(),
+            );
+        }
+        if ctx.peer().is_none() {
+            return Err(contract::OrcaError::invalid(format!(
+                "{name} is not available on this system; cannot verify dryRun support"
+            ))
+            .with_code("args.invalid")
+            .into());
+        }
+        return forward_unknown_to_peer(name, args, ctx).await;
     }
     // On a static miss, try the dynamic loaded-plugin fallback, then the live
     // unit surface, before giving up — so loaded plugin tools AND the
@@ -987,6 +1002,8 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_is_refused_on_paths_that_bypass_the_gate() {
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
         use contract::{CallerIdentity, RemoteExec};
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct CountingExec(AtomicUsize);
@@ -1010,21 +1027,22 @@ mod tests {
         ctx.register_service(svc);
         ctx.set_peer(Some("thor".into()));
 
-        for name in ["unit.container.delete", "proxmox.vm_delete"] {
-            let err = dispatch(name, serde_json::json!({"id": "u-1", "dryRun": true}), &ctx)
-                .await
-                .unwrap_err();
-            let oe = err
-                .downcast_ref::<contract::OrcaError>()
-                .expect("OrcaError");
-            assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{name}: {err}");
-            assert_eq!(oe.kind, contract::ErrorKind::Invalid, "{name}: {err}");
-            assert!(
-                err.to_string()
-                    .contains(&format!("{name} does not support dryRun")),
-                "{name}: {err}"
-            );
-        }
+        // A plugin tool loaded here is refused even with a peer named: this
+        // host knows it does not honour `dryRun`.
+        let name = FAKE_PLUGIN_TOOL;
+        let err = dispatch(name, serde_json::json!({"id": "u-1", "dryRun": true}), &ctx)
+            .await
+            .unwrap_err();
+        let oe = err
+            .downcast_ref::<contract::OrcaError>()
+            .expect("OrcaError");
+        assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{name}: {err}");
+        assert_eq!(oe.kind, contract::ErrorKind::Invalid, "{name}: {err}");
+        assert!(
+            err.to_string()
+                .contains(&format!("{name} does not support dryRun")),
+            "{name}: {err}"
+        );
         assert_eq!(
             spy.0.load(Ordering::SeqCst),
             0,
@@ -1470,6 +1488,62 @@ mod tests {
         let mut args = json!({});
         apply_dry_run_query(&HashMap::new(), &mut args).unwrap();
         assert_eq!(args, json!({}));
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_of_a_tool_absent_here_names_why_it_cannot_be_checked() {
+        let err = dispatch("ghost.tool", json!({ "dryRun": true }), &make_ctx())
+            .await
+            .unwrap_err();
+        let oe = find_orca_error(&err).unwrap_or_else(|| panic!("{err}"));
+        assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{oe}");
+        assert_eq!(
+            oe.message,
+            "ghost.tool is not available on this system; cannot verify dryRun support"
+        );
+    }
+
+    type RemoteCall = (String, String, Value);
+
+    struct RecordingRemote(std::sync::Mutex<Vec<RemoteCall>>);
+
+    #[async_trait]
+    impl contract::RemoteExec for RecordingRemote {
+        async fn exec(
+            &self,
+            peer: &str,
+            tool: &str,
+            args: Value,
+            _caller: Option<contract::CallerIdentity>,
+            _correlation_id: Option<String>,
+        ) -> Result<Value> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((peer.into(), tool.into(), args));
+            Ok(json!({ "forwarded": true }))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_of_a_tool_absent_here_goes_to_the_named_peer() {
+        let remote = Arc::new(RecordingRemote(std::sync::Mutex::new(Vec::new())));
+        let mut ctx = make_ctx();
+        ctx.register_service::<Arc<dyn contract::RemoteExec>>(remote.clone());
+        ctx.set_peer(Some("peer-a".into()));
+        let out = dispatch("ghost.tool", json!({ "dryRun": true }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out, json!({ "forwarded": true }));
+        let calls = remote.0.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![(
+                "peer-a".into(),
+                "ghost.tool".into(),
+                json!({ "dryRun": true })
+            )]
+        );
     }
 
     #[tokio::test]

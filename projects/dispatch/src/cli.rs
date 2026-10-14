@@ -249,11 +249,19 @@ pub async fn exec_remote<T: contract::OrcaToolDef>(
     #[allow(clippy::disallowed_types)]
     let mut args_value =
         serde_json::to_value(&args).map_err(|e| anyhow::anyhow!("serialize args: {e}"))?;
-    if dry_run && let Some(obj) = args_value.as_object_mut() {
-        obj.insert(
-            contract::plan::DRY_RUN_FIELD.into(),
-            serde_json::Value::Bool(true),
-        );
+    if let Some(obj) = args_value.as_object_mut() {
+        if dry_run {
+            obj.insert(
+                contract::plan::DRY_RUN_FIELD.into(),
+                serde_json::Value::Bool(true),
+            );
+        } else if T::EXECUTE_GATED {
+            // An older peer's gate plans unless told to execute.
+            obj.insert(
+                contract::plan::EXECUTE_FIELD.into(),
+                serde_json::Value::Bool(true),
+            );
+        }
     }
     let svc = ctx.service::<Arc<dyn RemoteExec>>()?;
     // Local CLI/REST entrypoints reach this path after passing their own auth
@@ -1638,13 +1646,31 @@ mod tests {
         exec_gated::<Gated>(Args { apply: true }, true, Some("host-x"), &ctx)
             .await
             .unwrap();
-        let calls = spy.0.lock().unwrap();
+        let calls = spy.0.lock().unwrap().clone();
         assert_eq!(
             calls[0],
             serde_json::json!({ "apply": true, "execute": true })
         );
         assert_eq!(
             calls[1],
+            serde_json::json!({ "apply": false, "dryRun": true })
+        );
+
+        exec_remote::<Gated>("host-x", Args { apply: true }, &ctx)
+            .await
+            .unwrap();
+        let mut dry_ctx = ctx.clone();
+        dry_ctx.set_dry_run(true);
+        exec_remote::<Gated>("host-x", Args { apply: true }, &dry_ctx)
+            .await
+            .unwrap();
+        let calls = spy.0.lock().unwrap();
+        assert_eq!(
+            calls[2],
+            serde_json::json!({ "apply": true, "execute": true })
+        );
+        assert_eq!(
+            calls[3],
             serde_json::json!({ "apply": false, "dryRun": true })
         );
     }
