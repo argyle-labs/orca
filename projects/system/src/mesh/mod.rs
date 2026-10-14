@@ -2609,7 +2609,7 @@ pub(crate) async fn connect_mesh_tls(
         }
         Err(e) => return Err(e),
     };
-    verify_dialled_peer(host, &tls)?;
+    verify_dialled_peer(host, &tls).await?;
     Ok(tls)
 }
 
@@ -2623,7 +2623,7 @@ tokio::task_local! {
 /// When the dial is for a known peer id, refuse a server cert bound to another
 /// system and pin the peer once it presents its own name: any mesh member
 /// chains to the CA, so the chain alone does not show which one answered.
-pub(crate) fn verify_dialled_peer(
+pub(crate) async fn verify_dialled_peer(
     host: &str,
     tls: &tokio_rustls::client::TlsStream<TcpStream>,
 ) -> Result<()> {
@@ -2635,15 +2635,20 @@ pub(crate) fn verify_dialled_peer(
         .1
         .peer_certificates()
         .and_then(|c| c.first())
-        .context("peer presented no server cert")?;
-    let pinned =
-        ::db::pool::with_pooled_or_open(|c| ::db::mesh::is_peer_identity_pinned(c, &expected))?;
-    if check_peer_identity(host, &expected, leaf.as_ref(), pinned)?
-        && !pinned
-        && let Err(e) =
-            ::db::pool::with_pooled_or_open(|c| ::db::mesh::pin_peer_identity(c, &expected))
-    {
-        tracing::warn!(host, expected, "pin peer identity: {e:#}");
+        .context("peer presented no server cert")?
+        .to_vec();
+    let id = expected.clone();
+    let pinned = ::db::pool::Db::process()
+        .read_async(move |c| ::db::mesh::is_peer_identity_pinned(c, &id))
+        .await?;
+    if check_peer_identity(host, &expected, &leaf, pinned)? && !pinned {
+        let id = expected.clone();
+        if let Err(e) = ::db::pool::Db::process()
+            .write_async(move |c| ::db::mesh::pin_peer_identity(c, &id))
+            .await
+        {
+            tracing::warn!(host, expected, "pin peer identity: {e:#}");
+        }
     }
     Ok(())
 }

@@ -1055,7 +1055,7 @@ async fn dial_mesh_mtls(
             .with_context(|| format!("connect {target}"))?;
         let sni = ServerName::try_from(utils::pki::MESH_SERVER_SAN)?.to_owned();
         let mut tls = connector.connect(sni, tcp).await.context("TLS handshake")?;
-        crate::mesh::verify_dialled_peer(host, &tls)?;
+        crate::mesh::verify_dialled_peer(host, &tls).await?;
         write_frame(
             &mut tls,
             &serde_json::to_vec(&Request::new(1, method, Some(params)))?,
