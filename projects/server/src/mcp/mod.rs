@@ -380,30 +380,7 @@ pub async fn handle_jsonrpc(
                 ));
             }
 
-            if name.contains('.') && is_plugin_tool(name) {
-                // Plugin-declared tool. Forward to the daemon, which
-                // dispatches via the in-process PluginRegistry.
-                match call_plugin_tool(name, args).await {
-                    Ok(result) => reply(
-                        id,
-                        json!({
-                            "content": [{
-                                "type": "text",
-                                "text": serde_json::to_string(&result).unwrap_or_default()
-                            }],
-                            "isError": false,
-                            "structuredContent": result,
-                        }),
-                    ),
-                    Err(e) => reply(
-                        id,
-                        json!({
-                            "content": [{ "type": "text", "text": format!("Error: {e}") }],
-                            "isError": true
-                        }),
-                    ),
-                }
-            } else if let Some((server_name, internal_name)) = tool_registry.get(name).cloned() {
+            if let Some((server_name, internal_name)) = tool_registry.get(name).cloned() {
                 // Route to the owning federated server using the internal tool name
                 match pool.get_or_connect(&server_name).await {
                     Err(e) => reply(
@@ -433,8 +410,8 @@ pub async fn handle_jsonrpc(
                         }
                     }
                 }
-            } else if dispatch::names().contains(&name)
-                || (in_daemon && dispatch::dynamic_owns(name))
+            } else if dispatch::tool_exists(name)
+                || (in_daemon && dispatch::dispatchable(name, args))
             {
                 // Ambient-input overlay — the MCP equivalent of REST's
                 // header extraction in `http_dispatch`. JSON-RPC has no
@@ -558,8 +535,8 @@ fn tool_names_hash(names: &[&str]) -> u64 {
 //
 // `mcp-serve` is a stdio child process spawned by Claude — distinct from the
 // orca daemon, so it cannot share the in-process `PluginRegistry`. Plugin tool
-// declarations are read from orca.db (cheap, no IPC); calls are forwarded to
-// the daemon's HTTP endpoint, which dispatches via the registry.
+// declarations are read from orca.db (cheap, no IPC); calls go through the
+// daemon's `/api/v1/{name}` route, which dispatches via the registry.
 
 const PLUGIN_TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
 
@@ -579,55 +556,6 @@ fn load_plugin_tool_rows() -> Vec<db::plugin_tools::PluginToolRow> {
             Vec::new()
         }
     }
-}
-
-fn is_plugin_tool(fq_name: &str) -> bool {
-    db::open_default()
-        .and_then(|c| db::plugin_tools::get(&c, fq_name))
-        .map(|r| r.is_some())
-        .unwrap_or(false)
-}
-
-async fn call_plugin_tool(fq_name: &str, args: &Value) -> Result<Value> {
-    use anyhow::Context;
-    let url = format!(
-        "{}/api/plugin-tools/{fq_name}/call",
-        plugin_tool_http_base()
-    );
-    let body = json!({ "arguments": args.clone() });
-    // Loopback HTTPS to the same-process daemon: self-signed core-CA cert,
-    // accept invalid so we don't have to thread the CA root through here.
-    let token = auth::loopback_token::get()
-        .map(|s| s.to_string())
-        .or_else(auth::loopback_token::read_from_disk)
-        .context("loopback token unavailable — is the daemon running?")?;
-    let resp = auth::loopback_token::loopback_only_reqwest_client(&url)?
-        .post(&url)
-        .bearer_auth(token)
-        .json(&body)
-        .timeout(PLUGIN_TOOL_CALL_TIMEOUT)
-        .send()
-        .await
-        .with_context(|| format!("POST {url}"))?;
-    let status = resp.status();
-    let payload: Value = resp
-        .json()
-        .await
-        .context("plugin tool response was not JSON")?;
-    if !status.is_success() {
-        let msg = payload
-            .get("error")
-            .and_then(|e| e.as_str())
-            .unwrap_or("unknown error");
-        anyhow::bail!(
-            "plugin tool '{fq_name}' failed ({}): {msg}",
-            status.as_u16()
-        );
-    }
-    Ok(payload
-        .get("result")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null))
 }
 
 /// The orca-core tool catalog (registry-derived + not-yet-migrated static +
@@ -1057,14 +985,6 @@ mod tests {
     }
 
     #[test]
-    fn is_plugin_tool_false_for_unregistered_name() {
-        // A fully-qualified name that no plugin declares must not be treated as
-        // a plugin tool (it would otherwise be forwarded to the wrong dispatch
-        // path). Holds whether or not a db is present in the test env.
-        assert!(!is_plugin_tool("definitely.not.a.real.plugin.tool"));
-    }
-
-    #[test]
     fn load_plugin_tool_rows_never_panics() {
         // Robustness: a missing/locked db must degrade to an empty list, not a
         // panic — the bridge falls back to the registry-only catalog.
@@ -1171,16 +1091,6 @@ mod tests {
                 "signature version must match catalog version"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn call_plugin_tool_errors_for_bogus_tool() {
-        // A plugin tool that cannot exist never resolves to a success value:
-        // either the loopback token/daemon is unavailable (transport error) or
-        // the daemon rejects the unknown tool. Both are `Err`.
-        ::model::ensure_crypto_provider();
-        let res = call_plugin_tool("nonexistent.bogus_tool", &json!({})).await;
-        assert!(res.is_err(), "bogus plugin tool must not succeed: {res:?}");
     }
 
     #[test]
@@ -1414,11 +1324,6 @@ mod tests {
         assert_eq!(entry["description"], "desc here");
         assert_eq!(entry["inputSchema"]["properties"]["x"]["type"], "string");
 
-        // The same seeded row drives the routing predicates the serve loop uses.
-        assert!(
-            is_plugin_tool("myns.dothing"),
-            "seeded fq_name must be recognized as a plugin tool"
-        );
         assert!(
             load_plugin_tool_rows()
                 .iter()
@@ -1581,6 +1486,105 @@ mod tests {
             .as_str()
             .unwrap_or_default();
         assert!(text.contains("peer: a blank"), "{resp}");
+    }
+
+    const REMOTE_SYSTEM: &str = "0190a1b2-0000-7000-8000-000000000002";
+
+    struct RosterExec;
+    // Hand-desugared `async_trait` impl: this crate does not depend on the macro.
+    impl contract::RemoteExec for RosterExec {
+        fn peers<'a, 'b>(
+            &'a self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Vec<contract::PeerRef>>> + Send + 'b>,
+        >
+        where
+            'a: 'b,
+            Self: 'b,
+        {
+            Box::pin(async {
+                Ok(vec![contract::PeerRef {
+                    id: REMOTE_SYSTEM.into(),
+                    name: "there".into(),
+                    is_local: false,
+                }])
+            })
+        }
+        fn exec<'a, 'b, 'c, 'd>(
+            &'a self,
+            peer: &'b str,
+            tool: &'c str,
+            args: Value,
+            _caller: Option<contract::CallerIdentity>,
+            _cid: Option<String>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'd>>
+        where
+            'a: 'd,
+            'b: 'd,
+            'c: 'd,
+            Self: 'd,
+        {
+            let out = json!({ "peer": peer, "tool": tool, "args": args });
+            Box::pin(async move { Ok(out) })
+        }
+    }
+
+    fn call_text(resp: &Value) -> &str {
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn handle_jsonrpc_tools_call_routes_unit_op_with_system_id() {
+        ::model::ensure_crypto_provider();
+        let (mut ctx, pool, cfg) = jsonrpc_fixtures();
+        let remote: Arc<dyn contract::RemoteExec> = Arc::new(RosterExec);
+        ctx.register_service(remote);
+        let mut reg = HashMap::new();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+            "params": {
+                "name": "routing_test_kind.list",
+                "arguments": { "systemId": REMOTE_SYSTEM, "limit": 1 }
+            }
+        });
+        let resp = handle_jsonrpc(&req, &ctx, &pool, &mut reg, &cfg, true, Some("admin"), true)
+            .await
+            .expect("tools/call must reply");
+        assert_eq!(resp["result"]["isError"], false, "{resp}");
+        let out: Value = serde_json::from_str(call_text(&resp)).expect("json text");
+        assert_eq!(out["peer"], REMOTE_SYSTEM);
+        assert_eq!(out["tool"], "routing_test_kind.list");
+        assert_eq!(out["args"], json!({ "limit": 1 }));
+    }
+
+    #[tokio::test]
+    async fn handle_jsonrpc_tools_call_rejects_system_id_on_static_tool() {
+        ::model::ensure_crypto_provider();
+        let (ctx, pool, cfg) = jsonrpc_fixtures();
+        let mut reg = HashMap::new();
+        let tool = dispatch::mcp_definitions()
+            .into_iter()
+            .find_map(|d| {
+                let name = d["name"].as_str()?.to_string();
+                (dispatch::tool_exists(&name)
+                    && d["inputSchema"]["properties"]["systemId"].is_null())
+                .then_some(name)
+            })
+            .expect("a static tool without its own systemId field");
+        let req = json!({
+            "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+            "params": { "name": tool, "arguments": { "systemId": REMOTE_SYSTEM } }
+        });
+        let resp = handle_jsonrpc(&req, &ctx, &pool, &mut reg, &cfg, true, Some("admin"), true)
+            .await
+            .expect("tools/call must reply");
+        assert_eq!(resp["result"]["isError"], true, "{resp}");
+        assert!(
+            call_text(&resp).contains("does not take systemId"),
+            "{resp}"
+        );
     }
 
     #[tokio::test]
