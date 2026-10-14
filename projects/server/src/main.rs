@@ -320,12 +320,15 @@ enum AdminAction {
     PluginApply,
     /// Record the invoking user's installed `<name>` plugin binary as trusted
     /// for `plugin-apply`, in the root-owned store under
-    /// `/etc/orca/plugin-trust`. Must run as root, and is deliberately absent
-    /// from the daemon's sudoers grant: approving a binary to run as root is an
-    /// administrator's decision. Re-run after every plugin update.
+    /// `/etc/orca/plugin-trust`, once its `<name>.minisig` release signature
+    /// verifies against a trusted key and names this plugin and binary hash.
+    /// Must run as root. Re-run after every plugin update.
     PluginTrust {
         /// Installed plugin name (the file under `~/.orca/plugins`).
         name: String,
+        /// Development only: record the binary without a signature check.
+        #[arg(long)]
+        unsigned: bool,
     },
     /// List all users (id, username, role, updated_at). Local-only; requires
     /// shell + DB access. Used to diagnose replicated user-id divergence.
@@ -1033,7 +1036,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::LxcPush => cmd_admin_lxc_push().await,
         AdminAction::CronApply => cmd_admin_cron_apply().await,
         AdminAction::PluginApply => cmd_admin_plugin_apply().await,
-        AdminAction::PluginTrust { name } => cmd_admin_plugin_trust(&name),
+        AdminAction::PluginTrust { name, unsigned } => cmd_admin_plugin_trust(&name, unsigned),
         AdminAction::ListUsers => cmd_admin_list_users(),
         AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
     }
@@ -1249,23 +1252,31 @@ async fn cmd_admin_plugin_apply() -> Result<()> {
     }
 }
 
-fn cmd_admin_plugin_trust(name: &str) -> Result<()> {
-    use system::plugin_apply;
+fn cmd_admin_plugin_trust(name: &str, unsigned: bool) -> Result<()> {
+    use system::plugin_apply::{self, Signing};
     anyhow::ensure!(
         plugin_apply::is_root(),
         "plugin-trust must run as root (sudo orca admin plugin-trust {name})"
     );
     let home = plugin_apply::invoking_orca_home()
         .context("cannot resolve the invoking user's orca home")?;
-    let hex = plugin_apply::trust(
+    let signing = if unsigned {
+        tracing::warn!(plugin = %name, "plugin-trust --unsigned: recording without a signature check");
+        Signing::Unsigned
+    } else {
+        Signing::Required(system::plugin_sig::trusted_keys())
+    };
+    let trusted = plugin_apply::trust(
         &home,
         &plugin_apply::TrustStore::system(),
         name,
         plugin_apply::invoking_uid()?,
+        signing,
     )?;
     let caller_uid = std::env::var("SUDO_UID").unwrap_or_else(|_| "direct".into());
-    tracing::info!(plugin = %name, sha256 = %hex, caller_uid = %caller_uid, "plugin-trust recorded");
-    println!("trusted {name} sha256={hex}");
+    let version = trusted.version.as_deref().unwrap_or("unsigned");
+    tracing::info!(plugin = %name, sha256 = %trusted.sha256, version = %version, caller_uid = %caller_uid, "plugin-trust recorded");
+    println!("trusted {name} {version} sha256={}", trusted.sha256);
     Ok(())
 }
 

@@ -105,6 +105,8 @@ graphql_client_codegen = "0.14"
 
 # Hashing & RNG
 sha2 = "0.11"
+# Plugin release signatures (`system::plugin_sig`).
+minisign-verify = "0.3"
 rand = "0.10"
 
 # Per-host bootstrap signing key for the pre-join channel (mesh/offer +
