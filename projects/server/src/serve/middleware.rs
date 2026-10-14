@@ -580,18 +580,20 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
         }
         if let Some(ident) = try_token_auth(token) {
             let mut req = req;
-            // Token rows minted post-2026-05-29 carry the issuer's user_id;
-            // resolve to a CallerIdentity so REST→mesh dispatch mints a token
-            // bound to the actual operator. Legacy NULL → no override; the
-            // shared ctx's ambient host-admin identity stays in effect.
-            if let Some(uid) = identity_user_id(&ident)
-                && let Some(mut c) = caller_from_user_id(&uid)
-            {
-                // Dispatch re-checks the role against this identity, so it
-                // carries the token's scope, not the issuing user's.
-                c.role = ident.role.clone();
-                c.can_mutate = ident.can_mutate;
-                req.extensions_mut().insert(c);
+            // Resolve the issuing user so REST→mesh dispatch mints a token
+            // bound to them. A legacy (NULL user) or orphaned token is marked
+            // unbound so it never inherits the ambient admin host operator.
+            match identity_user_id(&ident).and_then(|uid| caller_from_user_id(&uid)) {
+                Some(mut c) => {
+                    // Dispatch re-checks the role against this identity, so
+                    // it carries the token's scope, not the issuing user's.
+                    c.role = ident.role.clone();
+                    c.can_mutate = ident.can_mutate;
+                    req.extensions_mut().insert(c);
+                }
+                None => {
+                    req.extensions_mut().insert(dispatch::UnboundCaller);
+                }
             }
             req.extensions_mut().insert(ident);
             return next.run(req).await;

@@ -637,6 +637,7 @@ fn progress_token_probe(req: &serde_json::Value) -> Option<&'static str> {
 async fn mcp_jsonrpc_handler(
     axum::extract::State(pool): axum::extract::State<Arc<::mcp::client::McpPool>>,
     caller: Option<axum::Extension<contract::CallerIdentity>>,
+    unbound: Option<axum::Extension<dispatch::UnboundCaller>>,
     auth: Option<axum::Extension<middleware::AuthIdentity>>,
     axum::Json(req): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
@@ -667,6 +668,9 @@ async fn mcp_jsonrpc_handler(
     // Same registry + service wiring the /api/v1 nest and stdio bridge use; fold
     // the request's resolved caller so peer-dispatch mints a token bound to it.
     let mut tool_ctx = crate::mcp::build_tool_ctx(cfg.clone());
+    if unbound.is_some() {
+        tool_ctx.set_caller(None);
+    }
     if let Some(axum::Extension(c)) = caller {
         tool_ctx.set_verified_caller(Some(c.clone()));
         tool_ctx = tool_ctx.with_auth(c);
