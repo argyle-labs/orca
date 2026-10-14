@@ -49,6 +49,9 @@ pub const SAFE_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 /// Refuse to stage anything larger; plugin binaries are tens of MiB.
 const MAX_PLUGIN_BYTES: u64 = 512 * 1024 * 1024;
 
+/// A minisign signature is a few hundred bytes plus its trusted comment.
+const MAX_SIGNATURE_BYTES: u64 = 4096;
+
 /// One request on the seam's stdin.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -351,13 +354,41 @@ fn open_nofollow(path: &Path, extra_flags: i32) -> std::io::Result<std::fs::File
 /// `O_NOFOLLOW` fd so the bytes hashed are the bytes returned. The file must
 /// be owned by `owner_uid` and not group/world-writable.
 fn read_installed(orca_home: &Path, name: &str, owner_uid: u32) -> Result<Vec<u8>> {
+    validate_plugin_name(name)?;
+    let path = orca_home.join("plugins").join(name);
+    read_owned(&path, name, owner_uid, MAX_PLUGIN_BYTES, || {
+        format!("plugin '{name}' is not installed")
+    })
+}
+
+/// The release signature saved beside the installed binary, read with the
+/// same fd, owner and mode checks as the binary.
+fn read_signature(orca_home: &Path, name: &str, owner_uid: u32) -> Result<String> {
+    validate_plugin_name(name)?;
+    let path = orca_home.join("plugins").join(format!("{name}.minisig"));
+    let bytes = read_owned(&path, name, owner_uid, MAX_SIGNATURE_BYTES, || {
+        format!(
+            "plugin '{name}' has no release signature at {}",
+            path.display()
+        )
+    })?;
+    String::from_utf8(bytes).with_context(|| format!("{} is not text", path.display()))
+}
+
+/// Read `path` through one `O_NOFOLLOW` fd, owned by `owner_uid` and not
+/// group/world-writable. `missing` describes a path that cannot be opened.
+fn read_owned(
+    path: &Path,
+    name: &str,
+    owner_uid: u32,
+    max: u64,
+    missing: impl FnOnce() -> String,
+) -> Result<Vec<u8>> {
     use std::io::Read;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
-    validate_plugin_name(name)?;
-    let path = orca_home.join("plugins").join(name);
     // O_NONBLOCK so a FIFO planted at the path cannot block the open.
-    let file = match open_nofollow(&path, libc::O_NONBLOCK) {
+    let file = match open_nofollow(path, libc::O_NONBLOCK) {
         Ok(f) => f,
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
             bail!(
@@ -365,17 +396,15 @@ fn read_installed(orca_home: &Path, name: &str, owner_uid: u32) -> Result<Vec<u8
                 path.display()
             )
         }
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("plugin '{name}' is not installed")));
-        }
+        Err(e) => return Err(anyhow::Error::new(e).context(missing())),
     };
-    let meta = file.metadata().context("fstat plugin binary")?;
+    let meta = file.metadata().context("fstat plugin file")?;
     ensure!(
         meta.is_file(),
         "plugin '{name}' is not a regular file at {}",
         path.display()
     );
-    check_owner(&path, meta.uid(), meta.mode(), owner_uid)?;
+    check_owner(path, meta.uid(), meta.mode(), owner_uid)?;
     let fd = file.as_raw_fd();
     // SAFETY: fd is a valid open descriptor owned by `file`.
     let cleared = unsafe {
@@ -384,12 +413,13 @@ fn read_installed(orca_home: &Path, name: &str, owner_uid: u32) -> Result<Vec<u8
     };
     ensure!(cleared, "clear O_NONBLOCK on {}", path.display());
     let mut bytes = Vec::new();
-    file.take(MAX_PLUGIN_BYTES + 1)
+    file.take(max + 1)
         .read_to_end(&mut bytes)
         .with_context(|| format!("read {}", path.display()))?;
     ensure!(
-        bytes.len() as u64 <= MAX_PLUGIN_BYTES,
-        "plugin '{name}' is implausibly large"
+        bytes.len() as u64 <= max,
+        "{} is implausibly large",
+        path.display()
     );
     Ok(bytes)
 }
@@ -417,12 +447,51 @@ pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// How [`trust`] decides a binary may be recorded.
+#[derive(Debug, Clone, Copy)]
+pub enum Signing<'a> {
+    /// The `<name>.minisig` beside the binary must verify against one of these
+    /// keys (see [`crate::plugin_sig`]).
+    Required(&'a [&'a str]),
+    /// Development override: record the binary without a signature.
+    Unsigned,
+}
+
+/// What [`trust`] recorded.
+#[derive(Debug)]
+pub struct Trusted {
+    pub sha256: String,
+    /// The signed release version; `None` for an unsigned record.
+    pub version: Option<String>,
+}
+
 /// Record the currently installed binary for `name`, owned by `owner_uid`, as
-/// trusted. Only a root caller can write the system store.
-pub fn trust(orca_home: &Path, store: &TrustStore, name: &str, owner_uid: u32) -> Result<String> {
-    let hex = utils::hash::sha256_hex(&read_installed(orca_home, name, owner_uid)?);
-    store.record(name, &hex)?;
-    Ok(hex)
+/// trusted once `signing` accepts it. Nothing is recorded on any failure. Only
+/// a root caller can write the system store.
+pub fn trust(
+    orca_home: &Path,
+    store: &TrustStore,
+    name: &str,
+    owner_uid: u32,
+    signing: Signing<'_>,
+) -> Result<Trusted> {
+    let bytes = read_installed(orca_home, name, owner_uid)?;
+    let trusted = match signing {
+        Signing::Required(keys) => {
+            let sig = read_signature(orca_home, name, owner_uid)?;
+            let signed = crate::plugin_sig::verify(&bytes, &sig, name, keys)?;
+            Trusted {
+                sha256: signed.sha256,
+                version: Some(signed.version),
+            }
+        }
+        Signing::Unsigned => Trusted {
+            sha256: utils::hash::sha256_hex(&bytes),
+            version: None,
+        },
+    };
+    store.record(name, &trusted.sha256)?;
+    Ok(trusted)
 }
 
 /// Run one request: verify, stage, execute, relay. `caller_uid` is the
@@ -762,7 +831,14 @@ esac
         let bin = dir.join(name);
         std::fs::write(&bin, script).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        trust(home.path(), &store_in(home.path()), name, me()).unwrap();
+        trust(
+            home.path(),
+            &store_in(home.path()),
+            name,
+            me(),
+            Signing::Unsigned,
+        )
+        .unwrap();
         home
     }
 
@@ -886,7 +962,14 @@ esac
             std::fs::write(dir.join("leaver"), &script).unwrap();
             std::fs::set_permissions(dir.join("leaver"), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
-            trust(home.path(), &store_in(home.path()), "leaver", me()).unwrap();
+            trust(
+                home.path(),
+                &store_in(home.path()),
+                "leaver",
+                me(),
+                Signing::Unsigned,
+            )
+            .unwrap();
         }
         let out = apply_in(home.path(), &req("leaver", "ping"), Duration::from_secs(10))
             .await
@@ -1095,6 +1178,114 @@ esac
         assert!(verified_binary(home.path(), &store, "fakeplug", me()).is_err());
     }
 
+    fn sig_fixture(file: &str) -> String {
+        std::fs::read_to_string(format!(
+            "{}/tests/fixtures/plugin_sig/{file}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+
+    /// An orca home with the signed `demo` fixture installed, its signature
+    /// from `sig` (none when `None`), and the fixture key to verify against.
+    fn signed_home(sig: Option<&str>) -> (tempfile::TempDir, String) {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("plugins");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("demo"), sig_fixture("demo")).unwrap();
+        if let Some(sig) = sig {
+            std::fs::write(dir.join("demo.minisig"), sig_fixture(sig)).unwrap();
+        }
+        let key = sig_fixture("test.pub").lines().nth(1).unwrap().to_string();
+        (home, key)
+    }
+
+    #[test]
+    fn a_signed_binary_is_trusted_with_its_release_version() {
+        let (home, key) = signed_home(Some("demo.minisig"));
+        let store = store_in(home.path());
+        let got = trust(
+            home.path(),
+            &store,
+            "demo",
+            me(),
+            Signing::Required(&[&key]),
+        )
+        .unwrap();
+        assert_eq!(got.version.as_deref(), Some("1.2.3"));
+        assert_eq!(store.expected_hash("demo").unwrap(), got.sha256);
+    }
+
+    #[test]
+    fn a_failed_signature_check_records_nothing() {
+        for sig in [
+            None,
+            Some("demo.wrong-sha.minisig"),
+            Some("demo.no-sha.minisig"),
+        ] {
+            let (home, key) = signed_home(sig);
+            let store = store_in(home.path());
+            let err = trust(
+                home.path(),
+                &store,
+                "demo",
+                me(),
+                Signing::Required(&[&key]),
+            );
+            assert!(err.is_err(), "{sig:?} was trusted");
+            assert!(!store.record_path("demo").exists(), "{sig:?} left a record");
+        }
+        let (home, _) = signed_home(Some("demo.minisig"));
+        let other = sig_fixture("other.pub").lines().nth(1).unwrap().to_string();
+        let store = store_in(home.path());
+        let err = trust(
+            home.path(),
+            &store,
+            "demo",
+            me(),
+            Signing::Required(&[&other]),
+        );
+        assert!(err.is_err());
+        assert!(!store.record_path("demo").exists());
+    }
+
+    #[test]
+    fn a_missing_signature_is_named_in_the_error() {
+        let (home, key) = signed_home(None);
+        let err = trust(
+            home.path(),
+            &store_in(home.path()),
+            "demo",
+            me(),
+            Signing::Required(&[&key]),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no release signature"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_symlinked_signature_is_refused() {
+        let (home, key) = signed_home(None);
+        let real = home.path().join("elsewhere.minisig");
+        std::fs::write(&real, sig_fixture("demo.minisig")).unwrap();
+        std::os::unix::fs::symlink(&real, home.path().join("plugins/demo.minisig")).unwrap();
+        let store = store_in(home.path());
+        assert!(
+            trust(
+                home.path(),
+                &store,
+                "demo",
+                me(),
+                Signing::Required(&[&key])
+            )
+            .is_err()
+        );
+        assert!(!store.record_path("demo").exists());
+    }
+
     #[test]
     fn a_retrust_replaces_the_record_and_new_files_are_0644() {
         use std::os::unix::fs::PermissionsExt;
@@ -1103,7 +1294,7 @@ esac
         let bin = home.path().join("plugins/fakeplug");
         std::fs::write(&bin, format!("{FAKE_PLUGIN}\n# v2\n")).unwrap();
         assert!(verified_binary(home.path(), &store, "fakeplug", me()).is_err());
-        trust(home.path(), &store, "fakeplug", me()).unwrap();
+        trust(home.path(), &store, "fakeplug", me(), Signing::Unsigned).unwrap();
         verified_binary(home.path(), &store, "fakeplug", me()).unwrap();
         let mode = std::fs::metadata(store.record_path("fakeplug"))
             .unwrap()
@@ -1184,7 +1375,14 @@ esac
             std::fs::write(dir.join("forker"), &script).unwrap();
             std::fs::set_permissions(dir.join("forker"), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
-            trust(home.path(), &store_in(home.path()), "forker", me()).unwrap();
+            trust(
+                home.path(),
+                &store_in(home.path()),
+                "forker",
+                me(),
+                Signing::Unsigned,
+            )
+            .unwrap();
             home
         };
         // Under load the timeout can fire before the script forks and writes the

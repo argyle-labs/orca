@@ -122,6 +122,8 @@ pub mod logs_tui;
 pub mod plugin_apply;
 pub mod plugin_fetch;
 pub mod plugin_manager;
+/// Minisign verification of plugin release binaries (orca#872).
+pub mod plugin_sig;
 /// `identity.privilege.audit` — who can escalate on this host and how (orca#681).
 /// Read-only sudoers/doas parsing; flags dangling grants and lockout-inducing
 /// sole grants.
