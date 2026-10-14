@@ -38,6 +38,9 @@ pub struct ToolCtx {
     /// across every host involved. `None` on CLI/MCP paths until those wire
     /// equivalent ingest points.
     correlation_id: Option<String>,
+    /// True when the caller asked for a dry run (`dryRun: true`). Lets a tool
+    /// body that runs outside the central gate plan instead of apply.
+    dry_run: bool,
     services: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
@@ -49,6 +52,7 @@ impl ToolCtx {
             verified_caller: None,
             peer_target: None,
             correlation_id: None,
+            dry_run: false,
             services: HashMap::new(),
         }
     }
@@ -115,6 +119,16 @@ impl ToolCtx {
     /// The per-request correlation id, if one was set.
     pub fn correlation_id(&self) -> Option<&str> {
         self.correlation_id.as_deref()
+    }
+
+    /// Mark this invocation as a dry run (or not).
+    pub fn set_dry_run(&mut self, dry_run: bool) {
+        self.dry_run = dry_run;
+    }
+
+    /// Whether the caller asked for a dry run. Defaults to `false`: execute.
+    pub fn dry_run(&self) -> bool {
+        self.dry_run
     }
 
     /// Insert a service handle. `T` is typically `Arc<dyn FooService>` —
@@ -196,6 +210,14 @@ mod tests {
         assert_eq!(&*from_base, "svc_value");
         assert_eq!(&*from_clone, "svc_value");
         assert!(Arc::ptr_eq(&from_base, &from_clone));
+    }
+
+    #[test]
+    fn dry_run_defaults_off_and_survives_clone() {
+        let mut ctx = ToolCtx::new(cfg());
+        assert!(!ctx.dry_run());
+        ctx.set_dry_run(true);
+        assert!(ctx.clone().dry_run());
     }
 
     #[test]
