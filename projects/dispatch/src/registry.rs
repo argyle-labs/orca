@@ -595,12 +595,18 @@ async fn forward_to_peer(peer: &str, name: &str, mut args: Value, ctx: &ToolCtx)
         .map_err(|_| {
             anyhow::anyhow!("unknown tool: {name} (no mesh transport to reach peer {peer})")
         })?;
+    let dry_run = crate::erased::dry_run_requested(&args)?;
     if let Some(obj) = args.as_object_mut() {
         obj.remove(AMBIENT_PEER_KEY);
         // Only a tool this host knows as execute-gated gets the explicit
         // opt-in; a gated plugin loaded solely on the peer plans unless told.
+        // A dry run must never carry `execute`, or an older gate applies it.
         if crate::tool_roles::plugin_execute_gated(name) {
-            obj.insert(contract::plan::EXECUTE_FIELD.into(), Value::Bool(true));
+            obj.remove(contract::plan::EXECUTE_FIELD);
+            if !dry_run {
+                obj.remove(contract::plan::DRY_RUN_FIELD);
+                obj.insert(contract::plan::EXECUTE_FIELD.into(), Value::Bool(true));
+            }
         }
     }
     svc.exec(
@@ -1890,6 +1896,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, args);
+    }
+
+    #[tokio::test]
+    async fn dispatch_system_id_dry_run_of_gated_tool_forwards_without_execute() {
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        let out = dispatch(
+            GATED_PLUGIN_TOOL,
+            json!({ "systemId": REMOTE_ID, "id": "a", "dryRun": true, "execute": true }),
+            &roster_ctx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["peer"], REMOTE_ID);
+        assert_eq!(out["args"], json!({ "id": "a", "dryRun": true }));
+        let out = dispatch(
+            GATED_PLUGIN_TOOL,
+            json!({ "systemId": REMOTE_ID, "id": "a", "dryRun": false }),
+            &roster_ctx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["args"], json!({ "id": "a", "execute": true }));
     }
 
     #[tokio::test]
