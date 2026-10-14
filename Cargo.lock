@@ -4233,6 +4233,7 @@ version = "0.2.1-rc.14"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "notify",
  "orca-contract",
  "orca-db",
