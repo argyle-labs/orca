@@ -254,18 +254,7 @@ fn register_unit_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> 
 /// and `capabilities` carries the `spa_fallback` flag — so no ABI/proto field
 /// was added. Renders route back through `invoke` as `"{invoke_prefix}.render"`.
 fn register_web_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
-    let route = contract::web::WebRoute {
-        prefix: web_path(def),
-        spa_fallback: def
-            .capabilities
-            .iter()
-            .any(|c| c == contract::web::CAP_SPA_FALLBACK),
-        dev_upstream: def
-            .capabilities
-            .iter()
-            .find_map(|c| c.strip_prefix(contract::web::CAP_DEV_UPSTREAM))
-            .map(str::to_string),
-    };
+    let route = contract::web::WebRoute::from_def_axes(&def.endpoint, &def.capabilities);
     contract::web::register_from_def(def.name.clone(), route, invoke)
         .map_err(|e| anyhow!("register web backend '{}': {e}", def.name))
 }

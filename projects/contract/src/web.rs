@@ -151,6 +151,25 @@ pub struct WebRoute {
     pub dev_upstream: Option<String>,
 }
 
+impl WebRoute {
+    /// Read a route off a `BackendDef`'s shared axes: `endpoint` is the prefix
+    /// (empty → `"/"`), `capabilities` carry `spa_fallback` / `dev_upstream=…`.
+    pub fn from_def_axes(endpoint: &str, capabilities: &[String]) -> Self {
+        WebRoute {
+            prefix: if endpoint.is_empty() {
+                "/".to_string()
+            } else {
+                endpoint.to_string()
+            },
+            spa_fallback: capabilities.iter().any(|c| c == CAP_SPA_FALLBACK),
+            dev_upstream: capabilities
+                .iter()
+                .find_map(|c| c.strip_prefix(CAP_DEV_UPSTREAM))
+                .map(str::to_string),
+        }
+    }
+}
+
 /// `settings`-table key prefix for user-chosen web-route owners: the row
 /// `web.owner.<exact-path>` → `<provider-name>` records "the user selected this
 /// provider to own this contested path". Typed K/V, no `serde_json::Value`.
