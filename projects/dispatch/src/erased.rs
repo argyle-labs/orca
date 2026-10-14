@@ -79,10 +79,10 @@ pub trait ErasedTool: Send + Sync {
     /// holding the `can_mutate` opt-in invoke it despite `required_role` being
     /// `"admin"`; control-plane admin tools leave this false.
     fn data_mutation(&self) -> bool;
-    /// Whether this tool APPLIES changes and so requires an explicit `execute`
-    /// opt-in. Mirrors `OrcaToolDef::EXECUTE_GATED`. Dry-run is the default:
-    /// without the opt-in, [`Self::run_json`] returns an `ExecutionPlan` and
-    /// the tool body never runs.
+    /// Whether this tool applies changes and can be previewed. Mirrors
+    /// `OrcaToolDef::EXECUTE_GATED`: it executes by default, and with
+    /// `dryRun: true` [`Self::run_json`] returns an `ExecutionPlan` without
+    /// running the body.
     fn execute_gated(&self) -> bool;
     /// JSON Schema for this tool's Args — used for MCP tools/list, CLI flag generation,
     /// OpenAPI request body, and TS `.d.ts` emission.
@@ -132,8 +132,8 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
         // reads it off the raw args. Advertise it here so OpenAPI, MCP
         // tools/list and CLI flag generation all show it instead of it being
         // an undocumented magic field.
-        if T::EXECUTE_GATED {
-            return with_dry_run_opt_in(schema);
+        if T::EXECUTE_GATED || T::DRY_RUN_AWARE {
+            return with_dry_run_opt_in(schema, T::EXECUTE_GATED);
         }
         schema
     }
@@ -170,11 +170,18 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
             // returns without entering the body, so a plan cannot half-apply.
             // The role check above runs first: an admin verb's dry run is
             // admin-only too.
-            let args = if T::EXECUTE_GATED {
-                let dry_run = dry_run_requested(&args);
-                // Strip the gate's fields before typed deserialization;
-                // `deny_unknown_fields` args would otherwise reject them.
-                let args = without_gate_fields(args);
+            // `dryRun` is stripped from every tool's args before typed
+            // deserialization, so no verb can silently ignore it: gated verbs
+            // plan, dry-run-aware verbs run with `ctx.dry_run()` set, and any
+            // other verb refuses.
+            let dry_run = dry_run_requested(&args);
+            let mut args = without_dry_run_field(args);
+            let mut dry_run_ctx;
+            let mut ctx = ctx;
+            if T::EXECUTE_GATED {
+                if let Some(obj) = args.as_object_mut() {
+                    obj.remove(contract::plan::EXECUTE_FIELD);
+                }
                 if dry_run {
                     // A plan for inputs the verb would refuse is a false
                     // promise, so they are rejected here exactly as an apply
@@ -185,10 +192,19 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
                         anyhow::anyhow!("failed to serialize plan for {}: {e}", T::NAME)
                     });
                 }
-                args
-            } else {
-                args
-            };
+            } else if dry_run {
+                if !T::DRY_RUN_AWARE {
+                    return Err(contract::OrcaError::invalid(format!(
+                        "{} does not support dryRun",
+                        T::NAME
+                    ))
+                    .with_code("args.invalid")
+                    .into());
+                }
+                dry_run_ctx = ctx.clone();
+                dry_run_ctx.set_dry_run(true);
+                ctx = &dry_run_ctx;
+            }
             let parsed = parse_args::<T>(args, ctx)?;
             let out = T::run(parsed, ctx).await?;
             serde_json::to_value(&out)
@@ -205,35 +221,39 @@ fn dry_run_requested(args: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Remove the gate's own fields so they never reach the verb's typed `Args`.
-/// The legacy `execute` opt-in is accepted and ignored.
-fn without_gate_fields(mut args: Value) -> Value {
+fn without_dry_run_field(mut args: Value) -> Value {
     if let Some(obj) = args.as_object_mut() {
         obj.remove(contract::plan::DRY_RUN_FIELD);
-        obj.remove(contract::plan::EXECUTE_FIELD);
     }
     args
 }
 
-/// Advertise the `dryRun` opt-in (and the deprecated `execute` no-op) on a
-/// gated tool's input schema. Leaves an existing property of either name
+/// Advertise the `dryRun` opt-in on a gated or dry-run-aware tool's input
+/// schema, plus the deprecated `execute` no-op on a gated one. Leaves an existing property of either name
 /// alone — a verb that models its own keeps its documentation.
-fn with_dry_run_opt_in(mut schema: Value) -> Value {
+fn with_dry_run_opt_in(mut schema: Value, gated: bool) -> Value {
     let Some(obj) = schema.as_object_mut() else {
         return schema;
     };
     let props = obj
         .entry("properties")
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let description = if gated {
+        "Describe the change without applying it: returns an ExecutionPlan and changes nothing. Omitted or false applies the change."
+    } else {
+        "Describe the change without applying it: the verb reports what it would do and changes nothing."
+    };
     if let Some(map) = props.as_object_mut() {
-        map.entry(contract::plan::DRY_RUN_FIELD)
-            .or_insert_with(|| {
-                serde_json::json!({
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Describe the change without applying it: returns an ExecutionPlan and changes nothing. Omitted or false applies the change.",
-                })
-            });
+        map.entry(contract::plan::DRY_RUN_FIELD).or_insert_with(|| {
+            serde_json::json!({
+                "type": "boolean",
+                "default": false,
+                "description": description,
+            })
+        });
+        if !gated {
+            return schema;
+        }
         map.entry(contract::plan::EXECUTE_FIELD)
             .or_insert_with(|| {
                 serde_json::json!({
@@ -852,7 +872,7 @@ mod tests {
     async fn a_caller_with_the_required_role_can_ask_what_would_happen() {
         // `test.gated` requires only the default role, so a member may plan it
         // without mutate permission.
-        let target = "unauthorized-plan-target";
+        let target = "member-plan-target";
         let out = gated()
             .run_json(
                 serde_json::json!({ "target": target, "dryRun": true }),
@@ -961,8 +981,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_execute_is_a_no_op() {
         let ctx = ctx();
-        // `execute: false` used to mean "plan"; it now executes like any call
-        // without dryRun.
+        // `execute: false` executes like any call without dryRun.
         let target = "legacy-execute-false";
         gated()
             .run_json(
@@ -1006,6 +1025,85 @@ mod tests {
             );
             assert!(ran(&target), "{args} did not run the body");
         }
+    }
+
+    struct UngatedStrictTool;
+
+    impl OrcaToolDef for UngatedStrictTool {
+        const NAME: &'static str = "test.ungated_strict";
+        const DESCRIPTION: &'static str = "applies without a dry run";
+        type Args = GatedArgs;
+        type Output = GatedOut;
+    }
+
+    #[async_trait]
+    impl OrcaTool for UngatedStrictTool {
+        async fn run(args: GatedArgs, _ctx: &ToolCtx) -> Result<GatedOut> {
+            RAN_TARGETS.lock().unwrap().push(args.target.clone());
+            Ok(GatedOut {
+                applied: args.target,
+            })
+        }
+    }
+
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct AwareOut {
+        saw_dry_run: bool,
+    }
+
+    struct AwareTool;
+
+    impl OrcaToolDef for AwareTool {
+        const NAME: &'static str = "test.aware";
+        const DESCRIPTION: &'static str = "plans itself";
+        const DRY_RUN_AWARE: bool = true;
+        type Args = GatedArgs;
+        type Output = AwareOut;
+    }
+
+    #[async_trait]
+    impl OrcaTool for AwareTool {
+        async fn run(_args: GatedArgs, ctx: &ToolCtx) -> Result<AwareOut> {
+            Ok(AwareOut {
+                saw_dry_run: ctx.dry_run(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unaware_ungated_tool_refuses_dry_run_by_name() {
+        let target = "ungated-dry-run-target";
+        let err = ToolWrapper::<UngatedStrictTool>(PhantomData)
+            .run_json(
+                serde_json::json!({ "target": target, "dryRun": true }),
+                &ctx(),
+            )
+            .await
+            .expect_err("dryRun must never be silently ignored");
+        let oe = err
+            .downcast_ref::<contract::OrcaError>()
+            .unwrap_or_else(|| panic!("not an OrcaError: {err}"));
+        assert_eq!(oe.kind, contract::ErrorKind::Invalid, "{oe}");
+        assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{oe}");
+        assert_eq!(oe.message, "test.ungated_strict does not support dryRun");
+        assert!(!ran(target));
+    }
+
+    #[tokio::test]
+    async fn an_aware_ungated_tool_runs_with_dry_run_set() {
+        let w = ToolWrapper::<AwareTool>(PhantomData);
+        let out = w
+            .run_json(serde_json::json!({ "target": "a", "dryRun": true }), &ctx())
+            .await
+            .unwrap();
+        assert_eq!(out["saw_dry_run"], serde_json::json!(true));
+        let out = w
+            .run_json(serde_json::json!({ "target": "a" }), &ctx())
+            .await
+            .unwrap();
+        assert_eq!(out["saw_dry_run"], serde_json::json!(false));
+        assert!(w.input_schema()["properties"]["dryRun"].is_object());
+        assert!(w.input_schema()["properties"].get("execute").is_none());
     }
 
     #[test]

@@ -265,6 +265,10 @@ struct ToolAttr {
     /// `dispatch::erased`, so the verb body needs no flag of its own. Set on
     /// every verb that applies changes. Default off.
     execute_gated: Option<bool>,
+    /// `#[orca_tool(..., dry_run_aware = true)]`: an ungated verb whose body
+    /// honours `ToolCtx::dry_run()`. Without it, `dryRun` on an ungated verb
+    /// is refused. Default off.
+    dry_run_aware: bool,
     /// Minimum role required to invoke this tool via authenticated surfaces.
     /// `"any"` (default) means any authenticated identity passes; `"admin"`
     /// requires `AuthIdentity::role == "admin"`. Set via
@@ -294,6 +298,7 @@ impl Parse for ToolAttr {
         let mut refresh_runtime = false;
         let mut data_mutation: Option<bool> = None;
         let mut execute_gated: Option<bool> = None;
+        let mut dry_run_aware = false;
         let mut role: Option<LitStr> = None;
         let mut title: Option<LitStr> = None;
         let mut crate_path: Option<syn::Path> = None;
@@ -396,6 +401,19 @@ impl Parse for ToolAttr {
                         }
                     });
                 }
+                "dry_run_aware" => {
+                    dry_run_aware = match &nv.value {
+                        Expr::Lit(ExprLit {
+                            lit: Lit::Bool(b), ..
+                        }) => b.value,
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                "dry_run_aware expects a bool literal",
+                            ));
+                        }
+                    };
+                }
                 "role" => {
                     let s = lit_str(&nv.value)?;
                     match s.value().as_str() {
@@ -449,6 +467,7 @@ impl Parse for ToolAttr {
             refresh_runtime,
             data_mutation,
             execute_gated,
+            dry_run_aware,
             role,
             title,
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
@@ -881,12 +900,12 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     // `data_mutation = false` so the `can_mutate` escape hatch cannot reach them.
     let data_mutation_lit = attr.data_mutation.unwrap_or(!read_shaped);
     // Every verb that changes something honours `dryRun` (#636, #877). The
-    // gate is DERIVED from the verb's own shape rather than opted into: an
-    // opt-in flag is how 61 mutating endpoints ended up ungated while two were
-    // gated. Read-shaped verbs have nothing to plan because they change nothing;
+    // gate is derived from the verb's own shape so a mutating verb cannot be
+    // left ungated by omission. Read-shaped verbs have nothing to plan because they change nothing;
     // everything else gates. `execute_gated = false` remains available for a
     // verb whose write-shaped name is misleading.
     let execute_gated_lit = attr.execute_gated.unwrap_or(!read_shaped);
+    let dry_run_aware_lit = attr.dry_run_aware;
     // REQUIRED_ROLE: explicit `role = "..."` wins; otherwise default-deny
     // derives from the verb — read-shaped verbs (`list`/`detail`/`search`) get
     // "any", anything else gets "admin". This closes C2 (default-deny on
@@ -1101,6 +1120,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             const LOCAL_ONLY: bool = !#remote_ok_lit;
             const DATA_MUTATION: bool = #data_mutation_lit;
             const EXECUTE_GATED: bool = #execute_gated_lit;
+            const DRY_RUN_AWARE: bool = #dry_run_aware_lit;
             #role_const
             type Args = #args_ty;
             type Output = #output_ty;
@@ -1612,6 +1632,15 @@ mod tests {
         let attr = parse_attr(quote!(domain = "h", verb = "v", remote_ok = true)).unwrap();
         let out = expand(attr, ok_fn()).unwrap().to_string();
         assert!(out.contains("REMOTE_OK : bool = true"), "got: {out}");
+    }
+
+    #[test]
+    fn dry_run_aware_defaults_off_and_is_settable() {
+        let out = expand(attr_ok(), ok_fn()).unwrap().to_string();
+        assert!(out.contains("DRY_RUN_AWARE : bool = false"), "got: {out}");
+        let attr = parse_attr(quote!(domain = "h", verb = "v", dry_run_aware = true)).unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
+        assert!(out.contains("DRY_RUN_AWARE : bool = true"), "got: {out}");
     }
 
     #[test]

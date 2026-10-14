@@ -240,8 +240,19 @@ pub async fn exec_remote<T: contract::OrcaToolDef>(
     // Wire-only serialization: Value lives entirely behind the
     // RemoteExec trait boundary, never on a public type.
     #[allow(clippy::disallowed_types)]
-    let args_value =
+    let mut args_value =
         serde_json::to_value(&args).map_err(|e| anyhow::anyhow!("serialize args: {e}"))?;
+    // A dry run must stay one across the hop; only tools that honour `dryRun`
+    // get it, since any other tool refuses the field.
+    if ctx.dry_run()
+        && (T::EXECUTE_GATED || T::DRY_RUN_AWARE)
+        && let Some(obj) = args_value.as_object_mut()
+    {
+        obj.insert(
+            contract::plan::DRY_RUN_FIELD.into(),
+            serde_json::Value::Bool(true),
+        );
+    }
     let svc = ctx.service::<Arc<dyn RemoteExec>>()?;
     // Local CLI/REST entrypoints reach this path after passing their own auth
     // gate (CLI has local DB/key access; REST has session middleware). The

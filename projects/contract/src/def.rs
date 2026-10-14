@@ -53,6 +53,11 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     /// Distinct from [`Self::DATA_MUTATION`], which asks *who may call this*.
     /// This asks *may it be previewed*. A tool is normally both.
     const EXECUTE_GATED: bool = false;
+    /// Whether an ungated tool honours `dryRun` itself. When true,
+    /// `dryRun: true` runs the body with `ToolCtx::dry_run()` set and the body
+    /// must report what it would do without applying it. An ungated tool that
+    /// is not aware refuses `dryRun` rather than ignoring it.
+    const DRY_RUN_AWARE: bool = false;
     /// Whether this tool must run in the calling process (pre-daemon ops only:
     /// `install`, `daemon`, `system bootstrap`, `--version`). When false (the
     /// default), CLI + MCP-stdio invocations are proxied to the local daemon's

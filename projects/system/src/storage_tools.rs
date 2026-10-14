@@ -959,20 +959,22 @@ fn parse_octal_mode(s: &str) -> anyhow::Result<u32> {
 // REPLACE a real plan with an empty one. It still spells the opt-in `apply`,
 // a legacy spelling that migrates with it (#636). Migrating it to return a typed
 // `ExecutionPlan` is the follow-up; that needs the body to run in plan mode,
-// which the intercept-before-body gate cannot express.
+// which the intercept-before-body gate cannot express. `dry_run_aware` routes
+// `dryRun: true` to its own plan path.
 #[orca_tool(
     domain = "storage.share",
     verb = "repair-permissions",
     data_mutation = true,
-    execute_gated = false
+    execute_gated = false,
+    dry_run_aware = true
 )]
 async fn storage_share_repair_permissions(
     args: StorageShareRepairPermsArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<StorageShareRepairPermsOutput> {
     let current = contract::permissions::read(&args.path).await;
 
-    if !args.apply {
+    if !args.apply || ctx.dry_run() {
         // DETECT: observe what sibling shares use and present candidates. Nothing
         // is changed; the caller confirms a mode and re-invokes with `apply`.
         let candidates = contract::permissions::detect_candidates(&args.path).await;
