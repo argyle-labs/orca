@@ -400,15 +400,27 @@ pub fn tool_manifest_json() -> String {
 
 /// Dispatch a `tools/call` by name, returning a structured JSON value.
 /// Returns `Err` for unknown tool names.
-pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
+pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Value> {
     if let Some(tool) = find(name) {
         return tool.run_json(args, ctx).await;
+    }
+    let dry_run = crate::erased::dry_run_requested(&args)?;
+    if crate::tool_roles::plugin_execute_gated(name)
+        && let Some(obj) = args.as_object_mut()
+    {
+        // An older plugin's gate plans unless told to execute, so a normal
+        // call says so explicitly; a dry run carries only `dryRun`.
+        obj.remove(contract::plan::EXECUTE_FIELD);
+        if !dry_run {
+            obj.remove(contract::plan::DRY_RUN_FIELD);
+            obj.insert(contract::plan::EXECUTE_FIELD.into(), Value::Bool(true));
+        }
     }
     // The surfaces below bypass the `run_json` gate, so a `dryRun` they
     // cannot honour would apply. A plugin tool declared execute-gated plans in
     // its own gate. A tool this host does not have is checked by the peer it
     // is forwarded to, which knows whether it honours `dryRun`.
-    if crate::erased::dry_run_requested(&args)? && !crate::tool_roles::plugin_execute_gated(name) {
+    if dry_run && !crate::tool_roles::plugin_execute_gated(name) {
         let known_here = dynamic_owns(name)
             || crate::unit_surface::unit_owns(name)
             || crate::diagnostics_surface::diagnostics_owns(name)
@@ -1457,8 +1469,31 @@ mod tests {
             post_json(&format!("/{GATED_PLUGIN_TOOL}?dryRun=true"), json!({})).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let seen = GATED_SEEN.lock().unwrap().clone();
-        assert_eq!(seen.len(), 1, "{seen:?}");
-        assert_eq!(seen[0]["dryRun"], json!(true), "{seen:?}");
+        assert_eq!(seen, vec![json!({ "dryRun": true })]);
+    }
+
+    #[tokio::test]
+    async fn a_gated_plugin_is_told_to_execute_unless_it_is_a_dry_run() {
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        GATED_SEEN.lock().unwrap().clear();
+        let ctx = make_ctx();
+        for args in [
+            json!({ "id": "a" }),
+            json!({ "id": "a", "dryRun": false }),
+            json!({ "id": "a", "dryRun": true, "execute": true }),
+        ] {
+            dispatch(GATED_PLUGIN_TOOL, args, &ctx).await.unwrap();
+        }
+        let seen = GATED_SEEN.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                json!({ "id": "a", "execute": true }),
+                json!({ "id": "a", "execute": true }),
+                json!({ "id": "a", "dryRun": true }),
+            ]
+        );
     }
 
     #[cfg(feature = "server")]
