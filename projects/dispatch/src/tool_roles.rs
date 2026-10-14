@@ -20,6 +20,7 @@ pub struct PluginToolPolicy {
     pub role: &'static str,
     pub execute_gated: bool,
     pub data_mutation: bool,
+    pub local_only: bool,
 }
 
 impl PluginToolPolicy {
@@ -41,7 +42,15 @@ impl PluginToolPolicy {
             role,
             execute_gated: execute_gated.unwrap_or(false),
             data_mutation: data_mutation.unwrap_or(false),
+            local_only: false,
         }
+    }
+
+    /// Apply the manifest's `local_only`. Absent means a plugin built before
+    /// the flag crossed the wire, which stays remote-callable.
+    pub fn local_only(mut self, local_only: Option<bool>) -> Self {
+        self.local_only = local_only.unwrap_or(false);
+        self
     }
 }
 
@@ -60,6 +69,11 @@ pub fn remove_plugin_tools<'a>(names: impl IntoIterator<Item = &'a str>) {
             map.remove(n);
         }
     }
+}
+
+/// True if a loaded plugin declared `tool` local-only.
+pub fn is_plugin_local_only(tool: &str) -> bool {
+    plugin_policy(tool).is_some_and(|p| p.local_only)
 }
 
 fn plugin_policy(tool: &str) -> Option<PluginToolPolicy> {
@@ -308,6 +322,20 @@ mod tests {
         assert_eq!(p(Some("read")), "read");
         assert_eq!(p(Some("admin")), "admin");
         assert_eq!(p(Some("wizard")), "admin");
+    }
+
+    #[test]
+    fn plugin_local_only_is_installed_and_removed() {
+        let name = "tool_roles_test_plugin.engine_update";
+        let policy = PluginToolPolicy::from_manifest(Some("admin"), None, None);
+        assert!(!policy.local_only);
+        assert!(!policy.local_only(None).local_only);
+        install_plugin_tools([(name.to_string(), policy.local_only(Some(true)))]);
+        assert!(is_plugin_local_only(name));
+        assert!(!crate::remote_ok::is_allowed(name));
+        remove_plugin_tools([name]);
+        assert!(!is_plugin_local_only(name));
+        assert!(crate::remote_ok::is_allowed(name));
     }
 
     #[test]

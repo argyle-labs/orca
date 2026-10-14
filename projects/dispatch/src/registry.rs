@@ -494,6 +494,7 @@ pub fn tool_manifest_json() -> String {
                 "role": t.required_role(),
                 "execute_gated": t.execute_gated(),
                 "data_mutation": t.data_mutation(),
+                "local_only": !t.remote_ok(),
             })
         })
         .collect();
