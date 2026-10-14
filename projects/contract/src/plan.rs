@@ -2,8 +2,7 @@
 //! `dryRun: true`.
 //!
 //! A dry run must describe what the verb would change and change nothing. This
-//! is the shape that
-//! description takes, so every surface (REST, MCP, CLI, peacock) renders one
+//! is the shape that description takes, so every surface (REST, MCP, CLI, peacock) renders one
 //! thing rather than each verb inventing its own "would have" payload.
 
 use schemars::JsonSchema;
@@ -107,8 +106,7 @@ impl ExecutionPlan {
     }
 }
 
-/// Legacy execute opt-in field. Accepted and ignored once gated verbs execute
-/// by default; superseded by [`DRY_RUN_FIELD`].
+/// Execute opt-in field, accepted and ignored; [`DRY_RUN_FIELD`] is the opt-in.
 pub const EXECUTE_FIELD: &str = "execute";
 
 /// Field name of the universal dry-run opt-in, in wire (camelCase) form. Gated
