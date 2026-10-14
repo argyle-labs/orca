@@ -112,7 +112,7 @@ pub fn ops() -> impl Iterator<Item = &'static CliOp> {
 /// `orca update` is the aggregate "update all the things": the same
 /// `system.update` tool. It needs no overridden default any more — updating
 /// every system IS the default when no `--id` is given (#647) — so the alias is
-/// now pure spelling. DRY RUN unless `--execute`, exactly like `system update`.
+/// pure spelling, exactly like `system update`.
 const CLI_ALIASES: &[(&str, &str, &str)] = &[("update", "system", "update")];
 
 /// Clap arg defaults an alias overrides, as `(alias, arg id, default value)`.

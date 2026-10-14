@@ -1224,14 +1224,13 @@ fn snake_to_pascal(s: &str) -> String {
 /// Does this verb only READ?
 ///
 /// One predicate drives three things that must agree: `REQUIRED_ROLE`,
-/// `DATA_MUTATION`, and the dry-run gate. They were three independent opt-ins,
-/// which is how 61 mutating endpoints ended up ungated while two were gated
-/// (#636) — a flag nobody remembers to set is not a policy.
+/// `DATA_MUTATION`, and the dry-run gate, so a mutating verb cannot be left
+/// ungated by omission (#636).
 ///
 /// The list is explicit rather than a heuristic, and deliberately conservative:
-/// a verb wrongly treated as a WRITE merely asks for `execute`, which is
-/// visible the first time anyone calls it. A verb wrongly treated as a READ
-/// applies changes with no consent and no audit, which is not. So anything not
+/// a verb wrongly treated as a WRITE merely becomes admin-only and offers a
+/// `dryRun`, which is visible the first time anyone calls it. A verb wrongly
+/// treated as a READ applies changes with no audit, which is not. So anything not
 /// named here gates.
 ///
 /// A noun-shaped verb is not evidence of a read: `profile` is absent because

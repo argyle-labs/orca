@@ -667,9 +667,9 @@ pub fn data_mutation_names() -> Vec<&'static str> {
         .collect()
 }
 
-/// Names of every registered tool that is execute-gated — i.e. dry-run by
-/// default. Lets a surface (and the Phase A conformance test) enumerate which
-/// verbs require an explicit `execute` opt-in without walking the inventory.
+/// Names of every registered tool that is execute-gated — i.e. executes by
+/// default and plans under `dryRun`. Lets a surface (and the conformance test)
+/// enumerate them without walking the inventory.
 pub fn execute_gated_names() -> Vec<&'static str> {
     cache()
         .ordered
@@ -1174,10 +1174,10 @@ mod tests {
     /// The gate injects `dryRun` and the deprecated `execute` into a gated
     /// tool's advertised schema and strips both before typed deserialization.
     /// A verb that ALSO declares either field would have it silently
-    /// swallowed, so catch that here rather than at runtime. The legacy ad-hoc
-    /// gates (`system.update`, `plugin.update` with `execute`;
+    /// swallowed, so catch that here rather than at runtime. The ad-hoc gates
+    /// (`system.update`, `plugin.update` with `execute`;
     /// `storage.share.repair-permissions` with `apply`; `storage.mount.create`
-    /// with `force`) are deliberately NOT execute_gated yet.
+    /// with `force`) are deliberately NOT execute_gated.
     #[test]
     fn no_execute_gated_tool_declares_its_own_gate_field() {
         for name in execute_gated_names() {

@@ -401,7 +401,7 @@ pub struct SystemUpdateArgs {
     /// a bare `orca system update` probes current→latest and reports whether an
     /// update is available WITHOUT applying it. Pass `--execute` to apply. An
     /// explicit `--version` already implies apply (a deliberate operator action)
-    /// and does not need this flag.
+    /// and does not need this flag; `dryRun: true` overrides both.
     #[serde(default)]
     #[arg(long)]
     pub execute: bool,
@@ -1052,8 +1052,9 @@ async fn run_system_update(
     let _ = channel_changed; // marker is written upstream; install intent is version-only now
     // DRY RUN by default: a bare `orca system update` only probes. `--execute`
     // (apply channel-latest) or an explicit `--version` (apply that tag) is the
-    // deliberate operator action that lifts the gate. Per HARD RULE
-    // [[feedback-updates-are-user-actions-only]] an empty `{}` probe never applies.
+    // deliberate operator action that lifts the gate, unless `dryRun` is set.
+    // Per HARD RULE [[feedback-updates-are-user-actions-only]] an empty `{}`
+    // probe never applies.
     let binary_intent = !ctx.dry_run() && (args.version.is_some() || args.execute);
 
     // Effective channel = max(stored pref, channel implied by running version).

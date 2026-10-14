@@ -24,8 +24,8 @@
 //! exists (see `sysadmin::install_autofs_sudoers`).
 //!
 //! `system.cron.diff` plans an edit and returns the before/after diff plus the
-//! hash it planned against; `system.cron.update` applies it (dry-run unless
-//! `execute`). All three verbs are admin-only: crontabs routinely carry secrets.
+//! hash it planned against; `system.cron.update` applies it (`dryRun` plans
+//! instead). All three verbs are admin-only: crontabs routinely carry secrets.
 
 use derive::orca_tool;
 use schemars::JsonSchema;
