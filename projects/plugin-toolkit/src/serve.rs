@@ -268,11 +268,13 @@ fn serve_session<S: Read + Write + 'static>(
                         ok: true,
                         value,
                         error: None,
+                        error_kind: None,
                     },
                     Err(e) => Frame::Result {
                         id,
                         ok: false,
                         value: Value::Null,
+                        error_kind: error_kind(&e),
                         error: Some(format!("{e:#}")),
                     },
                 };
@@ -284,6 +286,13 @@ fn serve_session<S: Read + Write + 'static>(
         }
     }
     Ok(())
+}
+
+/// The wire `error_kind` of a failed invoke: the [`contract::OrcaError`] kind,
+/// when the tool raised one.
+fn error_kind(e: &anyhow::Error) -> Option<String> {
+    e.downcast_ref::<crate::contract::OrcaError>()
+        .map(|oe| oe.kind.as_str().to_string())
 }
 
 /// Buffers each frame and writes it whole under `lock`, so heartbeat frames
@@ -572,6 +581,13 @@ mod tests {
         }
         write_frame(&mut orca, &Frame::Shutdown).unwrap();
         plugin.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn error_kind_carries_an_orca_error_kind_only() {
+        let invalid: anyhow::Error = crate::contract::OrcaError::invalid("bad").into();
+        assert_eq!(error_kind(&invalid).as_deref(), Some("invalid"));
+        assert_eq!(error_kind(&anyhow::anyhow!("boom")), None);
     }
 
     #[test]

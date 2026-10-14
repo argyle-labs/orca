@@ -161,11 +161,14 @@ pub fn handshake<S: Read + Write>(stream: &mut S, capabilities: &[&str]) -> Resu
 /// A tool's own error, delivered in a well-formed `Result` frame — the
 /// session is still in sync, unlike an I/O or protocol failure.
 #[derive(Debug)]
-struct ToolFailed(String);
+pub(crate) struct ToolFailed {
+    pub(crate) message: String,
+    pub(crate) kind: Option<contract::ErrorKind>,
+}
 
 impl std::fmt::Display for ToolFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -204,14 +207,16 @@ pub fn invoke_on<S: Read + Write>(
                 ok,
                 value,
                 error,
+                error_kind,
             } if rid == id => {
                 return if ok {
                     Ok(value)
                 } else {
-                    Err(ToolFailed(format!(
-                        "plugin tool '{tool}' failed: {}",
-                        error.unwrap_or_else(|| "unknown error".into())
-                    ))
+                    Err(ToolFailed {
+                        message: error.unwrap_or_else(|| "unknown error".into()),
+                        kind: error_kind
+                            .and_then(|k| serde_json::from_value(Value::String(k)).ok()),
+                    }
                     .into())
                 };
             }
@@ -1152,6 +1157,7 @@ mod tests {
                     ok: true,
                     value: json!({"done": true}),
                     error: None,
+                    error_kind: None,
                 },
             )
             .unwrap();
@@ -1178,6 +1184,7 @@ mod tests {
                     ok: true,
                     value: serde_json::to_value(&caller).unwrap(),
                     error: None,
+                    error_kind: None,
                 },
             )
             .unwrap();
@@ -1230,6 +1237,7 @@ mod tests {
                     ok: false,
                     value: Value::Null,
                     error: Some("boom".into()),
+                    error_kind: None,
                 },
             )
             .unwrap();
