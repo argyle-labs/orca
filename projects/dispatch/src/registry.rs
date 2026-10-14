@@ -1155,15 +1155,14 @@ mod tests {
     }
 
     /// An execute-gated verb applies changes, so it must also be gated on WHO
-    /// may call it. Gating consent without gating authorization would let any
-    /// authenticated caller apply changes just by passing `execute: true`.
+    /// may call it — for the default execute and for its dry run alike.
     #[test]
     fn every_execute_gated_tool_is_also_an_admin_data_mutation() {
         for name in execute_gated_names() {
             assert_eq!(
                 required_role(name),
                 Some("admin"),
-                "{name} is execute_gated but not role=admin — consent without authorization"
+                "{name} is execute_gated but not role=admin — mutation without authorization"
             );
             assert!(
                 data_mutation_names().contains(&name),
@@ -1172,29 +1171,30 @@ mod tests {
         }
     }
 
-    /// The gate injects `execute` into a gated tool's advertised schema and
-    /// strips it before typed deserialization. A verb that ALSO declares its own
-    /// `execute` field would have it silently swallowed, so catch that here
-    /// rather than at runtime. The four legacy ad-hoc gates (`system.update`,
-    /// `plugin.update` with `execute`; `storage.share.repair-permissions` with
-    /// `apply`; `storage.mount.create` with `force`) are deliberately NOT
-    /// execute_gated yet — they migrate onto the shared field separately.
+    /// The gate injects `dryRun` and the deprecated `execute` into a gated
+    /// tool's advertised schema and strips both before typed deserialization.
+    /// A verb that ALSO declares either field would have it silently
+    /// swallowed, so catch that here rather than at runtime. The legacy ad-hoc
+    /// gates (`system.update`, `plugin.update` with `execute`;
+    /// `storage.share.repair-permissions` with `apply`; `storage.mount.create`
+    /// with `force`) are deliberately NOT execute_gated yet.
     #[test]
-    fn no_execute_gated_tool_declares_its_own_execute_field() {
+    fn no_execute_gated_tool_declares_its_own_gate_field() {
         for name in execute_gated_names() {
             let Some(tool) = find(name) else { continue };
             let schema = tool.input_schema();
-            // `properties.execute` is present because the gate injected it; the
-            // failure we are guarding is a *verb-owned* one, which would carry a
-            // description of its own rather than the gate's.
-            let desc = schema["properties"]["execute"]["description"]
-                .as_str()
-                .unwrap_or_default();
-            assert!(
-                desc.contains("ExecutionPlan"),
-                "{name} appears to declare its own `execute` field; it would be \
-                 swallowed by the gate. Migrate it or drop execute_gated."
-            );
+            // Both properties are present because the gate injected them; a
+            // verb-owned one would carry its own description instead.
+            for (field, marker) in [("dryRun", "ExecutionPlan"), ("execute", "Deprecated no-op")] {
+                let desc = schema["properties"][field]["description"]
+                    .as_str()
+                    .unwrap_or_default();
+                assert!(
+                    desc.contains(marker),
+                    "{name} appears to declare its own `{field}` field; it would be \
+                     swallowed by the gate. Migrate it or drop execute_gated."
+                );
+            }
         }
     }
 

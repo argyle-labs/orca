@@ -259,8 +259,8 @@ struct ToolAttr {
     /// leave it off so the opt-in can't reach them. Default: derived from the
     /// verb shape; `data_mutation = false` opts a control-plane write out.
     data_mutation: Option<bool>,
-    /// Opt-in: `#[orca_tool(..., execute_gated = true)]` makes this verb
-    /// **dry-run by default** — invoked without `execute: true` it returns an
+    /// `#[orca_tool(..., execute_gated = true)]` lets this verb be previewed:
+    /// it executes by default, and with `dryRun: true` returns an
     /// `ExecutionPlan` and changes nothing. Enforced centrally in
     /// `dispatch::erased`, so the verb body needs no flag of its own. Set on
     /// every verb that applies changes. Default off.
@@ -880,10 +880,10 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     // remembered to say so. Control-plane writes (auth, secrets) opt out with
     // `data_mutation = false` so the `can_mutate` escape hatch cannot reach them.
     let data_mutation_lit = attr.data_mutation.unwrap_or(!read_shaped);
-    // Dry-run is the DEFAULT for every verb that changes something (#636). The
+    // Every verb that changes something honours `dryRun` (#636, #877). The
     // gate is DERIVED from the verb's own shape rather than opted into: an
     // opt-in flag is how 61 mutating endpoints ended up ungated while two were
-    // gated. Read-shaped verbs plan nothing because they change nothing;
+    // gated. Read-shaped verbs have nothing to plan because they change nothing;
     // everything else gates. `execute_gated = false` remains available for a
     // verb whose write-shaped name is misleading.
     let execute_gated_lit = attr.execute_gated.unwrap_or(!read_shaped);
@@ -982,10 +982,10 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     } else {
         quote! {}
     };
-    // The execute gate strips the opt-in before `run`, so a gated verb that
-    // reaches `run` was already opted in and authorized here. Re-assert it on
-    // the forwarded args, or the peer's own gate answers with a plan that
-    // cannot decode as this verb's output.
+    // A gated verb that reaches `run` is executing: a dry run returns its plan
+    // in the gate and never forwards. `execute: true` keeps an older peer,
+    // whose gate still plans by default, applying instead of answering with a
+    // plan that cannot decode as this verb's output.
     let forward_execute_stanza = if execute_gated_lit {
         quote! {
             let mut __args_value = __args_value;

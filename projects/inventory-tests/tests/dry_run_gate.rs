@@ -1,4 +1,5 @@
-//! Conformance tests for the execute gate — dry-run by default (orca#636).
+//! Conformance tests for the dry-run gate — execute by default, `dryRun`
+//! opt-in (orca#636, #877).
 //!
 //! These live here, not in `dispatch`, for a reason worth stating: `dispatch`'s
 //! own test binary links no buckets, so `execute_gated_names()` is EMPTY there
@@ -122,9 +123,8 @@ const CONTROL_PLANE_WRITES: &[&str] = &[
     "system.cron.update",
 ];
 
-/// Consent without authorization is not a gate: if a verb applies changes, it
-/// must also be restricted in WHO may call it, or any authenticated caller can
-/// apply changes simply by passing `execute: true`.
+/// A verb that applies changes must be restricted in WHO may call it — its
+/// default execute and its dry run alike.
 #[test]
 fn every_gated_verb_is_also_an_admin_data_mutation() {
     let mutations = dispatch::data_mutation_names();
@@ -132,7 +132,7 @@ fn every_gated_verb_is_also_an_admin_data_mutation() {
         assert_eq!(
             dispatch::required_role(name),
             Some("admin"),
-            "{name} is execute_gated but not role=admin — consent without authorization"
+            "{name} is execute_gated but not role=admin — mutation without authorization"
         );
         assert_eq!(
             mutations.contains(&name),
@@ -153,9 +153,10 @@ fn control_plane_writes_list_has_no_stale_entries() {
     }
 }
 
-/// The gate injects `execute` into a gated verb's advertised schema and strips
-/// it before typed deserialization. A verb declaring its OWN `execute` field
-/// would have it silently swallowed, so fail loudly at test time instead.
+/// The gate injects `dryRun` and the deprecated `execute` into a gated verb's
+/// advertised schema and strips both before typed deserialization. A verb
+/// declaring its OWN field of either name would have it silently swallowed, so
+/// fail loudly at test time instead.
 ///
 /// `system.update`, `plugin.update` and `storage.share.repair-permissions` are
 /// deliberately NOT `execute_gated`: each already implements dry-run by default
@@ -165,26 +166,28 @@ fn control_plane_writes_list_has_no_stale_entries() {
 /// all — it overrides the multi-mount collision guard, a different concept that
 /// must not be folded into this one.
 #[test]
-fn no_gated_verb_declares_its_own_execute_field() {
+fn no_gated_verb_declares_its_own_gate_field() {
     let gated = dispatch::execute_gated_names();
     for entry in inventory::iter::<ToolRegistration> {
         if !gated.contains(&entry.name) {
             continue;
         }
         let schema = (entry.make_erased)().input_schema();
-        let desc = schema["properties"]["execute"]["description"]
-            .as_str()
-            .unwrap_or_default();
-        assert!(
-            desc.contains("ExecutionPlan"),
-            "{} appears to declare its own `execute` field — the gate would \
-             swallow it. Migrate the verb or drop execute_gated.",
-            entry.name
-        );
+        for (field, marker) in [("dryRun", "ExecutionPlan"), ("execute", "Deprecated no-op")] {
+            let desc = schema["properties"][field]["description"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                desc.contains(marker),
+                "{} appears to declare its own `{field}` field — the gate would \
+                 swallow it. Migrate the verb or drop execute_gated.",
+                entry.name
+            );
+        }
     }
 }
 
-/// Every gated verb advertises the opt-in, so callers can discover it from the
+/// Every gated verb advertises `dryRun`, so callers can discover it from the
 /// schema rather than from documentation or source.
 #[test]
 fn every_gated_verb_advertises_the_opt_in() {
@@ -195,22 +198,22 @@ fn every_gated_verb_advertises_the_opt_in() {
         }
         let schema = (entry.make_erased)().input_schema();
         assert_eq!(
-            schema["properties"]["execute"]["type"],
+            schema["properties"]["dryRun"]["type"],
             serde_json::json!("boolean"),
-            "{} does not advertise an `execute` boolean: {schema}",
+            "{} does not advertise a `dryRun` boolean: {schema}",
             entry.name
         );
     }
 }
 
-/// The invariant the whole phase exists for: a gated verb invoked WITHOUT the
-/// opt-in must change nothing and say what it would have done.
+/// A gated verb invoked with `dryRun: true` must change nothing and say what
+/// it would have done.
 ///
 /// The schema assertions above prove the gate is advertised; only this proves
 /// it is enforced. They are different claims, and the first passing while the
 /// second failed is precisely how a gate becomes decorative.
 #[tokio::test]
-async fn a_gated_verb_called_without_the_opt_in_returns_a_plan_and_applies_nothing() {
+async fn a_gated_verb_called_with_dry_run_returns_a_plan_and_applies_nothing() {
     let cfg = std::sync::Arc::new(contract::config::Config::load().expect("config"));
     let ctx = contract::ToolCtx::new(cfg);
 
@@ -218,7 +221,7 @@ async fn a_gated_verb_called_without_the_opt_in_returns_a_plan_and_applies_nothi
     // harmless to plan against a row that does not exist.
     let out = dispatch::dispatch(
         "config.delete",
-        serde_json::json!({ "noun": "orca-gate-probe", "name": "no-such-row" }),
+        serde_json::json!({ "noun": "orca-gate-probe", "name": "no-such-row", "dryRun": true }),
         &ctx,
     )
     .await
@@ -227,7 +230,7 @@ async fn a_gated_verb_called_without_the_opt_in_returns_a_plan_and_applies_nothi
     assert_eq!(
         out["dryRun"],
         serde_json::json!(true),
-        "a gated verb with no opt-in must report a dry run: {out}"
+        "a gated verb called with dryRun must report a dry run: {out}"
     );
     assert_eq!(out["tool"], serde_json::json!("config.delete"));
     assert!(
@@ -241,7 +244,7 @@ async fn a_gated_verb_called_without_the_opt_in_returns_a_plan_and_applies_nothi
         out["howToExecute"]
             .as_str()
             .unwrap_or_default()
-            .contains("execute"),
+            .contains("without `dryRun`"),
         "the plan says how to apply it: {out}"
     );
 }
