@@ -319,11 +319,14 @@ fn the_plugin_manifest_carries_each_tools_policy() {
     assert!(!manifest.is_empty());
     let gated = dispatch::execute_gated_names();
     let mutations = dispatch::data_mutation_names();
+    let local_only = dispatch::local_only_names();
+    assert!(manifest.iter().any(|e| e.local_only == Some(true)));
     for e in &manifest {
         let name = e.name.as_str();
         assert_eq!(e.role.as_deref(), dispatch::required_role(name), "{name}");
         assert_eq!(e.execute_gated, Some(gated.contains(&name)), "{name}");
         assert_eq!(e.data_mutation, Some(mutations.contains(&name)), "{name}");
+        assert_eq!(e.local_only, Some(local_only.contains(&name)), "{name}");
     }
 }
 
