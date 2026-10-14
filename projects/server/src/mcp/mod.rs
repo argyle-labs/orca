@@ -446,10 +446,7 @@ pub async fn handle_jsonrpc(
                         id,
                         json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
                     ),
-                    Err(e) => reply(
-                        id,
-                        json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
-                    ),
+                    Err(e) => reply(id, tool_error_result(&e)),
                 }
             } else if in_daemon {
                 // In-process: this tool isn't a plugin, federated, or registry
@@ -496,10 +493,7 @@ pub async fn handle_jsonrpc(
                             ),
                         }
                     }
-                    Err(e) => reply(
-                        id,
-                        json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
-                    ),
+                    Err(e) => reply(id, tool_error_result(&e)),
                 }
             }
         }
@@ -668,12 +662,42 @@ async fn call_core_tool_via_daemon(name: &str, args: &Value) -> Result<Option<Va
     if status.as_u16() == 404 || code == "tool.unknown" || kind == "not_found" {
         return Ok(None);
     }
+    if let Some(oe) = structured_daemon_error(&payload) {
+        return Err(oe.into());
+    }
     let msg = payload
         .get("message")
         .or_else(|| payload.get("error"))
         .and_then(Value::as_str)
         .unwrap_or("unknown error");
     anyhow::bail!("tool '{name}' failed ({}): {msg}", status.as_u16());
+}
+
+/// A daemon error body that carries a remediation, rebuilt so the MCP reply
+/// can return it as `structuredContent` instead of flattening it to text.
+fn structured_daemon_error(payload: &Value) -> Option<contract::OrcaError> {
+    payload.get("remediation")?;
+    serde_json::from_value(payload.clone()).ok()
+}
+
+/// The `tools/call` result for a failed tool. A classified error with a
+/// remediation also rides as `structuredContent` (kind, code, remediation).
+fn tool_error_result(e: &anyhow::Error) -> Value {
+    let structured = e
+        .chain()
+        .find_map(|c| c.downcast_ref::<contract::OrcaError>())
+        .filter(|oe| oe.remediation.is_some())
+        .and_then(|oe| serde_json::to_value(oe).ok());
+    match structured {
+        Some(sc) => json!({
+            "content": [{ "type": "text", "text": format!("Error: {e}") }],
+            "isError": true,
+            "structuredContent": sc,
+        }),
+        None => {
+            json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true })
+        }
+    }
 }
 
 // Context7 federation dispatch. All other tools flow through
@@ -739,6 +763,38 @@ fn error_reply(id: Value, code: i64, message: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tool_error_result_carries_remediation_as_structured_content() {
+        let oe = contract::OrcaError::blocked(
+            "x.off",
+            "service off",
+            contract::ManualSteps::new("no API").step("Enable", "in the UI"),
+        );
+        let r = super::tool_error_result(&anyhow::Error::from(oe));
+        assert_eq!(r["isError"], true);
+        assert_eq!(r["structuredContent"]["code"], "x.off");
+        assert_eq!(
+            r["structuredContent"]["remediation"]["steps"][0]["title"],
+            "Enable"
+        );
+        let text = r["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("  1. Enable"), "{text}");
+
+        let plain = super::tool_error_result(&anyhow::anyhow!("boom"));
+        assert!(plain.get("structuredContent").is_none());
+    }
+
+    #[test]
+    fn structured_daemon_error_needs_a_remediation() {
+        let body = serde_json::json!({"kind": "unavailable", "message": "m"});
+        assert!(super::structured_daemon_error(&body).is_none());
+        let body = serde_json::json!({
+            "kind": "unavailable", "message": "m",
+            "remediation": {"type": "manual", "reason": "r", "steps": []}
+        });
+        assert!(super::structured_daemon_error(&body).is_some());
+    }
+
     use super::*;
 
     /// Serializes tests that repoint the process-global `ORCA_HOME`/`ORCA_DB_PATH`

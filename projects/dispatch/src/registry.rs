@@ -1488,6 +1488,23 @@ mod tests {
         assert_eq!(*SEEN_ARGS.lock().unwrap(), vec![json!({ "x": 1 })]);
     }
 
+    #[cfg(feature = "server")]
+    #[test]
+    fn rest_error_body_carries_remediation_intact() {
+        let oe = contract::OrcaError::blocked(
+            "x.off",
+            "service off",
+            contract::ManualSteps::new("no API")
+                .step("Enable", "in the UI")
+                .verify("x status"),
+        );
+        let (status, Json(body)) = orca_error_response(oe);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "x.off");
+        assert_eq!(body["remediation"]["type"], "manual");
+        assert_eq!(body["remediation"]["steps"][0]["verify"], "x status");
+    }
+
     #[test]
     fn find_orca_error_sees_wrapped_and_context_held_errors() {
         let wrapped = anyhow::Error::from(contract::OrcaError::invalid("a")).context("ctx");

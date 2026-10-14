@@ -39,6 +39,9 @@ pub mod json_any;
 
 /// Shared pagination primitive for every `*.list` verb (PageParams + Page<T>).
 pub mod paging;
+/// Structured way out of a blocked state (automatic op or manual steps).
+pub mod remediation;
+pub use remediation::{Blocked, ManualStep, ManualSteps, Remediation};
 /// Dry-run plan returned by execute-gated tools (see `plan::ExecutionPlan`).
 pub mod plan;
 // The re-export itself triggers the disallowed-type lint workspace-wide;

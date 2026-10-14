@@ -94,6 +94,8 @@ pub mod process;
 /// generic surface a dynamic plugin registers its async work against. Always
 /// available; the runtime is an internal detail plugins never name.
 pub mod reactor;
+#[cfg(feature = "tools")]
+pub mod remediation;
 pub mod route;
 #[cfg(feature = "db")]
 pub mod runtime;

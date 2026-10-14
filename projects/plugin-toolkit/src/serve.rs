@@ -273,7 +273,7 @@ fn serve_session<S: Read + Write + 'static>(
                     Err(e) => Frame::Result {
                         id,
                         ok: false,
-                        value: Value::Null,
+                        value: structured_error(&e),
                         error_kind: error_kind(&e),
                         error: Some(format!("{e:#}")),
                     },
@@ -293,6 +293,15 @@ fn serve_session<S: Read + Write + 'static>(
 fn error_kind(e: &anyhow::Error) -> Option<String> {
     e.downcast_ref::<crate::contract::OrcaError>()
         .map(|oe| oe.kind.as_str().to_string())
+}
+
+/// The `OrcaError` behind `e`, serialized so the host can rebuild it with its
+/// kind, code, and remediation; `Null` for an unclassified error.
+fn structured_error(e: &anyhow::Error) -> Value {
+    e.chain()
+        .find_map(|c| c.downcast_ref::<contract::OrcaError>())
+        .and_then(|oe| serde_json::to_value(oe).ok())
+        .unwrap_or(Value::Null)
 }
 
 /// Buffers each frame and writes it whole under `lock`, so heartbeat frames

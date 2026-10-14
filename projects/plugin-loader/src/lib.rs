@@ -1216,15 +1216,24 @@ fn backing_for(name: &str) -> Option<(Backing, String)> {
 
 /// Marshal an invoke result into the caller's `Result<Value>`. The value is
 /// already parsed (it rode the wire as `Value`), so success passes through with
-/// no reparse; an error `Value` is rendered to text with a plugin-named context.
-/// A plugin's failure keeps the [`contract::ErrorKind`] it reported, so a
-/// refusal like invalid args reaches REST as its own status rather than a 500.
+/// no reparse; a structured `OrcaError` passes through intact, any other error
+/// is rendered to text with a plugin-named context. A plugin's failure keeps the
+/// [`contract::ErrorKind`] it reported, so a refusal like invalid args reaches
+/// REST as its own status rather than a 500.
 fn parse_invoke_result(
     result: Result<sj::Value>,
     name: &str,
     _software: &str,
 ) -> Result<sj::Value> {
     result.map_err(|e| {
+        #[cfg(unix)]
+        let e = match e.downcast::<supervisor::ToolFailed>() {
+            Ok(supervisor::ToolFailed {
+                error: Some(oe), ..
+            }) => return oe.into(),
+            Ok(failed) => anyhow::Error::from(failed),
+            Err(e) => e,
+        };
         let msg = format!("plugin tool '{name}' failed: {e:#}");
         #[cfg(unix)]
         if let Some(kind) = e
@@ -1650,6 +1659,7 @@ mod loader_tests {
         let failed = supervisor::ToolFailed {
             message: "invalid args for some.tool: missing field `id`".into(),
             kind: Some(contract::ErrorKind::Invalid),
+            error: None,
         };
         let err = parse_invoke_result(Err(failed.into()), "some.tool", "sw").unwrap_err();
         let oe = err
@@ -1665,9 +1675,30 @@ mod loader_tests {
         let failed = supervisor::ToolFailed {
             message: "boom".into(),
             kind: None,
+            error: None,
         };
         let err = parse_invoke_result(Err(failed.into()), "some.tool", "sw").unwrap_err();
         assert!(err.downcast_ref::<contract::OrcaError>().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_invoke_result_passes_structured_orca_error_through() {
+        let oe = contract::OrcaError::blocked(
+            "x.off",
+            "service off",
+            contract::ManualSteps::new("no API").step("Enable", "in the UI"),
+        );
+        let failed = supervisor::ToolFailed {
+            message: "unavailable: service off".into(),
+            kind: Some(contract::ErrorKind::Unavailable),
+            error: Some(oe),
+        };
+        let err = parse_invoke_result(Err(failed.into()), "t", "sw").unwrap_err();
+        let back = err.downcast_ref::<contract::OrcaError>().unwrap();
+        assert_eq!(back.kind, contract::ErrorKind::Unavailable);
+        assert_eq!(back.code.as_deref(), Some("x.off"));
+        assert!(back.remediation.is_some());
     }
 
     #[test]
