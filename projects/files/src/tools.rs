@@ -433,7 +433,26 @@ mod tests {
             .as_nanos();
         base.push(format!("orca-files-tools-{tag}-{nanos}-{:p}", &base));
         std::fs::create_dir_all(&base).unwrap();
+        register_root(&base);
         base
+    }
+
+    /// Registers `dir` as a root so absolute paths beneath it are in scope.
+    /// The DB is per test thread: guard tests plant a fake `.db_key` in the
+    /// shared state dir, which would break the encrypted default DB.
+    fn register_root(dir: &Path) {
+        db::set_thread_db_path(Some(&format!("{}.db", dir.display())));
+        let conn = db::open_default().unwrap();
+        crate::docs::upsert_root(
+            &conn,
+            &crate::docs::RootRow {
+                name: dir.file_name().unwrap().to_string_lossy().into_owned(),
+                path: dir.to_string_lossy().into_owned(),
+                description: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
     }
 
     // ── fs_list ──────────────────────────────────────────────────────────────
