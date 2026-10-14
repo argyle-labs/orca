@@ -2082,6 +2082,48 @@ mod tests {
         );
     }
 
+    // Drives the real dial path end to end, so a spawn anywhere between the
+    // tracked dialer and the handshake (which would drop the task-local
+    // expected peer id) makes this dial succeed instead of being refused.
+    #[serial_test::serial(env)]
+    #[tokio::test]
+    async fn tracked_dial_refuses_a_peer_answering_with_another_identity() {
+        // Fails only when another test already installed one.
+        drop(rustls::crypto::ring::default_provider().install_default());
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, "system-y").unwrap();
+            let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let _tls = acceptor.accept(tcp).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            });
+            let targets = vec!["127.0.0.1".to_string()];
+            let err = crate::mesh::dialer::try_targets_tracked(
+                Some("system-x"),
+                &targets,
+                |t| async move {
+                    call_mesh_method_pub(&t, port, "mesh/ping", serde_json::json!({})).await
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("answered as system system-y"),
+                "got: {err:#}"
+            );
+            server.abort();
+        })
+        .await;
+    }
+
     // ── call_mesh_method_pub — not-a-member guard (mesh client bundle absent) ───
     //
     // With HOME at an empty tempdir there is no mesh client bundle, so the mTLS
