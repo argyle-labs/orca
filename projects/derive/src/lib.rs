@@ -259,12 +259,20 @@ struct ToolAttr {
     /// leave it off so the opt-in can't reach them. Default: derived from the
     /// verb shape; `data_mutation = false` opts a control-plane write out.
     data_mutation: Option<bool>,
-    /// Opt-in: `#[orca_tool(..., execute_gated = true)]` makes this verb
-    /// **dry-run by default** — invoked without `execute: true` it returns an
+    /// `#[orca_tool(..., execute_gated = true)]` lets this verb be previewed:
+    /// it executes by default, and with `dryRun: true` returns an
     /// `ExecutionPlan` and changes nothing. Enforced centrally in
     /// `dispatch::erased`, so the verb body needs no flag of its own. Set on
     /// every verb that applies changes. Default off.
     execute_gated: Option<bool>,
+    /// `#[orca_tool(..., dry_run_aware = true)]`: an ungated verb whose body
+    /// honours `ToolCtx::dry_run()`. Without it, `dryRun` on an ungated verb
+    /// is refused. Default off.
+    dry_run_aware: bool,
+    /// `#[orca_tool(..., dry_run_neutralize = path::to::fn)]`: a
+    /// `fn(&mut Args)` that clears the verb's own apply opt-ins before a dry
+    /// run is forwarded to a peer, so a peer that ignores `dryRun` probes.
+    dry_run_neutralize: Option<syn::Path>,
     /// Minimum role required to invoke this tool via authenticated surfaces.
     /// `"any"` (default) means any authenticated identity passes; `"admin"`
     /// requires `AuthIdentity::role == "admin"`. Set via
@@ -294,6 +302,8 @@ impl Parse for ToolAttr {
         let mut refresh_runtime = false;
         let mut data_mutation: Option<bool> = None;
         let mut execute_gated: Option<bool> = None;
+        let mut dry_run_aware = false;
+        let mut dry_run_neutralize: Option<syn::Path> = None;
         let mut role: Option<LitStr> = None;
         let mut title: Option<LitStr> = None;
         let mut crate_path: Option<syn::Path> = None;
@@ -396,6 +406,22 @@ impl Parse for ToolAttr {
                         }
                     });
                 }
+                "dry_run_aware" => {
+                    dry_run_aware = match &nv.value {
+                        Expr::Lit(ExprLit {
+                            lit: Lit::Bool(b), ..
+                        }) => b.value,
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                "dry_run_aware expects a bool literal",
+                            ));
+                        }
+                    };
+                }
+                "dry_run_neutralize" => {
+                    dry_run_neutralize = Some(parse_path(&nv.value)?);
+                }
                 "role" => {
                     let s = lit_str(&nv.value)?;
                     match s.value().as_str() {
@@ -449,6 +475,8 @@ impl Parse for ToolAttr {
             refresh_runtime,
             data_mutation,
             execute_gated,
+            dry_run_aware,
+            dry_run_neutralize,
             role,
             title,
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
@@ -880,13 +908,13 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     // remembered to say so. Control-plane writes (auth, secrets) opt out with
     // `data_mutation = false` so the `can_mutate` escape hatch cannot reach them.
     let data_mutation_lit = attr.data_mutation.unwrap_or(!read_shaped);
-    // Dry-run is the DEFAULT for every verb that changes something (#636). The
-    // gate is DERIVED from the verb's own shape rather than opted into: an
-    // opt-in flag is how 61 mutating endpoints ended up ungated while two were
-    // gated. Read-shaped verbs plan nothing because they change nothing;
+    // Every verb that changes something honours `dryRun` (#636, #877). The
+    // gate is derived from the verb's own shape so a mutating verb cannot be
+    // left ungated by omission. Read-shaped verbs have nothing to plan because they change nothing;
     // everything else gates. `execute_gated = false` remains available for a
     // verb whose write-shaped name is misleading.
     let execute_gated_lit = attr.execute_gated.unwrap_or(!read_shaped);
+    let dry_run_aware_lit = attr.dry_run_aware;
     // REQUIRED_ROLE: explicit `role = "..."` wins; otherwise default-deny
     // derives from the verb — read-shaped verbs (`list`/`detail`/`search`) get
     // "any", anything else gets "admin". This closes C2 (default-deny on
@@ -982,22 +1010,52 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     } else {
         quote! {}
     };
-    // The execute gate strips the opt-in before `run`, so a gated verb that
-    // reaches `run` was already opted in and authorized here. Re-assert it on
-    // the forwarded args, or the peer's own gate answers with a plan that
-    // cannot decode as this verb's output.
-    let forward_execute_stanza = if execute_gated_lit {
+    // A dry run stays one across the hop: `dryRun: true` for a current peer,
+    // and the verb's own apply opt-ins cleared for one that ignores `dryRun`.
+    // Otherwise a gated verb sends `execute: true`, keeping an older peer,
+    // whose gate still plans by default, applying instead of answering with a
+    // plan that cannot decode as this verb's output.
+    let forward_dry_run_stanza = if execute_gated_lit || dry_run_aware_lit {
+        quote! {
+            if #ctx_param_name.dry_run() {
+                <#zst_ident as #crate_path::contract::OrcaToolDef>::neutralize_for_dry_run(&mut __fwd_args);
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let forward_flag_stanza = if execute_gated_lit || dry_run_aware_lit {
+        let field = if execute_gated_lit {
+            quote! { if #ctx_param_name.dry_run() { #crate_path::contract::plan::DRY_RUN_FIELD } else { #crate_path::contract::plan::EXECUTE_FIELD } }
+        } else {
+            quote! { #crate_path::contract::plan::DRY_RUN_FIELD }
+        };
+        let guard = if execute_gated_lit {
+            quote! {}
+        } else {
+            quote! { #ctx_param_name.dry_run() && }
+        };
         quote! {
             let mut __args_value = __args_value;
-            if let ::core::option::Option::Some(__obj) = __args_value.as_object_mut() {
+            if #guard let ::core::option::Option::Some(__obj) = __args_value.as_object_mut()
+            {
                 __obj.insert(
-                    ::std::string::ToString::to_string(#crate_path::contract::plan::EXECUTE_FIELD),
+                    ::std::string::ToString::to_string(#field),
                     #crate_path::serde_json::Value::Bool(true),
                 );
             }
         }
     } else {
         quote! {}
+    };
+    let neutralize_fn = match attr.dry_run_neutralize.as_ref() {
+        Some(path) => quote! {
+            const DRY_RUN_NEUTRALIZES: bool = true;
+            fn neutralize_for_dry_run(args: &mut Self::Args) {
+                #path(args)
+            }
+        },
+        None => quote! {},
     };
     let peer_dispatch_stanza = if emit_peer_dispatch {
         quote! {
@@ -1006,9 +1064,12 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             {
                 let __svc = #ctx_param_name
                     .service::<::std::sync::Arc<dyn #crate_path::contract::RemoteExec>>()?;
-                let __args_value = #crate_path::serde_json::to_value(&#args_forward)
+                #[allow(unused_mut)]
+                let mut __fwd_args = #args_forward;
+                #forward_dry_run_stanza
+                let __args_value = #crate_path::serde_json::to_value(&__fwd_args)
                     .map_err(|e| #crate_path::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
-                #forward_execute_stanza
+                #forward_flag_stanza
                 // Forward the ctx's ambient operator identity; the transport
                 // mints a signed caller token from it (project-remote-exec-full-fix
                 // S1–S4). `None` on unauthenticated paths.
@@ -1101,9 +1162,11 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             const LOCAL_ONLY: bool = !#remote_ok_lit;
             const DATA_MUTATION: bool = #data_mutation_lit;
             const EXECUTE_GATED: bool = #execute_gated_lit;
+            const DRY_RUN_AWARE: bool = #dry_run_aware_lit;
             #role_const
             type Args = #args_ty;
             type Output = #output_ty;
+            #neutralize_fn
         }
 
         impl #crate_path::contract::OrcaOp for #zst_ident {
@@ -1204,14 +1267,13 @@ fn snake_to_pascal(s: &str) -> String {
 /// Does this verb only READ?
 ///
 /// One predicate drives three things that must agree: `REQUIRED_ROLE`,
-/// `DATA_MUTATION`, and the dry-run gate. They were three independent opt-ins,
-/// which is how 61 mutating endpoints ended up ungated while two were gated
-/// (#636) — a flag nobody remembers to set is not a policy.
+/// `DATA_MUTATION`, and the dry-run gate, so a mutating verb cannot be left
+/// ungated by omission (#636).
 ///
 /// The list is explicit rather than a heuristic, and deliberately conservative:
-/// a verb wrongly treated as a WRITE merely asks for `execute`, which is
-/// visible the first time anyone calls it. A verb wrongly treated as a READ
-/// applies changes with no consent and no audit, which is not. So anything not
+/// a verb wrongly treated as a WRITE merely becomes admin-only and offers a
+/// `dryRun`, which is visible the first time anyone calls it. A verb wrongly
+/// treated as a READ applies changes with no audit, which is not. So anything not
 /// named here gates.
 ///
 /// A noun-shaped verb is not evidence of a read: `profile` is absent because
@@ -1612,6 +1674,15 @@ mod tests {
         let attr = parse_attr(quote!(domain = "h", verb = "v", remote_ok = true)).unwrap();
         let out = expand(attr, ok_fn()).unwrap().to_string();
         assert!(out.contains("REMOTE_OK : bool = true"), "got: {out}");
+    }
+
+    #[test]
+    fn dry_run_aware_defaults_off_and_is_settable() {
+        let out = expand(attr_ok(), ok_fn()).unwrap().to_string();
+        assert!(out.contains("DRY_RUN_AWARE : bool = false"), "got: {out}");
+        let attr = parse_attr(quote!(domain = "h", verb = "v", dry_run_aware = true)).unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
+        assert!(out.contains("DRY_RUN_AWARE : bool = true"), "got: {out}");
     }
 
     #[test]

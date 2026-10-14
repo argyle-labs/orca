@@ -1,6 +1,6 @@
 //! Conformance test for the `[MUTATES STATE]` doc marker.
 //!
-//! Lives here, not in `dispatch`, for the same reason as `execute_gate.rs`:
+//! Lives here, not in `dispatch`, for the same reason as `dry_run_gate.rs`:
 //! `dispatch`'s own test binary links no buckets, so anything iterating
 //! `data_mutation_names()` there passes vacuously.
 
