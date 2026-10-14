@@ -110,45 +110,29 @@ fn model_backends_check_is_an_ungated_read() {
     );
 }
 
-/// Gated control-plane writes that opt out of `data_mutation`, so a non-admin
-/// `can_mutate` caller can never reach them.
-const CONTROL_PLANE_WRITES: &[&str] = &[
-    "auth.session.create",
-    "auth.session.delete",
-    "auth.token.create",
-    "auth.token.delete",
-    "pki.create",
-    "secrets.delete",
-    "secrets.upsert",
-    "system.cron.update",
-];
+/// Core verbs a non-admin `can_mutate` caller may invoke. `data_mutation` is
+/// opt-in, so anything else that writes stays admin-only.
+const ALLOWED_DATA_MUTATIONS: &[&str] = &[];
 
 /// A verb that applies changes must be restricted in WHO may call it — its
 /// default execute and its dry run alike.
 #[test]
-fn every_gated_verb_is_also_an_admin_data_mutation() {
-    let mutations = dispatch::data_mutation_names();
+fn every_gated_verb_is_admin_only() {
     for name in dispatch::execute_gated_names() {
         assert_eq!(
             dispatch::required_role(name),
             Some("admin"),
             "{name} is execute_gated but not role=admin — mutation without authorization"
         );
-        assert_eq!(
-            mutations.contains(&name),
-            !CONTROL_PLANE_WRITES.contains(&name),
-            "{name}: a gated verb is a data_mutation unless it is a listed control-plane write"
-        );
     }
 }
 
 #[test]
-fn control_plane_writes_list_has_no_stale_entries() {
-    let gated = dispatch::execute_gated_names();
-    for name in CONTROL_PLANE_WRITES {
+fn only_allowed_verbs_are_data_mutations() {
+    for name in dispatch::data_mutation_names() {
         assert!(
-            gated.contains(name),
-            "`{name}` is not an execute_gated verb"
+            ALLOWED_DATA_MUTATIONS.contains(&name),
+            "`{name}` is a data_mutation, so a non-admin `can_mutate` token can call it"
         );
     }
 }
