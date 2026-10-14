@@ -711,6 +711,12 @@ pub struct PluginCreateArgs {
     #[serde(default)]
     #[arg(long, default_value = "{}", value_parser = parse_json_object)]
     pub args: serde_json::Value,
+    /// `install`: apply it. Omitted or false returns an ExecutionPlan and
+    /// installs nothing. Ignored by `invoke`: the plugin verb gates itself, so
+    /// pass its own opt-in inside `args`.
+    #[arg(long, default_value_t = false)]
+    #[serde(default)]
+    pub execute: bool,
 }
 
 /// `plugin.create` payload — one variant per `action`.
@@ -719,6 +725,7 @@ pub struct PluginCreateArgs {
 pub enum PluginCreateOutput {
     Install(PluginInstallOutput),
     Invoke(PluginInvokeOutput),
+    Plan(contract::plan::ExecutionPlan),
 }
 
 /// [MUTATES STATE] Create a plugin artifact. `action=install` sideloads (`--file`) or
@@ -728,9 +735,18 @@ pub enum PluginCreateOutput {
 /// over the mesh: call it with `peer: <host>` and the universal peer-dispatch
 /// stanza relays it to the peer, which dispatches the named verb through its own
 /// loaded-plugin registry. Discover verb names with `plugin.detail`/`plugin.list`.
-#[orca_tool(domain = "plugin", verb = "create")]
+// Not intercepted by the generic gate: `invoke` reaches plugin verbs that are
+// reads or gate themselves, so an outer gate would plan a `docker.list` and hide
+// the plugin's own plan. Only `install` is gated, here.
+#[orca_tool(domain = "plugin", verb = "create", execute_gated = false)]
 async fn plugin_create(args: PluginCreateArgs, ctx: &ToolCtx) -> Result<PluginCreateOutput> {
     match args.action {
+        PluginCreateAction::Install if !args.execute => {
+            let inputs = serde_json::to_value(&args)?;
+            Ok(PluginCreateOutput::Plan(
+                contract::plan::ExecutionPlan::generic("plugin.create", inputs.into()),
+            ))
+        }
         PluginCreateAction::Install => {
             let install = PluginInstallArgs {
                 file: args.file,
@@ -2335,6 +2351,7 @@ mod tests {
             replace: false,
             tool: None,
             args: serde_json::json!({}),
+            execute: false,
         };
         let err = plugin_create(args, &ctx).await.unwrap_err();
         assert!(
@@ -2480,6 +2497,7 @@ mod tests {
             replace: false,
             tool: None,
             args: serde_json::json!({}),
+            execute: true,
         };
         let err = plugin_create(args, &ctx).await.unwrap_err();
         assert!(
@@ -2506,6 +2524,7 @@ mod tests {
             replace: false,
             tool: None,
             args: serde_json::json!({}),
+            execute: true,
         };
         let err = plugin_create(args, &ctx).await.unwrap_err();
         assert!(
@@ -2533,6 +2552,7 @@ mod tests {
             replace: false,
             tool: None,
             args: serde_json::json!({}),
+            execute: true,
         };
         let err = plugin_create(args, &ctx).await.unwrap_err();
         assert!(
@@ -2559,6 +2579,7 @@ mod tests {
             replace: false,
             tool: Some("nope-plugin.nope".to_string()),
             args: serde_json::json!({}),
+            execute: false,
         };
         let err = plugin_create(args, &ctx).await.unwrap_err();
         assert!(
