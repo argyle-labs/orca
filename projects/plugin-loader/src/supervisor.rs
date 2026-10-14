@@ -461,6 +461,7 @@ impl PluginProcess {
                     .set_write_timeout(Some(Duration::from_millis(1)))
                     .ok();
                 session.stop();
+                crate::ws::drop_sessions(&self.software);
                 SessionState::Broken
             }
             Err(e) if is_idle_timeout(e) => SessionState::Stale(id),
@@ -499,6 +500,7 @@ impl PluginProcess {
     fn respawn(&self, session: &mut Session) -> Result<()> {
         tracing::warn!(plugin = %self.software, "respawning plugin after a broken session");
         session.stop();
+        crate::ws::drop_sessions(&self.software);
         let (child, stream, hs, _) = start(&self.exe, &self.software)
             .with_context(|| format!("respawning plugin '{}'", self.software))?;
         let mut fresh = Session {
@@ -534,6 +536,7 @@ impl PluginProcess {
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .stop();
+        crate::ws::drop_sessions(&self.software);
     }
 }
 
