@@ -40,12 +40,15 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Inbound messages / bytes a plugin may leave unread before its session is
-/// dropped, bounding host memory without ever stalling the socket pump.
+/// dropped, bounding host memory without ever stalling the socket pump. The
+/// byte bound grows to two max-size messages for sessions that raise the cap.
 const MAX_BACKLOG: usize = 1024;
 const MAX_BACKLOG_BYTES: usize = 8 << 20;
 
-const MAX_MESSAGE: usize = 1 << 20;
-const MAX_FRAME: usize = 256 << 10;
+/// Largest inbound message (and frame: some peers, e.g. Home Assistant, send
+/// multi-MiB replies as one unfragmented frame) unless the plugin asks for more.
+const DEFAULT_MESSAGE: usize = 1 << 20;
+const MAX_MESSAGE: usize = 16 << 20;
 
 const MAX_SESSIONS: usize = 16;
 
@@ -78,18 +81,26 @@ enum Cmd {
 
 type Inbound = Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Result<WsChunk>>>>;
 
-#[derive(Default)]
 struct Backlog {
     count: AtomicUsize,
     bytes: AtomicUsize,
+    max_bytes: usize,
 }
 
 impl Backlog {
+    fn new(max_message: usize) -> Self {
+        Self {
+            count: AtomicUsize::new(0),
+            bytes: AtomicUsize::new(0),
+            max_bytes: MAX_BACKLOG_BYTES.max(2 * max_message),
+        }
+    }
+
     /// Account one queued message; false once either bound is exceeded.
     fn push(&self, len: usize) -> bool {
         let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
         let bytes = self.bytes.fetch_add(len, Ordering::Relaxed) + len;
-        count <= MAX_BACKLOG && bytes <= MAX_BACKLOG_BYTES
+        count <= MAX_BACKLOG && bytes <= self.max_bytes
     }
 
     fn pop(&self, len: usize) {
@@ -157,6 +168,12 @@ fn wait_limit(requested_ms: Option<u64>) -> Duration {
     }
 }
 
+fn message_limit(requested: Option<u64>) -> usize {
+    requested.map_or(DEFAULT_MESSAGE, |n| {
+        usize::try_from(n).unwrap_or(usize::MAX).min(MAX_MESSAGE)
+    })
+}
+
 fn session_limit(principal: &str) -> anyhow::Error {
     anyhow!("ws.open: plugin '{principal}' already holds {MAX_SESSIONS} sessions; close one first")
 }
@@ -167,13 +184,14 @@ pub(crate) fn open(req: WsOpen, principal: &str) -> Result<WsChunk> {
         return Err(session_limit(principal));
     }
     let wait = wait_limit(req.timeout_ms);
+    let max_message = message_limit(req.max_message_bytes);
     let url = req.url.clone();
-    let ws = run_on_cap_runtime(async move { timeout(wait, connect(req)).await })?
+    let ws = run_on_cap_runtime(async move { timeout(wait, connect(req, max_message)).await })?
         .map_err(|_| anyhow!("ws.open: '{url}' timed out after {wait:?}"))??;
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (in_tx, in_rx) = mpsc::unbounded_channel();
-    let backlog = Arc::new(Backlog::default());
+    let backlog = Arc::new(Backlog::new(max_message));
     let pump = cap_runtime().spawn(pump(ws, cmd_rx, in_tx, Arc::clone(&backlog)));
     let session = Session {
         cmds: cmd_tx,
@@ -318,7 +336,7 @@ pub(crate) fn insert_idle_session(principal: &str) -> IdleSession {
         Session {
             cmds,
             inbound: Arc::new(tokio::sync::Mutex::new(in_rx)),
-            backlog: Arc::default(),
+            backlog: Arc::new(Backlog::new(DEFAULT_MESSAGE)),
             pump,
         },
     );
@@ -342,7 +360,7 @@ fn with_session<R>(
         .ok_or_else(|| anyhow!("{op}: no open session {session}"))
 }
 
-async fn connect(req: WsOpen) -> Result<WebSocketStream<Box<dyn Io>>> {
+async fn connect(req: WsOpen, max_message: usize) -> Result<WebSocketStream<Box<dyn Io>>> {
     let mut request = req
         .url
         .as_str()
@@ -385,8 +403,8 @@ async fn connect(req: WsOpen) -> Result<WebSocketStream<Box<dyn Io>>> {
         Box::new(tcp)
     };
     let config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_MESSAGE))
-        .max_frame_size(Some(MAX_FRAME));
+        .max_message_size(Some(max_message))
+        .max_frame_size(Some(max_message));
     let (ws, _) = client_async_with_config(request, io, Some(config))
         .await
         .map_err(|e| anyhow!("ws.open: handshake: {e}"))?;
@@ -509,7 +527,8 @@ async fn pump(
                 };
                 if !backlog.push(chunk_len(&chunk)) {
                     _ = inbound.send(Err(anyhow!(
-                        "ws: plugin left over {MAX_BACKLOG} messages or {MAX_BACKLOG_BYTES} bytes unread; session dropped"
+                        "ws: plugin left over {MAX_BACKLOG} messages or {} bytes unread; session dropped",
+                        backlog.max_bytes
                     )));
                     return;
                 }
@@ -809,12 +828,41 @@ mod tests {
     fn oversize_message_is_refused() {
         let (url, _closed) = server(Peer::Flood {
             count: 1,
-            size: MAX_MESSAGE * 2,
+            size: DEFAULT_MESSAGE * 2,
         });
         let s = open(&url, "ws-oversize");
         let err = recv(s, "ws-oversize").unwrap_err().to_string();
         assert!(err.contains("connection dropped"), "got: {err}");
         assert_eq!(session_count("ws-oversize"), 0);
+    }
+
+    #[test]
+    fn raised_message_cap_accepts_a_large_single_frame() {
+        let (url, _closed) = server(Peer::Flood {
+            count: 1,
+            size: DEFAULT_MESSAGE * 2,
+        });
+        let reply = handle_cap(
+            "ws.open",
+            json!({"url": url, "max_message_bytes": 4 << 20}),
+            "ws-large",
+        )
+        .unwrap();
+        let WsChunk::Open { session } = serde_json::from_value(reply).unwrap() else {
+            panic!("expected Open");
+        };
+        let msg: WsChunk = serde_json::from_value(recv(session, "ws-large").unwrap()).unwrap();
+        assert_eq!(chunk_len(&msg), DEFAULT_MESSAGE * 2);
+    }
+
+    #[test]
+    fn message_cap_is_defaulted_and_clamped() {
+        assert_eq!(message_limit(None), DEFAULT_MESSAGE);
+        assert_eq!(message_limit(Some(4 << 20)), 4 << 20);
+        assert_eq!(message_limit(Some(64 << 20)), MAX_MESSAGE);
+        assert_eq!(message_limit(Some(u64::MAX)), MAX_MESSAGE);
+        assert_eq!(Backlog::new(MAX_MESSAGE).max_bytes, 2 * MAX_MESSAGE);
+        assert_eq!(Backlog::new(DEFAULT_MESSAGE).max_bytes, MAX_BACKLOG_BYTES);
     }
 
     #[test]
