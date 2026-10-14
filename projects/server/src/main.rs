@@ -330,6 +330,10 @@ enum AdminAction {
         #[arg(long)]
         unsigned: bool,
     },
+    /// `plugin-trust` with the signature required and the plugin name read
+    /// from stdin, so its sudoers grant names no argument wildcard. Invoked by
+    /// the daemon via `sudo -n` after a catalog install saves a signature.
+    PluginTrustSigned,
     /// List all users (id, username, role, updated_at). Local-only; requires
     /// shell + DB access. Used to diagnose replicated user-id divergence.
     ListUsers,
@@ -1037,6 +1041,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::CronApply => cmd_admin_cron_apply().await,
         AdminAction::PluginApply => cmd_admin_plugin_apply().await,
         AdminAction::PluginTrust { name, unsigned } => cmd_admin_plugin_trust(&name, unsigned),
+        AdminAction::PluginTrustSigned => cmd_admin_plugin_trust_signed(),
         AdminAction::ListUsers => cmd_admin_list_users(),
         AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
     }
@@ -1252,6 +1257,18 @@ async fn cmd_admin_plugin_apply() -> Result<()> {
     }
 }
 
+fn cmd_admin_plugin_trust_signed() -> Result<()> {
+    use std::io::Read;
+    let mut name = String::new();
+    std::io::stdin()
+        .take(128)
+        .read_to_string(&mut name)
+        .context("read plugin name from stdin")?;
+    let name = name.trim();
+    system::plugin_apply::validate_plugin_name(name)?;
+    cmd_admin_plugin_trust(name, false)
+}
+
 fn cmd_admin_plugin_trust(name: &str, unsigned: bool) -> Result<()> {
     use system::plugin_apply::{self, Signing};
     anyhow::ensure!(
@@ -1335,6 +1352,19 @@ mod tests {
     use super::*;
     use contract::config::{Config, Model, Ports};
     use std::path::PathBuf;
+
+    #[test]
+    fn plugin_trust_signed_takes_no_arguments() {
+        let parse = |args: &[&str]| Cli::try_parse_from(["orca", "admin"].iter().chain(args));
+        assert!(matches!(
+            parse(&["plugin-trust-signed"]).unwrap().command,
+            Some(Command::Admin {
+                action: AdminAction::PluginTrustSigned
+            })
+        ));
+        assert!(parse(&["plugin-trust-signed", "--unsigned"]).is_err());
+        assert!(parse(&["plugin-trust-signed", "demo"]).is_err());
+    }
 
     fn test_config(db_path: PathBuf, memory_root: PathBuf) -> Config {
         Config {

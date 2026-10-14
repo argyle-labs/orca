@@ -272,6 +272,40 @@ fn save_signature(dir: &Path, software: &str, minisig: Option<&str>) -> Result<(
     std::fs::rename(&tmp, &dest).with_context(|| format!("install {}", dest.display()))
 }
 
+/// Record the just-installed `software` as trusted for `plugin-apply` through
+/// `sudo -n <self> admin plugin-trust-signed`, which re-verifies the saved
+/// signature as root. Installing is the trust decision, so no admin step.
+#[cfg(unix)]
+async fn request_trust(software: &str) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let exe = std::env::current_exe().context("resolve current exe")?;
+    let mut child = tokio::process::Command::new("sudo")
+        .arg("-n")
+        .arg(&exe)
+        .args(["admin", "plugin-trust-signed"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("spawn sudo plugin-trust-signed")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(software.as_bytes()).await?;
+        stdin.shutdown().await?;
+    }
+    let out = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+        .await
+        .context("plugin-trust-signed timed out")??;
+    if !out.status.success() {
+        bail!(
+            "plugin-trust-signed exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 // ── Startup scan ──────────────────────────────────────────────────────────────
 
 /// Scan the install dir and spawn every executable plugin found. Called once on
@@ -1095,6 +1129,11 @@ pub(crate) async fn install_from_catalog(
         // The signature must sit beside the binary it signs, so it is written
         // only once the candidate is live; root's `plugin-trust` reads it.
         save_signature(&dir, &entry.target_software, fetched.minisig.as_deref())?;
+        if fetched.minisig.is_some()
+            && let Err(e) = request_trust(&entry.target_software).await
+        {
+            tracing::warn!(plugin = %entry.target_software, error = %e, "plugin installed but not recorded as trusted for privileged ops");
+        }
         // Candidate is live — the incumbent is no longer needed.
         if let Some(prev) = incumbent.as_deref()
             && let Err(rm) = std::fs::remove_file(prev)
