@@ -950,6 +950,11 @@ fn parse_octal_mode(s: &str) -> anyhow::Result<u32> {
     u32::from_str_radix(digits, 8).map_err(|_| anyhow::anyhow!("invalid octal mode `{s}`"))
 }
 
+/// A dry run forwarded to a peer that ignores `dryRun` still only detects.
+fn neutralize_repair_permissions(args: &mut StorageShareRepairPermsArgs) {
+    args.apply = false;
+}
+
 /// [MUTATES STATE] Repair a share's permissions. Without `--apply` it detects
 /// mode and ownership drift against sibling shares and changes nothing; with
 /// `--apply` it writes the confirmed mode/owner onto the path.
@@ -959,20 +964,23 @@ fn parse_octal_mode(s: &str) -> anyhow::Result<u32> {
 // REPLACE a real plan with an empty one. It still spells the opt-in `apply`,
 // a legacy spelling that migrates with it (#636). Migrating it to return a typed
 // `ExecutionPlan` is the follow-up; that needs the body to run in plan mode,
-// which the intercept-before-body gate cannot express.
+// which the intercept-before-body gate cannot express. `dry_run_aware` routes
+// `dryRun: true` to its own plan path.
 #[orca_tool(
     domain = "storage.share",
     verb = "repair-permissions",
     data_mutation = true,
-    execute_gated = false
+    execute_gated = false,
+    dry_run_aware = true,
+    dry_run_neutralize = neutralize_repair_permissions
 )]
 async fn storage_share_repair_permissions(
     args: StorageShareRepairPermsArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<StorageShareRepairPermsOutput> {
     let current = contract::permissions::read(&args.path).await;
 
-    if !args.apply {
+    if !args.apply || ctx.dry_run() {
         // DETECT: observe what sibling shares use and present candidates. Nothing
         // is changed; the caller confirms a mode and re-invokes with `apply`.
         let candidates = contract::permissions::detect_candidates(&args.path).await;
