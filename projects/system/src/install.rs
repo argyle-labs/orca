@@ -1970,8 +1970,27 @@ mod tests {
         std::fs::write(&hook, PRE_PUSH_GATE).unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+        // Run from a git hook, the parent exports GIT_DIR/GIT_WORK_TREE etc.,
+        // which would redirect these commands at the enclosing real repo.
+        const GIT_REPO_ENV: &[&str] = &[
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_PREFIX",
+        ];
+        let clean = |cmd: &mut Command| {
+            for var in GIT_REPO_ENV {
+                cmd.env_remove(var);
+            }
+        };
+
         let git = |dir: &std::path::Path, args: &[&str]| -> String {
-            let out = Command::new("git")
+            let mut cmd = Command::new("git");
+            clean(&mut cmd);
+            let out = cmd
                 .current_dir(dir)
                 .args(args)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -2001,7 +2020,9 @@ mod tests {
 
         let zero = "0".repeat(40);
         let run = |line: String| -> bool {
-            let mut child = Command::new("bash")
+            let mut cmd = Command::new("bash");
+            clean(&mut cmd);
+            let mut child = cmd
                 .arg(&hook)
                 .args(["origin", remote.to_str().unwrap()])
                 .current_dir(&work)
