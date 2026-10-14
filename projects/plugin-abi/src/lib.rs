@@ -49,6 +49,10 @@ pub struct ToolDef {
     /// Whether the tool writes to an external managed system.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_mutation: Option<bool>,
+    /// Whether the tool is refused over `mesh/exec`, so a paired peer cannot
+    /// run it on this host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_only: Option<bool>,
 }
 
 /// JSON shape of a single domain backend a plugin contributes, in the plugin's

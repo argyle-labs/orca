@@ -26,6 +26,7 @@ pub fn install(local_only: impl IntoIterator<Item = &'static str>) {
 /// allowed — the denylist simply isn't known yet.
 pub fn is_allowed(tool: &str) -> bool {
     !LOCAL_ONLY.get().map(|s| s.contains(tool)).unwrap_or(false)
+        && !crate::tool_roles::is_plugin_local_only(tool)
 }
 
 /// Snapshot of the currently-denied (`local_only`) names for introspection.

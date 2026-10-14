@@ -63,6 +63,10 @@ pub struct ToolDef {
     /// `can_mutate` identity may invoke despite an `admin` role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_mutation: Option<bool>,
+    /// Whether the tool is refused over `mesh/exec`, so a paired peer cannot
+    /// run it on this host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_only: Option<bool>,
 }
 
 /// The identity an [`Frame::Invoke`] acts for, resolved by the daemon from the
@@ -294,6 +298,7 @@ mod tests {
                 role: Some("admin".into()),
                 execute_gated: Some(true),
                 data_mutation: Some(true),
+                local_only: Some(true),
             }],
             backends: vec![json!({
                 "domain": "host_facts",
