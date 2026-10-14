@@ -173,15 +173,40 @@ pub const MESH_SERVER_SAN: &str = "mesh.orca.local";
 /// upgraded from a pre-rename build starts holding a cert without
 /// [`MESH_SERVER_SAN`]. `cert_lacks_mesh_san` catches exactly that and the
 /// daemon reissues at startup, so convergence is one restart, not 23 days.
-pub fn mesh_server_sans() -> Vec<String> {
+///
+/// The [`mesh_identity_san`] lets a dialer check it reached the system it
+/// meant to, not just some mesh member answering on that address.
+pub fn mesh_server_sans(host_cn: &str) -> Vec<String> {
+    let mut sans = mesh_shared_server_sans();
+    sans.push(mesh_identity_san(host_cn));
+    sans
+}
+
+/// Server SANs without the identity name: what a joiner whose CSR does not
+/// ask for one gets, since its build rejects a refreshed cert with extra SANs.
+fn mesh_shared_server_sans() -> Vec<String> {
     let mut sans = vec![MESH_SERVER_SAN.to_string()];
     sans.extend(crate::mesh_compat::legacy_server_sans());
     sans
 }
 
+/// `<system id>.mesh.orca.local`: the DNS name binding a mesh leaf to a system.
+pub fn mesh_identity_san(host_cn: &str) -> String {
+    format!("{host_cn}.{MESH_SERVER_SAN}")
+}
+
+/// The system id a mesh server cert is bound to, or `None` for a cert issued
+/// without an identity name.
+pub fn mesh_server_identity(cert_der: &[u8]) -> Option<String> {
+    let suffix = format!(".{MESH_SERVER_SAN}");
+    cert_dns_names_der(cert_der)?
+        .into_iter()
+        .find_map(|d| d.strip_suffix(&suffix).map(str::to_string))
+}
+
 /// Per-host DNS names a mesh CLIENT cert is issued for.
 pub fn mesh_client_sans(host_cn: &str) -> Vec<String> {
-    let mut sans = vec![format!("{host_cn}.{MESH_SERVER_SAN}")];
+    let mut sans = vec![mesh_identity_san(host_cn)];
     sans.extend(crate::mesh_compat::legacy_client_sans(host_cn));
     sans
 }
@@ -208,7 +233,11 @@ fn cert_dns_names(cert_pem: &str) -> Option<Vec<String>> {
     use rustls_pemfile::certs;
     let mut reader = cert_pem.as_bytes();
     let der = certs(&mut reader).next()?.ok()?;
-    let (_, parsed) = x509_parser::parse_x509_certificate(der.as_ref()).ok()?;
+    cert_dns_names_der(der.as_ref())
+}
+
+fn cert_dns_names_der(der: &[u8]) -> Option<Vec<String>> {
+    let (_, parsed) = x509_parser::parse_x509_certificate(der).ok()?;
     let san = parsed.subject_alternative_name().ok()??;
     Some(
         san.value
@@ -253,16 +282,20 @@ pub fn init_mesh_ca(pki_dir: &Path, host_cn: &str) -> Result<()> {
     write_pem(mesh_ca_key_path(pki_dir), &ca_key.serialize_pem())?;
 
     let issuer = Issuer::new(ca_params, ca_key);
-    issue_mesh_server_cert(pki_dir, &issuer)?;
+    issue_mesh_server_cert(pki_dir, &issuer, host_cn)?;
     issue_mesh_client_cert(pki_dir, &issuer, host_cn)?;
     Ok(())
 }
 
 /// Re-issue this host's mesh server cert from the mesh CA. Used by `mesh init`
 /// and by the join flow once the peer cert lands.
-fn issue_mesh_server_cert(pki_dir: &Path, issuer: &Issuer<'_, KeyPair>) -> Result<()> {
+fn issue_mesh_server_cert(
+    pki_dir: &Path,
+    issuer: &Issuer<'_, KeyPair>,
+    host_cn: &str,
+) -> Result<()> {
     let key = gen_keypair()?;
-    let mut params = CertificateParams::new(mesh_server_sans())?;
+    let mut params = CertificateParams::new(mesh_server_sans(host_cn))?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     set_validity_days(&mut params, PEER_VALIDITY_DAYS);
@@ -357,7 +390,7 @@ pub fn build_peer_csr(peer_cn: &str, role: PeerRole) -> Result<(String, String)>
     let key = gen_keypair()?;
     let sans = match role {
         PeerRole::Client => mesh_client_sans(peer_cn),
-        PeerRole::Server => mesh_server_sans(),
+        PeerRole::Server => mesh_server_sans(peer_cn),
     };
     let mut params = CertificateParams::new(sans)?;
     params.is_ca = IsCa::NoCa;
@@ -415,10 +448,18 @@ pub fn sign_peer_csr(
         CertificateSigningRequestParams::from_pem(csr_pem).context("parse / verify peer CSR")?;
 
     // Enforce naming policy: rewrite SAN, DN, EKU regardless of what the
-    // joiner asked for. Joiner-controlled fields are not trusted.
+    // joiner asked for. Joiner-controlled fields are not trusted; the only
+    // request honoured is whether a server cert carries the identity name,
+    // and that name is always `peer_cn`'s.
+    let wants_identity = csr
+        .params
+        .subject_alt_names
+        .iter()
+        .any(|s| matches!(s, SanType::DnsName(d) if d.as_str() == mesh_identity_san(peer_cn)));
     let sans = match role {
         PeerRole::Client => mesh_client_sans(peer_cn),
-        PeerRole::Server => mesh_server_sans(),
+        PeerRole::Server if wants_identity => mesh_server_sans(peer_cn),
+        PeerRole::Server => mesh_shared_server_sans(),
     };
     csr.params.subject_alt_names.clear();
     csr.params = {
@@ -633,7 +674,7 @@ pub fn atomic_write_pem(path: &Path, contents: &str) -> Result<()> {
 /// Re-issue this host's mesh server cert against the local mesh CA. Requires
 /// `has_mesh_ca_key`. New keypair, new SAN/CN/EKU material (identical to
 /// init-time issuance). Atomic on disk.
-pub fn reissue_mesh_server_cert(pki_dir: &Path) -> Result<()> {
+pub fn reissue_mesh_server_cert(pki_dir: &Path, host_cn: &str) -> Result<()> {
     anyhow::ensure!(
         has_mesh_ca_key(pki_dir),
         "reissue: this host does not have the mesh CA private key"
@@ -644,7 +685,7 @@ pub fn reissue_mesh_server_cert(pki_dir: &Path) -> Result<()> {
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
 
     let key = gen_keypair()?;
-    let mut params = CertificateParams::new(mesh_server_sans())?;
+    let mut params = CertificateParams::new(mesh_server_sans(host_cn))?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     set_validity_days(&mut params, PEER_VALIDITY_DAYS);
@@ -893,8 +934,20 @@ pub fn verify_refreshed_peer_certs(
         &server_der,
         server_key_pem,
         "orca-mesh-server",
-        mesh_server_sans(),
+        mesh_server_sans(host_cn),
     )
+    // A signer that predates identity names issues without one.
+    .or_else(|e| {
+        check_refreshed_leaf(
+            "server",
+            server_cert_pem,
+            &server_der,
+            server_key_pem,
+            "orca-mesh-server",
+            mesh_shared_server_sans(),
+        )
+        .map_err(|_| e)
+    })
 }
 
 fn first_cert_der(cert_pem: &str) -> Result<rustls::pki_types::CertificateDer<'static>> {
@@ -2043,7 +2096,7 @@ mod tests {
         let before = std::fs::read_to_string(mesh_server_cert_path(pki)).unwrap();
         // Wait long enough that not_before differs (clock resolution).
         std::thread::sleep(std::time::Duration::from_secs(1));
-        reissue_mesh_server_cert(pki).unwrap();
+        reissue_mesh_server_cert(pki, "host-g").unwrap();
         let after = std::fs::read_to_string(mesh_server_cert_path(pki)).unwrap();
         assert_ne!(before, after, "reissue must produce a different cert");
         // New cert still validates (chain intact).
@@ -2426,7 +2479,30 @@ mod tests {
         init_mesh_ca(dir.path(), "founder").unwrap();
         let (csr, _) = build_peer_csr("joiner", PeerRole::Server).unwrap();
         let (cert, _) = sign_peer_csr(dir.path(), &csr, "joiner", PeerRole::Server).unwrap();
-        assert_eq!(sorted_dns_names(&cert), sorted(mesh_server_sans()));
+        assert_eq!(sorted_dns_names(&cert), sorted(mesh_server_sans("joiner")));
+        let der = first_cert_der(&cert).unwrap();
+        assert_eq!(mesh_server_identity(&der).as_deref(), Some("joiner"));
+    }
+
+    #[test]
+    fn sign_peer_csr_server_without_identity_request_gets_none() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        let key = gen_keypair().unwrap();
+        let params = CertificateParams::new(mesh_shared_server_sans()).unwrap();
+        let csr = params.serialize_request(&key).unwrap().pem().unwrap();
+        let (cert, _) = sign_peer_csr(dir.path(), &csr, "joiner", PeerRole::Server).unwrap();
+        assert_eq!(sorted_dns_names(&cert), sorted(mesh_shared_server_sans()));
+        assert_eq!(mesh_server_identity(&first_cert_der(&cert).unwrap()), None);
+    }
+
+    #[test]
+    fn sign_peer_csr_server_identity_is_always_the_signed_cn() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        let (csr, _) = build_peer_csr("someone-else", PeerRole::Server).unwrap();
+        let (cert, _) = sign_peer_csr(dir.path(), &csr, "joiner", PeerRole::Server).unwrap();
+        assert_eq!(mesh_server_identity(&first_cert_der(&cert).unwrap()), None);
     }
 
     #[test]

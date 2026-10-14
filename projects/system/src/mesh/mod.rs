@@ -2200,7 +2200,7 @@ pub fn reconcile_mesh_leaf_identity(
                  (mesh membership preserved)."
             );
         }
-        utils::pki::reissue_mesh_server_cert(pki_dir)
+        utils::pki::reissue_mesh_server_cert(pki_dir, expected_cn)
             .context("migrate mesh leaf: re-issue server cert")?;
         utils::pki::reissue_mesh_client_cert(pki_dir, expected_cn)
             .context("migrate mesh leaf: re-issue client cert")?;
@@ -2571,8 +2571,8 @@ pub(crate) async fn connect_mesh_tls(
         }
     };
 
-    match dial(utils::pki::MESH_SERVER_SAN).await {
-        Ok(tls) => Ok(tls),
+    let tls = match dial(utils::pki::MESH_SERVER_SAN).await {
+        Ok(tls) => tls,
         // A peer that has not been upgraded yet answers only the pre-rename
         // SNI and refuses this one at the TLS layer. Retry under the old name
         // rather than reporting an unreachable host: without this an upgraded
@@ -2584,9 +2584,40 @@ pub(crate) async fn connect_mesh_tls(
                 host,
                 "current mesh SNI refused; retrying as a pre-rename peer"
             );
-            dial(utils::mesh_compat::server_sni_fallback()).await
+            dial(utils::mesh_compat::server_sni_fallback()).await?
         }
-        Err(e) => Err(e),
+        Err(e) => return Err(e),
+    };
+    if let Ok(expected) = DIAL_PEER.try_with(Clone::clone) {
+        let (_, conn) = tls.get_ref();
+        let leaf = conn
+            .peer_certificates()
+            .and_then(|c| c.first())
+            .context("peer presented no server cert")?;
+        check_peer_identity(host, &expected, leaf.as_ref())?;
+    }
+    Ok(tls)
+}
+
+tokio::task_local! {
+    /// The peer id a dial is meant to reach. Set by
+    /// [`dialer::try_targets_tracked`]; unset for pairing, bootstrap, and other
+    /// dials made before the peer's id is known.
+    pub(crate) static DIAL_PEER: String;
+}
+
+/// Refuse a server cert bound to a different system than `expected`: any
+/// mesh member chains to the CA, so the chain alone does not show which one
+/// answered at `host`. A cert without an identity name is from a build that
+/// predates it and is accepted until it rotates.
+fn check_peer_identity(host: &str, expected: &str, leaf_der: &[u8]) -> Result<()> {
+    match utils::pki::mesh_server_identity(leaf_der) {
+        Some(id) if id == expected => Ok(()),
+        Some(id) => anyhow::bail!("{host} answered as peer {id}, not {expected}; refusing"),
+        None => {
+            tracing::debug!(host, expected, "peer cert carries no identity name");
+            Ok(())
+        }
     }
 }
 
@@ -2715,6 +2746,50 @@ where
 #[cfg(test)]
 mod mesh_tests {
     use super::*;
+
+    fn server_leaf_der(host_cn: &str) -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(dir.path(), "founder").unwrap();
+        let (csr, _) = utils::pki::build_peer_csr(host_cn, utils::pki::PeerRole::Server).unwrap();
+        let (pem, _) =
+            utils::pki::sign_peer_csr(dir.path(), &csr, host_cn, utils::pki::PeerRole::Server)
+                .unwrap();
+        rustls_pemfile::certs(&mut pem.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap()
+            .to_vec()
+    }
+
+    #[test]
+    fn dialling_x_refuses_y_answering() {
+        let y = server_leaf_der("system-y");
+        let err = check_peer_identity("10.0.0.5", "system-x", &y).unwrap_err();
+        assert!(format!("{err}").contains("answered as peer system-y, not system-x"));
+    }
+
+    #[test]
+    fn dialling_x_accepts_x() {
+        let x = server_leaf_der("system-x");
+        check_peer_identity("10.0.0.5", "system-x", &x).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tracked_dial_scopes_the_expected_peer() {
+        let targets = vec!["10.0.0.5".to_string()];
+        let seen = dialer::try_targets_tracked(Some("system-x"), &targets, |_| async {
+            Ok(DIAL_PEER.try_with(Clone::clone).ok())
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen.as_deref(), Some("system-x"));
+        let unset = dialer::try_targets(&targets, |_| async {
+            Ok(DIAL_PEER.try_with(Clone::clone).ok())
+        })
+        .await
+        .unwrap();
+        assert_eq!(unset, None);
+    }
 
     fn classified(kind: &str, code: &str, message: &str) -> utils::jsonrpc::ErrorObject {
         utils::jsonrpc::ErrorObject {

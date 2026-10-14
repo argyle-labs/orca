@@ -866,7 +866,7 @@ pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
     // current-CA-signed material to peers as soon as possible.
     // CN is the stable machine_id (see mesh accept).
     let host = crate::host_identity::machine_id().to_string();
-    utils::pki::reissue_mesh_server_cert(&pki_d)?;
+    utils::pki::reissue_mesh_server_cert(&pki_d, &host)?;
     utils::pki::reissue_mesh_client_cert(&pki_d, &host)?;
 
     println!("✓ rotated mesh CA");
