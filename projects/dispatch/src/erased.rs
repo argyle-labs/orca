@@ -87,6 +87,9 @@ pub trait ErasedTool: Send + Sync {
     /// Whether this ungated tool honours `dryRun` in its own body. Mirrors
     /// `OrcaToolDef::DRY_RUN_AWARE`.
     fn dry_run_aware(&self) -> bool;
+    /// Whether this tool clears its apply opt-ins before a dry run is
+    /// forwarded. Mirrors `OrcaToolDef::DRY_RUN_NEUTRALIZES`.
+    fn dry_run_neutralizes(&self) -> bool;
     /// JSON Schema for this tool's Args — used for MCP tools/list, CLI flag generation,
     /// OpenAPI request body, and TS `.d.ts` emission.
     fn input_schema(&self) -> Value;
@@ -131,6 +134,10 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
 
     fn dry_run_aware(&self) -> bool {
         T::DRY_RUN_AWARE
+    }
+
+    fn dry_run_neutralizes(&self) -> bool {
+        T::DRY_RUN_NEUTRALIZES
     }
 
     fn input_schema(&self) -> Value {

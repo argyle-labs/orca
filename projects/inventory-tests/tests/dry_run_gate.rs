@@ -325,3 +325,24 @@ fn the_plugin_manifest_carries_each_tools_policy() {
         assert_eq!(e.data_mutation, Some(mutations.contains(&name)), "{name}");
     }
 }
+
+/// Dry-run-aware tools that forward no apply opt-in a pre-`dryRun` peer could
+/// act on, so they need no `dry_run_neutralize` hook. Adding a name here is a
+/// claim that a peer ignoring `dryRun` still changes nothing.
+const AWARE_WITHOUT_NEUTRALIZE: &[&str] = &[];
+
+/// A dry-run-aware tool runs its own body under a dry run, so a peer that
+/// predates `dryRun` would apply unless the forwarded args are neutralized.
+#[test]
+fn every_dry_run_aware_tool_neutralizes_its_forwarded_args() {
+    let aware = dispatch::dry_run_aware_names();
+    assert!(!aware.is_empty(), "no tool is dry_run_aware");
+    let neutralized = dispatch::dry_run_neutralized_names();
+    for name in aware {
+        assert!(
+            neutralized.contains(&name) != AWARE_WITHOUT_NEUTRALIZE.contains(&name),
+            "{name} is dry_run_aware: give it a dry_run_neutralize hook, or list it in \
+             AWARE_WITHOUT_NEUTRALIZE if its forwarded args cannot apply anything"
+        );
+    }
+}

@@ -1050,6 +1050,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     };
     let neutralize_fn = match attr.dry_run_neutralize.as_ref() {
         Some(path) => quote! {
+            const DRY_RUN_NEUTRALIZES: bool = true;
             fn neutralize_for_dry_run(args: &mut Self::Args) {
                 #path(args)
             }

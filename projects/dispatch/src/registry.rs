@@ -765,6 +765,17 @@ pub fn dry_run_aware_names() -> Vec<&'static str> {
         .collect()
 }
 
+/// Names of every registered tool that clears its apply opt-ins before a dry
+/// run is forwarded to a peer.
+pub fn dry_run_neutralized_names() -> Vec<&'static str> {
+    cache()
+        .ordered
+        .iter()
+        .filter(|t| t.dry_run_neutralizes())
+        .map(|t| t.name())
+        .collect()
+}
+
 /// Whether a statically-linked (inventory) tool with this name exists. Used by
 /// the runtime plugin loader to reject a plugin tool that would shadow a
 /// built-in one.
