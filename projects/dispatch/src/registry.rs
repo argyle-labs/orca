@@ -1631,16 +1631,12 @@ mod tests {
     /// An execute-gated verb applies changes, so it must also be gated on WHO
     /// may call it — for the default execute and for its dry run alike.
     #[test]
-    fn every_execute_gated_tool_is_also_an_admin_data_mutation() {
+    fn every_execute_gated_tool_is_admin_only() {
         for name in execute_gated_names() {
             assert_eq!(
                 required_role(name),
                 Some("admin"),
                 "{name} is execute_gated but not role=admin — mutation without authorization"
-            );
-            assert!(
-                data_mutation_names().contains(&name),
-                "{name} is execute_gated but not data_mutation — the two must agree"
             );
         }
     }

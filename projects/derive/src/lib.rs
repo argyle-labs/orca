@@ -256,8 +256,7 @@ struct ToolAttr {
     /// mutations default to `role = "admin"` but become invokable by a
     /// non-admin identity that holds the `can_mutate` opt-in capability. Set by
     /// the surface generators on mutating operations; control-plane admin tools
-    /// leave it off so the opt-in can't reach them. Default: derived from the
-    /// verb shape; `data_mutation = false` opts a control-plane write out.
+    /// leave it off so the opt-in can't reach them. Default off.
     data_mutation: Option<bool>,
     /// `#[orca_tool(..., execute_gated = true)]` lets this verb be previewed:
     /// it executes by default, and with `dryRun: true` returns an
@@ -904,10 +903,10 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let tool_name = format!("{}.{}", domain.value(), verb.value());
     let remote_ok_lit = attr.remote_ok;
     let read_shaped = is_read_shaped(verb.value().as_str());
-    // A verb that changes something is a data mutation, whether or not anyone
-    // remembered to say so. Control-plane writes (auth, secrets) opt out with
-    // `data_mutation = false` so the `can_mutate` escape hatch cannot reach them.
-    let data_mutation_lit = attr.data_mutation.unwrap_or(!read_shaped);
+    // Opt-in only: `can_mutate` lets a non-admin reach a data mutation, so a
+    // hand-written write (plugin install, guest exec, mesh join) must never
+    // become one by default. External-system writes declare it explicitly.
+    let data_mutation_lit = attr.data_mutation.unwrap_or(false);
     // Every verb that changes something honours `dryRun` (#636, #877). The
     // gate is derived from the verb's own shape so a mutating verb cannot be
     // left ungated by omission. Read-shaped verbs have nothing to plan because they change nothing;
@@ -1708,19 +1707,26 @@ mod tests {
         );
     }
 
-    // #636: one predicate drives role, data_mutation and the dry-run gate, so
-    // they cannot disagree. Three independent opt-ins is how 61 mutating
-    // endpoints ended up ungated while two were gated.
+    // #636: one predicate drives role and the dry-run gate, so they cannot
+    // disagree. `data_mutation` is NOT derived: it opens the verb to non-admin
+    // `can_mutate` callers, so it is opt-in only.
     #[test]
-    fn a_write_shaped_verb_is_gated_a_mutation_and_admin_together() {
+    fn a_write_shaped_verb_is_gated_and_admin_but_not_a_data_mutation() {
         let attr = parse_attr(quote!(domain = "h", verb = "delete")).unwrap();
         let out = expand(attr, ok_fn()).unwrap().to_string();
         assert!(out.contains("EXECUTE_GATED : bool = true"), "got: {out}");
-        assert!(out.contains("DATA_MUTATION : bool = true"), "got: {out}");
+        assert!(out.contains("DATA_MUTATION : bool = false"), "got: {out}");
         assert!(
             out.contains("REQUIRED_ROLE : & 'static str = \"admin\""),
             "got: {out}"
         );
+    }
+
+    #[test]
+    fn data_mutation_is_set_only_when_declared() {
+        let attr = parse_attr(quote!(domain = "h", verb = "create", data_mutation = true)).unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
+        assert!(out.contains("DATA_MUTATION : bool = true"), "got: {out}");
     }
 
     #[test]
@@ -1756,14 +1762,14 @@ mod tests {
     }
 
     /// `system.profile` changes how a plugin's next process launches, so it
-    /// must derive as an admin-only, execute-gated mutation despite its
+    /// must derive as an admin-only, execute-gated write despite its
     /// noun-shaped name.
     #[test]
     fn a_noun_shaped_write_verb_is_not_read_shaped() {
         assert!(!is_read_shaped("profile"));
         let attr = parse_attr(quote!(domain = "system", verb = "profile")).unwrap();
         let out = expand(attr, ok_fn()).unwrap().to_string();
-        assert!(out.contains("DATA_MUTATION : bool = true"), "got: {out}");
+        assert!(out.contains("DATA_MUTATION : bool = false"), "got: {out}");
         assert!(
             out.contains("REQUIRED_ROLE : & 'static str = \"admin\""),
             "got: {out}"
