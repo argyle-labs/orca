@@ -2570,15 +2570,13 @@ mod tests {
     }
 
     // ── apply_persisted_web_owners ──────────────────────────────────────────────
-    // Replays the user's persisted `web.owner.<path>` choices into the registry.
-    // A choice for a registered contender must flip the active owner; a choice
-    // naming an absent provider/path is skipped (logged), never fatal.
+    // Replays the persisted `web.owner.<path>` choices. A path has one owner, so
+    // a choice naming any other provider (or an absent path) is skipped, never
+    // fatal, and the owner keeps serving.
 
     #[tokio::test]
-    async fn apply_persisted_web_owners_promotes_chosen_contender_and_skips_absent() {
+    async fn apply_persisted_web_owners_skips_non_owners_and_absent_paths() {
         let path = "/__shrew_owner_path__";
-        // Two providers claim the same path: "inc" is the incumbent (first
-        // registered, active by default), "con" is the contender.
         register_mock(
             "shrew-inc",
             path,
@@ -2590,34 +2588,16 @@ mod tests {
                 body: Vec::new(),
             },
         );
-        register_mock(
-            "shrew-con",
-            path,
-            false,
-            None,
-            MockBehavior::Fixed {
-                status: 200,
-                headers: Vec::new(),
-                body: Vec::new(),
-            },
-        );
-        assert_eq!(
-            contract::web::active_owner(path).as_deref(),
-            Some("shrew-inc"),
-            "incumbent must be active before replay"
-        );
         let db_path = scratch_db_path("web-owners");
         let cleanup = db_path.clone();
         db::with_db_path(db_path, async move {
             let conn = db::open_default().unwrap();
-            // Valid choice: promote the contender for the contested path.
             db::settings::set(
                 &conn,
                 &format!("{}{path}", contract::web::WEB_OWNER_SETTING_PREFIX),
                 "shrew-con",
             )
             .unwrap();
-            // Absent choice: references a path no provider registered → skipped.
             db::settings::set(
                 &conn,
                 &format!(
@@ -2633,8 +2613,7 @@ mod tests {
         .await;
         assert_eq!(
             contract::web::active_owner(path).as_deref(),
-            Some("shrew-con"),
-            "persisted choice must promote the contender"
+            Some("shrew-inc")
         );
         std::fs::remove_file(cleanup).ok();
     }
