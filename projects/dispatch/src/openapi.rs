@@ -126,7 +126,13 @@ pub fn inject_tool_paths(spec: &mut Value) {
             "params": { "name": mcp_form, "arguments": {} }
         }))
         .unwrap_or_default();
-        let path_item = json!({
+        // The `?dryRun=` opt-in only exists where the tool honours it; any
+        // other tool refuses it, so it is not advertised there.
+        let parameters: Vec<Value> = crate::registry::find(entry.name)
+            .filter(|t| t.execute_gated() || t.dry_run_aware())
+            .map(|_| vec![dry_run_query_parameter()])
+            .unwrap_or_default();
+        let mut path_item = json!({
             "post": {
                 "operationId": operation_id_for(entry.name),
                 "summary": summary,
@@ -155,6 +161,9 @@ pub fn inject_tool_paths(spec: &mut Value) {
             }
         });
 
+        if !parameters.is_empty() {
+            path_item["post"]["parameters"] = Value::Array(parameters);
+        }
         new_paths.insert(path, path_item);
     }
 
@@ -396,6 +405,16 @@ fn build_tag_groups(tags: &std::collections::BTreeSet<String>) -> Vec<Value> {
         .into_iter()
         .map(|(root, tags)| json!({ "name": tag_group_name(root), "tags": tags }))
         .collect()
+}
+
+fn dry_run_query_parameter() -> Value {
+    json!({
+        "name": contract::plan::DRY_RUN_FIELD,
+        "in": "query",
+        "required": false,
+        "schema": { "type": "boolean", "default": false },
+        "description": "Describe the change without applying it. Omitted or false applies the change; only `true` and `false` are accepted. Equivalent to `dryRun` in the body; the two must agree when both are given."
+    })
 }
 
 fn tool_error_response(desc: &str) -> Value {
