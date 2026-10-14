@@ -70,7 +70,8 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     type Output: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
 
     /// Whether [`Self::neutralize_for_dry_run`] is overridden. Set alongside it
-    /// by `#[orca_tool(..., dry_run_neutralize = ...)]`.
+    /// by `#[orca_tool(..., dry_run_neutralize = ...)]`. A hand impl must set
+    /// it only together with a `neutralize_for_dry_run` override.
     const DRY_RUN_NEUTRALIZES: bool = false;
 
     /// Clear every apply opt-in on `args` before a dry run is forwarded to a

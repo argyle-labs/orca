@@ -20,7 +20,7 @@ use anyhow::Result;
 #[cfg(feature = "server")]
 use axum::{
     Extension, Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, rejection::QueryRejection},
     http::{HeaderMap, StatusCode},
     routing::post,
 };
@@ -418,8 +418,9 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
     }
     // The surfaces below bypass the `run_json` gate, so a `dryRun` they
     // cannot honour would apply. A plugin tool declared execute-gated plans in
-    // its own gate. A tool this host does not have is checked by the peer it
-    // is forwarded to, which knows whether it honours `dryRun`.
+    // its own gate. A tool this host does not have is refused even with a
+    // peer named: no peer capability signal proves the peer honours `dryRun`,
+    // and one that predates it would drop the flag and apply.
     if dry_run && !crate::tool_roles::plugin_execute_gated(name) {
         let known_here = dynamic_owns(name)
             || crate::unit_surface::unit_owns(name)
@@ -432,14 +433,18 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
                     .into(),
             );
         }
-        if ctx.peer().is_none() {
-            return Err(contract::OrcaError::invalid(format!(
-                "{name} is not available on this system; cannot verify dryRun support"
-            ))
+        let msg = match ctx.peer() {
+            Some(peer) => format!(
+                "{name} is not on this system, so a dry run can't be verified on {peer}; \
+                 run it on that system directly"
+            ),
+            None => {
+                format!("{name} is not available on this system; cannot verify dryRun support")
+            }
+        };
+        return Err(contract::OrcaError::invalid(msg)
             .with_code("args.invalid")
             .into());
-        }
-        return forward_unknown_to_peer(name, args, ctx).await;
     }
     // On a static miss, try the dynamic loaded-plugin fallback, then the live
     // unit surface, before giving up — so loaded plugin tools AND the
@@ -483,6 +488,11 @@ async fn forward_unknown_to_peer(name: &str, mut args: Value, ctx: &ToolCtx) -> 
         })?;
     if let Some(obj) = args.as_object_mut() {
         obj.remove(AMBIENT_PEER_KEY);
+        // Only a tool this host knows as execute-gated gets the explicit
+        // opt-in; a gated plugin loaded solely on the peer plans unless told.
+        if crate::tool_roles::plugin_execute_gated(name) {
+            obj.insert(contract::plan::EXECUTE_FIELD.into(), Value::Bool(true));
+        }
     }
     svc.exec(
         &peer,
@@ -532,9 +542,15 @@ async fn http_dispatch(
     Path(name): Path<String>,
     caller: Option<Extension<contract::CallerIdentity>>,
     headers: HeaderMap,
-    Query(query): Query<HashMap<String, String>>,
+    query: std::result::Result<Query<Vec<(String, String)>>, QueryRejection>,
     Json(mut args): Json<Value>,
 ) -> std::result::Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Query(query) = query.map_err(|e| {
+        orca_error_response(
+            contract::OrcaError::invalid(format!("invalid query string: {e}"))
+                .with_code("args.invalid"),
+        )
+    })?;
     apply_dry_run_query(&query, &mut args).map_err(orca_error_response)?;
     // Per-request identity + peer-routing overlay. Both come off the shared
     // ctx via clone-and-mutate so the base ctx stays immutable across
@@ -629,14 +645,18 @@ async fn http_dispatch(
 /// body `dryRun` that disagrees is refused rather than one silently winning.
 #[cfg(feature = "server")]
 fn apply_dry_run_query(
-    query: &HashMap<String, String>,
+    query: &[(String, String)],
     args: &mut Value,
 ) -> std::result::Result<(), contract::OrcaError> {
     let field = contract::plan::DRY_RUN_FIELD;
-    let Some(raw) = query.get(field) else {
+    let invalid = |msg: String| contract::OrcaError::invalid(msg).with_code("args.invalid");
+    let mut values = query.iter().filter(|(k, _)| k == field).map(|(_, v)| v);
+    let Some(raw) = values.next() else {
         return Ok(());
     };
-    let invalid = |msg: String| contract::OrcaError::invalid(msg).with_code("args.invalid");
+    if values.next().is_some() {
+        return Err(invalid(format!("?{field} given more than once")));
+    }
     let dry_run = match raw.as_str() {
         "true" => true,
         "false" => false,
@@ -1520,7 +1540,7 @@ mod tests {
     #[cfg(feature = "server")]
     #[test]
     fn dry_run_query_and_body_must_agree() {
-        let q = |v: &str| HashMap::from([("dryRun".to_string(), v.to_string())]);
+        let q = |v: &str| vec![("dryRun".to_string(), v.to_string())];
         let mut args = json!({ "dryRun": true });
         let err = apply_dry_run_query(&q("false"), &mut args).unwrap_err();
         assert_eq!(err.code.as_deref(), Some("args.invalid"));
@@ -1532,8 +1552,18 @@ mod tests {
         apply_dry_run_query(&q("false"), &mut args).unwrap();
         assert_eq!(args, json!({ "dryRun": false }));
         let mut args = json!({});
-        apply_dry_run_query(&HashMap::new(), &mut args).unwrap();
+        apply_dry_run_query(&[], &mut args).unwrap();
         assert_eq!(args, json!({}));
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_repeated_dry_run_query_is_refused() {
+        for q in ["dryRun=true&dryRun=false", "dryRun=true&dryRun=true"] {
+            let (status, body) = post_json(&format!("/ghost.tool?{q}"), json!({})).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{q}: {body}");
+            assert_eq!(body["code"], json!("args.invalid"), "{q}: {body}");
+        }
     }
 
     #[tokio::test]
@@ -1572,23 +1602,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dry_run_of_a_tool_absent_here_goes_to_the_named_peer() {
+    async fn a_dry_run_of_a_tool_absent_here_is_refused_not_sent_to_the_peer() {
         let remote = Arc::new(RecordingRemote(std::sync::Mutex::new(Vec::new())));
         let mut ctx = make_ctx();
         ctx.register_service::<Arc<dyn contract::RemoteExec>>(remote.clone());
         ctx.set_peer(Some("peer-a".into()));
-        let out = dispatch("ghost.tool", json!({ "dryRun": true }), &ctx)
+        let err = dispatch("ghost.tool", json!({ "dryRun": true }), &ctx)
+            .await
+            .unwrap_err();
+        let oe = find_orca_error(&err).unwrap_or_else(|| panic!("{err}"));
+        assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{oe}");
+        assert_eq!(
+            oe.message,
+            "ghost.tool is not on this system, so a dry run can't be verified on peer-a; \
+             run it on that system directly"
+        );
+        assert!(remote.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_normal_call_forwarded_to_a_peer_carries_execute_only_when_gated() {
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        let remote = Arc::new(RecordingRemote(std::sync::Mutex::new(Vec::new())));
+        let mut ctx = make_ctx();
+        ctx.register_service::<Arc<dyn contract::RemoteExec>>(remote.clone());
+        ctx.set_peer(Some("peer-a".into()));
+        dispatch("ghost.tool", json!({ "id": "a" }), &ctx)
             .await
             .unwrap();
-        assert_eq!(out, json!({ "forwarded": true }));
+        forward_unknown_to_peer(GATED_PLUGIN_TOOL, json!({ "id": "a" }), &ctx)
+            .await
+            .unwrap();
         let calls = remote.0.lock().unwrap().clone();
         assert_eq!(
             calls,
-            vec![(
-                "peer-a".into(),
-                "ghost.tool".into(),
-                json!({ "dryRun": true })
-            )]
+            vec![
+                ("peer-a".into(), "ghost.tool".into(), json!({ "id": "a" })),
+                (
+                    "peer-a".into(),
+                    GATED_PLUGIN_TOOL.into(),
+                    json!({ "id": "a", "execute": true })
+                ),
+            ]
         );
     }
 
