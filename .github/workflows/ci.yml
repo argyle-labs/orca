@@ -228,6 +228,29 @@ jobs:
         env:
           ORCA_FORBIDDEN_IP_PATTERNS: ${{ secrets.FORBIDDEN_IP_PATTERNS }}
         run: ./scripts/check-no-real-ips.sh
+      - name: Source hash
+        id: src
+        uses: argyle-labs/.github/.github/actions/source-hash@main
+        with:
+          image: ci-rust:1.95.0
+          workflow-file: .github/workflows/ci.yml
+          extra-paths: clippy.toml
+      - name: Check pass cache
+        id: pass
+        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
+        with:
+          mode: check
+          job: lint
+          hash: ${{ steps.src.outputs.hash }}
+          force: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
+          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+      - name: Reuse recorded pass
+        if: ${{ steps.pass.outputs.hit == 'true' }}
+        env:
+          SHA: ${{ steps.pass.outputs.sha }}
+        run: echo "Unchanged — reusing clippy + package pass from ${SHA:-unknown}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Set up Rust
         if: ${{ !cancelled() }}
         uses: argyle-labs/.github/.github/actions/rust-setup@main
@@ -242,13 +265,13 @@ jobs:
         if: ${{ !cancelled() }}
       - name: Clippy
         uses: argyle-labs/.github/.github/actions/cargo-clippy@main
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
         with:
           args: --workspace --all-targets
       # Checks each publishable crate's manifest and file list. The full
       # build-from-tarball verify runs once, at release, in `cargo publish`.
       - name: Package publishable crates
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.pass.outputs.hit != 'true' }}
         run: |
           set -o pipefail
           mapfile -t pkgs < <(cargo metadata --format-version 1 --no-deps --locked \
@@ -263,6 +286,16 @@ jobs:
       - name: Lock file check
         uses: argyle-labs/.github/.github/actions/cargo-lock-check@main
         if: ${{ !cancelled() }}
+      - name: Record pass
+        if: ${{ success() && steps.pass.outputs.hit != 'true' }}
+        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
+        with:
+          mode: record
+          job: lint
+          hash: ${{ steps.src.outputs.hash }}
+          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
       - name: CI summary
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
