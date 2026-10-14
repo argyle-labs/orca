@@ -542,6 +542,11 @@ pub struct WsOpen {
     /// Connect + handshake timeout in milliseconds. `None` = core's default.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Largest inbound message (and single frame) to accept, in bytes. `None` =
+    /// core's default (1 MiB). Core clamps it to 16 MiB. A larger message
+    /// fails the session.
+    #[serde(default)]
+    pub max_message_bytes: Option<u64>,
 }
 
 /// One event on a WebSocket session: the `ws.open` reply ([`WsChunk::Open`]) or
@@ -666,6 +671,7 @@ mod tests {
                 headers: vec![],
                 insecure: false,
                 timeout_ms: None,
+                max_message_bytes: None,
             }
         );
     }
