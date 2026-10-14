@@ -566,7 +566,8 @@ pub enum WsChunk {
 pub struct WsRecv {
     pub session: u64,
     /// Give up (error, session kept) after this many milliseconds. `None` =
-    /// core's default.
+    /// core's default (30s). Core clamps it to 30s and to the time left before
+    /// the enclosing tool invocation's ceiling.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
 }
