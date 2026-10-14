@@ -586,7 +586,7 @@ pub fn unit_cli_commands_from(ops: Vec<UnitOp>) -> Vec<clap::Command> {
 /// Route a `unit.<kind>.<op>` call back through the contract-side dispatcher.
 /// Returns `None` when `name` isn't a unit op (so the caller falls through).
 /// `caller` is the request's verified identity, handed to the provider on
-/// update/upsert/delete.
+/// create/update/upsert/delete.
 pub async fn unit_dispatch(
     name: &str,
     args: &Value,
@@ -665,7 +665,11 @@ async fn run(
                 .action
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("create op missing action"))?;
-            let call = CreateArgs { action, payload };
+            let call = CreateArgs {
+                action,
+                payload,
+                caller,
+            };
             // Pick the provider: explicit `provider`, else the sole declarer.
             let provider = args
                 .get("provider")
@@ -793,7 +797,11 @@ mod tests {
                     }),
                     VerbArgs::Create(c) => VerbOutcome::Action(ActionOutcome {
                         changed: true,
-                        message: format!("forge:{name}:{}", c.action),
+                        message: format!(
+                            "forge:{name}:{}:{}",
+                            c.action,
+                            c.caller.map_or("-".to_string(), |c| c.username)
+                        ),
                     }),
                     _ => VerbOutcome::Action(ActionOutcome::default()),
                 })
@@ -913,7 +921,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unit_update_carries_the_verified_caller_never_the_host_operator() {
+    async fn unit_update_and_create_carry_the_verified_caller_never_the_host_operator() {
         let (name, kind) = setup("caller");
         let who = |n: &str| contract::CallerIdentity {
             user_id: format!("u_{n}"),
@@ -945,6 +953,12 @@ mod tests {
         per_req.set_verified_caller(Some(who("alice")));
         let out = crate::dispatch(&tool, args, &per_req).await.unwrap();
         assert_eq!(out["message"], "spin:w1:alice");
+
+        let forge = format!("{kind}.forge");
+        let out = crate::dispatch(&forge, json!({}), &host).await.unwrap();
+        assert_eq!(out["message"], format!("forge:{name}:forge:-"));
+        let out = crate::dispatch(&forge, json!({}), &per_req).await.unwrap();
+        assert_eq!(out["message"], format!("forge:{name}:forge:alice"));
         assert!(unit::deregister_provider(&name));
     }
 
@@ -955,7 +969,7 @@ mod tests {
             .await
             .expect("is a unit op")
             .expect("ok");
-        assert_eq!(out["message"], format!("forge:{name}:forge"));
+        assert_eq!(out["message"], format!("forge:{name}:forge:-"));
         assert!(unit::deregister_provider(&name));
     }
 
