@@ -115,6 +115,8 @@ fn close_session(session: u64) -> Result<()> {
     .map(drop)
 }
 
+/// Closes the session, blocking the calling thread up to the host's close
+/// limit (2 s). In async code call [`WsClient::close`] explicitly instead.
 impl Drop for WsClient {
     fn drop(&mut self) {
         _ = close_session(self.session);
