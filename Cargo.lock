@@ -4500,6 +4500,7 @@ dependencies = [
  "orca-plugin-toolkit",
  "orca-secrets",
  "orca-utils",
+ "rcgen",
  "rusqlite",
  "rustls",
  "rustls-platform-verifier",

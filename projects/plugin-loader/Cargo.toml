@@ -48,6 +48,7 @@ libc       = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
 db = { workspace = true, default-features = true, features = ["test-util"] }
+rcgen = { workspace = true }
 
 [lints]
 workspace = true
