@@ -33,6 +33,13 @@ use axum::{
 /// drives the fleet.
 #[cfg(feature = "server")]
 pub const PEER_HEADER: &str = "x-orca-peer";
+
+/// Request extension marking an authenticated request with no resolvable
+/// user (a legacy or orphaned token). Such a request must never borrow the
+/// ctx's ambient host-operator identity, which is an admin.
+#[cfg(feature = "server")]
+#[derive(Clone, Copy, Debug)]
+pub struct UnboundCaller;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 #[cfg(any(feature = "server", feature = "in-process"))]
@@ -565,6 +572,7 @@ async fn http_dispatch(
     State(state): State<ToolHttpState>,
     Path(name): Path<String>,
     caller: Option<Extension<contract::CallerIdentity>>,
+    unbound: Option<Extension<UnboundCaller>>,
     headers: HeaderMap,
     query: std::result::Result<Query<Vec<(String, String)>>, QueryRejection>,
     Json(mut args): Json<Value>,
@@ -633,22 +641,26 @@ async fn http_dispatch(
             .with_code("tool.unknown");
         return Err(orca_error_response(oe));
     }
-    let ctx_owned = if caller.is_some() || peer.is_some() || correlation_id.is_some() {
-        let mut ctx = (*state.ctx).clone();
-        if let Some(Extension(c)) = caller {
-            ctx.set_verified_caller(Some(c.clone()));
-            ctx.set_caller(Some(c));
-        }
-        if let Some(p) = peer {
-            ctx.set_peer(Some(p));
-        }
-        if let Some(cid) = correlation_id {
-            ctx.set_correlation_id(Some(cid));
-        }
-        Some(ctx)
-    } else {
-        None
-    };
+    let ctx_owned =
+        if caller.is_some() || unbound.is_some() || peer.is_some() || correlation_id.is_some() {
+            let mut ctx = (*state.ctx).clone();
+            if unbound.is_some() {
+                ctx.set_caller(None);
+            }
+            if let Some(Extension(c)) = caller {
+                ctx.set_verified_caller(Some(c.clone()));
+                ctx.set_caller(Some(c));
+            }
+            if let Some(p) = peer {
+                ctx.set_peer(Some(p));
+            }
+            if let Some(cid) = correlation_id {
+                ctx.set_correlation_id(Some(cid));
+            }
+            Some(ctx)
+        } else {
+            None
+        };
     let ctx_ref: &ToolCtx = ctx_owned.as_ref().unwrap_or(&state.ctx);
     dispatch(&name, args, ctx_ref).await.map(Json).map_err(|e| {
         if let Some(oe) = find_orca_error(&e) {
@@ -1824,5 +1836,62 @@ mod tests {
         assert!(seen.contains(&None), "{seen:?}");
         assert!(seen.contains(&Some("alice".into())), "{seen:?}");
         assert!(!seen.contains(&Some("host_admin".into())), "{seen:?}");
+    }
+
+    /// A legacy or orphaned token resolves no user. Forwarding its call to a
+    /// peer must carry no caller, so the peer refuses any role-gated tool,
+    /// rather than borrowing the admin host operator from the shared ctx.
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn rest_unbound_caller_forwards_to_a_peer_without_the_host_operator() {
+        use axum::body::Body;
+        use axum::http::Request as AxumReq;
+        use contract::{CallerIdentity, RemoteExec};
+        use tower::ServiceExt;
+
+        struct SpyExec;
+        #[async_trait]
+        impl RemoteExec for SpyExec {
+            async fn exec(
+                &self,
+                _peer: &str,
+                _tool: &str,
+                _args: Value,
+                caller: Option<CallerIdentity>,
+                _cid: Option<String>,
+            ) -> Result<Value> {
+                Ok(json!({ "caller": caller.map(|c| c.username) }))
+            }
+        }
+        let mut ctx = make_ctx().with_auth(identity("host_admin"));
+        let spy: Arc<dyn RemoteExec> = Arc::new(SpyExec);
+        ctx.register_service(spy);
+        let router = axum_router(Arc::new(ctx));
+        let post = |unbound: bool| {
+            let mut req = AxumReq::builder()
+                .method("POST")
+                .uri("/proxmox.cluster_list")
+                .header("content-type", "application/json")
+                .header(PEER_HEADER, "thor")
+                .body(Body::from("{}"))
+                .unwrap();
+            if unbound {
+                req.extensions_mut().insert(UnboundCaller);
+            }
+            req
+        };
+        let caller_of = |resp: axum::response::Response| async move {
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            serde_json::from_slice::<Value>(&bytes).unwrap()["caller"].clone()
+        };
+
+        let resp = router.clone().oneshot(post(true)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(caller_of(resp).await, Value::Null);
+        // Control: the loopback/in-process path keeps the host operator.
+        let resp = router.oneshot(post(false)).await.unwrap();
+        assert_eq!(caller_of(resp).await, json!("host_admin"));
     }
 }

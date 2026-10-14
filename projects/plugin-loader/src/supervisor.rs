@@ -161,11 +161,14 @@ pub fn handshake<S: Read + Write>(stream: &mut S, capabilities: &[&str]) -> Resu
 /// A tool's own error, delivered in a well-formed `Result` frame — the
 /// session is still in sync, unlike an I/O or protocol failure.
 #[derive(Debug)]
-struct ToolFailed(String);
+pub(crate) struct ToolFailed {
+    pub(crate) message: String,
+    pub(crate) kind: Option<contract::ErrorKind>,
+}
 
 impl std::fmt::Display for ToolFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -204,14 +207,16 @@ pub fn invoke_on<S: Read + Write>(
                 ok,
                 value,
                 error,
+                error_kind,
             } if rid == id => {
                 return if ok {
                     Ok(value)
                 } else {
-                    Err(ToolFailed(format!(
-                        "plugin tool '{tool}' failed: {}",
-                        error.unwrap_or_else(|| "unknown error".into())
-                    ))
+                    Err(ToolFailed {
+                        message: error.unwrap_or_else(|| "unknown error".into()),
+                        kind: error_kind
+                            .and_then(|k| serde_json::from_value(Value::String(k)).ok()),
+                    }
                     .into())
                 };
             }
@@ -516,6 +521,13 @@ impl PluginProcess {
                 on_disk = %hs.semver,
                 "plugin binary changed since load; reload the plugin"
             );
+            // Every later invoke would fail the same way: unload so the plugin's
+            // backend names and claims are released. On its own thread because
+            // this invoke can run under the registry lock (a backend constructor
+            // calling into the plugin during load).
+            let software = self.software.clone();
+            let addr = std::ptr::from_ref(self) as usize;
+            std::thread::spawn(move || crate::unload_if_backed_by(&software, addr));
             bail!(
                 "plugin '{}' binary changed since load ({} -> {}); reload the plugin",
                 self.software,
@@ -1146,6 +1158,7 @@ mod tests {
                     ok: true,
                     value: json!({"done": true}),
                     error: None,
+                    error_kind: None,
                 },
             )
             .unwrap();
@@ -1172,6 +1185,7 @@ mod tests {
                     ok: true,
                     value: serde_json::to_value(&caller).unwrap(),
                     error: None,
+                    error_kind: None,
                 },
             )
             .unwrap();
@@ -1224,6 +1238,7 @@ mod tests {
                     ok: false,
                     value: Value::Null,
                     error: Some("boom".into()),
+                    error_kind: None,
                 },
             )
             .unwrap();
@@ -1525,6 +1540,45 @@ mod tests {
             .invoke("loaderfakeplugin.ping", json!({}), None)
             .unwrap_err();
         assert!(format!("{err:#}").contains("reload"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_changed_binary_unloads_the_plugin() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        let _g = crate::FAKE_PLUGIN_LOCK.blocking_lock();
+        crate::unload_plugin("loaderfakeplugin");
+        proc.semver = "0.0.0-registered".into();
+        let proc = std::sync::Arc::new(proc);
+        {
+            let mut reg = crate::registry().write().unwrap_or_else(|e| e.into_inner());
+            let backing = crate::Backing::Process(proc.clone());
+            crate::attach_plugin(
+                &mut reg,
+                crate::LoadedPlugin {
+                    software: "loaderfakeplugin".into(),
+                    semver: proc.semver.clone(),
+                    target_compat: String::new(),
+                    orca_compat: String::new(),
+                    backing,
+                    tools: std::collections::HashMap::new(),
+                    domain_backends: Vec::new(),
+                    backend_defs: Vec::new(),
+                },
+            );
+        }
+        proc.session.lock().unwrap().state = SessionState::Broken;
+        proc.invoke("loaderfakeplugin.ping", json!({}), None)
+            .unwrap_err();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while crate::is_loaded("loaderfakeplugin") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !crate::is_loaded("loaderfakeplugin"),
+            "unloaded after a permanent respawn failure"
+        );
     }
 
     #[test]

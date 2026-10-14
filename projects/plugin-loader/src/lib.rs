@@ -67,6 +67,9 @@ struct LoadedPlugin {
     /// dropped plugin doesn't leave stale backends pointing at a dead invoke
     /// thunk.
     domain_backends: Vec<(String, String)>,
+    /// The backend descriptors behind `domain_backends`, kept so a failed reload
+    /// can re-register them.
+    backend_defs: Vec<BackendDef>,
 }
 
 /// How a loaded plugin's tools are invoked: an out-of-process subprocess spoken
@@ -81,20 +84,17 @@ enum Backing {
 }
 
 impl Backing {
-    /// Invoke `tool` with `args`, returning the tool's result `Value` or an
-    /// error `Value`. Both cross the wire as `serde_json::Value` already, so
-    /// there is no String encode/decode here.
+    /// Invoke `tool` with `args`. A tool's own failure is a
+    /// [`supervisor::ToolFailed`] carrying the kind the plugin reported.
     #[cfg(unix)]
     fn invoke(
         &self,
         tool: &str,
         args: sj::Value,
         caller: Option<plugin_proto::VerifiedCaller>,
-    ) -> std::result::Result<sj::Value, sj::Value> {
+    ) -> Result<sj::Value> {
         match self {
-            Backing::Process(proc) => proc
-                .invoke(tool, args, caller)
-                .map_err(|e| sj::Value::String(format!("{e:#}"))),
+            Backing::Process(proc) => proc.invoke(tool, args, caller),
         }
     }
 
@@ -106,7 +106,7 @@ impl Backing {
         _tool: &str,
         _args: sj::Value,
         _caller: Option<plugin_proto::VerifiedCaller>,
-    ) -> std::result::Result<sj::Value, sj::Value> {
+    ) -> Result<sj::Value> {
         match *self {}
     }
 }
@@ -144,9 +144,10 @@ pub type BackendInvoke =
 /// before any plugin loads, via [`register_domain_constructor`]. Consulted as
 /// the fallthrough of both [`domain_register`] and [`domain_deregister`], so an
 /// injected domain loads and unloads exactly like a built-in one.
-static EXTRA_DOMAINS: std::sync::LazyLock<
-    RwLock<HashMap<String, (DomainRegister, DomainDeregister)>>,
-> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+type ExtraDomain = (DomainRegister, DomainDeregister, NameScope);
+
+static EXTRA_DOMAINS: std::sync::LazyLock<RwLock<HashMap<String, ExtraDomain>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Contribute a plugin-backend domain from a crate downstream of the loader.
 ///
@@ -154,16 +155,18 @@ static EXTRA_DOMAINS: std::sync::LazyLock<
 /// built-in provider registration). Re-registering the same `domain` replaces
 /// its constructors in place. This is the dependency-inversion seam that lets
 /// `system` own the backup KIND/TARGET registries while the loader — upstream of
-/// `system` — still drives their out-of-process registration.
+/// `system` — still drives their out-of-process registration. `scope` binds the
+/// domain's backend names to the registering plugin.
 pub fn register_domain_constructor(
     domain: &str,
     register: DomainRegister,
     deregister: DomainDeregister,
+    scope: NameScope,
 ) {
     EXTRA_DOMAINS
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(domain.to_string(), (register, deregister));
+        .insert(domain.to_string(), (register, deregister, scope));
 }
 
 /// Domain dispatch table: `domain` → constructor. Domain-agnostic loader seam.
@@ -197,7 +200,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(other)
-            .map(|(register, _)| *register),
+            .map(|(register, _, _)| *register),
     }
 }
 
@@ -250,13 +253,8 @@ fn register_unit_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> 
 /// and `capabilities` carries the `spa_fallback` flag — so no ABI/proto field
 /// was added. Renders route back through `invoke` as `"{invoke_prefix}.render"`.
 fn register_web_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
-    let prefix = if def.endpoint.is_empty() {
-        "/".to_string()
-    } else {
-        def.endpoint.clone()
-    };
     let route = contract::web::WebRoute {
-        prefix,
+        prefix: web_path(def),
         spa_fallback: def
             .capabilities
             .iter()
@@ -267,23 +265,17 @@ fn register_web_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
             .find_map(|c| c.strip_prefix(contract::web::CAP_DEV_UPSTREAM))
             .map(str::to_string),
     };
-    // Registration is non-fatal by contract: an exact-path conflict is recorded
-    // and surfaced (never returned as an error), and the only failure — a
-    // poisoned registry lock — is logged and swallowed here so a web plugin can
-    // never fail to load, and can never take an already-serving route offline.
-    if let Err(e) = contract::web::register_from_def(def.name.clone(), route, invoke) {
-        tracing::warn!(backend = %def.name, error = %e, "web backend registration issue (non-fatal)");
+    contract::web::register_from_def(def.name.clone(), route, invoke)
+        .map_err(|e| anyhow!("register web backend '{}': {e}", def.name))
+}
+
+/// The exact path a web backend mounts at; an empty `endpoint` is `/`.
+fn web_path(def: &BackendDef) -> String {
+    if def.endpoint.is_empty() {
+        "/".to_string()
+    } else {
+        def.endpoint.clone()
     }
-    // Surface any contested paths for observability after this registration.
-    for c in contract::web::conflicts() {
-        tracing::warn!(
-            path = %c.path,
-            active = %c.active_owner,
-            contenders = ?c.contenders,
-            "web route contested; incumbent holds until the user chooses an owner"
-        );
-    }
-    Ok(())
 }
 
 /// Container-runtime-domain entry: register a plugin-backed
@@ -643,7 +635,7 @@ fn domain_deregister(domain: &str, name: &str) {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(other)
-                .map(|(_, deregister)| *deregister);
+                .map(|(_, deregister, _)| *deregister);
             match injected {
                 Some(deregister) => deregister(name),
                 None => {
@@ -656,9 +648,122 @@ fn domain_deregister(domain: &str, name: &str) {
 
 /// Reverse a set of `(domain, name)` registrations — used both to roll back a
 /// partially-registered plugin on load failure and to clean up on unload.
-fn rollback_domain_backends(pairs: &[(String, String)]) {
+fn rollback_domain_backends(software: &str, pairs: &[(String, String)]) {
     for (domain, name) in pairs {
         domain_deregister(domain, name);
+        release_backend_claim(software, domain, name);
+    }
+}
+
+/// How a domain's backend `name` is bound to the plugin registering it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameScope {
+    /// The name is the provider identity: it must equal the plugin id.
+    Own,
+    /// `agents`: the plugin id, or `<owner>/<id>`.
+    Agent,
+    /// The name is a domain key (notify endpoint, deploy host, backup kind)
+    /// that legitimately differs from the plugin id; the first plugin to
+    /// register it owns it until unload.
+    Claimed,
+}
+
+fn name_scope(domain: &str) -> NameScope {
+    match domain {
+        "agents" => NameScope::Agent,
+        "notifications" | "deploy_target" => NameScope::Claimed,
+        d if BUILTIN_BACKEND_DOMAINS.contains(&d) => NameScope::Own,
+        other => EXTRA_DOMAINS
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(other)
+            .map_or(NameScope::Own, |(_, _, scope)| *scope),
+    }
+}
+
+/// Every domain [`domain_register`] resolves without consulting
+/// [`EXTRA_DOMAINS`].
+const BUILTIN_BACKEND_DOMAINS: &[&str] = &[
+    "storage",
+    "media",
+    "guest_mount",
+    "service",
+    "deploy_target",
+    "notifications",
+    "cluster_roster",
+    "topology",
+    "host_facts",
+    "secrets_backend",
+    "service_identity",
+    "diagnostics",
+    "permissions",
+    "notification_source",
+    "ups",
+    "guest_exec",
+    "agents",
+    "container_runtime",
+    "unit",
+    "web",
+    "subprocess_env",
+    "replication",
+];
+
+/// `(domain, name)` → plugin id for [`NameScope::Claimed`] registrations.
+static BACKEND_CLAIMS: std::sync::LazyLock<RwLock<HashMap<(String, String), String>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Refuse a backend whose name `software` may not register under.
+fn check_backend_owner(software: &str, def: &BackendDef) -> Result<()> {
+    let (domain, name) = (def.domain.as_str(), def.name.as_str());
+    if is_reserved_plugin_id(name) {
+        bail!(
+            "plugin '{software}' may not register {domain} backend '{name}': the name is reserved"
+        );
+    }
+    match name_scope(domain) {
+        NameScope::Own if name != software => bail!(
+            "plugin '{software}' may not register {domain} backend '{name}'; the name must be '{software}'"
+        ),
+        NameScope::Agent if !capability::agent_provider_owned(name, software) => bail!(
+            "plugin '{software}' may not register {domain} backend '{name}'; the name must be '{software}' or '<owner>/{software}'"
+        ),
+        NameScope::Claimed => {
+            let claims = BACKEND_CLAIMS.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(owner) = claims.get(&(domain.to_string(), name.to_string()))
+                && owner != software
+            {
+                bail!(
+                    "plugin '{software}' may not register {domain} backend '{name}': already registered by plugin '{owner}'"
+                );
+            }
+        }
+        _ => {}
+    }
+    if domain == "web" {
+        let path = web_path(def);
+        if !contract::web::path_in_scope(software, &path) {
+            bail!(
+                "plugin '{software}' may not register web path '{path}'; it must be under '/plugins/{software}/'"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn claim_backend(software: &str, domain: &str, name: &str) {
+    if name_scope(domain) == NameScope::Claimed {
+        BACKEND_CLAIMS
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((domain.to_string(), name.to_string()), software.to_string());
+    }
+}
+
+fn release_backend_claim(software: &str, domain: &str, name: &str) {
+    let mut claims = BACKEND_CLAIMS.write().unwrap_or_else(|e| e.into_inner());
+    let key = (domain.to_string(), name.to_string());
+    if claims.get(&key).is_some_and(|owner| owner == software) {
+        claims.remove(&key);
     }
 }
 
@@ -673,6 +778,7 @@ fn make_backend_invoke(backing: Backing, invoke_prefix: String) -> BackendInvoke
         // Domain registries call this thunk directly, often from async code, so
         // this layer keeps it off the async worker itself.
         off_async_worker(|| backing.invoke(&tool, args, None))
+            .map_err(|e| sj::Value::String(format!("{e:#}")))
     })
 }
 
@@ -706,30 +812,35 @@ fn register_backends(
     software: &str,
     defs: &[BackendDef],
 ) -> Result<Vec<(String, String)>> {
+    register_backends_with(software, defs, |def| {
+        make_backend_invoke(backing.clone(), def.invoke_prefix.clone())
+    })
+}
+
+fn register_backends_with(
+    software: &str,
+    defs: &[BackendDef],
+    make_invoke: impl Fn(&BackendDef) -> BackendInvoke,
+) -> Result<Vec<(String, String)>> {
     let mut registered: Vec<(String, String)> = Vec::new();
     for def in defs {
         let Some(register) = domain_register(&def.domain) else {
-            rollback_domain_backends(&registered);
+            rollback_domain_backends(software, &registered);
             bail!(
                 "plugin '{software}' backend '{}' targets unknown domain '{}'",
                 def.name,
                 def.domain
             );
         };
-        // Agent providers are keyed by name and contribute hooks into the
-        // operator's Claude config, so a plugin may only register its own.
-        if def.domain == "agents" && !capability::agent_provider_owned(&def.name, software) {
-            rollback_domain_backends(&registered);
-            bail!(
-                "plugin '{software}' may not register agents provider '{}'; the provider name must be '{software}' or '<owner>/{software}'",
-                def.name
-            );
+        if let Err(e) = check_backend_owner(software, def) {
+            rollback_domain_backends(software, &registered);
+            return Err(e);
         }
-        let invoke = make_backend_invoke(backing.clone(), def.invoke_prefix.clone());
-        if let Err(e) = register(def, invoke) {
-            rollback_domain_backends(&registered);
+        if let Err(e) = register(def, make_invoke(def)) {
+            rollback_domain_backends(software, &registered);
             return Err(e.context(format!("plugin '{software}' backend registration failed")));
         }
+        claim_backend(software, &def.domain, &def.name);
         registered.push((def.domain.clone(), def.name.clone()));
     }
     Ok(registered)
@@ -832,46 +943,40 @@ pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
 
     let backing = Backing::Process(Arc::new(proc));
 
-    // Upgrade / reload semantics: if a plugin reporting the SAME `software` is
-    // already loaded, unload it first so its tool routes free up. Without this an
-    // in-place upgrade (install a newer build of a loaded plugin) false-collides
-    // with its own previous version's tool names and bails. A collision against a
-    // *different* software's tool below still errors. `unload_plugin` takes the
-    // registry lock itself, so run it before acquiring the write lock here.
-    // See [[project-orca-plugin-rollout-defects]].
-    if is_loaded(&software) {
-        let n = unload_plugin(&software);
-        tracing::info!(plugin = %software, unloaded = n, "reloading plugin (same software already loaded)");
-    }
-
+    // Reload: detach any plugin already loaded under this id so its tool routes
+    // and backend names free up, all under one write lock so nothing else can
+    // claim them in between. If the new load fails, the previous one is restored.
     let mut reg = registry().write().unwrap_or_else(|e| e.into_inner());
-    for name in &tool_names {
-        if reg.by_tool.contains_key(name) {
-            bail!("plugin '{software}' tool '{name}' collides with an already-loaded plugin tool");
-        }
-        if dispatch::tool_exists(name) {
-            bail!("plugin '{software}' tool '{name}' collides with a built-in tool");
-        }
+    let previous = detach_plugins(&mut reg, &software);
+    if !previous.is_empty() {
+        tracing::info!(plugin = %software, "reloading plugin (same software already loaded)");
     }
-    let registered = register_backends(&backing, &software, &backend_defs)?;
-
-    let idx = reg.plugins.len();
-    for name in &tool_names {
-        reg.by_tool.insert(name.clone(), idx);
-    }
-    install_tool_policies(&software, &tools);
+    let registered = match attach_checked(&reg, &software, &tool_names, &backing, &backend_defs) {
+        Ok(registered) => registered,
+        Err(e) => {
+            for old in previous {
+                restore_plugin(&mut reg, old);
+            }
+            return Err(e);
+        }
+    };
     let backend_names: Vec<String> = registered.iter().map(|(_, n)| n.clone()).collect();
-    reg.plugins.push(LoadedPlugin {
-        software: software.clone(),
-        semver: semver.clone(),
-        // Process plugins negotiate compat at the wire level; there is no
-        // target/orca semver range on this path. Empty = "not applicable".
-        target_compat: String::new(),
-        orca_compat: String::new(),
-        backing,
-        tools,
-        domain_backends: registered,
-    });
+    attach_plugin(
+        &mut reg,
+        LoadedPlugin {
+            software: software.clone(),
+            semver: semver.clone(),
+            // Process plugins negotiate compat at the wire level; there is no
+            // target/orca semver range on this path. Empty = "not applicable".
+            target_compat: String::new(),
+            orca_compat: String::new(),
+            backing,
+            tools,
+            domain_backends: registered,
+            backend_defs,
+        },
+    );
+    drop(reg);
 
     tracing::info!(
         plugin = %software,
@@ -975,31 +1080,7 @@ pub fn loaded_plugins() -> Vec<LoadedPluginInfo> {
         .collect()
 }
 
-/// Ids a plugin may never load as. A plugin's principal owns every secret named
-/// `<id>` or `<id>.…`, so an id equal to a core secret name (or a core
-/// namespace) would hand the plugin that secret.
-pub const RESERVED_PLUGIN_IDS: &[&str] = &[
-    "orca",
-    "core",
-    "system",
-    "auth",
-    "secret",
-    "secrets",
-    "mesh",
-    "model",
-    "notify",
-    "plugin",
-    "db",
-    "github",
-    "github_token",
-    "anthropic",
-    "anthropic_api_key",
-    "release_source_api",
-];
-
-pub fn is_reserved_plugin_id(id: &str) -> bool {
-    RESERVED_PLUGIN_IDS.contains(&id)
-}
+pub use contract::plugin::{RESERVED_PLUGIN_IDS, is_reserved_plugin_id};
 
 /// Whether `id` matches `^[a-z][a-z0-9_-]{0,63}$`. No `.` (a dotted id would
 /// own a core secret's `<id>.…` names past the reserved list) and no `/`
@@ -1035,41 +1116,90 @@ pub fn is_loaded(software: &str) -> bool {
 /// number of plugins removed.
 pub fn unload_plugin(software: &str) -> usize {
     let mut reg = registry().write().unwrap_or_else(|e| e.into_inner());
-    let before = reg.plugins.len();
-    let removed_tools: Vec<String> = reg
-        .plugins
-        .iter()
-        .filter(|p| p.software == software)
-        .flat_map(|p| p.tools.keys().cloned())
-        .collect();
-    // Reverse every domain-backend registration the unloaded plugins made, so a
-    // dropped plugin leaves no storage (etc.) backend pointing at a dead invoke
-    // thunk. Collected before the `retain` removes the plugins.
-    let removed_backends: Vec<(String, String)> = reg
-        .plugins
-        .iter()
-        .filter(|p| p.software == software)
-        .flat_map(|p| p.domain_backends.iter().cloned())
-        .collect();
-    rollback_domain_backends(&removed_backends);
-    dispatch::tool_roles::remove_plugin_tools(removed_tools.iter().map(String::as_str));
-    reg.plugins.retain(|p| p.software != software);
-    for name in &removed_tools {
-        reg.by_tool.remove(name);
+    detach_plugins(&mut reg, software).len()
+}
+
+/// Unload `software` only if it is still served by the process at `proc_addr`,
+/// so a stale process never unloads the plugin that replaced it.
+#[cfg(unix)]
+pub(crate) fn unload_if_backed_by(software: &str, proc_addr: usize) -> bool {
+    let mut reg = registry().write().unwrap_or_else(|e| e.into_inner());
+    let current = reg.plugins.iter().any(|p| {
+        p.software == software
+            && match &p.backing {
+                Backing::Process(proc) => Arc::as_ptr(proc) as usize == proc_addr,
+            }
+    });
+    current && !detach_plugins(&mut reg, software).is_empty()
+}
+
+/// Remove every plugin loaded as `software` from the registry, reversing its
+/// domain-backend registrations, claims, and tool policies. The detached
+/// plugins are returned so the caller decides when their processes drop.
+fn detach_plugins(reg: &mut Registry, software: &str) -> Vec<LoadedPlugin> {
+    let (detached, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut reg.plugins)
+        .into_iter()
+        .partition(|p| p.software == software);
+    reg.plugins = kept;
+    for p in &detached {
+        rollback_domain_backends(software, &p.domain_backends);
+        dispatch::tool_roles::remove_plugin_tools(p.tools.keys().map(String::as_str));
     }
-    // Tool→index map points into `plugins` by position; rebuild it after a
-    // retain shifts indices.
-    reg.by_tool.clear();
-    let rebuilt: Vec<(String, usize)> = reg
+    rebuild_tool_index(reg);
+    detached
+}
+
+/// `by_tool` points into `plugins` by position; rebuild it after the list changes.
+fn rebuild_tool_index(reg: &mut Registry) {
+    reg.by_tool = reg
         .plugins
         .iter()
         .enumerate()
         .flat_map(|(idx, p)| p.tools.keys().cloned().map(move |n| (n, idx)))
         .collect();
-    for (name, idx) in rebuilt {
-        reg.by_tool.insert(name, idx);
+}
+
+/// Refuse tool-name collisions, then register `defs`' backends. Nothing is left
+/// registered on error.
+fn attach_checked(
+    reg: &Registry,
+    software: &str,
+    tool_names: &[String],
+    backing: &Backing,
+    defs: &[BackendDef],
+) -> Result<Vec<(String, String)>> {
+    for name in tool_names {
+        if reg.by_tool.contains_key(name) {
+            bail!("plugin '{software}' tool '{name}' collides with an already-loaded plugin tool");
+        }
+        if dispatch::tool_exists(name) {
+            bail!("plugin '{software}' tool '{name}' collides with a built-in tool");
+        }
     }
-    before - reg.plugins.len()
+    register_backends(backing, software, defs)
+}
+
+fn attach_plugin(reg: &mut Registry, plugin: LoadedPlugin) {
+    install_tool_policies(&plugin.software, &plugin.tools);
+    let idx = reg.plugins.len();
+    for name in plugin.tools.keys() {
+        reg.by_tool.insert(name.clone(), idx);
+    }
+    reg.plugins.push(plugin);
+}
+
+/// Put a detached plugin back after a failed reload. Its tool names and backend
+/// claims were freed under the same lock and nothing new took them, so this
+/// re-registers what it had.
+fn restore_plugin(reg: &mut Registry, mut plugin: LoadedPlugin) {
+    match register_backends(&plugin.backing, &plugin.software, &plugin.backend_defs) {
+        Ok(registered) => plugin.domain_backends = registered,
+        Err(e) => {
+            tracing::error!(plugin = %plugin.software, error = %format!("{e:#}"), "restoring the previous plugin's backends failed");
+            plugin.domain_backends = Vec::new();
+        }
+    }
+    attach_plugin(reg, plugin);
 }
 
 /// The cloned backing + owning plugin name for a tool, or `None` if no loaded
@@ -1086,18 +1216,24 @@ fn backing_for(name: &str) -> Option<(Backing, String)> {
 /// Marshal an invoke result into the caller's `Result<Value>`. The value is
 /// already parsed (it rode the wire as `Value`), so success passes through with
 /// no reparse; an error `Value` is rendered to text with a plugin-named context.
+/// A plugin's failure keeps the [`contract::ErrorKind`] it reported, so a
+/// refusal like invalid args reaches REST as its own status rather than a 500.
 fn parse_invoke_result(
-    result: std::result::Result<sj::Value, sj::Value>,
+    result: Result<sj::Value>,
     name: &str,
     _software: &str,
 ) -> Result<sj::Value> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(msg) => Err(anyhow!(
-            "plugin tool '{name}' failed: {}",
-            contract::render_invoke_error(&msg)
-        )),
-    }
+    result.map_err(|e| {
+        let msg = format!("plugin tool '{name}' failed: {e:#}");
+        #[cfg(unix)]
+        if let Some(kind) = e
+            .downcast_ref::<supervisor::ToolFailed>()
+            .and_then(|f| f.kind)
+        {
+            return contract::OrcaError::new(kind, msg).into();
+        }
+        anyhow!(msg)
+    })
 }
 
 /// Dispatch a tool call. Tries the dynamically-loaded plugin registry first;
@@ -1139,6 +1275,10 @@ pub fn invoke_plugin(
     Some(parse_invoke_result(result, name, &software))
 }
 
+/// Serializes tests that load the shared `loaderfakeplugin` id.
+#[cfg(test)]
+static FAKE_PLUGIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod extra_domain_tests {
     use super::*;
@@ -1162,7 +1302,7 @@ mod extra_domain_tests {
         // Unknown before injection.
         assert!(domain_register(domain).is_none());
 
-        register_domain_constructor(domain, fake_register, fake_deregister);
+        register_domain_constructor(domain, fake_register, fake_deregister, NameScope::Own);
 
         // domain_register now resolves the injected constructor.
         let ctor = domain_register(domain).expect("injected domain resolves");
@@ -1191,29 +1331,7 @@ mod loader_tests {
         Arc::new(|_op: &str, _args: sj::Value| Ok(sj::json!({})))
     }
 
-    /// The full set of domains the hardcoded [`domain_register`] table names.
-    const BUILTIN_DOMAINS: &[&str] = &[
-        "storage",
-        "service",
-        "deploy_target",
-        "notifications",
-        "cluster_roster",
-        "topology",
-        "host_facts",
-        "secrets_backend",
-        "service_identity",
-        "diagnostics",
-        "notification_source",
-        "ups",
-        "guest_exec",
-        "agents",
-        "container_runtime",
-        "unit",
-        "web",
-        "subprocess_env",
-        "guest_mount",
-        "replication",
-    ];
+    const BUILTIN_DOMAINS: &[&str] = BUILTIN_BACKEND_DOMAINS;
 
     #[test]
     fn domain_register_resolves_every_builtin_domain() {
@@ -1273,7 +1391,7 @@ mod loader_tests {
             invoke_prefix: "loader-web-root".to_string(),
             ..Default::default()
         };
-        register_web_backend(&def, noop_invoke()).expect("web register is non-fatal");
+        register_web_backend(&def, noop_invoke()).expect("web registers");
 
         // Non-empty endpoint → explicit prefix, no spa fallback.
         let def2 = BackendDef {
@@ -1284,60 +1402,64 @@ mod loader_tests {
             invoke_prefix: "loader-web-app".to_string(),
             ..Default::default()
         };
-        register_web_backend(&def2, noop_invoke()).expect("web register is non-fatal");
+        register_web_backend(&def2, noop_invoke()).expect("web registers");
 
         domain_deregister("web", "loader-web-root");
         domain_deregister("web", "loader-web-app");
     }
 
-    /// Two web backends claiming the exact same route prefix must not fail to
-    /// load (registration is non-fatal by contract), and the contested path must
-    /// be recorded so the loader's post-registration `conflicts()` warn loop runs
-    /// with a real conflict in hand. The incumbent keeps serving the route.
+    fn web_def(name: &str, endpoint: &str) -> BackendDef {
+        BackendDef {
+            domain: "web".to_string(),
+            name: name.to_string(),
+            endpoint: endpoint.to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn web_backend_records_route_conflict_non_fatally() {
-        let prefix = "/loader-web-dup";
-        let incumbent = "loader-web-dup-a";
-        let contender = "loader-web-dup-b";
+    fn web_path_outside_the_plugins_namespace_fails_the_load() {
+        for endpoint in ["", "/", "/api/v1", "/plugins/someone-else/x"] {
+            let err =
+                register_backends_with("webscope-a", &[web_def("webscope-a", endpoint)], |_| {
+                    noop_invoke()
+                })
+                .expect_err("out-of-scope path refused")
+                .to_string();
+            assert!(
+                err.contains("webscope-a") && err.contains("may not register web path"),
+                "{endpoint}: {err}"
+            );
+        }
+        let ok = register_backends_with(
+            "webscope-a",
+            &[web_def("webscope-a", "/plugins/webscope-a/ui")],
+            |_| noop_invoke(),
+        )
+        .expect("own namespace registers");
+        rollback_domain_backends("webscope-a", &ok);
+    }
 
-        let def_a = BackendDef {
-            domain: "web".to_string(),
-            name: incumbent.to_string(),
-            endpoint: prefix.to_string(),
-            invoke_prefix: incumbent.to_string(),
-            ..Default::default()
-        };
-        // First claim on the path: non-fatal, no conflict yet.
-        register_web_backend(&def_a, noop_invoke()).expect("first web register is non-fatal");
-
-        let def_b = BackendDef {
-            domain: "web".to_string(),
-            name: contender.to_string(),
-            endpoint: prefix.to_string(),
-            invoke_prefix: contender.to_string(),
-            ..Default::default()
-        };
-        // Second claim on the SAME path: still non-fatal, but records a conflict
-        // that the loader's conflicts() warn loop iterates.
-        register_web_backend(&def_b, noop_invoke()).expect("conflicting web register is non-fatal");
-
-        let contested = contract::web::conflicts();
-        let mine = contested
-            .iter()
-            .find(|c| c.path == prefix)
-            .expect("the contested path is recorded");
-        assert_eq!(
-            mine.active_owner, incumbent,
-            "the incumbent holds the route until the user chooses an owner"
-        );
+    #[test]
+    fn taken_web_path_fails_the_load() {
+        let path = "/plugins/webtaken-a/ui";
+        register_web_backend(&web_def("webtaken-squatter", path), noop_invoke())
+            .expect("first claim registers");
+        let err = register_backends_with("webtaken-a", &[web_def("webtaken-a", path)], |_| {
+            noop_invoke()
+        })
+        .expect_err("taken path refused");
+        let msg = format!("{err:#}");
         assert!(
-            mine.contenders.iter().any(|c| c == contender),
-            "the second backend is recorded as a contender: {:?}",
-            mine.contenders
+            msg.contains("webtaken-a") && msg.contains(path) && msg.contains("webtaken-squatter"),
+            "{msg}"
         );
-
-        domain_deregister("web", incumbent);
-        domain_deregister("web", contender);
+        assert_eq!(
+            contract::web::active_owner(path).as_deref(),
+            Some("webtaken-squatter")
+        );
+        domain_deregister("web", "webtaken-squatter");
     }
 
     #[test]
@@ -1357,7 +1479,119 @@ mod loader_tests {
             };
             let _outcome = ctor(&def, noop_invoke());
         }
-        rollback_domain_backends(&pairs);
+        rollback_domain_backends("loader-test", &pairs);
+    }
+
+    fn def(domain: &str, name: &str) -> BackendDef {
+        BackendDef {
+            domain: domain.to_string(),
+            name: name.to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn own_name_domains_refuse_another_plugins_name() {
+        for domain in BUILTIN_DOMAINS {
+            if name_scope(domain) == NameScope::Claimed {
+                continue;
+            }
+            let err =
+                register_backends_with("owner-a", &[def(domain, "owner-b")], |_| noop_invoke())
+                    .expect_err("foreign name refused")
+                    .to_string();
+            assert!(
+                err.contains("owner-a") && err.contains(domain) && err.contains("owner-b"),
+                "{domain}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_names_are_refused_in_every_domain() {
+        for domain in BUILTIN_DOMAINS {
+            let err = register_backends_with("orca", &[def(domain, "orca")], |_| noop_invoke())
+                .expect_err("reserved name refused")
+                .to_string();
+            assert!(err.contains("reserved"), "{domain}: {err}");
+        }
+    }
+
+    #[test]
+    fn own_name_registration_works_and_unload_spares_other_plugins() {
+        let b = register_backends_with("owner-own-b", &[def("host_facts", "owner-own-b")], |_| {
+            noop_invoke()
+        })
+        .expect("own name registers");
+        let a = register_backends_with("owner-own-a", &[def("host_facts", "owner-own-a")], |_| {
+            noop_invoke()
+        })
+        .expect("own name registers");
+        assert!(
+            register_backends_with("owner-own-a", &[def("host_facts", "owner-own-b")], |_| {
+                noop_invoke()
+            })
+            .is_err()
+        );
+        rollback_domain_backends("owner-own-a", &a);
+        let names: Vec<String> = contract::host_facts::providers()
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n == "owner-own-b"));
+        assert!(!names.iter().any(|n| n == "owner-own-a"));
+        rollback_domain_backends("owner-own-b", &b);
+    }
+
+    #[test]
+    fn claimed_names_belong_to_the_first_registrant() {
+        let domain = "notifications";
+        let b = register_backends_with("claim-b", &[def(domain, "claim-endpoint")], |_| {
+            noop_invoke()
+        })
+        .expect("first claim registers");
+        let err = register_backends_with("claim-a", &[def(domain, "claim-endpoint")], |_| {
+            noop_invoke()
+        })
+        .expect_err("second plugin refused")
+        .to_string();
+        assert!(err.contains("claim-a") && err.contains("claim-b"), "{err}");
+        // Re-registering its own claim (reload) is allowed.
+        register_backends_with("claim-b", &[def(domain, "claim-endpoint")], |_| {
+            noop_invoke()
+        })
+        .expect("owner may re-register");
+        // A's rollback of B's pair releases nothing it does not own.
+        release_backend_claim("claim-a", domain, "claim-endpoint");
+        assert!(
+            register_backends_with("claim-a", &[def(domain, "claim-endpoint")], |_| {
+                noop_invoke()
+            })
+            .is_err()
+        );
+        rollback_domain_backends("claim-b", &b);
+        let a = register_backends_with("claim-a", &[def(domain, "claim-endpoint")], |_| {
+            noop_invoke()
+        })
+        .expect("released claim is free");
+        rollback_domain_backends("claim-a", &a);
+    }
+
+    #[test]
+    fn injected_domains_take_their_declared_scope() {
+        fn reg(_: &BackendDef, _: BackendInvoke) -> Result<()> {
+            Ok(())
+        }
+        fn dereg(_: &str) {}
+        register_domain_constructor("scope-test-claimed", reg, dereg, NameScope::Claimed);
+        register_domain_constructor("scope-test-own", reg, dereg, NameScope::Own);
+        assert_eq!(name_scope("scope-test-claimed"), NameScope::Claimed);
+        assert_eq!(name_scope("scope-test-own"), NameScope::Own);
+        assert_eq!(name_scope("scope-test-unregistered"), NameScope::Own);
+        assert_eq!(name_scope("deploy_target"), NameScope::Claimed);
+        assert_eq!(name_scope("agents"), NameScope::Agent);
+        assert_eq!(name_scope("secrets_backend"), NameScope::Own);
     }
 
     /// A nested `block_on` panics on an async worker, so running one inside
@@ -1401,24 +1635,38 @@ mod loader_tests {
     }
 
     #[test]
-    fn parse_invoke_result_renders_string_error_verbatim() {
-        let err = parse_invoke_result(
-            Err(sj::Value::String("boom".to_string())),
-            "some.tool",
-            "sw",
-        )
-        .unwrap_err()
-        .to_string();
+    fn parse_invoke_result_names_the_tool_and_error() {
+        let err = parse_invoke_result(Err(anyhow!("boom")), "some.tool", "sw")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("some.tool"), "names the tool: {err}");
         assert!(err.contains("boom"), "includes the error text: {err}");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn parse_invoke_result_renders_non_string_error_as_json() {
-        let err = parse_invoke_result(Err(sj::json!({"code": 42})), "t", "sw")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("42"), "renders structured error: {err}");
+    fn parse_invoke_result_keeps_the_plugin_error_kind() {
+        let failed = supervisor::ToolFailed {
+            message: "invalid args for some.tool: missing field `id`".into(),
+            kind: Some(contract::ErrorKind::Invalid),
+        };
+        let err = parse_invoke_result(Err(failed.into()), "some.tool", "sw").unwrap_err();
+        let oe = err
+            .downcast_ref::<contract::OrcaError>()
+            .expect("OrcaError");
+        assert_eq!(oe.kind, contract::ErrorKind::Invalid);
+        assert!(oe.message.contains("missing field `id`"), "{oe}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_invoke_result_without_kind_is_not_an_orca_error() {
+        let failed = supervisor::ToolFailed {
+            message: "boom".into(),
+            kind: None,
+        };
+        let err = parse_invoke_result(Err(failed.into()), "some.tool", "sw").unwrap_err();
+        assert!(err.downcast_ref::<contract::OrcaError>().is_none());
     }
 
     #[test]
@@ -1947,6 +2195,7 @@ mod loader_tests {
         if std::env::var(supervisor::SOCKET_ENV).is_ok() {
             return;
         }
+        let _g = FAKE_PLUGIN_LOCK.lock().await;
         // A prior aborted run could leave it loaded; start from a clean slate.
         unload_plugin("loaderfakeplugin");
 
@@ -2048,6 +2297,85 @@ mod loader_tests {
                 .any(|t| t.name == "loaderfakeplugin.ping"),
             "tool def gone after unload"
         );
+    }
+
+    fn fake_agents_registered() -> bool {
+        agents::registry::providers()
+            .iter()
+            .any(|p| p.name() == "argyle-labs/loaderfakeplugin")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_reload_restores_the_previous_plugin() {
+        if std::env::var(supervisor::SOCKET_ENV).is_ok() {
+            return;
+        }
+        let _g = FAKE_PLUGIN_LOCK.blocking_lock();
+        unload_plugin("loaderfakeplugin");
+        let exe = std::env::current_exe().expect("test binary path");
+        spawn_plugin(&exe, "loaderfakeplugin").expect("first load");
+
+        // Another plugin owning one of its tool names makes the reload fail
+        // after the previous load was detached.
+        {
+            let mut reg = registry().write().unwrap_or_else(|e| e.into_inner());
+            let owner = &reg.plugins[reg.by_tool["loaderfakeplugin.ping"]];
+            let backing = owner.backing.clone();
+            let tools = HashMap::from([(
+                "loaderfakeplugin.ping".to_string(),
+                owner.tools["loaderfakeplugin.ping"].clone(),
+            )]);
+            attach_plugin(
+                &mut reg,
+                LoadedPlugin {
+                    software: "reloadcollider".into(),
+                    semver: String::new(),
+                    target_compat: String::new(),
+                    orca_compat: String::new(),
+                    backing,
+                    tools,
+                    domain_backends: Vec::new(),
+                    backend_defs: Vec::new(),
+                },
+            );
+        }
+
+        let err = spawn_plugin(&exe, "loaderfakeplugin").expect_err("reload collides");
+        assert!(format!("{err:#}").contains("collides"), "{err:#}");
+        assert!(is_loaded("loaderfakeplugin"), "previous load restored");
+        assert!(fake_agents_registered(), "previous backends restored");
+        assert!(
+            invoke_plugin("loaderfakeplugin.fetch", &sj::json!({}), None).is_some(),
+            "previous tool routes restored"
+        );
+
+        unload_plugin("reloadcollider");
+        unload_plugin("loaderfakeplugin");
+        assert!(!fake_agents_registered());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unload_if_backed_by_spares_a_replacement() {
+        if std::env::var(supervisor::SOCKET_ENV).is_ok() {
+            return;
+        }
+        let _g = FAKE_PLUGIN_LOCK.blocking_lock();
+        unload_plugin("loaderfakeplugin");
+        let exe = std::env::current_exe().expect("test binary path");
+        spawn_plugin(&exe, "loaderfakeplugin").expect("load");
+        let Some((Backing::Process(proc), _)) = backing_for("loaderfakeplugin.ping") else {
+            panic!("loaded plugin has a backing");
+        };
+        let addr = Arc::as_ptr(&proc) as usize;
+        drop(proc);
+
+        assert!(!unload_if_backed_by("loaderfakeplugin", addr ^ 1));
+        assert!(is_loaded("loaderfakeplugin"));
+        assert!(unload_if_backed_by("loaderfakeplugin", addr));
+        assert!(!is_loaded("loaderfakeplugin"));
+        assert!(!fake_agents_registered(), "claims released");
     }
 
     #[test]
