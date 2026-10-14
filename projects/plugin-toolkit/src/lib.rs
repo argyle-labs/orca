@@ -271,6 +271,8 @@ pub use ::reqwest;
 // the `http.request` capability with no codegen change and links no reqwest.
 #[cfg(feature = "delegated-http")]
 pub mod delegated_http;
+#[cfg(feature = "delegated-ws")]
+pub mod delegated_ws;
 #[cfg(feature = "delegated-http")]
 pub use delegated_http::{api_client, progenitor_client, reqwest};
 // Generated string-pattern validation needs `regress` even under delegated HTTP

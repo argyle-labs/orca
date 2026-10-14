@@ -451,7 +451,10 @@ impl PluginProcess {
             idle: self.idle_timeout,
             deadline: Instant::now() + self.max_invoke,
         };
-        let result = invoke_on(&mut stream, id, tool, args, caller, &self.software);
+        let deadline = stream.deadline;
+        let result = crate::ws::with_invoke_deadline(deadline, || {
+            invoke_on(&mut stream, id, tool, args, caller, &self.software)
+        });
         // A tool error arrives as a well-formed `Result` frame; an idle timeout
         // may still be followed by one; anything else (including the ceiling)
         // means the stream is mid-frame or the plugin is gone or wedged.
@@ -466,6 +469,7 @@ impl PluginProcess {
                     .set_write_timeout(Some(Duration::from_millis(1)))
                     .ok();
                 session.stop();
+                crate::ws::drop_sessions(&self.software);
                 SessionState::Broken
             }
             Err(e) if is_idle_timeout(e) => SessionState::Stale(id),
@@ -504,6 +508,7 @@ impl PluginProcess {
     fn respawn(&self, session: &mut Session) -> Result<()> {
         tracing::warn!(plugin = %self.software, "respawning plugin after a broken session");
         session.stop();
+        crate::ws::drop_sessions(&self.software);
         let (child, stream, hs, _) = start(&self.exe, &self.software)
             .with_context(|| format!("respawning plugin '{}'", self.software))?;
         let mut fresh = Session {
@@ -539,6 +544,7 @@ impl PluginProcess {
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .stop();
+        crate::ws::drop_sessions(&self.software);
     }
 }
 
@@ -1355,6 +1361,7 @@ mod tests {
             return;
         };
         let before = child_pid(&proc);
+        let mut ws = crate::ws::insert_idle_session("loaderfakeplugin");
         thread::scope(|s| {
             s.spawn(|| {
                 let _session = proc.session.lock().unwrap();
@@ -1371,6 +1378,17 @@ mod tests {
         assert_eq!(out, json!({ "n": 1 }));
         assert!(!proc.session.is_poisoned());
         assert_ne!(child_pid(&proc), before, "a fresh child serves the invoke");
+        assert!(ws.dropped(), "ws sessions dropped");
+    }
+
+    #[test]
+    fn shutdown_drops_the_plugins_ws_sessions() {
+        let Some(mut proc) = spawn_fake_plugin() else {
+            return;
+        };
+        let mut ws = crate::ws::insert_idle_session("loaderfakeplugin");
+        proc.shutdown();
+        assert!(ws.dropped(), "ws sessions dropped");
     }
 
     #[test]
@@ -1417,11 +1435,13 @@ mod tests {
         proc.idle_timeout = Duration::from_secs(2);
         proc.max_invoke = Duration::from_millis(600);
         let before = child_pid(&proc);
+        let mut ws = crate::ws::insert_idle_session("loaderfakeplugin");
         let started = Instant::now();
         let err = proc
             .invoke("loaderfakeplugin.wedge", json!({}), None)
             .unwrap_err();
         assert!(is_ceiling(&err), "got: {err:#}");
+        assert!(ws.dropped(), "ws sessions dropped");
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(proc.session.lock().unwrap().state, SessionState::Broken);
 

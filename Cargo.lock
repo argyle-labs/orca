@@ -4500,10 +4500,15 @@ dependencies = [
  "orca-plugin-toolkit",
  "orca-secrets",
  "orca-utils",
+ "rcgen",
  "rusqlite",
+ "rustls",
+ "rustls-platform-verifier",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite 0.29.0",
  "tracing",
 ]
 
