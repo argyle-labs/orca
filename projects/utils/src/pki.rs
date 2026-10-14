@@ -946,17 +946,29 @@ pub fn verify_refreshed_peer_certs(
     )
     // A signer that predates identity names issues without one. Once this
     // host holds an identity name, peers pin it and would refuse a cert
-    // without one, so that downgrade is refused here instead.
+    // without one, so that downgrade is refused here instead. An unreadable
+    // current cert can't rule out a pin, so it refuses too.
     .or_else(|e| {
+        const REMEDY: &str = "upgrade a CA-key holder, or run \
+             `orca system mesh update --action unpin --id <this host>` on each peer";
         let current = std::fs::read_to_string(mesh_server_cert_path(pki_dir))
-            .ok()
-            .and_then(|p| first_cert_der(&p).ok())
-            .and_then(|d| mesh_server_identity(&d).ok().flatten());
-        if current.is_some() {
-            return Err(e.context(
-                "refreshed server cert has no identity name but the current one has; \
-                 the signer predates identity names; keeping the current cert",
-            ));
+            .context("read current server cert")
+            .and_then(|p| first_cert_der(&p))
+            .and_then(|d| mesh_server_identity(&d));
+        match current {
+            Ok(Some(_)) => {
+                return Err(e.context(format!(
+                    "refreshed server cert has no identity name but the current one has; \
+                     the signer predates identity names; keeping the current cert; {REMEDY}"
+                )));
+            }
+            Err(read_err) => {
+                return Err(e.context(format!(
+                    "refreshed server cert has no identity name and the current one is \
+                     unreadable ({read_err:#}); keeping the current cert; {REMEDY}"
+                )));
+            }
+            Ok(None) => {}
         }
         check_refreshed_leaf(
             "server",
@@ -2470,7 +2482,15 @@ mod tests {
     fn install_refreshed_refuses_identity_downgrade() {
         let f = refresh_fixture("host-r");
         let bare = server_cert_without_identity(&f);
-        assert_install_refused(&f, &f.cert_c, &bare, "keeping the current cert");
+        assert_install_refused(&f, &f.cert_c, &bare, "--action unpin --id");
+    }
+
+    #[test]
+    fn install_refreshed_refuses_identity_downgrade_when_current_unreadable() {
+        let f = refresh_fixture("host-r");
+        let bare = server_cert_without_identity(&f);
+        std::fs::write(mesh_server_cert_path(f.dir.path()), "not a cert").unwrap();
+        assert_install_refused(&f, &f.cert_c, &bare, "unreadable");
     }
 
     #[test]

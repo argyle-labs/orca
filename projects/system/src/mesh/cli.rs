@@ -251,7 +251,8 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
     // this the inviter sees mutual=false forever after auto-accept — the
     // initial DB write is local-only and roster-sync only carries identity,
     // not trust state.
-    if let Err(e) = call_mesh_method_pub(
+    if let Err(e) = call_peer(
+        &r.inviter_peer_id,
         &offer.peer_addr,
         offer.peer_port,
         "mesh/notify-trust",
