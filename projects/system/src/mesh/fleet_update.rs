@@ -544,6 +544,7 @@ async fn probe_or_apply(
     ctx: &contract::ToolCtx,
 ) -> FleetPluginResult {
     let args = PluginUpdateArgs {
+        allow_unsigned: false,
         name: name.to_string(),
         execute,
         version: None,

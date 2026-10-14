@@ -69,6 +69,34 @@ pub struct FetchedPlugin {
     /// downloaded bytes. Callers delegating a fetch across the mesh re-verify
     /// this after base64 transit. See [[github-token-proxy-delegate-on-miss]].
     pub sha256: String,
+    /// The release's `<asset>.minisig`, already verified against
+    /// [`crate::plugin_sig::trusted_keys`]. `None` only for an install that
+    /// explicitly allowed an unsigned release.
+    pub minisig: Option<String>,
+}
+
+/// Verify a fetched plugin's signature, or accept its absence only when
+/// `allow_unsigned`. Run on every host that installs the bytes, since a
+/// peer-served fetch carries the signature across the mesh.
+pub fn check_signature(
+    name: &str,
+    bytes: &[u8],
+    minisig: Option<&str>,
+    allow_unsigned: bool,
+) -> Result<()> {
+    match minisig {
+        Some(sig) => {
+            crate::plugin_sig::verify(bytes, sig, name, crate::plugin_sig::trusted_keys())?;
+        }
+        None if allow_unsigned => {
+            tracing::warn!(plugin = %name, "installing an unsigned plugin release (allow-unsigned)");
+        }
+        None => bail!(
+            "plugin '{name}' release has no .minisig signature; refusing to install it \
+             (pass --allow-unsigned only for a development build)"
+        ),
+    }
+    Ok(())
 }
 
 /// REST API base for a plugin repo's releases. The `owner`/`repo` always come
@@ -285,11 +313,14 @@ async fn resolve_release(
 /// * `version` — explicit version/tag, or `None` for the newest release.
 /// * `allow_prerelease` — when `None` version: include `-rc` tags (newest wins)
 ///   rather than only the stable `/releases/latest`.
+/// * `allow_unsigned` — accept a release with no `<asset>.minisig`. A signature
+///   that is present must verify regardless.
 pub async fn fetch(
     name: &str,
     repo_url: &str,
     version: Option<&str>,
     allow_prerelease: bool,
+    allow_unsigned: bool,
 ) -> Result<FetchedPlugin> {
     let triple = update::build_target();
     if triple == "unknown-target" {
@@ -298,7 +329,14 @@ pub async fn fetch(
              cannot resolve a matching plugin asset"
         );
     }
-    fetch_for_target(name, repo_url, version, allow_prerelease, triple).await
+    let fetched = fetch_for_target(name, repo_url, version, allow_prerelease, triple).await?;
+    check_signature(
+        name,
+        &fetched.bytes,
+        fetched.minisig.as_deref(),
+        allow_unsigned,
+    )?;
+    Ok(fetched)
 }
 
 /// Like [`fetch`], but resolves the asset for an **explicit** target triple
@@ -306,7 +344,8 @@ pub async fn fetch(
 /// a plugin asset for a requester on a different arch/libc: the holder runs
 /// this with the *caller's* triple + the holder's own GitHub token. See
 /// [`crate::plugin_manager`]'s `plugin.serve_asset` and
-/// [[github-token-proxy-delegate-on-miss]].
+/// [[github-token-proxy-delegate-on-miss]]. The signature is returned
+/// unchecked; the installing host runs [`check_signature`].
 pub async fn fetch_for_target(
     name: &str,
     repo_url: &str,
@@ -397,11 +436,24 @@ pub async fn fetch_for_target(
         utils::hash::sha256_hex(&bytes)
     };
 
+    let minisig = match release
+        .assets
+        .iter()
+        .find(|a| a.name == format!("{want}.minisig"))
+    {
+        Some(a) => Some(
+            String::from_utf8(fetch_one(a).await?)
+                .with_context(|| format!("signature asset {want}.minisig is not text"))?,
+        ),
+        None => None,
+    };
+
     Ok(FetchedPlugin {
         bytes,
         version: resolved,
         asset: want,
         sha256,
+        minisig,
     })
 }
 
@@ -665,6 +717,7 @@ mod tests {
             "https://gitlab.com/argyle-labs/proxmox",
             None,
             false,
+            false,
         )
         .await;
         let Err(err) = res else {
@@ -678,6 +731,18 @@ mod tests {
         assert!(msg.contains("gitlab.com"), "should echo the bad url: {msg}");
     }
 
+    #[test]
+    fn a_missing_signature_is_refused_unless_unsigned_is_allowed() {
+        let err = check_signature("demo", b"x", None, false).unwrap_err();
+        assert!(err.to_string().contains("no .minisig"), "{err:#}");
+        check_signature("demo", b"x", None, true).unwrap();
+    }
+
+    #[test]
+    fn a_bad_signature_is_refused_even_when_unsigned_is_allowed() {
+        assert!(check_signature("demo", b"x", Some("garbage"), true).is_err());
+    }
+
     #[tokio::test]
     async fn fetch_delegation_reports_unknown_triple_for_bad_explicit_version() {
         // Same delegation path, but with an explicit version supplied: `fetch`
@@ -689,6 +754,7 @@ mod tests {
             "https://example.com/not-github",
             Some("0.1.1"),
             true,
+            false,
         )
         .await;
         let Err(err) = res else {

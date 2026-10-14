@@ -223,8 +223,14 @@ async fn baseline_plugin_tick() -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    match crate::plugin_manager::install_from_catalog(BASELINE_PLUGIN_NAME, None, prerelease, &ctx)
-        .await
+    match crate::plugin_manager::install_from_catalog(
+        BASELINE_PLUGIN_NAME,
+        None,
+        prerelease,
+        false,
+        &ctx,
+    )
+    .await
     {
         Ok(out) => tracing::info!(
             "[maintenance] installed baseline plugin {} v{}",
