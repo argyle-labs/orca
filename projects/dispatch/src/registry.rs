@@ -404,6 +404,7 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
     if let Some(tool) = find(name) {
         return tool.run_json(args, ctx).await;
     }
+    authorize_fallback(name, ctx)?;
     let dry_run = crate::erased::dry_run_requested(&args)?;
     if crate::tool_roles::plugin_execute_gated(name)
         && let Some(obj) = args.as_object_mut()
@@ -471,6 +472,29 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
             }
         }
     }
+}
+
+/// Role check for the non-static surfaces, mirroring the one `run_json`
+/// applies to static tools, so a surface that skips its own gate still cannot
+/// reach a plugin/unit/diagnostics/UPS body. A name with no local role is
+/// left to the peer forward, whose recipient authorizes it.
+fn authorize_fallback(name: &str, ctx: &ToolCtx) -> Result<()> {
+    let (Some(caller), Some(required)) = (ctx.caller(), crate::tool_roles::known_role(name)) else {
+        return Ok(());
+    };
+    if crate::tool_roles::authorize(
+        &caller.role,
+        caller.can_mutate,
+        required,
+        crate::tool_roles::is_data_mutation(name),
+    ) {
+        return Ok(());
+    }
+    Err(contract::OrcaError::forbidden(format!(
+        "{name} requires role '{required}'; caller '{}' has '{}'",
+        caller.username, caller.role
+    ))
+    .into())
 }
 
 /// Router-level peer pass-through for a tool this host does not have. Only
@@ -1376,6 +1400,33 @@ mod tests {
     #[test]
     fn required_role_returns_none_for_unknown_tool() {
         assert!(required_role("does.not.exist").is_none());
+    }
+
+    #[tokio::test]
+    async fn fallback_dispatch_refuses_caller_below_plugin_tool_role() {
+        use crate::tool_roles::{PluginToolPolicy, install_plugin_tools, remove_plugin_tools};
+        let name = "registry_test_plugin.no_role";
+        install_plugin_tools([(
+            name.to_string(),
+            PluginToolPolicy::from_manifest(None, None, None),
+        )]);
+        let caller = |role: &str| contract::CallerIdentity {
+            user_id: "u".into(),
+            username: "u".into(),
+            role: role.into(),
+            can_mutate: false,
+        };
+        let member = make_ctx().with_auth(caller("member"));
+        let err = dispatch(name, serde_json::json!({}), &member)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("requires role 'admin'"), "{err}");
+        let admin = make_ctx().with_auth(caller("admin"));
+        let err = dispatch(name, serde_json::json!({}), &admin)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown tool"), "{err}");
+        remove_plugin_tools([name]);
     }
 
     #[tokio::test]
