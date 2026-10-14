@@ -81,20 +81,17 @@ enum Backing {
 }
 
 impl Backing {
-    /// Invoke `tool` with `args`, returning the tool's result `Value` or an
-    /// error `Value`. Both cross the wire as `serde_json::Value` already, so
-    /// there is no String encode/decode here.
+    /// Invoke `tool` with `args`. A tool's own failure is a
+    /// [`supervisor::ToolFailed`] carrying the kind the plugin reported.
     #[cfg(unix)]
     fn invoke(
         &self,
         tool: &str,
         args: sj::Value,
         caller: Option<plugin_proto::VerifiedCaller>,
-    ) -> std::result::Result<sj::Value, sj::Value> {
+    ) -> Result<sj::Value> {
         match self {
-            Backing::Process(proc) => proc
-                .invoke(tool, args, caller)
-                .map_err(|e| sj::Value::String(format!("{e:#}"))),
+            Backing::Process(proc) => proc.invoke(tool, args, caller),
         }
     }
 
@@ -106,7 +103,7 @@ impl Backing {
         _tool: &str,
         _args: sj::Value,
         _caller: Option<plugin_proto::VerifiedCaller>,
-    ) -> std::result::Result<sj::Value, sj::Value> {
+    ) -> Result<sj::Value> {
         match *self {}
     }
 }
@@ -673,6 +670,7 @@ fn make_backend_invoke(backing: Backing, invoke_prefix: String) -> BackendInvoke
         // Domain registries call this thunk directly, often from async code, so
         // this layer keeps it off the async worker itself.
         off_async_worker(|| backing.invoke(&tool, args, None))
+            .map_err(|e| sj::Value::String(format!("{e:#}")))
     })
 }
 
@@ -1081,18 +1079,24 @@ fn backing_for(name: &str) -> Option<(Backing, String)> {
 /// Marshal an invoke result into the caller's `Result<Value>`. The value is
 /// already parsed (it rode the wire as `Value`), so success passes through with
 /// no reparse; an error `Value` is rendered to text with a plugin-named context.
+/// A plugin's failure keeps the [`contract::ErrorKind`] it reported, so a
+/// refusal like invalid args reaches REST as its own status rather than a 500.
 fn parse_invoke_result(
-    result: std::result::Result<sj::Value, sj::Value>,
+    result: Result<sj::Value>,
     name: &str,
     _software: &str,
 ) -> Result<sj::Value> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(msg) => Err(anyhow!(
-            "plugin tool '{name}' failed: {}",
-            contract::render_invoke_error(&msg)
-        )),
-    }
+    result.map_err(|e| {
+        let msg = format!("plugin tool '{name}' failed: {e:#}");
+        #[cfg(unix)]
+        if let Some(kind) = e
+            .downcast_ref::<supervisor::ToolFailed>()
+            .and_then(|f| f.kind)
+        {
+            return contract::OrcaError::new(kind, msg).into();
+        }
+        anyhow!(msg)
+    })
 }
 
 /// Dispatch a tool call. Tries the dynamically-loaded plugin registry first;
@@ -1396,24 +1400,38 @@ mod loader_tests {
     }
 
     #[test]
-    fn parse_invoke_result_renders_string_error_verbatim() {
-        let err = parse_invoke_result(
-            Err(sj::Value::String("boom".to_string())),
-            "some.tool",
-            "sw",
-        )
-        .unwrap_err()
-        .to_string();
+    fn parse_invoke_result_names_the_tool_and_error() {
+        let err = parse_invoke_result(Err(anyhow!("boom")), "some.tool", "sw")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("some.tool"), "names the tool: {err}");
         assert!(err.contains("boom"), "includes the error text: {err}");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn parse_invoke_result_renders_non_string_error_as_json() {
-        let err = parse_invoke_result(Err(sj::json!({"code": 42})), "t", "sw")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("42"), "renders structured error: {err}");
+    fn parse_invoke_result_keeps_the_plugin_error_kind() {
+        let failed = supervisor::ToolFailed {
+            message: "invalid args for some.tool: missing field `id`".into(),
+            kind: Some(contract::ErrorKind::Invalid),
+        };
+        let err = parse_invoke_result(Err(failed.into()), "some.tool", "sw").unwrap_err();
+        let oe = err
+            .downcast_ref::<contract::OrcaError>()
+            .expect("OrcaError");
+        assert_eq!(oe.kind, contract::ErrorKind::Invalid);
+        assert!(oe.message.contains("missing field `id`"), "{oe}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_invoke_result_without_kind_is_not_an_orca_error() {
+        let failed = supervisor::ToolFailed {
+            message: "boom".into(),
+            kind: None,
+        };
+        let err = parse_invoke_result(Err(failed.into()), "some.tool", "sw").unwrap_err();
+        assert!(err.downcast_ref::<contract::OrcaError>().is_none());
     }
 
     #[test]
