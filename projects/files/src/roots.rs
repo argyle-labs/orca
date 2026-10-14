@@ -4,7 +4,6 @@
 
 use crate::ops::expand_tilde;
 use crate::tree::{NodeType, TreeNode, build_tree_raw};
-use anyhow::Result;
 use contract::config::Config;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -106,29 +105,4 @@ pub fn collect_all_doc_files(nodes: &[TreeNode]) -> Vec<TreeNode> {
         }
     }
     files
-}
-
-/// Resolve `rel` relative to `root`, verifying the result stays within `root`.
-pub fn resolve_within_root(root: &Path, rel: &str) -> Result<PathBuf> {
-    let candidate = root.join(rel);
-    let canonical = candidate
-        .canonicalize()
-        .unwrap_or_else(|_| candidate.clone());
-    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    if !canonical.starts_with(&root_canonical) {
-        anyhow::bail!("path escapes root: {rel}");
-    }
-    Ok(canonical)
-}
-
-pub fn resolve_doc_file(root_dir: &Path, doc_path: &str) -> Option<PathBuf> {
-    for ext in &[".md", ".mdx", ""] {
-        let rel = format!("{doc_path}{ext}");
-        if let Ok(full) = resolve_within_root(root_dir, &rel)
-            && full.is_file()
-        {
-            return Some(full);
-        }
-    }
-    None
 }

@@ -436,9 +436,10 @@ fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
 ///   2. the token's signer fingerprint equals the authenticated peer's *pinned*
 ///      `mesh_peers.pubkey_fp` (a valid sig from an unpinned key is rejected);
 ///   3. the token nonce has not been seen before (replay guard);
-///   4. the effective role comes ONLY from this host's own (replicated) `users`
-///      row for `caller_user_id` — never the token's asserted `role`. Unknown
-///      user or insufficient role → refuse.
+///   4. the effective role is the LOWER of this host's own (replicated) `users`
+///      row for `caller_user_id` and the token's signed `role`: the user row
+///      caps a forged-high claim, the token role caps a narrowly-scoped API
+///      token issued by an admin. Unknown user or insufficient role → refuse.
 ///
 /// Returns that locally-resolved user, the only identity a mesh call may hand
 /// on to a plugin.
@@ -482,16 +483,18 @@ fn authorize_role_gated(
                 verified.token.caller_user_id
             )
         })?;
+    let role = effective_role(&user.role, &verified.token.role);
     anyhow::ensure!(
-        role_satisfies(&user.role, required_role),
-        "mesh/exec refused: tool '{tool}' requires role '{required_role}' but user {} has role '{}'",
-        user.username,
-        user.role
+        role_satisfies(role, required_role),
+        "mesh/exec refused: tool '{tool}' requires role '{required_role}' but user {} acts with \
+         role '{role}'",
+        user.username
     );
+    let role = role.to_string();
     Ok(contract::CallerIdentity {
         user_id: user.id,
         username: user.username,
-        role: user.role,
+        role,
         // A caller token carries no capability grant; unknown means no.
         can_mutate: false,
     })
@@ -504,6 +507,15 @@ fn role_rank(role: &str) -> u8 {
         "admin" => 2,
         "member" | "user" => 1,
         _ => 0,
+    }
+}
+
+/// The lower-ranked of the replicated user role and the caller token's role.
+fn effective_role<'a>(user_role: &'a str, token_role: &'a str) -> &'a str {
+    if role_rank(token_role) < role_rank(user_role) {
+        token_role
+    } else {
+        user_role
     }
 }
 
@@ -1028,6 +1040,17 @@ mod tests {
             err.to_string().contains("caller token verification failed"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn effective_role_is_capped_by_the_token_scope() {
+        // An admin's read-scoped token must not act as admin on a peer.
+        assert_eq!(effective_role("admin", "member"), "member");
+        assert!(!role_satisfies(effective_role("admin", "member"), "admin"));
+        assert!(!role_satisfies(effective_role("admin", "read"), "member"));
+        // A token cannot claim more than the replicated user holds.
+        assert_eq!(effective_role("member", "admin"), "member");
+        assert_eq!(effective_role("admin", "admin"), "admin");
     }
 
     #[test]
