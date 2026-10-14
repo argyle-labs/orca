@@ -127,6 +127,11 @@ pub enum Frame {
         value: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// The failure's `contract::ErrorKind` (snake_case) when the plugin knows
+        /// it, so the host can answer e.g. a 400 instead of a 500. Absent from
+        /// older plugins; an unrecognized kind is treated as absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_kind: Option<String>,
     },
     /// plugin → orca: call a host capability. `id` is the plugin's request id.
     Cap { id: u64, cap: String, args: Value },
@@ -322,6 +327,7 @@ mod tests {
             ok: true,
             value: json!({"cluster": "yggdrasil"}),
             error: None,
+            error_kind: None,
         });
         roundtrip(&Frame::Cap {
             id: 1,
