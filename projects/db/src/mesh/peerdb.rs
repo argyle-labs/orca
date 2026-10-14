@@ -1037,8 +1037,9 @@ pub fn unmark_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
 /// mesh_discovery, and any outbound offers tied to it. Unlike
 /// [`mark_peer_departed`] this leaves no audit row — it's the purge path for
 /// `orca system mesh delete --action forget`, used to evict stale/orphan identities (machine_id churn,
-/// decommissioned hosts) so they stop showing up in the roster. Returns the
-/// total number of rows removed across all four tables.
+/// decommissioned hosts) so they stop showing up in the roster. Releases the
+/// id: a host may join under it again afterwards. Returns the total number of
+/// rows removed across all four tables.
 pub fn forget_peer(conn: &Connection, peer_id: &str) -> Result<u32> {
     let tx = conn.unchecked_transaction()?;
     let mut removed = 0u32;

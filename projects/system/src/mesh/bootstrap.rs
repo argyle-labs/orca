@@ -449,7 +449,8 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
 /// an id already held by this system or by another member's bootstrap key
 /// would let the joiner answer as that system. A row pinned to the joiner's
 /// own key is the same host re-joining; a forgotten id with no row left is
-/// re-admitted the same way.
+/// re-admitted the same way. A row with no pinned key cannot be matched to
+/// the joiner, so it is refused too.
 fn refuse_taken_joiner_id(
     conn: &rusqlite::Connection,
     joiner_id: &str,
@@ -463,7 +464,9 @@ fn refuse_taken_joiner_id(
     if let Some(fp) = pdb::peer_pubkey_fp_raw(conn, joiner_id)? {
         anyhow::ensure!(
             fp.as_deref() == Some(signer_fp),
-            "join refused: {joiner_id} already belongs to another mesh member"
+            "join refused: {joiner_id} already belongs to another mesh member; if that \
+             member is gone, run `orca system mesh delete --action forget --peer-id \
+             {joiner_id}` on this system, then re-join"
         );
     }
     Ok(())
@@ -1770,6 +1773,10 @@ mod tests {
                     "got: {err}"
                 );
             }
+            let unpinned = utils::id::new();
+            pdb::upsert_peer(&conn, &unpinned, "m", "10.0.0.3", 12002, None, "").unwrap();
+            let err = refuse_taken_joiner_id(&conn, &unpinned, "fp-joiner", &own).unwrap_err();
+            assert!(format!("{err}").contains("--action forget"), "got: {err}");
             refuse_taken_joiner_id(&conn, &active, "fp-other", &own).unwrap();
             refuse_taken_joiner_id(&conn, &utils::id::new(), "fp-joiner", &own).unwrap();
         })
