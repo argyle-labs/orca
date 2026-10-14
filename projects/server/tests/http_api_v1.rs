@@ -753,3 +753,102 @@ async fn mcp_endpoint_tools_call_enforces_role() {
         "insufficient role must return an authz error: {body}"
     );
 }
+
+// ── ?dryRun= query opt-in ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn dry_run_query_plans_a_gated_tool() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/v1/system.profile?dryRun=true",
+        Some(&token),
+        Some(serde_json::json!({ "plugin": "docker" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["dryRun"], serde_json::json!(true), "body: {body}");
+    assert_eq!(body["tool"], serde_json::json!("system.profile"));
+}
+
+#[tokio::test]
+async fn dry_run_query_runs_an_aware_tool_in_plan_mode() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let share = tempfile::tempdir().unwrap();
+    let path = share.path().to_string_lossy().to_string();
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/v1/storage.share.repair-permissions?dryRun=true",
+        Some(&token),
+        Some(serde_json::json!({ "path": path, "apply": true, "mode": "0777" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["applied"], serde_json::json!(false), "body: {body}");
+}
+
+#[tokio::test]
+async fn dry_run_query_is_refused_by_an_unaware_tool() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/v1/system.health?dryRun=true",
+        Some(&token),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(
+        body["code"],
+        serde_json::json!("args.invalid"),
+        "body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_query_rejects_non_boolean_values() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    for q in ["1", "yes", "TRUE", ""] {
+        let (status, body) = oneshot_json(
+            env.router(),
+            "POST",
+            &format!("/api/v1/system.profile?dryRun={q}"),
+            Some(&token),
+            Some(serde_json::json!({ "plugin": "docker" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{q}: {body}");
+        assert_eq!(
+            body["code"],
+            serde_json::json!("args.invalid"),
+            "{q}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dry_run_query_and_body_must_agree() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/v1/system.profile?dryRun=false",
+        Some(&token),
+        Some(serde_json::json!({ "plugin": "docker", "dryRun": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(
+        body["code"],
+        serde_json::json!("args.invalid"),
+        "body: {body}"
+    );
+}
