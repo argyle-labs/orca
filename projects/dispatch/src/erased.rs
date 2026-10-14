@@ -24,7 +24,110 @@ use contract::{OrcaTool, ToolCtx};
 /// where serde can track one, which it cannot through `#[serde(flatten)]`, and
 /// any hint the ctx's [`contract::ArgRefusalHint`] adds.
 fn parse_args<T: OrcaTool>(args: Value, ctx: &ToolCtx) -> Result<T::Args> {
-    parse_named_args(T::NAME, args).map_err(|e| with_refusal_hint(e, ctx))
+    reject_unknown_keys(T::NAME, &args, &accepted_keys::<T>())
+        .and_then(|()| parse_named_args(T::NAME, args))
+        .map_err(|e| with_refusal_hint(e, ctx))
+}
+
+/// The top-level arg keys a tool accepts, from its Args schema: `None` when
+/// the Args take open keys (a map, a flattened map, an untyped value).
+type AcceptedKeys = Option<std::collections::HashSet<String>>;
+
+/// [`AcceptedKeys`] per tool, derived once: a schema build per call is waste.
+fn accepted_keys<T: OrcaTool>() -> std::sync::Arc<AcceptedKeys> {
+    static CACHE: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<&'static str, std::sync::Arc<AcceptedKeys>>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    cache
+        .entry(T::NAME)
+        .or_insert_with(|| {
+            let schema = schemars::schema_for!(T::Args).to_value();
+            let mut keys = std::collections::HashSet::new();
+            std::sync::Arc::new(collect_keys(&schema, &schema, &mut keys).then_some(keys))
+        })
+        .clone()
+}
+
+/// Gathers the property names `node` accepts into `keys`, following `$ref`s
+/// and combinators. False when the node accepts keys it does not name.
+fn collect_keys(root: &Value, node: &Value, keys: &mut std::collections::HashSet<String>) -> bool {
+    let Some(obj) = node.as_object() else {
+        return node == &Value::Bool(false);
+    };
+    if let Some(target) = obj.get("$ref").and_then(Value::as_str) {
+        let resolved = target.strip_prefix('#').and_then(|ptr| root.pointer(ptr));
+        if !resolved.is_some_and(|r| collect_keys(root, r, keys)) {
+            return false;
+        }
+    }
+    if obj
+        .get("additionalProperties")
+        .is_some_and(|a| a != &Value::Bool(false))
+    {
+        return false;
+    }
+    let mut constrained = obj.contains_key("$ref");
+    if let Some(props) = obj.get("properties").and_then(Value::as_object) {
+        keys.extend(props.keys().map(|k| canonical_key(k)));
+        constrained = true;
+    }
+    for combinator in ["allOf", "anyOf", "oneOf"] {
+        if let Some(variants) = obj.get(combinator).and_then(Value::as_array) {
+            for variant in variants {
+                if !collect_keys(root, variant, keys) {
+                    return false;
+                }
+            }
+            constrained = true;
+        }
+    }
+    constrained || obj.get("type").is_some_and(|t| t != "object")
+}
+
+/// A key's spelling-insensitive form, so a camelCase field's snake_case
+/// serde alias (`#[snake_aliases]`) matches it.
+fn canonical_key(key: &str) -> String {
+    key.chars()
+        .filter(|c| *c != '_')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Run-mode switches any tool may receive, whether or not its Args declare them.
+const AMBIENT_SWITCHES: [&str; 2] = [contract::plan::EXECUTE_FIELD, contract::plan::DRY_RUN_FIELD];
+
+/// Refuses arg keys the tool does not take. serde would drop them silently, so
+/// a misspelled or misplaced field (e.g. a target system) would run the call
+/// with that input missing instead of failing.
+fn reject_unknown_keys(tool: &str, args: &Value, accepted: &AcceptedKeys) -> Result<()> {
+    let (Some(accepted), Some(obj)) = (accepted, args.as_object()) else {
+        return Ok(());
+    };
+    let mut unknown: Vec<&str> = obj
+        .keys()
+        // A generic client may send the execute / dry-run switch to an ungated
+        // tool, where it is meaningless rather than a misdirected input.
+        .filter(|k| {
+            let key = canonical_key(k);
+            !AMBIENT_SWITCHES.iter().any(|s| canonical_key(s) == key) && !accepted.contains(&key)
+        })
+        .map(String::as_str)
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    unknown.sort_unstable();
+    Err(contract::OrcaError::invalid(format!(
+        "invalid args for {tool}: unknown field(s) {}",
+        unknown
+            .iter()
+            .map(|k| format!("`{k}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+    .with_code("args.invalid")
+    .into())
 }
 
 fn with_refusal_hint(err: anyhow::Error, ctx: &ToolCtx) -> anyhow::Error {
@@ -624,6 +727,86 @@ mod tests {
         let err = e.run_json(serde_json::json!({}), &ctx()).await.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("invalid args for double"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn run_json_refuses_an_unknown_key_by_name() {
+        let w = ToolWrapper::<DoubleTool>(PhantomData);
+        let e: &dyn ErasedTool = &w;
+        let err = e
+            .run_json(serde_json::json!({"n": 1, "system": "x"}), &ctx())
+            .await
+            .unwrap_err();
+        assert_invalid(&err, "unknown field(s) `system`");
+    }
+
+    fn keys_of(schema: Value) -> AcceptedKeys {
+        let mut keys = std::collections::HashSet::new();
+        collect_keys(&schema, &schema, &mut keys).then_some(keys)
+    }
+
+    #[test]
+    fn accepted_keys_follow_flatten_refs_and_options() {
+        #[derive(JsonSchema)]
+        #[allow(dead_code)]
+        #[serde(rename_all = "camelCase")]
+        struct Inner {
+            host_id: String,
+        }
+        #[derive(JsonSchema)]
+        #[allow(dead_code)]
+        struct Outer {
+            #[serde(flatten)]
+            inner: Inner,
+            nested: Option<Inner>,
+        }
+        let keys = keys_of(schemars::schema_for!(Outer).to_value()).expect("closed");
+        assert!(keys.contains(&canonical_key("hostId")));
+        assert!(keys.contains(&canonical_key("host_id")), "snake alias");
+        assert!(keys.contains("nested"));
+        assert!(
+            reject_unknown_keys(
+                "t",
+                &serde_json::json!({"host_id": "a"}),
+                &Some(keys.clone())
+            )
+            .is_ok()
+        );
+        assert!(
+            reject_unknown_keys("t", &serde_json::json!({"system": "a"}), &Some(keys)).is_err()
+        );
+    }
+
+    #[test]
+    fn open_args_accept_any_key() {
+        #[derive(JsonSchema)]
+        #[allow(dead_code)]
+        struct WithMap {
+            n: i64,
+            #[serde(flatten)]
+            rest: std::collections::HashMap<String, Value>,
+        }
+        assert!(keys_of(schemars::schema_for!(WithMap).to_value()).is_none());
+        assert!(keys_of(schemars::schema_for!(Value).to_value()).is_none());
+    }
+
+    #[test]
+    fn execute_is_tolerated_on_an_ungated_tool() {
+        let keys = keys_of(schemars::schema_for!(Args).to_value());
+        assert!(
+            reject_unknown_keys("t", &serde_json::json!({"n": 1, "execute": true}), &keys).is_ok()
+        );
+    }
+
+    #[test]
+    fn dry_run_is_tolerated_on_an_ungated_tool() {
+        let keys = keys_of(schemars::schema_for!(Args).to_value());
+        for args in [
+            serde_json::json!({"n": 1, "dryRun": true}),
+            serde_json::json!({"n": 1, "dry_run": true}),
+        ] {
+            assert!(reject_unknown_keys("t", &args, &keys).is_ok(), "{args}");
+        }
     }
 
     #[test]

@@ -23,19 +23,19 @@ pub struct PluginToolPolicy {
 }
 
 impl PluginToolPolicy {
-    /// Policy from a plugin manifest entry. An absent role means the plugin
-    /// predates roles on the wire and stays `"any"`; an unrecognized one fails
-    /// closed to `"admin"` (the mesh gate ranks unknown roles lowest, so
-    /// passing one through would open the tool instead).
+    /// Policy from a plugin manifest entry. An absent or unrecognized role
+    /// fails closed to `"admin"`: the manifest gives no proof the tool is
+    /// read-only, and the mesh gate ranks unknown roles lowest, so passing one
+    /// through would open the tool instead.
     pub fn from_manifest(
         role: Option<&str>,
         execute_gated: Option<bool>,
         data_mutation: Option<bool>,
     ) -> Self {
         let role = match role {
-            None | Some("any") => "any",
+            Some("any") => "any",
             Some("read") => "read",
-            Some(_) => "admin",
+            None | Some(_) => "admin",
         };
         Self {
             role,
@@ -121,10 +121,11 @@ pub fn known_role(tool: &str) -> Option<&'static str> {
         .or_else(|| crate::unit_surface::unit_policy(tool).map(|(role, _)| role))
         // Routable without an installed entry: the static table before
         // `install`, the fixed surfaces' `any` reads (only their admin pairs
-        // are installed), and a loaded plugin tool that declared no policy.
+        // are installed), and a loaded plugin tool with no installed policy,
+        // which fails closed to admin.
         .or_else(|| crate::registry::required_role(tool))
         .or_else(|| fixed_surface_role(tool))
-        .or_else(|| crate::registry::dynamic_owns(tool).then_some("any"))
+        .or_else(|| crate::registry::dynamic_owns(tool).then_some("admin"))
 }
 
 fn fixed_surface_role(tool: &str) -> Option<&'static str> {
@@ -302,7 +303,7 @@ mod tests {
     #[test]
     fn plugin_policy_maps_manifest_roles_and_fails_closed() {
         let p = |r| PluginToolPolicy::from_manifest(r, None, None).role;
-        assert_eq!(p(None), "any");
+        assert_eq!(p(None), "admin");
         assert_eq!(p(Some("any")), "any");
         assert_eq!(p(Some("read")), "read");
         assert_eq!(p(Some("admin")), "admin");
@@ -324,6 +325,32 @@ mod tests {
         remove_plugin_tools([name]);
         assert_eq!(required_role(name), "any");
         assert!(!is_data_mutation(name));
+    }
+
+    #[test]
+    fn undeclared_plugin_tool_is_admin_only() {
+        let name = "tool_roles_test_plugin.no_role";
+        install_plugin_tools([(
+            name.to_string(),
+            PluginToolPolicy::from_manifest(None, None, Some(false)),
+        )]);
+        assert_eq!(required_role(name), "admin");
+        assert!(!authorize("member", false, required_role(name), false));
+        assert!(!authorize("read", false, required_role(name), false));
+        assert!(authorize("admin", false, required_role(name), false));
+        remove_plugin_tools([name]);
+    }
+
+    #[test]
+    fn declared_read_plugin_tool_admits_read_caller() {
+        let name = "tool_roles_test_plugin.read_role";
+        install_plugin_tools([(
+            name.to_string(),
+            PluginToolPolicy::from_manifest(Some("read"), None, None),
+        )]);
+        assert!(authorize("read", false, required_role(name), false));
+        assert!(!authorize("member", false, required_role(name), false));
+        remove_plugin_tools([name]);
     }
 
     #[test]

@@ -309,17 +309,22 @@ fn invalid_peer(why: &str) -> contract::OrcaError {
 pub fn take_ambient(
     mut args: Value,
 ) -> std::result::Result<(Value, Option<String>, Option<String>), contract::OrcaError> {
-    let mut peer = None;
-    let mut correlation_id = None;
-    if let Some(obj) = args.as_object_mut() {
-        peer = peer_selector(obj.remove(AMBIENT_PEER_KEY).as_ref())?;
-        correlation_id = obj
-            .remove(AMBIENT_CORRELATION_KEY)
-            .and_then(|v| v.as_str().map(str::to_string))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-    }
+    let peer = peer_selector(
+        args.as_object_mut()
+            .and_then(|obj| obj.remove(AMBIENT_PEER_KEY))
+            .as_ref(),
+    )?;
+    let correlation_id = take_correlation_id(&mut args);
     Ok((args, peer, correlation_id))
+}
+
+/// Removes the ambient `correlation_id` key from an args object, returning its
+/// trimmed value when it is a non-blank string.
+fn take_correlation_id(args: &mut Value) -> Option<String> {
+    args.as_object_mut()?
+        .remove(AMBIENT_CORRELATION_KEY)
+        .and_then(|v| v.as_str().map(str::trim).map(str::to_string))
+        .filter(|s| !s.is_empty())
 }
 
 /// Advertise the ambient `peer` property on an MCP `inputSchema` for a
@@ -516,6 +521,7 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
     if let Some(tool) = find(name) {
         return tool.run_json(args, ctx).await;
     }
+    authorize_fallback(name, ctx)?;
     let dry_run = crate::erased::dry_run_requested(&args)?;
     if crate::tool_roles::plugin_execute_gated(name)
         && let Some(obj) = args.as_object_mut()
@@ -583,6 +589,29 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
             }
         }
     }
+}
+
+/// Role check for the non-static surfaces, mirroring the one `run_json`
+/// applies to static tools, so a surface that skips its own gate still cannot
+/// reach a plugin/unit/diagnostics/UPS body. A name with no local role is
+/// left to the peer forward, whose recipient authorizes it.
+fn authorize_fallback(name: &str, ctx: &ToolCtx) -> Result<()> {
+    let (Some(caller), Some(required)) = (ctx.caller(), crate::tool_roles::known_role(name)) else {
+        return Ok(());
+    };
+    if crate::tool_roles::authorize(
+        &caller.role,
+        caller.can_mutate,
+        required,
+        crate::tool_roles::is_data_mutation(name),
+    ) {
+        return Ok(());
+    }
+    Err(contract::OrcaError::forbidden(format!(
+        "{name} requires role '{required}'; caller '{}' has '{}'",
+        caller.username, caller.role
+    ))
+    .into())
 }
 
 /// Router-level peer pass-through for a tool this host does not have. Only
@@ -713,12 +742,15 @@ async fn http_dispatch(
         }
         (h, b) => h.or(b),
     };
+    // Always stripped from the body, as on MCP; the header wins when both are set.
+    let body_correlation_id = take_correlation_id(&mut args);
     let correlation_id = headers
         .get("x-correlation-id")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(String::from);
+        .map(String::from)
+        .or(body_correlation_id);
     // Unknown-tool guard, deferred until after peer resolution: a peer-only
     // tool forwards over the mesh; a genuinely unknown local call 404s.
     if peer.is_none() && !dispatchable(&name, &args) {
@@ -1430,6 +1462,32 @@ mod tests {
         assert_eq!(clean, json!({ "self_secure": true }));
     }
 
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn rest_body_correlation_id_never_reaches_the_tool() {
+        use axum::body::Body;
+        use axum::http::Request as AxumReq;
+        use tower::ServiceExt;
+
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        SEEN_ARGS.lock().unwrap().clear();
+        let req = AxumReq::builder()
+            .method("POST")
+            .uri(format!("/{FAKE_PLUGIN_TOOL}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "correlation_id": "abc", "x": 1 }).to_string(),
+            ))
+            .unwrap();
+        let resp = axum_router(Arc::new(make_ctx()))
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(*SEEN_ARGS.lock().unwrap(), vec![json!({ "x": 1 })]);
+    }
+
     #[test]
     fn find_orca_error_sees_wrapped_and_context_held_errors() {
         let wrapped = anyhow::Error::from(contract::OrcaError::invalid("a")).context("ctx");
@@ -1607,6 +1665,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fallback_dispatch_refuses_caller_below_plugin_tool_role() {
+        use crate::tool_roles::{PluginToolPolicy, install_plugin_tools, remove_plugin_tools};
+        let name = "registry_test_plugin.no_role";
+        install_plugin_tools([(
+            name.to_string(),
+            PluginToolPolicy::from_manifest(None, None, None),
+        )]);
+        let caller = |role: &str| contract::CallerIdentity {
+            user_id: "u".into(),
+            username: "u".into(),
+            role: role.into(),
+            can_mutate: false,
+        };
+        let member = make_ctx().with_auth(caller("member"));
+        let err = dispatch(name, serde_json::json!({}), &member)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("requires role 'admin'"), "{err}");
+        let admin = make_ctx().with_auth(caller("admin"));
+        let err = dispatch(name, serde_json::json!({}), &admin)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown tool"), "{err}");
+        remove_plugin_tools([name]);
+    }
+
+    #[tokio::test]
     async fn dispatch_text_unknown_tool_propagates_error() {
         let err = dispatch_text("ghost.tool", serde_json::json!({}), &make_ctx())
             .await
@@ -1646,7 +1731,10 @@ mod tests {
     /// Callers the fake plugin saw, by username (`None` = no caller).
     static SEEN: std::sync::Mutex<Vec<Option<String>>> = std::sync::Mutex::new(Vec::new());
 
-    /// Serializes the tests that clear and read `SEEN`.
+    /// Args the fake plugin saw.
+    static SEEN_ARGS: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+    /// Serializes the tests that clear and read `SEEN` / `SEEN_ARGS`.
     static SEEN_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn install_fake_plugin() {
@@ -1672,6 +1760,7 @@ mod tests {
                         SEEN.lock()
                             .unwrap()
                             .push(caller.map(|c| c.username.clone()));
+                        SEEN_ARGS.lock().unwrap().push(args.clone());
                         Ok(json!({}))
                     })
                 }),

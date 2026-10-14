@@ -29,6 +29,7 @@
 pub mod capability;
 #[cfg(unix)]
 pub mod supervisor;
+mod ws;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -997,12 +998,17 @@ pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
 /// Install each tool's declared role into [`dispatch::tool_roles`], so REST,
 /// MCP and mesh gate plugin tools exactly like core ones.
 fn install_tool_policies(software: &str, tools: &HashMap<String, ToolDef>) {
-    let undeclared = tools.values().filter(|d| d.role.is_none()).count();
-    if undeclared > 0 {
+    let mut undeclared: Vec<&str> = tools
+        .values()
+        .filter(|d| d.role.is_none())
+        .map(|d| d.name.as_str())
+        .collect();
+    if !undeclared.is_empty() {
+        undeclared.sort_unstable();
         tracing::warn!(
             plugin = %software,
-            undeclared,
-            "plugin manifest declares no role for some tools; they stay callable by any role \
+            tools = ?undeclared,
+            "plugin manifest declares no role for these tools; they are admin-only \
              until the plugin is rebuilt against a toolkit that emits roles"
         );
     }

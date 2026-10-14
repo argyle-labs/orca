@@ -26,6 +26,7 @@ openapi = ["orca_plugin_toolkit/openapi"]
 http = ["orca_plugin_toolkit/http"]
 socketio = ["orca_plugin_toolkit/socketio"]
 delegated-http = ["orca_plugin_toolkit/delegated-http"]
+delegated-ws = ["orca_plugin_toolkit/delegated-ws"]
 openapi-plugin = ["orca_plugin_toolkit/openapi-plugin"]
 jemalloc-stats = ["orca_plugin_toolkit/jemalloc-stats"]
 
