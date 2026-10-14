@@ -251,7 +251,8 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
     // this the inviter sees mutual=false forever after auto-accept — the
     // initial DB write is local-only and roster-sync only carries identity,
     // not trust state.
-    if let Err(e) = call_mesh_method_pub(
+    if let Err(e) = call_peer(
+        &r.inviter_peer_id,
         &offer.peer_addr,
         offer.peer_port,
         "mesh/notify-trust",
@@ -712,7 +713,8 @@ pub async fn cmd_mesh_trust(peer_id: &str, on: bool) -> Result<()> {
         new.peer_secure
     );
 
-    match call_mesh_method(
+    match call_peer(
+        &peer.peer_id,
         &peer.peer_addr,
         peer.peer_port,
         "mesh/notify-trust",
@@ -736,7 +738,8 @@ pub async fn cmd_mesh_trust(peer_id: &str, on: bool) -> Result<()> {
 async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
     let pki_d = pki_dir();
     let i_have_key = utils::pki::has_mesh_ca_key(&pki_d);
-    let resp = call_mesh_method(
+    let resp = call_peer(
+        &peer.peer_id,
         &peer.peer_addr,
         peer.peer_port,
         "mesh/has-ca-key",
@@ -749,7 +752,8 @@ async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
         .unwrap_or(false);
     if i_have_key && !peer_has_key {
         let (cert_pem, key_pem) = utils::pki::export_mesh_ca_keypair(&pki_d)?;
-        call_mesh_method(
+        call_peer(
+            &peer.peer_id,
             &peer.peer_addr,
             peer.peer_port,
             "mesh/push-ca-key",
@@ -866,7 +870,7 @@ pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
     // current-CA-signed material to peers as soon as possible.
     // CN is the stable machine_id (see mesh accept).
     let host = crate::host_identity::machine_id().to_string();
-    utils::pki::reissue_mesh_server_cert(&pki_d)?;
+    utils::pki::reissue_mesh_server_cert(&pki_d, &host)?;
     utils::pki::reissue_mesh_client_cert(&pki_d, &host)?;
 
     println!("✓ rotated mesh CA");
@@ -895,7 +899,15 @@ pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
             "previous_key_pem": prev_key,
             "previous_expires_at": expires_at,
         });
-        match call_mesh_method(&p.peer_addr, p.peer_port, "mesh/push-ca-state", params).await {
+        match call_peer(
+            &p.peer_id,
+            &p.peer_addr,
+            p.peer_port,
+            "mesh/push-ca-state",
+            params,
+        )
+        .await
+        {
             Ok(_) => println!("  ✓ replicated CA state to {}", p.peer_id),
             Err(e) => println!("  ! could not replicate to {} ({e})", p.peer_id),
         }
@@ -915,7 +927,8 @@ pub async fn cmd_mesh_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {
         if p.departed_at.is_some() {
             continue;
         }
-        if let Err(e) = call_mesh_method(
+        if let Err(e) = call_peer(
+            &p.peer_id,
             &p.peer_addr,
             p.peer_port,
             "mesh/peer-leaving",
@@ -980,6 +993,23 @@ pub async fn call_mesh_method_pub(
     call_mesh_method(host, port, method, params).await
 }
 
+/// [`call_mesh_method`] for a known peer: refuses a listener that answers as
+/// another system before any request is written.
+async fn call_peer(
+    peer_id: &str,
+    host: &str,
+    port: u16,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value> {
+    crate::mesh::DIAL_PEER
+        .scope(
+            peer_id.to_string(),
+            call_mesh_method(host, port, method, params),
+        )
+        .await
+}
+
 pub async fn dial_bootstrap_pub(
     host: &str,
     port: u16,
@@ -1026,6 +1056,7 @@ async fn dial_mesh_mtls(
             .with_context(|| format!("connect {target}"))?;
         let sni = ServerName::try_from(utils::pki::MESH_SERVER_SAN)?.to_owned();
         let mut tls = connector.connect(sni, tcp).await.context("TLS handshake")?;
+        crate::mesh::verify_dialled_peer(host, &tls).await?;
         write_frame(
             &mut tls,
             &serde_json::to_vec(&Request::new(1, method, Some(params)))?,
@@ -2079,6 +2110,102 @@ mod tests {
             format!("{err:#}").contains("connect 127.0.0.1:1"),
             "got: {err:#}"
         );
+    }
+
+    // Drives the real dial path end to end, so a spawn anywhere between the
+    // tracked dialer and the handshake (which would drop the task-local
+    // expected peer id) makes this dial succeed instead of being refused.
+    #[serial_test::serial(env)]
+    #[tokio::test]
+    async fn tracked_dial_refuses_a_peer_answering_with_another_identity() {
+        // Fails only when another test already installed one.
+        drop(rustls::crypto::ring::default_provider().install_default());
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, "system-y").unwrap();
+            let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let _tls = acceptor.accept(tcp).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            });
+            let targets = vec!["127.0.0.1".to_string()];
+            let err = crate::mesh::dialer::try_targets_tracked(
+                Some("system-x"),
+                &targets,
+                |t| async move {
+                    call_mesh_method_pub(&t, port, "mesh/ping", serde_json::json!({})).await
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("answered as system system-y"),
+                "got: {err:#}"
+            );
+            server.abort();
+        })
+        .await;
+    }
+
+    #[serial_test::serial(env)]
+    #[tokio::test]
+    async fn replicate_ca_key_refuses_another_identity_before_sending_the_key() {
+        drop(rustls::crypto::ring::default_provider().install_default());
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, "system-y").unwrap();
+            assert!(utils::pki::has_mesh_ca_key(&pki));
+            let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let mut frames = 0;
+                while let Ok(Ok((tcp, _))) =
+                    tokio::time::timeout(Duration::from_secs(2), listener.accept()).await
+                {
+                    if let Ok(mut tls) = acceptor.accept(tcp).await {
+                        while read_frame(&mut tls).await.is_ok() {
+                            frames += 1;
+                        }
+                    }
+                }
+                frames
+            });
+            let peer = pdb::PeerRow {
+                peer_id: "system-x".into(),
+                peer_hostname: "x".into(),
+                peer_addr: "127.0.0.1".into(),
+                peer_port: port,
+                pubkey_fp: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                departed_at: None,
+                local_secure: true,
+                peer_secure: true,
+            };
+            let err = replicate_ca_key_if_needed(&peer).await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("answered as system system-y"),
+                "got: {err:#}"
+            );
+            assert_eq!(
+                server.await.unwrap(),
+                0,
+                "no request may reach the impostor"
+            );
+        })
+        .await;
     }
 
     // ── call_mesh_method_pub — not-a-member guard (mesh client bundle absent) ───
