@@ -459,7 +459,7 @@ pub fn unit_mcp_defs() -> Vec<Value> {
             json!({
                 "name": op.name,
                 "description": op.description,
-                "inputSchema": op.input_schema,
+                "inputSchema": crate::registry::advertise_system(op.input_schema),
             })
         })
         .collect()
@@ -573,7 +573,8 @@ pub fn unit_cli_commands_from(ops: Vec<UnitOp>) -> Vec<clap::Command> {
                         .value_name("KEY=VALUE")
                         .num_args(0..)
                         .help("Args as key=value pairs (values parsed as JSON, else string)"),
-                );
+                )
+                .arg(crate::cli::system_id_flag());
             kind_cmd = kind_cmd.subcommand(leaf_cmd);
         }
         commands.push(kind_cmd);

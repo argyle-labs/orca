@@ -34,6 +34,7 @@ in-process = ["contract/in-process", "dep:tokio"]
 server = ["dep:axum", "dep:tower"]
 
 [dependencies]
+uuid          = { workspace = true }
 contract = { workspace = true }
 anyhow        = { workspace = true }
 axum          = { workspace = true, optional = true }
