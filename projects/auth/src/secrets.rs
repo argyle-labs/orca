@@ -303,10 +303,13 @@ fn resolve_value_from_stdin<R: std::io::Read>(
 /// to be consumed in the *calling* process — only the CLI has a stdin. Same
 /// reasoning as `orca auth login`'s hand-rolled block: a purely client-side
 /// affordance the daemon must not know about. The dispatch below mirrors
-/// `register_op!`'s execute-gated path verbatim so dry-run-by-default still
-/// holds for this verb.
+/// `register_op!`'s execute-gated path verbatim so `--dry-run` holds for this
+/// verb.
 const _: () = {
-    use __cp::contract::{OrcaToolDef, plan::EXECUTE_FIELD};
+    use __cp::contract::{
+        OrcaToolDef,
+        plan::{DRY_RUN_FIELD, EXECUTE_FIELD},
+    };
     use __cp::dispatch::cli::{CliBuildFn, CliOp, CliRunFn};
     use ::plugin_toolkit as __cp;
 
@@ -314,13 +317,16 @@ const _: () = {
         let cmd = __cp::clap::Command::new("upsert")
             .about(<SecretUpsert as OrcaToolDef>::DESCRIPTION)
             .arg(
+                __cp::clap::Arg::new(DRY_RUN_FIELD)
+                    .long(__cp::dispatch::cli::DRY_RUN_FLAG)
+                    .action(__cp::clap::ArgAction::SetTrue)
+                    .help("Report what WOULD change and change nothing. Omitted, the change is applied."),
+            )
+            .arg(
                 __cp::clap::Arg::new(EXECUTE_FIELD)
                     .long(EXECUTE_FIELD)
                     .action(__cp::clap::ArgAction::SetTrue)
-                    .help(
-                        "Apply the change. Omitted, this reports what WOULD change and \
-                         changes nothing.",
-                    ),
+                    .hide(true),
             );
         <<SecretUpsert as OrcaToolDef>::Args as __cp::clap::Args>::augment_args(cmd)
     }
@@ -338,15 +344,15 @@ const _: () = {
                     .map_err(|e| __cp::anyhow::anyhow!("{e}"))?;
             resolve_value_from_stdin(&mut args, &mut ::std::io::stdin().lock())?;
 
-            let execute = m.get_flag(EXECUTE_FIELD);
+            let dry_run = m.get_flag(DRY_RUN_FIELD);
             let value = __cp::dispatch::cli::exec_gated::<SecretUpsert>(
                 args,
-                execute,
+                dry_run,
                 peer.as_deref(),
                 &ctx,
             )
             .await?;
-            if !execute {
+            if dry_run {
                 // The plan IS the answer here — print it as-is.
                 println!(
                     "{}",

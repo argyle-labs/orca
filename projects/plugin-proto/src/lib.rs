@@ -56,7 +56,7 @@ pub struct ToolDef {
     /// plugin built before roles crossed the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    /// Whether the tool is dry-run unless the caller opts in with `execute`.
+    /// Whether the tool executes by default and plans under `dryRun: true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execute_gated: Option<bool>,
     /// Whether the tool writes to an external managed system, which a

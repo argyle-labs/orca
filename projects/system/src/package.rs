@@ -2020,8 +2020,8 @@ mod tests {
         assert!(calls > 0, "{what}: no lifecycle call found");
     }
 
-    // `system install`/`uninstall` are execute-gated: without `--execute` they
-    // print a dry-run plan and exit 0, so a package would install no service.
+    // `--execute` makes an older binary, whose gated verbs plan by default,
+    // apply; current binaries accept it as a no-op.
     #[test]
     fn generated_package_scripts_pass_execute_to_lifecycle_calls() {
         let dir = tempfile::tempdir().unwrap();
