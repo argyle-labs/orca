@@ -192,12 +192,14 @@ where
                         ok: true,
                         value,
                         error: None,
+                        error_kind: None,
                     },
                     Err(error) => Frame::Result {
                         id,
                         ok: false,
                         value: Value::Null,
                         error: Some(error),
+                        error_kind: None,
                     },
                 };
                 write_frame(&mut stream, &reply)?;
