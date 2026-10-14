@@ -20,7 +20,7 @@ use anyhow::Result;
 #[cfg(feature = "server")]
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::post,
 };
@@ -77,7 +77,7 @@ fn cache() -> &'static ToolCache {
     })
 }
 
-fn find(name: &str) -> Option<&'static dyn ErasedTool> {
+pub(crate) fn find(name: &str) -> Option<&'static dyn ErasedTool> {
     let c = cache();
     c.by_name.get(name).map(|i| c.ordered[*i].as_ref())
 }
@@ -401,31 +401,26 @@ pub fn tool_manifest_json() -> String {
 /// Dispatch a `tools/call` by name, returning a structured JSON value.
 /// Returns `Err` for unknown tool names.
 pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
-    match find(name) {
-        Some(tool) => tool.run_json(args, ctx).await,
-        // The surfaces below bypass the `run_json` gate, so a `dryRun` they
-        // cannot honour would apply. A plugin tool declared execute-gated
-        // plans in its own gate.
-        None if args
-            .get(contract::plan::DRY_RUN_FIELD)
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-            && !crate::tool_roles::plugin_execute_gated(name) =>
-        {
-            Err(
-                contract::OrcaError::invalid(format!("{name} does not support dryRun"))
-                    .with_code("args.invalid")
-                    .into(),
-            )
-        }
-        // On a static miss, try the dynamic loaded-plugin fallback, then the
-        // live unit surface, before giving up — so loaded plugin tools AND the
-        // universal `unit.<kind>.<verb>` surface share this one entrypoint.
-        None => match dynamic_dispatch(name, &args, ctx.verified_caller()).await {
-            Some(result) => result,
-            None => match crate::unit_surface::unit_dispatch(name, &args, ctx.verified_caller())
-                .await
-            {
+    if let Some(tool) = find(name) {
+        return tool.run_json(args, ctx).await;
+    }
+    // The surfaces below bypass the `run_json` gate, so a `dryRun` they
+    // cannot honour would apply. A plugin tool declared execute-gated plans in
+    // its own gate.
+    if crate::erased::dry_run_requested(&args)? && !crate::tool_roles::plugin_execute_gated(name) {
+        return Err(
+            contract::OrcaError::invalid(format!("{name} does not support dryRun"))
+                .with_code("args.invalid")
+                .into(),
+        );
+    }
+    // On a static miss, try the dynamic loaded-plugin fallback, then the live
+    // unit surface, before giving up — so loaded plugin tools AND the
+    // universal `unit.<kind>.<verb>` surface share this one entrypoint.
+    match dynamic_dispatch(name, &args, ctx.verified_caller()).await {
+        Some(result) => result,
+        None => {
+            match crate::unit_surface::unit_dispatch(name, &args, ctx.verified_caller()).await {
                 Some(result) => result,
                 None => match crate::diagnostics_surface::diagnostics_dispatch(name, &args).await {
                     Some(result) => result,
@@ -437,14 +432,12 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
                         // PVE host). Forward the raw call over the mesh instead
                         // of 404ing, so a host's surface can reach any tool
                         // anywhere in the mesh, not just its locally-loaded set.
-                        // Same transport the macro peer-dispatch stanza uses,
-                        // lifted to the router so it covers tools this host
-                        // never registered. (mesh-tool-surface-must-expose-peer-tools)
+                        // (mesh-tool-surface-must-expose-peer-tools)
                         None => forward_unknown_to_peer(name, args, ctx).await,
                     },
                 },
-            },
-        },
+            }
+        }
     }
 }
 
@@ -512,8 +505,10 @@ async fn http_dispatch(
     Path(name): Path<String>,
     caller: Option<Extension<contract::CallerIdentity>>,
     headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
     Json(mut args): Json<Value>,
 ) -> std::result::Result<Json<Value>, (StatusCode, Json<Value>)> {
+    apply_dry_run_query(&query, &mut args).map_err(orca_error_response)?;
     // Per-request identity + peer-routing overlay. Both come off the shared
     // ctx via clone-and-mutate so the base ctx stays immutable across
     // concurrent requests. Caller swap: auth middleware → real user identity
@@ -600,6 +595,44 @@ async fn http_dispatch(
         let oe = contract::OrcaError::internal(e.to_string());
         orca_error_response(oe)
     })
+}
+
+/// Fold the `?dryRun=` query opt-in into the args so the gate, the refusal
+/// and peer forwarding all see one value. Only `true`/`false` parse, and a
+/// body `dryRun` that disagrees is refused rather than one silently winning.
+#[cfg(feature = "server")]
+fn apply_dry_run_query(
+    query: &HashMap<String, String>,
+    args: &mut Value,
+) -> std::result::Result<(), contract::OrcaError> {
+    let field = contract::plan::DRY_RUN_FIELD;
+    let Some(raw) = query.get(field) else {
+        return Ok(());
+    };
+    let invalid = |msg: String| contract::OrcaError::invalid(msg).with_code("args.invalid");
+    let dry_run = match raw.as_str() {
+        "true" => true,
+        "false" => false,
+        _ => {
+            return Err(invalid(format!(
+                "?{field} must be true or false, got '{raw}'"
+            )));
+        }
+    };
+    let Some(obj) = args.as_object_mut() else {
+        return Err(invalid(format!(
+            "?{field} needs a JSON object request body"
+        )));
+    };
+    match obj.get(field) {
+        Some(body) if *body != Value::Bool(dry_run) => Err(invalid(format!(
+            "?{field}={dry_run} and the body {field} {body} disagree"
+        ))),
+        _ => {
+            obj.insert(field.to_string(), Value::Bool(dry_run));
+            Ok(())
+        }
+    }
 }
 
 /// The classified error behind `e`, if any. `downcast_ref` sees through anyhow
@@ -690,6 +723,17 @@ pub fn execute_gated_names() -> Vec<&'static str> {
         .ordered
         .iter()
         .filter(|t| t.execute_gated())
+        .map(|t| t.name())
+        .collect()
+}
+
+/// Names of every registered ungated tool that honours `dryRun` in its own
+/// body.
+pub fn dry_run_aware_names() -> Vec<&'static str> {
+    cache()
+        .ordered
+        .iter()
+        .filter(|t| t.dry_run_aware())
         .map(|t| t.name())
         .collect()
 }
@@ -1320,13 +1364,17 @@ mod tests {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             set_dynamic_dispatch(
-                Box::new(|name, _args, caller| {
+                Box::new(|name, args: &Value, caller| {
                     if name == NESTED_RUNTIME_TOOL {
                         // What a plugin's `http.request` capability does.
                         let rt = tokio::runtime::Builder::new_current_thread()
                             .build()
                             .unwrap();
                         return Some(Ok(rt.block_on(async { json!({ "nested": true }) })));
+                    }
+                    if name == GATED_PLUGIN_TOOL {
+                        GATED_SEEN.lock().unwrap().push(args.clone());
+                        return Some(Ok(json!({})));
                     }
                     (name == FAKE_PLUGIN_TOOL).then(|| {
                         SEEN.lock()
@@ -1335,9 +1383,104 @@ mod tests {
                         Ok(json!({}))
                     })
                 }),
-                Box::new(|| vec![json!({ "name": FAKE_PLUGIN_TOOL })]),
+                Box::new(|| {
+                    vec![
+                        json!({ "name": FAKE_PLUGIN_TOOL }),
+                        json!({ "name": GATED_PLUGIN_TOOL }),
+                    ]
+                }),
             );
+            crate::tool_roles::install_plugin_tools([(
+                GATED_PLUGIN_TOOL.to_string(),
+                crate::tool_roles::PluginToolPolicy::from_manifest(None, Some(true), None),
+            )]);
         });
+    }
+
+    const GATED_PLUGIN_TOOL: &str = "rest_fallback_test_plugin.gated";
+
+    /// Args the execute-gated fake plugin tool received.
+    static GATED_SEEN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+    #[cfg(feature = "server")]
+    async fn post_json(uri: &str, body: Value) -> (StatusCode, Value) {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request as AxumReq;
+        use tower::ServiceExt;
+
+        let router = axum_router(Arc::new(make_ctx()));
+        let req = AxumReq::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn dry_run_query_on_a_plugin_tool_is_refused_unless_it_is_gated() {
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        let (status, body) =
+            post_json(&format!("/{FAKE_PLUGIN_TOOL}?dryRun=true"), json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["code"], json!("args.invalid"), "{body}");
+
+        GATED_SEEN.lock().unwrap().clear();
+        let (status, body) =
+            post_json(&format!("/{GATED_PLUGIN_TOOL}?dryRun=true"), json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let seen = GATED_SEEN.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0]["dryRun"], json!(true), "{seen:?}");
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn dry_run_query_must_be_a_boolean() {
+        for q in ["1", "yes", "True", ""] {
+            let (status, body) = post_json(&format!("/ghost.tool?dryRun={q}"), json!({})).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{q}: {body}");
+            assert_eq!(body["code"], json!("args.invalid"), "{q}: {body}");
+        }
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn dry_run_query_and_body_must_agree() {
+        let q = |v: &str| HashMap::from([("dryRun".to_string(), v.to_string())]);
+        let mut args = json!({ "dryRun": true });
+        let err = apply_dry_run_query(&q("false"), &mut args).unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("args.invalid"));
+        let mut args = json!({ "dryRun": "true" });
+        assert!(apply_dry_run_query(&q("true"), &mut args).is_err());
+        let mut args = json!({ "dryRun": true });
+        apply_dry_run_query(&q("true"), &mut args).unwrap();
+        let mut args = json!({});
+        apply_dry_run_query(&q("false"), &mut args).unwrap();
+        assert_eq!(args, json!({ "dryRun": false }));
+        let mut args = json!({});
+        apply_dry_run_query(&HashMap::new(), &mut args).unwrap();
+        assert_eq!(args, json!({}));
+    }
+
+    #[tokio::test]
+    async fn a_non_boolean_dry_run_is_refused_off_the_static_registry() {
+        for v in [json!("true"), json!(1), Value::Null] {
+            let err = dispatch("ghost.tool", json!({ "dryRun": v }), &make_ctx())
+                .await
+                .unwrap_err();
+            let oe = find_orca_error(&err).unwrap_or_else(|| panic!("{err}"));
+            assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{oe}");
+        }
     }
 
     const NESTED_RUNTIME_TOOL: &str = "rest_fallback_test_plugin.nested_block_on";

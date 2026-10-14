@@ -84,6 +84,9 @@ pub trait ErasedTool: Send + Sync {
     /// `dryRun: true` [`Self::run_json`] returns an `ExecutionPlan` without
     /// running the body.
     fn execute_gated(&self) -> bool;
+    /// Whether this ungated tool honours `dryRun` in its own body. Mirrors
+    /// `OrcaToolDef::DRY_RUN_AWARE`.
+    fn dry_run_aware(&self) -> bool;
     /// JSON Schema for this tool's Args — used for MCP tools/list, CLI flag generation,
     /// OpenAPI request body, and TS `.d.ts` emission.
     fn input_schema(&self) -> Value;
@@ -124,6 +127,10 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
 
     fn execute_gated(&self) -> bool {
         T::EXECUTE_GATED
+    }
+
+    fn dry_run_aware(&self) -> bool {
+        T::DRY_RUN_AWARE
     }
 
     fn input_schema(&self) -> Value {
@@ -174,7 +181,7 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
             // deserialization, so no verb can silently ignore it: gated verbs
             // plan, dry-run-aware verbs run with `ctx.dry_run()` set, and any
             // other verb refuses.
-            let dry_run = dry_run_requested(&args);
+            let dry_run = dry_run_requested(&args)?;
             let mut args = without_dry_run_field(args);
             let mut dry_run_ctx;
             let mut ctx = ctx;
@@ -213,12 +220,19 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
     }
 }
 
-/// True only for boolean `dryRun: true`. Anything else — absent, `false`, a
-/// string, `null` — executes.
-fn dry_run_requested(args: &Value) -> bool {
-    args.get(contract::plan::DRY_RUN_FIELD)
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+/// Absent or `false` executes, `true` dry-runs. Any other value is refused:
+/// guessing either way would apply a change the caller meant to preview, or
+/// silently skip one they meant to apply.
+pub(crate) fn dry_run_requested(args: &Value) -> Result<bool> {
+    match args.get(contract::plan::DRY_RUN_FIELD) {
+        None => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(contract::OrcaError::invalid(format!(
+            "dryRun must be a boolean, got {other}"
+        ))
+        .with_code("args.invalid")
+        .into()),
+    }
 }
 
 fn without_dry_run_field(mut args: Value) -> Value {
@@ -1005,26 +1019,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_boolean_true_requests_a_dry_run() {
+    async fn a_non_boolean_dry_run_is_refused() {
         let ctx = ctx();
         for (i, value) in [
             serde_json::json!("true"),
             serde_json::json!(1),
-            serde_json::json!(false),
             serde_json::json!(null),
         ]
         .into_iter()
         .enumerate()
         {
-            let target = format!("not-dry-run-{i}");
+            let target = format!("bad-dry-run-{i}");
             let args = serde_json::json!({ "target": target, "dryRun": value });
-            let out = gated().run_json(args.clone(), &ctx).await.unwrap();
-            assert!(
-                out.get("dryRun").is_none(),
-                "{args} was treated as a dry run"
-            );
-            assert!(ran(&target), "{args} did not run the body");
+            let err = gated().run_json(args.clone(), &ctx).await.unwrap_err();
+            let oe = err
+                .downcast_ref::<contract::OrcaError>()
+                .unwrap_or_else(|| panic!("not an OrcaError: {err}"));
+            assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{args}: {oe}");
+            assert!(!ran(&target), "{args} ran the body");
         }
+        let target = "dry-run-false";
+        let out = gated()
+            .run_json(
+                serde_json::json!({ "target": target, "dryRun": false }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(out.get("dryRun").is_none());
+        assert!(ran(target));
     }
 
     struct UngatedStrictTool;
