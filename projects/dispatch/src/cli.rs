@@ -274,34 +274,35 @@ pub async fn exec_remote<T: contract::OrcaToolDef>(
     Ok(out)
 }
 
-/// Invoke an execute-gated verb, carrying the CLI's opt-in at the JSON layer.
+/// CLI spelling of [`contract::plan::DRY_RUN_FIELD`] on gated verbs.
+pub const DRY_RUN_FLAG: &str = "dry-run";
+
+/// Invoke an execute-gated verb, carrying the CLI's `--dry-run` at the JSON
+/// layer.
 ///
-/// Gated verbs answer with one of TWO shapes — an `ExecutionPlan` when the
-/// caller did not opt in, the verb's own `Output` when it did — so this returns
-/// raw JSON and lets the caller decide. Decoding straight into `T::Output` is
-/// what broke every gated verb on the CLI in rc.8: the plan does not match the
-/// output type, so a correctly-refused apply surfaced as
-/// `data did not match any variant` (#665).
+/// Gated verbs answer with one of TWO shapes — an `ExecutionPlan` under
+/// `dryRun`, the verb's own `Output` otherwise — so this returns raw JSON and
+/// lets the caller decide which to decode.
 ///
-/// `execute` is injected here rather than living on `T::Args`, because the gate
+/// `dryRun` is injected here rather than living on `T::Args`, because the gate
 /// reads it off the raw args and a gated verb must never declare the field
-/// itself (pinned by `no_gated_verb_declares_its_own_execute_field`).
+/// itself.
 // The gate's two-shape answer (plan OR output) is the wire itself; the caller
 // decides which to decode. Same sanctioned seam as `RemoteExec::exec`.
 #[allow(clippy::disallowed_types)]
 pub async fn exec_gated<T: contract::OrcaToolDef>(
     args: T::Args,
-    execute: bool,
+    dry_run: bool,
     peer: Option<&str>,
     ctx: &ToolCtx,
 ) -> Result<serde_json::Value> {
     #[allow(clippy::disallowed_types)]
     let mut body =
         serde_json::to_value(&args).map_err(|e| anyhow::anyhow!("serialize args: {e}"))?;
-    if execute && let Some(obj) = body.as_object_mut() {
+    if dry_run && let Some(obj) = body.as_object_mut() {
         #[allow(clippy::disallowed_types)]
         obj.insert(
-            contract::plan::EXECUTE_FIELD.to_string(),
+            contract::plan::DRY_RUN_FIELD.to_string(),
             serde_json::Value::Bool(true),
         );
     }
@@ -319,8 +320,7 @@ pub async fn exec_gated<T: contract::OrcaToolDef>(
     }
     // No daemon to round-trip through: go through `dispatch`, NOT
     // `OrcaTool::run`. The gate lives in `run_json`, so calling the body
-    // directly would apply changes the operator never opted into — the CLI
-    // would be the one surface where dry-run-by-default silently did not hold.
+    // directly would ignore `--dry-run` and apply the change.
     if T::LOCAL_ONLY || !local_daemon_reachable() {
         return crate::dispatch(T::NAME, body, ctx).await;
     }
@@ -1214,25 +1214,26 @@ macro_rules! register_op {
 
             fn build() -> __cp::clap::Command {
                 let mut cmd = __cp::clap::Command::new($verb).about($summary);
-                // An execute-gated verb plans by default, so the CLI has to be
-                // able to say "apply it". Without this flag the opt-in existed
-                // only in the JSON schema and no operator could reach it: every
-                // gated verb planned, returned an ExecutionPlan, and the CLI
-                // failed to decode it as the verb's Output (#665).
-                //
-                // Added here rather than on `T::Args` because the gate reads it
-                // off the raw args, and a gated verb must never declare the
-                // field itself.
+                // Added here rather than on `T::Args` because the gate reads
+                // `dryRun` off the raw args, and a gated verb must never
+                // declare the field itself.
                 if <$tool as OrcaToolDef>::EXECUTE_GATED {
-                    cmd = cmd.arg(
-                        __cp::clap::Arg::new(__cp::contract::plan::EXECUTE_FIELD)
-                            .long(__cp::contract::plan::EXECUTE_FIELD)
-                            .action(__cp::clap::ArgAction::SetTrue)
-                            .help(
-                                "Apply the change. Omitted, this reports what WOULD change and \
-                                 changes nothing.",
-                            ),
-                    );
+                    cmd = cmd
+                        .arg(
+                            __cp::clap::Arg::new(__cp::contract::plan::DRY_RUN_FIELD)
+                                .long(__cp::dispatch::cli::DRY_RUN_FLAG)
+                                .action(__cp::clap::ArgAction::SetTrue)
+                                .help(
+                                    "Report what WOULD change and change nothing. Omitted, the \
+                                     change is applied.",
+                                ),
+                        )
+                        .arg(
+                            __cp::clap::Arg::new(__cp::contract::plan::EXECUTE_FIELD)
+                                .long(__cp::contract::plan::EXECUTE_FIELD)
+                                .action(__cp::clap::ArgAction::SetTrue)
+                                .hide(true),
+                        );
                 }
                 // Cross-cutting `--peer <PEER>` is registered as a global flag
                 // on the root command (see `build_root`) and propagates to
@@ -1252,19 +1253,18 @@ macro_rules! register_op {
                     let peer = ctx.peer().map(|s| s.to_string());
                     let args = <<$tool as OrcaToolDef>::Args as __cp::clap::FromArgMatches>::from_arg_matches(&m)
                         .map_err(|e| __cp::anyhow::anyhow!("{e}"))?;
-                    // A gated verb returns one of two shapes. Ask for JSON and
-                    // branch on which we got, instead of assuming `Output` and
-                    // failing to decode the plan.
+                    // A gated verb returns a plan under `--dry-run` and its
+                    // `Output` otherwise; decode only the shape asked for.
                     if <$tool as OrcaToolDef>::EXECUTE_GATED {
-                        let execute = m.get_flag(__cp::contract::plan::EXECUTE_FIELD);
+                        let dry_run = m.get_flag(__cp::contract::plan::DRY_RUN_FIELD);
                         let value = __cp::dispatch::cli::exec_gated::<$tool>(
                             args,
-                            execute,
+                            dry_run,
                             peer.as_deref(),
                             &ctx,
                         )
                         .await?;
-                        if !execute {
+                        if dry_run {
                             // The plan IS the answer here — print it as-is.
                             println!(
                                 "{}",

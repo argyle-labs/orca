@@ -249,20 +249,10 @@ async fn a_gated_verb_called_with_dry_run_returns_a_plan_and_applies_nothing() {
     );
 }
 
-/// The gate is only real if an operator can satisfy it. rc.8 shipped with the
-/// opt-in advertised in the JSON schema and NO way to pass it from the CLI, so
-/// every gated verb planned, returned an `ExecutionPlan`, and the CLI failed to
-/// decode it as the verb's own `Output`:
-///
-/// ```text
-/// Error: decode storage.mount.update output: data did not match any variant
-/// of untagged enum StorageMountUpdateOutput
-/// ```
-///
-/// A completed-looking command that changed nothing, on every mutating verb,
-/// across the whole fleet (#665).
+/// Every gated verb on the CLI offers `--dry-run` to plan, applies on a bare
+/// call, and still accepts `--execute` as a hidden no-op.
 #[test]
-fn every_gated_verb_can_actually_be_executed_from_the_cli() {
+fn every_gated_verb_offers_dry_run_on_the_cli() {
     let root = dispatch::cli::build_root(clap::Command::new("orca"));
 
     let mut checked = 0usize;
@@ -271,14 +261,42 @@ fn every_gated_verb_can_actually_be_executed_from_the_cli() {
             // Not every tool is on the CLI tree (plugin verbs, aliases).
             continue;
         };
-        assert!(
-            cmd.get_arguments()
-                .any(|a| a.get_long() == Some(contract::plan::EXECUTE_FIELD)),
-            "gated verb `{name}` has no --execute flag, so its gate cannot be satisfied"
-        );
+        let dry_run = cmd
+            .get_arguments()
+            .find(|a| a.get_long() == Some(dispatch::cli::DRY_RUN_FLAG))
+            .unwrap_or_else(|| panic!("gated verb `{name}` has no --dry-run flag"));
+        assert_eq!(dry_run.get_id(), contract::plan::DRY_RUN_FIELD, "{name}");
+        let execute = cmd
+            .get_arguments()
+            .find(|a| a.get_long() == Some(contract::plan::EXECUTE_FIELD))
+            .unwrap_or_else(|| panic!("gated verb `{name}` dropped the --execute no-op"));
+        assert!(execute.is_hide_set(), "{name}: --execute must be hidden");
         checked += 1;
     }
     assert!(checked > 0, "no gated verbs were reachable on the CLI tree");
+}
+
+/// The flag the CLI run path reads: `--dry-run` plans, a bare call or
+/// `--execute` applies.
+#[test]
+fn the_dry_run_flag_selects_the_plan_and_execute_does_not() {
+    let root = dispatch::cli::build_root(clap::Command::new("orca"));
+    let leaf = dispatch::execute_gated_names()
+        .into_iter()
+        .find_map(|n| find_leaf(&root, n))
+        .expect("a gated verb on the CLI tree");
+    for (flags, want) in [
+        (&["--dry-run"][..], true),
+        (&[][..], false),
+        (&["--execute"][..], false),
+    ] {
+        let m = leaf
+            .clone()
+            .ignore_errors(true)
+            .try_get_matches_from(std::iter::once("verb").chain(flags.iter().copied()))
+            .unwrap_or_else(|e| panic!("{flags:?}: {e}"));
+        assert_eq!(m.get_flag(contract::plan::DRY_RUN_FIELD), want, "{flags:?}");
+    }
 }
 
 /// Walk `domain.sub.verb` down the command tree.
