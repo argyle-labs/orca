@@ -309,17 +309,22 @@ fn invalid_peer(why: &str) -> contract::OrcaError {
 pub fn take_ambient(
     mut args: Value,
 ) -> std::result::Result<(Value, Option<String>, Option<String>), contract::OrcaError> {
-    let mut peer = None;
-    let mut correlation_id = None;
-    if let Some(obj) = args.as_object_mut() {
-        peer = peer_selector(obj.remove(AMBIENT_PEER_KEY).as_ref())?;
-        correlation_id = obj
-            .remove(AMBIENT_CORRELATION_KEY)
-            .and_then(|v| v.as_str().map(str::to_string))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-    }
+    let peer = peer_selector(
+        args.as_object_mut()
+            .and_then(|obj| obj.remove(AMBIENT_PEER_KEY))
+            .as_ref(),
+    )?;
+    let correlation_id = take_correlation_id(&mut args);
     Ok((args, peer, correlation_id))
+}
+
+/// Removes the ambient `correlation_id` key from an args object, returning its
+/// trimmed value when it is a non-blank string.
+fn take_correlation_id(args: &mut Value) -> Option<String> {
+    args.as_object_mut()?
+        .remove(AMBIENT_CORRELATION_KEY)
+        .and_then(|v| v.as_str().map(str::trim).map(str::to_string))
+        .filter(|s| !s.is_empty())
 }
 
 /// Advertise the ambient `peer` property on an MCP `inputSchema` for a
@@ -737,12 +742,15 @@ async fn http_dispatch(
         }
         (h, b) => h.or(b),
     };
+    // Always stripped from the body, as on MCP; the header wins when both are set.
+    let body_correlation_id = take_correlation_id(&mut args);
     let correlation_id = headers
         .get("x-correlation-id")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(String::from);
+        .map(String::from)
+        .or(body_correlation_id);
     // Unknown-tool guard, deferred until after peer resolution: a peer-only
     // tool forwards over the mesh; a genuinely unknown local call 404s.
     if peer.is_none() && !dispatchable(&name, &args) {
@@ -1454,6 +1462,32 @@ mod tests {
         assert_eq!(clean, json!({ "self_secure": true }));
     }
 
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn rest_body_correlation_id_never_reaches_the_tool() {
+        use axum::body::Body;
+        use axum::http::Request as AxumReq;
+        use tower::ServiceExt;
+
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        SEEN_ARGS.lock().unwrap().clear();
+        let req = AxumReq::builder()
+            .method("POST")
+            .uri(format!("/{FAKE_PLUGIN_TOOL}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "correlation_id": "abc", "x": 1 }).to_string(),
+            ))
+            .unwrap();
+        let resp = axum_router(Arc::new(make_ctx()))
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(*SEEN_ARGS.lock().unwrap(), vec![json!({ "x": 1 })]);
+    }
+
     #[test]
     fn find_orca_error_sees_wrapped_and_context_held_errors() {
         let wrapped = anyhow::Error::from(contract::OrcaError::invalid("a")).context("ctx");
@@ -1701,7 +1735,10 @@ mod tests {
     /// Callers the fake plugin saw, by username (`None` = no caller).
     static SEEN: std::sync::Mutex<Vec<Option<String>>> = std::sync::Mutex::new(Vec::new());
 
-    /// Serializes the tests that clear and read `SEEN`.
+    /// Args the fake plugin saw.
+    static SEEN_ARGS: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+    /// Serializes the tests that clear and read `SEEN` / `SEEN_ARGS`.
     static SEEN_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn install_fake_plugin() {
@@ -1727,6 +1764,7 @@ mod tests {
                         SEEN.lock()
                             .unwrap()
                             .push(caller.map(|c| c.username.clone()));
+                        SEEN_ARGS.lock().unwrap().push(args.clone());
                         Ok(json!({}))
                     })
                 }),
