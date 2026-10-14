@@ -366,6 +366,12 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     let conn = db::open_default()?;
     let offer = pdb::find_outbound_offer_by_code_and_fp(&conn, &body.code, &signer_fp)?
         .context("no matching pending outbound offer (wrong code, wrong peer, or expired)")?;
+    refuse_taken_joiner_id(
+        &conn,
+        &body.joiner_hostname,
+        &signer_fp,
+        crate::host_identity::machine_id(),
+    )?;
 
     let pki_d = pki_dir();
     let (client_cert_pem, ca_cert_pem) = utils::pki::sign_peer_csr(
@@ -437,6 +443,30 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
         inviter_peer_id,
         mesh_id,
     })
+}
+
+/// The joiner's id becomes the CN and identity name of the certs we sign, so
+/// an id already held by this system or by another member's bootstrap key
+/// would let the joiner answer as that system. A row pinned to the joiner's
+/// own key is the same host re-joining; a forgotten id with no row left is
+/// re-admitted the same way.
+fn refuse_taken_joiner_id(
+    conn: &rusqlite::Connection,
+    joiner_id: &str,
+    signer_fp: &str,
+    own_id: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        joiner_id != own_id,
+        "join refused: {joiner_id} is this system's own id"
+    );
+    if let Some(fp) = pdb::peer_pubkey_fp_raw(conn, joiner_id)? {
+        anyhow::ensure!(
+            fp.as_deref() == Some(signer_fp),
+            "join refused: {joiner_id} already belongs to another mesh member"
+        );
+    }
+    Ok(())
 }
 
 /// Body of `mesh/refresh-cert-bootstrap`: a peer whose mesh **leaf** cert has
@@ -1716,6 +1746,34 @@ mod tests {
                 assert!(pdb::list_pending_offers(&conn, "out").unwrap().is_empty());
             }));
         });
+    }
+
+    #[tokio::test]
+    async fn refuse_taken_joiner_id_guards_own_and_other_members_ids() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        db::with_db_path(tmp.path().to_path_buf(), async {
+            let conn = db::open_default().unwrap();
+            let own = utils::id::new();
+            let active = utils::id::new();
+            let departed = utils::id::new();
+            for id in [&active, &departed] {
+                pdb::upsert_peer(&conn, id, "m", "10.0.0.2", 12002, Some("fp-other"), "").unwrap();
+            }
+            pdb::mark_peer_departed(&conn, &departed).unwrap();
+
+            let own_err = refuse_taken_joiner_id(&conn, &own, "fp-joiner", &own).unwrap_err();
+            assert!(format!("{own_err}").contains("own id"), "got: {own_err}");
+            for id in [&active, &departed] {
+                let err = refuse_taken_joiner_id(&conn, id, "fp-joiner", &own).unwrap_err();
+                assert!(
+                    format!("{err}").contains("another mesh member"),
+                    "got: {err}"
+                );
+            }
+            refuse_taken_joiner_id(&conn, &active, "fp-other", &own).unwrap();
+            refuse_taken_joiner_id(&conn, &utils::id::new(), "fp-joiner", &own).unwrap();
+        })
+        .await;
     }
 
     #[test]
