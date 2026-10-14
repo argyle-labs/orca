@@ -401,7 +401,7 @@ pub struct SystemUpdateArgs {
     /// a bare `orca system update` probes current→latest and reports whether an
     /// update is available WITHOUT applying it. Pass `--execute` to apply. An
     /// explicit `--version` already implies apply (a deliberate operator action)
-    /// and does not need this flag.
+    /// and does not need this flag; `dryRun: true` overrides both.
     #[serde(default)]
     #[arg(long)]
     pub execute: bool,
@@ -544,6 +544,20 @@ pub struct SystemUpdateArgs {
     #[command(flatten)]
     #[serde(flatten)]
     pub retention: RetentionSetArgs,
+}
+
+/// A dry run forwarded to a peer that ignores `dryRun` still only probes.
+fn neutralize_system_update(args: &mut SystemUpdateArgs) {
+    args.execute = false;
+    args.version = None;
+}
+
+/// A this-system mutation `dryRun` cannot preview: each applies directly.
+fn dry_run_unpreviewable_arg(args: &SystemUpdateArgs) -> Option<&'static str> {
+    if args.os_packages {
+        return Some("os_packages");
+    }
+    fleet_incompatible_arg(args)
 }
 
 /// Args that configure THIS system and cannot mean anything fleet-wide.
@@ -692,12 +706,15 @@ pub struct PendingRestart {
 // REPLACE a real plan with an empty one. It still spells the opt-in `execute`,
 // which is the single fleet-wide name (#636). Migrating it to return a typed
 // `ExecutionPlan` is the follow-up; that needs the body to run in plan mode,
-// which the intercept-before-body gate cannot express.
+// which the intercept-before-body gate cannot express. `dry_run_aware` routes
+// `dryRun: true` to its own plan path.
 #[orca_tool(
     domain = "system",
     verb = "update",
     refresh_runtime = true,
-    execute_gated = false
+    execute_gated = false,
+    dry_run_aware = true,
+    dry_run_neutralize = neutralize_system_update
 )]
 async fn system_update(
     args: SystemUpdateArgs,
@@ -708,6 +725,16 @@ async fn system_update(
             "`scope` is gone: it chose a mode where an address belongs. Omit `--id` to \
              update every system, or pass `--id <system>` to update one (#647)."
         );
+    }
+
+    if ctx.dry_run()
+        && let Some(arg) = dry_run_unpreviewable_arg(&args)
+    {
+        return Err(contract::OrcaError::invalid(format!(
+            "system.update cannot preview `{arg}`; dryRun covers the daemon and plugin update only"
+        ))
+        .with_code("args.invalid")
+        .into());
     }
 
     // An id addresses ONE system. Resolve it here and route; a caller never
@@ -751,7 +778,7 @@ async fn system_update(
         let mut out = hook
             .fleet_update(
                 crate::fleet::FleetUpdateRequest {
-                    execute: args.execute,
+                    execute: args.execute && !ctx.dry_run(),
                     prerelease: args.prerelease,
                     break_lock: args.break_lock,
                     daemons_only: args.daemons_only,
@@ -1056,9 +1083,10 @@ async fn run_system_update(
     let _ = channel_changed; // marker is written upstream; install intent is version-only now
     // DRY RUN by default: a bare `orca system update` only probes. `--execute`
     // (apply channel-latest) or an explicit `--version` (apply that tag) is the
-    // deliberate operator action that lifts the gate. Per HARD RULE
-    // [[feedback-updates-are-user-actions-only]] an empty `{}` probe never applies.
-    let binary_intent = args.version.is_some() || args.execute;
+    // deliberate operator action that lifts the gate, unless `dryRun` is set.
+    // Per HARD RULE [[feedback-updates-are-user-actions-only]] an empty `{}`
+    // probe never applies.
+    let binary_intent = !ctx.dry_run() && (args.version.is_some() || args.execute);
 
     // Effective channel = max(stored pref, channel implied by running version).
     // If the binary is a prerelease but the marker says stable (common on
@@ -2844,6 +2872,40 @@ mod tests {
     // assert on the actionable error surfaced before any db/network work. They
     // exercise the dispatch arms + argument-validation paths that the pure
     // `require_cap_name` unit tests can't reach on their own.
+
+    #[tokio::test]
+    async fn system_update_dry_run_with_a_version_does_not_apply() {
+        let args = SystemUpdateArgs {
+            version: Some("0.0.1".to_string()),
+            self_only: true,
+            list_channels: true,
+            ..Default::default()
+        };
+        let mut ctx = serve_ctx();
+        ctx.set_dry_run(true);
+        let SystemUpdateResult::Update(out) = system_update(args, &ctx).await.unwrap() else {
+            panic!("a single-system dry run returns the update shape");
+        };
+        assert!(out.applied.is_none(), "dryRun applied {:?}", out.applied);
+    }
+
+    #[tokio::test]
+    async fn system_update_dry_run_refuses_a_mutation_it_cannot_preview() {
+        let args = SystemUpdateArgs {
+            hostname: Some("renamed".to_string()),
+            self_only: true,
+            ..Default::default()
+        };
+        let mut ctx = serve_ctx();
+        ctx.set_dry_run(true);
+        let Err(err) = system_update(args, &ctx).await else {
+            panic!("dryRun must not apply a hostname change");
+        };
+        assert!(
+            err.to_string().contains("cannot preview `hostname`"),
+            "{err}"
+        );
+    }
 
     #[tokio::test]
     async fn system_update_disable_cap_requires_name() {

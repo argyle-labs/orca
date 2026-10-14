@@ -635,6 +635,7 @@ pub async fn fleet_update(
         break_lock,
         daemons_only,
     } = req;
+    let execute = execute && !ctx.dry_run();
     let started = utils::time::now();
     let mut out = FleetUpdateOutput {
         dry_run: !execute,
