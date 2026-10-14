@@ -165,6 +165,12 @@ pub struct CreateArgs {
     /// before forwarding. `None` = no payload (e.g. `backup` with defaults).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+    /// The identity the surface verified for this request, so a provider can
+    /// authorize the change itself. `None` when the request carried none; never
+    /// the host operator's ambient identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub caller: Option<crate::CallerIdentity>,
 }
 
 /// Args for [`Verb::Update`] — identify the target + what update to apply.
@@ -1226,6 +1232,7 @@ mod tests {
             Verb::of(&VerbArgs::Create(CreateArgs {
                 action: "provision".into(),
                 payload: None,
+                caller: None,
             })),
             Verb::Create
         );
@@ -1832,6 +1839,7 @@ mod tests {
         let err = dispatch(VerbArgs::Create(CreateArgs {
             action: "provision".into(),
             payload: None,
+            caller: None,
         }))
         .await
         .unwrap_err();
@@ -1908,6 +1916,7 @@ mod tests {
         assert!(!action_is_guarded(&VerbArgs::Create(CreateArgs {
             action: "provision".into(),
             payload: None,
+            caller: None,
         })));
         assert!(!action_is_guarded(&VerbArgs::List(ListArgs::default())));
     }
@@ -2118,6 +2127,7 @@ mod tests {
             VerbArgs::Create(CreateArgs {
                 action: "provision".into(),
                 payload: Some("{}".into()),
+                caller: None,
             }),
             VerbArgs::Update(UpdateArgs {
                 caller: None,
@@ -2457,6 +2467,7 @@ mod tests {
         let err = dispatch(VerbArgs::Create(CreateArgs {
             action: "provision".into(),
             payload: None,
+            caller: None,
         }))
         .await
         .unwrap_err();
