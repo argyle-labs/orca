@@ -78,6 +78,9 @@ pub struct RetentionSetArgs {
     /// long is `--retention-peer` to avoid colliding with the global `--peer`
     /// mesh-dispatch flag (#455); the serde/MCP field stays `peer`.
     #[arg(long = "retention-peer")]
+    // An absent key, not `null`: REST strips and validates every body `peer`
+    // as a mesh selector, and refuses a non-string one.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
     /// Age cap in days. Pass to set, omit to leave unchanged.
     #[arg(long)]
@@ -310,5 +313,11 @@ mod tests {
     fn set_args_unset_flag_deserializes() {
         let args: RetentionSetArgs = serde_json::from_str(r#"{"unset":true}"#).unwrap();
         assert!(args.unset);
+    }
+
+    #[test]
+    fn unset_peer_is_omitted_from_serialized_args() {
+        let v = serde_json::to_value(RetentionSetArgs::default()).unwrap();
+        assert!(v.get("peer").is_none(), "{v}");
     }
 }
