@@ -136,12 +136,12 @@ async fn an_ungated_verb_forwards_without_execute() {
 }
 
 /// `plugin.create action=invoke` is the mesh seam for peer-loaded plugin verbs.
-/// It is gated by verb name, not by action, so `invoke` forwards like any
-/// gated verb.
+/// It is not generically gated (#802): a read verb runs without an outer
+/// `execute`, and the call is forwarded rather than planned locally.
 #[tokio::test]
-async fn plugin_create_invoke_forwards_execute_to_the_peer() {
+async fn plugin_create_invoke_runs_a_read_verb_without_execute() {
     let gated = dispatch::execute_gated_names();
-    assert!(gated.contains(&"plugin.create"));
+    assert!(!gated.contains(&"plugin.create"));
     assert!(!gated.contains(&"plugin.update"));
 
     let (ctx, spy) = peered_ctx(serde_json::json!({ "tool": "docker.list", "result": [] }));
@@ -155,9 +155,99 @@ async fn plugin_create_invoke_forwards_execute_to_the_peer() {
     .expect("forwarded call decodes as PluginCreateOutput");
 
     assert_eq!(out["tool"], serde_json::json!("docker.list"));
+    assert!(out.get("dryRun").is_none(), "{out}");
     let calls = spy.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].1["action"], serde_json::json!("invoke"));
+}
+
+/// A mutating plugin verb's own opt-in rides inside `args` untouched, so the
+/// plugin's gate (not orca's) decides between plan and apply.
+#[tokio::test]
+async fn plugin_create_invoke_forwards_the_inner_args_verbatim() {
+    let (ctx, spy) = peered_ctx(serde_json::json!({ "tool": "docker.stack_allow", "result": {} }));
+
+    dispatch::dispatch(
+        "plugin.create",
+        serde_json::json!({
+            "action": "invoke",
+            "tool": "docker.stack_allow",
+            "args": { "stack": "s", "execute": true },
+        }),
+        &ctx,
+    )
+    .await
+    .expect("forwarded");
+
+    let calls = spy.calls.lock().unwrap();
+    assert_eq!(
+        calls[0].1["args"],
+        serde_json::json!({ "stack": "s", "execute": true })
+    );
+}
+
+/// `install` still applies only on an explicit opt-in: without it the peer is
+/// asked for a plan (`execute: false`) and the plan decodes as the output.
+#[tokio::test]
+async fn plugin_create_install_without_execute_asks_the_peer_for_a_plan() {
+    let (ctx, spy) = peered_ctx(serde_json::json!({
+        "dryRun": true, "tool": "plugin.create", "summary": "s", "detailed": false,
+        "inputs": {}, "howToExecute": "re-invoke plugin.create with `execute: true` to apply",
+    }));
+
+    let out = dispatch::dispatch(
+        "plugin.create",
+        serde_json::json!({ "action": "install", "name": "docker" }),
+        &ctx,
+    )
+    .await
+    .expect("dispatch succeeds");
+
+    assert_eq!(out["dryRun"], serde_json::json!(true), "{out}");
+    let calls = spy.calls.lock().unwrap();
+    assert_eq!(
+        calls[0].1["execute"],
+        serde_json::json!(false),
+        "{}",
+        calls[0].1
+    );
+}
+
+/// Without a peer, `install` with no opt-in plans locally and touches nothing.
+#[tokio::test]
+async fn plugin_create_install_without_execute_plans_locally() {
+    let cfg = Arc::new(contract::config::Config::load().expect("config"));
+    let ctx = contract::ToolCtx::new(cfg);
+
+    let out = dispatch::dispatch(
+        "plugin.create",
+        serde_json::json!({ "action": "install", "name": "no-such-plugin" }),
+        &ctx,
+    )
+    .await
+    .expect("plans rather than fetching");
+
+    assert_eq!(out["dryRun"], serde_json::json!(true), "{out}");
+    assert_eq!(out["tool"], serde_json::json!("plugin.create"));
+}
+
+#[tokio::test]
+async fn plugin_create_install_with_execute_forwards_the_opt_in() {
+    let (ctx, spy) = peered_ctx(serde_json::json!({
+        "software": "docker", "version": "1", "tools": [],
+        "installedPath": "/x", "loadedLive": true,
+    }));
+
+    dispatch::dispatch(
+        "plugin.create",
+        serde_json::json!({ "action": "install", "name": "docker", "execute": true }),
+        &ctx,
+    )
+    .await
+    .expect("forwarded");
+
+    let calls = spy.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
     assert_eq!(
         calls[0].1["execute"],
         serde_json::json!(true),
@@ -204,4 +294,28 @@ async fn a_dry_run_forwards_dry_run_and_neutralized_args() {
             "{tool}: {fwd}"
         );
     }
+}
+
+/// The plan is answered by the role check first: a non-admin gets neither a
+/// plan nor a forward.
+#[tokio::test]
+async fn plugin_create_dry_run_is_admin_only() {
+    let (mut ctx, spy) = peered_ctx(serde_json::json!({}));
+    ctx.set_caller(Some(CallerIdentity {
+        user_id: "u_member".into(),
+        username: "member".into(),
+        role: "member".into(),
+        can_mutate: false,
+    }));
+
+    let err = dispatch::dispatch(
+        "plugin.create",
+        serde_json::json!({ "action": "install", "name": "docker" }),
+        &ctx,
+    )
+    .await
+    .expect_err("a member may not plan plugin.create");
+
+    assert!(err.to_string().contains("requires role"), "{err}");
+    assert!(spy.calls.lock().unwrap().is_empty());
 }
