@@ -234,20 +234,22 @@ use contract::RemoteExec;
 /// an error.
 pub async fn exec_remote<T: contract::OrcaToolDef>(
     peer: &str,
-    args: T::Args,
+    mut args: T::Args,
     ctx: &ToolCtx,
 ) -> Result<T::Output> {
+    // A dry run must stay one across the hop; only tools that honour `dryRun`
+    // get it, since any other tool refuses the field. The neutralized args
+    // keep a peer that ignores `dryRun` probing.
+    let dry_run = ctx.dry_run() && (T::EXECUTE_GATED || T::DRY_RUN_AWARE);
+    if dry_run {
+        T::neutralize_for_dry_run(&mut args);
+    }
     // Wire-only serialization: Value lives entirely behind the
     // RemoteExec trait boundary, never on a public type.
     #[allow(clippy::disallowed_types)]
     let mut args_value =
         serde_json::to_value(&args).map_err(|e| anyhow::anyhow!("serialize args: {e}"))?;
-    // A dry run must stay one across the hop; only tools that honour `dryRun`
-    // get it, since any other tool refuses the field.
-    if ctx.dry_run()
-        && (T::EXECUTE_GATED || T::DRY_RUN_AWARE)
-        && let Some(obj) = args_value.as_object_mut()
-    {
+    if dry_run && let Some(obj) = args_value.as_object_mut() {
         obj.insert(
             contract::plan::DRY_RUN_FIELD.into(),
             serde_json::Value::Bool(true),
@@ -291,11 +293,14 @@ pub const DRY_RUN_FLAG: &str = "dry-run";
 // decides which to decode. Same sanctioned seam as `RemoteExec::exec`.
 #[allow(clippy::disallowed_types)]
 pub async fn exec_gated<T: contract::OrcaToolDef>(
-    args: T::Args,
+    mut args: T::Args,
     dry_run: bool,
     peer: Option<&str>,
     ctx: &ToolCtx,
 ) -> Result<serde_json::Value> {
+    if dry_run && peer.is_some() {
+        T::neutralize_for_dry_run(&mut args);
+    }
     #[allow(clippy::disallowed_types)]
     let mut body =
         serde_json::to_value(&args).map_err(|e| anyhow::anyhow!("serialize args: {e}"))?;
@@ -307,6 +312,17 @@ pub async fn exec_gated<T: contract::OrcaToolDef>(
         );
     }
     if let Some(peer) = peer {
+        // An older peer's gate plans unless told to execute.
+        if !dry_run
+            && T::EXECUTE_GATED
+            && let Some(obj) = body.as_object_mut()
+        {
+            #[allow(clippy::disallowed_types)]
+            obj.insert(
+                contract::plan::EXECUTE_FIELD.to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
         let svc = ctx.service::<Arc<dyn RemoteExec>>()?;
         return svc
             .exec(
@@ -1567,6 +1583,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, Out { y: 42 });
+    }
+
+    #[tokio::test]
+    async fn exec_gated_to_a_peer_sends_execute_or_a_neutralized_dry_run() {
+        use contract::{CallerIdentity, OrcaToolDef, RemoteExec};
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Serialize, Deserialize, JsonSchema)]
+        struct Args {
+            apply: bool,
+        }
+        struct Gated;
+        impl OrcaToolDef for Gated {
+            type Args = Args;
+            type Output = ();
+            const NAME: &'static str = "ex.gated";
+            const DESCRIPTION: &'static str = "gated";
+            const EXECUTE_GATED: bool = true;
+            fn neutralize_for_dry_run(args: &mut Args) {
+                args.apply = false;
+            }
+        }
+
+        #[allow(clippy::disallowed_types)]
+        struct Spy(Mutex<Vec<serde_json::Value>>);
+        #[async_trait::async_trait]
+        impl RemoteExec for Spy {
+            #[allow(clippy::disallowed_types)]
+            async fn exec(
+                &self,
+                _peer: &str,
+                _tool: &str,
+                args: serde_json::Value,
+                _caller: Option<CallerIdentity>,
+                _correlation_id: Option<String>,
+            ) -> anyhow::Result<serde_json::Value> {
+                self.0.lock().unwrap().push(args);
+                Ok(serde_json::Value::Null)
+            }
+        }
+
+        let cfg = Arc::new(contract::config::Config::load().unwrap());
+        let mut ctx = contract::ToolCtx::new(cfg);
+        let spy = Arc::new(Spy(Mutex::new(Vec::new())));
+        let svc: Arc<dyn RemoteExec> = spy.clone();
+        ctx.register_service(svc);
+
+        exec_gated::<Gated>(Args { apply: true }, false, Some("host-x"), &ctx)
+            .await
+            .unwrap();
+        exec_gated::<Gated>(Args { apply: true }, true, Some("host-x"), &ctx)
+            .await
+            .unwrap();
+        let calls = spy.0.lock().unwrap();
+        assert_eq!(
+            calls[0],
+            serde_json::json!({ "apply": true, "execute": true })
+        );
+        assert_eq!(
+            calls[1],
+            serde_json::json!({ "apply": false, "dryRun": true })
+        );
     }
 
     #[tokio::test]

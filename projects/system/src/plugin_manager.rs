@@ -1131,6 +1131,11 @@ fn plugin_update_skip(installed: Option<&str>, target: &str, pinned: bool) -> Op
     Some(format!("already up to date at {cur}"))
 }
 
+/// A dry run forwarded to a peer that ignores `dryRun` still only probes.
+fn neutralize_plugin_update(args: &mut PluginUpdateArgs) {
+    args.execute = false;
+}
+
 /// [MUTATES STATE] Update ONE installed plugin to the newest release (or a pinned
 /// `--version`). DRY RUN by default — resolves installed→target and reports
 /// whether an update is available without touching disk; pass `--execute` to
@@ -1148,7 +1153,8 @@ fn plugin_update_skip(installed: Option<&str>, target: &str, pinned: bool) -> Op
     domain = "plugin",
     verb = "update",
     execute_gated = false,
-    dry_run_aware = true
+    dry_run_aware = true,
+    dry_run_neutralize = neutralize_plugin_update
 )]
 async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUpdateOutput> {
     let entry = catalog_resolved()

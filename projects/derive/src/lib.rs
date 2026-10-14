@@ -269,6 +269,10 @@ struct ToolAttr {
     /// honours `ToolCtx::dry_run()`. Without it, `dryRun` on an ungated verb
     /// is refused. Default off.
     dry_run_aware: bool,
+    /// `#[orca_tool(..., dry_run_neutralize = path::to::fn)]`: a
+    /// `fn(&mut Args)` that clears the verb's own apply opt-ins before a dry
+    /// run is forwarded to a peer, so a peer that ignores `dryRun` probes.
+    dry_run_neutralize: Option<syn::Path>,
     /// Minimum role required to invoke this tool via authenticated surfaces.
     /// `"any"` (default) means any authenticated identity passes; `"admin"`
     /// requires `AuthIdentity::role == "admin"`. Set via
@@ -299,6 +303,7 @@ impl Parse for ToolAttr {
         let mut data_mutation: Option<bool> = None;
         let mut execute_gated: Option<bool> = None;
         let mut dry_run_aware = false;
+        let mut dry_run_neutralize: Option<syn::Path> = None;
         let mut role: Option<LitStr> = None;
         let mut title: Option<LitStr> = None;
         let mut crate_path: Option<syn::Path> = None;
@@ -414,6 +419,9 @@ impl Parse for ToolAttr {
                         }
                     };
                 }
+                "dry_run_neutralize" => {
+                    dry_run_neutralize = Some(parse_path(&nv.value)?);
+                }
                 "role" => {
                     let s = lit_str(&nv.value)?;
                     match s.value().as_str() {
@@ -468,6 +476,7 @@ impl Parse for ToolAttr {
             data_mutation,
             execute_gated,
             dry_run_aware,
+            dry_run_neutralize,
             role,
             title,
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
@@ -1001,22 +1010,51 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     } else {
         quote! {}
     };
-    // A gated verb that reaches `run` is executing: a dry run returns its plan
-    // in the gate and never forwards. `execute: true` keeps an older peer,
+    // A dry run stays one across the hop: `dryRun: true` for a current peer,
+    // and the verb's own apply opt-ins cleared for one that ignores `dryRun`.
+    // Otherwise a gated verb sends `execute: true`, keeping an older peer,
     // whose gate still plans by default, applying instead of answering with a
     // plan that cannot decode as this verb's output.
-    let forward_execute_stanza = if execute_gated_lit {
+    let forward_dry_run_stanza = if execute_gated_lit || dry_run_aware_lit {
+        quote! {
+            if #ctx_param_name.dry_run() {
+                <#zst_ident as #crate_path::contract::OrcaToolDef>::neutralize_for_dry_run(&mut __fwd_args);
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let forward_flag_stanza = if execute_gated_lit || dry_run_aware_lit {
+        let field = if execute_gated_lit {
+            quote! { if #ctx_param_name.dry_run() { #crate_path::contract::plan::DRY_RUN_FIELD } else { #crate_path::contract::plan::EXECUTE_FIELD } }
+        } else {
+            quote! { #crate_path::contract::plan::DRY_RUN_FIELD }
+        };
+        let guard = if execute_gated_lit {
+            quote! {}
+        } else {
+            quote! { #ctx_param_name.dry_run() && }
+        };
         quote! {
             let mut __args_value = __args_value;
-            if let ::core::option::Option::Some(__obj) = __args_value.as_object_mut() {
+            if #guard let ::core::option::Option::Some(__obj) = __args_value.as_object_mut()
+            {
                 __obj.insert(
-                    ::std::string::ToString::to_string(#crate_path::contract::plan::EXECUTE_FIELD),
+                    ::std::string::ToString::to_string(#field),
                     #crate_path::serde_json::Value::Bool(true),
                 );
             }
         }
     } else {
         quote! {}
+    };
+    let neutralize_fn = match attr.dry_run_neutralize.as_ref() {
+        Some(path) => quote! {
+            fn neutralize_for_dry_run(args: &mut Self::Args) {
+                #path(args)
+            }
+        },
+        None => quote! {},
     };
     let peer_dispatch_stanza = if emit_peer_dispatch {
         quote! {
@@ -1025,9 +1063,12 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             {
                 let __svc = #ctx_param_name
                     .service::<::std::sync::Arc<dyn #crate_path::contract::RemoteExec>>()?;
-                let __args_value = #crate_path::serde_json::to_value(&#args_forward)
+                #[allow(unused_mut)]
+                let mut __fwd_args = #args_forward;
+                #forward_dry_run_stanza
+                let __args_value = #crate_path::serde_json::to_value(&__fwd_args)
                     .map_err(|e| #crate_path::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
-                #forward_execute_stanza
+                #forward_flag_stanza
                 // Forward the ctx's ambient operator identity; the transport
                 // mints a signed caller token from it (project-remote-exec-full-fix
                 // S1–S4). `None` on unauthenticated paths.
@@ -1124,6 +1165,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             #role_const
             type Args = #args_ty;
             type Output = #output_ty;
+            #neutralize_fn
         }
 
         impl #crate_path::contract::OrcaOp for #zst_ident {

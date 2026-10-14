@@ -538,9 +538,12 @@ pub struct SystemUpdateArgs {
     pub retention: RetentionSetArgs,
 }
 
-/// Args that configure THIS system and cannot mean anything fleet-wide.
-/// Their presence makes a call a this-system call rather than a fan-out, which
-/// is what keeps `orca system update --hostname x` working without an address.
+/// A dry run forwarded to a peer that ignores `dryRun` still only probes.
+fn neutralize_system_update(args: &mut SystemUpdateArgs) {
+    args.execute = false;
+    args.version = None;
+}
+
 /// A this-system mutation `dryRun` cannot preview: each applies directly.
 fn dry_run_unpreviewable_arg(args: &SystemUpdateArgs) -> Option<&'static str> {
     if args.os_packages {
@@ -549,6 +552,9 @@ fn dry_run_unpreviewable_arg(args: &SystemUpdateArgs) -> Option<&'static str> {
     fleet_incompatible_arg(args)
 }
 
+/// Args that configure THIS system and cannot mean anything fleet-wide.
+/// Their presence makes a call a this-system call rather than a fan-out, which
+/// is what keeps `orca system update --hostname x` working without an address.
 fn fleet_incompatible_arg(args: &SystemUpdateArgs) -> Option<&'static str> {
     [
         ("hostname", args.hostname.is_some()),
@@ -698,7 +704,8 @@ pub struct PendingRestart {
     verb = "update",
     refresh_runtime = true,
     execute_gated = false,
-    dry_run_aware = true
+    dry_run_aware = true,
+    dry_run_neutralize = neutralize_system_update
 )]
 async fn system_update(
     args: SystemUpdateArgs,

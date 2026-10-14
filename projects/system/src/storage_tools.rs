@@ -950,6 +950,11 @@ fn parse_octal_mode(s: &str) -> anyhow::Result<u32> {
     u32::from_str_radix(digits, 8).map_err(|_| anyhow::anyhow!("invalid octal mode `{s}`"))
 }
 
+/// A dry run forwarded to a peer that ignores `dryRun` still only detects.
+fn neutralize_repair_permissions(args: &mut StorageShareRepairPermsArgs) {
+    args.apply = false;
+}
+
 /// [MUTATES STATE] Repair a share's permissions. Without `--apply` it detects
 /// mode and ownership drift against sibling shares and changes nothing; with
 /// `--apply` it writes the confirmed mode/owner onto the path.
@@ -966,7 +971,8 @@ fn parse_octal_mode(s: &str) -> anyhow::Result<u32> {
     verb = "repair-permissions",
     data_mutation = true,
     execute_gated = false,
-    dry_run_aware = true
+    dry_run_aware = true,
+    dry_run_neutralize = neutralize_repair_permissions
 )]
 async fn storage_share_repair_permissions(
     args: StorageShareRepairPermsArgs,

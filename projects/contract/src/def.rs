@@ -68,6 +68,12 @@ pub trait OrcaToolDef: Send + Sync + 'static {
 
     type Args: DeserializeOwned + Serialize + JsonSchema + Send;
     type Output: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
+
+    /// Clear every apply opt-in on `args` before a dry run is forwarded to a
+    /// peer. A peer that predates `dryRun` ignores it, so the forwarded args
+    /// alone must make it probe rather than apply. Set via
+    /// `#[orca_tool(..., dry_run_neutralize = path::to::fn)]`.
+    fn neutralize_for_dry_run(_args: &mut Self::Args) {}
 }
 
 /// Surface-reorg metadata. `NAME` is `<DOMAIN>.<VERB>` by convention; the

@@ -1,6 +1,7 @@
 //! A gated verb executes on the peer by default; a `dryRun` call plans locally
 //! and never forwards. The forwarded args keep `execute: true` so an older
-//! peer, whose gate still plans by default, applies too.
+//! peer, whose gate still plans by default, applies too. A dry run of a
+//! dry-run-aware verb forwards `dryRun` with its apply opt-ins cleared.
 
 use std::sync::{Arc, Mutex};
 
@@ -163,4 +164,44 @@ async fn plugin_create_invoke_forwards_execute_to_the_peer() {
         "{}",
         calls[0].1
     );
+}
+
+/// A dry run of a dry-run-aware verb forwards `dryRun: true` for a current
+/// peer and cleared apply opt-ins for one that ignores `dryRun`.
+#[tokio::test]
+async fn a_dry_run_forwards_dry_run_and_neutralized_args() {
+    let cases = [
+        (
+            "system.update",
+            serde_json::json!({ "version": "9.9.9", "execute": true, "dryRun": true }),
+        ),
+        (
+            "plugin.update",
+            serde_json::json!({ "name": "docker", "execute": true, "dryRun": true }),
+        ),
+        (
+            "storage.share.repair-permissions",
+            serde_json::json!({ "path": "/mnt/none", "apply": true, "dryRun": true }),
+        ),
+    ];
+    for (tool, args) in cases {
+        let (ctx, spy) = peered_ctx(serde_json::json!({}));
+        // Only the forwarded args matter; the canned reply need not decode.
+        drop(dispatch::dispatch(tool, args, &ctx).await);
+
+        let calls = spy.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "{tool}");
+        let fwd = &calls[0].1;
+        assert_eq!(fwd["dryRun"], serde_json::json!(true), "{tool}: {fwd}");
+        for opt_in in ["execute", "apply"] {
+            assert!(
+                !fwd.get(opt_in).and_then(|v| v.as_bool()).unwrap_or(false),
+                "{tool} forwarded {opt_in}: {fwd}"
+            );
+        }
+        assert!(
+            fwd.get("version").is_none_or(|v| v.is_null()),
+            "{tool}: {fwd}"
+        );
+    }
 }
