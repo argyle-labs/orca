@@ -1197,7 +1197,11 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             ca_cert_pem   TEXT NOT NULL,
             first_seen_at INTEGER NOT NULL,
             last_seen_at  INTEGER NOT NULL,
-            departed_at   INTEGER
+            departed_at   INTEGER,
+            -- Set once the peer has presented a server cert naming its id; from
+            -- then on a cert without that name is refused. See
+            -- 20261013000000__mesh_peers_identity_pinned.
+            identity_pinned_at INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS mesh_trust (

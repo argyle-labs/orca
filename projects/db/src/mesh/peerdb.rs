@@ -938,6 +938,39 @@ pub fn peer_pubkey_fp_raw(conn: &Connection, peer_id: &str) -> Result<Option<Opt
     Ok(row)
 }
 
+/// Record that `peer_id` has presented a server cert bound to its id. Local
+/// to this host: each dialler pins what it has itself seen.
+pub fn pin_peer_identity(conn: &Connection, peer_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE mesh_peers SET identity_pinned_at = ? WHERE peer_id = ? AND identity_pinned_at IS NULL",
+        params![now_secs(), peer_id],
+    )?;
+    Ok(())
+}
+
+/// Drop the pin so `peer_id` is accepted without an identity name again, e.g.
+/// after it was renewed by a signer that predates identity names. `true` when
+/// a pin was cleared.
+pub fn unpin_peer_identity(conn: &Connection, peer_id: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE mesh_peers SET identity_pinned_at = NULL WHERE peer_id = ? AND identity_pinned_at IS NOT NULL",
+        params![peer_id],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn is_peer_identity_pinned(conn: &Connection, peer_id: &str) -> Result<bool> {
+    let v: Option<i64> = conn
+        .query_row(
+            "SELECT identity_pinned_at FROM mesh_peers WHERE peer_id = ?",
+            params![peer_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(v.is_some())
+}
+
 pub fn list_peers(conn: &Connection) -> Result<Vec<PeerRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT p.peer_id,
@@ -1004,8 +1037,9 @@ pub fn unmark_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
 /// mesh_discovery, and any outbound offers tied to it. Unlike
 /// [`mark_peer_departed`] this leaves no audit row — it's the purge path for
 /// `orca system mesh delete --action forget`, used to evict stale/orphan identities (machine_id churn,
-/// decommissioned hosts) so they stop showing up in the roster. Returns the
-/// total number of rows removed across all four tables.
+/// decommissioned hosts) so they stop showing up in the roster. Releases the
+/// id: a host may join under it again afterwards. Returns the total number of
+/// rows removed across all four tables.
 pub fn forget_peer(conn: &Connection, peer_id: &str) -> Result<u32> {
     let tx = conn.unchecked_transaction()?;
     let mut removed = 0u32;
@@ -2357,6 +2391,29 @@ mod tests {
             pinned_pubkey_fp(&c, HOSTG).unwrap().is_none(),
             "departed peer refused"
         );
+    }
+
+    #[test]
+    fn pin_peer_identity_sticks() {
+        let (_d, conn) = test_conn();
+        let id = utils::id::new();
+        upsert_peer(&conn, &id, "h", "10.0.0.2", 12002, None, "").unwrap();
+        assert!(!is_peer_identity_pinned(&conn, &id).unwrap());
+        pin_peer_identity(&conn, &id).unwrap();
+        assert!(is_peer_identity_pinned(&conn, &id).unwrap());
+        upsert_peer(&conn, &id, "h", "10.0.0.2", 12002, None, "").unwrap();
+        assert!(is_peer_identity_pinned(&conn, &id).unwrap());
+    }
+
+    #[test]
+    fn unpin_peer_identity_clears_only_a_set_pin() {
+        let (_d, conn) = test_conn();
+        let id = utils::id::new();
+        upsert_peer(&conn, &id, "h", "10.0.0.2", 12002, None, "").unwrap();
+        assert!(!unpin_peer_identity(&conn, &id).unwrap());
+        pin_peer_identity(&conn, &id).unwrap();
+        assert!(unpin_peer_identity(&conn, &id).unwrap());
+        assert!(!is_peer_identity_pinned(&conn, &id).unwrap());
     }
 
     #[test]

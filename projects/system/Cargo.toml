@@ -80,6 +80,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 serial_test = { workspace = true }
 wiremock = { workspace = true }
+rcgen = { workspace = true }
 db = { workspace = true, default-features = true, features = ["test-util"] }
 # A hook test drives libc fork/dup2/waitpid directly.
 libc = { workspace = true }

@@ -152,7 +152,8 @@ async fn renew(pki_d: &std::path::Path, need_server: bool, need_client: bool) ->
         // Cert CN must be stable across hostname flaps — use machine_id.
         let host = crate::host_identity::machine_id().to_string();
         if need_server {
-            utils::pki::reissue_mesh_server_cert(pki_d).context("self-sign mesh server cert")?;
+            utils::pki::reissue_mesh_server_cert(pki_d, &host)
+                .context("self-sign mesh server cert")?;
             info!("[cert-rotation] self-reissued mesh server cert");
         }
         if need_client {
