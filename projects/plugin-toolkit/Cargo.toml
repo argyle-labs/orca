@@ -92,6 +92,11 @@ socketio = ["in-process", "dep:rust_socketio", "dep:native-tls"]
 # generated string-pattern validation); sheds reqwest/rustls/hyper + the
 # progenitor-client crate — that HTTP/TLS bulk is the size win.
 delegated-http = ["dep:regress"]
+# Delegated WebSocket (`plugin_toolkit::delegated_ws::WsClient`) over orca's
+# `ws.*` capabilities. Separate from `delegated-http` because that feature
+# swaps the `reqwest`/`api_client` names and excludes `http`; a plugin on the
+# real `http` stack can still delegate WebSocket. Dependency-free.
+delegated-ws = []
 # Meta-feature: the canonical profile for a full OpenAPI plugin built with
 # `plugin_toolkit_build::openapi_plugin`. Bundles the tool surface (`tools`),
 # the endpoint registry (`db`), and delegated HTTP so the generated progenitor

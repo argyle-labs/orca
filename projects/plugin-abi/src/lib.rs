@@ -519,3 +519,239 @@ pub struct AgentRegistration {
     #[serde(default)]
     pub prompt_fragments_json: String,
 }
+
+// ── Host-brokered WebSocket (the `ws.*` capability payloads) ─────────────────
+//
+// Core owns the WebSocket/TLS stack; a plugin opens a session, then pulls
+// inbound messages and pushes outbound ones by session id. Inbound delivery is
+// a pull (`ws.recv`) because the capability wire is serial: a plugin cannot
+// issue a `ws.send` while it is inside a host-driven stream.
+
+/// Open a WebSocket — the payload of the `ws.open` capability. The reply is a
+/// [`WsChunk::Open`] carrying the session id every other `ws.*` op names.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WsOpen {
+    /// Absolute `ws://` or `wss://` URL.
+    pub url: String,
+    /// Handshake request headers as ordered `(name, value)` pairs.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    /// Skip TLS verification (self-signed upstreams).
+    #[serde(default)]
+    pub insecure: bool,
+    /// Connect + handshake timeout in milliseconds. `None` = core's default.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Largest inbound message (and single frame) to accept, in bytes. `None` =
+    /// core's default (1 MiB). Core clamps it to 16 MiB. A larger message
+    /// fails the session.
+    #[serde(default)]
+    pub max_message_bytes: Option<u64>,
+}
+
+/// One event on a WebSocket session: the `ws.open` reply ([`WsChunk::Open`]) or
+/// one inbound message (the `ws.recv` reply; `null` there means the peer closed).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum WsChunk {
+    Open {
+        session: u64,
+    },
+    Text {
+        text: String,
+    },
+    Binary {
+        #[serde(with = "b64")]
+        bytes: Vec<u8>,
+    },
+}
+
+/// Wait for the next inbound message — the payload of the `ws.recv` capability.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WsRecv {
+    pub session: u64,
+    /// Give up (error, session kept) after this many milliseconds. `None` =
+    /// core's default (30s). Core clamps it to 30s and to the time left before
+    /// the enclosing tool invocation's ceiling.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// An outbound message body for [`WsSend`].
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WsPayload {
+    Text(String),
+    Binary(#[serde(with = "b64")] Vec<u8>),
+}
+
+/// Send one message — the payload of the `ws.send` capability.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WsSend {
+    pub session: u64,
+    #[serde(flatten)]
+    pub payload: WsPayload,
+}
+
+/// Close a session — the payload of the `ws.close` capability. `code` defaults
+/// to 1000 (normal closure).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WsClose {
+    pub session: u64,
+    #[serde(default)]
+    pub code: Option<u16>,
+}
+
+/// Standard-alphabet padded base64 for binary WebSocket payloads, hand-rolled so
+/// this crate keeps only its serde + schemars deps.
+mod b64 {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub fn serialize<S: serde::Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let n = chunk
+                .iter()
+                .enumerate()
+                .fold(0u32, |acc, (i, b)| acc | (u32::from(*b) << (16 - 8 * i)));
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        s.serialize_str(&out)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let text: String = serde::Deserialize::deserialize(d)?;
+        decode(&text).ok_or_else(|| serde::de::Error::custom("invalid base64"))
+    }
+
+    fn decode(text: &str) -> Option<Vec<u8>> {
+        let raw = text.as_bytes();
+        if !raw.len().is_multiple_of(4) {
+            return None;
+        }
+        let mut out = Vec::with_capacity(raw.len() / 4 * 3);
+        for quad in raw.chunks(4) {
+            let pad = quad.iter().rev().take_while(|&&c| c == b'=').count();
+            if pad > 2 {
+                return None;
+            }
+            let mut n = 0u32;
+            for (i, &c) in quad.iter().enumerate() {
+                let v = if i >= 4 - pad {
+                    0
+                } else {
+                    ALPHABET.iter().position(|&a| a == c)? as u32
+                };
+                n |= v << (18 - 6 * i);
+            }
+            out.extend_from_slice(&n.to_be_bytes()[1..4 - pad]);
+        }
+        Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn ws_open_defaults_optional_fields() {
+        let open: WsOpen = serde_json::from_value(json!({"url": "wss://h/ws"})).unwrap();
+        assert_eq!(
+            open,
+            WsOpen {
+                url: "wss://h/ws".into(),
+                headers: vec![],
+                insecure: false,
+                timeout_ms: None,
+                max_message_bytes: None,
+            }
+        );
+    }
+
+    #[test]
+    fn ws_chunk_wire_shape() {
+        assert_eq!(
+            serde_json::to_value(WsChunk::Open { session: 7 }).unwrap(),
+            json!({"t": "open", "session": 7})
+        );
+        assert_eq!(
+            serde_json::to_value(WsChunk::Text { text: "hi".into() }).unwrap(),
+            json!({"t": "text", "text": "hi"})
+        );
+        assert_eq!(
+            serde_json::to_value(WsChunk::Binary {
+                bytes: b"hello".to_vec()
+            })
+            .unwrap(),
+            json!({"t": "binary", "bytes": "aGVsbG8="})
+        );
+    }
+
+    #[test]
+    fn ws_send_wire_shape() {
+        let text = WsSend {
+            session: 1,
+            payload: WsPayload::Text("ping".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&text).unwrap(),
+            json!({"session": 1, "text": "ping"})
+        );
+        let bin = WsSend {
+            session: 2,
+            payload: WsPayload::Binary(vec![0, 255]),
+        };
+        let v = serde_json::to_value(&bin).unwrap();
+        assert_eq!(v, json!({"session": 2, "binary": "AP8="}));
+        assert_eq!(serde_json::from_value::<WsSend>(v).unwrap(), bin);
+    }
+
+    #[test]
+    fn ws_close_and_recv_default_optional_fields() {
+        let close: WsClose = serde_json::from_value(json!({"session": 3})).unwrap();
+        assert_eq!(
+            close,
+            WsClose {
+                session: 3,
+                code: None
+            }
+        );
+        let recv: WsRecv = serde_json::from_value(json!({"session": 3})).unwrap();
+        assert_eq!(
+            recv,
+            WsRecv {
+                session: 3,
+                timeout_ms: None
+            }
+        );
+    }
+
+    #[test]
+    fn base64_round_trips_every_padding_length() {
+        for len in 0..=8u8 {
+            let bytes: Vec<u8> = (0..len).map(|i| i.wrapping_mul(97)).collect();
+            let chunk = WsChunk::Binary { bytes };
+            let back: WsChunk =
+                serde_json::from_value(serde_json::to_value(&chunk).unwrap()).unwrap();
+            assert_eq!(back, chunk);
+        }
+    }
+
+    #[test]
+    fn base64_rejects_garbage() {
+        for bad in ["abc", "a!==", "a==="] {
+            assert!(
+                serde_json::from_value::<WsChunk>(json!({"t": "binary", "bytes": bad})).is_err(),
+                "{bad}"
+            );
+        }
+    }
+}

@@ -34,6 +34,12 @@ tokio      = { workspace = true }
 # `http.request` capability instead of linking their own reqwest — the capability
 # host executes it here on orca's one client. (`utils::http` = the ONE HTTP home.)
 utils      = { workspace = true, default-features = true }
+# Host side of the `ws.*` capabilities, on the same rustls + platform-verifier
+# trust stack `utils::http` uses.
+tokio-tungstenite = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls     = { workspace = true }
+rustls-platform-verifier = { workspace = true }
 tracing    = { workspace = true }
 # Peer credentials of the accepted plugin connection (SO_PEERCRED / LOCAL_PEERPID).
 libc       = { workspace = true }
@@ -42,6 +48,7 @@ libc       = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
 db = { workspace = true, default-features = true, features = ["test-util"] }
+rcgen = { workspace = true }
 
 [lints]
 workspace = true
