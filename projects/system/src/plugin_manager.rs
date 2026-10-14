@@ -1131,6 +1131,11 @@ fn plugin_update_skip(installed: Option<&str>, target: &str, pinned: bool) -> Op
     Some(format!("already up to date at {cur}"))
 }
 
+/// A dry run forwarded to a peer that ignores `dryRun` still only probes.
+fn neutralize_plugin_update(args: &mut PluginUpdateArgs) {
+    args.execute = false;
+}
+
 /// [MUTATES STATE] Update ONE installed plugin to the newest release (or a pinned
 /// `--version`). DRY RUN by default — resolves installed→target and reports
 /// whether an update is available without touching disk; pass `--execute` to
@@ -1142,8 +1147,15 @@ fn plugin_update_skip(installed: Option<&str>, target: &str, pinned: bool) -> Op
 // REPLACE a real plan with an empty one. It still spells the opt-in `execute`,
 // which is the single fleet-wide name (#636). Migrating it to return a typed
 // `ExecutionPlan` is the follow-up; that needs the body to run in plan mode,
-// which the intercept-before-body gate cannot express.
-#[orca_tool(domain = "plugin", verb = "update", execute_gated = false)]
+// which the intercept-before-body gate cannot express. `dry_run_aware` routes
+// `dryRun: true` to its own plan path.
+#[orca_tool(
+    domain = "plugin",
+    verb = "update",
+    execute_gated = false,
+    dry_run_aware = true,
+    dry_run_neutralize = neutralize_plugin_update
+)]
 async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUpdateOutput> {
     let entry = catalog_resolved()
         .await
@@ -1207,9 +1219,10 @@ async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUp
         args.version.is_some(),
     );
 
-    if !args.execute || skip.is_some() {
+    let execute = args.execute && !ctx.dry_run();
+    if !execute || skip.is_some() {
         let note = match (&installed_version, skip) {
-            (_, Some(why)) if args.execute => why,
+            (_, Some(why)) if execute => why,
             (_, Some(why)) => format!("dry-run: {why}"),
             (Some(cur), None) if update_available => format!(
                 "dry-run: update available {cur} → {target_version} (pass --execute to apply)"

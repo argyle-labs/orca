@@ -524,8 +524,17 @@ async fn run_staged(stage: &Stage, input: &[u8], caller_uid: u32) -> Result<Appl
     let child = &mut running.child;
     let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
     if let Some(mut stdin) = stdin {
-        stdin.write_all(input).await.context("write op to plugin")?;
-        stdin.shutdown().await.context("close plugin stdin")?;
+        // A plugin may exit without reading its op; its exit status is the
+        // outcome, so a closed pipe is not an error.
+        let written = match stdin.write_all(input).await {
+            Ok(()) => stdin.shutdown().await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = written
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(e).context("write op to plugin");
+        }
     }
     let (status, stdout, stderr) =
         tokio::try_join!(child.wait(), read_all(stdout), read_all(stderr))
@@ -896,6 +905,17 @@ esac
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn a_plugin_exiting_without_reading_its_op_reports_its_exit() {
+        let home = orca_home_with("deaf", "#!/bin/sh\nexit 3\n");
+        let mut r = req("deaf", "ping");
+        r.payload = Some(serde_json::Value::String("x".repeat(1 << 20)));
+        let out = apply_in(home.path(), &r, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 3);
     }
 
     #[test]

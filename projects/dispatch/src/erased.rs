@@ -79,11 +79,17 @@ pub trait ErasedTool: Send + Sync {
     /// holding the `can_mutate` opt-in invoke it despite `required_role` being
     /// `"admin"`; control-plane admin tools leave this false.
     fn data_mutation(&self) -> bool;
-    /// Whether this tool APPLIES changes and so requires an explicit `execute`
-    /// opt-in. Mirrors `OrcaToolDef::EXECUTE_GATED`. Dry-run is the default:
-    /// without the opt-in, [`Self::run_json`] returns an `ExecutionPlan` and
-    /// the tool body never runs.
+    /// Whether this tool applies changes and can be previewed. Mirrors
+    /// `OrcaToolDef::EXECUTE_GATED`: it executes by default, and with
+    /// `dryRun: true` [`Self::run_json`] returns an `ExecutionPlan` without
+    /// running the body.
     fn execute_gated(&self) -> bool;
+    /// Whether this ungated tool honours `dryRun` in its own body. Mirrors
+    /// `OrcaToolDef::DRY_RUN_AWARE`.
+    fn dry_run_aware(&self) -> bool;
+    /// Whether this tool clears its apply opt-ins before a dry run is
+    /// forwarded. Mirrors `OrcaToolDef::DRY_RUN_NEUTRALIZES`.
+    fn dry_run_neutralizes(&self) -> bool;
     /// JSON Schema for this tool's Args — used for MCP tools/list, CLI flag generation,
     /// OpenAPI request body, and TS `.d.ts` emission.
     fn input_schema(&self) -> Value;
@@ -126,14 +132,22 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
         T::EXECUTE_GATED
     }
 
+    fn dry_run_aware(&self) -> bool {
+        T::DRY_RUN_AWARE
+    }
+
+    fn dry_run_neutralizes(&self) -> bool {
+        T::DRY_RUN_NEUTRALIZES
+    }
+
     fn input_schema(&self) -> Value {
         let schema = schema_for::<T::Args>();
-        // A gated tool's Args deliberately do not carry `execute` — the gate
+        // A gated tool's Args deliberately do not carry `dryRun` — the gate
         // reads it off the raw args. Advertise it here so OpenAPI, MCP
-        // tools/list and CLI flag generation all show the opt-in that callers
-        // must pass, instead of it being an undocumented magic field.
-        if T::EXECUTE_GATED {
-            return with_execute_opt_in(schema);
+        // tools/list and CLI flag generation all show it instead of it being
+        // an undocumented magic field.
+        if T::EXECUTE_GATED || T::DRY_RUN_AWARE {
+            return with_dry_run_opt_in(schema, T::EXECUTE_GATED);
         }
         schema
     }
@@ -166,12 +180,23 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
                 ))
                 .into());
             }
-            // Dry-run is the DEFAULT for every verb that applies changes. No
-            // opt-in ⇒ describe and return; the tool body is never entered, so
-            // this cannot half-apply.
-            let args = if T::EXECUTE_GATED {
-                if !execute_opt_in(&args) {
-                    let args = without_execute(args);
+            // Gated verbs execute by default; `dryRun: true` describes and
+            // returns without entering the body, so a plan cannot half-apply.
+            // The role check above runs first: an admin verb's dry run is
+            // admin-only too.
+            // `dryRun` is stripped from every tool's args before typed
+            // deserialization, so no verb can silently ignore it: gated verbs
+            // plan, dry-run-aware verbs run with `ctx.dry_run()` set, and any
+            // other verb refuses.
+            let dry_run = dry_run_requested(&args)?;
+            let mut args = without_dry_run_field(args);
+            let mut dry_run_ctx;
+            let mut ctx = ctx;
+            if T::EXECUTE_GATED {
+                if let Some(obj) = args.as_object_mut() {
+                    obj.remove(contract::plan::EXECUTE_FIELD);
+                }
+                if dry_run {
                     // A plan for inputs the verb would refuse is a false
                     // promise, so they are rejected here exactly as an apply
                     // would reject them.
@@ -181,13 +206,19 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
                         anyhow::anyhow!("failed to serialize plan for {}: {e}", T::NAME)
                     });
                 }
-                // Strip the opt-in before typed deserialization: it is the
-                // gate's field, not the verb's, and `deny_unknown_fields` args
-                // would otherwise reject it.
-                without_execute(args)
-            } else {
-                args
-            };
+            } else if dry_run {
+                if !T::DRY_RUN_AWARE {
+                    return Err(contract::OrcaError::invalid(format!(
+                        "{} does not support dryRun",
+                        T::NAME
+                    ))
+                    .with_code("args.invalid")
+                    .into());
+                }
+                dry_run_ctx = ctx.clone();
+                dry_run_ctx.set_dry_run(true);
+                ctx = &dry_run_ctx;
+            }
             let parsed = parse_args::<T>(args, ctx)?;
             let out = T::run(parsed, ctx).await?;
             serde_json::to_value(&out)
@@ -196,43 +227,62 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
     }
 }
 
-/// True when the caller explicitly opted in to apply changes. Anything other
-/// than boolean `true` — absent, `false`, a string, `null` — is NOT consent.
-fn execute_opt_in(args: &Value) -> bool {
-    args.get(contract::plan::EXECUTE_FIELD)
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+/// Absent or `false` executes, `true` dry-runs. Any other value is refused:
+/// guessing either way would apply a change the caller meant to preview, or
+/// silently skip one they meant to apply.
+pub(crate) fn dry_run_requested(args: &Value) -> Result<bool> {
+    match args.get(contract::plan::DRY_RUN_FIELD) {
+        None => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(contract::OrcaError::invalid(format!(
+            "dryRun must be a boolean, got {other}"
+        ))
+        .with_code("args.invalid")
+        .into()),
+    }
 }
 
-/// Remove the gate's own field so it never reaches the verb's typed `Args`.
-fn without_execute(mut args: Value) -> Value {
+fn without_dry_run_field(mut args: Value) -> Value {
     if let Some(obj) = args.as_object_mut() {
-        obj.remove(contract::plan::EXECUTE_FIELD);
+        obj.remove(contract::plan::DRY_RUN_FIELD);
     }
     args
 }
 
-/// Add the `execute` opt-in to a gated tool's advertised input schema. Leaves
-/// an existing `execute` property alone — a verb that already models its own
-/// opt-in keeps its documentation and semantics.
-fn with_execute_opt_in(mut schema: Value) -> Value {
+/// Advertise the `dryRun` opt-in on a gated or dry-run-aware tool's input
+/// schema, plus the deprecated `execute` no-op on a gated one. Leaves an existing property of either name
+/// alone — a verb that models its own keeps its documentation.
+fn with_dry_run_opt_in(mut schema: Value, gated: bool) -> Value {
     let Some(obj) = schema.as_object_mut() else {
         return schema;
     };
     let props = obj
         .entry("properties")
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    if let Some(map) = props.as_object_mut()
-        && !map.contains_key(contract::plan::EXECUTE_FIELD)
-    {
-        map.insert(
-            contract::plan::EXECUTE_FIELD.to_string(),
+    let description = if gated {
+        "Describe the change without applying it: returns an ExecutionPlan and changes nothing. Omitted or false applies the change."
+    } else {
+        "Describe the change without applying it: the verb reports what it would do and changes nothing."
+    };
+    if let Some(map) = props.as_object_mut() {
+        map.entry(contract::plan::DRY_RUN_FIELD).or_insert_with(|| {
             serde_json::json!({
                 "type": "boolean",
                 "default": false,
-                "description": "Apply the change. Omitted or false returns an ExecutionPlan describing what would happen, and changes nothing.",
-            }),
-        );
+                "description": description,
+            })
+        });
+        if !gated {
+            return schema;
+        }
+        map.entry(contract::plan::EXECUTE_FIELD)
+            .or_insert_with(|| {
+                serde_json::json!({
+                    "type": "boolean",
+                    "deprecated": true,
+                    "description": "Deprecated no-op: the change is applied by default. Use dryRun to preview.",
+                })
+            });
     }
     schema
 }
@@ -664,13 +714,11 @@ mod tests {
         assert_eq!(sanitize_schema(Value::Null), Value::Null);
     }
 
-    // ── execute gate (dry-run by default) ────────────────────────────────────
+    // ── execute gate (execute by default, dryRun opt-in) ─────────────────────
     //
-    // The invariant these lock down: a verb that applies changes does NOTHING
-    // unless the caller explicitly opted in. A regression here silently turns
-    // plans into applications, which is exactly the class of bug the gate
-    // exists to prevent — so each assertion below checks *behaviour*, not just
-    // the returned shape.
+    // The invariant these lock down: `dryRun: true` does NOTHING but plan, and
+    // anything else applies. Each assertion checks *behaviour* (did the body
+    // run), not just the returned shape.
 
     /// Targets whose body actually ran. A shared bool would be contaminated by
     /// tests running in parallel, so each test uses a UNIQUE target and asserts
@@ -716,7 +764,7 @@ mod tests {
         ToolWrapper(PhantomData)
     }
 
-    // ── execute authorization (opting in is not being allowed) ───────────────
+    // ── authorization (applies to execute and dry run alike) ─────────────────
 
     /// An admin-only data mutation — the shape nearly every gated verb has.
     struct AdminGatedTool;
@@ -757,11 +805,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unauthorized_caller_that_opts_in_is_refused_not_quietly_planned() {
+    async fn an_unauthorized_caller_is_refused_not_quietly_planned() {
         let target = "unauthorized-execute-target";
         let err = admin_gated()
             .run_json(
-                serde_json::json!({ "target": target, "execute": true }),
+                serde_json::json!({ "target": target }),
                 &ctx_as("member", false),
             )
             .await
@@ -777,11 +825,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_authorized_caller_that_opts_in_applies() {
+    async fn an_authorized_caller_applies() {
         let target = "authorized-execute-target";
         let out = admin_gated()
             .run_json(
-                serde_json::json!({ "target": target, "execute": true }),
+                serde_json::json!({ "target": target }),
                 &ctx_as("admin", false),
             )
             .await
@@ -798,7 +846,7 @@ mod tests {
         let target = "can-mutate-execute-target";
         admin_gated()
             .run_json(
-                serde_json::json!({ "target": target, "execute": true }),
+                serde_json::json!({ "target": target }),
                 &ctx_as("member", true),
             )
             .await
@@ -833,7 +881,7 @@ mod tests {
         let target = "unauthorized-admin-plan-target";
         admin_gated()
             .run_json(
-                serde_json::json!({ "target": target }),
+                serde_json::json!({ "target": target, "dryRun": true }),
                 &ctx_as("member", false),
             )
             .await
@@ -842,13 +890,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unauthorized_caller_can_still_ask_what_would_happen() {
-        // Planning is a read. Denying it would push operators toward executing
-        // blind, which is the opposite of what the gate is for.
-        let target = "unauthorized-plan-target";
+    async fn a_caller_with_the_required_role_can_ask_what_would_happen() {
+        // `test.gated` requires only the default role, so a member may plan it
+        // without mutate permission.
+        let target = "member-plan-target";
         let out = gated()
             .run_json(
-                serde_json::json!({ "target": target }),
+                serde_json::json!({ "target": target, "dryRun": true }),
                 &ctx_as("member", false),
             )
             .await
@@ -860,7 +908,7 @@ mod tests {
     #[tokio::test]
     async fn a_dry_run_with_invalid_args_is_refused_not_planned() {
         let err = gated()
-            .run_json(serde_json::json!({ "target": 7 }), &ctx())
+            .run_json(serde_json::json!({ "target": 7, "dryRun": true }), &ctx())
             .await
             .expect_err("a plan for args the verb would refuse must be an error");
         assert_invalid(&err, "invalid args for test.gated");
@@ -887,37 +935,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gated_tool_without_opt_in_does_not_run_and_returns_a_plan() {
-        let target = "no-opt-in-target";
+    async fn gated_tool_with_dry_run_does_not_run_and_returns_a_plan() {
+        let target = "dry-run-target";
         let ctx = ctx();
         let out = gated()
-            .run_json(serde_json::json!({ "target": target }), &ctx)
+            .run_json(
+                serde_json::json!({ "target": target, "dryRun": true }),
+                &ctx,
+            )
             .await
             .expect("planning must succeed, not error");
 
-        assert!(!ran(target), "the tool body ran despite no execute opt-in");
+        assert!(!ran(target), "the tool body ran despite dryRun");
         assert_eq!(out["dryRun"], serde_json::json!(true));
         assert_eq!(out["tool"], serde_json::json!("test.gated"));
-        // Inputs are echoed so an operator can confirm before opting in.
+        // Inputs are echoed without the gate's own field.
         assert_eq!(out["inputs"]["target"], serde_json::json!(target));
+        assert!(out["inputs"].get("dryRun").is_none(), "{out}");
         // Generic plans must not claim detail they do not have.
         assert_eq!(out["detailed"], serde_json::json!(false));
     }
 
     #[tokio::test]
-    async fn gated_tool_with_execute_true_actually_runs() {
-        let target = "opt-in-target";
+    async fn gated_tool_without_dry_run_actually_runs() {
+        let target = "default-execute-target";
         let ctx = ctx();
         let out = gated()
-            .run_json(
-                serde_json::json!({ "target": target, "execute": true }),
-                &ctx,
-            )
+            .run_json(serde_json::json!({ "target": target }), &ctx)
             .await
-            .expect("execute must run the body");
+            .expect("the default must run the body");
 
-        assert!(ran(target), "opt-in was given but the body never ran");
-        // Real output, not a plan.
+        assert!(ran(target), "no dryRun was given but the body never ran");
         assert_eq!(out["applied"], serde_json::json!(target));
         assert!(
             out.get("dryRun").is_none(),
@@ -926,61 +974,189 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_is_stripped_before_typed_deserialization() {
-        // GatedArgs is `deny_unknown_fields`: if the gate leaked `execute`
-        // through, this would fail to deserialize. That makes the strip a
-        // hard requirement, not a tidiness choice.
+    async fn gate_fields_are_stripped_before_typed_deserialization() {
+        // GatedArgs is `deny_unknown_fields`: a leaked gate field would fail
+        // to deserialize, so the strip is a hard requirement.
         let ctx = ctx();
-        let out = gated()
-            .run_json(
-                serde_json::json!({ "target": "strip-target", "execute": true }),
-                &ctx,
-            )
-            .await
-            .expect("execute must not reach the verb's typed Args");
-        assert_eq!(out["applied"], serde_json::json!("strip-target"));
+        for (i, extra) in [
+            serde_json::json!({ "dryRun": false }),
+            serde_json::json!({ "execute": true }),
+            serde_json::json!({ "execute": false }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let target = format!("strip-target-{i}");
+            let mut args = serde_json::json!({ "target": target });
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let out = gated()
+                .run_json(args.clone(), &ctx)
+                .await
+                .unwrap_or_else(|e| panic!("{args} reached the verb's typed Args: {e}"));
+            assert_eq!(out["applied"], serde_json::json!(target), "{args}");
+        }
     }
 
     #[tokio::test]
-    async fn only_boolean_true_counts_as_consent() {
+    async fn legacy_execute_is_a_no_op() {
         let ctx = ctx();
-        // A truthy-looking string is NOT consent — a caller fumbling the type
-        // must get a plan, never an application.
+        // `execute: false` executes like any call without dryRun.
+        let target = "legacy-execute-false";
+        gated()
+            .run_json(
+                serde_json::json!({ "target": target, "execute": false }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(ran(target));
+        // `execute: true` alongside dryRun does not override the dry run.
+        let target = "legacy-execute-with-dry-run";
+        let out = gated()
+            .run_json(
+                serde_json::json!({ "target": target, "execute": true, "dryRun": true }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["dryRun"], serde_json::json!(true));
+        assert!(!ran(target));
+    }
+
+    #[tokio::test]
+    async fn a_non_boolean_dry_run_is_refused() {
+        let ctx = ctx();
         for (i, value) in [
             serde_json::json!("true"),
             serde_json::json!(1),
-            serde_json::json!(false),
             serde_json::json!(null),
         ]
         .into_iter()
         .enumerate()
         {
-            let target = format!("not-consent-{i}");
-            let args = serde_json::json!({ "target": target, "execute": value });
-            let out = gated().run_json(args.clone(), &ctx).await.unwrap();
-            assert_eq!(
-                out["dryRun"],
-                serde_json::json!(true),
-                "{args} was treated as consent"
-            );
-            assert!(!ran(&target), "{args} caused the body to run");
+            let target = format!("bad-dry-run-{i}");
+            let args = serde_json::json!({ "target": target, "dryRun": value });
+            let err = gated().run_json(args.clone(), &ctx).await.unwrap_err();
+            let oe = err
+                .downcast_ref::<contract::OrcaError>()
+                .unwrap_or_else(|| panic!("not an OrcaError: {err}"));
+            assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{args}: {oe}");
+            assert!(!ran(&target), "{args} ran the body");
+        }
+        let target = "dry-run-false";
+        let out = gated()
+            .run_json(
+                serde_json::json!({ "target": target, "dryRun": false }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(out.get("dryRun").is_none());
+        assert!(ran(target));
+    }
+
+    struct UngatedStrictTool;
+
+    impl OrcaToolDef for UngatedStrictTool {
+        const NAME: &'static str = "test.ungated_strict";
+        const DESCRIPTION: &'static str = "applies without a dry run";
+        type Args = GatedArgs;
+        type Output = GatedOut;
+    }
+
+    #[async_trait]
+    impl OrcaTool for UngatedStrictTool {
+        async fn run(args: GatedArgs, _ctx: &ToolCtx) -> Result<GatedOut> {
+            RAN_TARGETS.lock().unwrap().push(args.target.clone());
+            Ok(GatedOut {
+                applied: args.target,
+            })
         }
     }
 
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct AwareOut {
+        saw_dry_run: bool,
+    }
+
+    struct AwareTool;
+
+    impl OrcaToolDef for AwareTool {
+        const NAME: &'static str = "test.aware";
+        const DESCRIPTION: &'static str = "plans itself";
+        const DRY_RUN_AWARE: bool = true;
+        type Args = GatedArgs;
+        type Output = AwareOut;
+    }
+
+    #[async_trait]
+    impl OrcaTool for AwareTool {
+        async fn run(_args: GatedArgs, ctx: &ToolCtx) -> Result<AwareOut> {
+            Ok(AwareOut {
+                saw_dry_run: ctx.dry_run(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unaware_ungated_tool_refuses_dry_run_by_name() {
+        let target = "ungated-dry-run-target";
+        let err = ToolWrapper::<UngatedStrictTool>(PhantomData)
+            .run_json(
+                serde_json::json!({ "target": target, "dryRun": true }),
+                &ctx(),
+            )
+            .await
+            .expect_err("dryRun must never be silently ignored");
+        let oe = err
+            .downcast_ref::<contract::OrcaError>()
+            .unwrap_or_else(|| panic!("not an OrcaError: {err}"));
+        assert_eq!(oe.kind, contract::ErrorKind::Invalid, "{oe}");
+        assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{oe}");
+        assert_eq!(oe.message, "test.ungated_strict does not support dryRun");
+        assert!(!ran(target));
+    }
+
+    #[tokio::test]
+    async fn an_aware_ungated_tool_runs_with_dry_run_set() {
+        let w = ToolWrapper::<AwareTool>(PhantomData);
+        let out = w
+            .run_json(serde_json::json!({ "target": "a", "dryRun": true }), &ctx())
+            .await
+            .unwrap();
+        assert_eq!(out["saw_dry_run"], serde_json::json!(true));
+        let out = w
+            .run_json(serde_json::json!({ "target": "a" }), &ctx())
+            .await
+            .unwrap();
+        assert_eq!(out["saw_dry_run"], serde_json::json!(false));
+        assert!(w.input_schema()["properties"]["dryRun"].is_object());
+        assert!(w.input_schema()["properties"].get("execute").is_none());
+    }
+
     #[test]
-    fn gated_tool_advertises_the_execute_opt_in_and_ungated_does_not() {
+    fn gated_tool_advertises_dry_run_and_ungated_does_not() {
         let gated_schema = gated().input_schema();
-        assert!(
-            gated_schema["properties"]["execute"]["type"] == serde_json::json!("boolean"),
-            "gated tool must document its opt-in: {gated_schema}"
+        assert_eq!(
+            gated_schema["properties"]["dryRun"]["type"],
+            serde_json::json!("boolean"),
+            "gated tool must document dryRun: {gated_schema}"
+        );
+        assert_eq!(
+            gated_schema["properties"]["execute"]["deprecated"],
+            serde_json::json!(true),
+            "legacy execute stays documented as deprecated: {gated_schema}"
         );
         // The verb's own field survives the injection.
         assert!(gated_schema["properties"]["target"].is_object());
 
         let plain = ToolWrapper::<DoubleTool>(PhantomData).input_schema();
         assert!(
-            plain["properties"].get("execute").is_none(),
-            "ungated tool must not advertise an opt-in it does not honour"
+            plain["properties"].get("dryRun").is_none()
+                && plain["properties"].get("execute").is_none(),
+            "ungated tool must not advertise a gate it does not honour"
         );
     }
 
