@@ -1,16 +1,11 @@
 name: Release
 
-# Orca's release runs on the SHARED Gitea-native pipeline in argyle-labs/.github
-# (see [[unified-cicd-pipeline-architecture]]). This file is a thin caller — all
-# build/package/publish logic lives in the shared reusable release.yml.
-#
-# This file owns the GATED release stages ONLY, triggered by operator dispatch:
-#   dispatch rc-publish     → cut vX.Y.Z-rc.N → Gitea Releases (canonical) → mirror GitHub
-#   dispatch promote-stable → cut vX.Y.Z stable → Gitea → mirror GitHub
-#
-# Releases are cut only via the operator dispatch stages above.
-#
-# Gates = the operator dispatch itself (Gitea has no environment: reviewers).
+# Ordered release jobs from argyle-labs/.github job-release-* actions, triggered
+# by operator dispatch (the dispatch is the gate; Gitea has no environment
+# reviewers):
+#   rc-publish     → vX.Y.Z-rc.N → Gitea Releases (canonical) → mirror GitHub
+#   promote-stable → vX.Y.Z      → Gitea → mirror GitHub
+# version → build-* (parallel) → package / package-macos → publish → crates.
 
 on:
   workflow_dispatch:
@@ -26,33 +21,159 @@ on:
         options: [patch, minor, major]
         default: patch
 
-jobs:
-  release:
-    uses: argyle-labs/.github/.github/workflows/release.yml@main
-    with:
-      stage: ${{ inputs.stage }}
-      bump: ${{ inputs.bump }}
-      asset-profile: full
-      # Build the macOS .pkg on our mint mac runner (label `macos`).
-      # Without this the shared pipeline skips package-macos-pkg.
-      mint-runner-label: macos
-      # Ship ONLY the orca daemon. The workspace also has a `uniffi-bindgen`
-      # helper bin (in app-kit); without this the shared pipeline's derive-all-
-      # bins logic tries to build it as a release artifact and fails with
-      # "no bin target named `uniffi-bindgen` in default-run packages".
-      bins: '["orca"]'
-      # Linux targets only. The aarch64-apple-darwin binary is built NATIVELY on
-      # the mac runner leg (mint-runner-label) — the zigbuild cross-compile emits
-      # a duplicate-libiconv Mach-O that macOS dyld refuses to load.
-      targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl"]'
-    secrets: inherit
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_REGISTRIES_GITEA_INDEX: sparse+https://gitea.scottkey.me/api/packages/argyle-labs/cargo/
 
-  # Publishes the orca-* crates to the Gitea cargo registry from the release
-  # tag. The branch tip carries the version bump; the tag pins the exact commit
-  # released, so a later push to the branch can't change what gets published.
-  publish-crates:
-    name: Publish crates to Gitea registry
-    needs: [release]
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      rel-name: ${{ steps.v.outputs.rel-name }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      draft: ${{ steps.v.outputs.draft }}
+      mirror: ${{ steps.v.outputs.mirror }}
+    steps:
+      - name: Version
+        id: v
+        uses: argyle-labs/.github/.github/actions/job-release-version@feat/composable-release-jobs
+        with:
+          stage: ${{ inputs.stage }}
+          bump: ${{ inputs.bump }}
+
+  build-x86_64-linux-gnu:
+    needs: version
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Build x86_64-unknown-linux-gnu
+        uses: argyle-labs/.github/.github/actions/job-release-build@feat/composable-release-jobs
+        with:
+          target: x86_64-unknown-linux-gnu
+          version: ${{ needs.version.outputs.version }}
+          tag: ${{ needs.version.outputs.tag }}
+          asset-profile: full
+          # The workspace also has a uniffi-bindgen helper bin; ship only orca.
+          bins: '["orca"]'
+          disable-lto-for-rc: 'true'
+          orca-fetch-token: ${{ secrets.ORCA_FETCH_TOKEN }}
+          sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+
+  build-x86_64-linux-musl:
+    needs: version
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Build x86_64-unknown-linux-musl
+        uses: argyle-labs/.github/.github/actions/job-release-build@feat/composable-release-jobs
+        with:
+          target: x86_64-unknown-linux-musl
+          version: ${{ needs.version.outputs.version }}
+          tag: ${{ needs.version.outputs.tag }}
+          asset-profile: full
+          # The workspace also has a uniffi-bindgen helper bin; ship only orca.
+          bins: '["orca"]'
+          disable-lto-for-rc: 'true'
+          orca-fetch-token: ${{ secrets.ORCA_FETCH_TOKEN }}
+          sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+
+  build-aarch64-linux-gnu:
+    needs: version
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Build aarch64-unknown-linux-gnu
+        uses: argyle-labs/.github/.github/actions/job-release-build@feat/composable-release-jobs
+        with:
+          target: aarch64-unknown-linux-gnu
+          version: ${{ needs.version.outputs.version }}
+          tag: ${{ needs.version.outputs.tag }}
+          asset-profile: full
+          # The workspace also has a uniffi-bindgen helper bin; ship only orca.
+          bins: '["orca"]'
+          disable-lto-for-rc: 'true'
+          orca-fetch-token: ${{ secrets.ORCA_FETCH_TOKEN }}
+          sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
+          sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+          sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+
+  build-aarch64-apple-darwin:
+    needs: version
+    runs-on: macos
+    steps:
+      - name: Build aarch64-apple-darwin
+        uses: argyle-labs/.github/.github/actions/job-release-build-macos@feat/composable-release-jobs
+        with:
+          version: ${{ needs.version.outputs.version }}
+          disable-lto-for-rc: 'true'
+
+  package:
+    needs: [version, build-x86_64-linux-gnu, build-x86_64-linux-musl, build-aarch64-linux-gnu, build-aarch64-apple-darwin]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Package deb/rpm/PKGBUILD/homebrew/plg
+        uses: argyle-labs/.github/.github/actions/job-release-package@feat/composable-release-jobs
+
+  package-macos:
+    needs: [version, build-aarch64-apple-darwin]
+    runs-on: macos
+    continue-on-error: true
+    steps:
+      - name: Package .pkg
+        uses: argyle-labs/.github/.github/actions/job-release-package-macos@feat/composable-release-jobs
+        with:
+          version: ${{ needs.version.outputs.version }}
+
+  # No `if:` on publish: Gitea's act never schedules a job whose `if` reads
+  # needs.*.result, and hangs one that needs a skipped job.
+  publish:
+    needs: [version, package, package-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish
+        uses: argyle-labs/.github/.github/actions/job-release-publish@feat/composable-release-jobs
+        with:
+          version: ${{ needs.version.outputs.version }}
+          tag: ${{ needs.version.outputs.tag }}
+          rel-name: ${{ needs.version.outputs.rel-name }}
+          prerelease: ${{ needs.version.outputs.prerelease }}
+          draft: ${{ needs.version.outputs.draft }}
+          mirror: ${{ needs.version.outputs.mirror }}
+          targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl","aarch64-unknown-linux-gnu","aarch64-apple-darwin"]'
+          asset-profile: full
+          release-token: ${{ secrets.ORCA_RELEASE_TOKEN }}
+          github-token: ${{ secrets.GH_RELEASE_TOKEN }}
+
+  crates:
+    needs: publish
     runs-on: ci-large
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
@@ -63,23 +184,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Check out release branch
-        uses: actions/checkout@v5
+      - name: Publish crates
+        uses: argyle-labs/.github/.github/actions/job-release-crates@feat/composable-release-jobs
         with:
-          ref: ${{ github.ref }}
-          fetch-depth: 0
-      - name: Check out release tag
-        run: |
-          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
-          tag="v$version"
-          [ -n "$version" ] || { echo "no [workspace.package] version in Cargo.toml" >&2; exit 1; }
-          git rev-parse -q --verify "refs/tags/$tag" >/dev/null || { echo "tag $tag not found" >&2; exit 1; }
-          git checkout -q "$tag"
-          [ "$(git rev-parse HEAD)" = "$(git rev-parse "$tag^{commit}")" ] || { echo "HEAD is not $tag" >&2; exit 1; }
-          echo "Publishing from $tag ($(git rev-parse HEAD))"
-      - name: Fetch dependencies
-        run: cargo fetch --locked
-      - name: Publish crates in dependency order
-        env:
-          CARGO_REGISTRIES_GITEA_TOKEN: Bearer ${{ secrets.CI_REGISTRY_TOKEN }}
-        run: scripts/publish-crates.sh
+          registry-token: ${{ secrets.CI_REGISTRY_TOKEN }}

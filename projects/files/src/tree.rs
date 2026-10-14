@@ -127,6 +127,10 @@ pub fn build_tree_raw(dir: &Path, root_dir: &Path, ignored: &HashSet<String>) ->
         if name.starts_with('.') || ignored.contains(&name) {
             continue;
         }
+        // A link could point out of the root; `files.*` never follows one.
+        if entry.file_type().is_ok_and(|t| t.is_symlink()) {
+            continue;
+        }
         let full = entry.path();
         let rel = full
             .strip_prefix(root_dir)

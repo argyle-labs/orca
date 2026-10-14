@@ -59,4 +59,4 @@ pub use registry::{
     role_table, set_dynamic_dispatch, take_ambient, tool_exists, tool_manifest_json,
 };
 #[cfg(feature = "server")]
-pub use registry::{PEER_HEADER, axum_router};
+pub use registry::{PEER_HEADER, UnboundCaller, axum_router};
