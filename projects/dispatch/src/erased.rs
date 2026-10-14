@@ -94,6 +94,9 @@ fn canonical_key(key: &str) -> String {
         .collect()
 }
 
+/// Run-mode switches any tool may receive, whether or not its Args declare them.
+const AMBIENT_SWITCHES: [&str; 2] = [contract::plan::EXECUTE_FIELD, contract::plan::DRY_RUN_FIELD];
+
 /// Refuses arg keys the tool does not take. serde would drop them silently, so
 /// a misspelled or misplaced field (e.g. a target system) would run the call
 /// with that input missing instead of failing.
@@ -103,9 +106,12 @@ fn reject_unknown_keys(tool: &str, args: &Value, accepted: &AcceptedKeys) -> Res
     };
     let mut unknown: Vec<&str> = obj
         .keys()
-        // A generic client may send the execute opt-in to an ungated tool,
-        // where it is meaningless rather than a misdirected input.
-        .filter(|k| *k != contract::plan::EXECUTE_FIELD && !accepted.contains(&canonical_key(k)))
+        // A generic client may send the execute / dry-run switch to an ungated
+        // tool, where it is meaningless rather than a misdirected input.
+        .filter(|k| {
+            let key = canonical_key(k);
+            !AMBIENT_SWITCHES.iter().any(|s| canonical_key(s) == key) && !accepted.contains(&key)
+        })
         .map(String::as_str)
         .collect();
     if unknown.is_empty() {
@@ -790,6 +796,17 @@ mod tests {
         assert!(
             reject_unknown_keys("t", &serde_json::json!({"n": 1, "execute": true}), &keys).is_ok()
         );
+    }
+
+    #[test]
+    fn dry_run_is_tolerated_on_an_ungated_tool() {
+        let keys = keys_of(schemars::schema_for!(Args).to_value());
+        for args in [
+            serde_json::json!({"n": 1, "dryRun": true}),
+            serde_json::json!({"n": 1, "dry_run": true}),
+        ] {
+            assert!(reject_unknown_keys("t", &args, &keys).is_ok(), "{args}");
+        }
     }
 
     #[test]
