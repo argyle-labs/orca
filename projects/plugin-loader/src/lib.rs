@@ -656,9 +656,111 @@ fn domain_deregister(domain: &str, name: &str) {
 
 /// Reverse a set of `(domain, name)` registrations — used both to roll back a
 /// partially-registered plugin on load failure and to clean up on unload.
-fn rollback_domain_backends(pairs: &[(String, String)]) {
+fn rollback_domain_backends(software: &str, pairs: &[(String, String)]) {
     for (domain, name) in pairs {
         domain_deregister(domain, name);
+        release_backend_claim(software, domain, name);
+    }
+}
+
+/// How a domain's backend `name` is bound to the plugin registering it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameScope {
+    /// The name is the provider identity: it must equal the plugin id.
+    Own,
+    /// `agents`: the plugin id, or `<owner>/<id>`.
+    Agent,
+    /// The name is a domain key (notify endpoint, deploy host, backup kind)
+    /// that legitimately differs from the plugin id; the first plugin to
+    /// register it owns it until unload.
+    Claimed,
+}
+
+fn name_scope(domain: &str) -> NameScope {
+    match domain {
+        "agents" => NameScope::Agent,
+        "notifications" | "deploy_target" => NameScope::Claimed,
+        d if BUILTIN_BACKEND_DOMAINS.contains(&d) => NameScope::Own,
+        // Injected domains (backup KIND / TARGET) are keyed by kind.
+        _ => NameScope::Claimed,
+    }
+}
+
+/// Every domain [`domain_register`] resolves without consulting
+/// [`EXTRA_DOMAINS`].
+const BUILTIN_BACKEND_DOMAINS: &[&str] = &[
+    "storage",
+    "media",
+    "guest_mount",
+    "service",
+    "deploy_target",
+    "notifications",
+    "cluster_roster",
+    "topology",
+    "host_facts",
+    "secrets_backend",
+    "service_identity",
+    "diagnostics",
+    "permissions",
+    "notification_source",
+    "ups",
+    "guest_exec",
+    "agents",
+    "container_runtime",
+    "unit",
+    "web",
+    "subprocess_env",
+    "replication",
+];
+
+/// `(domain, name)` → plugin id for [`NameScope::Claimed`] registrations.
+static BACKEND_CLAIMS: std::sync::LazyLock<RwLock<HashMap<(String, String), String>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Refuse a backend whose name `software` may not register under.
+fn check_backend_owner(software: &str, def: &BackendDef) -> Result<()> {
+    let (domain, name) = (def.domain.as_str(), def.name.as_str());
+    if is_reserved_plugin_id(name) {
+        bail!(
+            "plugin '{software}' may not register {domain} backend '{name}': the name is reserved"
+        );
+    }
+    match name_scope(domain) {
+        NameScope::Own if name != software => bail!(
+            "plugin '{software}' may not register {domain} backend '{name}'; the name must be '{software}'"
+        ),
+        NameScope::Agent if !capability::agent_provider_owned(name, software) => bail!(
+            "plugin '{software}' may not register {domain} backend '{name}'; the name must be '{software}' or '<owner>/{software}'"
+        ),
+        NameScope::Claimed => {
+            let claims = BACKEND_CLAIMS.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(owner) = claims.get(&(domain.to_string(), name.to_string()))
+                && owner != software
+            {
+                bail!(
+                    "plugin '{software}' may not register {domain} backend '{name}': already registered by plugin '{owner}'"
+                );
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn claim_backend(software: &str, domain: &str, name: &str) {
+    if name_scope(domain) == NameScope::Claimed {
+        BACKEND_CLAIMS
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((domain.to_string(), name.to_string()), software.to_string());
+    }
+}
+
+fn release_backend_claim(software: &str, domain: &str, name: &str) {
+    let mut claims = BACKEND_CLAIMS.write().unwrap_or_else(|e| e.into_inner());
+    let key = (domain.to_string(), name.to_string());
+    if claims.get(&key).is_some_and(|owner| owner == software) {
+        claims.remove(&key);
     }
 }
 
@@ -706,30 +808,35 @@ fn register_backends(
     software: &str,
     defs: &[BackendDef],
 ) -> Result<Vec<(String, String)>> {
+    register_backends_with(software, defs, |def| {
+        make_backend_invoke(backing.clone(), def.invoke_prefix.clone())
+    })
+}
+
+fn register_backends_with(
+    software: &str,
+    defs: &[BackendDef],
+    make_invoke: impl Fn(&BackendDef) -> BackendInvoke,
+) -> Result<Vec<(String, String)>> {
     let mut registered: Vec<(String, String)> = Vec::new();
     for def in defs {
         let Some(register) = domain_register(&def.domain) else {
-            rollback_domain_backends(&registered);
+            rollback_domain_backends(software, &registered);
             bail!(
                 "plugin '{software}' backend '{}' targets unknown domain '{}'",
                 def.name,
                 def.domain
             );
         };
-        // Agent providers are keyed by name and contribute hooks into the
-        // operator's Claude config, so a plugin may only register its own.
-        if def.domain == "agents" && !capability::agent_provider_owned(&def.name, software) {
-            rollback_domain_backends(&registered);
-            bail!(
-                "plugin '{software}' may not register agents provider '{}'; the provider name must be '{software}' or '<owner>/{software}'",
-                def.name
-            );
+        if let Err(e) = check_backend_owner(software, def) {
+            rollback_domain_backends(software, &registered);
+            return Err(e);
         }
-        let invoke = make_backend_invoke(backing.clone(), def.invoke_prefix.clone());
-        if let Err(e) = register(def, invoke) {
-            rollback_domain_backends(&registered);
+        if let Err(e) = register(def, make_invoke(def)) {
+            rollback_domain_backends(software, &registered);
             return Err(e.context(format!("plugin '{software}' backend registration failed")));
         }
+        claim_backend(software, &def.domain, &def.name);
         registered.push((def.domain.clone(), def.name.clone()));
     }
     Ok(registered)
@@ -970,31 +1077,7 @@ pub fn loaded_plugins() -> Vec<LoadedPluginInfo> {
         .collect()
 }
 
-/// Ids a plugin may never load as. A plugin's principal owns every secret named
-/// `<id>` or `<id>.…`, so an id equal to a core secret name (or a core
-/// namespace) would hand the plugin that secret.
-pub const RESERVED_PLUGIN_IDS: &[&str] = &[
-    "orca",
-    "core",
-    "system",
-    "auth",
-    "secret",
-    "secrets",
-    "mesh",
-    "model",
-    "notify",
-    "plugin",
-    "db",
-    "github",
-    "github_token",
-    "anthropic",
-    "anthropic_api_key",
-    "release_source_api",
-];
-
-pub fn is_reserved_plugin_id(id: &str) -> bool {
-    RESERVED_PLUGIN_IDS.contains(&id)
-}
+pub use contract::plugin::{RESERVED_PLUGIN_IDS, is_reserved_plugin_id};
 
 /// Whether `id` matches `^[a-z][a-z0-9_-]{0,63}$`. No `.` (a dotted id would
 /// own a core secret's `<id>.…` names past the reserved list) and no `/`
@@ -1046,7 +1129,7 @@ pub fn unload_plugin(software: &str) -> usize {
         .filter(|p| p.software == software)
         .flat_map(|p| p.domain_backends.iter().cloned())
         .collect();
-    rollback_domain_backends(&removed_backends);
+    rollback_domain_backends(software, &removed_backends);
     dispatch::tool_roles::remove_plugin_tools(removed_tools.iter().map(String::as_str));
     reg.plugins.retain(|p| p.software != software);
     for name in &removed_tools {
@@ -1186,29 +1269,7 @@ mod loader_tests {
         Arc::new(|_op: &str, _args: sj::Value| Ok(sj::json!({})))
     }
 
-    /// The full set of domains the hardcoded [`domain_register`] table names.
-    const BUILTIN_DOMAINS: &[&str] = &[
-        "storage",
-        "service",
-        "deploy_target",
-        "notifications",
-        "cluster_roster",
-        "topology",
-        "host_facts",
-        "secrets_backend",
-        "service_identity",
-        "diagnostics",
-        "notification_source",
-        "ups",
-        "guest_exec",
-        "agents",
-        "container_runtime",
-        "unit",
-        "web",
-        "subprocess_env",
-        "guest_mount",
-        "replication",
-    ];
+    const BUILTIN_DOMAINS: &[&str] = BUILTIN_BACKEND_DOMAINS;
 
     #[test]
     fn domain_register_resolves_every_builtin_domain() {
@@ -1352,7 +1413,111 @@ mod loader_tests {
             };
             let _outcome = ctor(&def, noop_invoke());
         }
-        rollback_domain_backends(&pairs);
+        rollback_domain_backends("loader-test", &pairs);
+    }
+
+    fn def(domain: &str, name: &str) -> BackendDef {
+        BackendDef {
+            domain: domain.to_string(),
+            name: name.to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn own_name_domains_refuse_another_plugins_name() {
+        for domain in BUILTIN_DOMAINS {
+            if name_scope(domain) == NameScope::Claimed {
+                continue;
+            }
+            let err =
+                register_backends_with("owner-a", &[def(domain, "owner-b")], |_| noop_invoke())
+                    .expect_err("foreign name refused")
+                    .to_string();
+            assert!(
+                err.contains("owner-a") && err.contains(domain) && err.contains("owner-b"),
+                "{domain}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_names_are_refused_in_every_domain() {
+        for domain in BUILTIN_DOMAINS {
+            let err = register_backends_with("orca", &[def(domain, "orca")], |_| noop_invoke())
+                .expect_err("reserved name refused")
+                .to_string();
+            assert!(err.contains("reserved"), "{domain}: {err}");
+        }
+    }
+
+    #[test]
+    fn own_name_registration_works_and_unload_spares_other_plugins() {
+        let b = register_backends_with("owner-own-b", &[def("host_facts", "owner-own-b")], |_| {
+            noop_invoke()
+        })
+        .expect("own name registers");
+        let a = register_backends_with("owner-own-a", &[def("host_facts", "owner-own-a")], |_| {
+            noop_invoke()
+        })
+        .expect("own name registers");
+        assert!(
+            register_backends_with("owner-own-a", &[def("host_facts", "owner-own-b")], |_| {
+                noop_invoke()
+            })
+            .is_err()
+        );
+        rollback_domain_backends("owner-own-a", &a);
+        let names: Vec<String> = contract::host_facts::providers()
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n == "owner-own-b"));
+        assert!(!names.iter().any(|n| n == "owner-own-a"));
+        rollback_domain_backends("owner-own-b", &b);
+    }
+
+    #[test]
+    fn claimed_names_belong_to_the_first_registrant() {
+        let domain = "notifications";
+        let b = register_backends_with("claim-b", &[def(domain, "claim-endpoint")], |_| {
+            noop_invoke()
+        })
+        .expect("first claim registers");
+        let err = register_backends_with("claim-a", &[def(domain, "claim-endpoint")], |_| {
+            noop_invoke()
+        })
+        .expect_err("second plugin refused")
+        .to_string();
+        assert!(err.contains("claim-a") && err.contains("claim-b"), "{err}");
+        // Re-registering its own claim (reload) is allowed.
+        register_backends_with("claim-b", &[def(domain, "claim-endpoint")], |_| {
+            noop_invoke()
+        })
+        .expect("owner may re-register");
+        // A's rollback of B's pair releases nothing it does not own.
+        release_backend_claim("claim-a", domain, "claim-endpoint");
+        assert!(
+            register_backends_with("claim-a", &[def(domain, "claim-endpoint")], |_| {
+                noop_invoke()
+            })
+            .is_err()
+        );
+        rollback_domain_backends("claim-b", &b);
+        let a = register_backends_with("claim-a", &[def(domain, "claim-endpoint")], |_| {
+            noop_invoke()
+        })
+        .expect("released claim is free");
+        rollback_domain_backends("claim-a", &a);
+    }
+
+    #[test]
+    fn injected_domains_are_claimed() {
+        assert_eq!(name_scope("backup_kind"), NameScope::Claimed);
+        assert_eq!(name_scope("deploy_target"), NameScope::Claimed);
+        assert_eq!(name_scope("agents"), NameScope::Agent);
+        assert_eq!(name_scope("secrets_backend"), NameScope::Own);
     }
 
     /// A nested `block_on` panics on an async worker, so running one inside
