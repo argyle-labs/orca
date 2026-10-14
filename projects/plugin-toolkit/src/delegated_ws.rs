@@ -32,7 +32,8 @@ pub struct WsClient {
 }
 
 impl WsClient {
-    /// Open `req.url` (`ws://` / `wss://`) through the daemon.
+    /// Open `req.url` (`ws://` / `wss://`) through the daemon. Set
+    /// `req.max_message_bytes` for peers that send messages over 1 MiB.
     pub async fn connect(req: WsOpen) -> Result<Self> {
         match call("ws.open", &req)? {
             WsChunk::Open { session } => Ok(Self { session }),
@@ -173,6 +174,7 @@ mod tests {
                     headers: vec![("authorization".into(), "Bearer t".into())],
                     insecure: false,
                     timeout_ms: None,
+                    max_message_bytes: Some(4 << 20),
                 })
                 .await
                 .unwrap();
@@ -190,6 +192,7 @@ mod tests {
             ["ws.open", "ws.send", "ws.recv", "ws.recv", "ws.close"]
         );
         assert_eq!(calls[0].1["url"], "wss://example.test/ws");
+        assert_eq!(calls[0].1["max_message_bytes"], 4 << 20);
         assert_eq!(calls[1].1, json!({"session": 9, "text": "ping"}));
         assert_eq!(calls[4].1, json!({"session": 9, "code": null}));
     }
@@ -208,6 +211,7 @@ mod tests {
                     headers: vec![],
                     insecure: false,
                     timeout_ms: None,
+                    max_message_bytes: None,
                 })
                 .await?;
                 ws.recv().await
