@@ -5,6 +5,7 @@
 //! from `fs` to `files` to free up `std::fs` collision and reflect the
 //! domain (typed file/root operations) rather than a primitive.
 
+pub mod confine;
 pub mod docs;
 pub mod embedded;
 pub mod guard;
@@ -59,48 +60,54 @@ fn resolve_absolute(path: &str) -> Result<PathBuf> {
     Ok(pb)
 }
 
-fn resolve(
-    config: &Config,
-    root: Option<&str>,
-    path: &str,
-) -> Result<Option<(PathBuf, roots::FileRoot)>> {
-    let resolved = resolve_unguarded(config, root, path)?;
-    if let Some((dir, _)) = &resolved {
-        guard::deny_key_material(dir)?;
-    }
-    Ok(resolved)
+/// A path opened inside a registered root.
+struct Confined {
+    file: std::fs::File,
+    path: PathBuf,
+    root: roots::FileRoot,
 }
 
-fn resolve_unguarded(
-    config: &Config,
-    root: Option<&str>,
-    path: &str,
-) -> Result<Option<(PathBuf, roots::FileRoot)>> {
-    match root {
-        Some(EMBEDDED_ROOT) => Ok(None),
+/// Open `path` (relative to `root`, or absolute and beneath some registered
+/// root) through `confine::open_beneath`, refusing anything that resolves
+/// outside every root or into key material.
+fn open_confined(config: &Config, root: Option<&str>, path: &str) -> Result<Confined> {
+    let rs = roots::file_roots(config);
+    let (r, rel) = match root {
         Some(name) => {
-            let rs = roots::file_roots(config);
             let r = rs
                 .into_iter()
                 .find(|r| r.name == name)
                 .ok_or_else(|| anyhow!("unknown root: {name}"))?;
-            let dir = if path.is_empty() {
-                r.path.clone()
-            } else {
-                roots::resolve_within_root(&r.path, path)?
-            };
-            Ok(Some((dir, r)))
+            (r, PathBuf::from(path))
         }
         None => {
-            let dir = resolve_absolute(path)?;
-            let r = roots::FileRoot {
-                name: String::new(),
-                path: dir.clone(),
-                ignored: Default::default(),
-            };
-            Ok(Some((dir, r)))
+            let abs = resolve_absolute(path)?;
+            rs.into_iter()
+                .find_map(|r| confine::relative_to_root(&r.path, &abs).map(|rel| (r, rel)))
+                .ok_or_else(|| confine::outside_roots(&abs))?
         }
-    }
+    };
+    let full = r.path.join(&rel);
+    // A root may contain a key dir (e.g. a root at `~`).
+    guard::deny_key_material(&full)?;
+    let file = confine::open_beneath(&r.path, &rel)?;
+    Ok(Confined {
+        file,
+        path: full,
+        root: r,
+    })
+}
+
+fn is_not_found(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn read_text(mut file: std::fs::File) -> Result<String> {
+    use std::io::Read;
+    let mut s = String::new();
+    file.read_to_string(&mut s)?;
+    Ok(s)
 }
 
 pub async fn roots_list(config: &Config) -> Result<Vec<FsRootEntry>> {
@@ -149,25 +156,20 @@ pub async fn list(config: &Config, root: Option<&str>, path: &str) -> Result<Vec
             .collect());
     }
 
-    let (dir, _) = resolve(config, root, path)?.expect("non-embedded path returned");
+    let c = open_confined(config, root, path)?;
     let mut entries: Vec<FsEntry> = Vec::new();
-    for dent in std::fs::read_dir(&dir)? {
-        let dent = dent?;
-        let meta = dent.metadata()?;
-        let name = dent.file_name().to_string_lossy().into_owned();
+    for name in confine::read_dir_names(&c.file)? {
+        let st = confine::lstat_at(&c.file, &name)?;
+        let fmt = st.st_mode & libc::S_IFMT;
         entries.push(FsEntry {
-            path: dent.path().to_string_lossy().into_owned(),
-            kind: if meta.is_dir() {
+            path: c.path.join(&name).to_string_lossy().into_owned(),
+            kind: if fmt == libc::S_IFDIR {
                 FsNodeKind::Dir
             } else {
                 FsNodeKind::File
             },
-            size: if meta.is_file() {
-                Some(meta.len())
-            } else {
-                None
-            },
-            name,
+            size: (fmt == libc::S_IFREG).then_some(st.st_size as u64),
+            name: name.to_string_lossy().into_owned(),
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -185,8 +187,11 @@ pub async fn tree(
         return Ok(nodes.iter().map(tree_node_to_fs).collect());
     }
 
-    let (dir, r) = resolve(config, root, path)?.expect("non-embedded path returned");
-    let raw_nodes = roots::build_doc_tree(&dir, &r.path, &r.ignored);
+    let c = open_confined(config, root, path)?;
+    if !c.file.metadata()?.is_dir() {
+        return Err(anyhow!("not a directory: {}", c.path.display()));
+    }
+    let raw_nodes = roots::build_doc_tree(&c.path, &c.root.path, &c.root.ignored);
     let nodes = if raw {
         raw_nodes
     } else {
@@ -209,26 +214,22 @@ pub async fn read(
             .ok_or_else(|| anyhow!("not found: {EMBEDDED_ROOT}/{path}"));
     }
 
-    match root {
-        Some(name) => {
-            let rs = roots::file_roots(config);
-            let r = rs
-                .iter()
-                .find(|r| r.name == name)
-                .ok_or_else(|| anyhow!("unknown root: {name}"))?;
-            let full = roots::resolve_doc_file(&r.path, path)
-                .or_else(|| roots::resolve_within_root(&r.path, path).ok())
-                .filter(|p: &PathBuf| p.is_file())
-                .ok_or_else(|| anyhow!("not found: {name}/{path}"))?;
-            guard::deny_key_material(&full)?;
-            Ok(apply(std::fs::read_to_string(full)?))
-        }
-        None => {
-            let full = resolve_absolute(path)?;
-            guard::deny_key_material(&full)?;
-            Ok(apply(std::fs::read_to_string(full)?))
+    // Docs are addressed without their extension. Only not-found falls
+    // through, so an escape is never masked as "not found".
+    if root.is_some() {
+        for ext in [".md", ".mdx"] {
+            match open_confined(config, root, &format!("{path}{ext}")) {
+                Ok(c) if c.file.metadata()?.is_file() => return Ok(apply(read_text(c.file)?)),
+                Err(e) if !is_not_found(&e) => return Err(e),
+                _ => {}
+            }
         }
     }
+    let c = open_confined(config, root, path)?;
+    if !c.file.metadata()?.is_file() {
+        return Err(anyhow!("not a file: {}", c.path.display()));
+    }
+    Ok(apply(read_text(c.file)?))
 }
 
 /// Case-insensitive line search across one or all registered roots. Hits-only —
@@ -250,12 +251,12 @@ pub async fn search(config: &Config, query: &str, filter: &str) -> Result<Vec<Fs
             roots::collect_all_doc_files(&roots::build_doc_tree(&r.path, &r.path, &r.ignored));
         for file in files {
             let rel = file.path.clone();
-            let full = r.path.join(&rel);
             // A root that contains a key dir (e.g. `~`) must not search into it.
-            if guard::deny_key_material(&full).is_err() {
+            if guard::deny_key_material(&r.path.join(&rel)).is_err() {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&full) else {
+            let Ok(content) = confine::open_beneath(&r.path, Path::new(&rel)).and_then(read_text)
+            else {
                 continue;
             };
             let matches: Vec<FsSearchMatch> = content
@@ -314,18 +315,18 @@ pub async fn stat(config: &Config, root: Option<&str>, path: &str) -> Result<FsS
         });
     }
 
-    let (full, _) = resolve(config, root, path)?.expect("non-embedded path returned");
-    let exists = full.exists();
-    let (kind, size) = if exists {
-        let meta = std::fs::metadata(&full)?;
-        let kind = if meta.is_dir() {
-            FsNodeKind::Dir
-        } else {
-            FsNodeKind::File
-        };
-        (kind, meta.len())
-    } else {
-        (FsNodeKind::File, 0)
+    let (full, meta) = match open_confined(config, root, path) {
+        Ok(c) => {
+            let meta = c.file.metadata()?;
+            (c.path, Some(meta))
+        }
+        Err(e) if is_not_found(&e) => (resolve_unguarded_path(config, root, path)?, None),
+        Err(e) => return Err(e),
+    };
+    let (kind, size, exists) = match &meta {
+        Some(m) if m.is_dir() => (FsNodeKind::Dir, m.len(), true),
+        Some(m) => (FsNodeKind::File, m.len(), true),
+        None => (FsNodeKind::File, 0, false),
     };
     Ok(FsStatOutput {
         name: full
@@ -337,6 +338,19 @@ pub async fn stat(config: &Config, root: Option<&str>, path: &str) -> Result<FsS
         size,
         exists,
     })
+}
+
+/// Display path for a not-found `stat`; containment was already checked by
+/// the `open_confined` that reported not-found.
+fn resolve_unguarded_path(config: &Config, root: Option<&str>, path: &str) -> Result<PathBuf> {
+    match root {
+        Some(name) => roots::file_roots(config)
+            .into_iter()
+            .find(|r| r.name == name)
+            .map(|r| r.path.join(path))
+            .ok_or_else(|| anyhow!("unknown root: {name}")),
+        None => resolve_absolute(path),
+    }
 }
 
 #[cfg(test)]
@@ -374,7 +388,26 @@ mod tests {
             .as_nanos();
         base.push(format!("orca-files-{tag}-{nanos}-{:p}", &base));
         fs::create_dir_all(&base).unwrap();
+        register_root(&base);
         base
+    }
+
+    /// Registers `dir` as a root so absolute paths beneath it are in scope.
+    /// The DB is per test thread: guard tests plant a fake `.db_key` in the
+    /// shared state dir, which would break the encrypted default DB.
+    fn register_root(dir: &Path) {
+        db::set_thread_db_path(Some(&format!("{}.db", dir.display())));
+        let conn = db::open_default().unwrap();
+        crate::docs::upsert_root(
+            &conn,
+            &crate::docs::RootRow {
+                name: dir.file_name().unwrap().to_string_lossy().into_owned(),
+                path: dir.to_string_lossy().into_owned(),
+                description: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
     }
 
     // ── to_kind / tree_node_to_fs ──────────────────────────────────────────
@@ -432,32 +465,76 @@ mod tests {
         assert!(!p.to_string_lossy().starts_with('~'));
     }
 
-    // ── resolve ────────────────────────────────────────────────────────────
+    // ── confinement ────────────────────────────────────────────────────────
 
-    #[test]
-    fn resolve_embedded_returns_none() {
-        let out = resolve(&cfg(), Some(EMBEDDED_ROOT), "anything").unwrap();
-        assert!(out.is_none());
+    fn assert_forbidden<T>(res: Result<T>) {
+        let Err(err) = res else {
+            panic!("must be refused");
+        };
+        let oe = err
+            .downcast_ref::<contract::OrcaError>()
+            .unwrap_or_else(|| panic!("not an OrcaError: {err}"));
+        assert_eq!(oe.kind, contract::ErrorKind::Forbidden, "{oe}");
     }
 
     #[test]
-    fn resolve_no_root_absolute_returns_pathbuf() {
-        let dir = scratch("resolve");
-        let path = dir.to_string_lossy().into_owned();
-        let (pb, r) = resolve(&cfg(), None, &path).unwrap().expect("some");
-        assert_eq!(pb, dir);
-        assert!(r.name.is_empty());
+    fn open_confined_no_root_relative_errors() {
+        let err = open_confined(&cfg(), None, "not/absolute").err().unwrap();
+        assert!(err.to_string().contains("must be absolute"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn absolute_paths_outside_every_root_are_refused() {
+        let outside = tempfile::tempdir().unwrap();
+        let f = outside.path().join("f.md");
+        fs::write(&f, "x").unwrap();
+        let p = f.to_string_lossy().into_owned();
+        assert_forbidden(read(&cfg(), None, &p, false).await);
+        assert_forbidden(stat(&cfg(), None, &p).await);
+        let d = outside.path().to_string_lossy().into_owned();
+        assert_forbidden(list(&cfg(), None, &d).await);
+        assert_forbidden(tree(&cfg(), None, &d, true).await);
+        assert_forbidden(read(&cfg(), None, "/etc/hosts", false).await);
+    }
+
+    #[tokio::test]
+    async fn dot_dot_out_of_a_root_is_refused() {
+        let dir = scratch("dotdot");
+        let root = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let sibling = dir.parent().unwrap().join(format!("{root}-sibling.md"));
+        fs::write(&sibling, "x").unwrap();
+        let rel = format!("../{root}-sibling.md");
+        assert_forbidden(read(&cfg(), Some(&root), &rel, false).await);
+        assert_forbidden(stat(&cfg(), Some(&root), &rel).await);
+        let abs = dir.join("..").join(format!("{root}-sibling.md"));
+        assert_forbidden(read(&cfg(), None, &abs.to_string_lossy(), false).await);
+        fs::remove_file(&sibling).ok();
         fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn resolve_no_root_relative_errors() {
-        let res = resolve(&cfg(), None, "not/absolute");
-        let err = match res {
-            Ok(_) => panic!("expected error for relative path"),
-            Err(e) => e,
-        };
-        assert!(err.to_string().contains("must be absolute"), "got: {err}");
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinks_out_of_a_root_are_refused() {
+        let dir = scratch("symlink");
+        let root = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.md"), "s").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret.md"), dir.join("f.md")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.join("d")).unwrap();
+        assert_forbidden(read(&cfg(), Some(&root), "f", false).await);
+        assert_forbidden(read(&cfg(), Some(&root), "d/secret.md", false).await);
+        assert_forbidden(list(&cfg(), Some(&root), "d").await);
+        assert_forbidden(read(&cfg(), None, &dir.join("f.md").to_string_lossy(), false).await);
+        let names: Vec<String> = tree(&cfg(), Some(&root), "", true)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.path)
+            .collect();
+        assert!(names.is_empty(), "tree must not follow links: {names:?}");
+        let hits = search(&cfg(), "s", &root).await.unwrap();
+        assert!(hits.is_empty(), "search must not follow links");
+        fs::remove_dir_all(&dir).ok();
     }
 
     // ── list ───────────────────────────────────────────────────────────────
@@ -628,7 +705,7 @@ mod tests {
 
     #[tokio::test]
     async fn stat_absolute_missing_reports_not_exists() {
-        let missing = std::env::temp_dir().join("orca-files-stat-missing-000.txt");
+        let missing = scratch("statmissing").join("orca-files-stat-missing-000.txt");
         let out = stat(&cfg(), None, &missing.to_string_lossy())
             .await
             .unwrap();
