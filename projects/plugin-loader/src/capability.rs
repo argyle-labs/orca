@@ -19,7 +19,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use plugin_toolkit::abi::{
     AgentRegistration, DbOp, DbReply, DbRow, DbValue, HttpRequest, HttpResponse, HttpStreamChunk,
-    HttpStreamRequest, SecretOp,
+    HttpStreamRequest, SecretOp, WsClose, WsOpen, WsRecv, WsSend,
 };
 use plugin_toolkit::serde_json::{self, Value};
 use tracing::Instrument;
@@ -27,11 +27,16 @@ use tracing::Instrument;
 /// Capability names the daemon serves. Advertised in the handshake `Welcome`.
 /// `http.stream` is the streaming sibling of `http.request`: same request shape,
 /// but the response body is relayed chunk-by-chunk instead of buffered.
+/// `ws.*` broker a WebSocket session (see [`crate::ws`]).
 pub const CAPABILITIES: &[&str] = &[
     "db.op",
     "secret.op",
     "http.request",
     "http.stream",
+    "ws.open",
+    "ws.recv",
+    "ws.send",
+    "ws.close",
     "agents.register",
 ];
 
@@ -46,7 +51,7 @@ pub fn is_streaming_cap(cap: &str) -> bool {
 /// capability HTTP off the main scheduler. `handle_cap` is synchronous and runs
 /// on the supervisor's blocking invoke thread; work reaches this runtime only
 /// through [`run_on_cap_runtime`] / `spawn`, never `block_on`.
-fn cap_runtime() -> &'static tokio::runtime::Runtime {
+pub(crate) fn cap_runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -60,7 +65,7 @@ fn cap_runtime() -> &'static tokio::runtime::Runtime {
 /// Run `fut` on [`cap_runtime`] and wait for it on a std channel. Unlike
 /// `block_on`, this is sound from inside another runtime's context: a stray
 /// call from an async worker blocks that worker instead of panicking (#798).
-fn run_on_cap_runtime<F>(fut: F) -> Result<F::Output>
+pub(crate) fn run_on_cap_runtime<F>(fut: F) -> Result<F::Output>
 where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
@@ -310,6 +315,28 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
                 .map_err(|e| anyhow!("http.request: bad request payload: {e}"))?;
             let reply = exec_http(req)?;
             Ok(serde_json::to_value(reply)?)
+        }
+        "ws.open" => {
+            let req: WsOpen = serde_json::from_value(args)
+                .map_err(|e| anyhow!("ws.open: bad request payload: {e}"))?;
+            Ok(serde_json::to_value(crate::ws::open(req, principal)?)?)
+        }
+        "ws.recv" => {
+            let req: WsRecv = serde_json::from_value(args)
+                .map_err(|e| anyhow!("ws.recv: bad request payload: {e}"))?;
+            Ok(serde_json::to_value(crate::ws::recv(req, principal)?)?)
+        }
+        "ws.send" => {
+            let req: WsSend = serde_json::from_value(args)
+                .map_err(|e| anyhow!("ws.send: bad request payload: {e}"))?;
+            crate::ws::send(req, principal)?;
+            Ok(Value::Null)
+        }
+        "ws.close" => {
+            let req: WsClose = serde_json::from_value(args)
+                .map_err(|e| anyhow!("ws.close: bad request payload: {e}"))?;
+            crate::ws::close(req, principal)?;
+            Ok(Value::Null)
         }
         "agents.register" => {
             let reg: AgentRegistration = serde_json::from_value(args)
@@ -921,6 +948,8 @@ mod tests {
         assert!(CAPABILITIES.contains(&"db.op"));
         assert!(CAPABILITIES.contains(&"secret.op"));
         assert!(CAPABILITIES.contains(&"http.request"));
+        assert!(CAPABILITIES.contains(&"ws.open"));
+        assert!(!is_streaming_cap("ws.open"));
     }
 
     #[test]

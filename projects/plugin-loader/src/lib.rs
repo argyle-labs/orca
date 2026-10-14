@@ -29,6 +29,7 @@
 pub mod capability;
 #[cfg(unix)]
 pub mod supervisor;
+mod ws;
 
 use std::collections::HashMap;
 use std::path::Path;
