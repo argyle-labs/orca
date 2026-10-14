@@ -52,6 +52,23 @@ const MAX_MESSAGE: usize = 16 << 20;
 
 const MAX_SESSIONS: usize = 16;
 
+/// Unread bytes one plugin's sessions may hold together, and all plugins'
+/// sessions daemon-wide. A session whose message would overrun either is
+/// dropped; an open that cannot fit two max-size messages is refused.
+#[cfg(not(test))]
+const PLUGIN_BUDGET: usize = 64 << 20;
+#[cfg(test)]
+const PLUGIN_BUDGET: usize = 8 << 20;
+const DAEMON_BUDGET: usize = 256 << 20;
+
+static DAEMON_USED: AtomicUsize = AtomicUsize::new(0);
+
+/// Close codes a plugin may send (RFC 6455 §7.4; 1004-1006 and 1015 are
+/// reserved for the endpoint, never sent on the wire).
+fn valid_close_code(code: u16) -> bool {
+    matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999)
+}
+
 /// Handshake headers the host owns: the WebSocket upgrade itself and
 /// hop-by-hop headers.
 const RESERVED_HEADERS: &[&str] = &[
@@ -85,28 +102,50 @@ struct Backlog {
     count: AtomicUsize,
     bytes: AtomicUsize,
     max_bytes: usize,
+    plugin: Arc<AtomicUsize>,
 }
 
 impl Backlog {
-    fn new(max_message: usize) -> Self {
+    fn new(max_message: usize, plugin: Arc<AtomicUsize>) -> Self {
         Self {
             count: AtomicUsize::new(0),
             bytes: AtomicUsize::new(0),
             max_bytes: MAX_BACKLOG_BYTES.max(2 * max_message),
+            plugin,
         }
     }
 
-    /// Account one queued message; false once either bound is exceeded.
+    /// Account one queued message; false once any bound is exceeded. Bytes
+    /// stay charged until popped or the backlog drops.
     fn push(&self, len: usize) -> bool {
         let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
         let bytes = self.bytes.fetch_add(len, Ordering::Relaxed) + len;
-        count <= MAX_BACKLOG && bytes <= self.max_bytes
+        let plugin = self.plugin.fetch_add(len, Ordering::Relaxed) + len;
+        let daemon = DAEMON_USED.fetch_add(len, Ordering::Relaxed) + len;
+        count <= MAX_BACKLOG
+            && bytes <= self.max_bytes
+            && plugin <= PLUGIN_BUDGET
+            && daemon <= DAEMON_BUDGET
     }
 
     fn pop(&self, len: usize) {
         self.count.fetch_sub(1, Ordering::Relaxed);
         self.bytes.fetch_sub(len, Ordering::Relaxed);
+        self.plugin.fetch_sub(len, Ordering::Relaxed);
+        DAEMON_USED.fetch_sub(len, Ordering::Relaxed);
     }
+}
+
+impl Drop for Backlog {
+    fn drop(&mut self) {
+        let bytes = *self.bytes.get_mut();
+        self.plugin.fetch_sub(bytes, Ordering::Relaxed);
+        DAEMON_USED.fetch_sub(bytes, Ordering::Relaxed);
+    }
+}
+
+fn fits(used: &AtomicUsize, limit: usize, need: usize) -> bool {
+    limit.saturating_sub(used.load(Ordering::Relaxed)) >= need
 }
 
 fn chunk_len(chunk: &WsChunk) -> usize {
@@ -121,6 +160,7 @@ struct Session {
     cmds: mpsc::UnboundedSender<Cmd>,
     inbound: Inbound,
     backlog: Arc<Backlog>,
+    max_message: usize,
     pump: JoinHandle<()>,
 }
 
@@ -130,6 +170,7 @@ struct Session {
 struct Owned {
     next: u64,
     sessions: HashMap<u64, Session>,
+    budget: Arc<AtomicUsize>,
 }
 
 fn sessions() -> &'static Mutex<HashMap<String, Owned>> {
@@ -180,23 +221,35 @@ fn session_limit(principal: &str) -> anyhow::Error {
 
 /// Open a WebSocket for `principal` and register its session.
 pub(crate) fn open(req: WsOpen, principal: &str) -> Result<WsChunk> {
-    if live_sessions(principal) >= MAX_SESSIONS {
-        return Err(session_limit(principal));
+    let max_message = message_limit(req.max_message_bytes);
+    let budget = {
+        let mut table = table();
+        let owned = table.entry(principal.to_string()).or_default();
+        if owned.sessions.len() >= MAX_SESSIONS {
+            return Err(session_limit(principal));
+        }
+        Arc::clone(&owned.budget)
+    };
+    let need = 2 * max_message;
+    if !fits(&budget, PLUGIN_BUDGET, need) || !fits(&DAEMON_USED, DAEMON_BUDGET, need) {
+        bail!(
+            "ws.open: not enough unread-message budget for {need} bytes; read or close a session first"
+        );
     }
     let wait = wait_limit(req.timeout_ms);
-    let max_message = message_limit(req.max_message_bytes);
     let url = req.url.clone();
     let ws = run_on_cap_runtime(async move { timeout(wait, connect(req, max_message)).await })?
         .map_err(|_| anyhow!("ws.open: '{url}' timed out after {wait:?}"))??;
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (in_tx, in_rx) = mpsc::unbounded_channel();
-    let backlog = Arc::new(Backlog::new(max_message));
+    let backlog = Arc::new(Backlog::new(max_message, budget));
     let pump = cap_runtime().spawn(pump(ws, cmd_rx, in_tx, Arc::clone(&backlog)));
     let session = Session {
         cmds: cmd_tx,
         inbound: Arc::new(tokio::sync::Mutex::new(in_rx)),
         backlog,
+        max_message,
         pump,
     };
 
@@ -241,11 +294,19 @@ pub(crate) fn recv(req: WsRecv, principal: &str) -> Result<Option<WsChunk>> {
 }
 
 pub(crate) fn send(req: WsSend, principal: &str) -> Result<()> {
-    let cmds = with_session(principal, req.session, "ws.send", |s| s.cmds.clone())?;
+    let (cmds, max_message) = with_session(principal, req.session, "ws.send", |s| {
+        (s.cmds.clone(), s.max_message)
+    })?;
     let msg = match req.payload {
         WsPayload::Text(text) => Message::text(text),
         WsPayload::Binary(bytes) => Message::binary(bytes),
     };
+    if msg.len() > max_message {
+        bail!(
+            "ws.send: {} bytes exceeds the session's {max_message}-byte message limit",
+            msg.len()
+        );
+    }
     let closed = || anyhow!("ws.send: session {} is closed", req.session);
     let (ack, done) = oneshot::channel();
     cmds.send(Cmd::Send(msg, ack)).map_err(|_| closed())?;
@@ -263,14 +324,14 @@ pub(crate) fn send(req: WsSend, principal: &str) -> Result<()> {
 }
 
 pub(crate) fn close(req: WsClose, principal: &str) -> Result<()> {
+    let code = req.code.unwrap_or(1000);
+    if !valid_close_code(code) {
+        bail!("ws.close: close code {code} is not allowed");
+    }
     let session = remove(principal, req.session)
         .ok_or_else(|| anyhow!("ws.close: no open session {}", req.session))?;
     let (ack, done) = oneshot::channel();
-    if session
-        .cmds
-        .send(Cmd::Close(req.code.unwrap_or(1000), ack))
-        .is_ok()
-    {
+    if session.cmds.send(Cmd::Close(code, ack)).is_ok() {
         let pump = session.pump;
         run_on_cap_runtime(async move {
             if timeout(CLOSE_TIMEOUT, done).await.is_err() {
@@ -299,13 +360,9 @@ pub fn drop_sessions(principal: &str) {
     }
 }
 
-fn live_sessions(principal: &str) -> usize {
-    table().get(principal).map_or(0, |o| o.sessions.len())
-}
-
 #[cfg(test)]
 pub(crate) fn session_count(principal: &str) -> usize {
-    live_sessions(principal)
+    table().get(principal).map_or(0, |o| o.sessions.len())
 }
 
 #[cfg(test)]
@@ -331,12 +388,14 @@ pub(crate) fn insert_idle_session(principal: &str) -> IdleSession {
     let owned = table.entry(principal.to_string()).or_default();
     owned.next += 1;
     let id = owned.next;
+    let backlog = Arc::new(Backlog::new(DEFAULT_MESSAGE, Arc::clone(&owned.budget)));
     owned.sessions.insert(
         id,
         Session {
             cmds,
             inbound: Arc::new(tokio::sync::Mutex::new(in_rx)),
-            backlog: Arc::new(Backlog::new(DEFAULT_MESSAGE)),
+            backlog,
+            max_message: DEFAULT_MESSAGE,
             pump,
         },
     );
@@ -861,8 +920,112 @@ mod tests {
         assert_eq!(message_limit(Some(4 << 20)), 4 << 20);
         assert_eq!(message_limit(Some(64 << 20)), MAX_MESSAGE);
         assert_eq!(message_limit(Some(u64::MAX)), MAX_MESSAGE);
-        assert_eq!(Backlog::new(MAX_MESSAGE).max_bytes, 2 * MAX_MESSAGE);
-        assert_eq!(Backlog::new(DEFAULT_MESSAGE).max_bytes, MAX_BACKLOG_BYTES);
+        let budget = Arc::new(AtomicUsize::new(0));
+        assert_eq!(
+            Backlog::new(MAX_MESSAGE, Arc::clone(&budget)).max_bytes,
+            2 * MAX_MESSAGE
+        );
+        assert_eq!(
+            Backlog::new(DEFAULT_MESSAGE, budget).max_bytes,
+            MAX_BACKLOG_BYTES
+        );
+    }
+
+    fn budget_used(principal: &str) -> usize {
+        table()
+            .get(principal)
+            .map_or(0, |o| o.budget.load(Ordering::Relaxed))
+    }
+
+    /// Open a flood session and wait until all `count` messages are queued.
+    fn open_flooded(count: usize, size: usize, principal: &str) -> u64 {
+        let (url, _closed) = server(Peer::Flood { count, size });
+        let before = budget_used(principal);
+        let s = open(&url, principal);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while budget_used(principal) < before + count * size && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        s
+    }
+
+    #[test]
+    fn plugin_budget_overrun_drops_the_offending_session() {
+        let p = "ws-budget-two";
+        let first = open_flooded(25, 200_000, p);
+        let (url, _closed) = server(Peer::Flood {
+            count: 25,
+            size: 200_000,
+        });
+        let second = open(&url, p);
+        let err = recv_until_error(second, p);
+        assert!(err.contains("unread"), "got: {err}");
+        for _ in 0..25 {
+            recv(first, p).unwrap();
+        }
+        assert_eq!(session_count(p), 1);
+    }
+
+    #[test]
+    fn open_is_refused_until_budget_is_released() {
+        let p = "ws-budget-open";
+        let s = open_flooded(35, 200_000, p);
+        let (url, _closed) = server(Peer::Echo);
+        let err = handle_cap("ws.open", json!({"url": url}), p)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("budget"), "got: {err}");
+        for _ in 0..35 {
+            recv(s, p).unwrap();
+        }
+        assert_eq!(budget_used(p), 0);
+        let reused = open(&url, p);
+        handle_cap("ws.close", json!({"session": reused}), p).unwrap();
+
+        let s = open_flooded(35, 200_000, p);
+        handle_cap("ws.close", json!({"session": s}), p).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while budget_used(p) > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(budget_used(p), 0);
+        open(&url, p);
+    }
+
+    #[test]
+    fn send_larger_than_the_message_cap_is_refused() {
+        let (url, _closed) = server(Peer::Echo);
+        let s = open(&url, "ws-send-cap");
+        let text = "x".repeat(DEFAULT_MESSAGE + 1);
+        let err = handle_cap(
+            "ws.send",
+            json!({"session": s, "text": text}),
+            "ws-send-cap",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("message limit"), "got: {err}");
+        assert_eq!(session_count("ws-send-cap"), 1);
+    }
+
+    #[test]
+    fn reserved_close_codes_are_refused() {
+        let (url, _closed) = server(Peer::Echo);
+        let s = open(&url, "ws-close-code");
+        for code in [999, 1004, 1005, 1006, 1015, 1016, 2999, 5000] {
+            let err = handle_cap(
+                "ws.close",
+                json!({"session": s, "code": code}),
+                "ws-close-code",
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("not allowed"), "{code}: {err}");
+        }
+        assert_eq!(session_count("ws-close-code"), 1);
+        for code in [1000, 1003, 1007, 1014, 3000, 4999] {
+            assert!(valid_close_code(code), "{code}");
+        }
     }
 
     #[test]
