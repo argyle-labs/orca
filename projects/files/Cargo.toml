@@ -37,6 +37,9 @@ utoipa      = { workspace = true }
 # Markdown stripping
 regex       = { workspace = true }
 
+# fd-relative confinement to registered roots (`confine.rs`)
+libc        = { workspace = true }
+
 # Atomic writes
 tempfile    = { workspace = true }
 
