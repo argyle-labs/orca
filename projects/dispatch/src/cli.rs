@@ -1022,6 +1022,7 @@ pub fn plugin_verb_cli_commands_from(ops: Vec<PluginVerbOp>) -> Vec<clap::Comman
                     .num_args(0..)
                     .help("Args as key=value pairs (values parsed as JSON, else string)"),
             )
+            .arg(system_id_flag())
     }
 
     fn materialize(name: String, mut node: Node) -> clap::Command {
@@ -1092,6 +1093,15 @@ async fn run_diag(name: &str, args: serde_json::Value, ctx: &ToolCtx) -> Result<
     Ok(())
 }
 
+/// The `--system-id <uuid>` flag on unit and plugin verb leaves; carried to
+/// the daemon as the `systemId` arg, which routes the call to that system.
+pub(crate) fn system_id_flag() -> clap::Arg {
+    clap::Arg::new(crate::registry::SYSTEM_ID_KEY)
+        .long("system-id")
+        .value_name("UUID")
+        .help("UUID of the system to run this on (default: this system)")
+}
+
 /// Parse a unit leaf's args: `--json '{…}'` wins; otherwise `key=value` pairs
 /// (each value parsed as JSON, falling back to a string).
 ///
@@ -1101,6 +1111,26 @@ async fn run_diag(name: &str, args: serde_json::Value, ctx: &ToolCtx) -> Result<
 /// surface — the designated opaque seam, like plugin-loader's file-level allow.
 #[allow(clippy::disallowed_types)]
 fn build_unit_args(m: &ArgMatches) -> Result<serde_json::Value> {
+    use serde_json::Value;
+    let mut args = build_unit_payload(m)?;
+    let system_id = m
+        .try_get_one::<String>(crate::registry::SYSTEM_ID_KEY)
+        .ok()
+        .flatten();
+    if let Some(id) = system_id {
+        let obj = args
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("--system-id needs a JSON object payload"))?;
+        obj.insert(
+            crate::registry::SYSTEM_ID_KEY.to_string(),
+            Value::String(id.clone()),
+        );
+    }
+    Ok(args)
+}
+
+#[allow(clippy::disallowed_types)]
+fn build_unit_payload(m: &ArgMatches) -> Result<serde_json::Value> {
     use serde_json::{Map, Value};
     if let Some(js) = m.get_one::<String>("json") {
         return serde_json::from_str(js).map_err(|e| anyhow::anyhow!("invalid --json: {e}"));
@@ -1122,8 +1152,15 @@ fn build_unit_args(m: &ArgMatches) -> Result<serde_json::Value> {
 // Opaque unit-op payload forwarded to the daemon — see [`build_unit_args`].
 #[allow(clippy::disallowed_types)]
 async fn run_unit(name: &str, args: serde_json::Value, ctx: &ToolCtx) -> Result<()> {
+    let routed = args.get(crate::registry::SYSTEM_ID_KEY).is_some()
+        && !crate::registry::declares_system(name);
+    if routed && ctx.peer().is_some() {
+        anyhow::bail!("conflicting routing target: use --system-id alone");
+    }
     let out = if local_daemon_reachable() {
         post_daemon_raw(name, &args, ctx).await?
+    } else if routed {
+        anyhow::bail!("--system-id needs the local daemon, which is not reachable");
     } else {
         match crate::unit_surface::unit_dispatch(name, &args, None).await {
             Some(r) => r?,
@@ -1755,6 +1792,86 @@ mod tests {
         let m = unit_leaf().get_matches_from(["op"]);
         let v = build_unit_args(&m).unwrap();
         assert_eq!(v, serde_json::json!({}));
+    }
+
+    #[test]
+    fn build_unit_args_system_id_flag_lands_in_args() {
+        let leaf = || unit_leaf().arg(system_id_flag());
+        let id = "0190a1b2-0000-7000-8000-000000000002";
+        let m = leaf().get_matches_from(["op", "--system-id", id, "n=1"]);
+        assert_eq!(
+            build_unit_args(&m).unwrap(),
+            serde_json::json!({ "n": 1, "systemId": id })
+        );
+        let m = leaf().get_matches_from(["op", "--system-id", id, "--json", r#"{"a":1}"#]);
+        assert_eq!(build_unit_args(&m).unwrap()["systemId"], id);
+    }
+
+    #[test]
+    fn build_unit_args_system_id_rejects_non_object_payload() {
+        let m = unit_leaf().arg(system_id_flag()).get_matches_from([
+            "op",
+            "--system-id",
+            "0190a1b2-0000-7000-8000-000000000002",
+            "--json",
+            "[1]",
+        ]);
+        let err = build_unit_args(&m).unwrap_err();
+        assert!(err.to_string().contains("JSON object"), "got: {err}");
+    }
+
+    #[test]
+    fn plugin_verb_leaf_system_id_reaches_body() {
+        let mut root = Command::new("orca");
+        for c in plugin_verb_cli_commands_from(vec![plugin_op("docker", "ps")]) {
+            root = root.subcommand(c);
+        }
+        let id = "0190a1b2-0000-7000-8000-000000000002";
+        let m = root.get_matches_from(["orca", "docker", "ps", "--system-id", id, "all=true"]);
+        let (_, _, leaf) = walk_to_verb(&m).unwrap();
+        assert_eq!(
+            build_unit_args(leaf).unwrap(),
+            serde_json::json!({ "all": true, "systemId": id })
+        );
+    }
+
+    #[tokio::test]
+    async fn run_unit_system_id_with_peer_errors() {
+        let cfg = Arc::new(contract::config::Config::load().unwrap());
+        let mut ctx = ToolCtx::new(cfg);
+        ctx.set_peer(Some("there".into()));
+        let args = serde_json::json!({ "systemId": "0190a1b2-0000-7000-8000-000000000002" });
+        let err = run_unit("docker.ps", args, &ctx).await.unwrap_err();
+        assert!(
+            err.to_string().contains("conflicting routing target"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn run_unit_system_id_without_daemon_errors() {
+        with_env_lock(|| {
+            let saved = std::env::var("ORCA_DAEMON_URL").ok();
+            unsafe {
+                std::env::set_var("ORCA_DAEMON_URL", "http://127.0.0.1:1");
+            }
+            let ctx = ToolCtx::new(Arc::new(contract::config::Config::load().unwrap()));
+            let args = serde_json::json!({ "systemId": "0190a1b2-0000-7000-8000-000000000002" });
+            let res = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(run_unit("docker.ps", args, &ctx));
+            match saved {
+                Some(v) => unsafe { std::env::set_var("ORCA_DAEMON_URL", v) },
+                None => unsafe { std::env::remove_var("ORCA_DAEMON_URL") },
+            }
+            let err = res.unwrap_err();
+            assert!(
+                err.to_string().contains("needs the local daemon"),
+                "got: {err}"
+            );
+        });
     }
 
     // ── build_root: dotted-domain nesting ───────────────────────────────────
