@@ -4,7 +4,10 @@
 //!
 //! Each call is a capability round-trip on the installed cap sink, so a
 //! [`WsClient`] works only while a tool invocation is running. Sessions a
-//! plugin never closes are dropped by the daemon when the plugin exits.
+//! plugin never closes are dropped by the daemon when the plugin exits; a
+//! dropped [`WsClient`] closes its session best-effort.
+
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
@@ -73,25 +76,47 @@ impl WsClient {
     /// Next message of any kind; `None` once the peer closed. Errors on a
     /// dropped connection or when nothing arrives within the daemon's timeout.
     pub async fn recv_chunk(&self) -> Result<Option<WsChunk>> {
+        self.recv_with(None)
+    }
+
+    /// [`recv_chunk`](Self::recv_chunk) waiting at most `timeout`. The daemon
+    /// clamps it to its own maximum; timing out keeps the session open.
+    pub async fn recv_timeout(&self, timeout: Duration) -> Result<Option<WsChunk>> {
+        self.recv_with(Some(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)))
+    }
+
+    fn recv_with(&self, timeout_ms: Option<u64>) -> Result<Option<WsChunk>> {
         call(
             "ws.recv",
             &WsRecv {
                 session: self.session,
-                timeout_ms: None,
+                timeout_ms,
             },
         )
     }
 
     /// Close with code 1000.
     pub async fn close(self) -> Result<()> {
-        call::<serde::de::IgnoredAny>(
-            "ws.close",
-            &WsClose {
-                session: self.session,
-                code: None,
-            },
-        )
-        .map(drop)
+        let session = self.session;
+        std::mem::forget(self);
+        close_session(session)
+    }
+}
+
+fn close_session(session: u64) -> Result<()> {
+    call::<serde::de::IgnoredAny>(
+        "ws.close",
+        &WsClose {
+            session,
+            code: None,
+        },
+    )
+    .map(drop)
+}
+
+impl Drop for WsClient {
+    fn drop(&mut self) {
+        _ = close_session(self.session);
     }
 }
 
@@ -174,6 +199,7 @@ mod tests {
         let (sink, _) = fake_sink(vec![
             Ok(json!({"t": "open", "session": 1})),
             Err("ws: connection dropped"),
+            Err("ws.close: no open session 1"),
         ]);
         let err = with_cap_sink(sink, || {
             block_on(async {
@@ -194,7 +220,10 @@ mod tests {
 
     #[test]
     fn binary_message_is_refused_by_text_recv() {
-        let (sink, _) = fake_sink(vec![Ok(json!({"t": "binary", "bytes": "AP8="}))]);
+        let (sink, _) = fake_sink(vec![
+            Ok(json!({"t": "binary", "bytes": "AP8="})),
+            Ok(Value::Null),
+        ]);
         let err = with_cap_sink(sink, || block_on(WsClient { session: 1 }.recv()))
             .unwrap_err()
             .to_string();
@@ -209,6 +238,37 @@ mod tests {
         assert!(
             err.contains("not running as an orca subprocess"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn drop_closes_the_session_once() {
+        let (sink, calls) = fake_sink(vec![Ok(Value::Null), Ok(Value::Null)]);
+        with_cap_sink(sink, || {
+            drop(WsClient { session: 4 });
+            block_on(WsClient { session: 5 }.close()).unwrap();
+        });
+        let calls = calls.borrow();
+        assert_eq!(
+            *calls,
+            [
+                ("ws.close".to_string(), json!({"session": 4, "code": null})),
+                ("ws.close".to_string(), json!({"session": 5, "code": null})),
+            ]
+        );
+    }
+
+    #[test]
+    fn recv_timeout_sends_the_wait() {
+        let (sink, calls) = fake_sink(vec![Ok(json!({"t": "text", "text": "x"})), Ok(Value::Null)]);
+        let got = with_cap_sink(sink, || {
+            block_on(WsClient { session: 2 }.recv_timeout(Duration::from_millis(1500)))
+        })
+        .unwrap();
+        assert_eq!(got, Some(WsChunk::Text { text: "x".into() }));
+        assert_eq!(
+            calls.borrow()[0].1,
+            json!({"session": 2, "timeout_ms": 1500})
         );
     }
 }
