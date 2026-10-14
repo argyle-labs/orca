@@ -2588,14 +2588,7 @@ pub(crate) async fn connect_mesh_tls(
         }
         Err(e) => return Err(e),
     };
-    if let Ok(expected) = DIAL_PEER.try_with(Clone::clone) {
-        let (_, conn) = tls.get_ref();
-        let leaf = conn
-            .peer_certificates()
-            .and_then(|c| c.first())
-            .context("peer presented no server cert")?;
-        check_peer_identity(host, &expected, leaf.as_ref())?;
-    }
+    verify_dialled_peer(host, &tls)?;
     Ok(tls)
 }
 
@@ -2606,17 +2599,50 @@ tokio::task_local! {
     pub(crate) static DIAL_PEER: String;
 }
 
-/// Refuse a server cert bound to a different system than `expected`: any
-/// mesh member chains to the CA, so the chain alone does not show which one
-/// answered at `host`. A cert without an identity name is from a build that
-/// predates it and is accepted until it rotates.
-fn check_peer_identity(host: &str, expected: &str, leaf_der: &[u8]) -> Result<()> {
+/// When the dial is for a known peer id, refuse a server cert bound to another
+/// system and pin the peer once it presents its own name: any mesh member
+/// chains to the CA, so the chain alone does not show which one answered.
+pub(crate) fn verify_dialled_peer(
+    host: &str,
+    tls: &tokio_rustls::client::TlsStream<TcpStream>,
+) -> Result<()> {
+    let Ok(expected) = DIAL_PEER.try_with(Clone::clone) else {
+        return Ok(());
+    };
+    let leaf = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|c| c.first())
+        .context("peer presented no server cert")?;
+    let pinned =
+        ::db::pool::with_pooled_or_open(|c| ::db::mesh::is_peer_identity_pinned(c, &expected))?;
+    if check_peer_identity(host, &expected, leaf.as_ref(), pinned)?
+        && !pinned
+        && let Err(e) =
+            ::db::pool::with_pooled_or_open(|c| ::db::mesh::pin_peer_identity(c, &expected))
+    {
+        tracing::warn!(host, expected, "pin peer identity: {e:#}");
+    }
+    Ok(())
+}
+
+/// `Ok(true)` when the cert names `expected`. A cert without an identity name
+/// is refused only for a peer already pinned; refusing it for every peer is a
+/// later phase, once the whole fleet carries identity names.
+fn check_peer_identity(host: &str, expected: &str, leaf_der: &[u8], pinned: bool) -> Result<bool> {
     match utils::pki::mesh_server_identity(leaf_der)? {
-        Some(id) if id == expected => Ok(()),
-        Some(id) => anyhow::bail!("{host} answered as peer {id}, not {expected}; refusing"),
+        Some(id) if id == expected => Ok(true),
+        Some(id) => anyhow::bail!(
+            "{host} answered as system {id}, but the roster expects {expected} there; \
+             the roster id may be stale, or another system holds that address; refusing"
+        ),
+        None if pinned => anyhow::bail!(
+            "{host} presented no identity name, but {expected} has presented one before; refusing"
+        ),
         None => {
             tracing::debug!(host, expected, "peer cert carries no identity name");
-            Ok(())
+            Ok(false)
         }
     }
 }
@@ -2764,14 +2790,54 @@ mod mesh_tests {
     #[test]
     fn dialling_x_refuses_y_answering() {
         let y = server_leaf_der("system-y");
-        let err = check_peer_identity("10.0.0.5", "system-x", &y).unwrap_err();
-        assert!(format!("{err}").contains("answered as peer system-y, not system-x"));
+        let err = check_peer_identity("10.0.0.5", "system-x", &y, false).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("answered as system system-y"), "got: {msg}");
+        assert!(msg.contains("expects system-x"), "got: {msg}");
+        assert!(msg.contains("may be stale"), "got: {msg}");
     }
 
     #[test]
     fn dialling_x_accepts_x() {
         let x = server_leaf_der("system-x");
-        check_peer_identity("10.0.0.5", "system-x", &x).unwrap();
+        assert!(check_peer_identity("10.0.0.5", "system-x", &x, false).unwrap());
+        assert!(check_peer_identity("10.0.0.5", "system-x", &x, true).unwrap());
+    }
+
+    fn identityless_server_leaf_der() -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(dir.path(), "founder").unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let csr = rcgen::CertificateParams::new(vec![utils::pki::MESH_SERVER_SAN.to_string()])
+            .unwrap()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap();
+        let (pem, _) =
+            utils::pki::sign_peer_csr(dir.path(), &csr, "system-x", utils::pki::PeerRole::Server)
+                .unwrap();
+        rustls_pemfile::certs(&mut pem.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap()
+            .to_vec()
+    }
+
+    #[test]
+    fn pinned_peer_without_identity_name_is_refused() {
+        let leaf = identityless_server_leaf_der();
+        let err = check_peer_identity("10.0.0.5", "system-x", &leaf, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("presented no identity name"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn unpinned_peer_without_identity_name_is_accepted() {
+        let leaf = identityless_server_leaf_der();
+        assert!(!check_peer_identity("10.0.0.5", "system-x", &leaf, false).unwrap());
     }
 
     #[tokio::test]
