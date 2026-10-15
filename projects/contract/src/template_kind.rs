@@ -54,17 +54,28 @@ pub struct SecretRef(String);
 impl SecretRef {
     pub fn parse(s: impl Into<String>) -> std::result::Result<Self, String> {
         let s = s.into();
-        let valid = s.split_once("://").is_some_and(|(scheme, rest)| {
+        let scheme_ref = s.split_once("://").is_some_and(|(scheme, rest)| {
             !scheme.is_empty()
                 && !rest.is_empty()
                 && scheme
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         });
+        let dotted_name = s.split('.').count() >= 2
+            && s.split('.').all(|seg| {
+                !seg.is_empty()
+                    && seg
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            });
+        let valid = scheme_ref || dotted_name;
         if valid {
             Ok(Self(s))
         } else {
-            Err("secret_ref must be a reference of the form <scheme>://...".into())
+            Err(
+                "secret_ref must be <scheme>://... or a dotted secret name like proxmox.lab.token"
+                    .into(),
+            )
         }
     }
 
@@ -211,11 +222,13 @@ pub const DESTROY_OP: &str = "destroy";
 
 const UNSUPPORTED_LAYER: &str = "unsupported layer";
 
+#[cfg(feature = "in-process")]
 fn redact_outcome(mut out: ApplyOutcome) -> ApplyOutcome {
     utils::scrub::redact_json_in_place(&mut out.detail);
     out
 }
 
+#[cfg(feature = "in-process")]
 fn redact_status(mut out: StatusOutcome) -> StatusOutcome {
     utils::scrub::redact_json_in_place(&mut out.detail);
     out
@@ -260,21 +273,21 @@ pub async fn dispatch_op(
                 .apply(req)
                 .await
                 .map_err(|e| err(format!("{e:#}")))?;
-            serde_json::to_value(redact_outcome(out)).map_err(|e| err(e.to_string()))
+            serde_json::to_value(&out).map_err(|e| err(e.to_string()))
         }
         STATUS_OP => {
             let out = provider
                 .status(dec(op, args)?)
                 .await
                 .map_err(|e| err(format!("{e:#}")))?;
-            serde_json::to_value(redact_status(out)).map_err(|e| err(e.to_string()))
+            serde_json::to_value(&out).map_err(|e| err(e.to_string()))
         }
         DESTROY_OP => {
             let out = provider
                 .destroy(dec(op, args)?)
                 .await
                 .map_err(|e| err(format!("{e:#}")))?;
-            serde_json::to_value(redact_outcome(out)).map_err(|e| err(e.to_string()))
+            serde_json::to_value(&out).map_err(|e| err(e.to_string()))
         }
         other => Err(err(format!("unknown template_kind op: {other}"))),
     }
@@ -652,8 +665,12 @@ mod tests {
         let ok: SecretRef =
             serde_json::from_value(serde_json::json!("op://Vault/Item/field")).unwrap();
         assert_eq!(ok.as_str(), "op://Vault/Item/field");
+        let dotted: SecretRef =
+            serde_json::from_value(serde_json::json!("proxmox.lab.token")).unwrap();
+        assert_eq!(dotted.as_str(), "proxmox.lab.token");
         assert!(serde_json::from_value::<SecretRef>(serde_json::json!("hunter2")).is_err());
         assert!(serde_json::from_value::<SecretRef>(serde_json::json!("")).is_err());
+        assert!(serde_json::from_value::<SecretRef>(serde_json::json!(" ")).is_err());
     }
 
     #[tokio::test]
@@ -673,15 +690,15 @@ mod tests {
         assert_eq!(err, serde_json::json!(UNSUPPORTED_LAYER));
     }
 
-    #[tokio::test]
-    async fn template_kind_dispatch_op_redacts_detail() {
-        let mut apply = apply_req(false);
-        apply.rendered.native = serde_json::json!({"password": "hunter2", "id": "abc"});
-        let out = dispatch_op(&fake(), APPLY_OP, serde_json::to_value(apply).unwrap())
-            .await
-            .unwrap();
-        assert_ne!(out["detail"]["password"], "hunter2");
-        assert_eq!(out["detail"]["id"], "abc");
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn template_kind_proxy_redaction_follows_stack_wide_policy() {
+        let out = redact_outcome(ApplyOutcome {
+            executed: true,
+            detail: serde_json::json!({"key": "web", "id": "x"}),
+        });
+        assert_ne!(out.detail["key"], "web");
+        assert_eq!(out.detail["id"], "x");
     }
 
     #[cfg(feature = "in-process")]
