@@ -1,4 +1,5 @@
 name: Release
+run-name: Release ${{ inputs.version || format('{0} · {1}', inputs.stage, inputs.bump) }}
 
 # Ordered release jobs from argyle-labs/.github job-release-* actions, triggered
 # by operator dispatch (the dispatch is the gate; Gitea has no environment
@@ -20,6 +21,11 @@ on:
         type: choice
         options: [patch, minor, major]
         default: patch
+      version:
+        description: 'Exact version being released, e.g. v0.2.1-rc.18 (optional; must equal the computed next version)'
+        type: string
+        required: false
+        default: ''
 
 env:
   CARGO_TERM_COLOR: always
@@ -43,6 +49,7 @@ jobs:
         with:
           stage: ${{ inputs.stage }}
           bump: ${{ inputs.bump }}
+          expected-version: ${{ inputs.version }}
 
   build-x86_64-linux-gnu:
     needs: version
