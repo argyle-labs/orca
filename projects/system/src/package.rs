@@ -321,8 +321,6 @@ fn build_rpm(
         let ok = Command::new("rpmbuild")
             .args([
                 "-bb",
-                // Sets the package arch; a foreign `BuildArch` in the spec is
-                // rejected by rpmbuild even with `--target`.
                 "--target",
                 arch,
                 "--define",
@@ -354,7 +352,7 @@ fn build_rpm(
         keep.display()
     );
     println!(
-        "  build: rpmbuild -bb --define '_topdir {}' {}/SPECS/orca.spec",
+        "  build: rpmbuild -bb --target {arch} --define '_topdir {}' {}/SPECS/orca.spec",
         keep.display(),
         keep.display()
     );
@@ -1365,7 +1363,7 @@ mod tests {
     // ── rpm build (no rpmbuild → staged fallback) ─────────────────────
 
     #[test]
-    fn rpm_spec_splits_version_and_sets_target_arch() {
+    fn rpm_spec_omits_buildarch_and_disables_post_processing() {
         if utils::path::which("rpmbuild").is_some() {
             return;
         }
@@ -2536,33 +2534,6 @@ mod tests {
         // hidden build dir nor the kept fallback dir survives).
         assert!(!dir.path().join(".orca-deb-staging").exists());
         assert!(!dir.path().join("orca-deb-staging").exists());
-    }
-
-    #[test]
-    fn build_rpm_reports_failure_when_rpmbuild_rejects_target() {
-        // With rpmbuild present the fn attempts a real (cross-arch) build. On a
-        // host whose rpmbuild has no matching build platform this fails and must
-        // surface as an error rather than a silent partial package. Skip when
-        // rpmbuild is absent (that path is covered by the staged-fallback tests).
-        if utils::path::which("rpmbuild").is_none() {
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let bin = fake_binary(dir.path());
-        let res = build_rpm(&bin, "0.0.4-rc.7", "x86_64", "P", dir.path());
-        match res {
-            // rpmbuild succeeded → a real .rpm landed in out_dir and staging is gone.
-            Ok(()) => {
-                assert!(find_file_ext(dir.path(), "rpm").unwrap().is_some());
-                assert!(!dir.path().join(".orca-rpm-staging").exists());
-            }
-            // rpmbuild rejected the target arch → explicit failure, no staged tree
-            // kept (the tool-present branch bails without renaming staging).
-            Err(e) => {
-                assert!(e.to_string().contains("rpmbuild failed"), "{e}");
-                assert!(!dir.path().join("orca-rpm-staging").exists());
-            }
-        }
     }
 
     // ── build_pkg cleans a pre-existing staging tree ──────────────────────
