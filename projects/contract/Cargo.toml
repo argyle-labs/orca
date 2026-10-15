@@ -33,7 +33,7 @@ full = ["in-process"]
 in-process = ["dep:tokio"]
 
 [dependencies]
-# Light core only (`utils::{encoding,route}` — the sole modules this crate uses).
+# Light core only (`utils::{encoding,route,scrub}` — the sole modules this crate uses).
 # `utils`' default feature is `full` (yaml/toml/xml/git/pki/reqwest). `contract` is
 # reached by every thin plugin through `plugin-toolkit`, so taking defaults here
 # was the dominant path that made a thin plugin link an XML parser.

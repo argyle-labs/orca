@@ -26,7 +26,7 @@ pub struct TemplateKindDecl {
     #[serde(default)]
     pub layers: Vec<TemplateLayer>,
     #[serde(default)]
-    pub params_schema: serde_json::Value,
+    pub params_schema: Option<serde_json::Value>,
     #[serde(default)]
     pub unsupported_fields: Vec<String>,
     #[serde(default)]
@@ -47,10 +47,53 @@ pub struct TemplateRef {
     pub version: String,
 }
 
+#[derive(Serialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct SecretRef(String);
+
+impl SecretRef {
+    pub fn parse(s: impl Into<String>) -> std::result::Result<Self, String> {
+        let s = s.into();
+        let scheme_ref = s.split_once("://").is_some_and(|(scheme, rest)| {
+            !scheme.is_empty()
+                && !rest.is_empty()
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        });
+        let dotted_name = s.split('.').count() >= 2
+            && s.split('.').all(|seg| {
+                !seg.is_empty()
+                    && seg
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            });
+        let valid = scheme_ref || dotted_name;
+        if valid {
+            Ok(Self(s))
+        } else {
+            Err(
+                "secret_ref must be <scheme>://... or a dotted secret name like proxmox.lab.token"
+                    .into(),
+            )
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretRef {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Self::parse(String::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
 pub struct CredentialSlotRef {
     pub slot: String,
-    pub secret_ref: String,
+    pub secret_ref: SecretRef,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
@@ -177,6 +220,20 @@ pub const APPLY_OP: &str = "apply";
 pub const STATUS_OP: &str = "status";
 pub const DESTROY_OP: &str = "destroy";
 
+const UNSUPPORTED_LAYER: &str = "unsupported layer";
+
+#[cfg(feature = "in-process")]
+fn redact_outcome(mut out: ApplyOutcome) -> ApplyOutcome {
+    utils::scrub::redact_json_in_place(&mut out.detail);
+    out
+}
+
+#[cfg(feature = "in-process")]
+fn redact_status(mut out: StatusOutcome) -> StatusOutcome {
+    utils::scrub::redact_json_in_place(&mut out.detail);
+    out
+}
+
 pub async fn dispatch_op(
     provider: &dyn TemplateKindProvider,
     op: &str,
@@ -197,15 +254,23 @@ pub async fn dispatch_op(
             serde_json::to_value(&out).map_err(|e| err(e.to_string()))
         }
         RENDER_OP => {
+            let req: RenderRequest = dec(op, args)?;
+            if req.layer == TemplateLayer::Unknown {
+                return Err(err(UNSUPPORTED_LAYER));
+            }
             let out = provider
-                .render(dec(op, args)?)
+                .render(req)
                 .await
                 .map_err(|e| err(format!("{e:#}")))?;
             serde_json::to_value(&out).map_err(|e| err(e.to_string()))
         }
         APPLY_OP => {
+            let req: ApplyRequest = dec(op, args)?;
+            if req.layer == TemplateLayer::Unknown {
+                return Err(err(UNSUPPORTED_LAYER));
+            }
             let out = provider
-                .apply(dec(op, args)?)
+                .apply(req)
                 .await
                 .map_err(|e| err(format!("{e:#}")))?;
             serde_json::to_value(&out).map_err(|e| err(e.to_string()))
@@ -245,11 +310,13 @@ impl TemplateKindProxy {
     fn call<T: for<'de> Deserialize<'de>>(
         &self,
         op: &'static str,
-        args: serde_json::Value,
+        args: serde_json::Result<serde_json::Value>,
     ) -> BoxFuture<'_, Result<T>> {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
+            let args =
+                args.map_err(|e| anyhow::anyhow!("template_kind '{name}' {op} encode args: {e}"))?;
             let out = tokio::task::spawn_blocking(move || invoke(op, args))
                 .await
                 .map_err(|e| anyhow::anyhow!("template_kind '{name}' {op} task panicked: {e}"))?
@@ -273,27 +340,32 @@ impl TemplateKindProvider for TemplateKindProxy {
     }
 
     fn decl(&self) -> BoxFuture<'_, Result<TemplateKindDecl>> {
-        self.call(DECL_OP, serde_json::json!({}))
+        self.call(DECL_OP, Ok(serde_json::json!({})))
     }
 
     fn render(&self, req: RenderRequest) -> BoxFuture<'_, Result<RenderedPayload>> {
-        let args = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
-        self.call(RENDER_OP, args)
+        if req.layer == TemplateLayer::Unknown {
+            return Box::pin(async { Err(anyhow::anyhow!(UNSUPPORTED_LAYER)) });
+        }
+        self.call(RENDER_OP, serde_json::to_value(&req))
     }
 
     fn apply(&self, req: ApplyRequest) -> BoxFuture<'_, Result<ApplyOutcome>> {
-        let args = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
-        self.call(APPLY_OP, args)
+        if req.layer == TemplateLayer::Unknown {
+            return Box::pin(async { Err(anyhow::anyhow!(UNSUPPORTED_LAYER)) });
+        }
+        let fut = self.call(APPLY_OP, serde_json::to_value(&req));
+        Box::pin(async move { fut.await.map(redact_outcome) })
     }
 
     fn status(&self, req: StatusRequest) -> BoxFuture<'_, Result<StatusOutcome>> {
-        let args = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
-        self.call(STATUS_OP, args)
+        let fut = self.call(STATUS_OP, serde_json::to_value(&req));
+        Box::pin(async move { fut.await.map(redact_status) })
     }
 
     fn destroy(&self, req: DestroyRequest) -> BoxFuture<'_, Result<ApplyOutcome>> {
-        let args = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
-        self.call(DESTROY_OP, args)
+        let fut = self.call(DESTROY_OP, serde_json::to_value(&req));
+        Box::pin(async move { fut.await.map(redact_outcome) })
     }
 }
 
@@ -316,7 +388,7 @@ mod tests {
                 Ok(TemplateKindDecl {
                     kind,
                     layers: vec![TemplateLayer::Workload],
-                    params_schema: serde_json::json!({"type": "object"}),
+                    params_schema: Some(serde_json::json!({"type": "object"})),
                     unsupported_fields: vec![],
                     runtimes: vec!["docker".into()],
                 })
@@ -389,7 +461,7 @@ mod tests {
     fn creds() -> Vec<CredentialSlotRef> {
         vec![CredentialSlotRef {
             slot: "db_password".into(),
-            secret_ref: "op://orca/web/password".into(),
+            secret_ref: SecretRef::parse("op://orca/web/password").unwrap(),
         }]
     }
 
@@ -497,7 +569,7 @@ mod tests {
         round_trip(&TemplateKindDecl {
             kind: "compose".into(),
             layers: vec![TemplateLayer::Workload, TemplateLayer::Host],
-            params_schema: serde_json::json!({"type": "object"}),
+            params_schema: Some(serde_json::json!({"type": "object"})),
             unsupported_fields: vec!["build".into()],
             runtimes: vec!["docker".into()],
         });
@@ -526,7 +598,7 @@ mod tests {
             decl.layers,
             vec![TemplateLayer::Workload, TemplateLayer::Unknown]
         );
-        assert!(decl.params_schema.is_null());
+        assert!(decl.params_schema.is_none());
         assert!(decl.unsupported_fields.is_empty());
         assert!(decl.runtimes.is_empty());
 
@@ -586,6 +658,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(destroyed["executed"], false);
+    }
+
+    #[test]
+    fn template_kind_secret_ref_accepts_only_references() {
+        let ok: SecretRef =
+            serde_json::from_value(serde_json::json!("op://Vault/Item/field")).unwrap();
+        assert_eq!(ok.as_str(), "op://Vault/Item/field");
+        let dotted: SecretRef =
+            serde_json::from_value(serde_json::json!("proxmox.lab.token")).unwrap();
+        assert_eq!(dotted.as_str(), "proxmox.lab.token");
+        assert!(serde_json::from_value::<SecretRef>(serde_json::json!("hunter2")).is_err());
+        assert!(serde_json::from_value::<SecretRef>(serde_json::json!("")).is_err());
+        assert!(serde_json::from_value::<SecretRef>(serde_json::json!(" ")).is_err());
+    }
+
+    #[tokio::test]
+    async fn template_kind_dispatch_op_rejects_unknown_layer() {
+        let mut render = render_req();
+        render.layer = TemplateLayer::Unknown;
+        let err = dispatch_op(&fake(), RENDER_OP, serde_json::to_value(render).unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(err, serde_json::json!(UNSUPPORTED_LAYER));
+
+        let mut apply = apply_req(false);
+        apply.layer = TemplateLayer::Unknown;
+        let err = dispatch_op(&fake(), APPLY_OP, serde_json::to_value(apply).unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(err, serde_json::json!(UNSUPPORTED_LAYER));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[test]
+    fn template_kind_proxy_redaction_follows_stack_wide_policy() {
+        let out = redact_outcome(ApplyOutcome {
+            executed: true,
+            detail: serde_json::json!({"key": "web", "id": "x"}),
+        });
+        assert_ne!(out.detail["key"], "web");
+        assert_eq!(out.detail["id"], "x");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn template_kind_proxy_rejects_unknown_layer() {
+        let invoke: InvokeThunk = Arc::new(|_, _| panic!("unknown layer must not reach the wire"));
+        let proxy = TemplateKindProxy {
+            name: "template-kind-proxy-layer".into(),
+            invoke,
+        };
+        let mut render = render_req();
+        render.layer = TemplateLayer::Unknown;
+        let e = proxy.render(render).await.unwrap_err();
+        assert!(e.to_string().contains(UNSUPPORTED_LAYER));
+        let mut apply = apply_req(false);
+        apply.layer = TemplateLayer::Unknown;
+        let e = proxy.apply(apply).await.unwrap_err();
+        assert!(e.to_string().contains(UNSUPPORTED_LAYER));
     }
 
     #[tokio::test]
