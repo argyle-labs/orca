@@ -296,7 +296,8 @@ fn build_rpm(
              Release:     {rpm_rel}%{{?dist}}\n\
              Summary:     Orca AI daemon\n\
              License:     Proprietary\n\
-             BuildArch:   {arch}\n\
+             %global debug_package %{{nil}}\n\
+             %global __os_install_post %{{nil}}\n\
              Packager:    {maintainer}\n\
              Source0:     orca\n\n\
              %description\n\
@@ -320,10 +321,8 @@ fn build_rpm(
         let ok = Command::new("rpmbuild")
             .args([
                 "-bb",
-                // Set the target arch explicitly so rpmbuild will emit a
-                // package for a non-native arch (e.g. building the aarch64 rpm
-                // on an x86_64 runner). Without this, a foreign `BuildArch`
-                // fails with "No compatible architectures found for build".
+                // Sets the package arch; a foreign `BuildArch` in the spec is
+                // rejected by rpmbuild even with `--target`.
                 "--target",
                 arch,
                 "--define",
@@ -1377,7 +1376,9 @@ mod tests {
             std::fs::read_to_string(dir.path().join("orca-rpm-staging/SPECS/orca.spec")).unwrap();
         assert!(spec.contains("Version:     0.0.4"));
         assert!(spec.contains("Release:     rc.7%{?dist}"));
-        assert!(spec.contains("BuildArch:   aarch64"));
+        assert!(!spec.contains("BuildArch"));
+        assert!(spec.contains("%global debug_package %{nil}"));
+        assert!(spec.contains("%global __os_install_post %{nil}"));
         assert!(spec.contains("Packager:    Pkgr"));
         assert!(spec.contains("system install --execute --service-user orca"));
     }
