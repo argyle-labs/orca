@@ -1,10 +1,12 @@
 name: CI
 
 # Required checks are exactly `build`, `test` and `lint`. Each crate is hashed
-# with its workspace dependency closure (crate-hashes); only crates without a
-# recorded pass are built, tested and linted. When every crate is selected
-# (nightly schedule, workflow_dispatch, or a pass-cache backend failure) the
-# run uses --workspace. Coverage is report-only and covers the selection.
+# with its workspace dependency closure (crate-hashes). The build and clippy
+# always compile --workspace so feature unification matches a full build; they
+# are skipped only when every crate already has a recorded pass. `test` runs
+# just the crates without a pass, via a nextest package() filterset (no filter
+# when every crate is selected: nightly schedule, workflow_dispatch, or a
+# pass-cache backend failure). Coverage is report-only.
 # Compilation is cached through sccache (rust-setup). crate-hashes requires
 # every argyle-labs/.github action on the same ref.
 #
@@ -79,6 +81,7 @@ jobs:
         with:
           image: ci-rust:1.95.0
           workflow-file: .github/workflows/ci.yml
+          extra-paths: "orca-inventory-tests: README.md CRATE_RESPONSIBILITIES.md projects docs"
       - name: Check pass cache
         id: pass
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -91,23 +94,22 @@ jobs:
           endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-      # `selection` is the cargo package args: empty when every crate already
-      # passed, --workspace when every crate is missing.
+      # `selection` is empty when every crate already passed, `all` when every
+      # crate is missing, otherwise a nextest filterset over the missing crates.
       - name: Select crates
         id: select
         env:
           HASHES: ${{ steps.src.outputs.hashes }}
           MISSING: ${{ steps.pass.outputs.missing }}
-          PACKAGES: ${{ steps.pass.outputs.packages }}
         run: |
           set -euo pipefail
           n=$(jq length <<< "$MISSING")
           if [ "$n" -eq 0 ]; then
             sel=""
           elif [ "$n" -eq "$(jq length <<< "$HASHES")" ]; then
-            sel="--workspace"
+            sel="all"
           else
-            sel="$PACKAGES"
+            sel=$(jq -r 'map("package(=\(.))") | join("|")' <<< "$MISSING")
           fi
           echo "selection=$sel" >> "$GITHUB_OUTPUT"
           echo "Selected ($n crate(s)): ${sel:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -135,12 +137,9 @@ jobs:
       # rebuilding. Covers lib/bin/test targets, not examples or benches.
       - name: Build (coverage-instrumented test archive)
         if: ${{ steps.select.outputs.selection != '' }}
-        env:
-          SELECTION: ${{ steps.select.outputs.selection }}
         run: |
-          read -ra sel <<< "$SELECTION"
           cargo fetch --locked
-          cargo llvm-cov nextest-archive --locked "${sel[@]}" --archive-file nextest-archive.tar.zst
+          cargo llvm-cov nextest-archive --locked --workspace --archive-file nextest-archive.tar.zst
       - name: Upload test archive
         if: ${{ steps.select.outputs.selection != '' }}
         uses: actions/upload-artifact@v4
@@ -199,7 +198,7 @@ jobs:
         if: ${{ needs.build.outputs.selection != '' }}
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
-          nextest-args: --no-fail-fast --no-tests=pass
+          nextest-args: --no-fail-fast --no-tests=pass ${{ needs.build.outputs.selection != 'all' && format('-E {0}', needs.build.outputs.selection) || '' }}
       # One failing test withholds the marker from every selected crate.
       - name: Record pass
         if: ${{ success() && needs.build.outputs.selection != '' }}
@@ -244,7 +243,9 @@ jobs:
         with:
           image: ci-rust:1.95.0
           workflow-file: .github/workflows/ci.yml
-          extra-paths: "*: clippy.toml"
+          extra-paths: |
+            *: clippy.toml
+            orca-inventory-tests: README.md CRATE_RESPONSIBILITIES.md projects docs
       - name: Check pass cache
         id: pass
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
@@ -261,16 +262,15 @@ jobs:
         env:
           HASHES: ${{ steps.src.outputs.hashes }}
           MISSING: ${{ steps.pass.outputs.missing }}
-          PACKAGES: ${{ steps.pass.outputs.packages }}
         run: |
           set -euo pipefail
           n=$(jq length <<< "$MISSING")
           if [ "$n" -eq 0 ]; then
             sel=""
           elif [ "$n" -eq "$(jq length <<< "$HASHES")" ]; then
-            sel="--workspace"
+            sel="all"
           else
-            sel="$PACKAGES"
+            sel=$(jq -r 'map("package(=\(.))") | join("|")' <<< "$MISSING")
           fi
           echo "selection=$sel" >> "$GITHUB_OUTPUT"
           echo "Selected ($n crate(s)): ${sel:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -293,7 +293,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-clippy@main
         if: ${{ !cancelled() && steps.select.outputs.selection != '' }}
         with:
-          args: ${{ steps.select.outputs.selection }} --all-targets
+          args: --workspace --all-targets
       # Checks each publishable crate's manifest and file list. The full
       # build-from-tarball verify runs once, at release, in `cargo publish`.
       - name: Package publishable crates
