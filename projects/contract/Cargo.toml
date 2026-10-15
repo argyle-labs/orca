@@ -38,11 +38,10 @@ in-process = ["dep:tokio"]
 # reached by every thin plugin through `plugin-toolkit`, so taking defaults here
 # was the dominant path that made a thin plugin link an XML parser.
 utils = { workspace = true }
-schemars = { workspace = true, features = ["uuid1"] }
+schemars = { workspace = true }
 serde = { workspace = true }
 derive = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true, features = ["serde"] }
 tracing = { workspace = true }
 
 anyhow = { workspace = true }

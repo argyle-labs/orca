@@ -96,6 +96,11 @@ pub mod permissions;
 pub use permissions::{PermCandidate, PermInfo, PermissionsProvider};
 
 pub mod template_kind;
+pub use template_kind::{
+    ApplyOutcome, ApplyRequest, CredentialSlotRef, DestroyRequest, PlanStep, RenderRequest,
+    RenderedPayload, StatusOutcome, StatusRequest, TargetDescriptor, TemplateKindDecl,
+    TemplateKindProvider, TemplateLayer, TemplateRef,
+};
 
 pub mod ups;
 pub use ups::{UpsConfig, UpsConfigOutcome, UpsProvider, UpsState};

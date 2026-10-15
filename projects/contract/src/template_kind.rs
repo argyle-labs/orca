@@ -1,11 +1,13 @@
-#![allow(clippy::disallowed_types)]
+#![allow(
+    clippy::disallowed_types,
+    reason = "untyped JSON at the plugin invoke boundary"
+)]
 
 use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::BoxFuture;
 
@@ -14,37 +16,82 @@ use crate::BoxFuture;
 pub enum TemplateLayer {
     Workload,
     Host,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
 pub struct TemplateKindDecl {
     pub kind: String,
+    #[serde(default)]
     pub layers: Vec<TemplateLayer>,
+    #[serde(default)]
     pub params_schema: serde_json::Value,
     #[serde(default)]
     pub unsupported_fields: Vec<String>,
+    #[serde(default)]
+    pub runtimes: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+pub struct TargetDescriptor {
+    pub id: String,
+    pub runtime: String,
+    #[serde(default)]
+    pub host_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+pub struct TemplateRef {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+pub struct CredentialSlotRef {
+    pub slot: String,
+    pub secret_ref: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
 pub struct RenderRequest {
+    pub template: TemplateRef,
     pub template_body: serde_json::Value,
     #[serde(default)]
     pub overrides: serde_json::Value,
-    pub target_id: Uuid,
+    #[serde(default)]
+    pub credentials: Vec<CredentialSlotRef>,
+    pub target: TargetDescriptor,
+    pub layer: TemplateLayer,
+    pub instance_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+pub struct PlanStep {
+    pub action: String,
+    pub target: String,
+    #[serde(default)]
+    pub detail: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
 pub struct RenderedPayload {
     pub native: serde_json::Value,
     #[serde(default)]
-    pub plan: Vec<String>,
+    pub plan: Vec<PlanStep>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
 pub struct ApplyRequest {
+    pub template: TemplateRef,
     pub rendered: RenderedPayload,
-    pub target_id: Uuid,
-    pub execute: bool,
+    #[serde(default)]
+    pub credentials: Vec<CredentialSlotRef>,
+    pub target: TargetDescriptor,
+    pub layer: TemplateLayer,
+    pub instance_id: String,
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
@@ -52,6 +99,27 @@ pub struct ApplyOutcome {
     pub executed: bool,
     #[serde(default)]
     pub detail: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+pub struct StatusRequest {
+    pub instance_id: String,
+    pub target: TargetDescriptor,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+pub struct StatusOutcome {
+    pub healthy: bool,
+    #[serde(default)]
+    pub detail: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+pub struct DestroyRequest {
+    pub instance_id: String,
+    pub target: TargetDescriptor,
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 pub trait TemplateKindProvider: Send + Sync {
@@ -62,6 +130,10 @@ pub trait TemplateKindProvider: Send + Sync {
     fn render(&self, req: RenderRequest) -> BoxFuture<'_, Result<RenderedPayload>>;
 
     fn apply(&self, req: ApplyRequest) -> BoxFuture<'_, Result<ApplyOutcome>>;
+
+    fn status(&self, req: StatusRequest) -> BoxFuture<'_, Result<StatusOutcome>>;
+
+    fn destroy(&self, req: DestroyRequest) -> BoxFuture<'_, Result<ApplyOutcome>>;
 }
 
 static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn TemplateKindProvider>>>> =
@@ -102,6 +174,8 @@ pub type InvokeThunk = Arc<
 pub const DECL_OP: &str = "decl";
 pub const RENDER_OP: &str = "render";
 pub const APPLY_OP: &str = "apply";
+pub const STATUS_OP: &str = "status";
+pub const DESTROY_OP: &str = "destroy";
 
 pub async fn dispatch_op(
     provider: &dyn TemplateKindProvider,
@@ -132,6 +206,20 @@ pub async fn dispatch_op(
         APPLY_OP => {
             let out = provider
                 .apply(dec(op, args)?)
+                .await
+                .map_err(|e| err(format!("{e:#}")))?;
+            serde_json::to_value(&out).map_err(|e| err(e.to_string()))
+        }
+        STATUS_OP => {
+            let out = provider
+                .status(dec(op, args)?)
+                .await
+                .map_err(|e| err(format!("{e:#}")))?;
+            serde_json::to_value(&out).map_err(|e| err(e.to_string()))
+        }
+        DESTROY_OP => {
+            let out = provider
+                .destroy(dec(op, args)?)
                 .await
                 .map_err(|e| err(format!("{e:#}")))?;
             serde_json::to_value(&out).map_err(|e| err(e.to_string()))
@@ -197,6 +285,16 @@ impl TemplateKindProvider for TemplateKindProxy {
         let args = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
         self.call(APPLY_OP, args)
     }
+
+    fn status(&self, req: StatusRequest) -> BoxFuture<'_, Result<StatusOutcome>> {
+        let args = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
+        self.call(STATUS_OP, args)
+    }
+
+    fn destroy(&self, req: DestroyRequest) -> BoxFuture<'_, Result<ApplyOutcome>> {
+        let args = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
+        self.call(DESTROY_OP, args)
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +318,7 @@ mod tests {
                     layers: vec![TemplateLayer::Workload],
                     params_schema: serde_json::json!({"type": "object"}),
                     unsupported_fields: vec![],
+                    runtimes: vec!["docker".into()],
                 })
             })
         }
@@ -227,17 +326,112 @@ mod tests {
             Box::pin(async move {
                 Ok(RenderedPayload {
                     native: req.template_body,
-                    plan: vec!["render".into()],
+                    plan: vec![step()],
                 })
             })
         }
         fn apply(&self, req: ApplyRequest) -> BoxFuture<'_, Result<ApplyOutcome>> {
             Box::pin(async move {
                 Ok(ApplyOutcome {
-                    executed: req.execute,
+                    executed: !req.dry_run,
                     detail: req.rendered.native,
                 })
             })
+        }
+        fn status(&self, req: StatusRequest) -> BoxFuture<'_, Result<StatusOutcome>> {
+            Box::pin(async move {
+                Ok(StatusOutcome {
+                    healthy: true,
+                    detail: serde_json::json!({"instance": req.instance_id}),
+                })
+            })
+        }
+        fn destroy(&self, req: DestroyRequest) -> BoxFuture<'_, Result<ApplyOutcome>> {
+            Box::pin(async move {
+                Ok(ApplyOutcome {
+                    executed: !req.dry_run,
+                    detail: serde_json::Value::Null,
+                })
+            })
+        }
+    }
+
+    fn fake() -> FakeKind {
+        FakeKind {
+            name: "template-kind-fake".into(),
+            kind: "compose".into(),
+        }
+    }
+
+    fn target() -> TargetDescriptor {
+        TargetDescriptor {
+            id: "0192f0a0-0000-7000-8000-000000000001".into(),
+            runtime: "docker".into(),
+            host_id: Some("0192f0a0-0000-7000-8000-000000000002".into()),
+        }
+    }
+
+    fn template_ref() -> TemplateRef {
+        TemplateRef {
+            name: "web".into(),
+            version: "1.0.0".into(),
+        }
+    }
+
+    fn step() -> PlanStep {
+        PlanStep {
+            action: "create".into(),
+            target: "web".into(),
+            detail: serde_json::json!({"image": "nginx"}),
+        }
+    }
+
+    fn creds() -> Vec<CredentialSlotRef> {
+        vec![CredentialSlotRef {
+            slot: "db_password".into(),
+            secret_ref: "op://orca/web/password".into(),
+        }]
+    }
+
+    fn render_req() -> RenderRequest {
+        RenderRequest {
+            template: template_ref(),
+            template_body: serde_json::json!({"image": "nginx"}),
+            overrides: serde_json::json!({"port": 8080}),
+            credentials: creds(),
+            target: target(),
+            layer: TemplateLayer::Workload,
+            instance_id: "inst-1".into(),
+        }
+    }
+
+    fn apply_req(dry_run: bool) -> ApplyRequest {
+        ApplyRequest {
+            template: template_ref(),
+            rendered: RenderedPayload {
+                native: serde_json::json!({"a": 1}),
+                plan: vec![step()],
+            },
+            credentials: creds(),
+            target: target(),
+            layer: TemplateLayer::Workload,
+            instance_id: "inst-1".into(),
+            dry_run,
+        }
+    }
+
+    fn status_req() -> StatusRequest {
+        StatusRequest {
+            instance_id: "inst-1".into(),
+            target: target(),
+        }
+    }
+
+    fn destroy_req() -> DestroyRequest {
+        DestroyRequest {
+            instance_id: "inst-1".into(),
+            target: target(),
+            dry_run: true,
         }
     }
 
@@ -268,18 +462,8 @@ mod tests {
         let p = find("template-kind-test").expect("replaced");
         assert_eq!(p.decl().await.unwrap().kind, "v2");
 
-        let out = p
-            .apply(ApplyRequest {
-                rendered: RenderedPayload {
-                    native: serde_json::json!({"a": 1}),
-                    plan: vec![],
-                },
-                target_id: Uuid::nil(),
-                execute: false,
-            })
-            .await
-            .unwrap();
-        assert!(!out.executed);
+        assert!(!p.apply(apply_req(true)).await.unwrap().executed);
+        assert!(p.apply(apply_req(false)).await.unwrap().executed);
 
         assert!(deregister_provider("template-kind-test"));
         assert!(find("template-kind-test").is_none());
@@ -310,31 +494,158 @@ mod tests {
 
     #[test]
     fn template_kind_wire_types_round_trip() {
-        let target_id = Uuid::now_v7();
-        let rendered = RenderedPayload {
-            native: serde_json::json!({"services": {}}),
-            plan: vec!["create web".into()],
-        };
         round_trip(&TemplateKindDecl {
             kind: "compose".into(),
             layers: vec![TemplateLayer::Workload, TemplateLayer::Host],
             params_schema: serde_json::json!({"type": "object"}),
             unsupported_fields: vec!["build".into()],
+            runtimes: vec!["docker".into()],
         });
-        round_trip(&RenderRequest {
-            template_body: serde_json::json!({"image": "nginx"}),
-            overrides: serde_json::json!({"port": 8080}),
-            target_id,
-        });
-        round_trip(&rendered);
-        round_trip(&ApplyRequest {
-            rendered,
-            target_id,
-            execute: true,
+        round_trip(&render_req());
+        round_trip(&apply_req(true));
+        round_trip(&status_req());
+        round_trip(&destroy_req());
+        round_trip(&StatusOutcome {
+            healthy: true,
+            detail: serde_json::json!({"up": 1}),
         });
         round_trip(&ApplyOutcome {
             executed: true,
             detail: serde_json::json!({"id": "abc"}),
         });
+    }
+
+    #[test]
+    fn template_kind_tolerant_decode() {
+        let decl: TemplateKindDecl = serde_json::from_value(serde_json::json!({
+            "kind": "compose",
+            "layers": ["workload", "vm-image"],
+        }))
+        .unwrap();
+        assert_eq!(
+            decl.layers,
+            vec![TemplateLayer::Workload, TemplateLayer::Unknown]
+        );
+        assert!(decl.params_schema.is_null());
+        assert!(decl.unsupported_fields.is_empty());
+        assert!(decl.runtimes.is_empty());
+
+        let payload: RenderedPayload =
+            serde_json::from_value(serde_json::json!({"native": {}})).unwrap();
+        assert!(payload.plan.is_empty());
+
+        let step: PlanStep =
+            serde_json::from_value(serde_json::json!({"action": "create", "target": "web"}))
+                .unwrap();
+        assert!(step.detail.is_null());
+
+        let apply: ApplyRequest = serde_json::from_value(serde_json::json!({
+            "template": {"name": "web", "version": "1"},
+            "rendered": {"native": {}},
+            "target": {"id": "t", "runtime": "docker"},
+            "layer": "future-layer",
+            "instance_id": "i",
+        }))
+        .unwrap();
+        assert!(!apply.dry_run);
+        assert!(apply.credentials.is_empty());
+        assert_eq!(apply.layer, TemplateLayer::Unknown);
+        assert!(apply.target.host_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn template_kind_dispatch_op_routes_every_op() {
+        let p = fake();
+        let decl = dispatch_op(&p, DECL_OP, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(decl["kind"], "compose");
+
+        let rendered = dispatch_op(&p, RENDER_OP, serde_json::to_value(render_req()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(rendered["native"]["image"], "nginx");
+        assert_eq!(rendered["plan"][0]["action"], "create");
+
+        let applied = dispatch_op(
+            &p,
+            APPLY_OP,
+            serde_json::to_value(apply_req(false)).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied["executed"], true);
+
+        let status = dispatch_op(&p, STATUS_OP, serde_json::to_value(status_req()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(status["healthy"], true);
+        assert_eq!(status["detail"]["instance"], "inst-1");
+
+        let destroyed = dispatch_op(&p, DESTROY_OP, serde_json::to_value(destroy_req()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(destroyed["executed"], false);
+    }
+
+    #[tokio::test]
+    async fn template_kind_dispatch_op_unknown_op() {
+        let err = dispatch_op(&fake(), "explode", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.as_str()
+                .unwrap()
+                .contains("unknown template_kind op: explode")
+        );
+    }
+
+    #[tokio::test]
+    async fn template_kind_dispatch_op_decode_error() {
+        let err = dispatch_op(&fake(), STATUS_OP, serde_json::json!({"nope": 1}))
+            .await
+            .unwrap_err();
+        assert!(err.as_str().unwrap().starts_with("decode status args:"));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn template_kind_proxy_sends_every_op_on_the_wire() {
+        let calls: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = calls.clone();
+        let invoke: InvokeThunk = Arc::new(move |op, args| {
+            rec.lock().unwrap().push((op.to_string(), args));
+            Ok(match op {
+                DECL_OP => serde_json::json!({"kind": "compose"}),
+                RENDER_OP => serde_json::json!({"native": {}}),
+                STATUS_OP => serde_json::json!({"healthy": false}),
+                _ => serde_json::json!({"executed": false}),
+            })
+        });
+        let proxy = TemplateKindProxy {
+            name: "template-kind-proxy".into(),
+            invoke,
+        };
+
+        assert_eq!(proxy.decl().await.unwrap().kind, "compose");
+        assert!(proxy.render(render_req()).await.unwrap().plan.is_empty());
+        assert!(!proxy.apply(apply_req(true)).await.unwrap().executed);
+        assert!(!proxy.status(status_req()).await.unwrap().healthy);
+        assert!(!proxy.destroy(destroy_req()).await.unwrap().executed);
+
+        let calls = calls.lock().unwrap();
+        let ops: Vec<&str> = calls.iter().map(|(op, _)| op.as_str()).collect();
+        assert_eq!(ops, vec!["decl", "render", "apply", "status", "destroy"]);
+        assert_eq!(calls[0].1, serde_json::json!({}));
+        assert_eq!(calls[1].1, serde_json::to_value(render_req()).unwrap());
+        assert_eq!(calls[2].1, serde_json::to_value(apply_req(true)).unwrap());
+        assert_eq!(calls[2].1["dry_run"], true);
+        assert_eq!(
+            calls[2].1["credentials"][0]["secret_ref"],
+            "op://orca/web/password"
+        );
+        assert_eq!(calls[3].1, serde_json::to_value(status_req()).unwrap());
+        assert_eq!(calls[4].1, serde_json::to_value(destroy_req()).unwrap());
     }
 }
