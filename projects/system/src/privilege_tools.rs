@@ -233,6 +233,47 @@ fn is_dangling(root: &Path, cmd: &str) -> bool {
     !joined.exists()
 }
 
+fn severity_rank(s: &str) -> u8 {
+    match s {
+        "high" => 0,
+        "medium" => 1,
+        _ => 2,
+    }
+}
+
+fn sudoers_finding(check: crate::sysadmin::SudoersCheck) -> PrivilegeFinding {
+    use crate::sysadmin::SudoersCheck;
+    let (kind, severity, principal, detail) = match check {
+        SudoersCheck::Drift { user, diff } => (
+            "sudoers_drift",
+            "medium",
+            user,
+            format!(
+                "the orca drop-in differs from the one rendered for this binary ({} line(s)); \
+                 run `orca identity privilege repair`",
+                diff.len()
+            ),
+        ),
+        SudoersCheck::UnsafeBinary { user, reason } => {
+            ("sudoers_unsafe_binary", "high", user, reason)
+        }
+        SudoersCheck::Unreadable { reason } => (
+            "sudoers_unreadable",
+            "medium",
+            "-".to_string(),
+            format!("the orca drop-in could not be audited: {reason}"),
+        ),
+    };
+    PrivilegeFinding {
+        kind: kind.into(),
+        severity: severity.into(),
+        principal,
+        source: Some("/etc/sudoers.d/orca".into()),
+        line: None,
+        detail,
+    }
+}
+
 /// Audit a filesystem root. Split out from the tool fn so tests can drive it
 /// against a fixture tree.
 pub fn audit_root(root: &Path, host: String) -> PrivilegeAudit {
@@ -360,12 +401,7 @@ pub fn audit_root(root: &Path, host: String) -> PrivilegeAudit {
         });
     }
 
-    let rank = |s: &str| match s {
-        "high" => 0,
-        "medium" => 1,
-        _ => 2,
-    };
-    findings.sort_by_key(|f| rank(&f.severity));
+    findings.sort_by_key(|f| severity_rank(&f.severity));
 
     PrivilegeAudit {
         host,
@@ -388,19 +424,11 @@ async fn identity_privilege_audit(
     let live = args.root.is_none();
     let root = PathBuf::from(args.root.unwrap_or_else(|| "/".to_string()));
     let mut audit = audit_root(&root, crate::host_identity::hostname().to_string());
-    if live && let Some((user, diff)) = crate::sysadmin::sudoers_drift() {
-        audit.findings.push(PrivilegeFinding {
-            kind: "sudoers_drift".into(),
-            severity: "medium".into(),
-            principal: user,
-            source: Some("/etc/sudoers.d/orca".into()),
-            line: None,
-            detail: format!(
-                "the orca drop-in differs from the one rendered for this binary ({} line(s)); \
-                 run `orca identity privilege repair`",
-                diff.len()
-            ),
-        });
+    if live {
+        for check in crate::sysadmin::sudoers_drift() {
+            audit.findings.push(sudoers_finding(check));
+        }
+        audit.findings.sort_by_key(|f| severity_rank(&f.severity));
     }
     Ok(audit)
 }
