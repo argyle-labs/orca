@@ -111,6 +111,9 @@ openapi-plugin = ["tools", "db", "delegated-http"]
 # Folded into `full` so every daemon-shape and full plugin reports real stats;
 # a thin plugin without it returns `None` stats and the provider degrades.
 jemalloc-stats = ["dep:tikv-jemalloc-ctl"]
+# Serve an embedded built site (`plugin_toolkit::ui`) on a claimed web prefix,
+# plus the typed `web` BackendDef builder.
+ui = ["dep:contract", "dep:rust-embed", "dep:mime_guess"]
 
 [dependencies]
 # ── Always-on light core ────────────────────────────────────────────────
@@ -212,6 +215,8 @@ futures-util = { workspace = true }
 # Socket.IO async client transport (see the `socketio` feature).
 rust_socketio = { workspace = true, optional = true }
 native-tls = { workspace = true, optional = true }
+rust-embed = { workspace = true, optional = true }
+mime_guess = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Rotation tests write real files and must not touch the operator's state dir.
