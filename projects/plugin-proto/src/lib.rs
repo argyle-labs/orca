@@ -127,6 +127,8 @@ pub enum Frame {
     Result {
         id: u64,
         ok: bool,
+        /// The tool output when `ok`; when not `ok`, optionally the structured
+        /// `OrcaError` (kind, code, remediation) behind `error`.
         #[serde(default, skip_serializing_if = "Value::is_null")]
         value: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]

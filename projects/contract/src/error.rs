@@ -69,7 +69,7 @@ impl ErrorKind {
 /// failure is captured at first construction. Re-throwing via `?` does NOT
 /// re-log — From<anyhow::Error> logs once on conversion, then subsequent
 /// propagation is silent.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OrcaError {
     pub kind: ErrorKind,
     pub message: String,
@@ -81,6 +81,10 @@ pub struct OrcaError {
     /// the surface layer (axum middleware / cli wrapper / mcp handler).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    /// How to unblock the failure, when the tool knows. Carried intact
+    /// through REST, MCP, and plugin transport rather than flattened to text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<Box<crate::remediation::Remediation>>,
 }
 
 impl OrcaError {
@@ -96,7 +100,27 @@ impl OrcaError {
             message,
             code: None,
             context: None,
+            remediation: None,
         }
+    }
+
+    /// An `Unavailable` failure with a stable `reason_code` and the way out.
+    pub fn blocked(
+        reason_code: impl Into<String>,
+        detail: impl Into<String>,
+        remediation: impl Into<crate::remediation::Remediation>,
+    ) -> Self {
+        Self::unavailable(detail)
+            .with_code(reason_code)
+            .with_remediation(remediation)
+    }
+
+    pub fn with_remediation(
+        mut self,
+        remediation: impl Into<crate::remediation::Remediation>,
+    ) -> Self {
+        self.remediation = Some(Box::new(remediation.into()));
+        self
     }
 
     /// Attach a stable machine-readable code. Use for cross-language
@@ -140,7 +164,11 @@ impl OrcaError {
 
 impl fmt::Display for OrcaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.kind.as_str(), self.message)
+        write!(f, "{}: {}", self.kind.as_str(), self.message)?;
+        if let Some(r) = &self.remediation {
+            write!(f, "\n{r}")?;
+        }
+        Ok(())
     }
 }
 
@@ -334,6 +362,24 @@ mod tests {
         let s = serde_json::to_string(&full).unwrap();
         assert!(s.contains("\"code\":\"c\""));
         assert!(s.contains("\"context\":\"ctx\""));
+    }
+
+    #[test]
+    fn blocked_error_round_trips_remediation_and_renders_steps() {
+        let e = OrcaError::blocked(
+            "x.disabled",
+            "service off",
+            crate::ManualSteps::new("no API").step("Turn it on", "in the web UI"),
+        );
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["kind"], "unavailable");
+        assert_eq!(v["code"], "x.disabled");
+        assert_eq!(v["remediation"]["steps"][0]["title"], "Turn it on");
+        let back: OrcaError = serde_json::from_value(v).unwrap();
+        assert!(back.remediation.is_some());
+        let text = back.to_string();
+        assert!(text.starts_with("unavailable: service off\nManual steps required: no API"));
+        assert!(text.contains("  1. Turn it on"));
     }
 
     #[test]

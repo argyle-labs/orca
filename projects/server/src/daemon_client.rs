@@ -94,6 +94,12 @@ impl DaemonClient for HttpDaemonClient {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
+                // A remediation renders as numbered steps via `OrcaError`'s Display.
+                if let Ok(oe) = serde_json::from_str::<contract::OrcaError>(&text)
+                    && oe.remediation.is_some()
+                {
+                    return Err(oe.into());
+                }
                 anyhow::bail!("local daemon returned {status} for {name}: {}", text.trim());
             }
             serde_json::from_str(&text)

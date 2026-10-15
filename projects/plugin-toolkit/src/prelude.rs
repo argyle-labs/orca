@@ -28,6 +28,9 @@
 // `default-features = false` never references them and so drops `contract`.
 #[cfg(feature = "tools")]
 pub use contract::{JsonAny, ToolCtx};
+// Structured "how to unblock this" answers (no official API → manual steps).
+#[cfg(feature = "tools")]
+pub use crate::remediation::{Blocked, ManualStep, ManualSteps, Remediation, blocked};
 
 // ── Macros emitted into plugin scope ────────────────────────────────────
 // `#[orca_struct]` / `#[orca_struct(args)]` for data types (with

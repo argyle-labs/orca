@@ -160,10 +160,12 @@ pub fn handshake<S: Read + Write>(stream: &mut S, capabilities: &[&str]) -> Resu
 
 /// A tool's own error, delivered in a well-formed `Result` frame — the
 /// session is still in sync, unlike an I/O or protocol failure.
+/// Carries the plugin's structured `OrcaError` as its source, when it sent one.
 #[derive(Debug)]
 pub(crate) struct ToolFailed {
     pub(crate) message: String,
     pub(crate) kind: Option<contract::ErrorKind>,
+    pub(crate) error: Option<contract::OrcaError>,
 }
 
 impl std::fmt::Display for ToolFailed {
@@ -172,7 +174,11 @@ impl std::fmt::Display for ToolFailed {
     }
 }
 
-impl std::error::Error for ToolFailed {}
+impl std::error::Error for ToolFailed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.error.as_ref().map(|e| e as _)
+    }
+}
 
 /// Drive one tool invocation to completion over `stream`. Writes `Invoke{id}`,
 /// then services `Cap`/`Log` frames until the `Result` with the matching `id`.
@@ -216,6 +222,7 @@ pub fn invoke_on<S: Read + Write>(
                         message: error.unwrap_or_else(|| "unknown error".into()),
                         kind: error_kind
                             .and_then(|k| serde_json::from_value(Value::String(k)).ok()),
+                        error: serde_json::from_value(value).ok(),
                     }
                     .into())
                 };
@@ -1254,6 +1261,41 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("boom"), "got: {err}");
+        plugin.join().unwrap();
+    }
+
+    #[test]
+    fn invoke_carries_structured_tool_error_as_source() {
+        let (plugin_end, mut orca_end) = UnixStream::pair().unwrap();
+        let oe = contract::OrcaError::blocked(
+            "x.off",
+            "service off",
+            contract::ManualSteps::new("no API").step("Enable", "in the UI"),
+        );
+        let value = serde_json::to_value(&oe).unwrap();
+        let plugin = thread::spawn(move || {
+            let mut s = plugin_end;
+            let _ = read_frame(&mut s).unwrap();
+            write_frame(
+                &mut s,
+                &Frame::Result {
+                    id: 3,
+                    ok: false,
+                    value,
+                    error: Some("unavailable: service off".into()),
+                    error_kind: Some("unavailable".into()),
+                },
+            )
+            .unwrap();
+        });
+        let err = invoke_on(&mut orca_end, 3, "work", Value::Null, None, "p").unwrap_err();
+        assert!(err.is::<ToolFailed>(), "session stays healthy");
+        let back = err
+            .chain()
+            .find_map(|c| c.downcast_ref::<contract::OrcaError>())
+            .expect("structured error reaches the host");
+        assert_eq!(back.code.as_deref(), Some("x.off"));
+        assert!(back.remediation.is_some());
         plugin.join().unwrap();
     }
 
