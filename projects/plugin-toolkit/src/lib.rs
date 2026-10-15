@@ -121,6 +121,10 @@ pub mod time;
 /// Reactor-free, so gated on `tools` alone rather than `in-process`.
 #[cfg(feature = "tools")]
 pub mod tool_manifest;
+/// Serve an embedded built site on a web prefix ([`ui::EmbeddedSite`]) and
+/// declare its route with the typed [`ui::web_backend`] builder.
+#[cfg(feature = "ui")]
+pub mod ui;
 
 /// Thin-profile backend-descriptor builders (`unit_backend_def`,
 /// `topology_backend_def`, `host_facts_backend_def`, `service_identity_backend_def`,
