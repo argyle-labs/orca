@@ -167,4 +167,4 @@ for i in "${!shas[@]}"; do
   )
 done
 
-echo "pre-push checks passed (fmt + clippy + nextest; coverage floor runs in Gitea CI)."
+echo "pre-push checks passed for the selection above; the full workspace and coverage run in Gitea CI."
