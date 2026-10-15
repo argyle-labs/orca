@@ -39,7 +39,7 @@ jobs:
     steps:
       - name: Version
         id: v
-        uses: argyle-labs/.github/.github/actions/job-release-version@feat/composable-release-jobs
+        uses: argyle-labs/.github/.github/actions/job-release-version@main
         with:
           stage: ${{ inputs.stage }}
           bump: ${{ inputs.bump }}
@@ -57,7 +57,7 @@ jobs:
         shell: bash
     steps:
       - name: Build x86_64-unknown-linux-gnu
-        uses: argyle-labs/.github/.github/actions/job-release-build@feat/composable-release-jobs
+        uses: argyle-labs/.github/.github/actions/job-release-build@main
         with:
           target: x86_64-unknown-linux-gnu
           version: ${{ needs.version.outputs.version }}
@@ -84,7 +84,7 @@ jobs:
         shell: bash
     steps:
       - name: Build x86_64-unknown-linux-musl
-        uses: argyle-labs/.github/.github/actions/job-release-build@feat/composable-release-jobs
+        uses: argyle-labs/.github/.github/actions/job-release-build@main
         with:
           target: x86_64-unknown-linux-musl
           version: ${{ needs.version.outputs.version }}
@@ -111,7 +111,7 @@ jobs:
         shell: bash
     steps:
       - name: Build aarch64-unknown-linux-gnu
-        uses: argyle-labs/.github/.github/actions/job-release-build@feat/composable-release-jobs
+        uses: argyle-labs/.github/.github/actions/job-release-build@main
         with:
           target: aarch64-unknown-linux-gnu
           version: ${{ needs.version.outputs.version }}
@@ -130,7 +130,7 @@ jobs:
     runs-on: macos
     steps:
       - name: Build aarch64-apple-darwin
-        uses: argyle-labs/.github/.github/actions/job-release-build-macos@feat/composable-release-jobs
+        uses: argyle-labs/.github/.github/actions/job-release-build-macos@main
         with:
           version: ${{ needs.version.outputs.version }}
           disable-lto-for-rc: 'true'
@@ -140,7 +140,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Package deb/rpm/PKGBUILD/homebrew/plg
-        uses: argyle-labs/.github/.github/actions/job-release-package@feat/composable-release-jobs
+        uses: argyle-labs/.github/.github/actions/job-release-package@main
 
   package-macos:
     needs: [version, build-aarch64-apple-darwin]
@@ -148,7 +148,7 @@ jobs:
     continue-on-error: true
     steps:
       - name: Package .pkg
-        uses: argyle-labs/.github/.github/actions/job-release-package-macos@feat/composable-release-jobs
+        uses: argyle-labs/.github/.github/actions/job-release-package-macos@main
         with:
           version: ${{ needs.version.outputs.version }}
 
@@ -159,7 +159,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Publish
-        uses: argyle-labs/.github/.github/actions/job-release-publish@feat/composable-release-jobs
+        uses: argyle-labs/.github/.github/actions/job-release-publish@main
         with:
           version: ${{ needs.version.outputs.version }}
           tag: ${{ needs.version.outputs.tag }}
@@ -185,6 +185,6 @@ jobs:
         shell: bash
     steps:
       - name: Publish crates
-        uses: argyle-labs/.github/.github/actions/job-release-crates@feat/composable-release-jobs
+        uses: argyle-labs/.github/.github/actions/job-release-crates@main
         with:
           registry-token: ${{ secrets.CI_REGISTRY_TOKEN }}
