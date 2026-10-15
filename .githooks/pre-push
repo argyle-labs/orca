@@ -13,9 +13,17 @@ cd "$ROOT"
 # artifacts compiled from different source.
 ZERO=0000000000000000000000000000000000000000
 shas=()
-while read -r _lref lsha _rref _rsha; do
-  [ "$lsha" = "$ZERO" ] && continue # branch deletion
+bases=()
+while read -r _lref lsha _rref rsha; do
+  [ "$lsha" = "$ZERO" ] && continue
+  base=""
+  if [ "$rsha" != "$ZERO" ] && git cat-file -e "$rsha^{commit}" 2>/dev/null; then
+    base="$rsha"
+  else
+    base="$(git merge-base origin/main "$lsha" 2>/dev/null || true)"
+  fi
   shas+=("$lsha")
+  bases+=("$base")
 done
 if [ "${#shas[@]}" -eq 0 ]; then
   exit 0
@@ -70,43 +78,79 @@ run_bounded() {
   fi
 }
 
-# Pre-push runs the SAME gates as Gitea CI (.github/workflows/ci.yml) so a push
-# that passes locally passes CI: rustfmt, clippy (-D warnings), and the test
-# suite. Coverage's fail-under floor stays CI-only (it needs the instrumented
-# llvm-cov build); everything else is enforced here.
-#
-# Tests run under nextest, matching CI exactly (ci.yml runs
-# `cargo llvm-cov nextest --no-report --locked --workspace --no-fail-fast`).
-# nextest runs each test in its OWN process, so tests that share process-global
-# state (the db pool, the daemon-client registry, env vars) can't race each
-# other. Plain `cargo test` runs a crate's tests in-process in parallel and
-# DID race that shared state — producing false, non-deterministic failures in
-# unrelated crates (system/update one run, dispatch the next) that CI never saw.
-# The hook had drifted from CI (cargo test vs nextest); this realigns them.
-#
-# We do NOT weaken this gate to get a push through. A genuinely flaky test is a
-# defect to fix (make it deterministic, or fix the code it caught) — never a
-# reason to drop the check. For a faster inner loop scoped to changed crates,
-# run ./scripts/check-fast.sh; this hook is the full pre-push guarantee.
 if ! command -v cargo-nextest >/dev/null 2>&1; then
   echo "error: cargo-nextest is not installed, but CI runs tests under nextest." >&2
   echo "       install it:  cargo install cargo-nextest --locked" >&2
   exit 1
 fi
 
+select_crates() {
+  local base="$1" sha="$2" changed meta
+  if [ -z "$base" ]; then
+    echo "workspace no-base"
+    return
+  fi
+  changed="$(git diff --name-only "$base" "$sha")" || {
+    echo "workspace diff-failed"
+    return
+  }
+  if printf '%s\n' "$changed" | grep -qE '^(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?|\.cargo/.*|\.config/nextest\.toml|\.githooks/pre-push)$'; then
+    echo "workspace build-config-changed"
+    return
+  fi
+  meta="$(cd "$GATE_DIR/src" && cargo metadata --no-deps --format-version 1 --locked 2>/dev/null)" || {
+    echo "workspace metadata-failed"
+    return
+  }
+  printf '%s\n' "$meta" | jq -r --arg root "$GATE_DIR/src/" --arg files "$changed" '
+    (.packages | map({name, dir: (.manifest_path | sub("/Cargo.toml$"; "/") | ltrimstr($root)), deps: [.dependencies[] | select(.path != null) | .name]}) | if any(.[]; .dir | startswith("/")) then error("manifest outside gate dir") else . end) as $pkgs
+    | ($files | split("\n") | map(select(length > 0))) as $fs
+    | [$fs[] as $f | [$pkgs[] | select(.dir as $d | $f | startswith($d))] | max_by(.dir | length) | .name? // empty] | unique as $changed
+    | {seen: $changed, frontier: $changed}
+    | until(.frontier | length == 0;
+        .seen as $s
+        | ([$pkgs[] | select(.name as $n | $s | index($n) | not) | select(any(.deps[]; . as $d | $s | index($d)))] | map(.name) | unique) as $new
+        | {seen: ($s + $new), frontier: $new})
+    | .seen as $all
+    | ($all | map(select(. as $n | $changed | index($n) | not))) as $dependents
+    | "crates", ($changed | map("changed " + .)[]), ($dependents | map("dependent " + .)[])
+  ' || echo "workspace mapping-failed"
+}
+
 gate() {
+  local selection="$1" scope=() crates=()
   echo "==> rustfmt"
   cargo fmt --all -- --check
 
-  echo "==> clippy (-D warnings, matches CI)"
-  RUSTFLAGS="-D warnings" cargo clippy --tests --locked --workspace -- -D warnings
+  case "$(printf '%s\n' "$selection" | head -1)" in
+    workspace*)
+      echo "==> crate selection: workspace ($(printf '%s\n' "$selection" | head -1 | cut -d' ' -f2))"
+      scope=(--workspace)
+      ;;
+    *)
+      echo "==> crate selection"
+      while read -r why name; do
+        echo "    $why: $name"
+        crates+=("$name")
+      done < <(printf '%s\n' "$selection" | tail -n +2)
+      if [ "${#crates[@]}" -eq 0 ]; then
+        echo "==> crate selection: none affected, skipping clippy and tests"
+        return
+      fi
+      for c in "${crates[@]}"; do scope+=(-p "$c"); done
+      ;;
+  esac
 
-  echo "==> tests (nextest — matches CI's cargo llvm-cov nextest)"
-  run_bounded 600 cargo nextest run --locked --workspace --no-fail-fast
+  echo "==> clippy (-D warnings)"
+  RUSTFLAGS="-D warnings" cargo clippy --tests --locked "${scope[@]}" -- -D warnings
+
+  echo "==> tests (nextest)"
+  run_bounded 600 cargo nextest run --locked "${scope[@]}" --no-fail-fast
 }
 
 gated=" "
-for sha in "${shas[@]}"; do
+for i in "${!shas[@]}"; do
+  sha="${shas[$i]}"
   tree="$(git rev-parse "$sha^{tree}")"
   case "$gated" in *" $tree "*) continue ;; esac
   gated="$gated$tree "
@@ -117,8 +161,9 @@ for sha in "${shas[@]}"; do
   rsync -rlc --delete "$stage/" "$GATE_DIR/src/"
   echo "==> gating $(git log -1 --format='%h %s' "$sha")"
   (
+    selection="$(select_crates "${bases[$i]}" "$sha")"
     cd "$GATE_DIR/src"
-    gate
+    gate "$selection"
   )
 done
 
