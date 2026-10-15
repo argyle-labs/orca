@@ -195,6 +195,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "web" => Some(register_web_backend),
         "subprocess_env" => Some(register_subprocess_env_backend),
         "replication" => Some(register_replication_backend),
+        "template_kind" => Some(register_template_kind_backend),
         // Fall through to domains injected by downstream crates (backup KIND /
         // TARGET, contributed by `system` at startup).
         other => EXTRA_DOMAINS
@@ -372,6 +373,11 @@ fn register_notification_source_backend(def: &BackendDef, invoke: BackendInvoke)
 fn register_ups_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     contract::ups::register_from_def(def.name.clone(), invoke)
         .map_err(|e| anyhow!("register ups backend '{}': {e}", def.name))
+}
+
+fn register_template_kind_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::template_kind::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register template_kind backend '{}': {e}", def.name))
 }
 
 /// Guest-exec entry: register a plugin-backed [`contract::guest_exec::GuestExec`]
@@ -619,6 +625,9 @@ fn domain_deregister(domain: &str, name: &str) {
         "replication" => {
             plugin_toolkit::storage::deregister_status_provider(name);
         }
+        "template_kind" => {
+            contract::template_kind::deregister_provider(name);
+        }
         other => {
             // A domain injected by a downstream crate (backup KIND / TARGET)?
             let injected = EXTRA_DOMAINS
@@ -696,6 +705,7 @@ const BUILTIN_BACKEND_DOMAINS: &[&str] = &[
     "web",
     "subprocess_env",
     "replication",
+    "template_kind",
 ];
 
 /// `(domain, name)` → plugin id for [`NameScope::Claimed`] registrations.
@@ -1369,6 +1379,31 @@ mod loader_tests {
             // Deregister must be a safe no-op / reverse and never panic.
             domain_deregister(domain, &name);
         }
+    }
+
+    #[test]
+    fn template_kind_domain_registers_and_deregisters() {
+        let name = "loader-test-template-kind-roundtrip";
+        let def = BackendDef {
+            domain: "template_kind".to_string(),
+            name: name.to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        let ctor = domain_register("template_kind").expect("template_kind resolves");
+        ctor(&def, noop_invoke()).expect("template_kind registers");
+        assert!(
+            contract::template_kind::providers()
+                .iter()
+                .any(|p| p.name() == name)
+        );
+        assert_eq!(name_scope("template_kind"), NameScope::Own);
+        domain_deregister("template_kind", name);
+        assert!(
+            !contract::template_kind::providers()
+                .iter()
+                .any(|p| p.name() == name)
+        );
     }
 
     #[test]
