@@ -1,5 +1,5 @@
 name: Release
-run-name: Release ${{ inputs.version || format('{0} · {1}', inputs.stage, inputs.bump) }}
+run-name: Release ${{ github.event.inputs.version || format('{0} · {1}', github.event.inputs.stage, github.event.inputs.bump) }}
 
 # Ordered release jobs from argyle-labs/.github job-release-* actions, triggered
 # by operator dispatch (the dispatch is the gate; Gitea has no environment
