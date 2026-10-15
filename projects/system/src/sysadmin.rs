@@ -153,11 +153,7 @@ pub(crate) fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str
     validate_shell_safe("--service-user", user)?;
     validate_shell_safe("--home-dir", home_dir)?;
 
-    let user_exists = Command::new("id")
-        .arg(user)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let user_exists = crate::cron::lookup_uid(user).is_some();
 
     if user_exists {
         println!("{} user '{user}' already exists", "-".dimmed());
@@ -181,7 +177,10 @@ pub(crate) fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str
     // and plugin root ops are inert (the daemon runs unprivileged). Best-effort:
     // a failure here shouldn't abort the whole install.
     if let Err(e) = install_autofs_sudoers(user) {
-        eprintln!("{} autofs sudoers rule not installed: {e}", "!".yellow());
+        eprintln!(
+            "{} sudoers drop-in NOT installed; privileged helpers stay inert: {e:#}",
+            "!".yellow()
+        );
     }
 
     if let Some(pk) = admin_pubkey {
@@ -203,7 +202,7 @@ pub(crate) fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str
 /// re-installed at boot from a marked block in `/boot/config/go`.
 #[cfg(target_os = "linux")]
 fn install_autofs_sudoers(user: &str) -> Result<()> {
-    validate_shell_safe("--service-user", user)?;
+    require_service_user(user)?;
     if !is_root() {
         anyhow::bail!("must be root to write /etc/sudoers.d");
     }
@@ -237,12 +236,15 @@ fn install_autofs_sudoers(user: &str) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn sudoers_inputs() -> Result<(String, bool, bool)> {
     let exe = std::env::current_exe().context("resolve the orca binary path")?;
-    let exe = exe.canonicalize().unwrap_or(exe);
+    let exe = exe
+        .canonicalize()
+        .with_context(|| format!("canonicalize {}", exe.display()))?;
     let binary = exe
         .to_str()
         .context("orca binary path is not UTF-8")?
         .to_string();
     validate_shell_safe("orca binary path", &binary)?;
+    check_binary_trust(&exe, owner_mode)?;
     let is_proxmox = std::path::Path::new("/etc/pve").is_dir();
     let cron = std::path::Path::new(crate::cron::CRON_USERS_ALLOWLIST).exists();
     Ok((binary, is_proxmox, cron))
@@ -253,9 +255,80 @@ fn install_sudoers_drop_in(contents: &str) -> Result<()> {
     let path = std::path::Path::new(SUDOERS_DROP_IN);
     // sudo skips drop-in names containing '.', so the staged file is inert
     // until the rename.
-    let staged = std::path::Path::new("/etc/sudoers.d/.orca.incoming");
-    write_validated_sudoers(staged, contents)?;
-    std::fs::rename(staged, path).with_context(|| format!("install {}", path.display()))
+    let staged = std::path::PathBuf::from(format!(
+        "/etc/sudoers.d/.orca.incoming.{}",
+        std::process::id()
+    ));
+    write_validated_sudoers(&staged, contents)?;
+    std::fs::rename(&staged, path).with_context(|| format!("install {}", path.display()))
+}
+
+#[cfg(any(target_os = "linux", test))]
+const SUDOERS_KEYWORDS: &[&str] = &[
+    "all",
+    "defaults",
+    "user_alias",
+    "runas_alias",
+    "host_alias",
+    "cmnd_alias",
+    "cmd_alias",
+];
+
+#[cfg(any(target_os = "linux", test))]
+fn validate_service_user(user: &str) -> Result<()> {
+    let mut chars = user.chars();
+    let shape_ok = user.len() <= 32
+        && chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    if !shape_ok {
+        anyhow::bail!("service user '{user}' must match ^[a-z_][a-z0-9_-]{{0,31}}$");
+    }
+    if SUDOERS_KEYWORDS.contains(&user) {
+        anyhow::bail!("service user '{user}' is a sudoers keyword");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_service_user(user: &str) -> Result<()> {
+    validate_service_user(user)?;
+    if crate::cron::lookup_uid(user).is_none() {
+        anyhow::bail!("service user '{user}' does not exist on this host");
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn check_binary_trust(
+    binary: &std::path::Path,
+    meta: impl Fn(&std::path::Path) -> std::io::Result<(u32, u32)>,
+) -> Result<()> {
+    for p in binary.ancestors() {
+        if p.as_os_str().is_empty() {
+            continue;
+        }
+        let (uid, mode) = meta(p).map_err(|e| anyhow::anyhow!("stat {}: {e}", p.display()))?;
+        if uid != 0 || mode & 0o022 != 0 {
+            anyhow::bail!(
+                "refusing a NOPASSWD grant on {}: {} is owned by uid {uid} with mode {:o}, \
+                 so a non-root user could replace it; install a root-owned copy (e.g. \
+                 /usr/local/bin/orca, every parent dir root-owned and not group/world-writable) \
+                 and point the daemon's privileged helper at it",
+                binary.display(),
+                p.display(),
+                mode & 0o7777
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn owner_mode(p: &std::path::Path) -> std::io::Result<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(p).map(|m| (m.uid(), m.mode()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -280,13 +353,28 @@ impl SudoersRepairPlan {
 }
 
 #[cfg(any(target_os = "linux", test))]
+fn sudoers_grant(line: &str) -> Option<(&str, &str)> {
+    let (user, rest) = line.trim().split_once(' ')?;
+    validate_service_user(user).ok()?;
+    let rest = rest.strip_prefix("ALL=(root) NOPASSWD: ")?;
+    let binary = rest.split(' ').next().filter(|b| b.starts_with('/'))?;
+    Some((user, binary))
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn sudoers_user(drop_in: &str) -> Option<String> {
     drop_in
         .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .find_map(|l| l.split_whitespace().next())
-        .map(str::to_string)
+        .find_map(sudoers_grant)
+        .map(|(u, _)| u.to_string())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn sudoers_granted_binary(drop_in: &str) -> Option<String> {
+    drop_in
+        .lines()
+        .find_map(sudoers_grant)
+        .map(|(_, b)| b.to_string())
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -330,7 +418,11 @@ fn read_drop_in() -> Result<Option<String>> {
     match std::fs::read_to_string(SUDOERS_DROP_IN) {
         Ok(s) => Ok(Some(s)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("read {SUDOERS_DROP_IN} (run as root)")),
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "read {SUDOERS_DROP_IN}: run `sudo orca identity privilege repair` as root from the CLI"
+            )
+        }),
     }
 }
 
@@ -340,7 +432,7 @@ pub(crate) fn sudoers_repair(user: Option<String>, execute: bool) -> Result<Sudo
     let Some(user) = user.or_else(|| current.as_deref().and_then(sudoers_user)) else {
         anyhow::bail!("{SUDOERS_DROP_IN} does not name a service user; pass --service-user");
     };
-    validate_shell_safe("--service-user", &user)?;
+    require_service_user(&user)?;
     let (binary, is_proxmox, cron) = sudoers_inputs()?;
     let rendered = sudoers_contents(&user, &binary, is_proxmox, cron);
     let unraid = crate::update::is_unraid();
@@ -375,18 +467,51 @@ pub(crate) fn sudoers_repair(_user: Option<String>, _execute: bool) -> Result<Su
     anyhow::bail!("the orca sudoers drop-in is only managed on Linux")
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) enum SudoersCheck {
+    Drift { user: String, diff: Vec<String> },
+    UnsafeBinary { user: String, reason: String },
+    Unreadable { reason: String },
+}
+
 #[cfg(target_os = "linux")]
-pub(crate) fn sudoers_drift() -> Option<(String, Vec<String>)> {
-    let current = read_drop_in().ok()??;
-    let user = sudoers_user(&current)?;
-    let (binary, is_proxmox, cron) = sudoers_inputs().ok()?;
-    let rendered = sudoers_contents(&user, &binary, is_proxmox, cron);
-    (current != rendered).then(|| (user, sudoers_diff(&current, &rendered)))
+pub(crate) fn sudoers_drift() -> Vec<SudoersCheck> {
+    let current = match read_drop_in() {
+        Ok(Some(c)) => c,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            return vec![SudoersCheck::Unreadable {
+                reason: format!("{e:#}"),
+            }];
+        }
+    };
+    let Some(user) = sudoers_user(&current) else {
+        return Vec::new();
+    };
+    let mut checks = Vec::new();
+    if let Some(granted) = sudoers_granted_binary(&current)
+        && let Err(e) = check_binary_trust(std::path::Path::new(&granted), owner_mode)
+    {
+        checks.push(SudoersCheck::UnsafeBinary {
+            user: user.clone(),
+            reason: format!("{e:#}"),
+        });
+    }
+    if let Ok((binary, is_proxmox, cron)) = sudoers_inputs() {
+        let rendered = sudoers_contents(&user, &binary, is_proxmox, cron);
+        if current != rendered {
+            checks.push(SudoersCheck::Drift {
+                diff: sudoers_diff(&current, &rendered),
+                user,
+            });
+        }
+    }
+    checks
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn sudoers_drift() -> Option<(String, Vec<String>)> {
-    None
+pub(crate) fn sudoers_drift() -> Vec<SudoersCheck> {
+    Vec::new()
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -439,16 +564,25 @@ fn sudoers_contents(user: &str, binary: &str, is_proxmox: bool, cron: bool) -> S
 /// removing it if visudo rejects it.
 #[cfg(target_os = "linux")]
 fn write_validated_sudoers(path: &std::path::Path, contents: &str) -> Result<()> {
-    std::fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
-    // sudoers drop-ins must be 0440 or sudo ignores them.
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o440))
-        .with_context(|| format!("chmod {}", path.display()))?;
-    let ok = Command::new("visudo")
-        .arg("-cf")
-        .arg(path)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(true); // no visudo → assume the syntax (which we control) is fine
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o440)
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    if let Err(e) = f.write_all(contents.as_bytes()).and_then(|()| f.sync_all()) {
+        _ = std::fs::remove_file(path);
+        return Err(e).with_context(|| format!("write {}", path.display()));
+    }
+    let ok = match Command::new("visudo").arg("-cf").arg(path).output() {
+        Ok(o) => o.status.success(),
+        Err(e) => {
+            _ = std::fs::remove_file(path);
+            return Err(e).context("run visudo to validate the sudoers drop-in");
+        }
+    };
     if !ok {
         _ = std::fs::remove_file(path);
         anyhow::bail!("visudo rejected {} (removed)", path.display());
@@ -464,10 +598,38 @@ fn persist_sudoers_on_unraid(contents: &str) -> Result<()> {
     if let Some(dir) = copy.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
-    std::fs::write(copy, contents).with_context(|| format!("write {}", copy.display()))?;
-    let go = std::fs::read_to_string(UNRAID_GO).unwrap_or_default();
+    write_atomic(copy, contents, 0o600)?;
+    let go_path = std::path::Path::new(UNRAID_GO);
+    let go = std::fs::read_to_string(go_path).unwrap_or_default();
     if let Some(updated) = with_go_block(&go) {
-        std::fs::write(UNRAID_GO, updated).with_context(|| format!("write {UNRAID_GO}"))?;
+        write_atomic(go_path, &updated, 0o755)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn write_atomic(path: &std::path::Path, contents: &str, mode: u32) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = path.parent().context("atomic write target has no parent")?;
+    let name = path
+        .file_name()
+        .context("atomic write target has no file name")?
+        .to_string_lossy();
+    let tmp = dir.join(format!(".{name}.orca.{}", std::process::id()));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp)
+        .and_then(|mut f| {
+            f.write_all(contents.as_bytes())?;
+            f.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = written {
+        _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("write {}", path.display()));
     }
     Ok(())
 }
@@ -477,7 +639,7 @@ fn persist_sudoers_on_unraid(contents: &str) -> Result<()> {
 fn go_block() -> String {
     format!(
         "{GO_BLOCK_BEGIN}\n\
-         if [ -f {UNRAID_SUDOERS_COPY} ]; then\n\
+         if [ -f {UNRAID_SUDOERS_COPY} ] && visudo -cf {UNRAID_SUDOERS_COPY} >/dev/null 2>&1; then\n\
          \x20 install -m 0440 -o root -g root {UNRAID_SUDOERS_COPY} {SUDOERS_DROP_IN}\n\
          fi\n\
          {GO_BLOCK_END}\n"
@@ -708,12 +870,8 @@ fn install_ssh_key(user: &str, home_dir: &str, pubkey: &str) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn is_root() -> bool {
-    Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-        .unwrap_or(false)
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
 }
 
 #[cfg(target_os = "linux")]
@@ -796,6 +954,107 @@ mod sudoers_tests {
         let c = sudoers_contents("orca", "/usr/local/bin/orca", false, false);
         assert_eq!(sudoers_user(&c).as_deref(), Some("orca"));
         assert_eq!(sudoers_user("# only comments\n\n"), None);
+        assert_eq!(
+            sudoers_granted_binary(&c).as_deref(),
+            Some("/usr/local/bin/orca")
+        );
+    }
+
+    #[test]
+    fn sudoers_user_only_accepts_the_scoped_grant_shape() {
+        assert_eq!(
+            sudoers_user("ALL ALL=(root) NOPASSWD: /bin/x admin a\n"),
+            None
+        );
+        assert_eq!(sudoers_user("Defaults env_reset\n"), None);
+        assert_eq!(sudoers_user("orca ALL=(ALL) NOPASSWD: ALL\n"), None);
+        assert_eq!(
+            sudoers_user("%orca ALL=(root) NOPASSWD: /bin/x admin a\n"),
+            None
+        );
+        assert_eq!(sudoers_user("orca ALL=(root) NOPASSWD: ALL\n"), None);
+        assert_eq!(
+            sudoers_user("Defaults x\nsvc ALL=(root) NOPASSWD: /usr/local/bin/orca admin a\n")
+                .as_deref(),
+            Some("svc")
+        );
+    }
+
+    #[test]
+    fn service_user_validator_rejects_keywords_and_bad_shapes() {
+        for ok in ["orca", "_svc", "svc-1", "a"] {
+            assert!(validate_service_user(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "ALL",
+            "all",
+            "Defaults",
+            "defaults",
+            "User_Alias",
+            "runas_alias",
+            "host_alias",
+            "cmnd_alias",
+            "ORCA",
+            "1orca",
+            "-x",
+            "or ca",
+            "or.ca",
+            "%wheel",
+            "abcdefghijklmnopqrstuvwxyz0123456",
+        ] {
+            assert!(validate_service_user(bad).is_err(), "{bad}");
+        }
+    }
+
+    fn fake_meta(
+        bad: &'static str,
+        uid: u32,
+        mode: u32,
+    ) -> impl Fn(&std::path::Path) -> std::io::Result<(u32, u32)> {
+        move |p| {
+            if p == std::path::Path::new(bad) {
+                Ok((uid, mode))
+            } else {
+                Ok((0, 0o755))
+            }
+        }
+    }
+
+    #[test]
+    fn binary_trust_requires_root_owned_non_writable_chain() {
+        let bin = std::path::Path::new("/usr/local/bin/orca");
+        assert!(check_binary_trust(bin, fake_meta("/none", 0, 0)).is_ok());
+        let e = check_binary_trust(bin, fake_meta("/usr/local/bin/orca", 1000, 0o755))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("/usr/local/bin/orca is owned by uid 1000"),
+            "{e}"
+        );
+        assert!(check_binary_trust(bin, fake_meta("/usr/local", 0, 0o775)).is_err());
+        assert!(check_binary_trust(bin, fake_meta("/", 0, 0o757)).is_err());
+        assert!(check_binary_trust(bin, fake_meta("/usr", 0, 0o1755)).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_trust_reads_real_ownership() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("orca");
+        std::fs::write(&bin, "").unwrap();
+        let real = |p: &std::path::Path| std::fs::metadata(p).map(|m| (m.uid(), m.mode()));
+        let owned_by_root = std::fs::metadata(&bin).unwrap().uid() == 0;
+        assert_eq!(
+            check_binary_trust(&bin, real).is_ok(),
+            owned_by_root && {
+                dir.path().ancestors().all(|a| {
+                    a.as_os_str().is_empty()
+                        || std::fs::metadata(a).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0)
+                })
+            }
+        );
     }
 
     #[test]
