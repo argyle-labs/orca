@@ -385,11 +385,53 @@ async fn identity_privilege_audit(
     args: IdentityPrivilegeAuditArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PrivilegeAudit> {
+    let live = args.root.is_none();
     let root = PathBuf::from(args.root.unwrap_or_else(|| "/".to_string()));
-    Ok(audit_root(
-        &root,
-        crate::host_identity::hostname().to_string(),
-    ))
+    let mut audit = audit_root(&root, crate::host_identity::hostname().to_string());
+    if live && let Some((user, diff)) = crate::sysadmin::sudoers_drift() {
+        audit.findings.push(PrivilegeFinding {
+            kind: "sudoers_drift".into(),
+            severity: "medium".into(),
+            principal: user,
+            source: Some("/etc/sudoers.d/orca".into()),
+            line: None,
+            detail: format!(
+                "the orca drop-in differs from the one rendered for this binary ({} line(s)); \
+                 run `orca identity privilege repair`",
+                diff.len()
+            ),
+        });
+    }
+    Ok(audit)
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct IdentityPrivilegeRepairArgs {
+    #[arg(long)]
+    pub service_user: Option<String>,
+}
+
+fn neutralize_privilege_repair(_args: &mut IdentityPrivilegeRepairArgs) {}
+
+/// Rewrite only `/etc/sudoers.d/orca` (and its Unraid flash copy and boot block)
+/// for the service user. `dryRun` returns the current and rendered bodies and
+/// their line diff without writing.
+#[orca_tool(
+    domain = "identity.privilege",
+    verb = "repair",
+    role = "admin",
+    local_only = true,
+    data_mutation = false,
+    execute_gated = false,
+    dry_run_aware = true,
+    dry_run_neutralize = neutralize_privilege_repair
+)]
+async fn identity_privilege_repair(
+    args: IdentityPrivilegeRepairArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<crate::sysadmin::SudoersRepairPlan> {
+    crate::sysadmin::sudoers_repair(args.service_user, !ctx.dry_run())
 }
 
 #[cfg(test)]

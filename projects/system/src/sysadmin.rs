@@ -208,23 +208,9 @@ fn install_autofs_sudoers(user: &str) -> Result<()> {
         anyhow::bail!("must be root to write /etc/sudoers.d");
     }
 
-    let exe = std::env::current_exe().context("resolve the orca binary path")?;
-    let exe = exe.canonicalize().unwrap_or(exe);
-    let binary = exe
-        .to_str()
-        .context("orca binary path is not UTF-8")?
-        .to_string();
-    validate_shell_safe("orca binary path", &binary)?;
-    let is_proxmox = std::path::Path::new("/etc/pve").is_dir();
-    let cron = std::path::Path::new(crate::cron::CRON_USERS_ALLOWLIST).exists();
+    let (binary, is_proxmox, cron) = sudoers_inputs()?;
     let contents = sudoers_contents(user, &binary, is_proxmox, cron);
-
-    let path = std::path::Path::new(SUDOERS_DROP_IN);
-    // sudo skips drop-in names containing '.', so the staged file is inert
-    // until the rename.
-    let staged = std::path::Path::new("/etc/sudoers.d/.orca.incoming");
-    write_validated_sudoers(staged, &contents)?;
-    std::fs::rename(staged, path).with_context(|| format!("install {}", path.display()))?;
+    install_sudoers_drop_in(&contents)?;
 
     if crate::update::is_unraid()
         && let Err(e) = persist_sudoers_on_unraid(&contents)
@@ -246,6 +232,161 @@ fn install_autofs_sudoers(user: &str) -> Result<()> {
         }
     );
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn sudoers_inputs() -> Result<(String, bool, bool)> {
+    let exe = std::env::current_exe().context("resolve the orca binary path")?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    let binary = exe
+        .to_str()
+        .context("orca binary path is not UTF-8")?
+        .to_string();
+    validate_shell_safe("orca binary path", &binary)?;
+    let is_proxmox = std::path::Path::new("/etc/pve").is_dir();
+    let cron = std::path::Path::new(crate::cron::CRON_USERS_ALLOWLIST).exists();
+    Ok((binary, is_proxmox, cron))
+}
+
+#[cfg(target_os = "linux")]
+fn install_sudoers_drop_in(contents: &str) -> Result<()> {
+    let path = std::path::Path::new(SUDOERS_DROP_IN);
+    // sudo skips drop-in names containing '.', so the staged file is inert
+    // until the rename.
+    let staged = std::path::Path::new("/etc/sudoers.d/.orca.incoming");
+    write_validated_sudoers(staged, contents)?;
+    std::fs::rename(staged, path).with_context(|| format!("install {}", path.display()))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SudoersRepairPlan {
+    pub user: String,
+    pub path: String,
+    pub current: Option<String>,
+    pub rendered: String,
+    pub diff: Vec<String>,
+    pub up_to_date: bool,
+    pub unraid: bool,
+    pub flash_copy_current: bool,
+    pub go_block_current: bool,
+    pub executed: bool,
+}
+
+impl SudoersRepairPlan {
+    pub fn needs_repair(&self) -> bool {
+        !(self.up_to_date && self.flash_copy_current && self.go_block_current)
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn sudoers_user(drop_in: &str) -> Option<String> {
+    drop_in
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .find_map(|l| l.split_whitespace().next())
+        .map(str::to_string)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn sudoers_diff(current: &str, rendered: &str) -> Vec<String> {
+    let removed = current
+        .lines()
+        .filter(|l| !rendered.lines().any(|r| r == *l))
+        .map(|l| format!("-{l}"));
+    let added = rendered
+        .lines()
+        .filter(|l| !current.lines().any(|c| c == *l))
+        .map(|l| format!("+{l}"));
+    removed.chain(added).collect()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn plan_sudoers(
+    user: &str,
+    current: Option<String>,
+    rendered: String,
+    unraid: bool,
+    flash: Option<&str>,
+    go: Option<&str>,
+) -> SudoersRepairPlan {
+    SudoersRepairPlan {
+        user: user.to_string(),
+        path: SUDOERS_DROP_IN.to_string(),
+        diff: sudoers_diff(current.as_deref().unwrap_or(""), &rendered),
+        up_to_date: current.as_deref() == Some(rendered.as_str()),
+        unraid,
+        flash_copy_current: !unraid || flash == Some(rendered.as_str()),
+        go_block_current: !unraid || go.is_some_and(|g| with_go_block(g).is_none()),
+        current,
+        rendered,
+        executed: false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_drop_in() -> Result<Option<String>> {
+    match std::fs::read_to_string(SUDOERS_DROP_IN) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("read {SUDOERS_DROP_IN} (run as root)")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn sudoers_repair(user: Option<String>, execute: bool) -> Result<SudoersRepairPlan> {
+    let current = read_drop_in()?;
+    let Some(user) = user.or_else(|| current.as_deref().and_then(sudoers_user)) else {
+        anyhow::bail!("{SUDOERS_DROP_IN} does not name a service user; pass --service-user");
+    };
+    validate_shell_safe("--service-user", &user)?;
+    let (binary, is_proxmox, cron) = sudoers_inputs()?;
+    let rendered = sudoers_contents(&user, &binary, is_proxmox, cron);
+    let unraid = crate::update::is_unraid();
+    let flash = std::fs::read_to_string(UNRAID_SUDOERS_COPY).ok();
+    let go = std::fs::read_to_string(UNRAID_GO).ok();
+    let mut plan = plan_sudoers(
+        &user,
+        current,
+        rendered,
+        unraid,
+        flash.as_deref(),
+        go.as_deref(),
+    );
+    if !execute || !plan.needs_repair() {
+        return Ok(plan);
+    }
+    if !is_root() {
+        anyhow::bail!("must be root to write /etc/sudoers.d");
+    }
+    if !plan.up_to_date {
+        install_sudoers_drop_in(&plan.rendered)?;
+    }
+    if unraid && !(plan.flash_copy_current && plan.go_block_current) {
+        persist_sudoers_on_unraid(&plan.rendered)?;
+    }
+    plan.executed = true;
+    Ok(plan)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn sudoers_repair(_user: Option<String>, _execute: bool) -> Result<SudoersRepairPlan> {
+    anyhow::bail!("the orca sudoers drop-in is only managed on Linux")
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn sudoers_drift() -> Option<(String, Vec<String>)> {
+    let current = read_drop_in().ok()??;
+    let user = sudoers_user(&current)?;
+    let (binary, is_proxmox, cron) = sudoers_inputs().ok()?;
+    let rendered = sudoers_contents(&user, &binary, is_proxmox, cron);
+    (current != rendered).then(|| (user, sudoers_diff(&current, &rendered)))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn sudoers_drift() -> Option<(String, Vec<String>)> {
+    None
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -648,6 +789,74 @@ mod sudoers_tests {
                 .iter()
                 .all(|l| !l.contains('*') && !l.contains("unsigned"))
         );
+    }
+
+    #[test]
+    fn sudoers_user_is_the_first_grant_principal() {
+        let c = sudoers_contents("orca", "/usr/local/bin/orca", false, false);
+        assert_eq!(sudoers_user(&c).as_deref(), Some("orca"));
+        assert_eq!(sudoers_user("# only comments\n\n"), None);
+    }
+
+    #[test]
+    fn a_current_drop_in_plans_no_repair() {
+        let c = sudoers_contents("orca", "/usr/local/bin/orca", false, false);
+        let plan = plan_sudoers("orca", Some(c.clone()), c, false, None, None);
+        assert!(plan.up_to_date);
+        assert!(plan.diff.is_empty());
+        assert!(!plan.needs_repair());
+    }
+
+    #[test]
+    fn a_stale_binary_path_shows_in_the_diff() {
+        let old = sudoers_contents("orca", "/old/orca", false, false);
+        let new = sudoers_contents("orca", "/usr/local/bin/orca", false, false);
+        let plan = plan_sudoers("orca", Some(old), new, false, None, None);
+        assert!(!plan.up_to_date);
+        assert!(plan.needs_repair());
+        assert!(
+            plan.diff
+                .contains(&"-orca ALL=(root) NOPASSWD: /old/orca admin plugin-apply".to_string())
+        );
+        assert!(plan.diff.contains(
+            &"+orca ALL=(root) NOPASSWD: /usr/local/bin/orca admin plugin-apply".to_string()
+        ));
+        assert!(plan.diff.iter().all(|l| !l.contains("Managed by orca")));
+    }
+
+    #[test]
+    fn a_missing_drop_in_adds_every_line() {
+        let new = sudoers_contents("orca", "/usr/local/bin/orca", false, false);
+        let plan = plan_sudoers("orca", None, new.clone(), false, None, None);
+        assert_eq!(plan.diff.len(), new.lines().count());
+        assert!(plan.diff.iter().all(|l| l.starts_with('+')));
+    }
+
+    #[test]
+    fn unraid_flash_copy_and_go_block_are_checked() {
+        let c = sudoers_contents("orca", "/usr/local/bin/orca", false, false);
+        let go = with_go_block("#!/bin/bash\n").unwrap();
+        let ok = plan_sudoers(
+            "orca",
+            Some(c.clone()),
+            c.clone(),
+            true,
+            Some(&c),
+            Some(&go),
+        );
+        assert!(ok.flash_copy_current && ok.go_block_current && !ok.needs_repair());
+
+        let missing = plan_sudoers(
+            "orca",
+            Some(c.clone()),
+            c.clone(),
+            true,
+            None,
+            Some("#!/bin/bash\n"),
+        );
+        assert!(!missing.flash_copy_current);
+        assert!(!missing.go_block_current);
+        assert!(missing.needs_repair());
     }
 
     #[test]
