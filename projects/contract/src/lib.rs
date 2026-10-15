@@ -95,6 +95,8 @@ pub mod notification_source;
 pub mod permissions;
 pub use permissions::{PermCandidate, PermInfo, PermissionsProvider};
 
+pub mod template_kind;
+
 pub mod ups;
 pub use ups::{UpsConfig, UpsConfigOutcome, UpsProvider, UpsState};
 
