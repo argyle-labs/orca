@@ -1204,6 +1204,151 @@ async fn storage_exports(
     Ok(StorageExportsOutput { exports, errors })
 }
 
+// ── export.update / export.delete ────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageExportUpdateArgs {
+    #[arg(long)]
+    pub provider: String,
+    #[arg(long)]
+    pub path: String,
+    #[arg(long = "client", required = true)]
+    pub clients: Vec<String>,
+    #[arg(long = "option", value_delimiter = ',')]
+    pub options: Vec<String>,
+    #[arg(long)]
+    pub fsid: Option<String>,
+    /// DANGEROUS: permits `no_root_squash`, `insecure` and `no_all_squash`.
+    #[arg(long)]
+    pub allow_unsafe: bool,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageExportDeleteArgs {
+    #[arg(long)]
+    pub provider: String,
+    #[arg(long)]
+    pub path: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageExportWriteOutput {
+    pub provider: String,
+    pub path: String,
+    pub dry_run: bool,
+    pub before: Option<ExportRow>,
+    pub after: Option<ExportRow>,
+}
+
+fn export_row(provider: &str, e: ExportEntry) -> ExportRow {
+    ExportRow {
+        provider: provider.to_string(),
+        path: e.path,
+        allowed_clients: e.allowed_clients,
+        options: e.options,
+        fsid: e.fsid,
+    }
+}
+
+fn export_write_backend(
+    provider: &str,
+) -> anyhow::Result<std::sync::Arc<dyn storage::StorageBackend>> {
+    let b = storage::backends()
+        .into_iter()
+        .find(|b| b.name() == provider)
+        .ok_or_else(|| anyhow::anyhow!("no storage backend named `{provider}`"))?;
+    anyhow::ensure!(
+        b.supports(StorageCapability::ExportWrite),
+        "storage backend `{provider}` does not support export writes"
+    );
+    Ok(b)
+}
+
+async fn current_export(
+    b: &dyn storage::StorageBackend,
+    path: &str,
+) -> anyhow::Result<Option<ExportRow>> {
+    if !b.supports(StorageCapability::Exports) {
+        return Ok(None);
+    }
+    Ok(b.list_exports()
+        .await?
+        .into_iter()
+        .find(|e| e.path == path)
+        .map(|e| export_row(b.name(), e)))
+}
+
+/// [MUTATES STATE] Create or replace the export at `path` on `provider`. Clients
+/// must be IP addresses or CIDRs no wider than /16 (v4) or /48 (v6); options come
+/// from an allowlist. `dryRun` returns the before/after without writing.
+#[orca_tool(
+    domain = "storage.export",
+    verb = "update",
+    role = "admin",
+    execute_gated = false,
+    dry_run_aware = true
+)]
+async fn storage_export_update(
+    args: StorageExportUpdateArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageExportWriteOutput> {
+    let b = export_write_backend(&args.provider)?;
+    let entry = ExportEntry {
+        path: args.path,
+        allowed_clients: args.clients,
+        options: args.options,
+        fsid: args.fsid,
+    };
+    let policy = storage::ExportPolicy {
+        allow_unsafe: args.allow_unsafe,
+    };
+    policy.validate(&entry)?;
+    let before = current_export(b.as_ref(), &entry.path).await?;
+    let path = entry.path.clone();
+    let after = if ctx.dry_run() {
+        entry
+    } else {
+        b.upsert_export_checked(&entry, policy).await?
+    };
+    Ok(StorageExportWriteOutput {
+        provider: args.provider,
+        path,
+        dry_run: ctx.dry_run(),
+        before,
+        after: Some(export_row(b.name(), after)),
+    })
+}
+
+/// [MUTATES STATE] Withdraw the export at `path` on `provider`; the data is left
+/// untouched. `dryRun` returns the before/after without writing.
+#[orca_tool(
+    domain = "storage.export",
+    verb = "delete",
+    role = "admin",
+    execute_gated = false,
+    dry_run_aware = true
+)]
+async fn storage_export_delete(
+    args: StorageExportDeleteArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageExportWriteOutput> {
+    let b = export_write_backend(&args.provider)?;
+    let before = current_export(b.as_ref(), &args.path).await?;
+    if !ctx.dry_run() {
+        b.remove_export(&args.path).await?;
+    }
+    Ok(StorageExportWriteOutput {
+        provider: args.provider,
+        path: args.path,
+        dry_run: ctx.dry_run(),
+        before,
+        after: None,
+    })
+}
+
 // ── mount.update{action=apply} ───────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -5002,6 +5147,98 @@ mod tests {
         // Backend registered but does not advertise Exports → nothing surfaced.
         assert!(out.exports.is_empty());
         assert!(out.errors.is_empty());
+    }
+
+    #[test]
+    fn export_write_tools_are_admin_and_peer_dispatchable() {
+        for t in ["storage.export.update", "storage.export.delete"] {
+            assert_eq!(dispatch::required_role(t), Some("admin"), "{t}");
+            assert!(dispatch::remote_ok_names().contains(&t), "{t}");
+        }
+    }
+
+    fn export_update_args(clients: &[&str], options: &[&str]) -> StorageExportUpdateArgs {
+        StorageExportUpdateArgs {
+            provider: "fake-exp-w".into(),
+            path: "/srv/data".into(),
+            clients: clients.iter().map(|s| s.to_string()).collect(),
+            options: options.iter().map(|s| s.to_string()).collect(),
+            fsid: Some("7".into()),
+            allow_unsafe: false,
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn export_update_dry_run_shows_before_and_after() {
+        use plugin_toolkit::storage::StorageCapability;
+        let mut ctx = test_ctx();
+        ctx.set_dry_run(true);
+        let caps = [StorageCapability::Exports, StorageCapability::ExportWrite];
+        let out = with_backend("fake-exp-w", &caps, || {
+            rt().block_on(storage_export_update(
+                export_update_args(&["10.0.0.13"], &["rw", "sync", "all_squash"]),
+                &ctx,
+            ))
+            .expect("dry run ok")
+        });
+        assert!(out.dry_run);
+        assert_eq!(out.before.unwrap().allowed_clients, vec!["10.0.0.0/24"]);
+        assert_eq!(out.after.unwrap().allowed_clients, vec!["10.0.0.13"]);
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn export_update_rejects_unsafe_export_even_in_dry_run() {
+        use plugin_toolkit::storage::StorageCapability;
+        let mut ctx = test_ctx();
+        ctx.set_dry_run(true);
+        let caps = [StorageCapability::Exports, StorageCapability::ExportWrite];
+        with_backend("fake-exp-w", &caps, || {
+            for (c, o) in [("*", "rw"), ("10.0.0.13", "no_root_squash")] {
+                assert!(
+                    rt().block_on(storage_export_update(export_update_args(&[c], &[o]), &ctx))
+                        .is_err()
+                );
+            }
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn export_delete_dry_run_keeps_before() {
+        use plugin_toolkit::storage::StorageCapability;
+        let mut ctx = test_ctx();
+        ctx.set_dry_run(true);
+        let caps = [StorageCapability::Exports, StorageCapability::ExportWrite];
+        let out = with_backend("fake-exp-w", &caps, || {
+            rt().block_on(storage_export_delete(
+                StorageExportDeleteArgs {
+                    provider: "fake-exp-w".into(),
+                    path: "/srv/data".into(),
+                },
+                &ctx,
+            ))
+            .expect("dry run ok")
+        });
+        assert!(out.before.is_some());
+        assert!(out.after.is_none());
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn export_write_requires_export_write_capability() {
+        use plugin_toolkit::storage::StorageCapability;
+        let ctx = test_ctx();
+        with_backend("fake-exp-w", &[StorageCapability::Exports], || {
+            assert!(
+                rt().block_on(storage_export_update(
+                    export_update_args(&["10.0.0.13"], &["ro"]),
+                    &ctx
+                ))
+                .is_err()
+            );
+        });
     }
 
     #[test]
