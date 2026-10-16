@@ -12,7 +12,7 @@ path = "src/lib.rs"
 # `db-incore`: `managed_mounts` uses `endpoint_resource!` compiled INTO the
 # daemon, so its CRUD needs the in-process pooled-connection fallback (no
 # capability sink / host FFI channel in-core). Plugins never enable this.
-plugin-toolkit = { workspace = true, default-features = true, features = ["db-incore"] }
+plugin-toolkit = { workspace = true, features = ["tools", "db-incore"] }
 dispatch   = { workspace = true, default-features = true }
 plugin-loader = { workspace = true }
 contract  = { workspace = true }
