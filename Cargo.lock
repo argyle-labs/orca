@@ -4589,6 +4589,7 @@ dependencies = [
  "graphql-parser",
  "graphql_client_codegen",
  "openapiv3",
+ "orca-dispatch",
  "orca-openapi",
  "orca-utils",
  "prettyplease",

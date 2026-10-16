@@ -39,5 +39,8 @@ quote       = { workspace = true }
 regex       = { workspace = true }
 syn1        = { package = "syn", version = "1", features = ["full"] }
 
+[dev-dependencies]
+dispatch = { workspace = true }
+
 [lints]
 workspace = true

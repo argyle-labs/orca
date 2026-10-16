@@ -23,10 +23,13 @@
 //! Per-file marker comments in the `.graphql` source adjust the emitted tool:
 //! - `# @orca:admin` — force `role = "admin"` (for sensitive queries).
 //! - `# @orca:no-tool` — bind the operation for codegen but emit no tool.
-//! - `# @orca:data-mutation` — a mutation gains `data_mutation = true`, opening
-//!   it to non-admin `can_mutate` callers.
-//! - `# @orca:user-callable` — a mutation gains `data_mutation = true` and is
-//!   emitted `role = "read"`.
+//! - `# @orca:data-mutation` / `# @orca:user-callable` — a mutation gains
+//!   `data_mutation = true`, opening it to non-admin `can_mutate` callers. It
+//!   stays `role = "admin"`; `# @orca:admin` suppresses the opt-in.
+//!
+//! Mutations are never emitted below `role = "admin"`. A marked file must hold
+//! exactly one named operation, and an operation name may appear in only one
+//! file; markers are read only from comment lines outside block strings.
 
 #![allow(clippy::disallowed_types)]
 
@@ -35,7 +38,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use graphql_parser::query::{Definition, OperationDefinition};
-use regex::Regex;
 
 use crate::surface::common::{
     GENERATED_HEADER, derive_list, has_serde_crate_attr, push_jsonschema_anchor,
@@ -147,7 +149,11 @@ pub fn generate(out_dir: &Path, queries_dir: &Path, plugin_name: &str) -> Result
 
     let exception_hits = ops
         .iter()
-        .filter(|o| o.is_mutation && markers.get(&o.marker).is_some_and(|m| m.user_callable))
+        .filter(|o| {
+            markers
+                .get(&o.marker)
+                .is_some_and(|m| tool_policy(o.is_mutation, *m).1)
+        })
         .count();
     let surface = emit_surface(&ops, &qualifier, plugin_name, &markers);
     let surface_path = out_dir.join(format!("{plugin_name}_surface.rs"));
@@ -156,7 +162,7 @@ pub fn generate(out_dir: &Path, queries_dir: &Path, plugin_name: &str) -> Result
 
     println!(
         "cargo:warning=surface[{plugin_name}]: {} tool(s) emitted from {version}, \
-         JsonSchema anchored on {anchored} type(s), {exception_hits} user-callable exception(s), \
+         JsonSchema anchored on {anchored} type(s), {exception_hits} can_mutate opt-in(s), \
          {excluded} excluded",
         ops.len()
     );
@@ -165,30 +171,77 @@ pub fn generate(out_dir: &Path, queries_dir: &Path, plugin_name: &str) -> Result
 
 fn operation_markers(queries_dir: &Path) -> Result<HashMap<String, Markers>> {
     let mut out = HashMap::new();
-    let Ok(rd) = std::fs::read_dir(queries_dir) else {
-        return Ok(out);
-    };
-    for entry in rd.flatten() {
-        let p = entry.path();
+    let mut seen: HashMap<String, std::path::PathBuf> = HashMap::new();
+    let rd = std::fs::read_dir(queries_dir)
+        .with_context(|| format!("read queries dir {}", queries_dir.display()))?;
+    for entry in rd {
+        let p = entry
+            .with_context(|| format!("read entry in {}", queries_dir.display()))?
+            .path();
         if p.extension().and_then(|e| e.to_str()) != Some("graphql") {
             continue;
         }
         println!("cargo:rerun-if-changed={}", p.display());
         let text = std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
+        let names = document_operation_names(&text).with_context(|| format!("{}", p.display()))?;
+        for name in &names {
+            if let Some(prev) = seen.insert(name.clone(), p.clone()) {
+                bail!(
+                    "operation `{name}` declared in both {} and {}",
+                    prev.display(),
+                    p.display()
+                );
+            }
+        }
         let m = file_markers(&text);
         if m == Markers::default() {
             continue;
         }
-        for name in operation_names(&text) {
-            out.insert(name, m);
+        match names.as_slice() {
+            [name] => {
+                out.insert(name.clone(), m);
+            }
+            [] => bail!(
+                "{}: @orca marker on a file with no named operation",
+                p.display()
+            ),
+            _ => bail!(
+                "{}: @orca marker on a file with {} operations; split it",
+                p.display(),
+                names.len()
+            ),
         }
     }
     Ok(out)
 }
 
+fn document_operation_names(text: &str) -> Result<Vec<String>> {
+    let doc =
+        graphql_parser::parse_query::<&str>(text).map_err(|e| anyhow::anyhow!("parse: {e}"))?;
+    let mut names = Vec::new();
+    for d in &doc.definitions {
+        let Definition::Operation(o) = d else {
+            continue;
+        };
+        match op_name(o) {
+            Some(n) => names.push(n.to_string()),
+            None => bail!("anonymous operation"),
+        }
+    }
+    Ok(names)
+}
+
 fn file_markers(text: &str) -> Markers {
     let mut m = Markers::default();
+    let mut in_block = false;
     for l in text.lines() {
+        let line_in_block = in_block;
+        if l.replace("\\\"\"\"", "").matches("\"\"\"").count() % 2 == 1 {
+            in_block = !in_block;
+        }
+        if line_in_block {
+            continue;
+        }
         let Some(rest) = l.trim().strip_prefix('#') else {
             continue;
         };
@@ -196,8 +249,7 @@ fn file_markers(text: &str) -> Markers {
         let Some(name) = t.strip_prefix("@orca:") else {
             continue;
         };
-        let name = name.split_whitespace().next().unwrap_or("");
-        match name {
+        match name.split_whitespace().next().unwrap_or("") {
             "user-callable" => m.user_callable = true,
             "admin" => m.admin = true,
             "no-tool" => m.no_tool = true,
@@ -206,14 +258,6 @@ fn file_markers(text: &str) -> Markers {
         }
     }
     m
-}
-
-/// The operation names declared in a `.graphql` document (`query X`,
-/// `mutation X`, `subscription X`).
-fn operation_names(text: &str) -> Vec<String> {
-    let re =
-        Regex::new(r"(?m)\b(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap();
-    re.captures_iter(text).map(|c| c[1].to_string()).collect()
 }
 
 /// The lexicographically-greatest `v*` module ident (newest version).
@@ -410,6 +454,16 @@ fn anchor_module(items: &mut [syn::Item]) -> usize {
     n
 }
 
+fn tool_policy(is_mutation: bool, markers: Markers) -> (&'static str, bool) {
+    let role = if is_mutation || markers.admin {
+        "admin"
+    } else {
+        ""
+    };
+    let opted_in = markers.user_callable || markers.data_mutation;
+    (role, is_mutation && opted_in && !markers.admin)
+}
+
 fn emit_surface(
     ops: &[Op],
     qualifier: &str,
@@ -461,15 +515,13 @@ fn emit_one(op: &Op, qualifier: &str, plugin_name: &str, markers: Markers) -> St
         format!("{mod_path}::Variables {{ {inits} }}")
     };
 
-    let user_callable_op = *is_mutation && markers.user_callable;
-    let role = if markers.admin || (*is_mutation && !user_callable_op) {
-        ", role = \"admin\""
-    } else if user_callable_op {
-        ", role = \"read\""
+    let (role, data_mutation) = tool_policy(*is_mutation, markers);
+    let role = if role.is_empty() {
+        String::new()
     } else {
-        ""
+        format!(", role = \"{role}\"")
     };
-    let data_mutation = if user_callable_op || (*is_mutation && markers.data_mutation) {
+    let data_mutation = if data_mutation {
         ", data_mutation = true"
     } else {
         ""
@@ -525,29 +577,23 @@ mod tests {
     }
 
     #[test]
-    fn operation_names_extracted() {
-        let names =
-            operation_names("# @orca:user-callable\nmutation AddPlugin($i: In!) { addPlugin }");
-        assert_eq!(names, vec!["AddPlugin".to_string()]);
-        let q = operation_names("query ArrayStatus {\n array { id }\n}");
-        assert_eq!(q, vec!["ArrayStatus".to_string()]);
+    fn markers_ignored_inside_block_strings() {
+        let text =
+            "query X(\n  $a: String = \"\"\"\n# @orca:no-tool\n\"\"\"\n) { x }\n# @orca:admin\n";
+        let m = file_markers(text);
+        assert!(m.admin);
+        assert!(!m.no_tool);
     }
 
     #[test]
-    fn user_callable_set_keys_on_operation_name() {
-        // A file with the marker contributes its operation name to the set;
-        // `emit_one` matches that against `Op.marker` (OPERATION_NAME).
-        let text = "# @orca:user-callable\nmutation RestartArray { restartArray }";
-        assert!(file_markers(text).user_callable);
-        assert_eq!(operation_names(text), vec!["RestartArray".to_string()]);
-    }
-
-    #[test]
-    fn operation_names_multiple_kinds() {
-        let names = operation_names(
-            "query A { a }\nmutation B { b }\nsubscription C { c }\nfragment F on T { x }",
-        );
-        assert_eq!(names, vec!["A", "B", "C"]);
+    fn document_operation_names_from_ast() {
+        let names = document_operation_names(
+            "# mutation Fake { x }\nquery A { a }\nmutation B { b }\nfragment F on T { x }",
+        )
+        .unwrap();
+        assert_eq!(names, vec!["A", "B"]);
+        assert!(document_operation_names("{ anon }").is_err());
+        assert!(document_operation_names("query {").is_err());
     }
 
     #[test]
@@ -806,8 +852,14 @@ mod tests {
         assert!(out.contains("Variables { force: args.force }"));
     }
 
+    fn authorize(caller: &str, can_mutate: bool, is_mutation: bool, m: Markers) -> bool {
+        let (role, dm) = tool_policy(is_mutation, m);
+        let role = if role.is_empty() { "any" } else { role };
+        dispatch::tool_roles::authorize(caller, can_mutate, role, dm)
+    }
+
     #[test]
-    fn emit_one_mutation_user_callable_drops_to_read() {
+    fn emit_one_mutation_user_callable_stays_admin() {
         let o = op("add_plugin", "AddPlugin", true, vec![]);
         let m = Markers {
             user_callable: true,
@@ -815,8 +867,30 @@ mod tests {
         };
         let out = emit_one(&o, "crate::generated::v1", "unraid", m);
         assert!(out.contains("data_mutation = true"));
-        assert!(out.contains("role = \"read\""));
-        assert!(!out.contains("role = \"admin\""));
+        assert!(out.contains("role = \"admin\""));
+        assert!(!out.contains("role = \"read\""));
+        assert!(!authorize("read", false, true, m));
+        assert!(authorize("read", true, true, m));
+        assert!(authorize("admin", false, true, m));
+    }
+
+    #[test]
+    fn mutations_never_below_admin() {
+        for user_callable in [false, true] {
+            for admin in [false, true] {
+                for data_mutation in [false, true] {
+                    let m = Markers {
+                        user_callable,
+                        admin,
+                        no_tool: false,
+                        data_mutation,
+                    };
+                    assert_eq!(tool_policy(true, m).0, "admin");
+                    assert!(!authorize("read", false, true, m));
+                }
+            }
+        }
+        assert!(!authorize("read", true, true, Markers::default()));
     }
 
     #[test]
@@ -832,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn emit_one_admin_marker_forces_admin() {
+    fn emit_one_admin_marker_is_absolute() {
         let admin = Markers {
             admin: true,
             ..Markers::default()
@@ -841,15 +915,19 @@ mod tests {
         let out = emit_one(&q, "crate::generated::v1", "unraid", admin);
         assert!(out.contains("role = \"admin\""));
         assert!(!out.contains("data_mutation"));
+        assert!(!authorize("read", true, false, admin));
 
-        let both = Markers {
+        let all = Markers {
             admin: true,
             user_callable: true,
-            ..Markers::default()
+            data_mutation: true,
+            no_tool: false,
         };
         let m = op("add_plugin", "AddPlugin", true, vec![]);
-        let out = emit_one(&m, "crate::generated::v1", "unraid", both);
+        let out = emit_one(&m, "crate::generated::v1", "unraid", all);
         assert!(out.contains("role = \"admin\""));
+        assert!(!out.contains("data_mutation"));
+        assert!(!authorize("read", true, true, all));
     }
 
     #[test]
@@ -861,10 +939,9 @@ mod tests {
         assert!(out.contains("verb = \"b\""));
     }
 
-    #[test]
-    fn operation_markers_reads_marked_files() {
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "gql_uc_{}_{}",
+            "gql_{tag}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -872,31 +949,68 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("marked.graphql"),
-            "# @orca:user-callable\nmutation AddPlugin { addPlugin }",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("plain.graphql"),
-            "mutation RemovePlugin { removePlugin }",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("hidden.graphql"),
-            "# @orca:no-tool\nquery Secrets { secrets }",
-        )
-        .unwrap();
-        std::fs::write(dir.join("ignore.txt"), "# @orca:admin\nmutation Nope { x }").unwrap();
+        dir
+    }
 
-        let set = operation_markers(&dir).unwrap();
+    fn markers_of(files: &[(&str, &str)]) -> Result<HashMap<String, Markers>> {
+        let dir = scratch_dir("m");
+        for (name, body) in files {
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+        let got = operation_markers(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        got
+    }
+
+    #[test]
+    fn operation_markers_reads_marked_files() {
+        let set = markers_of(&[
+            (
+                "marked.graphql",
+                "# @orca:user-callable\nmutation AddPlugin { addPlugin }",
+            ),
+            ("plain.graphql", "mutation RemovePlugin { removePlugin }"),
+            (
+                "hidden.graphql",
+                "# @orca:no-tool\nquery Secrets { secrets }",
+            ),
+            ("ignore.txt", "# @orca:admin\nmutation Nope { x }"),
+        ])
+        .unwrap();
         assert!(set["AddPlugin"].user_callable);
         assert!(set["Secrets"].no_tool);
         assert!(!set.contains_key("RemovePlugin"));
         assert!(!set.contains_key("Nope"));
+    }
 
-        assert!(operation_markers(&dir.join("nope")).unwrap().is_empty());
+    #[test]
+    fn operation_markers_refuses_marker_on_multi_op_file() {
+        let err = markers_of(&[(
+            "two.graphql",
+            "# @orca:admin\nquery A { a }\nmutation B { b }",
+        )]);
+        assert!(err.is_err());
+        assert!(markers_of(&[("two.graphql", "query A { a }\nmutation B { b }")]).is_ok());
+    }
 
-        std::fs::remove_dir_all(&dir).ok();
+    #[test]
+    fn operation_markers_refuses_marker_without_operation() {
+        assert!(markers_of(&[("frag.graphql", "# @orca:admin\nfragment F on T { x }")]).is_err());
+    }
+
+    #[test]
+    fn operation_markers_refuses_duplicate_operation_names() {
+        assert!(
+            markers_of(&[
+                ("a.graphql", "query Dup { a }"),
+                ("b.graphql", "query Dup { b }"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn operation_markers_missing_dir_is_error() {
+        assert!(operation_markers(&scratch_dir("x").join("nope")).is_err());
     }
 }
