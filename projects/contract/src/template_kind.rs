@@ -627,9 +627,15 @@ mod tests {
         let dotted: SecretRef =
             serde_json::from_value(serde_json::json!("proxmox.lab.token")).unwrap();
         assert_eq!(dotted.as_str(), "proxmox.lab.token");
-        assert!(serde_json::from_value::<SecretRef>(serde_json::json!("hunter2")).is_err());
+        assert!(SecretRef::parse("hunter2").is_err());
         assert!(serde_json::from_value::<SecretRef>(serde_json::json!("")).is_err());
         assert!(serde_json::from_value::<SecretRef>(serde_json::json!(" ")).is_err());
+        assert!(
+            serde_json::from_value::<CredentialSlotRef>(
+                serde_json::json!({"slot": "s", "secret_ref": "github_token"})
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

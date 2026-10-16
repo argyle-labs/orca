@@ -204,7 +204,7 @@ pub struct MediaCredentials {
     /// Reference to the password secret (resolved via the secrets domain), if the
     /// backend uses a password. Never a plaintext value on the wire.
     #[serde(default)]
-    pub password_ref: Option<String>,
+    pub password_ref: Option<SecretRef>,
     /// Reachable URL(s) to point the device at.
     pub url: MediaUrl,
 }
@@ -1190,6 +1190,13 @@ pub async fn dispatch_op(
 #[cfg(test)]
 mod merge_tests {
     use super::*;
+
+    #[test]
+    fn non_canonical_password_ref_is_rejected() {
+        let v = |r: &str| serde_json::json!({"username": "u", "passwordRef": r, "url": {"primary": "http://m"}});
+        assert!(serde_json::from_value::<MediaCredentials>(v("a.b")).is_ok());
+        assert!(serde_json::from_value::<MediaCredentials>(v("github_token")).is_err());
+    }
 
     /// `source_by` doubles as the contributing server name, mirroring how the
     /// unit fan-out tags each partial with the backend that produced it.

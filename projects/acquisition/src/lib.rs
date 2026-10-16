@@ -251,6 +251,23 @@ fn check_url(raw: &str) -> Result<(), AcquisitionError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn non_canonical_secret_refs_are_rejected() {
+        let conn = |s: &str| serde_json::json!({"url": "http://q", "secret": s});
+        assert!(serde_json::from_value::<ClientConnection>(conn("a.b")).is_ok());
+        assert!(serde_json::from_value::<ClientConnection>(conn("github_token")).is_err());
+        let mut idx = serde_json::json!({
+            "id": Uuid::nil(), "name": "n", "protocol": "torznab", "provider": "p", "url": "http://i",
+            "api_key": "secret:x"
+        });
+        let err = serde_json::from_value::<Indexer>(idx.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("secret_ref"), "{err}");
+        idx["api_key"] = serde_json::json!("a.b");
+        assert!(serde_json::from_value::<Indexer>(idx).is_ok());
+    }
+
     fn client(protocol: Protocol, secret: bool) -> DownloadClient {
         DownloadClient {
             id: Uuid::now_v7(),

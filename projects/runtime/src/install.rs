@@ -42,6 +42,16 @@ fn install_manifest(
 ) -> Result<String> {
     let (m, abs_path) = plugin_manifest::parse_path(manifest_path)?;
     let instance_id = instance_id_override.unwrap_or(&m.plugin.id).to_string();
+    let collides: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM secrets WHERE name = ?1 AND instr(name, '.') = 0)",
+        [&instance_id],
+        |r| r.get(0),
+    )?;
+    if collides {
+        anyhow::bail!(
+            "plugin id '{instance_id}' equals the undotted secret `{instance_id}`; rename that secret first"
+        );
+    }
     let specs_dir = m
         .plugin
         .specs
@@ -140,6 +150,23 @@ label = "Dashboard"
 
     fn open_test_db(dir: &std::path::Path) -> rusqlite::Connection {
         db::open_unencrypted(&dir.join("test.db")).unwrap()
+    }
+
+    #[test]
+    fn install_manifest_refuses_id_matching_undotted_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open_test_db(dir.path());
+        conn.execute(
+            "INSERT INTO secrets (name, backend) VALUES ('test-plugin', 'inline')",
+            [],
+        )
+        .unwrap();
+        let path = write_manifest(dir.path(), MINIMAL_MANIFEST);
+        let err = install_manifest(&conn, &path, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("test-plugin"), "{err}");
+        assert!(db::plugins::get(&conn, "test-plugin").unwrap().is_none());
     }
 
     #[test]

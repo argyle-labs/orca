@@ -875,7 +875,7 @@ async fn resolve_secret_file(d: &DesiredMount) -> Option<crate::mount_exec::Secr
         source: d.sources.first().cloned().unwrap_or_default(),
         failover_sources: d.sources.iter().skip(1).cloned().collect(),
         options: Some(d.options.clone()),
-        credential: match plugin_toolkit::storage::SecretRef::parse(cred) {
+        credential: match plugin_toolkit::storage::SecretRef::from_stored(cred) {
             Ok(r) => Some(r),
             Err(e) => {
                 warn!(

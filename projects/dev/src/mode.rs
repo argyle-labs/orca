@@ -168,7 +168,7 @@ pub fn cmd_dev_enable(github_token: &str) -> Result<DevEnableResult> {
             .status()?;
         anyhow::ensure!(
             status.success(),
-            "git clone failed (private repo — ensure `github_token` secret is set on this host)"
+            "git clone failed (private repo — ensure `orca.github_token` secret is set on this host)"
         );
         true
     } else {

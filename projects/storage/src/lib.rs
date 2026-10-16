@@ -1281,6 +1281,32 @@ pub fn source_port_for_fstype(fstype: &str) -> Option<u16> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn non_canonical_credentials_are_rejected() {
+        let mut spec = serde_json::to_value(nfs_spec(None)).unwrap();
+        spec["credential"] = serde_json::json!("a.b");
+        assert!(serde_json::from_value::<MountSpec>(spec.clone()).is_ok());
+        spec["credential"] = serde_json::json!("github_token");
+        assert!(serde_json::from_value::<MountSpec>(spec).is_err());
+        let mut normalized = serde_json::to_value(NormalizedSpec {
+            backend: "nfs".into(),
+            target: "/mnt/pool".into(),
+            fstype: "nfs4".into(),
+            source: "nas:/e".into(),
+            failover_sources: vec![],
+            options: OptionSet::Raw { options: None },
+            credential: None,
+            secret_file: None,
+            remount_policy: None,
+            enabled: true,
+        })
+        .unwrap();
+        normalized["credential"] = serde_json::json!("a.b");
+        assert!(serde_json::from_value::<NormalizedSpec>(normalized.clone()).is_ok());
+        normalized["credential"] = serde_json::json!("secret:x");
+        assert!(serde_json::from_value::<NormalizedSpec>(normalized).is_err());
+    }
+
     struct FakeNas {
         name: String,
     }
