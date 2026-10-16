@@ -9,7 +9,7 @@ name = "files"
 path = "src/lib.rs"
 
 [dependencies]
-plugin-toolkit = { workspace = true, default-features = true }
+plugin-toolkit = { workspace = true, features = ["tools"] }
 contract = { workspace = true }
 derive    = { workspace = true }
 db        = { workspace = true, default-features = true }
