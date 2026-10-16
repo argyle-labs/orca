@@ -1,0 +1,23 @@
+[package]
+name = "orca-acquisition"
+version.workspace = true
+publish = ["gitea"]
+edition.workspace = true
+
+[lib]
+name = "acquisition"
+path = "src/lib.rs"
+
+[dependencies]
+contract  = { workspace = true }
+serde     = { workspace = true }
+thiserror = { workspace = true }
+schemars  = { workspace = true, features = ["uuid1"] }
+url       = { workspace = true }
+uuid      = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
