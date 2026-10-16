@@ -22,6 +22,7 @@ full = ["in-process"]
 in-process = ["dep:tokio"]
 
 [dependencies]
+utils = { workspace = true }
 derive = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }

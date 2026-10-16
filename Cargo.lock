@@ -4414,6 +4414,7 @@ name = "orca-media"
 version = "0.2.1-rc.19"
 dependencies = [
  "orca-derive",
+ "orca-utils",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -4754,6 +4755,7 @@ name = "orca-storage"
 version = "0.2.1-rc.19"
 dependencies = [
  "orca-derive",
+ "orca-utils",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -4842,6 +4844,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.11.0",
+ "static_assertions",
  "tempfile",
  "thiserror 2.0.20",
  "time",
@@ -4854,6 +4857,7 @@ dependencies = [
  "uuid",
  "wiremock",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]
