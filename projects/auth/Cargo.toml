@@ -12,6 +12,7 @@ path = "src/lib.rs"
 plugin-toolkit = { workspace = true, features = ["tools"] }
 macro-runtime = { workspace = true }
 contract    = { workspace = true }
+tracing     = { workspace = true }
 derive       = { workspace = true }
 schemars         = { workspace = true }
 serde            = { workspace = true }

@@ -308,6 +308,33 @@ pub fn grant(conn: &Connection, holder: &str, secret_name: &str, granted_by: &st
     Ok(n > 0)
 }
 
+pub fn grant_checked(
+    conn: &Connection,
+    holder: &str,
+    secret_name: &str,
+    granted_by: &str,
+) -> Result<bool> {
+    if !valid_principal(holder) {
+        anyhow::bail!("invalid holder plugin id '{holder}'");
+    }
+    if in_namespace(secret_name, holder) {
+        anyhow::bail!("'{holder}' already owns '{secret_name}'; a grant would be redundant");
+    }
+    if get(conn, secret_name)?.is_none() {
+        anyhow::bail!("secret '{secret_name}' does not exist");
+    }
+    grant(conn, holder, secret_name, granted_by)
+}
+
+pub fn revoke_holder(conn: &Connection, holder: &str) -> Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("DELETE FROM secret_grants WHERE holder = ?1 RETURNING secret_name")?;
+    let rows = stmt.query_map([holder], |row| row.get(0))?;
+    let mut names = rows.collect::<rusqlite::Result<Vec<String>>>()?;
+    names.sort();
+    Ok(names)
+}
+
 pub fn revoke(conn: &Connection, holder: &str, secret_name: &str) -> Result<bool> {
     let n = conn.execute(
         "DELETE FROM secret_grants WHERE holder = ?1 AND secret_name = ?2",
@@ -393,6 +420,34 @@ pub fn exec_secret_op_pooled(
 mod tests {
     use super::*;
     use db::testing::test_conn;
+
+    #[test]
+    fn checked_grant_allows_holder_read_until_revoked() {
+        let conn = test_conn();
+        upsert(&conn, "gitea.api.token", "inline", "", None).unwrap();
+        write_inline_value(&conn, "gitea.api.token", "tok").unwrap();
+        let holder = Principal::Plugin("mylar".into());
+        let op = plugin_abi::SecretOp::Get {
+            name: "gitea.api.token".into(),
+        };
+        assert!(exec_secret_op(&conn, &holder, &op).is_err());
+        assert!(grant_checked(&conn, "mylar", "gitea.api.token", "alice").unwrap());
+        let reply = exec_secret_op(&conn, &holder, &op).unwrap();
+        assert_eq!(reply.value.as_deref(), Some("tok"));
+        assert_eq!(list_grants(&conn).unwrap()[0].granted_by, "alice");
+        assert!(revoke(&conn, "mylar", "gitea.api.token").unwrap());
+        assert!(exec_secret_op(&conn, &holder, &op).is_err());
+    }
+
+    #[test]
+    fn checked_grant_refuses_missing_redundant_and_invalid() {
+        let conn = test_conn();
+        upsert(&conn, "gitea.api.token", "inline", "", None).unwrap();
+        assert!(grant_checked(&conn, "mylar", "nope.token", "a").is_err());
+        assert!(grant_checked(&conn, "gitea", "gitea.api.token", "a").is_err());
+        assert!(grant_checked(&conn, "Bad Id", "gitea.api.token", "a").is_err());
+        assert!(list_grants(&conn).unwrap().is_empty());
+    }
 
     #[test]
     fn upsert_and_get_round_trip() {

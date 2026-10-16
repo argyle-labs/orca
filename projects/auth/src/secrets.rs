@@ -127,6 +127,43 @@ pub struct SecretDeleteReport {
     pub removed: bool,
 }
 
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct SecretGrantArgs {
+    /// Plugin id that may read the secret.
+    pub holder: String,
+    /// Name of an existing secret outside the holder's namespace.
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SecretGrantReport {
+    pub holder: String,
+    pub name: String,
+    pub changed: bool,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(default)]
+pub struct SecretGrantListArgs {
+    #[arg(long)]
+    pub holder: Option<String>,
+}
+
+#[derive::snake_aliases]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretGrantEntry {
+    pub holder: String,
+    pub secret_name: String,
+    pub granted_by: String,
+    pub created_at: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SecretGrantListReport {
+    pub grants: Vec<SecretGrantEntry>,
+}
+
 // ── Backends ────────────────────────────────────────────────────────────────
 
 /// Fetch a value by name. Returns `(backend_kind, value)`. Used by tools and by
@@ -400,6 +437,79 @@ async fn secret_delete(
     })
 }
 
+fn caller_name(ctx: &contract::ToolCtx) -> anyhow::Result<String> {
+    ctx.verified_caller()
+        .cloned()
+        .or_else(|| ctx.caller())
+        .map(|c| c.username)
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| anyhow!("no caller identity"))
+}
+
+/// [MUTATES STATE] Grant a plugin read access to an existing secret outside its namespace.
+#[orca_tool(
+    domain = "secrets.grant",
+    verb = "create",
+    role = "admin",
+    data_mutation = false
+)]
+async fn secret_grant_create(
+    args: SecretGrantArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<SecretGrantReport> {
+    let by = caller_name(ctx)?;
+    let changed = db::pool::Db::process()
+        .write(|conn| secrets::grant_checked(conn, &args.holder, &args.name, &by))?;
+    tracing::info!(target: "audit", caller = %by, holder = %args.holder, secret = %args.name, changed, "secret grant");
+    Ok(SecretGrantReport {
+        holder: args.holder,
+        name: args.name,
+        changed,
+    })
+}
+
+/// [MUTATES STATE] Revoke a plugin's grant on a secret.
+#[orca_tool(
+    domain = "secrets.grant",
+    verb = "delete",
+    role = "admin",
+    data_mutation = false
+)]
+async fn secret_grant_delete(
+    args: SecretGrantArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<SecretGrantReport> {
+    let by = caller_name(ctx)?;
+    let changed =
+        db::pool::Db::process().write(|conn| secrets::revoke(conn, &args.holder, &args.name))?;
+    tracing::info!(target: "audit", caller = %by, holder = %args.holder, secret = %args.name, changed, "secret revoke");
+    Ok(SecretGrantReport {
+        holder: args.holder,
+        name: args.name,
+        changed,
+    })
+}
+
+/// List secret grants, optionally for one holder. Never returns values.
+#[orca_tool(domain = "secrets.grant", verb = "list", role = "admin")]
+async fn secret_grant_list(
+    args: SecretGrantListArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<SecretGrantListReport> {
+    let grants = db::pool::Db::process()
+        .read(secrets::list_grants)?
+        .into_iter()
+        .filter(|g| args.holder.as_ref().is_none_or(|h| *h == g.holder))
+        .map(|g| SecretGrantEntry {
+            holder: g.holder,
+            secret_name: g.secret_name,
+            granted_by: g.granted_by,
+            created_at: g.created_at,
+        })
+        .collect();
+    Ok(SecretGrantListReport { grants })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +532,14 @@ mod tests {
         assert_eq!(<SecretDetail as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretUpsert as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretDelete as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        assert_eq!(<SecretGrantCreate as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        assert_eq!(<SecretGrantDelete as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        assert_eq!(<SecretGrantList as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        const { assert!(!<SecretGrantCreate as OrcaToolDef>::DATA_MUTATION) };
+        const { assert!(!<SecretGrantDelete as OrcaToolDef>::DATA_MUTATION) };
+        const { assert!(!<SecretGrantList as OrcaToolDef>::DATA_MUTATION) };
+        const { assert!(<SecretGrantCreate as OrcaToolDef>::EXECUTE_GATED) };
+        const { assert!(<SecretGrantDelete as OrcaToolDef>::EXECUTE_GATED) };
         // DATA_MUTATION would let a non-admin `can_mutate` caller through.
         const { assert!(!<SecretList as OrcaToolDef>::DATA_MUTATION) };
         const { assert!(!<SecretDetail as OrcaToolDef>::DATA_MUTATION) };
