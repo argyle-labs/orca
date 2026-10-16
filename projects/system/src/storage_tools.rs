@@ -1219,11 +1219,13 @@ pub struct StorageExportUpdateArgs {
     pub options: Vec<String>,
     #[arg(long)]
     pub fsid: Option<String>,
-    /// DANGEROUS: permits `no_root_squash`, `insecure` and `no_all_squash`.
+    /// DANGEROUS: permits `no_root_squash`, `insecure`, `no_all_squash`, fsid `0`/`root`
+    /// and clients wider than /24 (v4) or /64 (v6).
     #[arg(long)]
     pub allow_unsafe: bool,
     #[arg(skip)]
     #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(skip)]
     pub preview: bool,
 }
 
@@ -1236,6 +1238,7 @@ pub struct StorageExportDeleteArgs {
     pub path: String,
     #[arg(skip)]
     #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(skip)]
     pub preview: bool,
 }
 
@@ -1296,7 +1299,7 @@ async fn current_export(
 }
 
 /// [MUTATES STATE] Create or replace the export at `path` on `provider`. Clients
-/// must be IP addresses or CIDRs no wider than /16 (v4) or /48 (v6); options come
+/// must be IP addresses or CIDRs no wider than /24 (v4) or /64 (v6) unless `allowUnsafe`; options come
 /// from an allowlist. `dryRun` returns the before/after without writing.
 #[orca_tool(
     domain = "storage.export",
@@ -1321,6 +1324,16 @@ async fn storage_export_update(
         allow_unsafe: args.allow_unsafe,
     };
     policy.validate(&entry)?;
+    if let Some(fsid) = &entry.fsid
+        && b.supports(StorageCapability::Exports)
+        && let Some(other) = b
+            .list_exports()
+            .await?
+            .into_iter()
+            .find(|e| e.path != entry.path && e.fsid.as_ref() == Some(fsid))
+    {
+        anyhow::bail!("fsid `{fsid}` is already used by export `{}`", other.path);
+    }
     let before = current_export(b.as_ref(), &entry.path).await?;
     let path = entry.path.clone();
     let dry_run = ctx.dry_run() || args.preview;
@@ -1352,6 +1365,7 @@ async fn storage_export_delete(
     args: StorageExportDeleteArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<StorageExportWriteOutput> {
+    storage::export_policy::validate_path(&args.path)?;
     let b = export_write_backend(&args.provider)?;
     let before = current_export(b.as_ref(), &args.path).await?;
     let dry_run = ctx.dry_run() || args.preview;

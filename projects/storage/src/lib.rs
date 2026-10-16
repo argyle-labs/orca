@@ -1210,6 +1210,7 @@ pub async fn dispatch_op(
         }
         "remove_export" => {
             let a: RemoveExportArgs = dec(op, args)?;
+            export_policy::validate_path(&a.path).map_err(err)?;
             enc(&backend.remove_export(&a.path).await.map_err(err)?)
         }
         "mount" => {
