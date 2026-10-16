@@ -28,27 +28,20 @@ use crate::runtime::secret_op;
 /// linked external secret also resolves through it.
 pub const BACKEND_INLINE: &str = "inline";
 
-/// The one secret-reference type for the whole system — the opaque handle a
-/// caller persists in place of a value and resolves at use time. Defined in the
-/// `storage` crate (the lowest layer that needs it) as a `#[serde(transparent)]`
-/// newtype over its name/URL string, and re-exported here so the secrets domain —
-/// which owns resolution — names the same type. There is deliberately no second
-/// `SecretRef`: storage rows, mount specs, and plugin endpoint fields all carry
-/// this exact type, and [`ResolveSecret::resolve`] turns it into a value.
-pub use ::storage::SecretRef;
+pub use utils::secret::{Secret, SecretRef};
 
 /// Resolve a [`SecretRef`] to its value via the secrets domain. Implemented as an
-/// extension trait because the type lives in the lower `storage` crate (which
+/// extension trait because the type lives in the lower `utils` crate (which
 /// cannot reach the secret backend) while resolution lives here — bring it into
 /// scope (`use plugin_toolkit::secrets::ResolveSecret;`) to call `.resolve()`.
 pub trait ResolveSecret {
     /// Resolve this reference to its plaintext value, erroring if unregistered.
-    fn resolve(&self) -> Result<String>;
+    fn resolve(&self) -> Result<Secret<String>>;
 }
 
 impl ResolveSecret for SecretRef {
-    fn resolve(&self) -> Result<String> {
-        get_required(&self.0)
+    fn resolve(&self) -> Result<Secret<String>> {
+        get_required(self.as_str())
     }
 }
 
@@ -71,28 +64,29 @@ pub fn set(name: &str, value: &str, description: Option<&str>) -> Result<SecretR
         value: value.to_string(),
         description: description.map(str::to_string),
     })?;
-    Ok(SecretRef(name.to_string()))
+    SecretRef::parse(name).map_err(|e| anyhow!(e))
 }
 
 /// Resolve `name` to its value, or `None` if no such secret is registered.
 /// Mirrors `auth::secrets::get_secret` resolution without pulling the auth
 /// crate: inline resolves locally; any other backend errors until its
 /// integration is loaded.
-pub fn get(name: &str) -> Result<Option<String>> {
+pub fn get(name: &str) -> Result<Option<Secret<String>>> {
     // Core performs the backend resolution (inline decrypt; external backends
     // error) on its pooled connection and returns the resolved value.
     Ok(secret_op(&SecretOp::Get {
         name: name.to_string(),
     })?
-    .value)
+    .value
+    .map(Secret::new))
 }
 
 /// Resolve `name`, erroring if it isn't registered.
-pub fn get_required(name: &str) -> Result<String> {
+pub fn get_required(name: &str) -> Result<Secret<String>> {
     get(name)?.ok_or_else(|| anyhow!("no secret named '{name}'"))
 }
 
-pub fn resolve_scoped(provider: &str, instance: &str, field: &str) -> Result<String> {
+pub fn resolve_scoped(provider: &str, instance: &str, field: &str) -> Result<Secret<String>> {
     let name = scoped_name(provider, instance, field);
     get(&name)?.ok_or_else(|| MissingSecret { name }.into())
 }

@@ -209,12 +209,7 @@ pub struct MediaCredentials {
     pub url: MediaUrl,
 }
 
-/// A reference to a credential the secrets domain resolves (`onepassword://…`,
-/// `bitwarden://…`, or a native id). Transparent newtype so the contract is
-/// explicit about which fields are credential references.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
-pub struct SecretRef(pub String);
+pub use utils::secret::SecretRef;
 
 /// One item in a media library / search result. Deliberately minimal + generic
 /// across types; type-specific detail rides `extra`.

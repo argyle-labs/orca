@@ -171,7 +171,7 @@ pub struct SecretGrantListReport {
 /// without going through `#[orca_tool]` dispatch. `inline` secrets read the value
 /// from the encrypted DB; any other backend is resolved by the matching
 /// registered `secrets_backend` plugin.
-pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
+pub async fn get_secret(name: &str) -> anyhow::Result<(String, utils::secret::Secret<String>)> {
     // All DB access goes through the pool seam. (Production never sets a
     // task-/thread-local DB override, so the pool resolves the canonical
     // encrypted db; test isolation is handled by scoped overrides.)
@@ -184,7 +184,7 @@ pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
             .ok_or_else(|| anyhow!("inline secret '{}' has no stored value", row.name))?,
         _ => contract::secrets_backend::resolve(&row.backend, &row.ref_path).await?,
     };
-    Ok((row.backend, value))
+    Ok((row.backend, utils::secret::Secret::new(value)))
 }
 
 // ── Native dispatch ─────────────────────────────────────────────────────────
@@ -231,7 +231,7 @@ async fn secret_detail(
     Ok(SecretGetReport {
         name: args.name,
         backend,
-        value,
+        value: value.expose_secret().clone(),
     })
 }
 

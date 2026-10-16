@@ -186,7 +186,10 @@ mod secretprov {
                     ))
                     .expect("create");
                 assert_eq!(
-                    secrets::get(key).expect("get").as_deref(),
+                    secrets::get(key)
+                        .expect("get")
+                        .as_ref()
+                        .map(|s| s.expose_secret().as_str()),
                     Some("s3cret-one")
                 );
                 assert!(out.endpoint.has_password);
@@ -224,7 +227,10 @@ mod secretprov {
                         .contains("s3cret-two")
                 );
                 assert_eq!(
-                    secrets::get(key).expect("get").as_deref(),
+                    secrets::get(key)
+                        .expect("get")
+                        .as_ref()
+                        .map(|s| s.expose_secret().as_str()),
                     Some("s3cret-two")
                 );
                 assert_eq!(

@@ -875,7 +875,16 @@ async fn resolve_secret_file(d: &DesiredMount) -> Option<crate::mount_exec::Secr
         source: d.sources.first().cloned().unwrap_or_default(),
         failover_sources: d.sources.iter().skip(1).cloned().collect(),
         options: Some(d.options.clone()),
-        credential: Some(plugin_toolkit::storage::SecretRef(cred.to_string())),
+        credential: match plugin_toolkit::storage::SecretRef::parse(cred) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                warn!(
+                    "[converge] {} credential is not a valid secret ref: {e}; mount will fail closed",
+                    d.target
+                );
+                return None;
+            }
+        },
         remount_policy: None,
         enabled: true,
     };
@@ -4156,7 +4165,7 @@ mod tests {
         }));
         let dm = DesiredMount {
             backend: name.to_string(),
-            credential: Some("secret:cred-ref".to_string()),
+            credential: Some("secret.cred-ref".to_string()),
             ..d("/mnt/data")
         };
         let got = resolve_secret_file(&dm).await;
@@ -4175,7 +4184,7 @@ mod tests {
         }));
         let dm = DesiredMount {
             backend: name.to_string(),
-            credential: Some("secret:cred-ref".to_string()),
+            credential: Some("secret.cred-ref".to_string()),
             ..d("/mnt/data")
         };
         let got = resolve_secret_file(&dm).await;
@@ -4356,7 +4365,7 @@ mod tests {
                 fstype: "nfs4".into(),
                 options: "{}".into(),
                 options_rendered: "vers=4.2,soft".into(),
-                credential: Some("secret:cred-ref".to_string()),
+                credential: Some("secret.cred-ref".to_string()),
                 replication: Some("rep-abc".to_string()),
                 routes: plugin_toolkit::route::Routes::from(vec![enabled_route, held_route]),
                 enabled: true,
@@ -4372,7 +4381,7 @@ mod tests {
             // ...but the full route set (held included) is retained for policy.
             assert_eq!(dm.routes.len(), 2);
             assert_eq!(dm.replication.as_deref(), Some("rep-abc"));
-            assert_eq!(dm.credential.as_deref(), Some("secret:cred-ref"));
+            assert_eq!(dm.credential.as_deref(), Some("secret.cred-ref"));
             assert_eq!(dm.options, "vers=4.2,soft");
             // No per-mount policy stored → the engine default.
             assert_eq!(dm.remount_policy, RemountPolicy::default());

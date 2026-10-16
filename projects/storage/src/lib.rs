@@ -76,14 +76,7 @@ pub enum MountStyle {
     UserspaceProcess,
 }
 
-/// A reference to a credential the secrets domain resolves — a `SecretRef` string
-/// such as `onepassword://…`, `bitwarden://…`, or a native secret id. Modeled as
-/// a newtype (not a bare `String`) so the mount contract is explicit about which
-/// fields are credential references; it (de)serializes transparently as its inner
-/// string, matching how `managed_mounts.credential` is already persisted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
-pub struct SecretRef(pub String);
+pub use utils::secret::SecretRef;
 
 /// Directory holding root-owned `0600` secret files a backend needs materialized
 /// on the host before a mount (an SMB `credentials=` file, a Kerberos keytab, …).
@@ -1581,7 +1574,7 @@ mod tests {
     #[test]
     fn secret_ref_serializes_transparently_as_its_inner_string() {
         assert_eq!(
-            serde_json::to_string(&SecretRef("bitwarden://x".into())).unwrap(),
+            serde_json::to_string(&SecretRef::parse("bitwarden://x").unwrap()).unwrap(),
             "\"bitwarden://x\""
         );
     }
@@ -1601,7 +1594,7 @@ mod tests {
             options: OptionSet::Raw {
                 options: Some("ro".into()),
             },
-            credential: Some(SecretRef("s".into())),
+            credential: Some(SecretRef::parse("s.t").unwrap()),
             secret_file: None,
             remount_policy: None,
             enabled: true,

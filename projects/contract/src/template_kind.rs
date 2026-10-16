@@ -47,48 +47,7 @@ pub struct TemplateRef {
     pub version: String,
 }
 
-#[derive(Serialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
-#[serde(transparent)]
-pub struct SecretRef(String);
-
-impl SecretRef {
-    pub fn parse(s: impl Into<String>) -> std::result::Result<Self, String> {
-        let s = s.into();
-        let scheme_ref = s.split_once("://").is_some_and(|(scheme, rest)| {
-            !scheme.is_empty()
-                && !rest.is_empty()
-                && scheme
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        });
-        let dotted_name = s.split('.').count() >= 2
-            && s.split('.').all(|seg| {
-                !seg.is_empty()
-                    && seg
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            });
-        let valid = scheme_ref || dotted_name;
-        if valid {
-            Ok(Self(s))
-        } else {
-            Err(
-                "secret_ref must be <scheme>://... or a dotted secret name like proxmox.lab.token"
-                    .into(),
-            )
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for SecretRef {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        Self::parse(String::deserialize(d)?).map_err(serde::de::Error::custom)
-    }
-}
+pub use utils::secret::SecretRef;
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
 pub struct CredentialSlotRef {

@@ -35,6 +35,7 @@ pub mod reachability;
 pub mod route;
 /// Secret scrubbing — the one keyword list the whole stack redacts against.
 pub mod scrub;
+pub mod secret;
 pub mod time;
 /// URL percent-encoding + base/path join. orca-owned; the urlencoding lib is
 /// hidden.

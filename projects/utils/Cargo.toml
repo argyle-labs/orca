@@ -113,8 +113,10 @@ git2 = { workspace = true, optional = true }
 
 # JSON Schema model (json_schema module)
 schemars = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
+static_assertions = { workspace = true }
 tokio    = { workspace = true }
 tempfile = { workspace = true }
 wiremock = { workspace = true }
