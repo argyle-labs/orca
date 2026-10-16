@@ -50,6 +50,20 @@ fn row_to_plugin(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginRow> {
     })
 }
 
+pub fn refuse_undotted_secret_collision(conn: &Connection, id: &str) -> Result<()> {
+    let collides: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM secrets WHERE name = ?1 AND instr(name, '.') = 0)",
+        [id],
+        |r| r.get(0),
+    )?;
+    if collides {
+        anyhow::bail!(
+            "plugin id '{id}' equals the undotted secret `{id}`; rename that secret first"
+        );
+    }
+    Ok(())
+}
+
 pub fn list(conn: &Connection) -> Result<Vec<PluginRow>> {
     let mut stmt = conn.prepare(&format!("SELECT {PLUGIN_COLS} FROM plugins ORDER BY id"))?;
     let rows = stmt.query_map([], row_to_plugin)?;

@@ -1327,7 +1327,7 @@ async fn run_system_update(
 pub(crate) fn no_secure_peer_message(insecure_present: &[(String, String)]) -> String {
     if insecure_present.is_empty() {
         return "no paired secure peer available to delegate the private-asset fetch, and this \
-                host has no paired peers at all. Pair a peer that holds a `orca.github_token` and \
+                host has no paired peers at all. Pair a peer that holds an `orca.github_token` and \
                 trust it with `orca mesh trust <peer_id> on`, or set a local \
                 `orca.github_token` secret to fetch the asset directly."
             .to_string();

@@ -42,16 +42,7 @@ fn install_manifest(
 ) -> Result<String> {
     let (m, abs_path) = plugin_manifest::parse_path(manifest_path)?;
     let instance_id = instance_id_override.unwrap_or(&m.plugin.id).to_string();
-    let collides: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM secrets WHERE name = ?1 AND instr(name, '.') = 0)",
-        [&instance_id],
-        |r| r.get(0),
-    )?;
-    if collides {
-        anyhow::bail!(
-            "plugin id '{instance_id}' equals the undotted secret `{instance_id}`; rename that secret first"
-        );
-    }
+    db::plugins::refuse_undotted_secret_collision(conn, &instance_id)?;
     let specs_dir = m
         .plugin
         .specs
