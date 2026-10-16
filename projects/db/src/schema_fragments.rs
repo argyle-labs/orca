@@ -189,6 +189,7 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
     for table in ["shares", "managed_mounts"] {
         reconcile_legacy_credentials(conn, table)?;
     }
+    warn_legacy_secret_names(conn)?;
     Ok(())
 }
 
@@ -206,9 +207,13 @@ fn reconcile_legacy_credentials(conn: &Connection, table: &str) -> Result<()> {
     if !table_exists(conn, table)? || !column_exists(conn, table, "credential")? {
         return Ok(());
     }
-    let rows: Vec<(String, String)> = conn
+    let has_clock = column_exists(conn, table, "updated_at")?;
+    let tx = conn.unchecked_transaction()?;
+    let rows: Vec<(String, String)> = tx
         .prepare(&format!(
-            "SELECT name, credential FROM {table} WHERE credential IS NOT NULL AND credential != ''"
+            "SELECT name, credential FROM {table} WHERE credential LIKE 'secret:%' \
+             OR credential = 'github_token' \
+             OR (credential != '' AND instr(credential, '.') = 0 AND instr(credential, '://') = 0)"
         ))?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
@@ -218,15 +223,54 @@ fn reconcile_legacy_credentials(conn: &Connection, table: &str) -> Result<()> {
         }
         match canonical_credential(&stored) {
             Some(canonical) => {
-                conn.execute(
-                    &format!("UPDATE {table} SET credential = ?1 WHERE name = ?2"),
-                    rusqlite::params![canonical, name],
-                )?;
+                if has_clock {
+                    tx.execute(
+                        &format!(
+                            "UPDATE {table} SET credential = ?1, updated_at = ?2 WHERE name = ?3 AND credential = ?4"
+                        ),
+                        rusqlite::params![canonical, utils::time::now_millis_since_epoch(), name, stored],
+                    )?;
+                } else {
+                    tx.execute(
+                        &format!(
+                            "UPDATE {table} SET credential = ?1 WHERE name = ?2 AND credential = ?3"
+                        ),
+                        rusqlite::params![canonical, name, stored],
+                    )?;
+                }
                 tracing::info!("{table} `{name}`: rewrote legacy credential ref to canonical form");
             }
             None => tracing::warn!(
                 "{table} `{name}`: credential ref is not canonical (<scheme>://… or dotted name); re-set it"
             ),
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn warn_legacy_secret_names(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "secrets")? {
+        return Ok(());
+    }
+    let names: Vec<String> = conn
+        .prepare("SELECT name FROM secrets WHERE instr(name, '.') = 0 AND instr(name, '://') = 0")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let has_new: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM secrets WHERE name = 'orca.github_token')",
+        [],
+        |r| r.get(0),
+    )?;
+    for name in names {
+        if name == "github_token" && has_new {
+            tracing::warn!(
+                "secret `github_token` remains alongside `orca.github_token`; delete the legacy secret once unused"
+            );
+        } else {
+            tracing::warn!(
+                "secret `{name}` has an undotted name; rename it to <provider>.<instance>.<field>"
+            );
         }
     }
     Ok(())
@@ -798,7 +842,9 @@ mod tests {
             "CREATE TABLE managed_mounts (name TEXT PRIMARY KEY, credential TEXT);
              INSERT INTO managed_mounts VALUES
                ('a','secret:smb.data.cred'),('b','github_token'),('c','plain'),
-               ('d','op://v/i'),('e',NULL);",
+               ('d','op://v/i'),('e',NULL);
+             CREATE TABLE shares (name TEXT PRIMARY KEY, credential TEXT, updated_at INTEGER);
+             INSERT INTO shares VALUES ('s','secret:a.b',5),('t','a.b',5);",
         )
         .unwrap();
         reconcile_legacy_credentials(&conn, "managed_mounts").unwrap();
@@ -816,5 +862,17 @@ mod tests {
         assert_eq!(get("c").as_deref(), Some("plain"));
         assert_eq!(get("d").as_deref(), Some("op://v/i"));
         assert_eq!(get("e"), None);
+        let share = |n: &str| -> (String, i64) {
+            conn.query_row(
+                "SELECT credential, updated_at FROM shares WHERE name=?1",
+                [n],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        let (cred, clock) = share("s");
+        assert_eq!(cred, "a.b");
+        assert!(clock > 5);
+        assert_eq!(share("t").1, 5);
     }
 }

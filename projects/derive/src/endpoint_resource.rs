@@ -368,9 +368,9 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 let ns = LitStr::new(&n.to_string(), Span::call_site());
                 let crate_path = &input.crate_path;
                 Some(quote! {
-                    #has: #crate_path::secrets::exists(&#crate_path::secrets::scoped_name(
+                    #has: #crate_path::secrets::exists(#crate_path::secrets::scoped_name(
                         #plugin_lit, &row.name, #ns,
-                    ))?,
+                    )?.as_str())?,
                 })
             } else if f.secret && f.optional {
                 let has = format_ident!("has_{}", n);
@@ -810,7 +810,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     let v = v.to_string();
                     if !v.is_empty() {
                         #crate_path::secrets::set(
-                            &#crate_path::secrets::scoped_name(PROVIDER, &ep.name, #ns),
+                            #crate_path::secrets::scoped_name(PROVIDER, &ep.name, #ns)?.as_str(),
                             &v,
                             ::std::option::Option::None,
                         )?;
@@ -838,9 +838,10 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     }
                     let mut first: ::std::option::Option<#crate_path::anyhow::Error> = ::std::option::Option::None;
                     #(
-                        if let ::std::result::Result::Err(e) = #crate_path::secrets::delete(
-                            &#crate_path::secrets::scoped_name(PROVIDER, name, #secret_names),
-                        ) {
+                        if let ::std::result::Result::Err(e) =
+                            #crate_path::secrets::scoped_name(PROVIDER, name, #secret_names)
+                                .and_then(|r| #crate_path::secrets::delete(r.as_str()))
+                        {
                             first.get_or_insert(e);
                         }
                     )*

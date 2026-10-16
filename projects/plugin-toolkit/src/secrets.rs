@@ -43,8 +43,8 @@ impl ResolveSecret for SecretRef {
 /// Build a `<provider>.<instance>.<field>` secret name. Matches the convention
 /// `secrets::list_provider_instances` enumerates, so secrets a plugin writes
 /// this way are discoverable per instance.
-pub fn scoped_name(provider: &str, instance: &str, field: &str) -> String {
-    format!("{provider}.{instance}.{field}")
+pub fn scoped_name(provider: &str, instance: &str, field: &str) -> Result<SecretRef> {
+    SecretRef::parse(format!("{provider}.{instance}.{field}")).map_err(|e| anyhow!(e))
 }
 
 /// Store `value` under `name` in the inline backend, creating or replacing it.
@@ -83,8 +83,13 @@ pub fn get_required(name: &str) -> Result<Secret<String>> {
 }
 
 pub fn resolve_scoped(provider: &str, instance: &str, field: &str) -> Result<Secret<String>> {
-    let name = scoped_name(provider, instance, field);
-    get(&name)?.ok_or_else(|| MissingSecret { name }.into())
+    let name = scoped_name(provider, instance, field)?;
+    get(name.as_str())?.ok_or_else(|| {
+        MissingSecret {
+            name: name.as_str().to_string(),
+        }
+        .into()
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,15 +130,22 @@ mod tests {
     #[test]
     fn scoped_name_joins_provider_instance_field() {
         assert_eq!(
-            scoped_name("proxmox", "host-d", "token_secret"),
+            scoped_name("proxmox", "host-d", "token_secret")
+                .unwrap()
+                .as_str(),
             "proxmox.host-d.token_secret"
         );
+        assert!(scoped_name("proxmox", "", "token").is_err());
+        assert!(scoped_name("proxmox", "a b", "token").is_err());
     }
 
     #[test]
     fn missing_secret_names_the_scoped_secret() {
         let e: anyhow::Error = MissingSecret {
-            name: scoped_name("gitea", "main", "token"),
+            name: scoped_name("gitea", "main", "token")
+                .unwrap()
+                .as_str()
+                .to_string(),
         }
         .into();
         assert_eq!(

@@ -630,6 +630,12 @@ mod tests {
         assert!(SecretRef::parse("hunter2").is_err());
         assert!(serde_json::from_value::<SecretRef>(serde_json::json!("")).is_err());
         assert!(serde_json::from_value::<SecretRef>(serde_json::json!(" ")).is_err());
+        assert!(
+            serde_json::from_value::<CredentialSlotRef>(
+                serde_json::json!({"slot": "s", "secret_ref": "github_token"})
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
