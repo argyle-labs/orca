@@ -24,9 +24,8 @@ use thiserror::Error;
 
 pub mod acquisition;
 pub use acquisition::{
-    AcquisitionError, DownloadClient, DownloadProvider, DropFolder, Indexer, IndexerProtocol,
-    NzbPayload, Payload, Protocol, ProtocolDefaults, SubmissionId, SubmissionState,
-    SubmissionStatus, TorrentPayload,
+    AcquisitionError, ClientConnection, DownloadClient, Indexer, IndexerProtocol, Protocol,
+    ResolvedConnection, ResolvedDownloadClient, ResolvedIndexer,
 };
 
 pub mod identity;
