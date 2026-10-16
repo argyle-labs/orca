@@ -19,18 +19,24 @@
 //! (NOT `clap::Args`) — the CLI surface is generated from the JSON Schema — so a
 //! nested typed body field is a first-class arg, not a JSON blob.
 //!
-//! Write methods (POST/PUT/DELETE) are emitted `data_mutation = true` +
-//! `role = "admin"`. A specific write can be made user-callable without the
-//! `can_mutate` opt-in by setting `x-orca-user-callable: true` on the operation
-//! in the spec — it then keeps `data_mutation = true` but is emitted
-//! `role = "read"`.
+//! Only `GET` surfaces as a read tool; every other method is a write and is
+//! emitted `role = "admin"`. Per-operation vendor extensions in the spec adjust
+//! the emitted tool:
+//! - `x-orca-admin: true` — force `role = "admin"` (for sensitive reads).
+//! - `x-orca-no-tool: true` — emit no tool for the operation.
+//! - `x-orca-data-mutation: true` / `x-orca-user-callable: true` — a write gains
+//!   `data_mutation = true`, opening it to non-admin `can_mutate` callers. It
+//!   stays `role = "admin"`; `x-orca-admin` suppresses the opt-in.
+//!
+//! Writes are never emitted below `role = "admin"`. A marker value that is not
+//! a boolean aborts generation.
 
 #![allow(clippy::disallowed_types)]
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use quote::ToTokens;
 use regex::Regex;
 
@@ -38,7 +44,7 @@ use crate::surface::common::{
     GENERATED_HEADER, collect_doc, first_generic, is_ident, option_inner, push_jsonschema_anchor,
 };
 
-/// Spec filename suffixes scanned for the `x-orca-user-callable` exception.
+/// Spec filename suffixes scanned for `x-orca-*` markers.
 const SPEC_SUFFIXES: &[&str] = &[".openapi.json", ".openapi.yaml", ".openapi.yml"];
 
 /// A generated `impl Client` method paired to its spec operation.
@@ -62,37 +68,34 @@ struct Param {
     call_expr: String,
 }
 
-/// One surface rule: match on `"<METHOD> <path>"`, name a verb prefix.
-///
-/// Every rule derives its verb from the method ident (a unique, deterministic
-/// name); there is no per-rule verb override.
-struct Rule {
-    re: Regex,
-    role_admin: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Markers {
+    user_callable: bool,
+    admin: bool,
+    no_tool: bool,
+    data_mutation: bool,
 }
 
-/// The single place that decides what becomes orca surface.
-///
-/// Surface **everything emittable** with full typed request + response bodies.
-/// Mutating methods (POST/PUT/PATCH/DELETE) get `role = "admin"` + `data_mutation`.
-/// Verb = the generated method ident (unique, deterministic).
-fn rules() -> Vec<Rule> {
-    vec![
-        Rule {
-            re: Regex::new(r"^(POST|PUT|PATCH|DELETE) ").unwrap(),
-            role_admin: true,
-        },
-        Rule {
-            re: Regex::new(r"^GET ").unwrap(),
-            role_admin: false,
-        },
-    ]
+type MarkerMap = HashMap<(String, String), Markers>;
+
+fn is_write(http: &str) -> bool {
+    http != "GET"
+}
+
+fn tool_policy(is_write: bool, markers: Markers) -> (&'static str, bool) {
+    let role = if is_write || markers.admin {
+        "admin"
+    } else {
+        ""
+    };
+    let opted_in = markers.user_callable || markers.data_mutation;
+    (role, is_write && opted_in && !markers.admin)
 }
 
 /// Generate `<flavor>_surface.rs` from the codegen'd `<flavor>_codegen.rs`.
 ///
 /// - `specs_dir`: where the `<flavor>.openapi.{json,yaml,yml}` spec(s) live —
-///   scanned for the `x-orca-user-callable` per-operation exception.
+///   scanned for `x-orca-*` per-operation markers.
 /// - `out_dir`: the codegen output dir (`OUT_DIR`). Reads
 ///   `<out_dir>/<flavor>_codegen.rs`, rewrites it in place to anchor
 ///   JsonSchema, and writes `<out_dir>/<flavor>_surface.rs`.
@@ -104,23 +107,23 @@ pub fn generate(specs_dir: &Path, out_dir: &Path, flavor: &str) -> Result<()> {
         .with_context(|| format!("read {}", gen_path.display()))?;
     let mut file: syn::File = syn::parse_file(&src).context("parse generated codegen")?;
 
-    let exceptions = user_callable_exceptions(specs_dir)?;
+    let markers = operation_markers(specs_dir)?;
 
     let type_idents = collect_type_idents(&file);
     let methods = collect_methods(&file, &type_idents);
-    let rules = rules();
 
-    let mut matched: Vec<(&Method, bool)> = Vec::new();
+    let mut matched: Vec<(&Method, Markers)> = Vec::new();
     let mut unit_returns = 0usize;
-    let mut unruled: BTreeSet<String> = BTreeSet::new();
+    let mut excluded = 0usize;
     for m in &methods {
-        let key = format!("{} {}", m.http, m.path);
-        let Some(r) = rules.iter().find(|r| r.re.is_match(&key)) else {
-            // Never silent: an HTTP verb the rule table forgot is a generator
-            // bug, not a policy choice. PATCH sat here unreported.
-            unruled.insert(m.http.clone());
+        let mk = markers
+            .get(&(m.http.clone(), m.path.clone()))
+            .copied()
+            .unwrap_or_default();
+        if mk.no_tool {
+            excluded += 1;
             continue;
-        };
+        }
         // A 204 No Content is the NORMAL success shape for a DELETE — not a
         // signal the operation is uninteresting. Skipping unit returns withheld
         // 144 real mutating operations on the gitea spec alone, and did so in
@@ -130,14 +133,7 @@ pub fn generate(specs_dir: &Path, out_dir: &Path, flavor: &str) -> Result<()> {
         if m.ret.is_none() {
             unit_returns += 1;
         }
-        matched.push((m, r.role_admin));
-    }
-    if !unruled.is_empty() {
-        println!(
-            "cargo:warning=surface[{flavor}]: NO RULE for HTTP verb(s) {} — those \
-             operations emit no tool; add them to `rules()`",
-            unruled.iter().cloned().collect::<Vec<_>>().join(", ")
-        );
+        matched.push((m, mk));
     }
 
     // Transitive closure of every type the surfaced tools touch, then anchor
@@ -155,34 +151,33 @@ pub fn generate(specs_dir: &Path, out_dir: &Path, flavor: &str) -> Result<()> {
 
     let exception_hits = matched
         .iter()
-        .filter(|(m, role_admin)| {
-            *role_admin && exceptions.contains(&(m.http.clone(), m.path.clone()))
-        })
+        .filter(|(m, mk)| tool_policy(is_write(&m.http), *mk).1)
         .count();
     println!(
         "cargo:warning=surface[{flavor}]: {} tool(s) emitted ({unit_returns} returning no \
-         content), JsonSchema on {anchored}/{} type(s), {exception_hits} user-callable exception(s)",
+         content), JsonSchema on {anchored}/{} type(s), {exception_hits} can_mutate opt-in(s), {excluded} excluded",
         matched.len(),
         needed.len()
     );
 
-    let surface = emit_surface(&matched, flavor, &exceptions);
+    let surface = emit_surface(&matched, flavor);
     let surface_path = out_dir.join(format!("{flavor}_surface.rs"));
     std::fs::write(&surface_path, surface)
         .with_context(|| format!("write {}", surface_path.display()))?;
     Ok(())
 }
 
-/// `(METHOD_UPPER, path)` for every operation marked `x-orca-user-callable: true`
-/// across the spec file(s) in `specs_dir`. Reads the raw spec value (JSON/YAML)
-/// so the vendor extension is seen regardless of 3.1→3.0 lowering.
-fn user_callable_exceptions(specs_dir: &Path) -> Result<HashSet<(String, String)>> {
-    let mut out = HashSet::new();
-    let Ok(rd) = std::fs::read_dir(specs_dir) else {
-        return Ok(out);
-    };
-    for entry in rd.flatten() {
-        let p = entry.path();
+/// `(METHOD_UPPER, path)` → markers across the spec file(s) in `specs_dir`.
+/// Reads the raw spec value (JSON/YAML) so vendor extensions are seen
+/// regardless of 3.1→3.0 lowering.
+fn operation_markers(specs_dir: &Path) -> Result<MarkerMap> {
+    let mut out = MarkerMap::new();
+    let rd = std::fs::read_dir(specs_dir)
+        .with_context(|| format!("read specs dir {}", specs_dir.display()))?;
+    for entry in rd {
+        let p = entry
+            .with_context(|| format!("read entry in {}", specs_dir.display()))?
+            .path();
         let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
@@ -195,16 +190,14 @@ fn user_callable_exceptions(specs_dir: &Path) -> Result<HashSet<(String, String)
         } else {
             utils::yaml::from_str(&raw).with_context(|| format!("parse {name} as YAML"))?
         };
-        exceptions_from_spec_value(&value, &mut out);
+        markers_from_spec_value(&value, &mut out).with_context(|| name.to_string())?;
     }
     Ok(out)
 }
 
-/// Scan an OpenAPI value for operations flagged `x-orca-user-callable: true`,
-/// inserting `(METHOD_UPPER, path)` into `out`. Split out for unit testing.
-fn exceptions_from_spec_value(v: &serde_json::Value, out: &mut HashSet<(String, String)>) {
+fn markers_from_spec_value(v: &serde_json::Value, out: &mut MarkerMap) -> Result<()> {
     let Some(paths) = v.get("paths").and_then(|p| p.as_object()) else {
-        return;
+        return Ok(());
     };
     for (path, item) in paths {
         let Some(item) = item.as_object() else {
@@ -215,11 +208,30 @@ fn exceptions_from_spec_value(v: &serde_json::Value, out: &mut HashSet<(String, 
             if !matches!(m.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "PATCH") {
                 continue;
             }
-            if op.get("x-orca-user-callable").and_then(|x| x.as_bool()) == Some(true) {
-                out.insert((m, path.clone()));
+            let flag = |key: &str| -> Result<bool> {
+                match op.get(key) {
+                    None => Ok(false),
+                    Some(serde_json::Value::Bool(b)) => Ok(*b),
+                    Some(other) => bail!("{m} {path}: `{key}` must be a boolean, got {other}"),
+                }
+            };
+            let mk = Markers {
+                user_callable: flag("x-orca-user-callable")?,
+                admin: flag("x-orca-admin")?,
+                no_tool: flag("x-orca-no-tool")?,
+                data_mutation: flag("x-orca-data-mutation")?,
+            };
+            if mk == Markers::default() {
+                continue;
             }
+            let e = out.entry((m.clone(), path.clone())).or_default();
+            e.user_callable |= mk.user_callable;
+            e.admin |= mk.admin;
+            e.no_tool |= mk.no_tool;
+            e.data_mutation |= mk.data_mutation;
         }
     }
+    Ok(())
 }
 
 /// Walk every `impl Client` block and turn each surfaceable `pub async fn` into
@@ -523,25 +535,16 @@ fn return_is_surfaceable(ty: &syn::Type, locals: &BTreeSet<String>) -> bool {
 }
 
 /// Emit the surface source: header + one `#[orca_tool]` block per matched method.
-fn emit_surface(
-    matched: &[(&Method, bool)],
-    flavor: &str,
-    exceptions: &HashSet<(String, String)>,
-) -> String {
+fn emit_surface(matched: &[(&Method, Markers)], flavor: &str) -> String {
     let mut s = String::from(GENERATED_HEADER);
-    for (m, role_admin) in matched {
-        s.push_str(&emit_one(m, *role_admin, flavor, exceptions));
+    for (m, mk) in matched {
+        s.push_str(&emit_one(m, *mk, flavor));
         s.push('\n');
     }
     s
 }
 
-fn emit_one(
-    m: &Method,
-    role_admin: bool,
-    flavor: &str,
-    exceptions: &HashSet<(String, String)>,
-) -> String {
+fn emit_one(m: &Method, markers: Markers, flavor: &str) -> String {
     let verb = &m.ident; // unique, deterministic; prettified later.
     let struct_ident = format!("SurfaceArgs_{verb}");
     let mut fields = String::from("    pub endpoint: String,\n");
@@ -554,19 +557,13 @@ fn emit_one(
     }
     let ret = m.ret.as_deref().unwrap_or("()");
 
-    // Writes are data mutations. A write flagged `x-orca-user-callable` keeps
-    // that classification but drops to `role = "read"` (callable by any read
-    // identity); otherwise it stays `role = "admin"` (opt-in gated).
-    let is_mutation = role_admin;
-    let user_callable = is_mutation && exceptions.contains(&(m.http.clone(), m.path.clone()));
-    let role = if user_callable {
-        ", role = \"read\""
-    } else if is_mutation {
-        ", role = \"admin\""
+    let (role, data_mutation) = tool_policy(is_write(&m.http), markers);
+    let role = if role.is_empty() {
+        String::new()
     } else {
-        ""
+        format!(", role = \"{role}\"")
     };
-    let data_mutation = if is_mutation {
+    let data_mutation = if data_mutation {
         ", data_mutation = true"
     } else {
         ""
@@ -767,38 +764,47 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn uc() -> Markers {
+        Markers {
+            user_callable: true,
+            ..Markers::default()
+        }
+    }
+
     #[test]
-    fn exceptions_pick_up_user_callable_ops_only() {
+    fn markers_pick_up_flagged_ops_only() {
         let spec = json!({
             "paths": {
                 "/vms": {
-                    "get": { "operationId": "list_vms" },
+                    "get": { "operationId": "list_vms", "x-orca-admin": true },
                     "post": { "operationId": "create_vm", "x-orca-user-callable": true }
                 },
                 "/vms/{id}": {
-                    "delete": { "operationId": "delete_vm" },
+                    "delete": { "operationId": "delete_vm", "x-orca-no-tool": true },
                     "put": { "operationId": "update_vm", "x-orca-user-callable": false }
                 }
             }
         });
-        let mut out = HashSet::new();
-        exceptions_from_spec_value(&spec, &mut out);
-        assert_eq!(out.len(), 1);
-        assert!(out.contains(&("POST".to_string(), "/vms".to_string())));
-        assert!(!out.contains(&("PUT".to_string(), "/vms/{id}".to_string())));
+        let mut out = MarkerMap::new();
+        markers_from_spec_value(&spec, &mut out).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[&("POST".to_string(), "/vms".to_string())], uc());
+        assert!(out[&("GET".to_string(), "/vms".to_string())].admin);
+        assert!(out[&("DELETE".to_string(), "/vms/{id}".to_string())].no_tool);
+        assert!(!out.contains_key(&("PUT".to_string(), "/vms/{id}".to_string())));
     }
 
     #[test]
-    fn exceptions_empty_when_no_paths() {
-        let mut out = HashSet::new();
-        exceptions_from_spec_value(&json!({"openapi": "3.0.0"}), &mut out);
+    fn markers_empty_when_no_paths() {
+        let mut out = MarkerMap::new();
+        markers_from_spec_value(&json!({"openapi": "3.0.0"}), &mut out).unwrap();
         assert!(out.is_empty());
     }
 
     #[test]
-    fn exceptions_ignore_non_http_and_malformed() {
-        let mut out = HashSet::new();
-        exceptions_from_spec_value(
+    fn markers_ignore_non_http_and_malformed() {
+        let mut out = MarkerMap::new();
+        markers_from_spec_value(
             &json!({
                 "paths": {
                     "/x": {
@@ -810,10 +816,37 @@ mod tests {
                 }
             }),
             &mut out,
-        );
-        // `patch` counts; `summary`/`parameters` are skipped; `/y` non-object skipped.
+        )
+        .unwrap();
         assert_eq!(out.len(), 1);
-        assert!(out.contains(&("PATCH".to_string(), "/x".to_string())));
+        assert!(out.contains_key(&("PATCH".to_string(), "/x".to_string())));
+    }
+
+    #[test]
+    fn markers_non_boolean_fails_closed() {
+        for v in [json!("true"), json!(1), json!(null)] {
+            let mut out = MarkerMap::new();
+            let spec = json!({"paths": {"/x": {"get": {"x-orca-admin": v}}}});
+            assert!(markers_from_spec_value(&spec, &mut out).is_err());
+        }
+    }
+
+    #[test]
+    fn markers_merge_across_specs() {
+        let mut out = MarkerMap::new();
+        markers_from_spec_value(
+            &json!({"paths": {"/x": {"post": {"x-orca-user-callable": true}}}}),
+            &mut out,
+        )
+        .unwrap();
+        markers_from_spec_value(
+            &json!({"paths": {"/x": {"post": {"x-orca-admin": true}}}}),
+            &mut out,
+        )
+        .unwrap();
+        let m = out[&("POST".to_string(), "/x".to_string())];
+        assert!(m.user_callable && m.admin);
+        assert_eq!(tool_policy(true, m), ("admin", false));
     }
 
     fn ty(s: &str) -> syn::Type {
@@ -1054,29 +1087,14 @@ mod tests {
         assert!(seeds.is_empty(), "a NonZero param seeds no JsonSchema type");
     }
 
-    /// PATCH is captured by the doc-path regex in `method_from_fn` but was
-    /// absent from `rules()`, so all 32 gitea PATCH operations matched no rule
-    /// and were dropped with no counter and no warning.
     #[test]
-    fn rules_cover_every_http_verb_the_doc_regex_captures() {
-        let rules = rules();
-        for verb in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
-            let key = format!("{verb} /repos/o/r/thing");
-            assert!(
-                rules.iter().any(|r| r.re.is_match(&key)),
-                "{verb} matches no surface rule — it would emit no tool"
-            );
+    fn only_get_is_a_read() {
+        assert!(!is_write("GET"));
+        for verb in [
+            "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "get", "",
+        ] {
+            assert!(is_write(verb), "{verb:?} must classify as a write");
         }
-    }
-
-    #[test]
-    fn rules_treat_patch_as_mutating() {
-        let rules = rules();
-        let r = rules
-            .iter()
-            .find(|r| r.re.is_match("PATCH /repos/o/r/issues/1"))
-            .expect("PATCH must match a rule");
-        assert!(r.role_admin, "PATCH mutates — it must require role = admin");
     }
 
     // ── return_inner / return_is_surfaceable ──
@@ -1277,40 +1295,93 @@ mod tests {
         }
     }
 
+    fn authorize(caller: &str, can_mutate: bool, http: &str, m: Markers) -> bool {
+        let (role, dm) = tool_policy(is_write(http), m);
+        let role = if role.is_empty() { "any" } else { role };
+        dispatch::tool_roles::authorize(caller, can_mutate, role, dm)
+    }
+
     #[test]
     fn emit_one_read_get_no_mutation() {
         let m = method("GET", "/vms");
-        let out = emit_one(&m, false, "prox", &HashSet::new());
+        let out = emit_one(&m, Markers::default(), "prox");
         assert!(out.contains("verb = \"do_thing\""));
         assert!(out.contains("domain = \"prox\""));
         assert!(!out.contains("data_mutation"));
         assert!(!out.contains("role ="));
         assert!(out.contains("make_client"));
+        assert!(authorize("read", false, "GET", Markers::default()));
     }
 
     #[test]
     fn emit_one_write_admin() {
         let m = method("POST", "/vms");
-        let out = emit_one(&m, true, "prox", &HashSet::new());
-        assert!(out.contains("data_mutation = true"));
+        let out = emit_one(&m, Markers::default(), "prox");
+        assert!(!out.contains("data_mutation"));
         assert!(out.contains("role = \"admin\""));
+        assert!(!authorize("read", true, "POST", Markers::default()));
+        assert!(authorize("admin", false, "POST", Markers::default()));
     }
 
     #[test]
-    fn emit_one_write_user_callable_reads() {
-        let m = method("POST", "/vms");
-        let mut ex = HashSet::new();
-        ex.insert(("POST".to_string(), "/vms".to_string()));
-        let out = emit_one(&m, true, "prox", &ex);
+    fn emit_one_write_user_callable_stays_admin() {
+        for verb in ["POST", "PUT", "PATCH", "DELETE"] {
+            let m = method(verb, "/vms");
+            let out = emit_one(&m, uc(), "prox");
+            assert!(out.contains("data_mutation = true"));
+            assert!(out.contains("role = \"admin\""));
+            assert!(!out.contains("role = \"read\""));
+            assert!(!authorize("read", false, verb, uc()));
+            assert!(authorize("read", true, verb, uc()));
+            assert!(authorize("admin", false, verb, uc()));
+        }
+    }
+
+    #[test]
+    fn emit_one_write_data_mutation_marker_opts_in() {
+        let dm = Markers {
+            data_mutation: true,
+            ..Markers::default()
+        };
+        let out = emit_one(&method("PUT", "/vms"), dm, "prox");
         assert!(out.contains("data_mutation = true"));
-        assert!(out.contains("role = \"read\""));
+        assert!(out.contains("role = \"admin\""));
+        assert!(authorize("read", true, "PUT", dm));
+    }
+
+    #[test]
+    fn user_callable_on_a_read_is_inert() {
+        let out = emit_one(&method("GET", "/vms"), uc(), "prox");
+        assert!(!out.contains("role ="));
+        assert!(!out.contains("data_mutation"));
+    }
+
+    #[test]
+    fn emit_one_admin_marker_is_absolute() {
+        let admin = Markers {
+            admin: true,
+            ..Markers::default()
+        };
+        let out = emit_one(&method("GET", "/secrets"), admin, "prox");
+        assert!(out.contains("role = \"admin\""));
+        assert!(!authorize("read", true, "GET", admin));
+        let all = Markers {
+            user_callable: true,
+            admin: true,
+            no_tool: false,
+            data_mutation: true,
+        };
+        let out = emit_one(&method("POST", "/vms"), all, "prox");
+        assert!(out.contains("role = \"admin\""));
+        assert!(!out.contains("data_mutation"));
+        assert!(!authorize("read", true, "POST", all));
     }
 
     #[test]
     fn emit_one_unit_return_defaults() {
         let mut m = method("DELETE", "/vms/{id}");
         m.ret = None;
-        let out = emit_one(&m, true, "prox", &HashSet::new());
+        let out = emit_one(&m, Markers::default(), "prox");
         assert!(out.contains("anyhow::Result<()>"));
     }
 
@@ -1322,16 +1393,14 @@ mod tests {
         let mut del = method("DELETE", "/vms/{id}");
         del.ret = None;
         let get = method("GET", "/vms");
-        let matched = vec![(&del, true), (&get, false)];
+        let matched = vec![(&del, Markers::default()), (&get, Markers::default())];
 
-        let out = emit_surface(&matched, "prox", &HashSet::new());
+        let out = emit_surface(&matched, "prox");
         assert_eq!(
             out.matches("#[orca_tool").count(),
             2,
             "the unit-returning delete is surfaced alongside the read"
         );
-        // It stays a mutation: emitting it must not quietly widen who can call it.
-        assert!(out.contains("data_mutation = true"));
         assert!(out.contains("role = \"admin\""));
         assert!(out.contains("anyhow::Result<()>"));
     }
@@ -1340,14 +1409,14 @@ mod tests {
     fn emit_surface_has_header_and_blocks() {
         let m1 = method("GET", "/vms");
         let m2 = method("POST", "/vms");
-        let matched = vec![(&m1, false), (&m2, true)];
-        let out = emit_surface(&matched, "prox", &HashSet::new());
+        let matched = vec![(&m1, Markers::default()), (&m2, Markers::default())];
+        let out = emit_surface(&matched, "prox");
         assert!(out.starts_with("// @generated"));
         assert_eq!(out.matches("#[orca_tool").count(), 2);
     }
 
     #[test]
-    fn user_callable_exceptions_reads_dir() {
+    fn operation_markers_reads_dir() {
         let dir = std::env::temp_dir().join(format!("ptb_surface_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let spec = dir.join("f.openapi.json");
@@ -1356,14 +1425,13 @@ mod tests {
             r#"{"paths":{"/vms":{"post":{"x-orca-user-callable":true}}}}"#,
         )
         .unwrap();
-        let ex = user_callable_exceptions(&dir).unwrap();
-        assert!(ex.contains(&("POST".to_string(), "/vms".to_string())));
+        let ex = operation_markers(&dir).unwrap();
+        assert_eq!(ex[&("POST".to_string(), "/vms".to_string())], uc());
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn user_callable_exceptions_missing_dir_ok() {
-        let ex = user_callable_exceptions(Path::new("/no/such/dir/xyz")).unwrap();
-        assert!(ex.is_empty());
+    fn operation_markers_missing_dir_fails_closed() {
+        assert!(operation_markers(Path::new("/no/such/dir/xyz")).is_err());
     }
 }
