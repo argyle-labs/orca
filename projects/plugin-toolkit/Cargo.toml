@@ -8,23 +8,9 @@ edition.workspace = true
 name = "plugin_toolkit"
 path = "src/lib.rs"
 
-# ── Feature surface ─────────────────────────────────────────────────────
-#
-# The toolkit is the single plugin-facing facade, but a plugin should link
-# only the slice of orca core its macros + imports actually touch. Heavy
-# domain/transport deps (containers→bollard, db→rusqlite, utils→git2+reqwest,
-# openapi→progenitor, graphql, dispatch+contract) are now optional features.
-#
-# `default = ["full"]` keeps every existing plugin (jellyfin/proxmox/…)
-# compiling unchanged — they get the whole facade. A storage-only plugin (smb,
-# nfs) sets `default-features = false`: it keeps the always-on light core
-# (serde/schemars/clap/tokio/derive anchors + the `storage` domain + native
-# `path`/`hash`) and drops ~300 crates of transitive bloat. See STEP 0/2 of
-# the thin-plugin migration: smb invokes only `#[plugin_struct]` + the storage
-# trait, never `#[orca_tool]`/`endpoint_resource!`, so it never references the
-# gated `contract`/`dispatch`/`db` macro anchors.
+# Default is the light core only; every consumer enables the features it uses.
 [features]
-default = ["full"]
+default = []
 full = ["in-process", "tools", "db", "containers", "notify", "graphql", "openapi", "http", "descriptor", "jemalloc-stats"]
 # Host-side domain-proxy profile: the daemon/loader links this to turn on the
 # subcrate host-side JSON proxies (storage/service/deploy-target/contract/
@@ -32,10 +18,7 @@ full = ["in-process", "tools", "db", "containers", "notify", "graphql", "openapi
 # backends. A THIN (out-of-process / subprocess) plugin does NOT enable it — it
 # advertises its backends and serves ops over the wire, so none of those
 # host-side proxies compile into it.
-#
-# Folded into `full`/default so every daemon build keeps the proxies; a thin
-# plugin builds with it OFF. `contract?` — it's only present when `tools` pulls
-# it, so the propagation is a no-op on a proxyless profile.
+# `contract?`/`dispatch?` propagate only when `tools` pulls them in.
 in-process = [
     "storage/in-process",
     "media/in-process",
@@ -101,15 +84,12 @@ delegated-ws = []
 # `plugin_toolkit_build::openapi_plugin`. Bundles the tool surface (`tools`),
 # the endpoint registry (`db`), and delegated HTTP so the generated progenitor
 # client rides orca's `http.request` capability and links no reqwest/rustls.
-# Use `features = ["openapi-plugin"]` with `default-features = false` — one name
-# instead of the four-crate incantation that was easy to get wrong.
 openapi-plugin = ["tools", "db", "delegated-http"]
 # Live jemalloc stats (allocated/active/resident/retained/mapped) for the
 # opt-in auto-diagnostics provider, read via mallctl. OFF by default: the
 # allocator substrate is always linked (see `tikv-jemallocator` below), but a
 # plugin only pays the `tikv-jemalloc-ctl` mallctl surface when this is on.
-# Folded into `full` so every daemon-shape and full plugin reports real stats;
-# a thin plugin without it returns `None` stats and the provider degrades.
+# Without it, stats are `None` and the provider degrades.
 jemalloc-stats = ["dep:tikv-jemalloc-ctl"]
 # Serve an embedded built site (`plugin_toolkit::ui`) on a claimed web prefix,
 # plus the typed `web` BackendDef builder.
@@ -144,17 +124,13 @@ tikv-jemallocator = { workspace = true }
 # Reactor-free `block_on` for the thin (`in-process`-off) `serve.rs` socket loop:
 # a subprocess plugin drives its serial-dispatch futures on a bare executor with
 # no tokio. On the `in-process` profile the loop uses tokio's current-thread
-# runtime instead (the cap sink's thread-affinity contract is unchanged — both
-# drive to completion on the socket-owning thread).
+# runtime; both drive to completion on the socket-owning thread.
 # The light `utils` core (default-features off → no contract/dispatch/tokio/glob)
-# is re-exported to plugins as `plugin_toolkit::{hash,id,url}` — see lib.rs. This
-# is why plugins drop their own sha2/uuid/urlencoding deps: the seams are
-# single-sourced in utils, not duplicated here.
+# is re-exported to plugins as `plugin_toolkit::{hash,id,url}`.
 derive      = { workspace = true }
 # The generic storage domain (thin: serde/trait/registry only) stays always-on
 # so storage adapters need no feature flag. `default-features = false` sheds its
-# tokio-bound host-side proxy on the thin profile; toolkit's `in-process` turns
-# it back on (see [features]) so the in-daemon build is unchanged.
+# tokio-bound host-side proxy; toolkit's `in-process` turns it back on.
 storage = { workspace = true }
 media = { workspace = true }
 # The generic service domain (same thin shape + a subprocess backup capability
@@ -177,9 +153,8 @@ contract    = { workspace = true, optional = true }
 db          = { workspace = true, default-features = true, optional = true }
 secrets = { workspace = true, optional = true }
 # `default-features = false` sheds dispatch's `full`→`in-process`→`contract/
-# in-process` chain on the thin profile; toolkit's own `in-process` re-enables it
-# via `dispatch?/in-process` so the in-daemon build is unchanged. Without this the
-# thin `tools` build would drag tokio back in through dispatch's default.
+# in-process` chain (and tokio) on the thin profile; toolkit's `in-process`
+# re-enables it via `dispatch?/in-process`.
 dispatch    = { workspace = true, optional = true }
 macro-runtime = { workspace = true, optional = true }
 notifications = { workspace = true, optional = true }

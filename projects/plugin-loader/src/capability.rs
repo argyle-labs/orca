@@ -16,7 +16,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use plugin_toolkit::abi::{
     AgentRegistration, DbOp, DbReply, DbRow, DbValue, HttpRequest, HttpResponse, HttpStreamChunk,
     HttpStreamRequest, SecretOp, WsClose, WsOpen, WsRecv, WsSend,
@@ -85,14 +85,6 @@ where
 fn http_client() -> &'static utils::http::Client {
     static CLIENT: OnceLock<utils::http::Client> = OnceLock::new();
     CLIENT.get_or_init(utils::http::Client::new)
-}
-
-/// A secret `name` belongs to `principal` when it is exactly the principal or is
-/// scoped beneath it (`<principal>.…`). This matches the toolkit convention that
-/// a plugin's secrets are named `<provider>.<instance>.<field>` with `provider`
-/// == the plugin id (`plugin_toolkit::secrets::scoped_name`).
-fn secret_name_owned(name: &str, principal: &str) -> bool {
-    name == principal || name.starts_with(&format!("{principal}."))
 }
 
 /// An agents provider name belongs to `principal` when it is the plugin id or its
@@ -300,14 +292,10 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
         "secret.op" => {
             let op: SecretOp = serde_json::from_value(args)
                 .map_err(|e| anyhow!("secret.op: bad op payload: {e}"))?;
-            if !secret_name_owned(op.name(), principal) {
-                bail!(
-                    "plugin '{principal}' may not secret.op/{} outside its namespace (target '{}')",
-                    op.kind(),
-                    op.name()
-                );
-            }
-            let reply = secrets::exec_secret_op_pooled(&op)?;
+            let reply = secrets::exec_secret_op_pooled(
+                &secrets::Principal::Plugin(principal.to_string()),
+                &op,
+            )?;
             Ok(serde_json::to_value(reply)?)
         }
         "http.request" => {
@@ -622,16 +610,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("db.op: bad op payload"), "got: {err}");
-    }
-
-    #[test]
-    fn secret_name_ownership() {
-        assert!(secret_name_owned("proxmox", "proxmox"));
-        assert!(secret_name_owned("proxmox.pve1.token", "proxmox"));
-        assert!(!secret_name_owned("jellyfin.api_key", "proxmox"));
-        assert!(!secret_name_owned("anthropic_api_key", "proxmox"));
-        // A prefix that isn't a namespace boundary must not be treated as owned.
-        assert!(!secret_name_owned("proxmoxen.token", "proxmox"));
     }
 
     #[test]
