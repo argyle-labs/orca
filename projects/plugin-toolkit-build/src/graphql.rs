@@ -11,7 +11,10 @@
 //!     pub type BigInt = String;
 //!     pub type PrefixedID = String;
 //!     pub type DateTime = String;
-//!     mod generated { use super::{BigInt, DateTime, PrefixedID};
+//!     pub type JSON = ::plugin_toolkit::serde_json::Value;
+//!     pub type Port = u16;
+//!     pub type URL = String;
+//!     mod generated { use super::{BigInt, DateTime, JSON, Port, PrefixedID, URL};
 //!         // graphql_client_codegen output for each .graphql file
 //!     }
 //!     pub use generated::*;
@@ -76,9 +79,14 @@ pub fn generate(schemas_dir: impl AsRef<Path>, queries_dir: impl AsRef<Path>) ->
         combined.push_str("pub type BigInt = String;\n");
         combined.push_str("pub type PrefixedID = String;\n");
         combined.push_str("pub type DateTime = String;\n");
+        combined.push_str("pub type JSON = ::plugin_toolkit::serde_json::Value;\n");
+        combined.push_str("pub type Port = u16;\n");
+        combined.push_str("pub type URL = String;\n");
         combined
             .push_str("#[allow(non_camel_case_types, unused_imports, dead_code, clippy::all)]\n");
-        combined.push_str("mod generated { use super::{BigInt, DateTime, PrefixedID};\n");
+        combined.push_str(
+            "mod generated { use super::{BigInt, DateTime, JSON, Port, PrefixedID, URL};\n",
+        );
         combined.push_str(&rewrite_codegen_paths(&tokens.to_string()));
         combined.push_str("}\npub use generated::*;\n");
         combined.push_str("}\n");
