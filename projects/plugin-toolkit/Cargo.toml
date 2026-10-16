@@ -182,7 +182,7 @@ secrets = { workspace = true, optional = true }
 # thin `tools` build would drag tokio back in through dispatch's default.
 dispatch    = { workspace = true, optional = true }
 macro-runtime = { workspace = true, optional = true }
-notifications = { workspace = true, default-features = true, optional = true }
+notifications = { workspace = true, optional = true }
 containers = { workspace = true, optional = true }
 # Runtime primitives — plugins reach these through the toolkit, never directly.
 utils       = { workspace = true, features = ["scrub_text"] }
