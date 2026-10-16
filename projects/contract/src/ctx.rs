@@ -41,6 +41,7 @@ pub struct ToolCtx {
     /// True when the caller asked for a dry run (`dryRun: true`). Lets a tool
     /// body that runs outside the central gate plan instead of apply.
     dry_run: bool,
+    unbound_role: Option<String>,
     services: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
@@ -53,6 +54,7 @@ impl ToolCtx {
             peer_target: None,
             correlation_id: None,
             dry_run: false,
+            unbound_role: None,
             services: HashMap::new(),
         }
     }
@@ -119,6 +121,14 @@ impl ToolCtx {
     /// The per-request correlation id, if one was set.
     pub fn correlation_id(&self) -> Option<&str> {
         self.correlation_id.as_deref()
+    }
+
+    pub fn set_unbound_role(&mut self, role: Option<String>) {
+        self.unbound_role = role;
+    }
+
+    pub fn unbound_role(&self) -> Option<&str> {
+        self.unbound_role.as_deref()
     }
 
     /// Mark this invocation as a dry run (or not).

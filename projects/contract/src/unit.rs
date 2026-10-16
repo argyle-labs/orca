@@ -124,7 +124,8 @@ pub struct QueryArgs {
     /// Content-kind filter (`tv_show`, `movie`, `vm`, …). None = all kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// Max items / log lines to return.
+    /// Max items / log lines to return. `None` = every item: a provider
+    /// that pages anyway must report `total` so callers can follow `offset`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
     /// Pagination offset.

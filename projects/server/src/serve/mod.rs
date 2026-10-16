@@ -668,8 +668,9 @@ async fn mcp_jsonrpc_handler(
     // Same registry + service wiring the /api/v1 nest and stdio bridge use; fold
     // the request's resolved caller so peer-dispatch mints a token bound to it.
     let mut tool_ctx = crate::mcp::build_tool_ctx(cfg.clone());
-    if unbound.is_some() {
+    if let Some(axum::Extension(u)) = unbound {
         tool_ctx.set_caller(None);
+        tool_ctx.set_unbound_role(Some(u.role));
     }
     if let Some(axum::Extension(c)) = caller {
         tool_ctx.set_verified_caller(Some(c.clone()));

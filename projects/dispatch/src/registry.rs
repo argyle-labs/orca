@@ -38,8 +38,10 @@ pub const PEER_HEADER: &str = "x-orca-peer";
 /// user (a legacy or orphaned token). Such a request must never borrow the
 /// ctx's ambient host-operator identity, which is an admin.
 #[cfg(feature = "server")]
-#[derive(Clone, Copy, Debug)]
-pub struct UnboundCaller;
+#[derive(Clone, Debug)]
+pub struct UnboundCaller {
+    pub role: String,
+}
 use serde_json::{Value, json};
 use std::collections::HashMap;
 #[cfg(any(feature = "server", feature = "in-process"))]
@@ -163,7 +165,7 @@ async fn dynamic_dispatch(
     DYNAMIC_INVOKER.get().and_then(|f| f(name, args, caller))
 }
 
-fn secs_from_env(var: &str, default: u64) -> Duration {
+pub(crate) fn secs_from_env(var: &str, default: u64) -> Duration {
     let secs = std::env::var(var)
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -540,7 +542,10 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
     // its own gate. A tool this host does not have is refused even with a
     // peer named: no peer capability signal proves the peer honours `dryRun`,
     // and one that predates it would drop the flag and apply.
-    if dry_run && !crate::tool_roles::plugin_execute_gated(name) {
+    if dry_run
+        && !crate::tool_roles::plugin_execute_gated(name)
+        && !crate::unit_surface::unit_dry_run_ok(name)
+    {
         let known_here = dynamic_owns(name)
             || crate::unit_surface::unit_owns(name)
             || crate::diagnostics_surface::diagnostics_owns(name)
@@ -597,7 +602,18 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
 /// reach a plugin/unit/diagnostics/UPS body. A name with no local role is
 /// left to the peer forward, whose recipient authorizes it.
 fn authorize_fallback(name: &str, ctx: &ToolCtx) -> Result<()> {
-    let (Some(caller), Some(required)) = (ctx.caller(), crate::tool_roles::known_role(name)) else {
+    if let Some(role) = ctx.unbound_role()
+        && role != "admin"
+        && let Some(required) = crate::tool_roles::known_role(name)
+        && required != "any"
+    {
+        return Err(contract::OrcaError::forbidden(format!(
+            "{name} requires role '{required}'; a token with no resolvable user has '{role}'"
+        ))
+        .into());
+    }
+    let caller = ctx.verified_caller().cloned().or_else(|| ctx.caller());
+    let (Some(caller), Some(required)) = (caller, crate::tool_roles::known_role(name)) else {
         return Ok(());
     };
     if crate::tool_roles::authorize(
@@ -762,8 +778,9 @@ async fn http_dispatch(
     let ctx_owned =
         if caller.is_some() || unbound.is_some() || peer.is_some() || correlation_id.is_some() {
             let mut ctx = (*state.ctx).clone();
-            if unbound.is_some() {
+            if let Some(Extension(u)) = unbound {
                 ctx.set_caller(None);
+                ctx.set_unbound_role(Some(u.role));
             }
             if let Some(Extension(c)) = caller {
                 ctx.set_verified_caller(Some(c.clone()));
@@ -2183,6 +2200,19 @@ mod tests {
         assert_eq!(*SEEN.lock().unwrap(), vec![None, Some("alice".into())]);
     }
 
+    #[test]
+    fn unbound_caller_is_refused_role_gated_fallback_names() {
+        let mut ctx = make_ctx().with_auth(identity("host_admin"));
+        assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_ok());
+        ctx.set_caller(None);
+        ctx.set_unbound_role(Some("admin".into()));
+        assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_ok());
+        ctx.set_unbound_role(Some("member".into()));
+        assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_err());
+        assert!(authorize_fallback(crate::ups_surface::STATE_TOOL, &ctx).is_ok());
+        assert!(authorize_fallback("__no_such_tool__", &ctx).is_ok());
+    }
+
     #[cfg(feature = "server")]
     #[tokio::test]
     async fn rest_fallback_never_forwards_the_daemon_identity() {
@@ -2255,7 +2285,9 @@ mod tests {
                 .body(Body::from("{}"))
                 .unwrap();
             if unbound {
-                req.extensions_mut().insert(UnboundCaller);
+                req.extensions_mut().insert(UnboundCaller {
+                    role: "admin".into(),
+                });
             }
             req
         };

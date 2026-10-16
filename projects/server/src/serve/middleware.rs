@@ -592,7 +592,9 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
                     req.extensions_mut().insert(c);
                 }
                 None => {
-                    req.extensions_mut().insert(dispatch::UnboundCaller);
+                    req.extensions_mut().insert(dispatch::UnboundCaller {
+                        role: ident.role.clone(),
+                    });
                 }
             }
             req.extensions_mut().insert(ident);
@@ -647,6 +649,7 @@ fn tool_name_from_path(path: &str) -> Option<&str> {
 pub async fn require_tool_role(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let header_peer = req.headers().contains_key(dispatch::PEER_HEADER);
+    let unbound = req.extensions().get::<dispatch::UnboundCaller>().is_some();
     let (caller_role, can_mutate) = req
         .extensions()
         .get::<AuthIdentity>()
@@ -673,6 +676,9 @@ pub async fn require_tool_role(req: Request, next: Next) -> Response {
             decision = check(true);
         }
         req = Request::from_parts(parts, Body::from(bytes));
+    }
+    if unbound {
+        decision = refuse_unbound(&path, decision, caller_role.as_deref());
     }
     match decision {
         ToolRoleCheck::Pass => next.run(req).await,
@@ -747,6 +753,23 @@ pub(crate) fn check_tool_role(
         Some(required) => role_decision(&tool, required, caller_role, can_mutate),
         None if peer_named => ToolRoleCheck::Pass,
         None => ToolRoleCheck::NotFound { tool },
+    }
+}
+
+pub(crate) fn refuse_unbound(
+    path: &str,
+    decision: ToolRoleCheck,
+    caller_role: Option<&str>,
+) -> ToolRoleCheck {
+    if decision != ToolRoleCheck::Pass || caller_role == Some("admin") {
+        return decision;
+    }
+    let Some(tool) = tool_name_from_path(path).and_then(|raw| utils::url::decode(raw).ok()) else {
+        return decision;
+    };
+    match dispatch::tool_roles::known_role(&tool) {
+        Some(required) if required != "any" => ToolRoleCheck::Forbidden { tool, required },
+        _ => decision,
     }
 }
 
@@ -949,6 +972,28 @@ mod tests {
         assert!(tool_name_from_path("/api/health").is_none());
         assert!(tool_name_from_path("/api/v1").is_none());
         assert!(tool_name_from_path("/").is_none());
+    }
+
+    #[test]
+    fn unbound_token_is_refused_role_gated_tools_unless_admin() {
+        let gated = format!("/api/v1/{}", dispatch::diagnostics_surface::REPAIR_TOOL);
+        let open = format!("/api/v1/{}", dispatch::ups_surface::STATE_TOOL);
+        assert!(matches!(
+            refuse_unbound(&gated, ToolRoleCheck::Pass, Some("member")),
+            ToolRoleCheck::Forbidden { .. }
+        ));
+        assert_eq!(
+            refuse_unbound(&gated, ToolRoleCheck::Pass, Some("admin")),
+            ToolRoleCheck::Pass
+        );
+        assert_eq!(
+            refuse_unbound(&open, ToolRoleCheck::Pass, Some("member")),
+            ToolRoleCheck::Pass
+        );
+        assert_eq!(
+            refuse_unbound(BOOTSTRAP_ALLOWED_TOOL, ToolRoleCheck::Pass, Some("admin")),
+            ToolRoleCheck::Pass
+        );
     }
 
     #[test]
