@@ -294,6 +294,8 @@ pub use ::regress;
 // emits one and the daemon applies it, so it rides the light `db` feature.
 #[cfg(feature = "db")]
 pub use ::macro_runtime::SchemaFragment;
+#[cfg(feature = "db")]
+pub use ::macro_runtime::SharedEndpointProvider;
 // `ReplicatedRegistration` carries `fn(&rusqlite::Connection)` and is emitted
 // only by `#[derive(Replicated)]` (a core mesh-sync primitive), so it rides
 // `db-incore`. A plugin's `endpoint_resource!` never references it.

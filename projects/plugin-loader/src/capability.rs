@@ -827,6 +827,22 @@ mod tests {
         assert!(exec_db_op_policed(&conn, &op, "alpha").is_err());
         let via_core = list("plug__beta__things");
         assert!(exec_db_op_policed(&conn, &via_core, "alpha").is_err());
+        for ns in ["alph", "alphax", "alpha_", "Alpha", "alpha__x"] {
+            let read = DbOp::List {
+                namespace: ns.into(),
+                table: "things".into(),
+            };
+            let write = DbOp::Insert {
+                namespace: ns.into(),
+                table: "things".into(),
+                row: name_row(),
+            };
+            assert!(exec_db_op_policed(&conn, &read, "alpha").is_err(), "{ns}");
+            assert!(exec_db_op_policed(&conn, &write, "alpha").is_err(), "{ns}");
+        }
+        for t in ["plug__alphax__things", "plug__alpha__things"] {
+            assert!(exec_db_op_policed(&conn, &list(t), "alpha").is_err(), "{t}");
+        }
     }
 
     #[test]

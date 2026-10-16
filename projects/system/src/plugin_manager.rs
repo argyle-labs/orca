@@ -401,7 +401,7 @@ fn apply_plugin_schema(report: &plugin_loader::LoadReport) {
             return;
         }
     };
-    match db::plugin_tables::apply_decl(&conn, &report.declared_schema) {
+    match db::plugin_tables::apply_decl(&conn, &report.software, &report.declared_schema) {
         Ok(reports) => tracing::info!(
             plugin = %report.software,
             namespace = %report.declared_schema.namespace,
@@ -3355,7 +3355,7 @@ mod tests {
         // uses an isolated db.
         let _ctx = guard_ctx(&tmp);
 
-        let report = report_with_schema("covschema", one_table_schema("covns", "widgets"));
+        let report = report_with_schema("covns", one_table_schema("covns", "widgets"));
         apply_plugin_schema(&report);
 
         let conn = db::open_default().expect("open db under temp ORCA_HOME");
@@ -3371,6 +3371,33 @@ mod tests {
             reply.rows.is_empty(),
             "a freshly materialized table holds no rows"
         );
+        unsafe {
+            std::env::remove_var("ORCA_HOME");
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn apply_plugin_schema_refuses_foreign_namespace() {
+        let _env = crate::test_env::snapshot();
+        let tmp = tempfile::tempdir().unwrap();
+        let _ctx = guard_ctx(&tmp);
+
+        apply_plugin_schema(&report_with_schema(
+            "covns",
+            one_table_schema("victim", "widgets"),
+        ));
+
+        let conn = db::open_default().expect("open db under temp ORCA_HOME");
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name LIKE 'plug\\_\\_%' ESCAPE '\\'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
         unsafe {
             std::env::remove_var("ORCA_HOME");
             std::env::remove_var("HOME");

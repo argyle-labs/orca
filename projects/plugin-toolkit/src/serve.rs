@@ -123,6 +123,7 @@ fn declared_surface(spec: &PluginSpec) -> Result<Value> {
 /// Connect the orca-provided socket and serve until shutdown. A plugin's
 /// `main()` calls this and returns its result.
 pub fn serve(spec: PluginSpec) -> Result<()> {
+    check_shared_endpoint_providers(&spec.name)?;
     // Off-orca introspection: dump the manifest and exit before touching a
     // socket. The CI gate (and local validation) drives this path.
     if std::env::var_os(DUMP_MANIFEST_ENV).is_some() {
@@ -148,7 +149,28 @@ pub fn serve(spec: PluginSpec) -> Result<()> {
 /// Serve over an already-connected stream. Split from [`serve`] so the loop is
 /// testable over an in-memory `UnixStream` pair.
 pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Result<()> {
+    check_shared_endpoint_providers(&spec.name)?;
     serve_session(stream, spec, None)
+}
+
+fn check_shared_endpoint_providers(name: &str) -> Result<()> {
+    shared_provider_mismatches(
+        name,
+        crate::inventory::iter::<crate::SharedEndpointProvider>
+            .into_iter()
+            .map(|p| p.plugin),
+    )
+}
+
+fn shared_provider_mismatches<'a>(
+    name: &str,
+    providers: impl Iterator<Item = &'a str>,
+) -> Result<()> {
+    let bad: Vec<&str> = providers.filter(|p| *p != name).collect();
+    if !bad.is_empty() {
+        bail!("endpoint_resource plugin {bad:?} must equal the plugin id '{name}'");
+    }
+    Ok(())
 }
 
 /// How often a running tool tells orca it is alive, well inside orca's
@@ -509,6 +531,12 @@ mod tests {
     use serde_json::json;
     use std::os::unix::net::UnixStream;
     use std::thread;
+
+    #[test]
+    fn shared_endpoint_provider_must_equal_plugin_id() {
+        assert!(shared_provider_mismatches("proxmox", ["proxmox"].into_iter()).is_ok());
+        assert!(shared_provider_mismatches("proxmox", ["proxmox", "pve"].into_iter()).is_err());
+    }
 
     #[test]
     fn heartbeat_beats_only_while_a_tool_runs() {
