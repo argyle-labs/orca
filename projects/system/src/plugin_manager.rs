@@ -408,10 +408,34 @@ fn apply_plugin_schema(report: &plugin_loader::LoadReport) {
             tables = reports.len(),
             "applied plugin-declared SQL schema"
         ),
+        Err(e) => {
+            tracing::warn!(
+                plugin = %report.software,
+                error = %format!("{e:#}"),
+                "plugin schema migration failed"
+            );
+            return;
+        }
+    }
+    match secrets::plugin_columns::migrate_secret_columns(
+        &conn,
+        &report.software,
+        &report.declared_schema,
+        false,
+    ) {
+        Ok(m) if m.moved + m.already_stored + m.skipped > 0 => tracing::info!(
+            plugin = %report.software,
+            moved = m.moved,
+            already_stored = m.already_stored,
+            skipped = m.skipped,
+            names = ?m.names,
+            "moved plaintext plugin secret columns into the secrets store"
+        ),
+        Ok(_) => {}
         Err(e) => tracing::warn!(
             plugin = %report.software,
             error = %format!("{e:#}"),
-            "plugin schema migration failed"
+            "plugin secret column migration failed"
         ),
     }
 }
@@ -3312,6 +3336,7 @@ mod tests {
                     not_null: true,
                     primary_key: true,
                     default: None,
+                    secret: false,
                 }],
                 indexes: Vec::new(),
             }],
