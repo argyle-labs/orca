@@ -11,8 +11,9 @@ path = "src/lib.rs"
 [features]
 # Default-on so the daemon is unchanged; opt-out so a thin plugin carries no
 # TOML parser. Gates `RoutingConfig::from_toml`.
-default = ["config"]
+default = ["config", "store"]
 config = ["dep:toml"]
+store = ["dep:db", "dep:rusqlite"]
 
 [dependencies]
 macro-runtime = { workspace = true }
@@ -24,8 +25,8 @@ macro-runtime = { workspace = true }
 # `db::{pool, settings::get, settings::secret_get}`, none of which need http.
 # The daemon is unaffected: server/runtime/mcp/spec still take `db`'s defaults,
 # and cargo unifies the feature back on for that build.
-db          = { workspace = true }
-rusqlite    = { workspace = true }
+db          = { workspace = true, optional = true }
+rusqlite    = { workspace = true, optional = true }
 # Light core only (`utils::time` — the sole module this crate uses). Taking
 # `utils`' `full` default here re-enabled `config_format` for the WHOLE graph via
 # feature unification, so every thin plugin linked an XML parser again even after

@@ -17,8 +17,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(feature = "store")]
 pub mod dismissable;
 pub mod notify_send;
+#[cfg(feature = "store")]
 pub mod smtp;
 
 // ── Event shape ─────────────────────────────────────────────────────────────
