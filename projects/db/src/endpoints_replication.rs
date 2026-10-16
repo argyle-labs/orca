@@ -24,6 +24,7 @@ const COLUMNS: &[&str] = &[
     "insecure",
     "created_at",
     "updated_at",
+    "config",
 ];
 
 fn export(conn: &Connection) -> Result<Value> {

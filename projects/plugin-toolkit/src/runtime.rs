@@ -193,6 +193,24 @@ pub fn map_insert_conflict(err: anyhow::Error, plugin: &str, name: &str) -> anyh
     }
 }
 
+/// Reject endpoint names that cannot safely scope a secret: must match
+/// `^[a-z0-9][a-z0-9_-]{0,63}$`.
+pub fn validate_endpoint_name(name: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    if !ok {
+        bail!("invalid endpoint name {name:?}: must match ^[a-z0-9][a-z0-9_-]{{0,63}}$");
+    }
+    Ok(())
+}
+
 /// Build the "not registered; use <plugin>.create" error used by `.update`
 /// and `.delete` when the row isn't found.
 pub fn missing_row_error(plugin: &str, name: &str) -> anyhow::Error {
