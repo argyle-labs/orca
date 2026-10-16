@@ -9,7 +9,7 @@ name = "auth"
 path = "src/lib.rs"
 
 [dependencies]
-plugin-toolkit = { workspace = true, default-features = true }
+plugin-toolkit = { workspace = true, features = ["tools"] }
 macro-runtime = { workspace = true }
 contract    = { workspace = true }
 derive       = { workspace = true }

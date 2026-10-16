@@ -48,7 +48,7 @@ config-source = { workspace = true }
 containers    = { workspace = true }
 dev           = { workspace = true }
 mcp           = { workspace = true }
-plugin-toolkit = { workspace = true, default-features = true }
+plugin-toolkit = { workspace = true, features = ["tools"] }
 # `spec.detail` is an #[orca_tool] hosted in the server crate itself.
 orca          = { workspace = true }
 
