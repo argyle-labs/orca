@@ -120,6 +120,7 @@ jobs:
         if: ${{ steps.select.outputs.selection != '' }}
         uses: argyle-labs/.github/.github/actions/rust-setup@main
         with:
+          cache-key: ci-build
           drop-cargo-config: 'false'
           wrap-cc: 'true'
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
@@ -133,12 +134,14 @@ jobs:
           v="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
           [ -n "$v" ] || exit 1
           echo "ORCA_RELEASE_VERSION=${v}-dev+gci" >> "$GITHUB_ENV"
+      - name: Fetch dependencies
+        if: ${{ steps.select.outputs.selection != '' }}
+        uses: argyle-labs/.github/.github/actions/cargo-fetch@main
       # One coverage-instrumented compile; `test` runs this archive instead of
       # rebuilding. Covers lib/bin/test targets, not examples or benches.
       - name: Build (coverage-instrumented test archive)
         if: ${{ steps.select.outputs.selection != '' }}
         run: |
-          cargo fetch --locked
           cargo llvm-cov nextest-archive --locked --workspace --archive-file nextest-archive.tar.zst
       - name: Upload test archive
         if: ${{ steps.select.outputs.selection != '' }}
@@ -281,6 +284,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: argyle-labs/.github/.github/actions/rust-setup@main
         with:
+          cache-key: ci-lint
           drop-cargo-config: 'false'
           wrap-cc: 'true'
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
