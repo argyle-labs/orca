@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock, RwLock};
 use thiserror::Error;
 
+pub mod export_policy;
+
 /// Cross-platform kernel-mount-table primitive shared by every network-share
 /// backend (nfs, smb, …). Plugins read the live table and classify health
 /// through this rather than each parsing `/proc/mounts` themselves.
@@ -36,6 +38,7 @@ pub mod remount_policy;
 /// plus the provider seam that yields it (mirrors the `StorageBackend` registry).
 pub mod replication_status;
 
+pub use export_policy::ExportPolicy;
 pub use mount_table::{
     MountEntry, MountHealth, RecoveryAction, mount_table, mount_table_of, probe_health,
     probe_health_rw, probe_source, probe_source_nfs, probe_writable, source_endpoint,
@@ -542,6 +545,15 @@ pub trait StorageBackend: Send + Sync {
         ))
     }
 
+    async fn upsert_export_checked(
+        &self,
+        entry: &ExportEntry,
+        policy: ExportPolicy,
+    ) -> Result<ExportEntry, StorageError> {
+        policy.validate(entry)?;
+        self.upsert_export(entry).await
+    }
+
     /// Withdraw the export at `path`, leaving the underlying data untouched.
     /// Idempotent: an export that is already absent is `Ok`, not an error.
     async fn remove_export(&self, _path: &str) -> Result<(), StorageError> {
@@ -1030,10 +1042,21 @@ impl StorageBackend for StorageProxy {
     }
 
     async fn upsert_export(&self, entry: &ExportEntry) -> Result<ExportEntry, StorageError> {
+        self.upsert_export_checked(entry, ExportPolicy::default())
+            .await
+    }
+
+    async fn upsert_export_checked(
+        &self,
+        entry: &ExportEntry,
+        policy: ExportPolicy,
+    ) -> Result<ExportEntry, StorageError> {
+        policy.validate(entry)?;
         self.call(
             "upsert_export",
             UpsertExportArgs {
                 entry: entry.clone(),
+                allow_unsafe: policy.allow_unsafe,
             },
         )
         .await
@@ -1115,6 +1138,8 @@ struct UnmountArgs {
 #[derive(Serialize, Deserialize)]
 struct UpsertExportArgs {
     entry: ExportEntry,
+    #[serde(default)]
+    allow_unsafe: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1175,7 +1200,13 @@ pub async fn dispatch_op(
         "list_exports" => enc(&backend.list_exports().await.map_err(err)?),
         "upsert_export" => {
             let a: UpsertExportArgs = dec(op, args)?;
-            enc(&backend.upsert_export(&a.entry).await.map_err(err)?)
+            let policy = ExportPolicy {
+                allow_unsafe: a.allow_unsafe,
+            };
+            enc(&backend
+                .upsert_export_checked(&a.entry, policy)
+                .await
+                .map_err(err)?)
         }
         "remove_export" => {
             let a: RemoveExportArgs = dec(op, args)?;
