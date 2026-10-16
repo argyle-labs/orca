@@ -601,6 +601,9 @@ pub fn apply_binary(bytes: &[u8], version: &str) -> Result<()> {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    crate::sysadmin::privileged_copy_after_update(bytes);
+
     println!("[orca] updated to v{version} — scheduling restart");
     write_pending_restart_marker(version);
     let method = schedule_self_restart();
