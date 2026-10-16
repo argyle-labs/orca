@@ -27,7 +27,7 @@ pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
 # the bursty JSON/serde churn of periodic drivers (mimalloc held pages far
 # longer here). Config in main.rs via `malloc_conf`.
 tikv-jemallocator = { workspace = true }
-plugin-toolkit = { workspace = true, default-features = true }
+plugin-toolkit = { workspace = true, features = ["tools", "jemalloc-stats"] }
 # Workspace crates
 utils = { workspace = true, default-features = true }
 dispatch = { workspace = true, default-features = true, features = ["server"] }

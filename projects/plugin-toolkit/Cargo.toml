@@ -15,16 +15,10 @@ path = "src/lib.rs"
 # domain/transport deps (containers→bollard, db→rusqlite, utils→git2+reqwest,
 # openapi→progenitor, graphql, dispatch+contract) are now optional features.
 #
-# `default = ["full"]` keeps every existing plugin (jellyfin/proxmox/…)
-# compiling unchanged — they get the whole facade. A storage-only plugin (smb,
-# nfs) sets `default-features = false`: it keeps the always-on light core
-# (serde/schemars/clap/tokio/derive anchors + the `storage` domain + native
-# `path`/`hash`) and drops ~300 crates of transitive bloat. See STEP 0/2 of
-# the thin-plugin migration: smb invokes only `#[plugin_struct]` + the storage
-# trait, never `#[orca_tool]`/`endpoint_resource!`, so it never references the
-# gated `contract`/`dispatch`/`db` macro anchors.
+# `default = []`: the always-on light core only. Every consumer opts into the
+# features it uses.
 [features]
-default = ["full"]
+default = []
 full = ["in-process", "tools", "db", "containers", "notify", "graphql", "openapi", "http", "descriptor", "jemalloc-stats"]
 # Host-side domain-proxy profile: the daemon/loader links this to turn on the
 # subcrate host-side JSON proxies (storage/service/deploy-target/contract/
@@ -33,7 +27,7 @@ full = ["in-process", "tools", "db", "containers", "notify", "graphql", "openapi
 # advertises its backends and serves ops over the wire, so none of those
 # host-side proxies compile into it.
 #
-# Folded into `full`/default so every daemon build keeps the proxies; a thin
+# Folded into `full`; the daemon enables it explicitly. A thin
 # plugin builds with it OFF. `contract?` — it's only present when `tools` pulls
 # it, so the propagation is a no-op on a proxyless profile.
 in-process = [

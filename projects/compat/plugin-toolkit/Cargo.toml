@@ -12,7 +12,7 @@ name = "plugin_toolkit"
 path = "src/lib.rs"
 
 [features]
-default = ["full"]
+default = []
 full = ["orca_plugin_toolkit/full"]
 in-process = ["orca_plugin_toolkit/in-process"]
 descriptor = ["orca_plugin_toolkit/descriptor"]
