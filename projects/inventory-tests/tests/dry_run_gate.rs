@@ -290,6 +290,44 @@ fn the_dry_run_flag_selects_the_plan_and_execute_does_not() {
     }
 }
 
+#[test]
+fn every_dry_run_aware_verb_offers_dry_run_on_the_cli() {
+    let root = dispatch::cli::build_root(clap::Command::new("orca"));
+    let aware = dispatch::dry_run_aware_names();
+    for name in ["storage.export.update", "storage.export.delete"] {
+        assert!(aware.contains(&name), "{name} is not dry_run_aware");
+    }
+    let mut checked = 0;
+    for name in aware {
+        let Some(leaf) = find_leaf(&root, name) else {
+            continue;
+        };
+        let m = leaf
+            .clone()
+            .ignore_errors(true)
+            .try_get_matches_from(["verb", "--dry-run"])
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(m.get_flag(contract::plan::DRY_RUN_FIELD), "{name}");
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "no dry-run-aware verbs were reachable on the CLI tree"
+    );
+    let base = ["verb", "--provider", "p", "--path", "/x", "--dry-run"];
+    for (name, extra) in [
+        ("storage.export.update", &["--client", "10.0.0.1"][..]),
+        ("storage.export.delete", &[][..]),
+    ] {
+        let m = find_leaf(&root, name)
+            .unwrap_or_else(|| panic!("{name} missing from the CLI tree"))
+            .clone()
+            .try_get_matches_from(base.iter().chain(extra))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(m.get_flag(contract::plan::DRY_RUN_FIELD), "{name}");
+    }
+}
+
 /// Walk `domain.sub.verb` down the command tree.
 fn find_leaf<'a>(root: &'a clap::Command, tool: &str) -> Option<&'a clap::Command> {
     let mut cur = root;

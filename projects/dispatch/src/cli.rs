@@ -1274,17 +1274,19 @@ macro_rules! register_op {
                 // Added here rather than on `T::Args` because the gate reads
                 // `dryRun` off the raw args, and a gated verb must never
                 // declare the field itself.
+                if <$tool as OrcaToolDef>::EXECUTE_GATED || <$tool as OrcaToolDef>::DRY_RUN_AWARE {
+                    cmd = cmd.arg(
+                        __cp::clap::Arg::new(__cp::contract::plan::DRY_RUN_FIELD)
+                            .long(__cp::dispatch::cli::DRY_RUN_FLAG)
+                            .action(__cp::clap::ArgAction::SetTrue)
+                            .help(
+                                "Report what WOULD change and change nothing. Omitted, the \
+                                 change is applied.",
+                            ),
+                    );
+                }
                 if <$tool as OrcaToolDef>::EXECUTE_GATED {
                     cmd = cmd
-                        .arg(
-                            __cp::clap::Arg::new(__cp::contract::plan::DRY_RUN_FIELD)
-                                .long(__cp::dispatch::cli::DRY_RUN_FLAG)
-                                .action(__cp::clap::ArgAction::SetTrue)
-                                .help(
-                                    "Report what WOULD change and change nothing. Omitted, the \
-                                     change is applied.",
-                                ),
-                        )
                         .arg(
                             __cp::clap::Arg::new(__cp::contract::plan::EXECUTE_FIELD)
                                 .long(__cp::contract::plan::EXECUTE_FIELD)
@@ -1312,8 +1314,10 @@ macro_rules! register_op {
                         .map_err(|e| __cp::anyhow::anyhow!("{e}"))?;
                     // A gated verb returns a plan under `--dry-run` and its
                     // `Output` otherwise; decode only the shape asked for.
-                    if <$tool as OrcaToolDef>::EXECUTE_GATED {
-                        let dry_run = m.get_flag(__cp::contract::plan::DRY_RUN_FIELD);
+                    let dry_run = (<$tool as OrcaToolDef>::EXECUTE_GATED
+                        || <$tool as OrcaToolDef>::DRY_RUN_AWARE)
+                        && m.get_flag(__cp::contract::plan::DRY_RUN_FIELD);
+                    if <$tool as OrcaToolDef>::EXECUTE_GATED || dry_run {
                         let value = __cp::dispatch::cli::exec_gated::<$tool>(
                             args,
                             dry_run,
@@ -1321,7 +1325,7 @@ macro_rules! register_op {
                             &ctx,
                         )
                         .await?;
-                        if dry_run {
+                        if dry_run && <$tool as OrcaToolDef>::EXECUTE_GATED {
                             // The plan IS the answer here — print it as-is.
                             println!(
                                 "{}",
