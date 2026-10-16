@@ -651,7 +651,7 @@ async fn run(
             unit::dispatch(VerbArgs::List(ListArgs { query })).await?
         }
         Verb::Detail => {
-            let id = target_id(&spec, args).await?;
+            let id = target_id(&spec, args).await?.id;
             let query: QueryArgs = args
                 .get("query")
                 .cloned()
@@ -662,14 +662,15 @@ async fn run(
             unit::dispatch(VerbArgs::Detail(DetailArgs { id, query })).await?
         }
         Verb::Delete => {
-            let id = target_id(&spec, args).await?;
+            let target = target_id(&spec, args).await?;
             if crate::erased::dry_run_requested(args)? {
-                return delete_plan(&spec.kind, id).await;
+                return delete_plan(&spec.kind, target).await;
             }
+            let id = target.id;
             unit::dispatch(VerbArgs::Delete(DeleteArgs { id, caller })).await?
         }
         Verb::Update => {
-            let id = target_id(&spec, args).await?;
+            let id = target_id(&spec, args).await?.id;
             let payload = args.get("payload").map(|v| v.to_string());
             let action = spec
                 .action
@@ -684,7 +685,7 @@ async fn run(
             .await?
         }
         Verb::Upsert => {
-            let id = target_id(&spec, args).await?;
+            let id = target_id(&spec, args).await?.id;
             let payload = args.get("payload").map(|v| v.to_string());
             let action = spec
                 .action
@@ -742,46 +743,96 @@ async fn run(
     value.map_err(|e| anyhow::anyhow!("encode outcome: {e}"))
 }
 
-async fn target_id(spec: &OpSpec, args: &Value) -> Result<UnitId> {
+struct Target {
+    id: UnitId,
+    listed: bool,
+}
+
+async fn target_id(spec: &OpSpec, args: &Value) -> Result<Target> {
     match args.get("id").and_then(Value::as_str).map(str::trim) {
-        Some(sel) if !sel.is_empty() => resolve_unit(&spec.kind, sel).await,
-        _ => parse_id(&spec.name, args),
+        Some(sel) if !sel.is_empty() => Ok(Target {
+            id: resolve_unit(&spec.kind, sel, spec.verb != Verb::Detail).await?,
+            listed: true,
+        }),
+        _ => Ok(Target {
+            id: parse_id(&spec.name, args)?,
+            listed: false,
+        }),
     }
+}
+
+fn resolve_timeout() -> std::time::Duration {
+    static WAIT: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *WAIT.get_or_init(|| crate::registry::secs_from_env("ORCA_UNIT_RESOLVE_TIMEOUT_SECS", 15))
+}
+
+#[cfg(feature = "in-process")]
+async fn bounded<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    let wait = resolve_timeout();
+    tokio::time::timeout(wait, fut)
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out after {wait:?}"))?
+}
+
+#[cfg(not(feature = "in-process"))]
+async fn bounded<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    let _ = resolve_timeout;
+    fut.await
 }
 
 async fn listed(provider: &dyn unit::UnitProvider, kind: &str) -> Result<Vec<UnitId>> {
-    let query = QueryArgs {
-        kind: Some(kind.to_string()),
-        ..Default::default()
-    };
-    match provider.invoke(VerbArgs::List(ListArgs { query })).await? {
-        unit::VerbOutcome::Items(items) => Ok(items
-            .items
-            .into_iter()
-            .map(|i| i.id)
-            .filter(|id| id.kind == kind)
-            .collect()),
-        other => anyhow::bail!("{} returned a non-list outcome: {other:?}", provider.name()),
+    let mut ids: Vec<UnitId> = Vec::new();
+    let mut offset: u32 = 0;
+    loop {
+        let query = QueryArgs {
+            kind: Some(kind.to_string()),
+            offset: (offset > 0).then_some(offset),
+            ..Default::default()
+        };
+        let page = match provider.invoke(VerbArgs::List(ListArgs { query })).await? {
+            unit::VerbOutcome::Items(items) => items,
+            _ => anyhow::bail!("{} returned a non-list outcome", provider.name()),
+        };
+        let n = page.items.len();
+        for id in page.items.into_iter().map(|i| i.id) {
+            if id.kind == kind && id.manager_base() == provider.name() && !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        offset = offset.saturating_add(u32::try_from(n).unwrap_or(u32::MAX));
+        match page.total {
+            Some(total) if n > 0 && u64::from(offset) < total => {}
+            _ => return Ok(ids),
+        }
     }
 }
 
-pub async fn resolve_unit(kind: &str, sel: &str) -> Result<UnitId> {
+pub async fn resolve_unit(kind: &str, sel: &str, strict: bool) -> Result<UnitId> {
     let providers = unit::providers_for_kind(kind);
+    let answers = futures::future::join_all(
+        providers
+            .iter()
+            .map(|p| async move { (p.name(), bounded(listed(p.as_ref(), kind)).await) }),
+    )
+    .await;
     let mut found: Vec<UnitId> = Vec::new();
-    let mut failed: Vec<String> = Vec::new();
-    for p in &providers {
-        match listed(p.as_ref(), kind).await {
-            Ok(ids) => {
-                for id in ids {
-                    if (id.id == sel || id.name == sel) && !found.contains(&id) {
-                        found.push(id);
-                    }
-                }
+    let mut failed: Vec<&str> = Vec::new();
+    for (name, answer) in answers {
+        match answer {
+            Ok(ids) => found.extend(ids.into_iter().filter(|id| id.id == sel || id.name == sel)),
+            Err(e) => {
+                tracing::warn!(provider = %name, error = %format!("{e:#}"), "unit resolve: list failed");
+                failed.push(name);
             }
-            Err(e) => failed.push(format!("{} ({e:#})", p.name())),
         }
     }
     let checked: Vec<&str> = providers.iter().map(|p| p.name()).collect();
+    if strict && !failed.is_empty() {
+        return Err(contract::OrcaError::unavailable(format!(
+            "cannot resolve {kind} '{sel}': managers unreachable: {failed:?}; pass the full id"
+        ))
+        .into());
+    }
     match found.len() {
         1 => Ok(found.remove(0)),
         0 if failed.is_empty() => Err(contract::OrcaError::not_found(format!(
@@ -806,7 +857,8 @@ pub async fn resolve_unit(kind: &str, sel: &str) -> Result<UnitId> {
     }
 }
 
-async fn delete_plan(kind: &str, id: UnitId) -> Result<Value> {
+async fn delete_plan(kind: &str, target: Target) -> Result<Value> {
+    let id = target.id;
     let owner = unit::owner_of(&id).ok_or_else(|| {
         anyhow::anyhow!(
             "no provider owns unit '{}' (manager '{}')",
@@ -814,12 +866,18 @@ async fn delete_plan(kind: &str, id: UnitId) -> Result<Value> {
             id.manager
         )
     })?;
-    if !listed(owner.as_ref(), kind).await?.contains(&id) {
-        return Err(contract::OrcaError::not_found(format!(
-            "no {kind} '{}' on manager '{}'",
-            id.id, id.manager
-        ))
-        .into());
+    if !target.listed {
+        let ids = bounded(listed(owner.as_ref(), kind)).await.map_err(|e| {
+            tracing::warn!(provider = %owner.name(), error = %format!("{e:#}"), "unit delete dry run: list failed");
+            contract::OrcaError::unavailable(format!("manager '{}' unreachable", id.manager))
+        })?;
+        if !ids.contains(&id) {
+            return Err(contract::OrcaError::not_found(format!(
+                "no {kind} '{}' on manager '{}'",
+                id.id, id.manager
+            ))
+            .into());
+        }
     }
     serde_json::to_value(unit::ActionOutcome {
         changed: false,
@@ -1440,6 +1498,8 @@ mod tests {
         kind: String,
         units: Vec<UnitId>,
         deleted: Arc<std::sync::Mutex<Vec<String>>>,
+        fail: bool,
+        page: Option<usize>,
     }
 
     impl UnitProvider for OwnerProvider {
@@ -1452,6 +1512,7 @@ mod tests {
                 backup_spec: None,
                 verbs: vec![
                     VerbDecl::list(),
+                    VerbDecl::detail(),
                     VerbDecl::update(vec![ActionDecl::new("start")]),
                     VerbDecl::delete(),
                 ],
@@ -1463,15 +1524,25 @@ mod tests {
         fn invoke(&self, args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>> {
             let (units, deleted, name) =
                 (self.units.clone(), self.deleted.clone(), self.name.clone());
+            let (fail, page) = (self.fail, self.page);
             Box::pin(async move {
                 Ok(match args {
-                    VerbArgs::List(_) => VerbOutcome::Items(ItemsOutcome {
-                        items: units
-                            .into_iter()
-                            .map(|id| ItemOutcome::new(id, "{}".into()))
-                            .collect(),
-                        total: None,
-                    }),
+                    VerbArgs::List(_) if fail => anyhow::bail!("secret backend detail"),
+                    VerbArgs::List(l) => {
+                        let total = units.len();
+                        let from = l.query.offset.unwrap_or(0) as usize;
+                        let take = page.unwrap_or(total);
+                        VerbOutcome::Items(ItemsOutcome {
+                            items: units
+                                .into_iter()
+                                .skip(from)
+                                .take(take)
+                                .map(|id| ItemOutcome::new(id, "{}".into()))
+                                .collect(),
+                            total: page.map(|_| total as u64),
+                        })
+                    }
+                    VerbArgs::Detail(d) => VerbOutcome::Item(ItemOutcome::new(d.id, "{}".into())),
                     VerbArgs::Update(u) => VerbOutcome::Action(ActionOutcome {
                         changed: true,
                         message: format!("{name}:{}:{}", u.action, u.id.manager),
@@ -1491,24 +1562,128 @@ mod tests {
 
     type Deleted = Arc<std::sync::Mutex<Vec<String>>>;
 
-    fn owner(base: &str, scope: &str, kind: &str, units: &[(&str, &str)]) -> Deleted {
-        let manager = UnitId::scoped_manager(base, scope);
+    fn units_of(manager: &str, kind: &str, units: &[(&str, &str)]) -> Vec<UnitId> {
+        units
+            .iter()
+            .map(|(id, name)| UnitId {
+                manager: manager.into(),
+                kind: kind.into(),
+                id: (*id).into(),
+                name: (*name).into(),
+            })
+            .collect()
+    }
+
+    fn owner_with(
+        base: &str,
+        kind: &str,
+        units: Vec<UnitId>,
+        fail: bool,
+        page: Option<usize>,
+    ) -> Deleted {
         let deleted: Deleted = Arc::default();
         register_provider(Arc::new(OwnerProvider {
             name: base.into(),
             kind: kind.into(),
-            units: units
-                .iter()
-                .map(|(id, name)| UnitId {
-                    manager: manager.clone(),
-                    kind: kind.into(),
-                    id: (*id).into(),
-                    name: (*name).into(),
-                })
-                .collect(),
+            units,
             deleted: deleted.clone(),
+            fail,
+            page,
         }));
         deleted
+    }
+
+    fn owner(base: &str, scope: &str, kind: &str, units: &[(&str, &str)]) -> Deleted {
+        let manager = UnitId::scoped_manager(base, scope);
+        owner_with(base, kind, units_of(&manager, kind, units), false, None)
+    }
+
+    #[tokio::test]
+    async fn a_provider_claiming_a_foreign_managers_unit_is_ignored() {
+        let kind = "own_foreign";
+        owner("unraid-f", "tower", kind, &[("abc", "plex")]);
+        let claimed = units_of("unraid-f@tower", kind, &[("abc", "plex"), ("zzz", "ghost")]);
+        owner_with("docker-f", kind, claimed, false, None);
+        let tool = format!("{kind}.start");
+        let out = unit_dispatch(&tool, &json!({ "id": "plex" }), None)
+            .await
+            .expect("is a unit op")
+            .expect("one owner");
+        assert_eq!(out["message"], "unraid-f:start:unraid-f@tower");
+        let err = unit_dispatch(&tool, &json!({ "id": "ghost" }), None)
+            .await
+            .expect("is a unit op")
+            .expect_err("only the foreign claimant lists it");
+        assert!(err.to_string().contains("no own_foreign 'ghost'"), "{err}");
+        assert!(unit::deregister_provider("unraid-f"));
+        assert!(unit::deregister_provider("docker-f"));
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_manager_refuses_mutations_but_not_detail() {
+        let kind = "own_down";
+        owner("unraid-d2", "tower", kind, &[("abc", "plex")]);
+        owner_with("docker-d2", kind, vec![], true, None);
+        let cases = [
+            ("start", json!({ "id": "plex" })),
+            ("delete", json!({ "id": "plex" })),
+            ("delete", json!({ "id": "plex", "dryRun": true })),
+        ];
+        for (op, args) in cases {
+            let err = unit_dispatch(&format!("{kind}.{op}"), &args, None)
+                .await
+                .expect("is a unit op")
+                .expect_err("refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unreachable") && msg.contains("docker-d2"),
+                "{op}: {msg}"
+            );
+            assert!(!msg.contains("secret backend detail"), "{msg}");
+        }
+        let out = unit_dispatch(&format!("{kind}.detail"), &json!({ "id": "plex" }), None)
+            .await
+            .expect("is a unit op")
+            .expect("detail is lenient");
+        assert_eq!(out["id"]["manager"], "unraid-d2@tower");
+        assert!(unit::deregister_provider("unraid-d2"));
+        assert!(unit::deregister_provider("docker-d2"));
+    }
+
+    #[tokio::test]
+    async fn resolution_follows_pages_until_total() {
+        let kind = "own_page";
+        let units = units_of(
+            "unraid-p@tower",
+            kind,
+            &[("a", "one"), ("b", "two"), ("c", "three")],
+        );
+        owner_with("unraid-p", kind, units, false, Some(1));
+        let out = unit_dispatch(&format!("{kind}.start"), &json!({ "id": "three" }), None)
+            .await
+            .expect("is a unit op")
+            .expect("found on the last page");
+        assert_eq!(out["message"], "unraid-p:start:unraid-p@tower");
+        assert!(unit::deregister_provider("unraid-p"));
+    }
+
+    #[tokio::test]
+    async fn the_gate_checks_the_verified_caller_over_the_ambient_operator() {
+        let kind = "own_gate";
+        owner("unraid-g", "tower", kind, &[("abc", "plex")]);
+        let who = |n: &str, role: &str| contract::CallerIdentity {
+            user_id: format!("u_{n}"),
+            username: n.into(),
+            role: role.into(),
+            can_mutate: false,
+        };
+        let mut ctx = test_ctx().with_auth(who("host_admin", "admin"));
+        ctx.set_verified_caller(Some(who("mallory", "member")));
+        let err = crate::dispatch(&format!("{kind}.start"), json!({ "id": "plex" }), &ctx)
+            .await
+            .expect_err("member refused");
+        assert!(err.to_string().contains("requires role 'admin'"), "{err}");
+        assert!(unit::deregister_provider("unraid-g"));
     }
 
     #[tokio::test]

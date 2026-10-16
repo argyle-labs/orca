@@ -163,7 +163,7 @@ async fn dynamic_dispatch(
     DYNAMIC_INVOKER.get().and_then(|f| f(name, args, caller))
 }
 
-fn secs_from_env(var: &str, default: u64) -> Duration {
+pub(crate) fn secs_from_env(var: &str, default: u64) -> Duration {
     let secs = std::env::var(var)
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -600,7 +600,8 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
 /// reach a plugin/unit/diagnostics/UPS body. A name with no local role is
 /// left to the peer forward, whose recipient authorizes it.
 fn authorize_fallback(name: &str, ctx: &ToolCtx) -> Result<()> {
-    let (Some(caller), Some(required)) = (ctx.caller(), crate::tool_roles::known_role(name)) else {
+    let caller = ctx.verified_caller().cloned().or_else(|| ctx.caller());
+    let (Some(caller), Some(required)) = (caller, crate::tool_roles::known_role(name)) else {
         return Ok(());
     };
     if crate::tool_roles::authorize(
