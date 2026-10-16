@@ -428,21 +428,18 @@ mod tests {
     fn plugin_table_entry_points_are_bound_to_a_principal() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let allowed = [
-            (
-                "plugin-loader/src/capability.rs",
-                "plugin_tables::exec_db_op(",
-            ),
-            (
-                "plugin-toolkit/src/runtime.rs",
-                "plugin_tables::exec_db_op_pooled(",
-            ),
-            ("system/src/plugin_manager.rs", "plugin_tables::apply_decl("),
+            ("plugin-loader/src/capability.rs", "exec_db_op"),
+            ("plugin-toolkit/src/runtime.rs", "exec_db_op_pooled"),
+            ("system/src/plugin_manager.rs", "apply_decl"),
         ];
-        let needles = [
-            "plugin_tables::exec_db_op(",
-            "plugin_tables::exec_db_op_pooled(",
-            "plugin_tables::apply_decl(",
-        ];
+        let needles = ["exec_db_op", "exec_db_op_pooled", "apply_decl"];
+        let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let mentions = |body: &str, n: &str| {
+            body.match_indices(n).any(|(i, _)| {
+                !body[..i].chars().next_back().is_some_and(is_ident)
+                    && !body[i + n.len()..].chars().next().is_some_and(is_ident)
+            })
+        };
         let mut stack = vec![root.clone()];
         let mut bad = Vec::new();
         while let Some(dir) = stack.pop() {
@@ -467,9 +464,16 @@ mod tests {
                     continue;
                 }
                 let src = std::fs::read_to_string(&path).unwrap();
-                let body = src.split("#[cfg(test)]").next().unwrap_or("");
+                let body = src
+                    .rfind("#[cfg(test)]\nmod tests")
+                    .map_or(src.as_str(), |i| &src[..i]);
+                let body: String = body
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with("//"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 for n in needles {
-                    if body.contains(n) && !allowed.contains(&(rel.as_str(), n)) {
+                    if mentions(&body, n) && !allowed.contains(&(rel.as_str(), n)) {
                         bad.push(format!("{rel}: {n}"));
                     }
                 }
