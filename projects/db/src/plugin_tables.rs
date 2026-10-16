@@ -50,7 +50,7 @@ pub struct MigrationReport {
 /// Strict identifier allow-list. Anything a plugin contributes that reaches SQL
 /// as an identifier (namespace, table, column, index) must match — no spaces,
 /// no quotes, no dots, no leading digit. This is the injection boundary.
-fn validate_ident(kind: &str, s: &str) -> Result<()> {
+pub fn validate_ident(kind: &str, s: &str) -> Result<()> {
     let ok = !s.is_empty()
         && s.len() <= 64
         && s.bytes()
@@ -249,6 +249,7 @@ mod tests {
                     not_null: true,
                     primary_key: true,
                     default: None,
+                    secret: false,
                 },
                 ColumnSpec {
                     name: "url".into(),
@@ -256,6 +257,7 @@ mod tests {
                     not_null: true,
                     primary_key: false,
                     default: None,
+                    secret: false,
                 },
             ],
             indexes: vec![IndexSpec {
@@ -302,6 +304,7 @@ mod tests {
             not_null: false,
             primary_key: false,
             default: None,
+            secret: false,
         });
         v2.columns.push(ColumnSpec {
             name: "enabled".into(),
@@ -309,6 +312,7 @@ mod tests {
             not_null: true,
             primary_key: false,
             default: Some("1".into()),
+            secret: false,
         });
         let mig = apply(&c, "mcp", &v2).unwrap();
         assert_eq!(mig.added_columns, vec!["label", "enabled"]);
@@ -336,6 +340,7 @@ mod tests {
             not_null: true,
             primary_key: false,
             default: None,
+            secret: false,
         });
         assert!(apply(&c, "mcp", &bad).is_err());
     }
