@@ -207,13 +207,124 @@ pub fn list_provider_instances(
 /// store (mirrors `plugin_toolkit::secrets::BACKEND_INLINE`).
 const BACKEND_INLINE: &str = "inline";
 
-/// Execute one plugin secrets op on `conn`. Replicates the resolution
-/// `plugin_toolkit::secrets` performed locally (inline decrypt; external
-/// backends are not resolvable on this host yet).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Principal {
+    Core,
+    Plugin(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretAccessDenied {
+    pub plugin: String,
+    pub name: String,
+    pub op: &'static str,
+}
+
+impl std::fmt::Display for SecretAccessDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "plugin '{}' may not secret.op/{} on '{}': outside its namespace and not granted",
+            self.plugin, self.op, self.name
+        )
+    }
+}
+
+impl std::error::Error for SecretAccessDenied {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretGrant {
+    pub holder: String,
+    pub secret_name: String,
+    pub granted_by: String,
+    pub created_at: String,
+}
+
+fn in_namespace(name: &str, plugin: &str) -> bool {
+    name == plugin
+        || name
+            .strip_prefix(plugin)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+fn has_grant(conn: &Connection, holder: &str, name: &str) -> Result<bool> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM secret_grants WHERE holder = ?1 AND secret_name = ?2",
+            rusqlite::params![holder, name],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn authorize(conn: &Connection, principal: &Principal, op: &plugin_abi::SecretOp) -> Result<()> {
+    use plugin_abi::SecretOp;
+    let Principal::Plugin(plugin) = principal else {
+        return Ok(());
+    };
+    let name = op.name();
+    if in_namespace(name, plugin) {
+        return Ok(());
+    }
+    let readonly = matches!(op, SecretOp::Get { .. } | SecretOp::Exists { .. });
+    if readonly && has_grant(conn, plugin, name)? {
+        return Ok(());
+    }
+    tracing::warn!(plugin = %plugin, secret = %name, op = op.kind(), "secret access denied");
+    Err(SecretAccessDenied {
+        plugin: plugin.clone(),
+        name: name.to_string(),
+        op: op.kind(),
+    }
+    .into())
+}
+
+pub fn grant(conn: &Connection, holder: &str, secret_name: &str, granted_by: &str) -> Result<bool> {
+    let n = conn.execute(
+        "INSERT INTO secret_grants (holder, secret_name, granted_by) VALUES (?1, ?2, ?3)
+         ON CONFLICT(holder, secret_name) DO NOTHING",
+        rusqlite::params![holder, secret_name, granted_by],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn revoke(conn: &Connection, holder: &str, secret_name: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM secret_grants WHERE holder = ?1 AND secret_name = ?2",
+        rusqlite::params![holder, secret_name],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn list_grants(conn: &Connection) -> Result<Vec<SecretGrant>> {
+    let mut stmt = conn.prepare(
+        "SELECT holder, secret_name, granted_by, created_at FROM secret_grants
+         ORDER BY holder, secret_name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SecretGrant {
+            holder: row.get(0)?,
+            secret_name: row.get(1)?,
+            granted_by: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 pub fn exec_secret_op(
     conn: &Connection,
+    principal: &Principal,
     op: &plugin_abi::SecretOp,
 ) -> Result<plugin_abi::SecretReply> {
+    authorize(conn, principal, op)?;
+    run_secret_op(conn, op)
+}
+
+fn run_secret_op(conn: &Connection, op: &plugin_abi::SecretOp) -> Result<plugin_abi::SecretReply> {
     use plugin_abi::{SecretOp, SecretReply};
     match op {
         SecretOp::Get { name } => {
@@ -253,10 +364,11 @@ pub fn exec_secret_op(
     }
 }
 
-/// Run a plugin secrets op on core's single shared pooled connection — the entry
-/// the loader binds into each plugin's `set_secret_op` channel.
-pub fn exec_secret_op_pooled(op: &plugin_abi::SecretOp) -> Result<plugin_abi::SecretReply> {
-    db::pool::with_pooled_or_open(|conn| exec_secret_op(conn, op))
+pub fn exec_secret_op_pooled(
+    principal: &Principal,
+    op: &plugin_abi::SecretOp,
+) -> Result<plugin_abi::SecretReply> {
+    db::pool::with_pooled_or_open(|conn| exec_secret_op(conn, principal, op))
 }
 
 #[cfg(test)]
@@ -360,5 +472,91 @@ mod tests {
     fn delete_missing_returns_false() {
         let conn = test_conn();
         assert!(!delete(&conn, "nope").unwrap());
+    }
+
+    fn plugin(name: &str) -> Principal {
+        Principal::Plugin(name.to_string())
+    }
+
+    fn seed(conn: &Connection, name: &str, value: &str) {
+        upsert(conn, name, "inline", "", None).unwrap();
+        write_inline_value(conn, name, value).unwrap();
+    }
+
+    fn get_op(name: &str) -> plugin_abi::SecretOp {
+        plugin_abi::SecretOp::Get {
+            name: name.to_string(),
+        }
+    }
+
+    fn denied(r: Result<plugin_abi::SecretReply>) -> bool {
+        r.unwrap_err()
+            .downcast_ref::<SecretAccessDenied>()
+            .is_some()
+    }
+
+    #[test]
+    fn plugin_reads_own_namespace() {
+        let conn = test_conn();
+        seed(&conn, "s3.main.key", "v");
+        let r = exec_secret_op(&conn, &plugin("s3"), &get_op("s3.main.key")).unwrap();
+        assert_eq!(r.value.as_deref(), Some("v"));
+    }
+
+    #[test]
+    fn plugin_reads_granted_ref() {
+        let conn = test_conn();
+        seed(&conn, "gitea.token", "t");
+        assert!(grant(&conn, "zot", "gitea.token", "operator").unwrap());
+        let r = exec_secret_op(&conn, &plugin("zot"), &get_op("gitea.token")).unwrap();
+        assert_eq!(r.value.as_deref(), Some("t"));
+        let del = plugin_abi::SecretOp::Delete {
+            name: "gitea.token".to_string(),
+        };
+        assert!(denied(exec_secret_op(&conn, &plugin("zot"), &del)));
+    }
+
+    #[test]
+    fn plugin_denied_other_plugins_secret() {
+        let conn = test_conn();
+        seed(&conn, "gitea.token", "t");
+        assert!(denied(exec_secret_op(
+            &conn,
+            &plugin("zot"),
+            &get_op("gitea.token")
+        )));
+    }
+
+    #[test]
+    fn lookalike_prefix_denied() {
+        let conn = test_conn();
+        seed(&conn, "s3x.main.key", "v");
+        assert!(denied(exec_secret_op(
+            &conn,
+            &plugin("s3"),
+            &get_op("s3x.main.key")
+        )));
+    }
+
+    #[test]
+    fn revoke_removes_access() {
+        let conn = test_conn();
+        seed(&conn, "gitea.token", "t");
+        grant(&conn, "zot", "gitea.token", "operator").unwrap();
+        assert!(revoke(&conn, "zot", "gitea.token").unwrap());
+        assert!(list_grants(&conn).unwrap().is_empty());
+        assert!(denied(exec_secret_op(
+            &conn,
+            &plugin("zot"),
+            &get_op("gitea.token")
+        )));
+    }
+
+    #[test]
+    fn core_principal_unrestricted() {
+        let conn = test_conn();
+        seed(&conn, "gitea.token", "t");
+        let r = exec_secret_op(&conn, &Principal::Core, &get_op("gitea.token")).unwrap();
+        assert_eq!(r.value.as_deref(), Some("t"));
     }
 }

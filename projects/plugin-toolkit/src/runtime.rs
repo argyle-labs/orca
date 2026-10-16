@@ -71,7 +71,7 @@ pub fn secret_op(op: &SecretOp) -> Result<SecretReply> {
     // See `db_op` for the full rationale.
     #[cfg(feature = "db-incore")]
     {
-        secrets::exec_secret_op_pooled(op)
+        secrets::exec_secret_op_pooled(&secrets::Principal::Core, op)
     }
     #[cfg(not(feature = "db-incore"))]
     Err(anyhow!(

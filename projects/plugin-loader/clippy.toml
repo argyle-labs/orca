@@ -1,0 +1,16 @@
+disallowed-types = [
+    { path = "serde_json::Value", reason = "no opaque JSON anywhere in the workspace — model the payload as a typed struct deriving serde + schemars. If the data is genuinely free-form upstream, add a #[allow(clippy::disallowed_types)] with a justifying comment." },
+    { path = "orca_contract::JsonAny", reason = "JsonAny is the same escape hatch as serde_json::Value — replace with a typed struct. Only legitimate for genuinely free-form upstream payloads (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent passthrough)." },
+]
+disallowed-methods = [
+    { path = "secrets::get", reason = "unscoped: plugin-facing code must go through secrets::exec_secret_op_pooled with a Principal" },
+    { path = "secrets::list", reason = "unscoped: plugin-facing code must go through secrets::exec_secret_op_pooled with a Principal" },
+    { path = "secrets::read_inline_value", reason = "unscoped: plugin-facing code must go through secrets::exec_secret_op_pooled with a Principal" },
+    { path = "secrets::write_inline_value", reason = "unscoped: plugin-facing code must go through secrets::exec_secret_op_pooled with a Principal" },
+    { path = "secrets::upsert", reason = "unscoped: plugin-facing code must go through secrets::exec_secret_op_pooled with a Principal" },
+    { path = "secrets::delete", reason = "unscoped: plugin-facing code must go through secrets::exec_secret_op_pooled with a Principal" },
+    { path = "secrets::list_provider_instances", reason = "unscoped: plugin-facing code must go through secrets::exec_secret_op_pooled with a Principal" },
+    { path = "secrets::grant", reason = "grants are core/operator only" },
+    { path = "secrets::revoke", reason = "grants are core/operator only" },
+    { path = "db::settings::secret_get", reason = "unscoped: plugin-facing code must go through secrets::exec_secret_op_pooled with a Principal" },
+]
