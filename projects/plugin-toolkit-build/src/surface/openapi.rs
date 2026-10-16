@@ -111,6 +111,7 @@ pub fn generate(specs_dir: &Path, out_dir: &Path, flavor: &str) -> Result<()> {
 
     let type_idents = collect_type_idents(&file);
     let methods = collect_methods(&file, &type_idents);
+    check_marker_usage(&markers, &client_operation_keys(&file), flavor)?;
 
     let mut matched: Vec<(&Method, Markers)> = Vec::new();
     let mut unit_returns = 0usize;
@@ -195,6 +196,31 @@ fn operation_markers(specs_dir: &Path) -> Result<MarkerMap> {
     Ok(out)
 }
 
+const SUPPORTED_METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH"];
+
+fn read_markers(obj: &serde_json::Map<String, serde_json::Value>, at: &str) -> Result<Markers> {
+    let flag = |key: &str| -> Result<bool> {
+        match obj.get(key) {
+            None => Ok(false),
+            Some(serde_json::Value::Bool(b)) => Ok(*b),
+            Some(other) => bail!("{at}: `{key}` must be a boolean, got {other}"),
+        }
+    };
+    Ok(Markers {
+        user_callable: flag("x-orca-user-callable")?,
+        admin: flag("x-orca-admin")?,
+        no_tool: flag("x-orca-no-tool")?,
+        data_mutation: flag("x-orca-data-mutation")?,
+    })
+}
+
+fn merge(into: &mut Markers, mk: Markers) {
+    into.user_callable |= mk.user_callable;
+    into.admin |= mk.admin;
+    into.no_tool |= mk.no_tool;
+    into.data_mutation |= mk.data_mutation;
+}
+
 fn markers_from_spec_value(v: &serde_json::Value, out: &mut MarkerMap) -> Result<()> {
     let Some(paths) = v.get("paths").and_then(|p| p.as_object()) else {
         return Ok(());
@@ -203,33 +229,75 @@ fn markers_from_spec_value(v: &serde_json::Value, out: &mut MarkerMap) -> Result
         let Some(item) = item.as_object() else {
             continue;
         };
+        let path_mk = read_markers(item, path)?;
+        let mut ops = 0usize;
         for (method, op) in item {
             let m = method.to_ascii_uppercase();
-            if !matches!(m.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "PATCH") {
+            let Some(op) = op.as_object() else {
+                continue;
+            };
+            if !SUPPORTED_METHODS.contains(&m.as_str()) {
+                if matches!(m.as_str(), "HEAD" | "OPTIONS" | "TRACE")
+                    && op.keys().any(|k| k.starts_with("x-orca-"))
+                {
+                    bail!("{m} {path}: x-orca-* marker on an unsupported method");
+                }
                 continue;
             }
-            let flag = |key: &str| -> Result<bool> {
-                match op.get(key) {
-                    None => Ok(false),
-                    Some(serde_json::Value::Bool(b)) => Ok(*b),
-                    Some(other) => bail!("{m} {path}: `{key}` must be a boolean, got {other}"),
-                }
-            };
-            let mk = Markers {
-                user_callable: flag("x-orca-user-callable")?,
-                admin: flag("x-orca-admin")?,
-                no_tool: flag("x-orca-no-tool")?,
-                data_mutation: flag("x-orca-data-mutation")?,
-            };
+            ops += 1;
+            let mut mk = read_markers(op, &format!("{m} {path}"))?;
+            merge(&mut mk, path_mk);
             if mk == Markers::default() {
                 continue;
             }
-            let e = out.entry((m.clone(), path.clone())).or_default();
-            e.user_callable |= mk.user_callable;
-            e.admin |= mk.admin;
-            e.no_tool |= mk.no_tool;
-            e.data_mutation |= mk.data_mutation;
+            merge(out.entry((m, path.clone())).or_default(), mk);
         }
+        if ops == 0 && path_mk != Markers::default() {
+            bail!("{path}: path-level x-orca-* marker but no supported operation");
+        }
+    }
+    Ok(())
+}
+
+fn client_operation_keys(file: &syn::File) -> BTreeSet<(String, String)> {
+    let re = Regex::new(r"Sends a `(GET|POST|PUT|DELETE|PATCH)` request to `([^`]+)`").unwrap();
+    let mut out = BTreeSet::new();
+    for item in &file.items {
+        let syn::Item::Impl(imp) = item else { continue };
+        for ii in &imp.items {
+            let syn::ImplItem::Fn(f) = ii else { continue };
+            if let Some(c) = re.captures(&collect_doc(&f.attrs)) {
+                out.insert((c[1].to_string(), c[2].to_string()));
+            }
+        }
+    }
+    out
+}
+
+fn check_marker_usage(
+    markers: &MarkerMap,
+    generated: &BTreeSet<(String, String)>,
+    flavor: &str,
+) -> Result<()> {
+    let mut unmatched = Vec::new();
+    for ((m, p), mk) in markers {
+        if generated.contains(&(m.clone(), p.clone())) {
+            continue;
+        }
+        if mk.admin || mk.no_tool {
+            unmatched.push(format!("{m} {p}"));
+        } else {
+            println!(
+                "cargo:warning=surface[{flavor}]: opt-in marker on `{m} {p}` matches no generated method"
+            );
+        }
+    }
+    if !unmatched.is_empty() {
+        unmatched.sort();
+        bail!(
+            "surface[{flavor}]: x-orca-admin/x-orca-no-tool marker(s) match no generated method: {}",
+            unmatched.join(", ")
+        );
     }
     Ok(())
 }
@@ -829,6 +897,78 @@ mod tests {
             let spec = json!({"paths": {"/x": {"get": {"x-orca-admin": v}}}});
             assert!(markers_from_spec_value(&spec, &mut out).is_err());
         }
+    }
+
+    #[test]
+    fn path_level_markers_apply_to_every_operation() {
+        let spec = json!({"paths": {"/x": {
+            "x-orca-admin": true,
+            "get": {},
+            "post": {"x-orca-user-callable": true},
+            "parameters": []
+        }}});
+        let mut out = MarkerMap::new();
+        markers_from_spec_value(&spec, &mut out).unwrap();
+        let get = out[&("GET".to_string(), "/x".to_string())];
+        let post = out[&("POST".to_string(), "/x".to_string())];
+        assert!(get.admin);
+        assert!(post.admin && post.user_callable);
+        assert_eq!(tool_policy(false, get), ("admin", false));
+        assert_eq!(tool_policy(true, post), ("admin", false));
+    }
+
+    #[test]
+    fn path_level_marker_without_operations_fails() {
+        let mut out = MarkerMap::new();
+        let spec = json!({"paths": {"/x": {"x-orca-no-tool": true, "head": {}}}});
+        assert!(markers_from_spec_value(&spec, &mut out).is_err());
+    }
+
+    #[test]
+    fn marker_on_unsupported_method_fails() {
+        for m in ["head", "options", "trace"] {
+            let mut out = MarkerMap::new();
+            let spec = json!({"paths": {"/x": {"get": {}, m: {"x-orca-admin": true}}}});
+            assert!(markers_from_spec_value(&spec, &mut out).is_err(), "{m}");
+        }
+        let mut out = MarkerMap::new();
+        let spec = json!({"paths": {"/x": {"get": {}, "head": {"summary": "s"}}}});
+        assert!(markers_from_spec_value(&spec, &mut out).is_ok());
+    }
+
+    #[test]
+    fn unmatched_admin_or_no_tool_marker_fails() {
+        let generated = client_operation_keys(&gen_file());
+        for mk in [
+            Markers {
+                admin: true,
+                ..Markers::default()
+            },
+            Markers {
+                no_tool: true,
+                ..Markers::default()
+            },
+        ] {
+            let mut markers = MarkerMap::new();
+            markers.insert(("GET".to_string(), "/vm/{id}".to_string()), mk);
+            assert!(check_marker_usage(&markers, &generated, "prox").is_err());
+        }
+    }
+
+    #[test]
+    fn matched_or_opt_in_only_markers_pass() {
+        let generated = client_operation_keys(&gen_file());
+        assert!(generated.contains(&("DELETE".to_string(), "/vms/{id}".to_string())));
+        let mut markers = MarkerMap::new();
+        markers.insert(
+            ("DELETE".to_string(), "/vms/{id}".to_string()),
+            Markers {
+                no_tool: true,
+                ..Markers::default()
+            },
+        );
+        markers.insert(("POST".to_string(), "/nope".to_string()), uc());
+        assert!(check_marker_usage(&markers, &generated, "prox").is_ok());
     }
 
     #[test]
