@@ -152,7 +152,7 @@ fn column_ddl(c: &ColumnSpec) -> Result<String> {
 /// Materialize / converge one plugin-declared table. Idempotent: re-applying an
 /// unchanged schema is a no-op; applying an evolved schema adds only what is
 /// new. Never drops or retypes — a conflicting retype is refused.
-pub fn apply(conn: &Connection, namespace: &str, schema: &TableSchema) -> Result<MigrationReport> {
+fn apply(conn: &Connection, namespace: &str, schema: &TableSchema) -> Result<MigrationReport> {
     let physical = physical_table_name(namespace, &schema.table)?;
     if schema.columns.is_empty() {
         bail!("table `{}` declares no columns", schema.table);
@@ -239,12 +239,23 @@ pub fn apply(conn: &Connection, namespace: &str, schema: &TableSchema) -> Result
 /// after `module.schemas()`: the plugin declares; orca migrates. Returns one
 /// [`MigrationReport`] per table. A declaration with an empty namespace and no
 /// tables is a clean no-op (the default for plugins that declare nothing).
-pub fn apply_decl(conn: &Connection, decl: &SchemaDecl) -> Result<Vec<MigrationReport>> {
+pub fn apply_decl(
+    conn: &Connection,
+    principal: &str,
+    decl: &SchemaDecl,
+) -> Result<Vec<MigrationReport>> {
     if decl.tables.is_empty() {
         return Ok(Vec::new());
     }
     if decl.namespace.is_empty() {
         bail!("schema declaration lists tables but no namespace");
+    }
+    validate_segment("principal", principal)?;
+    if decl.namespace != principal {
+        bail!(
+            "plugin '{principal}' declared schema namespace '{}' — refusing foreign namespace",
+            decl.namespace
+        );
     }
     let mut reports = Vec::with_capacity(decl.tables.len());
     for table in &decl.tables {
@@ -430,6 +441,100 @@ mod tests {
             docker_count, 0,
             "mcp's insert must not appear in docker's table"
         );
+    }
+
+    fn decl(namespace: &str) -> SchemaDecl {
+        SchemaDecl {
+            namespace: namespace.into(),
+            tables: vec![schema_v1()],
+        }
+    }
+
+    #[test]
+    fn apply_decl_binds_namespace_to_principal() {
+        let c = conn();
+        assert!(apply_decl(&c, "mcp", &decl("mcp")).is_ok());
+        for (principal, ns) in [
+            ("mcp", "docker"),
+            ("mcp", "mcpx"),
+            ("mcp", "mc"),
+            ("mcp", "mcp_"),
+            ("mcp", "MCP"),
+            ("mcp", "mcp__x"),
+            ("", "mcp"),
+            ("mcp__x", "mcp__x"),
+        ] {
+            assert!(
+                apply_decl(&c, principal, &decl(ns)).is_err(),
+                "{principal}/{ns}"
+            );
+        }
+        let n: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'plug%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn plugin_table_entry_points_are_bound_to_a_principal() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let allowed = [
+            ("plugin-loader/src/capability.rs", "exec_db_op"),
+            ("plugin-toolkit/src/runtime.rs", "exec_db_op_pooled"),
+            ("system/src/plugin_manager.rs", "apply_decl"),
+        ];
+        let needles = ["exec_db_op", "exec_db_op_pooled", "apply_decl"];
+        let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let mentions = |body: &str, n: &str| {
+            body.match_indices(n).any(|(i, _)| {
+                !body[..i].chars().next_back().is_some_and(is_ident)
+                    && !body[i + n.len()..].chars().next().is_some_and(is_ident)
+            })
+        };
+        let mut stack = vec![root.clone()];
+        let mut bad = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = e.path();
+                let name = e.file_name();
+                if path.is_dir() {
+                    if name != "target" && name != "node_modules" && name != ".git" {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                if path.extension().is_none_or(|x| x != "rs") {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if rel.contains("/tests/") || rel == "db/src/plugin_tables.rs" {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).unwrap();
+                let body = src
+                    .rfind("#[cfg(test)]\nmod tests")
+                    .map_or(src.as_str(), |i| &src[..i]);
+                let body: String = body
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with("//"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                for n in needles {
+                    if mentions(&body, n) && !allowed.contains(&(rel.as_str(), n)) {
+                        bad.push(format!("{rel}: {n}"));
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "unbound plugin-table entry points: {bad:?}");
     }
 
     #[test]
