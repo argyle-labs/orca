@@ -123,9 +123,9 @@ pub fn validate(op: &LxcExecOp) -> Result<(), String> {
 pub async fn run_privileged_lxc(op: &LxcExecOp) -> LxcExecResult {
     use tokio::io::AsyncWriteExt;
 
-    let exe = match std::env::current_exe() {
+    let exe = match utils::path::privileged_exe() {
         Ok(p) => p,
-        Err(e) => return LxcExecResult::refused(format!("resolve current exe: {e}")),
+        Err(e) => return LxcExecResult::refused(format!("resolve orca binary: {e}")),
     };
     let payload = match serde_json::to_vec(op) {
         Ok(v) => v,
@@ -348,9 +348,9 @@ impl Drop for TempFileGuard {
 pub async fn run_privileged_lxc_push(op: &LxcPushOp) -> LxcPushResult {
     use tokio::io::AsyncWriteExt;
 
-    let exe = match std::env::current_exe() {
+    let exe = match utils::path::privileged_exe() {
         Ok(p) => p,
-        Err(e) => return LxcPushResult::refused(format!("resolve current exe: {e}")),
+        Err(e) => return LxcPushResult::refused(format!("resolve orca binary: {e}")),
     };
     let payload = match serde_json::to_vec(op) {
         Ok(v) => v,

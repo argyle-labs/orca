@@ -57,10 +57,40 @@ fn is_executable(p: &Path) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_file())
 }
 
+pub const PRIVILEGED_BIN: &str = "/usr/local/libexec/orca/orca";
+
+pub fn privileged_exe() -> std::io::Result<std::path::PathBuf> {
+    pick_privileged(Path::new(PRIVILEGED_BIN).is_file(), std::env::current_exe)
+}
+
+fn pick_privileged(
+    installed: bool,
+    current: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
+) -> std::io::Result<std::path::PathBuf> {
+    if installed {
+        Ok(PRIVILEGED_BIN.into())
+    } else {
+        current()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn privileged_exe_prefers_the_installed_root_copy() {
+        let cur = || Ok(std::path::PathBuf::from("/home/svc/bin/orca"));
+        assert_eq!(
+            pick_privileged(true, cur).unwrap(),
+            Path::new(PRIVILEGED_BIN)
+        );
+        assert_eq!(
+            pick_privileged(false, cur).unwrap(),
+            Path::new("/home/svc/bin/orca")
+        );
+    }
 
     // Both `HOME`-mutating tests below touch the same process-global env var.
     // Serialize them behind one lock so the parallel test runner can't race one

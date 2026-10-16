@@ -362,9 +362,9 @@ pub async fn run_cron(op: &CronOp) -> CronOpResult {
 async fn run_privileged_cron(op: &CronOp) -> CronOpResult {
     use tokio::io::AsyncWriteExt;
 
-    let exe = match std::env::current_exe() {
+    let exe = match utils::path::privileged_exe() {
         Ok(p) => p,
-        Err(e) => return CronOpResult::refused(format!("resolve current exe: {e}")),
+        Err(e) => return CronOpResult::refused(format!("resolve orca binary: {e}")),
     };
     let payload = match serde_json::to_vec(op) {
         Ok(v) => v,

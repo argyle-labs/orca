@@ -207,7 +207,9 @@ fn install_autofs_sudoers(user: &str) -> Result<()> {
         anyhow::bail!("must be root to write /etc/sudoers.d");
     }
 
+    refresh_privileged_copy()?;
     let (binary, is_proxmox, cron) = sudoers_inputs()?;
+    check_binary_trust(std::path::Path::new(&binary), owner_mode)?;
     let contents = sudoers_contents(user, &binary, is_proxmox, cron);
     install_sudoers_drop_in(&contents)?;
 
@@ -235,19 +237,104 @@ fn install_autofs_sudoers(user: &str) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn sudoers_inputs() -> Result<(String, bool, bool)> {
-    let exe = std::env::current_exe().context("resolve the orca binary path")?;
+    let is_proxmox = std::path::Path::new("/etc/pve").is_dir();
+    let cron = std::path::Path::new(crate::cron::CRON_USERS_ALLOWLIST).exists();
+    Ok((utils::path::PRIVILEGED_BIN.to_string(), is_proxmox, cron))
+}
+
+#[cfg(target_os = "linux")]
+fn privileged_source() -> Result<Option<Vec<u8>>> {
+    let exe = crate::update::current_binary_path()?;
     let exe = exe
         .canonicalize()
         .with_context(|| format!("canonicalize {}", exe.display()))?;
-    let binary = exe
-        .to_str()
-        .context("orca binary path is not UTF-8")?
-        .to_string();
-    validate_shell_safe("orca binary path", &binary)?;
-    check_binary_trust(&exe, owner_mode)?;
-    let is_proxmox = std::path::Path::new("/etc/pve").is_dir();
-    let cron = std::path::Path::new(crate::cron::CRON_USERS_ALLOWLIST).exists();
-    Ok((binary, is_proxmox, cron))
+    if exe == std::path::Path::new(utils::path::PRIVILEGED_BIN) {
+        return Ok(None);
+    }
+    std::fs::read(&exe)
+        .map(Some)
+        .with_context(|| format!("read {}", exe.display()))
+}
+
+#[cfg(target_os = "linux")]
+fn privileged_copy_stale(unraid: bool) -> Result<bool> {
+    let Some(source) = privileged_source()? else {
+        return Ok(false);
+    };
+    let mut copies = vec![std::fs::read(utils::path::PRIVILEGED_BIN).ok()];
+    if unraid {
+        copies.push(std::fs::read(UNRAID_PRIVILEGED_COPY).ok());
+    }
+    Ok(copies_stale(&source, &copies))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn copies_stale(source: &[u8], copies: &[Option<Vec<u8>>]) -> bool {
+    copies.iter().any(|c| c.as_deref() != Some(source))
+}
+
+#[cfg(target_os = "linux")]
+fn refresh_privileged_copy() -> Result<()> {
+    let Some(source) = privileged_source()? else {
+        return Ok(());
+    };
+    if std::fs::read(utils::path::PRIVILEGED_BIN).ok().as_deref() == Some(source.as_slice()) {
+        return Ok(());
+    }
+    install_privileged_copy(&source)
+}
+
+#[cfg(target_os = "linux")]
+fn install_privileged_copy(bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = std::path::Path::new(utils::path::PRIVILEGED_BIN);
+    let dir = bin
+        .parent()
+        .context("privileged binary path has no parent")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    std::os::unix::fs::chown(dir, Some(0), Some(0))
+        .with_context(|| format!("chown {}", dir.display()))?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("chmod {}", dir.display()))?;
+    write_atomic(bin, bytes, 0o755)?;
+    std::os::unix::fs::chown(bin, Some(0), Some(0))
+        .with_context(|| format!("chown {}", bin.display()))?;
+    println!(
+        "{} privileged copy installed at {}",
+        "✓".green(),
+        bin.display()
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn privileged_copy_after_update(bytes: &[u8]) {
+    let bin = std::path::Path::new(utils::path::PRIVILEGED_BIN);
+    if !bin.exists() {
+        return;
+    }
+    if !is_root() {
+        if std::fs::read(bin).ok().as_deref() != Some(bytes) {
+            println!(
+                "[orca] privileged copy {} stale — run `sudo orca identity privilege repair`",
+                bin.display()
+            );
+        }
+        return;
+    }
+    let refreshed = install_privileged_copy(bytes).and_then(|()| {
+        if crate::update::is_unraid() {
+            persist_privileged_on_unraid(bytes)
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(e) = refreshed {
+        eprintln!(
+            "[orca] privileged copy {} NOT refreshed: {e:#}; run `sudo orca identity privilege repair`",
+            bin.display()
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -313,12 +400,12 @@ fn check_binary_trust(
         if uid != 0 || mode & 0o022 != 0 {
             anyhow::bail!(
                 "refusing a NOPASSWD grant on {}: {} is owned by uid {uid} with mode {:o}, \
-                 so a non-root user could replace it; install a root-owned copy (e.g. \
-                 /usr/local/bin/orca, every parent dir root-owned and not group/world-writable) \
-                 and point the daemon's privileged helper at it",
+                 so a non-root user could replace it; run `sudo orca identity privilege repair` \
+                 to install the root-owned copy at {}",
                 binary.display(),
                 p.display(),
-                mode & 0o7777
+                mode & 0o7777,
+                utils::path::PRIVILEGED_BIN
             );
         }
     }
@@ -343,12 +430,16 @@ pub struct SudoersRepairPlan {
     pub unraid: bool,
     pub flash_copy_current: bool,
     pub go_block_current: bool,
+    pub privileged_copy_current: bool,
     pub executed: bool,
 }
 
 impl SudoersRepairPlan {
     pub fn needs_repair(&self) -> bool {
-        !(self.up_to_date && self.flash_copy_current && self.go_block_current)
+        !(self.up_to_date
+            && self.flash_copy_current
+            && self.go_block_current
+            && self.privileged_copy_current)
     }
 }
 
@@ -398,6 +489,7 @@ fn plan_sudoers(
     unraid: bool,
     flash: Option<&str>,
     go: Option<&str>,
+    privileged_copy_current: bool,
 ) -> SudoersRepairPlan {
     SudoersRepairPlan {
         user: user.to_string(),
@@ -407,6 +499,7 @@ fn plan_sudoers(
         unraid,
         flash_copy_current: !unraid || flash == Some(rendered.as_str()),
         go_block_current: !unraid || go.is_some_and(|g| with_go_block(g).is_none()),
+        privileged_copy_current,
         current,
         rendered,
         executed: false,
@@ -445,6 +538,7 @@ pub(crate) fn sudoers_repair(user: Option<String>, execute: bool) -> Result<Sudo
         unraid,
         flash.as_deref(),
         go.as_deref(),
+        !privileged_copy_stale(unraid)?,
     );
     if !execute || !plan.needs_repair() {
         return Ok(plan);
@@ -452,10 +546,13 @@ pub(crate) fn sudoers_repair(user: Option<String>, execute: bool) -> Result<Sudo
     if !is_root() {
         anyhow::bail!("must be root to write /etc/sudoers.d");
     }
+    refresh_privileged_copy()?;
+    check_binary_trust(std::path::Path::new(&binary), owner_mode)?;
     if !plan.up_to_date {
         install_sudoers_drop_in(&plan.rendered)?;
     }
-    if unraid && !(plan.flash_copy_current && plan.go_block_current) {
+    if unraid && !(plan.flash_copy_current && plan.go_block_current && plan.privileged_copy_current)
+    {
         persist_sudoers_on_unraid(&plan.rendered)?;
     }
     plan.executed = true;
@@ -471,6 +568,7 @@ pub(crate) fn sudoers_repair(_user: Option<String>, _execute: bool) -> Result<Su
 pub(crate) enum SudoersCheck {
     Drift { user: String, diff: Vec<String> },
     UnsafeBinary { user: String, reason: String },
+    StalePrivilegedCopy { user: String },
     Unreadable { reason: String },
 }
 
@@ -497,6 +595,9 @@ pub(crate) fn sudoers_drift() -> Vec<SudoersCheck> {
             reason: format!("{e:#}"),
         });
     }
+    if let Ok(true) = privileged_copy_stale(false) {
+        checks.push(SudoersCheck::StalePrivilegedCopy { user: user.clone() });
+    }
     if let Ok((binary, is_proxmox, cron)) = sudoers_inputs() {
         let rendered = sudoers_contents(&user, &binary, is_proxmox, cron);
         if current != rendered {
@@ -519,6 +620,8 @@ const SUDOERS_DROP_IN: &str = "/etc/sudoers.d/orca";
 /// Flash-backed copy of the drop-in on Unraid.
 #[cfg(any(target_os = "linux", test))]
 const UNRAID_SUDOERS_COPY: &str = "/boot/config/plugins/orca/sudoers.d/orca";
+#[cfg(any(target_os = "linux", test))]
+const UNRAID_PRIVILEGED_COPY: &str = "/boot/config/plugins/orca/bin/orca";
 #[cfg(target_os = "linux")]
 const UNRAID_GO: &str = "/boot/config/go";
 #[cfg(any(target_os = "linux", test))]
@@ -599,6 +702,9 @@ fn persist_sudoers_on_unraid(contents: &str) -> Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
     write_atomic(copy, contents, 0o600)?;
+    let privileged = std::fs::read(utils::path::PRIVILEGED_BIN)
+        .with_context(|| format!("read {}", utils::path::PRIVILEGED_BIN))?;
+    persist_privileged_on_unraid(&privileged)?;
     let go_path = std::path::Path::new(UNRAID_GO);
     let go = std::fs::read_to_string(go_path).unwrap_or_default();
     if let Some(updated) = with_go_block(&go) {
@@ -608,9 +714,21 @@ fn persist_sudoers_on_unraid(contents: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn write_atomic(path: &std::path::Path, contents: &str, mode: u32) -> Result<()> {
+fn persist_privileged_on_unraid(bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let copy = std::path::Path::new(UNRAID_PRIVILEGED_COPY);
+    let dir = copy
+        .parent()
+        .context("flash privileged copy has no parent")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    write_atomic(copy, bytes, 0o700)
+}
+
+#[cfg(target_os = "linux")]
+fn write_atomic(path: &std::path::Path, contents: impl AsRef<[u8]>, mode: u32) -> Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let dir = path.parent().context("atomic write target has no parent")?;
     let name = path
         .file_name()
@@ -623,7 +741,8 @@ fn write_atomic(path: &std::path::Path, contents: &str, mode: u32) -> Result<()>
         .mode(mode)
         .open(&tmp)
         .and_then(|mut f| {
-            f.write_all(contents.as_bytes())?;
+            f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            f.write_all(contents.as_ref())?;
             f.sync_all()
         })
         .and_then(|()| std::fs::rename(&tmp, path));
@@ -639,10 +758,14 @@ fn write_atomic(path: &std::path::Path, contents: &str, mode: u32) -> Result<()>
 fn go_block() -> String {
     format!(
         "{GO_BLOCK_BEGIN}\n\
+         if [ -f {UNRAID_PRIVILEGED_COPY} ]; then\n\
+         \x20 install -D -m 0755 -o root -g root {UNRAID_PRIVILEGED_COPY} {PRIVILEGED_BIN}\n\
+         fi\n\
          if [ -f {UNRAID_SUDOERS_COPY} ] && visudo -cf {UNRAID_SUDOERS_COPY} >/dev/null 2>&1; then\n\
          \x20 install -m 0440 -o root -g root {UNRAID_SUDOERS_COPY} {SUDOERS_DROP_IN}\n\
          fi\n\
-         {GO_BLOCK_END}\n"
+         {GO_BLOCK_END}\n",
+        PRIVILEGED_BIN = utils::path::PRIVILEGED_BIN
     )
 }
 
@@ -1060,7 +1183,7 @@ mod sudoers_tests {
     #[test]
     fn a_current_drop_in_plans_no_repair() {
         let c = sudoers_contents("orca", "/usr/local/bin/orca", false, false);
-        let plan = plan_sudoers("orca", Some(c.clone()), c, false, None, None);
+        let plan = plan_sudoers("orca", Some(c.clone()), c, false, None, None, true);
         assert!(plan.up_to_date);
         assert!(plan.diff.is_empty());
         assert!(!plan.needs_repair());
@@ -1070,7 +1193,7 @@ mod sudoers_tests {
     fn a_stale_binary_path_shows_in_the_diff() {
         let old = sudoers_contents("orca", "/old/orca", false, false);
         let new = sudoers_contents("orca", "/usr/local/bin/orca", false, false);
-        let plan = plan_sudoers("orca", Some(old), new, false, None, None);
+        let plan = plan_sudoers("orca", Some(old), new, false, None, None, true);
         assert!(!plan.up_to_date);
         assert!(plan.needs_repair());
         assert!(
@@ -1086,7 +1209,7 @@ mod sudoers_tests {
     #[test]
     fn a_missing_drop_in_adds_every_line() {
         let new = sudoers_contents("orca", "/usr/local/bin/orca", false, false);
-        let plan = plan_sudoers("orca", None, new.clone(), false, None, None);
+        let plan = plan_sudoers("orca", None, new.clone(), false, None, None, true);
         assert_eq!(plan.diff.len(), new.lines().count());
         assert!(plan.diff.iter().all(|l| l.starts_with('+')));
     }
@@ -1102,6 +1225,7 @@ mod sudoers_tests {
             true,
             Some(&c),
             Some(&go),
+            true,
         );
         assert!(ok.flash_copy_current && ok.go_block_current && !ok.needs_repair());
 
@@ -1112,6 +1236,7 @@ mod sudoers_tests {
             true,
             None,
             Some("#!/bin/bash\n"),
+            true,
         );
         assert!(!missing.flash_copy_current);
         assert!(!missing.go_block_current);
@@ -1155,6 +1280,51 @@ mod sudoers_tests {
         // The .plg remove script deletes the block by these markers.
         assert!(GO_BLOCK_BEGIN.starts_with("# >>> orca sudoers:"));
         assert_eq!(GO_BLOCK_END, "# <<< orca sudoers <<<");
+    }
+
+    #[test]
+    fn the_go_block_installs_the_privileged_binary_before_the_grants() {
+        let b = go_block();
+        let bin = b
+            .find(&format!(
+                "install -D -m 0755 -o root -g root {UNRAID_PRIVILEGED_COPY} {}",
+                utils::path::PRIVILEGED_BIN
+            ))
+            .expect("binary install line");
+        let grants = b.find(UNRAID_SUDOERS_COPY).expect("sudoers install line");
+        assert!(bin < grants);
+    }
+
+    #[test]
+    fn grants_name_the_privileged_copy_which_passes_binary_trust() {
+        let c = sudoers_contents("orca", utils::path::PRIVILEGED_BIN, false, false);
+        assert_eq!(
+            sudoers_granted_binary(&c).as_deref(),
+            Some(utils::path::PRIVILEGED_BIN)
+        );
+        let root_dirs = |_: &std::path::Path| Ok((0, 0o755));
+        assert!(
+            check_binary_trust(std::path::Path::new(utils::path::PRIVILEGED_BIN), root_dirs)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_stale_privileged_copy_needs_repair() {
+        let c = sudoers_contents("orca", utils::path::PRIVILEGED_BIN, false, false);
+        let plan = plan_sudoers("orca", Some(c.clone()), c, false, None, None, false);
+        assert!(plan.up_to_date);
+        assert!(plan.needs_repair());
+    }
+
+    #[test]
+    fn any_missing_or_differing_copy_is_stale() {
+        let src = b"orca-v2".to_vec();
+        assert!(!copies_stale(&src, &[Some(src.clone())]));
+        assert!(!copies_stale(&src, &[Some(src.clone()), Some(src.clone())]));
+        assert!(copies_stale(&src, &[None]));
+        assert!(copies_stale(&src, &[Some(b"orca-v1".to_vec())]));
+        assert!(copies_stale(&src, &[Some(src.clone()), None]));
     }
 }
 

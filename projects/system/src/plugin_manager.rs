@@ -278,7 +278,7 @@ fn save_signature(dir: &Path, software: &str, minisig: Option<&str>) -> Result<(
 #[cfg(unix)]
 async fn request_trust(software: &str) -> Result<()> {
     use tokio::io::AsyncWriteExt;
-    let exe = std::env::current_exe().context("resolve current exe")?;
+    let exe = utils::path::privileged_exe().context("resolve the privileged orca binary")?;
     let mut child = tokio::process::Command::new("sudo")
         .arg("-n")
         .arg(&exe)

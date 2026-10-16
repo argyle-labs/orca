@@ -634,11 +634,11 @@ pub async fn retire_direct_map() -> ApplyOutcome {
 pub async fn run_privileged(op: &PrivilegedOp) -> PrivilegedResult {
     use tokio::io::AsyncWriteExt;
 
-    let exe = match std::env::current_exe() {
+    let exe = match utils::path::privileged_exe() {
         Ok(p) => p,
         Err(e) => {
             return PrivilegedResult {
-                errors: vec![format!("resolve current exe: {e}")],
+                errors: vec![format!("resolve orca binary: {e}")],
                 ..Default::default()
             };
         }
