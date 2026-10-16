@@ -22,6 +22,13 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock, RwLock};
 use thiserror::Error;
 
+pub mod acquisition;
+pub use acquisition::{
+    AcquisitionError, DownloadClient, DownloadProvider, DropFolder, Indexer, IndexerProtocol,
+    NzbPayload, Payload, Protocol, ProtocolDefaults, SubmissionId, SubmissionState,
+    SubmissionStatus, TorrentPayload,
+};
+
 pub mod identity;
 pub use identity::{IdSource, canonical_external_id, normalize_id, parse_guid};
 
