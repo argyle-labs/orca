@@ -1,0 +1,1 @@
+ALTER TABLE endpoints ADD COLUMN config TEXT NOT NULL DEFAULT '{}';

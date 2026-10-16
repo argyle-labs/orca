@@ -246,11 +246,39 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     // Shared mode: provider-tagged rows in the ONE core-migrated `endpoints`
     // table. Own-table mode (an explicit `table:`) keeps today's behaviour.
     let shared = input.shared;
-    // In shared mode two declared fields, recognised BY NAME, map onto the
-    // thin typed columns `endpoints` carries; every OTHER declared field is
-    // dropped (not persisted, reconstructed via `Default` on read).
+    // In shared mode `token_id` and `insecure` map onto typed columns, other
+    // non-secret fields persist in the JSON `config` column, and `#[secret]`
+    // fields live only in the secrets store under `<plugin>.<name>.<field>`.
     let has_token_id = input.fields.iter().any(|f| f.name == "token_id");
     let has_insecure = input.fields.iter().any(|f| f.name == "insecure");
+    let shared_secrets: Vec<&EndpointField> = if shared {
+        input.fields.iter().filter(|f| f.secret).collect()
+    } else {
+        Vec::new()
+    };
+    let has_shared_secrets = !shared_secrets.is_empty();
+    if shared {
+        for f in input.fields.iter().filter(|f| !f.secret) {
+            let n = f.name.to_string();
+            if [
+                "password",
+                "passwd",
+                "secret",
+                "api_key",
+                "apikey",
+                "private_key",
+                "credential",
+            ]
+            .iter()
+            .any(|k| n.contains(k))
+            {
+                return Err(syn::Error::new(
+                    f.name.span(),
+                    "shared-mode field name looks like a secret; mark it #[secret] so it is not persisted in the replicated config column",
+                ));
+            }
+        }
+    }
 
     let entry_ident = format_ident!("EndpointEntry");
     let row_ident = format_ident!("EndpointRow");
@@ -326,6 +354,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         })
         .collect();
 
+    let plugin_lit = LitStr::new(&plugin_str, Span::call_site());
     // Entry construction from a `row` binding.
     let entry_from_row: Vec<TokenStream2> = input
         .fields
@@ -334,6 +363,15 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             let n = &f.name;
             if f.secret && !f.optional {
                 None
+            } else if f.secret && f.optional && shared {
+                let has = format_ident!("has_{}", n);
+                let ns = LitStr::new(&n.to_string(), Span::call_site());
+                let crate_path = &input.crate_path;
+                Some(quote! {
+                    #has: #crate_path::secrets::exists(&#crate_path::secrets::scoped_name(
+                        #plugin_lit, &row.name, #ns,
+                    ))?,
+                })
             } else if f.secret && f.optional {
                 let has = format_ident!("has_{}", n);
                 Some(quote! { #has: row.#n.is_some(), })
@@ -718,7 +756,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
     } else {
         // Shared mode. `token_id` (if declared) ↔ `auth_principal`; `insecure`
-        // (if declared) ↔ `insecure`; every other declared field is dropped.
+        // (if declared) ↔ `insecure`; other non-secret fields ↔ `config`.
         let auth_principal_write = if has_token_id {
             quote! { ToDbValue::to_dbvalue(&ep.token_id) }
         } else {
@@ -739,12 +777,83 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     quote! { #n: field_from_row(m, "auth_principal")?, }
                 } else if n == "insecure" {
                     quote! { #n: field_from_row(m, "insecure")?, }
-                } else {
-                    // Dropped field — not persisted in the thin shared table.
+                } else if f.secret {
                     quote! { #n: ::std::default::Default::default(), }
+                } else {
+                    let ns = n.to_string();
+                    quote! {
+                        #n: __cfg
+                            .get(#ns)
+                            .and_then(|v| #crate_path::serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default(),
+                    }
                 }
             })
             .collect();
+        let config_fields: Vec<&EndpointField> = input
+            .fields
+            .iter()
+            .filter(|f| !f.secret && f.name != "token_id" && f.name != "insecure")
+            .collect();
+        let config_idents: Vec<&Ident> = config_fields.iter().map(|f| &f.name).collect();
+        let config_names: Vec<String> = config_fields.iter().map(|f| f.name.to_string()).collect();
+        let store_stmts: Vec<TokenStream2> = shared_secrets
+            .iter()
+            .map(|f| {
+                let n = &f.name;
+                let ns = n.to_string();
+                let set = quote! {
+                    let v = v.to_string();
+                    if !v.is_empty() {
+                        #crate_path::secrets::set(
+                            &#crate_path::secrets::scoped_name(PROVIDER, &ep.name, #ns),
+                            &v,
+                            ::std::option::Option::None,
+                        )?;
+                    }
+                };
+                if f.optional {
+                    quote! { if let ::std::option::Option::Some(v) = &ep.#n { #set } }
+                } else {
+                    quote! { { let v = &ep.#n; #set } }
+                }
+            })
+            .collect();
+        let secret_names: Vec<String> = shared_secrets.iter().map(|f| f.name.to_string()).collect();
+        let secret_fns = if has_shared_secrets {
+            quote! {
+                pub fn store_secrets(ep: &#row_ident) -> Result<()> {
+                    #crate_path::runtime::validate_endpoint_name(&ep.name)?;
+                    #( #store_stmts )*
+                    Ok(())
+                }
+
+                fn remove_secrets(name: &str) -> Result<()> {
+                    if #crate_path::runtime::validate_endpoint_name(name).is_err() {
+                        return Ok(());
+                    }
+                    let mut first: ::std::option::Option<#crate_path::anyhow::Error> = ::std::option::Option::None;
+                    #(
+                        if let ::std::result::Result::Err(e) = #crate_path::secrets::delete(
+                            &#crate_path::secrets::scoped_name(PROVIDER, name, #secret_names),
+                        ) {
+                            first.get_or_insert(e);
+                        }
+                    )*
+                    match first {
+                        ::std::option::Option::Some(e) => ::std::result::Result::Err(e),
+                        ::std::option::Option::None => Ok(()),
+                    }
+                }
+            }
+        } else {
+            quote! {}
+        };
+        let remove_secrets_call = if has_shared_secrets {
+            quote! { if reply.affected > 0 { remove_secrets(name)?; } }
+        } else {
+            quote! {}
+        };
         quote! {
             pub mod endpoint_db {
                 use super::#row_ident;
@@ -758,6 +867,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 // Build the thin, provider-tagged `endpoints` row. `id` is the
                 // minted uuidv7 PK; `updated_at` is the LWW clock, stamped on
                 // every live write. Secrets are never included here.
+                #[allow(clippy::disallowed_types)]
                 fn to_dbrow(ep: &#row_ident, id: &str) -> DbRow {
                     let mut m = DbRow::new();
                     m.insert(::std::string::String::from("id"), DbValue::Text(::std::string::String::from(id)));
@@ -773,6 +883,15 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     m.insert(::std::string::String::from("enabled"), DbValue::Bool(ep.enabled));
                     m.insert(::std::string::String::from("auth_principal"), #auth_principal_write);
                     m.insert(::std::string::String::from("insecure"), #insecure_write);
+                    let mut __cfg = #crate_path::serde_json::Map::new();
+                    #( __cfg.insert(
+                        ::std::string::String::from(#config_names),
+                        #crate_path::serde_json::to_value(&ep.#config_idents).unwrap_or_default(),
+                    ); )*
+                    m.insert(
+                        ::std::string::String::from("config"),
+                        DbValue::Text(#crate_path::serde_json::Value::Object(__cfg).to_string()),
+                    );
                     m.insert(
                         ::std::string::String::from("updated_at"),
                         DbValue::Int(#crate_path::now_millis_since_epoch()),
@@ -780,7 +899,12 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     m
                 }
 
+                #[allow(clippy::disallowed_types)]
                 fn from_dbrow(m: &DbRow) -> Result<#row_ident> {
+                    let __cfg: #crate_path::serde_json::Value = field_from_row::<::std::string::String>(m, "config")
+                        .ok()
+                        .and_then(|s| #crate_path::serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
                     Ok(#row_ident {
                         name: field_from_row(m, "name")?,
                         #( #from_row_fields )*
@@ -885,8 +1009,11 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                         key_col: ::std::string::String::from("id"),
                         key: id,
                     })?;
+                    #remove_secrets_call
                     Ok(reply.affected > 0)
                 }
+
+                #secret_fns
             }
         }
     };
@@ -903,6 +1030,20 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     // (e.g. `storage.mount.update{action}`), or a tool surface is retired while
     // its in-process table stays populatable (e.g. `managed_mounts`).
     let skip = &input.skip;
+    let (create_validate, create_store, update_store) = if has_shared_secrets {
+        (
+            quote! { #crate_path::runtime::validate_endpoint_name(&args.name)?; },
+            quote! {
+                if let ::std::result::Result::Err(e) = endpoint_db::store_secrets(&row) {
+                    let _ = endpoint_db::remove(&row.name);
+                    return ::std::result::Result::Err(e);
+                }
+            },
+            quote! { endpoint_db::store_secrets(&row)?; },
+        )
+    } else {
+        (quote! {}, quote! {}, quote! {})
+    };
 
     let list_tool = if skip.contains("list") {
         quote! {}
@@ -943,12 +1084,12 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             async fn #list_fn(args: #list_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#list_output> {
                 let mut endpoints: ::std::vec::Vec<#entry_ident> = endpoint_db::list()?
                     .into_iter()
-                    .map(|row| #entry_ident {
+                    .map(|row| -> #crate_path::anyhow::Result<#entry_ident> { Ok(#entry_ident {
                         name: row.name.clone(),
                         #( #entry_from_row )*
                         enabled: row.enabled,
-                    })
-                    .collect();
+                    }) })
+                    .collect::<#crate_path::anyhow::Result<_>>()?;
                 // Stable, deterministic order so offset cursors are consistent across pages.
                 endpoints.sort_by(|a, b| a.name.cmp(&b.name));
                 let params = #crate_path::contract::paging::PageParams { limit: args.limit, cursor: args.cursor };
@@ -1028,6 +1169,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #[doc = #create_doc]
             #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "create")]
             async fn #create_fn(args: #create_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#create_output> {
+                #create_validate
                 let row = #row_ident {
                     name: args.name.clone(),
                     #( #create_row_fields )*
@@ -1036,6 +1178,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 };
                 endpoint_db::insert(&row)
                     .map_err(|e| #crate_path::runtime::map_insert_conflict(e, #plugin_str_lit, &row.name))?;
+                #create_store
                 Ok(#create_output { endpoint: #entry_ident {
                     name: row.name.clone(),
                     #( #entry_from_row )*
@@ -1081,6 +1224,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #[doc = #update_doc]
             #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "update")]
             async fn #update_fn(args: #update_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#update_output> {
+                #create_validate
                 let mut row = endpoint_db::get(&args.name)?
                     .ok_or_else(|| #crate_path::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
                 let mut applied: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
@@ -1098,6 +1242,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 }
                 let changed = endpoint_db::update(&row)?;
                 if !changed { #crate_path::anyhow::bail!("update reported no row change for `{}`", row.name); }
+                #update_store
                 Ok(#update_output {
                     endpoint: #entry_ident {
                         name: row.name.clone(),
