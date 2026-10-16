@@ -36,6 +36,12 @@ pub enum AcquisitionError {
     InvalidUrl(String),
     #[error("{0:?} requires a secret")]
     MissingSecret(Protocol),
+    #[error("id is nil")]
+    NilId,
+    #[error("url {0:?} must not embed credentials")]
+    CredentialsInUrl(String),
+    #[error("plain http only allowed to a private or loopback ip literal: {0:?}")]
+    InsecureUrl(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -45,6 +51,12 @@ pub struct ClientConnection {
     pub username: Option<String>,
     #[serde(default)]
     pub secret: Option<SecretRef>,
+    #[serde(default = "verify_tls_default")]
+    pub verify_tls: bool,
+}
+
+fn verify_tls_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -52,17 +64,19 @@ pub struct DownloadClient {
     pub id: Uuid,
     pub name: String,
     pub protocol: Protocol,
-    /// Opaque id the provider plugin declares for itself.
     pub provider: String,
     pub connection: ClientConnection,
     #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]
     pub save_path: Option<String>,
+    #[serde(default)]
+    pub priority: Option<u32>,
 }
 
 impl DownloadClient {
     pub fn validate(&self) -> Result<(), AcquisitionError> {
+        non_nil(self.id)?;
         non_empty("name", &self.name)?;
         non_empty("provider", &self.provider)?;
         check_url(&self.connection.url)?;
@@ -82,9 +96,11 @@ impl DownloadClient {
                 url: self.connection.url,
                 username: self.connection.username,
                 secret,
+                verify_tls: self.connection.verify_tls,
             },
             category: self.category,
             save_path: self.save_path,
+            priority: self.priority,
         }
     }
 }
@@ -99,12 +115,16 @@ pub struct Indexer {
     pub api_key: Option<SecretRef>,
     #[serde(default)]
     pub categories: Vec<u32>,
-    /// Opaque id the provider plugin declares for itself.
     pub provider: String,
+    #[serde(default = "verify_tls_default")]
+    pub verify_tls: bool,
+    #[serde(default)]
+    pub priority: Option<u32>,
 }
 
 impl Indexer {
     pub fn validate(&self) -> Result<(), AcquisitionError> {
+        non_nil(self.id)?;
         non_empty("name", &self.name)?;
         non_empty("provider", &self.provider)?;
         check_url(&self.url)?;
@@ -123,15 +143,18 @@ impl Indexer {
             api_key,
             categories: self.categories,
             provider: self.provider,
+            verify_tls: self.verify_tls,
+            priority: self.priority,
         }
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct ResolvedConnection {
     pub url: String,
     pub username: Option<String>,
     pub secret: Option<String>,
+    pub verify_tls: bool,
 }
 
 impl fmt::Debug for ResolvedConnection {
@@ -140,11 +163,12 @@ impl fmt::Debug for ResolvedConnection {
             .field("url", &self.url)
             .field("username", &self.username)
             .field("secret", &redact(&self.secret))
+            .field("verify_tls", &self.verify_tls)
             .finish()
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ResolvedDownloadClient {
     pub id: Uuid,
     pub name: String,
@@ -153,9 +177,10 @@ pub struct ResolvedDownloadClient {
     pub connection: ResolvedConnection,
     pub category: Option<String>,
     pub save_path: Option<String>,
+    pub priority: Option<u32>,
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct ResolvedIndexer {
     pub id: Uuid,
     pub name: String,
@@ -164,6 +189,8 @@ pub struct ResolvedIndexer {
     pub api_key: Option<String>,
     pub categories: Vec<u32>,
     pub provider: String,
+    pub verify_tls: bool,
+    pub priority: Option<u32>,
 }
 
 impl fmt::Debug for ResolvedIndexer {
@@ -176,6 +203,8 @@ impl fmt::Debug for ResolvedIndexer {
             .field("api_key", &redact(&self.api_key))
             .field("categories", &self.categories)
             .field("provider", &self.provider)
+            .field("verify_tls", &self.verify_tls)
+            .field("priority", &self.priority)
             .finish()
     }
 }
@@ -191,10 +220,30 @@ fn non_empty(field: &'static str, value: &str) -> Result<(), AcquisitionError> {
     Ok(())
 }
 
-fn check_url(url: &str) -> Result<(), AcquisitionError> {
-    match url::Url::parse(url) {
-        Ok(u) if matches!(u.scheme(), "http" | "https") => Ok(()),
-        _ => Err(AcquisitionError::InvalidUrl(url.to_string())),
+fn non_nil(id: Uuid) -> Result<(), AcquisitionError> {
+    if id.is_nil() {
+        return Err(AcquisitionError::NilId);
+    }
+    Ok(())
+}
+
+fn check_url(raw: &str) -> Result<(), AcquisitionError> {
+    let u = url::Url::parse(raw).map_err(|_| AcquisitionError::InvalidUrl(raw.to_string()))?;
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err(AcquisitionError::CredentialsInUrl(
+            u.host_str().unwrap_or("").to_string(),
+        ));
+    }
+    match (u.scheme(), u.host()) {
+        ("https", Some(_)) => Ok(()),
+        ("http", Some(url::Host::Ipv4(ip))) if ip.is_private() || ip.is_loopback() => Ok(()),
+        ("http", Some(url::Host::Ipv6(ip)))
+            if ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local() =>
+        {
+            Ok(())
+        }
+        ("http", Some(_)) => Err(AcquisitionError::InsecureUrl(raw.to_string())),
+        _ => Err(AcquisitionError::InvalidUrl(raw.to_string())),
     }
 }
 
@@ -212,9 +261,11 @@ mod tests {
                 url: "http://10.0.0.5:8080".into(),
                 username: Some("orca".into()),
                 secret: secret.then(|| SecretRef("onepassword://x".into())),
+                verify_tls: true,
             },
             category: Some("comics".into()),
             save_path: None,
+            priority: None,
         }
     }
 
@@ -227,6 +278,8 @@ mod tests {
             api_key: api_key.then(|| SecretRef("onepassword://k".into())),
             categories: vec![7030],
             provider: "some-plugin".into(),
+            verify_tls: true,
+            priority: Some(1),
         }
     }
 
@@ -251,7 +304,27 @@ mod tests {
         assert!(matches!(c.validate(), Err(AcquisitionError::InvalidUrl(_))));
         c.connection.url = "ftp://10.0.0.5".into();
         assert!(matches!(c.validate(), Err(AcquisitionError::InvalidUrl(_))));
+        c.connection.url = "http://qbit.example.com".into();
+        assert!(matches!(
+            c.validate(),
+            Err(AcquisitionError::InsecureUrl(_))
+        ));
+        c.connection.url = "http://203.0.113.4".into();
+        assert!(matches!(
+            c.validate(),
+            Err(AcquisitionError::InsecureUrl(_))
+        ));
+        c.connection.url = "https://u:hunter2@qbit.example.com".into();
+        assert!(matches!(
+            c.validate(),
+            Err(AcquisitionError::CredentialsInUrl(_))
+        ));
+        c.connection.url = "http://[fd00::5]:8080".into();
+        assert_eq!(c.validate(), Ok(()));
         c.connection.url = "http://10.0.0.5".into();
+        c.id = Uuid::nil();
+        assert_eq!(c.validate(), Err(AcquisitionError::NilId));
+        c.id = Uuid::now_v7();
         c.provider = "".into();
         assert_eq!(c.validate(), Err(AcquisitionError::Empty("provider")));
         c.name = " ".into();
