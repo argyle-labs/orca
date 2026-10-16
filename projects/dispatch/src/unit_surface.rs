@@ -780,10 +780,13 @@ async fn bounded<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result
     fut.await
 }
 
+const MAX_LIST_PAGES: usize = 1000;
+
 async fn listed(provider: &dyn unit::UnitProvider, kind: &str) -> Result<Vec<UnitId>> {
     let mut ids: Vec<UnitId> = Vec::new();
+    let mut seen: std::collections::HashSet<UnitId> = std::collections::HashSet::new();
     let mut offset: u32 = 0;
-    loop {
+    for _ in 0..MAX_LIST_PAGES {
         let query = QueryArgs {
             kind: Some(kind.to_string()),
             offset: (offset > 0).then_some(offset),
@@ -795,16 +798,17 @@ async fn listed(provider: &dyn unit::UnitProvider, kind: &str) -> Result<Vec<Uni
         };
         let n = page.items.len();
         for id in page.items.into_iter().map(|i| i.id) {
-            if id.kind == kind && id.manager_base() == provider.name() && !ids.contains(&id) {
+            if id.kind == kind && id.manager_base() == provider.name() && seen.insert(id.clone()) {
                 ids.push(id);
             }
         }
         offset = offset.saturating_add(u32::try_from(n).unwrap_or(u32::MAX));
         match page.total {
-            Some(total) if n > 0 && u64::from(offset) < total => {}
+            Some(total) if n > 0 && offset < u32::MAX && u64::from(offset) < total => {}
             _ => return Ok(ids),
         }
     }
+    Ok(ids)
 }
 
 pub async fn resolve_unit(kind: &str, sel: &str, strict: bool) -> Result<UnitId> {
@@ -1828,5 +1832,46 @@ mod tests {
             "string"
         );
         assert!(unit::deregister_provider(&name));
+    }
+    struct EndlessProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl UnitProvider for EndlessProvider {
+        fn name(&self) -> &str {
+            "usurf-endless"
+        }
+        fn declarations(&self) -> Vec<KindDeclaration> {
+            vec![]
+        }
+        fn units(&self) -> BoxFuture<'_, Result<Vec<UnitDescriptor>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn invoke(&self, _args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                Ok(VerbOutcome::Items(ItemsOutcome {
+                    items: vec![
+                        ItemOutcome::new(uid("usurf-endless", "wid_endless", "a"), "{}".into()),
+                        ItemOutcome::new(uid("usurf-endless", "wid_endless", "a"), "{}".into()),
+                    ],
+                    total: Some(u64::MAX),
+                }))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn listed_stops_paging_a_provider_that_never_ends_and_dedupes() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = EndlessProvider {
+            calls: calls.clone(),
+        };
+        let ids = listed(&provider, "wid_endless").await.unwrap();
+        assert_eq!(ids, vec![uid("usurf-endless", "wid_endless", "a")]);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_LIST_PAGES
+        );
     }
 }
