@@ -240,6 +240,13 @@ pub struct SecretGrant {
     pub created_at: String,
 }
 
+fn valid_principal(plugin: &str) -> bool {
+    let mut bytes = plugin.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && plugin.len() <= 64
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 fn in_namespace(name: &str, plugin: &str) -> bool {
     name == plugin
         || name
@@ -265,6 +272,15 @@ fn authorize(conn: &Connection, principal: &Principal, op: &plugin_abi::SecretOp
         return Ok(());
     };
     let name = op.name();
+    if !valid_principal(plugin) {
+        tracing::warn!(plugin = %plugin, secret = %name, op = op.kind(), "secret access denied: invalid principal");
+        return Err(SecretAccessDenied {
+            plugin: plugin.clone(),
+            name: name.to_string(),
+            op: op.kind(),
+        }
+        .into());
+    }
     if in_namespace(name, plugin) {
         return Ok(());
     }
@@ -558,5 +574,43 @@ mod tests {
         seed(&conn, "gitea.token", "t");
         let r = exec_secret_op(&conn, &Principal::Core, &get_op("gitea.token")).unwrap();
         assert_eq!(r.value.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn invalid_principal_denied() {
+        let conn = test_conn();
+        seed(&conn, "gitea.home.token", "t");
+        seed(&conn, ".x", "t");
+        for p in ["", "gitea.home", "Gitea", "gitea.", ".", "g\u{e9}"] {
+            assert!(denied(exec_secret_op(&conn, &plugin(p), &get_op(p))), "{p}");
+        }
+        assert!(denied(exec_secret_op(&conn, &plugin(""), &get_op(".x"))));
+        assert!(denied(exec_secret_op(
+            &conn,
+            &plugin("gitea.home"),
+            &get_op("gitea.home.token")
+        )));
+    }
+
+    #[test]
+    fn grant_does_not_permit_writes_or_exists_leak_beyond_grant() {
+        let conn = test_conn();
+        seed(&conn, "gitea.token", "t");
+        grant(&conn, "zot", "gitea.token", "operator").unwrap();
+        let set = plugin_abi::SecretOp::Set {
+            name: "gitea.token".to_string(),
+            value: "x".to_string(),
+            description: None,
+        };
+        assert!(denied(exec_secret_op(&conn, &plugin("zot"), &set)));
+        let exists = plugin_abi::SecretOp::Exists {
+            name: "gitea.other".to_string(),
+        };
+        assert!(denied(exec_secret_op(&conn, &plugin("zot"), &exists)));
+        assert!(denied(exec_secret_op(
+            &conn,
+            &plugin("zot"),
+            &get_op("gitea.token.")
+        )));
     }
 }
