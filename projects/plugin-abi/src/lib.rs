@@ -202,6 +202,8 @@ pub struct ColumnDef {
     /// that may already hold rows.
     #[serde(default)]
     pub default: Option<String>,
+    #[serde(default)]
+    pub secret: bool,
 }
 
 /// One index over a plugin-declared table.

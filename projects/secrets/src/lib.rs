@@ -7,6 +7,8 @@
 //! keychain, …) the value is fetched on demand and `ref_path` is the vendor-
 //! specific address.
 
+pub mod plugin_columns;
+
 use anyhow::Result;
 use db::settings;
 use rusqlite::Connection;
@@ -205,7 +207,7 @@ pub fn list_provider_instances(
 
 /// The inline backend tag — a secret whose value lives in orca's own encrypted
 /// store (mirrors `plugin_toolkit::secrets::BACKEND_INLINE`).
-const BACKEND_INLINE: &str = "inline";
+pub(crate) const BACKEND_INLINE: &str = "inline";
 
 /// Execute one plugin secrets op on `conn`. Replicates the resolution
 /// `plugin_toolkit::secrets` performed locally (inline decrypt; external

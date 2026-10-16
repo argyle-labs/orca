@@ -464,6 +464,7 @@ mod tests {
                     not_null: true,
                     primary_key: true,
                     default: None,
+                    secret: false,
                 },
                 ColumnDef {
                     name: "cores".to_string(),
@@ -471,6 +472,7 @@ mod tests {
                     not_null: true,
                     primary_key: false,
                     default: Some("1".to_string()),
+                    secret: false,
                 },
             ],
             indexes: vec![],
