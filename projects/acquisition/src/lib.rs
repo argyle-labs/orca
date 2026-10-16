@@ -1,4 +1,4 @@
-use crate::SecretRef;
+use contract::SecretRef;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -260,7 +260,7 @@ mod tests {
             connection: ClientConnection {
                 url: "http://10.0.0.5:8080".into(),
                 username: Some("orca".into()),
-                secret: secret.then(|| SecretRef("onepassword://x".into())),
+                secret: secret.then(|| SecretRef::parse("onepassword://x").unwrap()),
                 verify_tls: true,
             },
             category: Some("comics".into()),
@@ -275,7 +275,7 @@ mod tests {
             name: "idx".into(),
             protocol,
             url: "https://10.0.0.6/api".into(),
-            api_key: api_key.then(|| SecretRef("onepassword://k".into())),
+            api_key: api_key.then(|| SecretRef::parse("onepassword://k").unwrap()),
             categories: vec![7030],
             provider: "some-plugin".into(),
             verify_tls: true,

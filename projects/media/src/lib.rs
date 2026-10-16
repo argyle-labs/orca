@@ -22,12 +22,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock, RwLock};
 use thiserror::Error;
 
-pub mod acquisition;
-pub use acquisition::{
-    AcquisitionError, ClientConnection, DownloadClient, Indexer, IndexerProtocol, Protocol,
-    ResolvedConnection, ResolvedDownloadClient, ResolvedIndexer,
-};
-
 pub mod identity;
 pub use identity::{IdSource, canonical_external_id, normalize_id, parse_guid};
 

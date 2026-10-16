@@ -214,6 +214,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # Internal crates — declared once here; members use `x.workspace = true`.
 # The key is the flat import name; `package` is the published `orca-*` name.
 # The exact version pin keeps published crates in lockstep.
+acquisition = { path = "projects/acquisition", version = "=0.2.1-rc.19", registry = "gitea", package = "orca-acquisition" }
 agents = { path = "projects/agents", version = "=0.2.1-rc.19", registry = "gitea", package = "orca-agents", default-features = false }
 app-kit = { path = "projects/app-kit", version = "=0.2.1-rc.19", registry = "gitea", package = "orca-app-kit" }
 auth = { path = "projects/auth", version = "=0.2.1-rc.19", registry = "gitea", package = "orca-auth" }
@@ -283,6 +284,7 @@ members = [
     "projects/notifications",
     "projects/storage",
     "projects/media",
+    "projects/acquisition",
     "projects/service",
     "projects/route",
     "projects/deploy-target",
