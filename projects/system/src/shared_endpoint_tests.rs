@@ -198,6 +198,14 @@ mod secretprov {
                 assert_eq!(row.username, "admin");
                 assert_eq!(row.port, Some(8080));
                 assert_eq!(row.password, None);
+                let cfg: String = db::open_default()
+                    .expect("open")
+                    .query_row("SELECT config FROM endpoints WHERE name = 'qb1'", [], |r| {
+                        r.get(0)
+                    })
+                    .expect("config");
+                assert!(!cfg.contains("s3cret-one"));
+                assert!(!cfg.contains("password"));
 
                 let upd = rt
                     .block_on(secretprov_update(
@@ -244,6 +252,30 @@ mod secretprov {
                     );
                 }
                 assert!(endpoint_db::list().expect("list").is_empty());
+
+                let legacy = EndpointRow {
+                    name: "a.b".to_string(),
+                    url: String::new(),
+                    username: String::new(),
+                    port: None,
+                    password: None,
+                    routes: Default::default(),
+                    enabled: true,
+                };
+                endpoint_db::insert(&legacy).expect("insert legacy");
+                assert!(
+                    rt.block_on(secretprov_update(
+                        SecretprovUpdateArgs {
+                            name: "a.b".to_string(),
+                            password: Some("x".to_string()),
+                            ..Default::default()
+                        },
+                        &ctx,
+                    ))
+                    .is_err()
+                );
+                assert!(!secrets::exists("secretprov.a.b.password").expect("exists"));
+                assert!(endpoint_db::remove("a.b").expect("remove"));
             });
         }
     }

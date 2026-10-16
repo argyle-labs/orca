@@ -257,6 +257,28 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         Vec::new()
     };
     let has_shared_secrets = !shared_secrets.is_empty();
+    if shared {
+        for f in input.fields.iter().filter(|f| !f.secret) {
+            let n = f.name.to_string();
+            if [
+                "password",
+                "passwd",
+                "secret",
+                "api_key",
+                "apikey",
+                "private_key",
+                "credential",
+            ]
+            .iter()
+            .any(|k| n.contains(k))
+            {
+                return Err(syn::Error::new(
+                    f.name.span(),
+                    "shared-mode field name looks like a secret; mark it #[secret] so it is not persisted in the replicated config column",
+                ));
+            }
+        }
+    }
 
     let entry_ident = format_ident!("EndpointEntry");
     let row_ident = format_ident!("EndpointRow");
@@ -348,8 +370,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 Some(quote! {
                     #has: #crate_path::secrets::exists(&#crate_path::secrets::scoped_name(
                         #plugin_lit, &row.name, #ns,
-                    ))
-                    .unwrap_or(false),
+                    ))?,
                 })
             } else if f.secret && f.optional {
                 let has = format_ident!("has_{}", n);
@@ -802,13 +823,27 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         let secret_fns = if has_shared_secrets {
             quote! {
                 pub fn store_secrets(ep: &#row_ident) -> Result<()> {
+                    #crate_path::runtime::validate_endpoint_name(&ep.name)?;
                     #( #store_stmts )*
                     Ok(())
                 }
 
                 fn remove_secrets(name: &str) -> Result<()> {
-                    #( #crate_path::secrets::delete(&#crate_path::secrets::scoped_name(PROVIDER, name, #secret_names))?; )*
-                    Ok(())
+                    if #crate_path::runtime::validate_endpoint_name(name).is_err() {
+                        return Ok(());
+                    }
+                    let mut first: ::std::option::Option<#crate_path::anyhow::Error> = ::std::option::Option::None;
+                    #(
+                        if let ::std::result::Result::Err(e) = #crate_path::secrets::delete(
+                            &#crate_path::secrets::scoped_name(PROVIDER, name, #secret_names),
+                        ) {
+                            first.get_or_insert(e);
+                        }
+                    )*
+                    match first {
+                        ::std::option::Option::Some(e) => ::std::result::Result::Err(e),
+                        ::std::option::Option::None => Ok(()),
+                    }
                 }
             }
         } else {
@@ -1049,12 +1084,12 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             async fn #list_fn(args: #list_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#list_output> {
                 let mut endpoints: ::std::vec::Vec<#entry_ident> = endpoint_db::list()?
                     .into_iter()
-                    .map(|row| #entry_ident {
+                    .map(|row| -> #crate_path::anyhow::Result<#entry_ident> { Ok(#entry_ident {
                         name: row.name.clone(),
                         #( #entry_from_row )*
                         enabled: row.enabled,
-                    })
-                    .collect();
+                    }) })
+                    .collect::<#crate_path::anyhow::Result<_>>()?;
                 // Stable, deterministic order so offset cursors are consistent across pages.
                 endpoints.sort_by(|a, b| a.name.cmp(&b.name));
                 let params = #crate_path::contract::paging::PageParams { limit: args.limit, cursor: args.cursor };
@@ -1189,6 +1224,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #[doc = #update_doc]
             #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "update")]
             async fn #update_fn(args: #update_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#update_output> {
+                #create_validate
                 let mut row = endpoint_db::get(&args.name)?
                     .ok_or_else(|| #crate_path::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
                 let mut applied: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
