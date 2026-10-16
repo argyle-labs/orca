@@ -30,17 +30,6 @@ impl SecretRef {
         }
     }
 
-    pub fn de_stored<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Self::from_stored(String::deserialize(d)?).map_err(serde::de::Error::custom)
-    }
-
-    pub fn de_stored_opt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Self>, D::Error> {
-        Option::<String>::deserialize(d)?
-            .map(Self::from_stored)
-            .transpose()
-            .map_err(serde::de::Error::custom)
-    }
-
     pub fn is_canonical(&self) -> bool {
         is_canonical(&self.0)
     }
@@ -189,12 +178,12 @@ mod tests {
     fn stored_legacy_refs_still_load() {
         for legacy in ["github_token", "secret:cred-ref", "secret:a.b"] {
             assert!(serde_json::from_value::<SecretRef>(serde_json::json!(legacy)).is_err());
-            let r = SecretRef::de_stored(serde_json::json!(legacy)).unwrap();
+            let r = SecretRef::from_stored(legacy).unwrap();
             assert!(!r.is_canonical());
         }
         assert!(SecretRef::from_stored("a.b").unwrap().is_canonical());
         for bad in ["", " ", "a b", "secret:"] {
-            assert!(SecretRef::de_stored(serde_json::json!(bad)).is_err());
+            assert!(SecretRef::from_stored(bad).is_err());
         }
     }
 

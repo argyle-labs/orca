@@ -1029,6 +1029,7 @@ fn check_sideload_name(name: &str, replace: bool) -> Result<()> {
     if plugin_loader::is_reserved_plugin_id(name) {
         bail!("plugin name '{name}' is reserved for orca core; choose another name");
     }
+    db::pool::with_pooled_or_open(|c| db::plugins::refuse_undotted_secret_collision(c, name))?;
     let on_disk = install_dir().is_some_and(|d| d.join(install_filename(name)).exists());
     if !replace && (on_disk || plugin_loader::is_loaded(name)) {
         bail!("plugin '{name}' is already installed; pass --replace to overwrite it");
@@ -1056,19 +1057,9 @@ pub(crate) async fn install_from_catalog(
         .with_context(|| {
             format!("'{name}' is not in the plugin catalog (see `plugin.list` for known plugins)")
         })?;
-    // Installability is release-derived, not read from a hand-curated status:
-    // a plugin declares itself installable by publishing a release asset for
-    // this target triple. The fetch below resolves the actual release and fails
-    // with a clear, honest error ("no releases published for {name}", or no
-    // asset for this triple) when the plugin has cut none. No catalog `status`
-    // field is consulted.
-    //
-    // Direct fetch from GitHub. On failure, when this host holds NO github_token
-    // (so a private/rate-limited asset is unreachable and retrying won't help),
-    // fall back to a paired secure peer that DOES hold one — the same
-    // delegate-on-miss the orca binary self-update uses. The token never leaves
-    // the holder; we get back verified bytes for our own triple.
-    // See [[github-token-proxy-delegate-on-miss]].
+    db::pool::with_pooled_or_open(|c| {
+        db::plugins::refuse_undotted_secret_collision(c, &entry.target_software)
+    })?;
     let fetched = match crate::plugin_fetch::fetch(
         &entry.target_software,
         &entry.repo_url,
@@ -3011,6 +3002,70 @@ mod tests {
 
     fn seed_catalog(entries: Vec<CatalogEntry>) {
         *catalog_cache().lock().unwrap() = Some((std::time::Instant::now(), entries));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn sideload_refuses_name_matching_undotted_secret() {
+        let _env = crate::test_env::snapshot();
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        let dbf = tempfile::NamedTempFile::new().unwrap();
+        db::with_db_path(dbf.path().to_path_buf(), async move {
+            db::open_default()
+                .unwrap()
+                .execute(
+                    "INSERT INTO secrets (name, backend) VALUES ('komga', 'env')",
+                    [],
+                )
+                .unwrap();
+            let bin = tmp.path().join("komga-main.bin");
+            std::fs::write(&bin, b"").unwrap();
+            let args = PluginInstallArgs {
+                file: Some(bin.display().to_string()),
+                name: Some("komga".to_string()),
+                ..Default::default()
+            };
+            let err = plugin_install(args, &ctx).await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("undotted secret"),
+                "unexpected: {err:#}"
+            );
+            assert!(
+                !install_dir()
+                    .unwrap()
+                    .join(install_filename("komga"))
+                    .exists()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn install_from_catalog_refuses_name_matching_undotted_secret() {
+        let _env = crate::test_env::snapshot();
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("collide-xyz", "available")]);
+        let dbf = tempfile::NamedTempFile::new().unwrap();
+        db::with_db_path(dbf.path().to_path_buf(), async move {
+            db::open_default()
+                .unwrap()
+                .execute(
+                    "INSERT INTO secrets (name, backend) VALUES ('collide-xyz', 'env')",
+                    [],
+                )
+                .unwrap();
+            let err = install_from_catalog("collide-xyz", None, false, false, &ctx)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("undotted secret"),
+                "unexpected: {err:#}"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
