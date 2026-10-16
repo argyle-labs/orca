@@ -948,23 +948,15 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
     // units fetched from the running daemon (or the local catalog when the
     // daemon is down). `unit` is internal: each kind becomes a TOP-LEVEL command
     // (`orca vm …`, `orca lxc …`), so `orca vm list --help` reflects exactly
-    // what's loaded at runtime — service discovery with type hints. A kind whose
-    // name collides with an existing static command is skipped (static wins).
+    // what's loaded at runtime — service discovery with type hints. A kind that
+    // is also a static command gains only the unit leaves it lacks.
     let unit_ops = op_cli::fetch_unit_ops().await;
-    let mut root = op_cli::build_root(clap::Command::new("orca"));
+    let root = op_cli::build_root(clap::Command::new("orca"));
     let existing: std::collections::HashSet<String> = root
         .get_subcommands()
         .map(|c| c.get_name().to_string())
         .collect();
-    // Filter and routing list come from ONE call, so they cannot disagree.
-    // Sourcing the routing list from the unfiltered `unit_kinds_from` let a
-    // colliding kind be skipped at registration yet still claimed at dispatch,
-    // shadowing the static command — the inverse of "static wins".
-    let (unit_cmds, unit_kinds) =
-        dispatch::unit_surface::registrable_unit_commands(unit_ops, &existing);
-    for cmd in unit_cmds {
-        root = root.subcommand(cmd);
-    }
+    let (mut root, unit_routes) = dispatch::unit_surface::register_unit_commands(root, unit_ops);
     // Static top-level `orca diagnostics` (two fixed ops; findings vary by plugin).
     {
         let diag = dispatch::diagnostics_surface::diagnostics_cli_command();
@@ -1007,8 +999,8 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
     let ctx = Arc::new(mcp::build_tool_ctx(Arc::new(config)));
 
     // The managed-unit kinds route through the daemon's REST path, not the CliOp
-    // inventory, so try them first (only claims top-level names in `unit_kinds`).
-    if let Some(r) = op_cli::dispatch_unit(&matches, ctx.clone(), &unit_kinds).await {
+    // inventory, so try them first (only claims `<kind>.<op>` names in `unit_routes`).
+    if let Some(r) = op_cli::dispatch_unit(&matches, ctx.clone(), &unit_routes).await {
         return r;
     }
     if let Some(r) = op_cli::dispatch_diagnostics(&matches, ctx.clone()).await {

@@ -540,7 +540,10 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
     // its own gate. A tool this host does not have is refused even with a
     // peer named: no peer capability signal proves the peer honours `dryRun`,
     // and one that predates it would drop the flag and apply.
-    if dry_run && !crate::tool_roles::plugin_execute_gated(name) {
+    if dry_run
+        && !crate::tool_roles::plugin_execute_gated(name)
+        && !crate::unit_surface::unit_dry_run_ok(name)
+    {
         let known_here = dynamic_owns(name)
             || crate::unit_surface::unit_owns(name)
             || crate::diagnostics_surface::diagnostics_owns(name)

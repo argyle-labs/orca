@@ -91,6 +91,9 @@ fn op_specs() -> Vec<OpSpec> {
     let mut specs: Vec<OpSpec> = Vec::new();
     let mut push =
         |name: String, kind: &str, verb: Verb, action: Option<String>, provider: &str| {
+            if shadowed(&name) {
+                return;
+            }
             if let Some(existing) = specs.iter_mut().find(|s| s.name == name) {
                 if !existing.providers.iter().any(|p| p == provider) {
                     existing.providers.push(provider.to_string());
@@ -147,6 +150,10 @@ fn op_specs() -> Vec<OpSpec> {
     specs
 }
 
+fn shadowed(name: &str) -> bool {
+    crate::registry::find(name).is_some()
+}
+
 fn resolve(name: &str) -> Option<OpSpec> {
     op_specs().into_iter().find(|s| s.name == name)
 }
@@ -168,6 +175,10 @@ pub fn unit_policy(name: &str) -> Option<(&'static str, bool)> {
         Verb::List | Verb::Detail => ("any", false),
         Verb::Create | Verb::Update | Verb::Upsert | Verb::Delete => ("admin", true),
     })
+}
+
+pub fn unit_dry_run_ok(name: &str) -> bool {
+    resolve(name).is_some_and(|s| s.verb == Verb::Delete)
 }
 
 // ── Full ops (with schemas) ─────────────────────────────────────────────────────
@@ -227,7 +238,7 @@ pub fn unit_ops() -> Vec<UnitOp> {
                             description: format!("Delete a {kind} unit"),
                             providers: providers_for(kind, Verb::Delete, None),
                             mutates: true,
-                            input_schema: id_only_input_schema(),
+                            input_schema: delete_input_schema(),
                             output_schema: schema_value::<unit::ActionOutcome>(),
                         });
                     }
@@ -274,6 +285,7 @@ pub fn unit_ops() -> Vec<UnitOp> {
             }
         }
     }
+    ops.retain(|op| !shadowed(&op.name));
     ops
 }
 
@@ -317,14 +329,32 @@ fn strip_meta(mut v: Value) -> Value {
     v
 }
 
-/// `{ id: UnitId }` — target selector for delete.
-fn id_only_input_schema() -> Value {
+fn target_schema(defs: &mut Map<String, Value>) -> Value {
+    json!({
+        "anyOf": [
+            embed(schema_value::<UnitId>(), defs),
+            {
+                "type": "string",
+                "description": "Unit name or manager-native id; resolved to the manager that owns it on the target system"
+            }
+        ]
+    })
+}
+
+fn delete_input_schema() -> Value {
     let mut defs = Map::new();
-    let id = embed(schema_value::<UnitId>(), &mut defs);
+    let id = target_schema(&mut defs);
     finish(
         json!({
             "type": "object",
-            "properties": { "id": id },
+            "properties": {
+                "id": id,
+                (contract::plan::DRY_RUN_FIELD): {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Describe the delete without applying it: resolves the owning manager and changes nothing."
+                }
+            },
             "required": ["id"],
         }),
         defs,
@@ -347,7 +377,7 @@ fn list_input_schema(extra: Option<&schemars::Schema>) -> Value {
 /// `{ id: UnitId, query?: QueryArgs }` — detail.
 fn detail_input_schema(extra: Option<&schemars::Schema>) -> Value {
     let mut defs = Map::new();
-    let id = embed(schema_value::<UnitId>(), &mut defs);
+    let id = target_schema(&mut defs);
     let query = query_schema(extra, &mut defs);
     finish(
         json!({
@@ -362,7 +392,7 @@ fn detail_input_schema(extra: Option<&schemars::Schema>) -> Value {
 /// `{ id: UnitId, payload?: <declared> }` — update actions.
 fn update_input_schema(payload: Option<&Value>) -> Value {
     let mut defs = Map::new();
-    let id = embed(schema_value::<UnitId>(), &mut defs);
+    let id = target_schema(&mut defs);
     let mut props = Map::new();
     props.insert("id".into(), id);
     if let Some(p) = payload {
@@ -503,29 +533,34 @@ pub fn unit_cli_commands() -> Vec<clap::Command> {
 /// kind is a first-class command. Each verb/action leaf accepts `--json '{…}'`
 /// or `key=value` pairs; its `--help` shows the live description + typed input
 /// schema, reflecting exactly what the currently-loaded plugins expose.
-/// The unit commands that may actually be registered, paired with their kind
-/// names — filtered so a kind colliding with an existing static command is
-/// dropped ("static wins").
-///
-/// Returns BOTH halves from one place on purpose. Building the command list and
-/// the dispatch-routing list separately is what let them drift: the routing list
-/// was sourced from the unfiltered [`unit_kinds_from`], so a colliding kind was
-/// skipped at registration yet still claimed at dispatch, shadowing the static
-/// command. One filter, one pass, two outputs that cannot disagree.
-pub fn registrable_unit_commands(
+/// Splice the unit commands into `root` and return the `<kind>.<leaf>` names
+/// they route. A kind that is already a static command keeps its static leaves
+/// and gains only the unit leaves it lacks, so both share one `orca <kind>`.
+pub fn register_unit_commands(
+    mut root: clap::Command,
     ops: Vec<UnitOp>,
-    existing: &std::collections::HashSet<String>,
-) -> (Vec<clap::Command>, Vec<String>) {
-    let mut cmds = Vec::new();
-    let mut kinds = Vec::new();
+) -> (clap::Command, Vec<String>) {
+    let mut routed = Vec::new();
     for cmd in unit_cli_commands_from(ops) {
-        let name = cmd.get_name().to_string();
-        if !existing.contains(&name) {
-            kinds.push(name);
-            cmds.push(cmd);
-        }
+        let kind = cmd.get_name().to_string();
+        let taken: Option<std::collections::HashSet<String>> =
+            root.find_subcommand(&kind).map(|c| {
+                c.get_subcommands()
+                    .map(|l| l.get_name().to_string())
+                    .collect()
+            });
+        let leaves: Vec<clap::Command> = cmd
+            .get_subcommands()
+            .filter(|l| taken.as_ref().is_none_or(|t| !t.contains(l.get_name())))
+            .cloned()
+            .collect();
+        routed.extend(leaves.iter().map(|l| format!("{kind}.{}", l.get_name())));
+        root = match taken {
+            None => root.subcommand(cmd),
+            Some(_) => root.mut_subcommand(kind, |c| c.subcommands(leaves)),
+        };
     }
-    (cmds, kinds)
+    (root, routed)
 }
 
 pub fn unit_cli_commands_from(ops: Vec<UnitOp>) -> Vec<clap::Command> {
@@ -616,7 +651,7 @@ async fn run(
             unit::dispatch(VerbArgs::List(ListArgs { query })).await?
         }
         Verb::Detail => {
-            let id = parse_id(&spec.name, args)?;
+            let id = target_id(&spec, args).await?;
             let query: QueryArgs = args
                 .get("query")
                 .cloned()
@@ -627,11 +662,14 @@ async fn run(
             unit::dispatch(VerbArgs::Detail(DetailArgs { id, query })).await?
         }
         Verb::Delete => {
-            let id = parse_id(&spec.name, args)?;
+            let id = target_id(&spec, args).await?;
+            if crate::erased::dry_run_requested(args)? {
+                return delete_plan(&spec.kind, id).await;
+            }
             unit::dispatch(VerbArgs::Delete(DeleteArgs { id, caller })).await?
         }
         Verb::Update => {
-            let id = parse_id(&spec.name, args)?;
+            let id = target_id(&spec, args).await?;
             let payload = args.get("payload").map(|v| v.to_string());
             let action = spec
                 .action
@@ -646,7 +684,7 @@ async fn run(
             .await?
         }
         Verb::Upsert => {
-            let id = parse_id(&spec.name, args)?;
+            let id = target_id(&spec, args).await?;
             let payload = args.get("payload").map(|v| v.to_string());
             let action = spec
                 .action
@@ -702,6 +740,95 @@ async fn run(
         unit::VerbOutcome::Action(a) => serde_json::to_value(a),
     };
     value.map_err(|e| anyhow::anyhow!("encode outcome: {e}"))
+}
+
+async fn target_id(spec: &OpSpec, args: &Value) -> Result<UnitId> {
+    match args.get("id").and_then(Value::as_str).map(str::trim) {
+        Some(sel) if !sel.is_empty() => resolve_unit(&spec.kind, sel).await,
+        _ => parse_id(&spec.name, args),
+    }
+}
+
+async fn listed(provider: &dyn unit::UnitProvider, kind: &str) -> Result<Vec<UnitId>> {
+    let query = QueryArgs {
+        kind: Some(kind.to_string()),
+        ..Default::default()
+    };
+    match provider.invoke(VerbArgs::List(ListArgs { query })).await? {
+        unit::VerbOutcome::Items(items) => Ok(items
+            .items
+            .into_iter()
+            .map(|i| i.id)
+            .filter(|id| id.kind == kind)
+            .collect()),
+        other => anyhow::bail!("{} returned a non-list outcome: {other:?}", provider.name()),
+    }
+}
+
+pub async fn resolve_unit(kind: &str, sel: &str) -> Result<UnitId> {
+    let providers = unit::providers_for_kind(kind);
+    let mut found: Vec<UnitId> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for p in &providers {
+        match listed(p.as_ref(), kind).await {
+            Ok(ids) => {
+                for id in ids {
+                    if (id.id == sel || id.name == sel) && !found.contains(&id) {
+                        found.push(id);
+                    }
+                }
+            }
+            Err(e) => failed.push(format!("{} ({e:#})", p.name())),
+        }
+    }
+    let checked: Vec<&str> = providers.iter().map(|p| p.name()).collect();
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 if failed.is_empty() => Err(contract::OrcaError::not_found(format!(
+            "no {kind} '{sel}' on this system; managers checked: {checked:?}"
+        ))
+        .into()),
+        0 => Err(contract::OrcaError::not_found(format!(
+            "no {kind} '{sel}' on this system; managers checked: {checked:?}; unreachable: {failed:?}"
+        ))
+        .into()),
+        _ => {
+            let candidates: Vec<String> = found
+                .iter()
+                .map(|id| format!("{}/{} ({})", id.manager, id.id, id.name))
+                .collect();
+            Err(contract::OrcaError::invalid(format!(
+                "{kind} '{sel}' is ambiguous across managers: {candidates:?}; pass the full id"
+            ))
+            .with_code("args.invalid")
+            .into())
+        }
+    }
+}
+
+async fn delete_plan(kind: &str, id: UnitId) -> Result<Value> {
+    let owner = unit::owner_of(&id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no provider owns unit '{}' (manager '{}')",
+            id.id,
+            id.manager
+        )
+    })?;
+    if !listed(owner.as_ref(), kind).await?.contains(&id) {
+        return Err(contract::OrcaError::not_found(format!(
+            "no {kind} '{}' on manager '{}'",
+            id.id, id.manager
+        ))
+        .into());
+    }
+    serde_json::to_value(unit::ActionOutcome {
+        changed: false,
+        message: format!(
+            "dry run: would delete {kind} '{}' ({}) on {}",
+            id.name, id.id, id.manager
+        ),
+    })
+    .map_err(|e| anyhow::anyhow!("encode outcome: {e}"))
 }
 
 fn parse_id(tool: &str, args: &Value) -> Result<UnitId> {
@@ -1246,36 +1373,38 @@ mod tests {
     }
 
     #[test]
-    fn registrable_drops_kinds_colliding_with_static_commands() {
+    fn a_static_kind_gains_only_the_unit_leaves_it_lacks() {
         let (name, kind) = setup("collide");
-        let ops = unit_ops();
-        // Pretend the colliding kind is already a static top-level command.
-        let existing: std::collections::HashSet<String> = [kind.to_string()].into_iter().collect();
-        let (cmds, kinds) = registrable_unit_commands(ops, &existing);
-        // Neither half may mention it: not registered, AND not routable. A kind
-        // present in `kinds` but absent from `cmds` is the bug this guards —
-        // dispatch would claim a command that was never registered, shadowing
-        // the static one.
-        assert!(
-            !kinds.contains(&kind),
-            "colliding kind must not be routable: {kinds:?}"
+        let root = clap::Command::new("orca").subcommand(
+            clap::Command::new(&*Box::leak(kind.clone().into_boxed_str()))
+                .subcommand(clap::Command::new("list").about("static list")),
         );
-        assert!(
-            !cmds.iter().any(|c| c.get_name() == kind.as_str()),
-            "colliding kind must not be registered"
+        let (root, routes) = register_unit_commands(root, unit_ops());
+        let kind_cmd = root.find_subcommand(&kind).expect("kind command");
+        let leaves: Vec<&str> = kind_cmd.get_subcommands().map(|s| s.get_name()).collect();
+        for want in ["list", "detail", "delete", "spin", "forge"] {
+            assert!(leaves.contains(&want), "missing {want} in {leaves:?}");
+        }
+        assert_eq!(leaves.iter().filter(|l| **l == "list").count(), 1);
+        let list = kind_cmd.find_subcommand("list").expect("list");
+        assert_eq!(
+            list.get_about().map(|a| a.to_string()).as_deref(),
+            Some("static list")
         );
+        assert!(!routes.contains(&format!("{kind}.list")), "{routes:?}");
+        assert!(routes.contains(&format!("{kind}.spin")), "{routes:?}");
         assert!(unit::deregister_provider(&name));
     }
 
     #[test]
-    fn registrable_keeps_kinds_and_commands_in_lockstep() {
-        let (name, _kind) = setup("lockstep");
-        let ops = unit_ops();
-        let (cmds, kinds) = registrable_unit_commands(ops, &std::collections::HashSet::new());
-        // With no collisions everything registers, and the two halves agree
-        // exactly — the invariant that makes dispatch routing safe.
-        let cmd_names: Vec<String> = cmds.iter().map(|c| c.get_name().to_string()).collect();
-        assert_eq!(cmd_names, kinds);
+    fn a_new_kind_routes_every_leaf() {
+        let (name, kind) = setup("lockstep");
+        let (root, routes) = register_unit_commands(clap::Command::new("orca"), unit_ops());
+        let kind_cmd = root.find_subcommand(&kind).expect("kind command");
+        for leaf in kind_cmd.get_subcommands() {
+            let full = format!("{kind}.{}", leaf.get_name());
+            assert!(routes.contains(&full), "{full} not routed: {routes:?}");
+        }
         assert!(unit::deregister_provider(&name));
     }
 
@@ -1300,6 +1429,228 @@ mod tests {
             arr.iter()
                 .any(|o| o["name"] == format!("{kind}.list").as_str()),
             "catalog missing {kind}.list"
+        );
+        assert!(unit::deregister_provider(&name));
+    }
+
+    // ── Owner resolution: a bare name/id picks the manager that owns it ──
+
+    struct OwnerProvider {
+        name: String,
+        kind: String,
+        units: Vec<UnitId>,
+        deleted: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl UnitProvider for OwnerProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn declarations(&self) -> Vec<KindDeclaration> {
+            vec![KindDeclaration {
+                kind: self.kind.clone(),
+                backup_spec: None,
+                verbs: vec![
+                    VerbDecl::list(),
+                    VerbDecl::update(vec![ActionDecl::new("start")]),
+                    VerbDecl::delete(),
+                ],
+            }]
+        }
+        fn units(&self) -> BoxFuture<'_, Result<Vec<UnitDescriptor>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn invoke(&self, args: VerbArgs) -> BoxFuture<'_, Result<VerbOutcome>> {
+            let (units, deleted, name) =
+                (self.units.clone(), self.deleted.clone(), self.name.clone());
+            Box::pin(async move {
+                Ok(match args {
+                    VerbArgs::List(_) => VerbOutcome::Items(ItemsOutcome {
+                        items: units
+                            .into_iter()
+                            .map(|id| ItemOutcome::new(id, "{}".into()))
+                            .collect(),
+                        total: None,
+                    }),
+                    VerbArgs::Update(u) => VerbOutcome::Action(ActionOutcome {
+                        changed: true,
+                        message: format!("{name}:{}:{}", u.action, u.id.manager),
+                    }),
+                    VerbArgs::Delete(d) => {
+                        deleted.lock().unwrap().push(d.id.id.clone());
+                        VerbOutcome::Action(ActionOutcome {
+                            changed: true,
+                            message: format!("deleted:{}", d.id.manager),
+                        })
+                    }
+                    _ => VerbOutcome::Action(ActionOutcome::default()),
+                })
+            })
+        }
+    }
+
+    type Deleted = Arc<std::sync::Mutex<Vec<String>>>;
+
+    fn owner(base: &str, scope: &str, kind: &str, units: &[(&str, &str)]) -> Deleted {
+        let manager = UnitId::scoped_manager(base, scope);
+        let deleted: Deleted = Arc::default();
+        register_provider(Arc::new(OwnerProvider {
+            name: base.into(),
+            kind: kind.into(),
+            units: units
+                .iter()
+                .map(|(id, name)| UnitId {
+                    manager: manager.clone(),
+                    kind: kind.into(),
+                    id: (*id).into(),
+                    name: (*name).into(),
+                })
+                .collect(),
+            deleted: deleted.clone(),
+        }));
+        deleted
+    }
+
+    #[tokio::test]
+    async fn a_bare_name_routes_to_the_manager_that_owns_it() {
+        let kind = "own_route";
+        owner("unraid-r", "tower", kind, &[("abc123", "plex")]);
+        owner("docker-r", "willow", kind, &[("def456", "sonarr")]);
+        let tool = format!("{kind}.start");
+        let out = unit_dispatch(&tool, &json!({ "id": "plex" }), None)
+            .await
+            .expect("is a unit op")
+            .expect("ok");
+        assert_eq!(out["message"], "unraid-r:start:unraid-r@tower");
+        let out = unit_dispatch(&tool, &json!({ "id": "def456" }), None)
+            .await
+            .expect("is a unit op")
+            .expect("ok");
+        assert_eq!(out["message"], "docker-r:start:docker-r@willow");
+        assert!(unit::deregister_provider("unraid-r"));
+        assert!(unit::deregister_provider("docker-r"));
+    }
+
+    #[tokio::test]
+    async fn a_name_two_managers_own_is_ambiguous_and_lists_them() {
+        let kind = "own_amb";
+        owner("unraid-a", "tower", kind, &[("abc", "plex")]);
+        owner("docker-a", "willow", kind, &[("def", "plex")]);
+        let err = unit_dispatch(&format!("{kind}.start"), &json!({ "id": "plex" }), None)
+            .await
+            .expect("is a unit op")
+            .expect_err("ambiguous");
+        let msg = err.to_string();
+        assert!(msg.contains("ambiguous"), "{msg}");
+        assert!(msg.contains("unraid-a@tower/abc"), "{msg}");
+        assert!(msg.contains("docker-a@willow/def"), "{msg}");
+        assert!(unit::deregister_provider("unraid-a"));
+        assert!(unit::deregister_provider("docker-a"));
+    }
+
+    #[tokio::test]
+    async fn a_name_no_manager_owns_lists_the_managers_checked() {
+        let kind = "own_none";
+        owner("unraid-n", "tower", kind, &[("abc", "plex")]);
+        let err = unit_dispatch(&format!("{kind}.start"), &json!({ "id": "ghost" }), None)
+            .await
+            .expect("is a unit op")
+            .expect_err("not found");
+        let msg = err.to_string();
+        assert!(msg.contains("no own_none 'ghost'"), "{msg}");
+        assert!(msg.contains("unraid-n"), "{msg}");
+        assert!(unit::deregister_provider("unraid-n"));
+    }
+
+    fn test_ctx() -> contract::ToolCtx {
+        let cfg = contract::config::Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: contract::config::Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: std::env::temp_dir(),
+            memory_root: std::env::temp_dir(),
+            db_path: std::env::temp_dir().join("unit-surface-test.db"),
+            ports: Default::default(),
+        };
+        contract::ToolCtx::new(Arc::new(cfg))
+    }
+
+    #[tokio::test]
+    async fn delete_dry_run_resolves_the_owner_and_deletes_nothing() {
+        let kind = "own_del";
+        let deleted = owner("unraid-d", "tower", kind, &[("abc", "plex")]);
+        let tool = format!("{kind}.delete");
+        let ctx = test_ctx();
+        let out = crate::dispatch(&tool, json!({ "id": "plex", "dryRun": true }), &ctx)
+            .await
+            .expect("dry run");
+        assert_eq!(out["changed"], false);
+        assert_eq!(
+            out["message"],
+            "dry run: would delete own_del 'plex' (abc) on unraid-d@tower"
+        );
+        assert!(deleted.lock().unwrap().is_empty());
+
+        let out = crate::dispatch(&tool, json!({ "id": "plex" }), &ctx)
+            .await
+            .expect("delete");
+        assert_eq!(out["message"], "deleted:unraid-d@tower");
+        assert_eq!(*deleted.lock().unwrap(), vec!["abc".to_string()]);
+        assert!(unit::deregister_provider("unraid-d"));
+    }
+
+    #[tokio::test]
+    async fn delete_dry_run_of_a_missing_unit_is_not_found() {
+        let kind = "own_delx";
+        owner("unraid-x", "tower", kind, &[("abc", "plex")]);
+        let ghost = UnitId {
+            manager: "unraid-x@tower".into(),
+            kind: kind.into(),
+            id: "zzz".into(),
+            name: "zzz".into(),
+        };
+        let err = crate::dispatch(
+            &format!("{kind}.delete"),
+            json!({ "id": ghost, "dryRun": true }),
+            &test_ctx(),
+        )
+        .await
+        .expect_err("missing");
+        assert!(err.to_string().contains("no own_delx 'zzz'"), "{err}");
+        assert!(unit::deregister_provider("unraid-x"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_on_a_non_delete_unit_op_is_still_refused() {
+        let kind = "own_upd";
+        owner("unraid-u", "tower", kind, &[("abc", "plex")]);
+        let err = crate::dispatch(
+            &format!("{kind}.start"),
+            json!({ "id": "plex", "dryRun": true }),
+            &test_ctx(),
+        )
+        .await
+        .expect_err("refused");
+        assert!(err.to_string().contains("does not support dryRun"), "{err}");
+        assert!(unit::deregister_provider("unraid-u"));
+    }
+
+    #[test]
+    fn delete_schema_advertises_dry_run_and_a_name_target() {
+        let (name, kind) = setup("delschema");
+        let ops = unit_ops();
+        let del = ops
+            .iter()
+            .find(|o| o.name == format!("{kind}.delete"))
+            .expect("delete op");
+        assert_eq!(del.input_schema["properties"]["dryRun"]["type"], "boolean");
+        assert_eq!(
+            del.input_schema["properties"]["id"]["anyOf"][1]["type"],
+            "string"
         );
         assert!(unit::deregister_provider(&name));
     }
