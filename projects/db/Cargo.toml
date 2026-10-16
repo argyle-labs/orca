@@ -9,19 +9,8 @@ name = "db"
 path = "src/lib.rs"
 
 [features]
-# ON BY DEFAULT, so every existing consumer (server/runtime/mcp/spec and the
-# daemon itself) is byte-for-byte unchanged. Exists solely so a THIN plugin can
-# opt OUT: `notifications` takes `db` with `default-features = false`, which is
-# the only path by which `db` reaches a plugin's dependency graph.
-#
-# Gates `db::openapi_specs_registry` and `db::plugin_creds` — the only two
-# modules that touch the network. Both are daemon-side; nothing plugin-facing
-# needs them.
 default = ["http", "config"]
 http = ["dep:reqwest"]
-# Gates `db::{plugin_manifest, startup, schema}` — the only modules that parse
-# TOML. Same rationale as `http`: default-on so the daemon is unchanged, opt-out
-# so the plugin-facing edge (`notifications`) carries no parser.
 config = ["dep:toml"]
 # Exposes `db::testing::test_conn` (an in-memory schema+migrations connection)
 # to downstream crates' test binaries. Enabled by domain crates that own query
@@ -47,22 +36,11 @@ serde_json  = { workspace = true }
 rusqlite    = { workspace = true }
 include_dir = { workspace = true }
 getrandom   = { workspace = true }
-# Optional, behind the default-on `config` feature. Only three modules use the
-# crate — `plugin_manifest`, `startup` and `schema::view` — all daemon-side. `db`
-# is reached by every THIN plugin through `notifications` -> `containers` ->
-# `plugin-toolkit`, so a non-optional toml here put a parser in plugins that
-# never read a config file.
 toml        = { workspace = true, optional = true }
 schemars    = { workspace = true }
 sha2        = { workspace = true }
 async-trait = { workspace = true }
 inventory   = { workspace = true }
-# Optional, behind the default-on `http` feature. Only `openapi_specs_registry`
-# and `plugin_creds` use it, and both are daemon-side concerns — but `db` is
-# reached by every THIN plugin through `notifications` -> `containers` ->
-# `plugin-toolkit`, so a non-optional reqwest here put the whole HTTP + TLS stack
-# in plugins that never make an outbound request. Measured on the proxmox plugin
-# at v0.2.1-rc.5: `db` was the SOLE parent of reqwest in its graph.
 reqwest     = { workspace = true, features = ["blocking"], optional = true }
 # Foreign-database schema introspection (`db::schema`) — connects to external
 # MySQL/Postgres engines to render the `schema.*` tabbed view. Folded in from
