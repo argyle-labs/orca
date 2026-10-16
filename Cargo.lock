@@ -4586,8 +4586,10 @@ name = "orca-plugin-toolkit-build"
 version = "0.2.1-rc.19"
 dependencies = [
  "anyhow",
+ "graphql-parser",
  "graphql_client_codegen",
  "openapiv3",
+ "orca-dispatch",
  "orca-openapi",
  "orca-utils",
  "prettyplease",
