@@ -52,6 +52,12 @@ pub struct SchemaFragment {
 
 ::inventory::collect!(SchemaFragment);
 
+pub struct SharedEndpointProvider {
+    pub plugin: &'static str,
+}
+
+::inventory::collect!(SharedEndpointProvider);
+
 /// One entry per `#[derive(Replicated)]` type. Gated behind `replication`
 /// because its export/merge fns take a live `rusqlite::Connection` — a
 /// core-only concern (the daemon owns the connection + drives mesh sync).

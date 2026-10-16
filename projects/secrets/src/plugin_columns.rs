@@ -134,7 +134,7 @@ mod tests {
 
     fn seeded() -> Connection {
         let conn = test_conn();
-        db::plugin_tables::apply_decl(&conn, &decl()).unwrap();
+        db::plugin_tables::apply_decl(&conn, "acme", &decl()).unwrap();
         conn.execute_batch(
             "INSERT INTO plug__acme__endpoints (name, token) VALUES \
              ('a', 'tok-a'), ('b', ''), ('c', NULL)",
@@ -220,7 +220,7 @@ mod tests {
         let mut other = d.tables[0].clone();
         other.table = "mirrors".into();
         d.tables.push(other);
-        db::plugin_tables::apply_decl(&conn, &d).unwrap();
+        db::plugin_tables::apply_decl(&conn, &d.namespace, &d).unwrap();
         conn.execute_batch("INSERT INTO plug__acme__mirrors (name, token) VALUES ('a', 'tok-m')")
             .unwrap();
         assert!(migrate_secret_columns(&conn, "acme", &d, false).is_err());

@@ -621,7 +621,11 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     // `apply_schema`. That is the whole fix — a per-plugin fragment is
     // process-local to a subprocess plugin binary and never reaches core.
     let schema_fragment = if shared {
-        quote! {}
+        quote! {
+            #crate_path::inventory::submit! {
+                #crate_path::SharedEndpointProvider { plugin: #plugin_str_lit }
+            }
+        }
     } else {
         quote! {
             #crate_path::inventory::submit! {
