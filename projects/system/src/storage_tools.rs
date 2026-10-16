@@ -1222,6 +1222,9 @@ pub struct StorageExportUpdateArgs {
     /// DANGEROUS: permits `no_root_squash`, `insecure` and `no_all_squash`.
     #[arg(long)]
     pub allow_unsafe: bool,
+    #[arg(skip)]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub preview: bool,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -1231,6 +1234,17 @@ pub struct StorageExportDeleteArgs {
     pub provider: String,
     #[arg(long)]
     pub path: String,
+    #[arg(skip)]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub preview: bool,
+}
+
+fn neutralize_export_update(args: &mut StorageExportUpdateArgs) {
+    args.preview = true;
+}
+
+fn neutralize_export_delete(args: &mut StorageExportDeleteArgs) {
+    args.preview = true;
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -1289,7 +1303,8 @@ async fn current_export(
     verb = "update",
     role = "admin",
     execute_gated = false,
-    dry_run_aware = true
+    dry_run_aware = true,
+    dry_run_neutralize = neutralize_export_update
 )]
 async fn storage_export_update(
     args: StorageExportUpdateArgs,
@@ -1308,7 +1323,8 @@ async fn storage_export_update(
     policy.validate(&entry)?;
     let before = current_export(b.as_ref(), &entry.path).await?;
     let path = entry.path.clone();
-    let after = if ctx.dry_run() {
+    let dry_run = ctx.dry_run() || args.preview;
+    let after = if dry_run {
         entry
     } else {
         b.upsert_export_checked(&entry, policy).await?
@@ -1316,7 +1332,7 @@ async fn storage_export_update(
     Ok(StorageExportWriteOutput {
         provider: args.provider,
         path,
-        dry_run: ctx.dry_run(),
+        dry_run,
         before,
         after: Some(export_row(b.name(), after)),
     })
@@ -1329,7 +1345,8 @@ async fn storage_export_update(
     verb = "delete",
     role = "admin",
     execute_gated = false,
-    dry_run_aware = true
+    dry_run_aware = true,
+    dry_run_neutralize = neutralize_export_delete
 )]
 async fn storage_export_delete(
     args: StorageExportDeleteArgs,
@@ -1337,13 +1354,14 @@ async fn storage_export_delete(
 ) -> anyhow::Result<StorageExportWriteOutput> {
     let b = export_write_backend(&args.provider)?;
     let before = current_export(b.as_ref(), &args.path).await?;
-    if !ctx.dry_run() {
+    let dry_run = ctx.dry_run() || args.preview;
+    if !dry_run {
         b.remove_export(&args.path).await?;
     }
     Ok(StorageExportWriteOutput {
         provider: args.provider,
         path: args.path,
-        dry_run: ctx.dry_run(),
+        dry_run,
         before,
         after: None,
     })
@@ -5165,6 +5183,7 @@ mod tests {
             options: options.iter().map(|s| s.to_string()).collect(),
             fsid: Some("7".into()),
             allow_unsafe: false,
+            preview: false,
         }
     }
 
@@ -5216,6 +5235,7 @@ mod tests {
                 StorageExportDeleteArgs {
                     provider: "fake-exp-w".into(),
                     path: "/srv/data".into(),
+                    preview: false,
                 },
                 &ctx,
             ))
@@ -5223,6 +5243,21 @@ mod tests {
         });
         assert!(out.before.is_some());
         assert!(out.after.is_none());
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn export_neutralized_args_preview_without_dry_run() {
+        use plugin_toolkit::storage::StorageCapability;
+        let ctx = test_ctx();
+        let mut args = export_update_args(&["10.0.0.13"], &["ro"]);
+        neutralize_export_update(&mut args);
+        let caps = [StorageCapability::Exports, StorageCapability::ExportWrite];
+        let out = with_backend("fake-exp-w", &caps, || {
+            rt().block_on(storage_export_update(args, &ctx))
+                .expect("preview ok")
+        });
+        assert!(out.dry_run);
     }
 
     #[test]
