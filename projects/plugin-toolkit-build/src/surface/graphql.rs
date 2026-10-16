@@ -6,8 +6,9 @@
 //! operation.
 //!
 //! It writes `<plugin>_surface.rs` — an `#[orca_tool]` wrapper per operation.
-//! Query operations surface as read tools; mutations get `data_mutation = true`
-//! together with `role = "admin"`. The args struct carries the operation's
+//! Operation kind comes from the parsed GraphQL document; a document that fails
+//! to parse or classify aborts generation. Query operations surface as read
+//! tools; mutations surface as `role = "admin"` control-plane tools. The args struct carries the operation's
 //! `Variables` as typed fields plus the endpoint/override selection; the return
 //! is the operation's typed `ResponseData`. It also anchors JsonSchema (and the
 //! missing serde direction) onto every type in each surfaced operation module,
@@ -19,16 +20,21 @@
 //! tree (`ResponseData` + nested structs, `Deserialize`). So anchoring the whole
 //! module is exactly the transitive closure — no graph walk needed.
 //!
-//! A specific mutation can be made user-callable without the `can_mutate`
-//! opt-in by adding a `# @orca:user-callable` comment line to its `.graphql`
-//! file — it then keeps `data_mutation = true` but is emitted `role = "read"`.
+//! Per-file marker comments in the `.graphql` source adjust the emitted tool:
+//! - `# @orca:admin` — force `role = "admin"` (for sensitive queries).
+//! - `# @orca:no-tool` — bind the operation for codegen but emit no tool.
+//! - `# @orca:data-mutation` — a mutation gains `data_mutation = true`, opening
+//!   it to non-admin `can_mutate` callers.
+//! - `# @orca:user-callable` — a mutation gains `data_mutation = true` and is
+//!   emitted `role = "read"`.
 
 #![allow(clippy::disallowed_types)]
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use graphql_parser::query::{Definition, OperationDefinition};
 use regex::Regex;
 
 use crate::surface::common::{
@@ -48,6 +54,16 @@ fn scalar_primitive(ident: &str) -> Option<&'static str> {
     })
 }
 
+const VERSION_SCALARS: &[&str] = &["BigInt", "DateTime", "JSON", "Port", "PrefixedID", "URL"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Markers {
+    user_callable: bool,
+    admin: bool,
+    no_tool: bool,
+    data_mutation: bool,
+}
+
 /// Rust primitives a `Variables` field can already be, rendered as-is.
 const PRIMITIVES: &[&str] = &[
     "bool", "String", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64",
@@ -59,7 +75,7 @@ struct Op {
     module: String,
     /// PascalCase marker struct implementing `GraphQLQuery` (`AddPlugin`).
     marker: String,
-    /// `true` for `mutation` operations → `data_mutation` + `role = "admin"`.
+    /// `true` for `mutation` operations → `role = "admin"`.
     is_mutation: bool,
     /// `Variables` fields as `(name, rendered_type)`. Empty ⇒ unit `Variables`
     /// (no arguments).
@@ -70,8 +86,7 @@ struct Op {
 ///
 /// - `out_dir`: the codegen output dir (`OUT_DIR`). Reads (and rewrites, to
 ///   anchor JsonSchema) `<out_dir>/modules.rs`; writes `<plugin>_surface.rs`.
-/// - `queries_dir`: the `.graphql` sources — scanned for the
-///   `# @orca:user-callable` per-operation exception.
+/// - `queries_dir`: the `.graphql` sources — scanned for `# @orca:*` markers.
 /// - `plugin_name`: the tool domain + emitted-file prefix (`"unraid"`).
 pub fn generate(out_dir: &Path, queries_dir: &Path, plugin_name: &str) -> Result<()> {
     let modules_path = out_dir.join("modules.rs");
@@ -79,7 +94,7 @@ pub fn generate(out_dir: &Path, queries_dir: &Path, plugin_name: &str) -> Result
         .with_context(|| format!("read {}", modules_path.display()))?;
     let mut file: syn::File = syn::parse_file(&src).context("parse generated modules.rs")?;
 
-    let user_callable = user_callable_operations(queries_dir);
+    let markers = operation_markers(queries_dir)?;
 
     // Newest committed version module (`v7_3_1`); ties break to the max ident,
     // matching the toolkit codegen's sort + `ApiVersion::newest`.
@@ -92,17 +107,24 @@ pub fn generate(out_dir: &Path, queries_dir: &Path, plugin_name: &str) -> Result
 
     let mut ops = Vec::new();
     let mut anchored = 0usize;
+    let mut excluded = 0usize;
     for item in gen_items.iter_mut() {
         let syn::Item::Mod(m) = item else { continue };
         let Some((_, items)) = m.content.as_mut() else {
             continue;
         };
         let module = m.ident.to_string();
-        let Some((marker, is_mutation)) = op_meta(items) else {
+        let Some((marker, is_mutation)) =
+            op_meta(items).with_context(|| format!("surface[{plugin_name}]: `{module}`"))?
+        else {
             continue;
         };
+        if markers.get(&marker).is_some_and(|m| m.no_tool) {
+            excluded += 1;
+            continue;
+        }
         let mod_qualifier = format!("{qualifier}::{module}");
-        let var_fields = match variables_fields(items, &mod_qualifier) {
+        let var_fields = match variables_fields(items, &qualifier, &mod_qualifier) {
             Some(f) => f,
             None => {
                 println!(
@@ -125,27 +147,26 @@ pub fn generate(out_dir: &Path, queries_dir: &Path, plugin_name: &str) -> Result
 
     let exception_hits = ops
         .iter()
-        .filter(|o| o.is_mutation && user_callable.contains(&o.marker))
+        .filter(|o| o.is_mutation && markers.get(&o.marker).is_some_and(|m| m.user_callable))
         .count();
-    let surface = emit_surface(&ops, &qualifier, plugin_name, &user_callable);
+    let surface = emit_surface(&ops, &qualifier, plugin_name, &markers);
     let surface_path = out_dir.join(format!("{plugin_name}_surface.rs"));
     std::fs::write(&surface_path, surface)
         .with_context(|| format!("write {}", surface_path.display()))?;
 
     println!(
         "cargo:warning=surface[{plugin_name}]: {} tool(s) emitted from {version}, \
-         JsonSchema anchored on {anchored} type(s), {exception_hits} user-callable exception(s)",
+         JsonSchema anchored on {anchored} type(s), {exception_hits} user-callable exception(s), \
+         {excluded} excluded",
         ops.len()
     );
     Ok(())
 }
 
-/// Operation names (PascalCase, matching `OPERATION_NAME`) whose `.graphql`
-/// source carries a `# @orca:user-callable` marker comment.
-fn user_callable_operations(queries_dir: &Path) -> HashSet<String> {
-    let mut out = HashSet::new();
+fn operation_markers(queries_dir: &Path) -> Result<HashMap<String, Markers>> {
+    let mut out = HashMap::new();
     let Ok(rd) = std::fs::read_dir(queries_dir) else {
-        return out;
+        return Ok(out);
     };
     for entry in rd.flatten() {
         let p = entry.path();
@@ -153,32 +174,38 @@ fn user_callable_operations(queries_dir: &Path) -> HashSet<String> {
             continue;
         }
         println!("cargo:rerun-if-changed={}", p.display());
-        let Ok(text) = std::fs::read_to_string(&p) else {
-            continue;
-        };
-        if !text_has_marker(&text) {
+        let text = std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
+        let m = file_markers(&text);
+        if m == Markers::default() {
             continue;
         }
         for name in operation_names(&text) {
-            out.insert(name);
+            out.insert(name, m);
         }
     }
-    out
+    Ok(out)
 }
 
-/// True if any line is a `# @orca:user-callable` comment (case-insensitive,
-/// tolerant of surrounding whitespace and extra `#`).
-fn text_has_marker(text: &str) -> bool {
-    text.lines().any(|l| {
-        let t = l.trim();
-        let Some(rest) = t.strip_prefix('#') else {
-            return false;
+fn file_markers(text: &str) -> Markers {
+    let mut m = Markers::default();
+    for l in text.lines() {
+        let Some(rest) = l.trim().strip_prefix('#') else {
+            continue;
         };
-        rest.trim_start_matches('#')
-            .trim()
-            .to_ascii_lowercase()
-            .starts_with("@orca:user-callable")
-    })
+        let t = rest.trim_start_matches('#').trim().to_ascii_lowercase();
+        let Some(name) = t.strip_prefix("@orca:") else {
+            continue;
+        };
+        let name = name.split_whitespace().next().unwrap_or("");
+        match name {
+            "user-callable" => m.user_callable = true,
+            "admin" => m.admin = true,
+            "no-tool" => m.no_tool = true,
+            "data-mutation" => m.data_mutation = true,
+            _ => {}
+        }
+    }
+    m
 }
 
 /// The operation names declared in a `.graphql` document (`query X`,
@@ -219,14 +246,53 @@ fn generated_items_mut<'a>(
     })
 }
 
-/// Read an operation module's `OPERATION_NAME` (marker struct) and classify
-/// `QUERY` as query vs mutation. `None` when the module isn't an operation
-/// module (no `OPERATION_NAME` const).
-fn op_meta(items: &[syn::Item]) -> Option<(String, bool)> {
-    let marker = const_str_value(items, "OPERATION_NAME")?;
-    let query = const_str_value(items, "QUERY").unwrap_or_default();
-    let is_mutation = query.trim_start().starts_with("mutation");
-    Some((marker, is_mutation))
+/// Read an operation module's `OPERATION_NAME` (marker struct) and classify it
+/// as query vs mutation from the parsed `QUERY` document. `Ok(None)` when the
+/// module isn't an operation module (no `OPERATION_NAME` const); `Err` when the
+/// kind can't be determined unambiguously.
+fn op_meta(items: &[syn::Item]) -> Result<Option<(String, bool)>> {
+    let Some(marker) = const_str_value(items, "OPERATION_NAME") else {
+        return Ok(None);
+    };
+    let query = const_str_value(items, "QUERY")
+        .with_context(|| format!("operation `{marker}` has no QUERY document"))?;
+    let is_mutation = classify(&query, &marker)?;
+    Ok(Some((marker, is_mutation)))
+}
+
+fn classify(doc: &str, name: &str) -> Result<bool> {
+    let parsed = graphql_parser::parse_query::<&str>(doc)
+        .map_err(|e| anyhow::anyhow!("parse operation `{name}`: {e}"))?;
+    let ops: Vec<&OperationDefinition<'_, &str>> = parsed
+        .definitions
+        .iter()
+        .filter_map(|d| match d {
+            Definition::Operation(o) => Some(o),
+            Definition::Fragment(_) => None,
+        })
+        .collect();
+    let named: Vec<_> = ops.iter().filter(|o| op_name(o) == Some(name)).collect();
+    let op = match (named.as_slice(), ops.as_slice()) {
+        ([one], _) => **one,
+        ([], [only]) => *only,
+        _ => bail!("operation `{name}` is missing or ambiguous in its document"),
+    };
+    match op {
+        OperationDefinition::SelectionSet(_) | OperationDefinition::Query(_) => Ok(false),
+        OperationDefinition::Mutation(_) => Ok(true),
+        OperationDefinition::Subscription(_) => {
+            bail!("operation `{name}` is a subscription; not supported")
+        }
+    }
+}
+
+fn op_name<'a>(o: &OperationDefinition<'a, &'a str>) -> Option<&'a str> {
+    match o {
+        OperationDefinition::SelectionSet(_) => None,
+        OperationDefinition::Query(q) => q.name,
+        OperationDefinition::Mutation(m) => m.name,
+        OperationDefinition::Subscription(s) => s.name,
+    }
 }
 
 /// Value of a `pub const <name>: &str = "...";` item.
@@ -247,7 +313,11 @@ fn const_str_value(items: &[syn::Item], name: &str) -> Option<String> {
 /// `Some(vec![])` for a unit `Variables` (no args), and `None` if any field type
 /// can't be confidently rendered (⇒ skip surfacing that op rather than emit
 /// broken code).
-fn variables_fields(items: &[syn::Item], mod_qualifier: &str) -> Option<Vec<(String, String)>> {
+fn variables_fields(
+    items: &[syn::Item],
+    version_qualifier: &str,
+    mod_qualifier: &str,
+) -> Option<Vec<(String, String)>> {
     let vars = items.iter().find_map(|it| match it {
         syn::Item::Struct(s) if s.ident == "Variables" => Some(s),
         _ => None,
@@ -258,7 +328,7 @@ fn variables_fields(items: &[syn::Item], mod_qualifier: &str) -> Option<Vec<(Str
             let mut out = Vec::new();
             for f in &named.named {
                 let name = f.ident.as_ref()?.to_string();
-                let rendered = render_type(&f.ty, mod_qualifier)?;
+                let rendered = render_type(&f.ty, version_qualifier, mod_qualifier)?;
                 out.push((name, rendered));
             }
             Some(out)
@@ -269,9 +339,10 @@ fn variables_fields(items: &[syn::Item], mod_qualifier: &str) -> Option<Vec<(Str
 
 /// Render a `Variables` field type into a path usable from the emitted surface
 /// module. Rust primitives pass through; GraphQL scalar aliases map to their
-/// primitive; a bare local ident (an input object) qualifies to its module
-/// path. Anything else (generics, references) ⇒ `None`.
-fn render_type(ty: &syn::Type, mod_qualifier: &str) -> Option<String> {
+/// primitive; a custom scalar qualifies to the version module; a bare local
+/// ident (an input object) qualifies to its module path. Anything else
+/// (generics, references) ⇒ `None`.
+fn render_type(ty: &syn::Type, version_qualifier: &str, mod_qualifier: &str) -> Option<String> {
     let syn::Type::Path(p) = ty else { return None };
     if p.qself.is_some() || p.path.segments.len() != 1 {
         return None;
@@ -286,6 +357,9 @@ fn render_type(ty: &syn::Type, mod_qualifier: &str) -> Option<String> {
     }
     if let Some(prim) = scalar_primitive(&ident) {
         return Some(prim.to_string());
+    }
+    if VERSION_SCALARS.contains(&ident.as_str()) {
+        return Some(format!("{version_qualifier}::{ident}"));
     }
     // A locally-defined input object — reachable at the module path once we
     // anchor Deserialize/JsonSchema on it.
@@ -340,22 +414,18 @@ fn emit_surface(
     ops: &[Op],
     qualifier: &str,
     plugin_name: &str,
-    user_callable: &HashSet<String>,
+    markers: &HashMap<String, Markers>,
 ) -> String {
     let mut s = String::from(GENERATED_HEADER);
     for op in ops {
-        s.push_str(&emit_one(op, qualifier, plugin_name, user_callable));
+        let m = markers.get(&op.marker).copied().unwrap_or_default();
+        s.push_str(&emit_one(op, qualifier, plugin_name, m));
         s.push('\n');
     }
     s
 }
 
-fn emit_one(
-    op: &Op,
-    qualifier: &str,
-    plugin_name: &str,
-    user_callable: &HashSet<String>,
-) -> String {
+fn emit_one(op: &Op, qualifier: &str, plugin_name: &str, markers: Markers) -> String {
     let Op {
         module,
         marker,
@@ -391,18 +461,15 @@ fn emit_one(
         format!("{mod_path}::Variables {{ {inits} }}")
     };
 
-    // Mutations are data mutations. A mutation flagged `# @orca:user-callable`
-    // keeps that classification but drops to `role = "read"`; otherwise it stays
-    // `role = "admin"` (opt-in gated). Queries stay at the default (any) role.
-    let user_callable_op = *is_mutation && user_callable.contains(marker);
-    let role = if user_callable_op {
-        ", role = \"read\""
-    } else if *is_mutation {
+    let user_callable_op = *is_mutation && markers.user_callable;
+    let role = if markers.admin || (*is_mutation && !user_callable_op) {
         ", role = \"admin\""
+    } else if user_callable_op {
+        ", role = \"read\""
     } else {
         ""
     };
-    let data_mutation = if *is_mutation {
+    let data_mutation = if user_callable_op || (*is_mutation && markers.data_mutation) {
         ", data_mutation = true"
     } else {
         ""
@@ -433,13 +500,28 @@ mod tests {
 
     #[test]
     fn marker_detected_various_spellings() {
-        assert!(text_has_marker("# @orca:user-callable\nmutation X { y }"));
-        assert!(text_has_marker(
-            "#   @Orca:User-Callable  (safe idempotent)\n"
-        ));
-        assert!(text_has_marker("mutation X { y }\n#@orca:user-callable"));
-        assert!(!text_has_marker("mutation X { y }"));
-        assert!(!text_has_marker("# just a normal comment"));
+        let uc = |t: &str| file_markers(t).user_callable;
+        assert!(uc("# @orca:user-callable\nmutation X { y }"));
+        assert!(uc("#   @Orca:User-Callable  (safe idempotent)\n"));
+        assert!(uc("mutation X { y }\n#@orca:user-callable"));
+        assert!(!uc("mutation X { y }"));
+        assert!(!uc("# just a normal comment"));
+    }
+
+    #[test]
+    fn file_markers_reads_each_marker() {
+        let m =
+            file_markers("# @orca:admin\n# @orca:no-tool\n## @orca:data-mutation\nquery X { y }");
+        assert_eq!(
+            m,
+            Markers {
+                user_callable: false,
+                admin: true,
+                no_tool: true,
+                data_mutation: true,
+            }
+        );
+        assert_eq!(file_markers("# @orca:administrator"), Markers::default());
     }
 
     #[test]
@@ -456,7 +538,7 @@ mod tests {
         // A file with the marker contributes its operation name to the set;
         // `emit_one` matches that against `Op.marker` (OPERATION_NAME).
         let text = "# @orca:user-callable\nmutation RestartArray { restartArray }";
-        assert!(text_has_marker(text));
+        assert!(file_markers(text).user_callable);
         assert_eq!(operation_names(text), vec!["RestartArray".to_string()]);
     }
 
@@ -485,24 +567,46 @@ mod tests {
     #[test]
     fn render_type_primitive_scalar_and_input_object() {
         // Rust primitive passes through.
-        assert_eq!(render_type(&ty("i64"), "q::m").as_deref(), Some("i64"));
-        assert_eq!(render_type(&ty("bool"), "q::m").as_deref(), Some("bool"));
+        assert_eq!(render_type(&ty("i64"), "v", "q::m").as_deref(), Some("i64"));
+        assert_eq!(
+            render_type(&ty("bool"), "v", "q::m").as_deref(),
+            Some("bool")
+        );
         // GraphQL scalar alias → primitive.
-        assert_eq!(render_type(&ty("Int"), "q::m").as_deref(), Some("i64"));
-        assert_eq!(render_type(&ty("ID"), "q::m").as_deref(), Some("String"));
+        assert_eq!(render_type(&ty("Int"), "v", "q::m").as_deref(), Some("i64"));
+        assert_eq!(
+            render_type(&ty("ID"), "v", "q::m").as_deref(),
+            Some("String")
+        );
         // Local input object → qualified module path.
         assert_eq!(
-            render_type(&ty("AddPluginInput"), "q::m").as_deref(),
+            render_type(&ty("AddPluginInput"), "v", "q::m").as_deref(),
             Some("q::m::AddPluginInput")
+        );
+        assert_eq!(
+            render_type(&ty("PrefixedID"), "v", "q::m").as_deref(),
+            Some("v::PrefixedID")
+        );
+        assert_eq!(
+            render_type(&ty("Port"), "v", "q::m").as_deref(),
+            Some("v::Port")
+        );
+        assert_eq!(
+            render_type(&ty("JSON"), "v", "q::m").as_deref(),
+            Some("v::JSON")
+        );
+        assert_eq!(
+            render_type(&ty("URL"), "v", "q::m").as_deref(),
+            Some("v::URL")
         );
     }
 
     #[test]
     fn render_type_rejects_generics_refs_and_multiseg() {
-        assert_eq!(render_type(&ty("Option<String>"), "q::m"), None);
-        assert_eq!(render_type(&ty("Vec<i64>"), "q::m"), None);
-        assert_eq!(render_type(&ty("&str"), "q::m"), None);
-        assert_eq!(render_type(&ty("std::string::String"), "q::m"), None);
+        assert_eq!(render_type(&ty("Option<String>"), "v", "q::m"), None);
+        assert_eq!(render_type(&ty("Vec<i64>"), "v", "q::m"), None);
+        assert_eq!(render_type(&ty("&str"), "v", "q::m"), None);
+        assert_eq!(render_type(&ty("std::string::String"), "v", "q::m"), None);
     }
 
     fn items(src: &str) -> Vec<syn::Item> {
@@ -520,38 +624,68 @@ mod tests {
         assert_eq!(const_str_value(&its, "MISSING"), None);
     }
 
+    fn meta(name: &str, query: &str) -> Result<Option<(String, bool)>> {
+        op_meta(&items(&format!(
+            "pub const OPERATION_NAME: &str = {name:?};\npub const QUERY: &str = {query:?};"
+        )))
+    }
+
     #[test]
     fn op_meta_classifies_query_vs_mutation() {
-        let m = items(
-            "pub const OPERATION_NAME: &str = \"AddPlugin\";\npub const QUERY: &str = \"  mutation AddPlugin { x }\";",
+        assert_eq!(
+            meta("AddPlugin", "  mutation AddPlugin { x }").unwrap(),
+            Some(("AddPlugin".into(), true))
         );
-        assert_eq!(op_meta(&m), Some(("AddPlugin".into(), true)));
-
-        let q = items(
-            "pub const OPERATION_NAME: &str = \"Status\";\npub const QUERY: &str = \"query Status { x }\";",
+        assert_eq!(
+            meta("Status", "query Status { x }").unwrap(),
+            Some(("Status".into(), false))
         );
-        assert_eq!(op_meta(&q), Some(("Status".into(), false)));
+        assert_eq!(meta("Anon", "{ x }").unwrap(), Some(("Anon".into(), false)));
+        assert!(op_meta(&items("pub const OPERATION_NAME: &str = \"Bare\";")).is_err());
+        assert_eq!(op_meta(&items("pub struct Foo;")).unwrap(), None);
+    }
 
-        // No QUERY const ⇒ defaults to query (not mutation).
-        let no_query = items("pub const OPERATION_NAME: &str = \"Bare\";");
-        assert_eq!(op_meta(&no_query), Some(("Bare".into(), false)));
+    #[test]
+    fn op_meta_commented_mutation_is_mutation() {
+        let got = meta(
+            "InstallPlugin",
+            "# installs a plugin\n# query-looking comment\nmutation InstallPlugin($u: String!) { installPlugin(url: $u) }",
+        )
+        .unwrap();
+        assert_eq!(got, Some(("InstallPlugin".into(), true)));
+        let o = op("install_plugin", "InstallPlugin", true, vec![]);
+        let out = emit_one(&o, "crate::generated::v1", "unraid", Markers::default());
+        assert!(out.contains("role = \"admin\""));
+        assert!(!out.contains("data_mutation"));
+    }
 
-        // No OPERATION_NAME ⇒ not an operation module.
-        assert_eq!(op_meta(&items("pub struct Foo;")), None);
+    #[test]
+    fn op_meta_picks_named_operation_among_many() {
+        let doc = "query A { a }\nmutation B { b }\nfragment F on T { x }";
+        assert_eq!(meta("B", doc).unwrap(), Some(("B".into(), true)));
+        assert_eq!(meta("A", doc).unwrap(), Some(("A".into(), false)));
+        assert!(meta("C", doc).is_err());
+    }
+
+    #[test]
+    fn op_meta_parse_failure_and_subscription_error() {
+        assert!(meta("X", "mutation X { ").is_err());
+        assert!(meta("X", "not graphql at all").is_err());
+        assert!(meta("S", "subscription S { s }").is_err());
     }
 
     #[test]
     fn variables_fields_unit_named_and_unrenderable() {
         // Unit Variables ⇒ Some(empty).
         assert_eq!(
-            variables_fields(&items("pub struct Variables;"), "q::m"),
+            variables_fields(&items("pub struct Variables;"), "v", "q::m"),
             Some(vec![])
         );
         // Named fields render.
         let named =
             items("pub struct Variables { pub id: String, pub count: Int, pub input: MyInput }");
         assert_eq!(
-            variables_fields(&named, "q::m"),
+            variables_fields(&named, "v", "q::m"),
             Some(vec![
                 ("id".into(), "String".into()),
                 ("count".into(), "i64".into()),
@@ -562,17 +696,21 @@ mod tests {
         assert_eq!(
             variables_fields(
                 &items("pub struct Variables { pub x: Option<String> }"),
+                "v",
                 "q::m"
             ),
             None
         );
         // Tuple struct Variables ⇒ None.
         assert_eq!(
-            variables_fields(&items("pub struct Variables(String);"), "q::m"),
+            variables_fields(&items("pub struct Variables(String);"), "v", "q::m"),
             None
         );
         // No Variables struct ⇒ None.
-        assert_eq!(variables_fields(&items("pub struct Other;"), "q::m"), None);
+        assert_eq!(
+            variables_fields(&items("pub struct Other;"), "v", "q::m"),
+            None
+        );
     }
 
     #[test]
@@ -643,7 +781,7 @@ mod tests {
     #[test]
     fn emit_one_query_no_role_no_mutation() {
         let o = op("array_status", "ArrayStatus", false, vec![]);
-        let out = emit_one(&o, "crate::generated::v1", "unraid", &HashSet::new());
+        let out = emit_one(&o, "crate::generated::v1", "unraid", Markers::default());
         assert!(out.contains("verb = \"array_status\""));
         assert!(!out.contains("data_mutation = true"));
         assert!(!out.contains("role ="));
@@ -660,8 +798,8 @@ mod tests {
             true,
             vec![("force", "bool")],
         );
-        let out = emit_one(&o, "crate::generated::v1", "unraid", &HashSet::new());
-        assert!(out.contains("data_mutation = true"));
+        let out = emit_one(&o, "crate::generated::v1", "unraid", Markers::default());
+        assert!(!out.contains("data_mutation"));
         assert!(out.contains("role = \"admin\""));
         assert!(out.contains("pub force: bool,"));
         // Named vars ⇒ struct init from args.
@@ -671,25 +809,60 @@ mod tests {
     #[test]
     fn emit_one_mutation_user_callable_drops_to_read() {
         let o = op("add_plugin", "AddPlugin", true, vec![]);
-        let mut uc = HashSet::new();
-        uc.insert("AddPlugin".to_string());
-        let out = emit_one(&o, "crate::generated::v1", "unraid", &uc);
+        let m = Markers {
+            user_callable: true,
+            ..Markers::default()
+        };
+        let out = emit_one(&o, "crate::generated::v1", "unraid", m);
         assert!(out.contains("data_mutation = true"));
         assert!(out.contains("role = \"read\""));
         assert!(!out.contains("role = \"admin\""));
     }
 
     #[test]
+    fn emit_one_mutation_data_mutation_marker_opts_in() {
+        let o = op("add_share", "AddShare", true, vec![]);
+        let m = Markers {
+            data_mutation: true,
+            ..Markers::default()
+        };
+        let out = emit_one(&o, "crate::generated::v1", "unraid", m);
+        assert!(out.contains("data_mutation = true"));
+        assert!(out.contains("role = \"admin\""));
+    }
+
+    #[test]
+    fn emit_one_admin_marker_forces_admin() {
+        let admin = Markers {
+            admin: true,
+            ..Markers::default()
+        };
+        let q = op("api_keys", "ApiKeys", false, vec![]);
+        let out = emit_one(&q, "crate::generated::v1", "unraid", admin);
+        assert!(out.contains("role = \"admin\""));
+        assert!(!out.contains("data_mutation"));
+
+        let both = Markers {
+            admin: true,
+            user_callable: true,
+            ..Markers::default()
+        };
+        let m = op("add_plugin", "AddPlugin", true, vec![]);
+        let out = emit_one(&m, "crate::generated::v1", "unraid", both);
+        assert!(out.contains("role = \"admin\""));
+    }
+
+    #[test]
     fn emit_surface_prepends_header_and_all_ops() {
         let ops = vec![op("a", "A", false, vec![]), op("b", "B", true, vec![])];
-        let out = emit_surface(&ops, "crate::generated::v1", "demo", &HashSet::new());
+        let out = emit_surface(&ops, "crate::generated::v1", "demo", &HashMap::new());
         assert!(out.starts_with(GENERATED_HEADER));
         assert!(out.contains("verb = \"a\""));
         assert!(out.contains("verb = \"b\""));
     }
 
     #[test]
-    fn user_callable_operations_reads_marked_files() {
+    fn operation_markers_reads_marked_files() {
         let dir = std::env::temp_dir().join(format!(
             "gql_uc_{}_{}",
             std::process::id(),
@@ -709,15 +882,20 @@ mod tests {
             "mutation RemovePlugin { removePlugin }",
         )
         .unwrap();
-        std::fs::write(dir.join("ignore.txt"), "mutation Nope { x }").unwrap();
+        std::fs::write(
+            dir.join("hidden.graphql"),
+            "# @orca:no-tool\nquery Secrets { secrets }",
+        )
+        .unwrap();
+        std::fs::write(dir.join("ignore.txt"), "# @orca:admin\nmutation Nope { x }").unwrap();
 
-        let set = user_callable_operations(&dir);
-        assert!(set.contains("AddPlugin"));
-        assert!(!set.contains("RemovePlugin"));
-        assert!(!set.contains("Nope"));
+        let set = operation_markers(&dir).unwrap();
+        assert!(set["AddPlugin"].user_callable);
+        assert!(set["Secrets"].no_tool);
+        assert!(!set.contains_key("RemovePlugin"));
+        assert!(!set.contains_key("Nope"));
 
-        // Missing dir ⇒ empty set.
-        assert!(user_callable_operations(&dir.join("nope")).is_empty());
+        assert!(operation_markers(&dir.join("nope")).unwrap().is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
     }
