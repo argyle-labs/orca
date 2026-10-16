@@ -193,7 +193,7 @@ fn operation_markers(queries_dir: &Path) -> Result<HashMap<String, Markers>> {
                 );
             }
         }
-        let m = file_markers(&text);
+        let m = file_markers(&text).with_context(|| format!("{}", p.display()))?;
         if m == Markers::default() {
             continue;
         }
@@ -231,12 +231,14 @@ fn document_operation_names(text: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
-fn file_markers(text: &str) -> Markers {
+fn file_markers(text: &str) -> Result<Markers> {
     let mut m = Markers::default();
     let mut in_block = false;
     for l in text.lines() {
         let line_in_block = in_block;
-        if l.replace("\\\"\"\"", "").matches("\"\"\"").count() % 2 == 1 {
+        let is_comment = l.trim_start().starts_with('#');
+        if (in_block || !is_comment) && l.replace("\\\"\"\"", "").matches("\"\"\"").count() % 2 == 1
+        {
             in_block = !in_block;
         }
         if line_in_block {
@@ -257,7 +259,10 @@ fn file_markers(text: &str) -> Markers {
             _ => {}
         }
     }
-    m
+    if in_block {
+        bail!("unterminated block string");
+    }
+    Ok(m)
 }
 
 /// The lexicographically-greatest `v*` module ident (newest version).
@@ -552,7 +557,7 @@ mod tests {
 
     #[test]
     fn marker_detected_various_spellings() {
-        let uc = |t: &str| file_markers(t).user_callable;
+        let uc = |t: &str| file_markers(t).unwrap().user_callable;
         assert!(uc("# @orca:user-callable\nmutation X { y }"));
         assert!(uc("#   @Orca:User-Callable  (safe idempotent)\n"));
         assert!(uc("mutation X { y }\n#@orca:user-callable"));
@@ -563,7 +568,8 @@ mod tests {
     #[test]
     fn file_markers_reads_each_marker() {
         let m =
-            file_markers("# @orca:admin\n# @orca:no-tool\n## @orca:data-mutation\nquery X { y }");
+            file_markers("# @orca:admin\n# @orca:no-tool\n## @orca:data-mutation\nquery X { y }")
+                .unwrap();
         assert_eq!(
             m,
             Markers {
@@ -573,16 +579,30 @@ mod tests {
                 data_mutation: true,
             }
         );
-        assert_eq!(file_markers("# @orca:administrator"), Markers::default());
+        assert_eq!(
+            file_markers("# @orca:administrator").unwrap(),
+            Markers::default()
+        );
     }
 
     #[test]
     fn markers_ignored_inside_block_strings() {
         let text =
             "query X(\n  $a: String = \"\"\"\n# @orca:no-tool\n\"\"\"\n) { x }\n# @orca:admin\n";
-        let m = file_markers(text);
+        let m = file_markers(text).unwrap();
         assert!(m.admin);
         assert!(!m.no_tool);
+    }
+
+    #[test]
+    fn comment_triple_quote_does_not_open_block() {
+        let m = file_markers("# \"\"\"\n# @orca:admin\nquery X { x }").unwrap();
+        assert!(m.admin);
+    }
+
+    #[test]
+    fn unterminated_block_string_is_error() {
+        assert!(file_markers("query X(\n  $a: String = \"\"\"\n# @orca:admin\n").is_err());
     }
 
     #[test]
