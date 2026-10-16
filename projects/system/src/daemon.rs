@@ -174,13 +174,8 @@ fn ensure_pki_for_home(home: &str) -> Result<()> {
 }
 
 fn is_root() -> bool {
-    // Avoid pulling in libc just for this — `id -u` is on every Unix host.
-    Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-        .unwrap_or(false)
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
 }
 
 fn home_dir_of(user: &str) -> Result<String> {

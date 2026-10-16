@@ -257,6 +257,16 @@ fn sudoers_finding(check: crate::sysadmin::SudoersCheck) -> PrivilegeFinding {
         SudoersCheck::UnsafeBinary { user, reason } => {
             ("sudoers_unsafe_binary", "high", user, reason)
         }
+        SudoersCheck::StalePrivilegedCopy { user } => (
+            "sudoers_privileged_copy_stale",
+            "medium",
+            user,
+            format!(
+                "{} differs from the running orca binary, so the privileged helpers run \
+                 another version; run `sudo orca identity privilege repair`",
+                utils::path::PRIVILEGED_BIN
+            ),
+        ),
         SudoersCheck::Unreadable { reason } => (
             "sudoers_unreadable",
             "medium",

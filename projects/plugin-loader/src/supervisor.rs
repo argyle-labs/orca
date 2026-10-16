@@ -686,12 +686,12 @@ fn start(
     expected_id: &str,
 ) -> Result<(Child, std::os::unix::net::UnixStream, Handshake, String)> {
     let (mut child, mut stream) = launch(exe, |cmd| {
-        // Tell the plugin which orca binary launched it, so toolkit helpers
-        // that need a privileged round-trip (e.g. `sudo -n <orca> admin
-        // lxc-exec`) can reach it. The daemon's own path is authoritative — a
-        // plugin never guesses it. Best-effort: absent ORCA_BIN, the toolkit
-        // falls back to a direct (non-orca) path where one exists.
-        if let Ok(orca_bin) = std::env::current_exe() {
+        // Tell the plugin which orca binary the sudoers grants name, so
+        // toolkit helpers that need a privileged round-trip (e.g. `sudo -n
+        // <orca> admin lxc-exec`) can reach it — a plugin never guesses it.
+        // Best-effort: absent ORCA_BIN, the toolkit falls back to a direct
+        // (non-orca) path where one exists.
+        if let Ok(orca_bin) = utils::path::privileged_exe() {
             cmd.env(ORCA_BIN_ENV, orca_bin);
         }
         // Opt-in instrumentation: when the daemon has enabled profiling for
