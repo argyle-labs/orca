@@ -18,7 +18,7 @@ path = "src/lib.rs"
 # depends on (workspace dep `inventory = "0.3"`). Lib name is `orca_inventory`.
 
 [dependencies]
-plugin-toolkit = { workspace = true, default-features = true }
+plugin-toolkit = { workspace = true, features = ["tools"] }
 contract       = { workspace = true }
 derive         = { workspace = true }
 

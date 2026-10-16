@@ -9,7 +9,7 @@ name = "conversation"
 path = "src/lib.rs"
 
 [dependencies]
-plugin-toolkit = { workspace = true, default-features = true }
+plugin-toolkit = { workspace = true, features = ["tools"] }
 contract = { workspace = true, default-features = true }
 derive    = { workspace = true }
 schemars      = { workspace = true }
