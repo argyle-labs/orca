@@ -1656,33 +1656,41 @@ async fn plugin_uninstall(
         bail!("--name is required");
     }
 
-    let removed_from_disk = if let Some(dir) = install_dir() {
-        let path = dir.join(install_filename(software));
-        if path.is_file() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("failed to remove {}", path.display()))?;
+    let installed = install_dir()
+        .map(|dir| dir.join(install_filename(software)))
+        .filter(|path| path.is_file());
+
+    let unloaded = plugin_loader::unload_plugin(software) > 0;
+
+    if installed.is_none() && !unloaded {
+        bail!("plugin '{software}' is not installed or loaded");
+    }
+
+    let (revoked_grants, dropped_tables) = db::pool::Db::process()
+        .write(|conn| purge_plugin_data(conn, software))
+        .with_context(|| {
+            format!("failed to purge data for plugin '{software}'; binary left in place, re-run uninstall")
+        })?;
+
+    let removed_from_disk = if let Some(path) = installed {
+        std::fs::remove_file(&path).with_context(|| {
+            format!(
+                "purged data for plugin '{software}' but failed to remove {}; re-run uninstall",
+                path.display()
+            )
+        })?;
+        if let Some(dir) = path.parent() {
             let sig = dir.join(signature_filename(software));
             if let Err(e) = std::fs::remove_file(&sig)
                 && e.kind() != std::io::ErrorKind::NotFound
             {
                 tracing::warn!(path = %sig.display(), error = %e, "could not remove plugin signature");
             }
-            true
-        } else {
-            false
         }
+        true
     } else {
         false
     };
-
-    let unloaded = plugin_loader::unload_plugin(software) > 0;
-
-    if !removed_from_disk && !unloaded {
-        bail!("plugin '{software}' is not installed or loaded");
-    }
-
-    let (revoked_grants, dropped_tables) =
-        db::pool::Db::process().write(|conn| purge_plugin_data(conn, software))?;
 
     tracing::info!(plugin = %software, removed_from_disk, unloaded, ?revoked_grants, ?dropped_tables, "uninstalled plugin");
 
@@ -1699,12 +1707,14 @@ fn purge_plugin_data(
     conn: &rusqlite::Connection,
     software: &str,
 ) -> Result<(Vec<String>, Vec<String>)> {
-    let revoked = secrets::revoke_holder(conn, software)?;
+    let tx = conn.unchecked_transaction()?;
     let dropped = if db::plugin_tables::validate_segment("namespace", software).is_ok() {
-        db::plugin_tables::drop_namespace(conn, software)?
+        db::plugin_tables::drop_namespace(&tx, software)?
     } else {
         Vec::new()
     };
+    let revoked = secrets::revoke_holder(&tx, software)?;
+    tx.commit()?;
     Ok((revoked, dropped))
 }
 
@@ -2727,6 +2737,33 @@ mod tests {
             .unwrap();
         }
         let (revoked, dropped) = purge_plugin_data(&conn, "my-plugin").unwrap();
+        assert!(revoked.is_empty() && dropped.is_empty());
+    }
+
+    #[test]
+    fn uninstall_purge_rolls_back_as_a_unit() {
+        let conn = db::testing::test_conn();
+        secrets::upsert(&conn, "shared.token", "inline", "", None).unwrap();
+        secrets::grant(&conn, "foo", "shared.token", "admin").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE plug__foo__a (id TEXT);
+             CREATE TABLE plug__foo__b (id TEXT);
+             CREATE TRIGGER fail_purge AFTER DELETE ON secret_grants BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+        assert!(purge_plugin_data(&conn, "foo").is_err());
+        assert_eq!(secrets::list_grants(&conn).unwrap().len(), 1);
+        for t in ["plug__foo__a", "plug__foo__b"] {
+            conn.query_row(&format!("SELECT COUNT(*) FROM \"{t}\""), [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        }
+        conn.execute_batch("DROP TRIGGER fail_purge").unwrap();
+        let (revoked, dropped) = purge_plugin_data(&conn, "foo").unwrap();
+        assert_eq!(revoked, vec!["shared.token"]);
+        assert_eq!(dropped, vec!["plug__foo__a", "plug__foo__b"]);
+        let (revoked, dropped) = purge_plugin_data(&conn, "foo").unwrap();
         assert!(revoked.is_empty() && dropped.is_empty());
     }
 

@@ -128,6 +128,10 @@ pub fn delete(conn: &Connection, name: &str) -> Result<bool> {
             rusqlite::params![name],
         )?;
         removed = n > 0;
+        conn.execute(
+            "DELETE FROM secret_grants WHERE secret_name = ?1",
+            rusqlite::params![name],
+        )?;
         if r.backend == "inline" {
             // Best-effort: ignore "not present" since the metadata is the
             // source of truth for whether the secret existed.
@@ -317,6 +321,13 @@ pub fn grant_checked(
     if !valid_principal(holder) {
         anyhow::bail!("invalid holder plugin id '{holder}'");
     }
+    if secret_name.is_empty()
+        || secret_name.chars().any(|c| {
+            matches!(c, '*' | '?' | '%' | '[' | ']') || c.is_whitespace() || c.is_control()
+        })
+    {
+        anyhow::bail!("invalid secret name '{secret_name}': grants name one exact secret");
+    }
     if in_namespace(secret_name, holder) {
         anyhow::bail!("'{holder}' already owns '{secret_name}'; a grant would be redundant");
     }
@@ -440,12 +451,26 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_secret_drops_its_grants() {
+        let conn = test_conn();
+        upsert(&conn, "anthropic_api_key", "inline", "", None).unwrap();
+        assert!(grant_checked(&conn, "mylar", "anthropic_api_key", "a").unwrap());
+        assert!(delete(&conn, "anthropic_api_key").unwrap());
+        upsert(&conn, "anthropic_api_key", "inline", "", None).unwrap();
+        assert!(list_grants(&conn).unwrap().is_empty());
+    }
+
+    #[test]
     fn checked_grant_refuses_missing_redundant_and_invalid() {
         let conn = test_conn();
         upsert(&conn, "gitea.api.token", "inline", "", None).unwrap();
         assert!(grant_checked(&conn, "mylar", "nope.token", "a").is_err());
         assert!(grant_checked(&conn, "gitea", "gitea.api.token", "a").is_err());
         assert!(grant_checked(&conn, "Bad Id", "gitea.api.token", "a").is_err());
+        upsert(&conn, "gitea.*", "inline", "", None).unwrap();
+        assert!(grant_checked(&conn, "mylar", "gitea.*", "a").is_err());
+        assert!(grant_checked(&conn, "mylar", "gitea.%", "a").is_err());
+        assert!(grant_checked(&conn, "mylar", "", "a").is_err());
         assert!(list_grants(&conn).unwrap().is_empty());
     }
 
