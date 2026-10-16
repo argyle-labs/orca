@@ -105,11 +105,14 @@ pub fn drop_namespace(conn: &Connection, namespace: &str) -> Result<Vec<String>>
         })
         .collect();
     tables.sort();
-    let tx = conn.unchecked_transaction()?;
+    conn.execute_batch("SAVEPOINT drop_namespace")?;
     for t in &tables {
-        tx.execute_batch(&format!("DROP TABLE \"{t}\""))?;
+        if let Err(e) = conn.execute_batch(&format!("DROP TABLE \"{t}\"")) {
+            conn.execute_batch("ROLLBACK TO drop_namespace; RELEASE drop_namespace")?;
+            return Err(e.into());
+        }
     }
-    tx.commit()?;
+    conn.execute_batch("RELEASE drop_namespace")?;
     Ok(tables)
 }
 
