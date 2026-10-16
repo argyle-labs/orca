@@ -91,6 +91,28 @@ pub fn physical_table_name(namespace: &str, table: &str) -> Result<String> {
     Ok(format!("plug__{namespace}__{table}"))
 }
 
+pub fn drop_namespace(conn: &Connection, namespace: &str) -> Result<Vec<String>> {
+    validate_segment("namespace", namespace)?;
+    let prefix = format!("plug__{namespace}__");
+    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
+    let mut tables: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|n| {
+            n.strip_prefix(&prefix)
+                .is_some_and(|t| validate_segment("table", t).is_ok())
+        })
+        .collect();
+    tables.sort();
+    let tx = conn.unchecked_transaction()?;
+    for t in &tables {
+        tx.execute_batch(&format!("DROP TABLE \"{t}\""))?;
+    }
+    tx.commit()?;
+    Ok(tables)
+}
+
 fn physical_index_name(namespace: &str, table: &str, index: &str) -> Result<String> {
     validate_ident("index", index)?;
     Ok(format!("plug__{namespace}__{table}__{index}"))
@@ -277,6 +299,39 @@ mod tests {
                 unique: false,
             }],
         }
+    }
+
+    #[test]
+    fn drop_namespace_touches_only_that_exact_id() {
+        let c = conn();
+        for ns in ["foo", "foo_bar", "foox", "fo"] {
+            apply(&c, ns, &schema_v1()).unwrap();
+        }
+        c.execute_batch("CREATE TABLE plug_foo__x (id TEXT)")
+            .unwrap();
+        assert_eq!(
+            drop_namespace(&c, "foo").unwrap(),
+            vec!["plug__foo__servers"]
+        );
+        let mut left: Vec<String> = c
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "plug__fo__servers",
+                "plug__foo_bar__servers",
+                "plug__foox__servers",
+                "plug_foo__x"
+            ]
+        );
+        assert!(drop_namespace(&c, "foo").unwrap().is_empty());
+        assert!(drop_namespace(&c, "f%").is_err());
     }
 
     #[test]

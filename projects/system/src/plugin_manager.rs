@@ -1634,6 +1634,12 @@ pub struct PluginUninstallOutput {
     pub removed_from_disk: bool,
     /// True if the plugin was unregistered from the live tool registry.
     pub unloaded: bool,
+    /// Secret grants held by the plugin, now revoked.
+    #[serde(default)]
+    pub revoked_grants: Vec<String>,
+    /// The plugin's own `plug__<id>__*` tables, now dropped.
+    #[serde(default)]
+    pub dropped_tables: Vec<String>,
 }
 
 /// [MUTATES STATE] Remove a plugin: delete its executable from the install dir and unregister
@@ -1675,13 +1681,31 @@ async fn plugin_uninstall(
         bail!("plugin '{software}' is not installed or loaded");
     }
 
-    tracing::info!(plugin = %software, removed_from_disk, unloaded, "uninstalled plugin");
+    let (revoked_grants, dropped_tables) =
+        db::pool::Db::process().write(|conn| purge_plugin_data(conn, software))?;
+
+    tracing::info!(plugin = %software, removed_from_disk, unloaded, ?revoked_grants, ?dropped_tables, "uninstalled plugin");
 
     Ok(PluginUninstallOutput {
         software: software.to_string(),
         removed_from_disk,
         unloaded,
+        revoked_grants,
+        dropped_tables,
     })
+}
+
+fn purge_plugin_data(
+    conn: &rusqlite::Connection,
+    software: &str,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let revoked = secrets::revoke_holder(conn, software)?;
+    let dropped = if db::plugin_tables::validate_segment("namespace", software).is_ok() {
+        db::plugin_tables::drop_namespace(conn, software)?
+    } else {
+        Vec::new()
+    };
+    Ok((revoked, dropped))
 }
 
 #[cfg(test)]
@@ -2679,11 +2703,41 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_purge_touches_only_that_exact_id() {
+        let conn = db::testing::test_conn();
+        secrets::upsert(&conn, "shared.token", "inline", "", None).unwrap();
+        for holder in ["foo", "foo_bar", "foox"] {
+            secrets::grant(&conn, holder, "shared.token", "admin").unwrap();
+            conn.execute_batch(&format!("CREATE TABLE plug__{holder}__items (id TEXT)"))
+                .unwrap();
+        }
+        let (revoked, dropped) = purge_plugin_data(&conn, "foo").unwrap();
+        assert_eq!(revoked, vec!["shared.token"]);
+        assert_eq!(dropped, vec!["plug__foo__items"]);
+        let holders: Vec<String> = secrets::list_grants(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|g| g.holder)
+            .collect();
+        assert_eq!(holders, vec!["foo_bar", "foox"]);
+        for t in ["plug__foo_bar__items", "plug__foox__items"] {
+            conn.query_row(&format!("SELECT COUNT(*) FROM \"{t}\""), [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        }
+        let (revoked, dropped) = purge_plugin_data(&conn, "my-plugin").unwrap();
+        assert!(revoked.is_empty() && dropped.is_empty());
+    }
+
+    #[test]
     fn uninstall_output_serializes_camel_case() {
         let out = PluginUninstallOutput {
             software: "plex".to_string(),
             removed_from_disk: true,
             unloaded: false,
+            revoked_grants: Vec::new(),
+            dropped_tables: Vec::new(),
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(json.contains("\"software\":\"plex\""), "{json}");
