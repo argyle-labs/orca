@@ -743,23 +743,19 @@ pub async fn fetch_unit_ops() -> Vec<crate::unit_surface::UnitOp> {
 
 /// Dispatch an `orca <kind> <op> [--json '{…}' | key=value …]` invocation, where
 /// `<kind>` is a top-level command owned by the live unit surface (`vm`, `lxc`,
-/// `container`, …). Returns `None` if the top subcommand isn't one of `kinds`
+/// `container`, …). Returns `None` unless `<kind>.<op>` is one of `routes`
 /// (caller falls through to the static op tree).
 pub async fn dispatch_unit(
     matches: &ArgMatches,
     ctx: Arc<ToolCtx>,
-    kinds: &[String],
+    routes: &[String],
 ) -> Option<Result<()>> {
     let (kind, kind_sub) = matches.subcommand()?;
-    if !kinds.iter().any(|k| k == kind) {
+    let (op, op_sub) = kind_sub.subcommand()?;
+    let name = format!("{kind}.{op}");
+    if !routes.contains(&name) {
         return None;
     }
-    let Some((op, op_sub)) = kind_sub.subcommand() else {
-        return Some(Err(anyhow::anyhow!(
-            "usage: orca {kind} <op> [--json '{{…}}' | key=value …]"
-        )));
-    };
-    let name = format!("{kind}.{op}");
     let args = match build_unit_args(op_sub) {
         Ok(a) => a,
         Err(e) => return Some(Err(e)),
@@ -1962,28 +1958,36 @@ mod tests {
                 .subcommand(Command::new("create")),
         );
         let m = cmd.get_matches_from(["orca", "vm", "create"]);
-        // kinds does not include "vm" → fall through to the static tree.
-        let out = dispatch_unit(&m, test_ctx(), &["lxc".to_string()]).await;
+        // routes do not include "vm.create" → fall through to the static tree.
+        let out = dispatch_unit(&m, test_ctx(), &["lxc.create".to_string()]).await;
         assert!(out.is_none());
     }
 
     #[tokio::test]
     async fn dispatch_unit_returns_none_when_no_top_subcommand() {
         let m = Command::new("orca").get_matches_from(["orca"]);
-        let out = dispatch_unit(&m, test_ctx(), &["vm".to_string()]).await;
+        let out = dispatch_unit(&m, test_ctx(), &["vm.create".to_string()]).await;
         assert!(out.is_none());
     }
 
     #[tokio::test]
-    async fn dispatch_unit_missing_op_yields_usage_error() {
-        // kind matches but no op subcommand was given.
+    async fn dispatch_unit_missing_op_falls_through() {
         let cmd = Command::new("orca").subcommand(Command::new("vm"));
         let m = cmd.get_matches_from(["orca", "vm"]);
-        let out = dispatch_unit(&m, test_ctx(), &["vm".to_string()])
-            .await
-            .expect("kind matched → Some")
-            .unwrap_err();
-        assert!(out.to_string().contains("usage: orca vm <op>"), "{out}");
+        let out = dispatch_unit(&m, test_ctx(), &["vm.create".to_string()]).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_unit_leaves_unrouted_leaves_of_a_routed_kind_to_the_static_tree() {
+        let cmd = Command::new("orca").subcommand(
+            Command::new("container")
+                .subcommand(Command::new("update"))
+                .subcommand(Command::new("start")),
+        );
+        let m = cmd.get_matches_from(["orca", "container", "update"]);
+        let routes = ["container.start".to_string()];
+        assert!(dispatch_unit(&m, test_ctx(), &routes).await.is_none());
     }
 
     #[tokio::test]
@@ -1996,7 +2000,7 @@ mod tests {
                 .subcommand(Command::new("create").arg(clap::Arg::new("json").long("json"))),
         );
         let m = cmd.get_matches_from(["orca", "vm", "create", "--json", "{not json"]);
-        let out = dispatch_unit(&m, test_ctx(), &["vm".to_string()])
+        let out = dispatch_unit(&m, test_ctx(), &["vm.create".to_string()])
             .await
             .expect("kind matched → Some")
             .unwrap_err();
@@ -2609,7 +2613,7 @@ mod tests {
         );
         let m = cmd.get_matches_from(["orca", "vm", "create"]);
         set_daemon_client(Box::new(MockDaemon));
-        let kinds = ["vm".to_string()];
+        let kinds = ["vm.create".to_string()];
         with_reachable_daemon(|| dispatch_unit(&m, test_ctx(), &kinds))
             .expect("kind matched → Some")
             .expect("reachable mock daemon round-trip succeeds");
@@ -2625,7 +2629,7 @@ mod tests {
                 .subcommand(unit_op_leaf("create")),
         );
         let m = cmd.get_matches_from(["orca", "zzznotreal", "create"]);
-        let kinds = ["zzznotreal".to_string()];
+        let kinds = ["zzznotreal.create".to_string()];
         let err = with_unreachable_daemon(|| dispatch_unit(&m, test_ctx(), &kinds))
             .expect("kind matched → Some")
             .unwrap_err();

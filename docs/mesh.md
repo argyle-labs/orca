@@ -236,6 +236,16 @@ Reaching mutual-trust with a peer:
 * Is the prerequisite for any federation primitive that handles
   sensitive material across hosts.
 
+### Caller identity on `mesh/exec`
+
+The recipient resolves a forwarded call's caller from the signed caller token
+and its own replicated `users` table, and acts with the lower of the user's
+role and the token's role. The token carries no `can_mutate` grant, so the
+listener always builds that caller with `can_mutate: false`. A member who
+holds `can_mutate` locally loses it over the mesh: admin-gated data-mutation
+tools that the grant would allow locally are refused when forwarded to a peer.
+Only an admin can run them across the mesh.
+
 ## Cert rotation
 
 Both leaf certs (peer client/server) and the mesh CA rotate. The mechanisms
