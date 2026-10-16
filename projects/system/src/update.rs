@@ -9,7 +9,7 @@
 //!
 //! Also owns [`resolve_github_token`] — the single canonical GitHub PAT
 //! resolver shared by the production update path, the dev-source fetcher,
-//! and the high-level lifecycle tools. Prefers the `github_token` secret in
+//! and the high-level lifecycle tools. Prefers the `orca.github_token` secret in
 //! orca.db; falls back to `$GITHUB_TOKEN` for bootstrap / CI.
 
 use anyhow::{Context, Result, bail};
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use crate::update_state::{Channel, is_newer_full};
 
-/// Resolve the GitHub token: prefer the `github_token` secret in orca.db
+/// Resolve the GitHub token: prefer the `orca.github_token` secret in orca.db
 /// (the canonical post-2026-05-11 location); fall back to `GITHUB_TOKEN` env
 /// var for bootstrap + CI flows. Returns an empty string if neither is set —
 /// callers should report an actionable error themselves.
@@ -29,8 +29,8 @@ use crate::update_state::{Channel, is_newer_full};
 /// db; test isolation is handled by scoped (`with_db_path`) overrides.
 pub fn resolve_github_token() -> String {
     let from_db = db::pool::Db::process().read(|conn| {
-        if secrets::get(conn, "github_token")?.is_some()
-            && let Some(v) = secrets::read_inline_value(conn, "github_token")?
+        if secrets::get(conn, "orca.github_token")?.is_some()
+            && let Some(v) = secrets::read_inline_value(conn, "orca.github_token")?
             && !v.is_empty()
         {
             return Ok(Some(v));
@@ -2227,9 +2227,15 @@ mod tests {
         }
         {
             let conn = db::open_default().expect("open temp canonical db");
-            secrets::upsert(&conn, "github_token", "inline", "github_token", None)
-                .expect("upsert secret metadata");
-            secrets::write_inline_value(&conn, "github_token", "db-token")
+            secrets::upsert(
+                &conn,
+                "orca.github_token",
+                "inline",
+                "orca.github_token",
+                None,
+            )
+            .expect("upsert secret metadata");
+            secrets::write_inline_value(&conn, "orca.github_token", "db-token")
                 .expect("write inline value");
         }
         assert_eq!(
@@ -2304,9 +2310,15 @@ mod tests {
         }
         {
             let conn = db::open_default().expect("open temp canonical db");
-            secrets::upsert(&conn, "github_token", "inline", "github_token", None)
-                .expect("upsert secret metadata");
-            secrets::write_inline_value(&conn, "github_token", "")
+            secrets::upsert(
+                &conn,
+                "orca.github_token",
+                "inline",
+                "orca.github_token",
+                None,
+            )
+            .expect("upsert secret metadata");
+            secrets::write_inline_value(&conn, "orca.github_token", "")
                 .expect("write empty inline value");
         }
         assert_eq!(

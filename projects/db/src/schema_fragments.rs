@@ -186,6 +186,49 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
         ensure_column(conn, "shares", "credential", "TEXT")
             .map_err(|e| anyhow::anyhow!("shares credential reconcile: {e}"))?;
     }
+    for table in ["shares", "managed_mounts"] {
+        reconcile_legacy_credentials(conn, table)?;
+    }
+    Ok(())
+}
+
+fn canonical_credential(stored: &str) -> Option<String> {
+    let candidate = match stored {
+        "github_token" => "orca.github_token",
+        s => s.strip_prefix("secret:")?,
+    };
+    utils::secret::SecretRef::parse(candidate)
+        .ok()
+        .map(|r| r.as_str().to_string())
+}
+
+fn reconcile_legacy_credentials(conn: &Connection, table: &str) -> Result<()> {
+    if !table_exists(conn, table)? || !column_exists(conn, table, "credential")? {
+        return Ok(());
+    }
+    let rows: Vec<(String, String)> = conn
+        .prepare(&format!(
+            "SELECT name, credential FROM {table} WHERE credential IS NOT NULL AND credential != ''"
+        ))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (name, stored) in rows {
+        if utils::secret::SecretRef::parse(stored.as_str()).is_ok() {
+            continue;
+        }
+        match canonical_credential(&stored) {
+            Some(canonical) => {
+                conn.execute(
+                    &format!("UPDATE {table} SET credential = ?1 WHERE name = ?2"),
+                    rusqlite::params![canonical, name],
+                )?;
+                tracing::info!("{table} `{name}`: rewrote legacy credential ref to canonical form");
+            }
+            None => tracing::warn!(
+                "{table} `{name}`: credential ref is not canonical (<scheme>://… or dotted name); re-set it"
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -746,5 +789,32 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn legacy_credentials_rewrite_or_stay() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE managed_mounts (name TEXT PRIMARY KEY, credential TEXT);
+             INSERT INTO managed_mounts VALUES
+               ('a','secret:smb.data.cred'),('b','github_token'),('c','plain'),
+               ('d','op://v/i'),('e',NULL);",
+        )
+        .unwrap();
+        reconcile_legacy_credentials(&conn, "managed_mounts").unwrap();
+        reconcile_legacy_credentials(&conn, "shares").unwrap();
+        let get = |n: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT credential FROM managed_mounts WHERE name=?1",
+                [n],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(get("a").as_deref(), Some("smb.data.cred"));
+        assert_eq!(get("b").as_deref(), Some("orca.github_token"));
+        assert_eq!(get("c").as_deref(), Some("plain"));
+        assert_eq!(get("d").as_deref(), Some("op://v/i"));
+        assert_eq!(get("e"), None);
     }
 }

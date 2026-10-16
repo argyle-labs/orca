@@ -109,6 +109,7 @@ sha2 = "0.11"
 # Plugin release signatures (`system::plugin_sig`).
 minisign-verify = "0.3"
 rand = "0.10"
+zeroize = "1"
 
 # Per-host bootstrap signing key for the pre-join channel (mesh/offer +
 # mesh/join-confirm). Independent of mesh PKI: this key is the orca's
@@ -132,7 +133,6 @@ mime_guess = "2"
 
 # Test
 tempfile = "3"
-zeroize = "1"
 static_assertions = "1"
 serial_test = "3"
 tower = { version = "0.5", features = ["util"] }

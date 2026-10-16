@@ -30,12 +30,7 @@ pub const BACKEND_INLINE: &str = "inline";
 
 pub use utils::secret::{Secret, SecretRef};
 
-/// Resolve a [`SecretRef`] to its value via the secrets domain. Implemented as an
-/// extension trait because the type lives in the lower `utils` crate (which
-/// cannot reach the secret backend) while resolution lives here — bring it into
-/// scope (`use plugin_toolkit::secrets::ResolveSecret;`) to call `.resolve()`.
 pub trait ResolveSecret {
-    /// Resolve this reference to its plaintext value, erroring if unregistered.
     fn resolve(&self) -> Result<Secret<String>>;
 }
 
@@ -59,12 +54,13 @@ pub fn scoped_name(provider: &str, instance: &str, field: &str) -> String {
 /// backends land, an overload will take a backend/policy and the return type is
 /// unchanged, so call sites don't move.
 pub fn set(name: &str, value: &str, description: Option<&str>) -> Result<SecretRef> {
+    let secret_ref = SecretRef::parse(name).map_err(|e| anyhow!(e))?;
     secret_op(&SecretOp::Set {
         name: name.to_string(),
         value: value.to_string(),
         description: description.map(str::to_string),
     })?;
-    SecretRef::parse(name).map_err(|e| anyhow!(e))
+    Ok(secret_ref)
 }
 
 /// Resolve `name` to its value, or `None` if no such secret is registered.

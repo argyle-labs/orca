@@ -11,21 +11,7 @@ pub struct SecretRef(String);
 impl SecretRef {
     pub fn parse(s: impl Into<String>) -> Result<Self, String> {
         let s = s.into();
-        let scheme_ref = s.split_once("://").is_some_and(|(scheme, rest)| {
-            !scheme.is_empty()
-                && !rest.is_empty()
-                && scheme
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        });
-        let dotted_name = s.split('.').count() >= 2
-            && s.split('.').all(|seg| {
-                !seg.is_empty()
-                    && seg
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            });
-        if scheme_ref || dotted_name {
+        if is_canonical(&s) {
             Ok(Self(s))
         } else {
             Err(
@@ -33,6 +19,19 @@ impl SecretRef {
                     .into(),
             )
         }
+    }
+
+    pub fn from_stored(s: impl Into<String>) -> Result<Self, String> {
+        let s = s.into();
+        if is_canonical(&s) || is_legacy(&s) {
+            Ok(Self(s))
+        } else {
+            Err("stored secret_ref is empty or malformed".into())
+        }
+    }
+
+    pub fn is_canonical(&self) -> bool {
+        is_canonical(&self.0)
     }
 
     pub fn as_str(&self) -> &str {
@@ -48,8 +47,34 @@ impl fmt::Display for SecretRef {
 
 impl<'de> Deserialize<'de> for SecretRef {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Self::parse(String::deserialize(d)?).map_err(serde::de::Error::custom)
+        Self::from_stored(String::deserialize(d)?).map_err(serde::de::Error::custom)
     }
+}
+
+fn is_name_segment(seg: &str) -> bool {
+    !seg.is_empty()
+        && seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn is_canonical(s: &str) -> bool {
+    let scheme_ref = s.split_once("://").is_some_and(|(scheme, rest)| {
+        !scheme.is_empty()
+            && !rest.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && !rest.chars().any(char::is_whitespace)
+            && !rest.split(['/', '\\']).any(|seg| seg == "..")
+    });
+    scheme_ref || (s.split('.').count() >= 2 && s.split('.').all(is_name_segment))
+}
+
+fn is_legacy(s: &str) -> bool {
+    is_name_segment(s)
+        || s.strip_prefix("secret:")
+            .is_some_and(|rest| is_canonical(rest) || is_name_segment(rest))
 }
 
 pub struct Secret<T: Zeroize>(T);
@@ -95,12 +120,6 @@ impl<T: Zeroize> fmt::Debug for Secret<T> {
     }
 }
 
-impl<T: Zeroize> fmt::Display for Secret<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("<redacted>")
-    }
-}
-
 impl<'de, T: Zeroize + Deserialize<'de>> Deserialize<'de> for Secret<T> {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         T::deserialize(d).map(Self)
@@ -119,15 +138,14 @@ mod tests {
         AsRef<OsStr>,
         AsRef<[u8]>,
         Into<String>,
-        Serialize
+        Serialize,
+        fmt::Display
     );
 
     #[test]
     fn formatting_redacts() {
         let s = Secret::new("hunter2".to_string());
-        assert_eq!(format!("{s}"), "<redacted>");
         assert_eq!(format!("{s:?}"), "<redacted>");
-        assert_eq!(s.to_string(), "<redacted>");
         assert_eq!(s.expose_secret(), "hunter2");
     }
 
@@ -149,10 +167,31 @@ mod tests {
         assert!(SecretRef::parse("onepassword://vault/item").is_ok());
         assert!(SecretRef::parse("proxmox.lab.token").is_ok());
         assert!(SecretRef::parse("plain").is_err());
-        assert!(serde_json::from_str::<SecretRef>(r#""bad""#).is_err());
+        assert!(SecretRef::parse("secret:a.b").is_err());
         assert_eq!(
             serde_json::to_string(&SecretRef::parse("a.b").unwrap()).unwrap(),
             r#""a.b""#
         );
+    }
+
+    #[test]
+    fn stored_legacy_refs_still_load() {
+        for legacy in ["github_token", "secret:cred-ref", "secret:a.b"] {
+            let r: SecretRef = serde_json::from_value(serde_json::json!(legacy)).unwrap();
+            assert!(!r.is_canonical());
+        }
+        assert!(SecretRef::from_stored("a.b").unwrap().is_canonical());
+        for bad in ["", " ", "a b", "secret:"] {
+            assert!(serde_json::from_value::<SecretRef>(serde_json::json!(bad)).is_err());
+        }
+    }
+
+    #[test]
+    fn traversal_after_scheme_is_rejected() {
+        for bad in ["x://../../etc", "file://a/../b", "x://..", "x://a\\..\\b"] {
+            assert!(SecretRef::parse(bad).is_err(), "{bad}");
+            assert!(SecretRef::from_stored(bad).is_err(), "{bad}");
+        }
+        assert!(SecretRef::parse("x://a..b/c").is_ok());
     }
 }
