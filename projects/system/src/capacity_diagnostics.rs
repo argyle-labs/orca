@@ -29,10 +29,19 @@ use utils::capacity_trend::{self, Projection, Sample, Trend};
 /// Registry name. Stable — operators type it as `--provider`.
 pub const PROVIDER_NAME: &str = "capacity";
 
-/// Samples to fit over. The ring is written once per refresher tick, so this is
-/// a window of recent behaviour rather than all history — a filesystem that
-/// filled last month and has been flat since should read Stable today.
-const WINDOW: usize = 500;
+/// Time window fitted over. Long enough that sampling quantization and short
+/// bursts cannot dominate the slope, short enough that a filesystem that filled
+/// last month and has been flat since reads Stable today.
+const WINDOW_SECS: i64 = 24 * 60 * 60;
+
+/// Below this observed span there is no growth verdict at all.
+const MIN_SPAN_SECS: i64 = 6 * 60 * 60;
+
+/// Samples are averaged into buckets this wide before fitting, so a 2 s ring
+/// and a sparse one weigh time equally.
+const BUCKET_SECS: i64 = 10 * 60;
+
+const MIB_PER_GIB: f64 = 1024.0;
 
 /// "Soon enough that I must act." A week is the useful line for a homelab: long
 /// enough to order a disk or prune, short enough that the warning still matters.
@@ -60,10 +69,11 @@ fn finding_for(p: &Projection) -> Option<Finding> {
             title: format!("Filesystem {pct:.0}% full (not growing)"),
             detail: format!(
                 "The filesystem hosting ~/.orca is {pct:.1}% used but is not trending \
-                 upward ({:+.2} GiB/day over the last {} samples), so there is no \
+                 upward ({:+.2} GiB/day over the last {} hours), so there is no \
                  projected exhaustion date. Headroom is thin: a large restore or \
                  image pull could still fill it.",
-                p.per_day, WINDOW
+                p.per_day,
+                WINDOW_SECS / 3600
             ),
             repair: None,
         }),
@@ -108,22 +118,82 @@ fn finding_for(p: &Projection) -> Option<Finding> {
     }
 }
 
-/// Pull `(ts, used, total)` triples out of history points that carry disk data.
+/// Pull `(ts, used, total)` triples in GiB out of history points that carry
+/// disk data, with the coarsest quantization step among them. MiB fields win
+/// when present; whole-GiB fields are the fallback for older points.
 ///
 /// Points predating the disk fields simply lack them, so an upgraded host fits
 /// over whatever it has and reports `Unknown` until the ring refills — which is
 /// correct, and the reason `Unknown` is distinct from `Stable`.
-fn samples_from(points: &[crate::system_info_types::SystemHistoryPoint]) -> Vec<Sample> {
-    points
+fn samples_from(points: &[crate::system_info_types::SystemHistoryPoint]) -> (Vec<Sample>, f64) {
+    let mut quantum: f64 = 0.0;
+    let samples = points
         .iter()
         .filter_map(|p| {
+            let (used, total, step) = match (p.fs_used_mb, p.fs_total_mb) {
+                (Some(u), Some(t)) => (
+                    u as f64 / MIB_PER_GIB,
+                    t as f64 / MIB_PER_GIB,
+                    1.0 / MIB_PER_GIB,
+                ),
+                _ => (p.fs_used_gb? as f64, p.fs_total_gb? as f64, 1.0),
+            };
+            quantum = quantum.max(step);
             Some(Sample {
                 ts: p.ts,
-                used: p.fs_used_gb? as f64,
-                total: p.fs_total_gb? as f64,
+                used,
+                total,
             })
         })
+        .collect();
+    (samples, quantum)
+}
+
+fn downsample(samples: &[Sample]) -> Vec<Sample> {
+    let mut buckets: std::collections::BTreeMap<i64, (i64, f64, f64, i64)> = Default::default();
+    for s in samples {
+        let b = buckets.entry(s.ts.div_euclid(BUCKET_SECS)).or_default();
+        b.0 += s.ts;
+        b.1 += s.used;
+        b.2 += s.total;
+        b.3 += 1;
+    }
+    buckets
+        .into_values()
+        .map(|(ts, used, total, n)| Sample {
+            ts: ts / n,
+            used: used / n as f64,
+            total: total / n as f64,
+        })
         .collect()
+}
+
+/// Project over the window, refusing a growth verdict that the data cannot
+/// support: too short a span is `Unknown`, and a net change no larger than one
+/// quantization step is `Stable`.
+fn assess(samples: &[Sample], quantum: f64) -> Projection {
+    let pts = downsample(samples);
+    let p = capacity_trend::project(&pts, HORIZON_DAYS);
+    let (Some(first), Some(last)) = (pts.first(), pts.last()) else {
+        return p;
+    };
+    if last.ts - first.ts < MIN_SPAN_SECS {
+        return Projection {
+            trend: Trend::Unknown,
+            per_day: 0.0,
+            seconds_to_full: None,
+            ..p
+        };
+    }
+    let growing = matches!(p.trend, Trend::Filling | Trend::FillingFast);
+    if growing && (last.used - first.used) <= quantum {
+        return Projection {
+            trend: Trend::Stable,
+            seconds_to_full: None,
+            ..p
+        };
+    }
+    p
 }
 
 /// Reports filesystems trending toward full. See the module docs for scope.
@@ -136,9 +206,10 @@ impl DiagnosticsProvider for CapacityDiagnostics {
 
     fn diagnose(&self, _args: DiagnoseArgs) -> BoxFuture<'_, Result<Vec<Finding>>> {
         Box::pin(async move {
-            let points = crate::system_info::history::read_tail(WINDOW);
-            let samples = samples_from(&points);
-            let p = capacity_trend::project(&samples, HORIZON_DAYS);
+            let since = utils::time::now().unix_seconds() - WINDOW_SECS;
+            let points = crate::system_info::history::read_since(since);
+            let (samples, quantum) = samples_from(&points);
+            let p = assess(&samples, quantum);
             Ok(finding_for(&p).into_iter().collect())
         })
     }
@@ -255,17 +326,65 @@ mod tests {
             mk(2 * DAY, Some((100, 50))),
             mk(3 * DAY, Some((100, 55))),
         ];
-        let s = samples_from(&pts);
+        let (s, _) = samples_from(&pts);
         assert_eq!(s.len(), 2, "only the points with disk data are fitted");
         assert!(capacity_trend::project(&s, HORIZON_DAYS).per_day > 0.0);
     }
 
     #[test]
     fn an_empty_ring_yields_unknown_and_no_finding() {
-        let s = samples_from(&[]);
+        let (s, _) = samples_from(&[]);
         let p = capacity_trend::project(&s, HORIZON_DAYS);
         assert_eq!(p.trend, Trend::Unknown);
         assert!(finding_for(&p).is_none());
+    }
+
+    fn gb_point(ts: i64, used: u64) -> SystemHistoryPoint {
+        SystemHistoryPoint {
+            ts,
+            fs_total_gb: Some(500),
+            fs_used_gb: Some(used),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_single_gib_step_over_seventeen_minutes_is_no_finding() {
+        let pts: Vec<_> = (0..500)
+            .map(|i| gb_point(i * 2, if i < 250 { 400 } else { 401 }))
+            .collect();
+        let (s, q) = samples_from(&pts);
+        let p = assess(&s, q);
+        assert_eq!(p.trend, Trend::Unknown);
+        assert!(finding_for(&p).is_none());
+    }
+
+    #[test]
+    fn a_single_gib_step_over_a_day_is_not_growth() {
+        let pts: Vec<_> = (0..288)
+            .map(|i| gb_point(i * 300, if i < 144 { 100 } else { 101 }))
+            .collect();
+        let (s, q) = samples_from(&pts);
+        let p = assess(&s, q);
+        assert_eq!(p.trend, Trend::Stable);
+        assert!(finding_for(&p).is_none());
+    }
+
+    #[test]
+    fn steady_growth_over_a_day_is_still_reported() {
+        let pts: Vec<_> = (0..288)
+            .map(|i| SystemHistoryPoint {
+                ts: i * 300,
+                fs_total_mb: Some(500 * 1024),
+                fs_used_mb: Some(400 * 1024 + (i as u64) * 1024 * 10 / 288),
+                ..Default::default()
+            })
+            .collect();
+        let (s, q) = samples_from(&pts);
+        let p = assess(&s, q);
+        let f = finding_for(&p).expect("must report");
+        assert_eq!(f.severity, Severity::Info);
+        assert!((p.per_day - 10.0).abs() < 0.5, "per_day {}", p.per_day);
     }
 
     #[tokio::test]

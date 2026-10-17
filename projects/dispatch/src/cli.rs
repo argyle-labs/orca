@@ -211,7 +211,7 @@ pub fn build_root(mut root: Command) -> Command {
 fn extract_peer_flag(matches: &ArgMatches) -> Result<Option<String>> {
     let mut cur = matches;
     loop {
-        if let Some(v) = cur.get_one::<String>(PEER_FLAG) {
+        if let Some(v) = cur.try_get_one::<String>(PEER_FLAG).ok().flatten() {
             let v = serde_json::Value::String(v.clone());
             return Ok(crate::registry::peer_selector(Some(&v))?);
         }
@@ -677,20 +677,24 @@ pub async fn try_dispatch(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Res
         None => (domain.as_str(), verb),
     };
     let op = ops().find(|o| o.domain == domain && o.verb == verb)?;
-    // Lift the per-invocation peer target onto a fresh ctx clone so the
-    // shared base ctx stays immutable (REST hot-path pattern).
-    let peer = match extract_peer_flag(matches) {
-        Ok(peer) => peer,
+    let ctx = match ctx_with_peer(matches, ctx) {
+        Ok(ctx) => ctx,
         Err(e) => return Some(Err(e)),
     };
-    let ctx = if let Some(peer) = peer {
-        let mut owned = (*ctx).clone();
-        owned.set_peer(Some(peer));
-        Arc::new(owned)
-    } else {
-        ctx
-    };
     Some((op.run)(op_matches, ctx).await)
+}
+
+/// Lift the per-invocation `--peer` onto a fresh ctx clone so the shared base
+/// ctx stays immutable (REST hot-path pattern).
+fn ctx_with_peer(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Result<Arc<ToolCtx>> {
+    Ok(match extract_peer_flag(matches)? {
+        Some(peer) => {
+            let mut owned = (*ctx).clone();
+            owned.set_peer(Some(peer));
+            Arc::new(owned)
+        }
+        None => ctx,
+    })
 }
 
 /// Walk nested subcommands to the verb leaf. A node whose `.subcommand()` is
@@ -773,6 +777,10 @@ pub async fn dispatch_diagnostics(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Op
     if top != "diagnostics" {
         return None;
     }
+    let ctx = match ctx_with_peer(matches, ctx) {
+        Ok(ctx) => ctx,
+        Err(e) => return Some(Err(e)),
+    };
     let Some((op, op_sub)) = sub.subcommand() else {
         return Some(Err(anyhow::anyhow!(
             "usage: orca diagnostics <diagnose|repair> [flags]"
@@ -816,6 +824,10 @@ pub async fn dispatch_ups(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Res
     if top != "ups" {
         return None;
     }
+    let ctx = match ctx_with_peer(matches, ctx) {
+        Ok(ctx) => ctx,
+        Err(e) => return Some(Err(e)),
+    };
     let Some((op, op_sub)) = sub.subcommand() else {
         return Some(Err(anyhow::anyhow!(
             "usage: orca ups <state|config|configure> [flags]"
@@ -1077,7 +1089,17 @@ pub async fn dispatch_plugin_verb(
 // as unit ops (typed at the contract layer; forwarded as JSON here).
 #[allow(clippy::disallowed_types)]
 async fn run_diag(name: &str, args: serde_json::Value, ctx: &ToolCtx) -> Result<()> {
-    let out = if local_daemon_reachable() {
+    let out = if let Some(peer) = ctx.peer() {
+        ctx.service::<Arc<dyn RemoteExec>>()?
+            .exec(
+                peer,
+                name,
+                args,
+                ctx.caller(),
+                ctx.correlation_id().map(str::to_string),
+            )
+            .await?
+    } else if local_daemon_reachable() {
         post_daemon_raw(name, &args, ctx).await?
     } else {
         match crate::diagnostics_surface::diagnostics_dispatch(name, &args).await {
@@ -2492,6 +2514,86 @@ mod tests {
             err.to_string()
                 .contains("no diagnostics provider named 'no-such-provider'"),
             "{err}"
+        );
+    }
+
+    struct RecordingExec(std::sync::Mutex<Vec<(String, String)>>);
+    #[async_trait::async_trait]
+    impl contract::RemoteExec for RecordingExec {
+        #[allow(clippy::disallowed_types)]
+        async fn exec(
+            &self,
+            peer: &str,
+            tool: &str,
+            _args: serde_json::Value,
+            _caller: Option<contract::CallerIdentity>,
+            _correlation_id: Option<String>,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((peer.to_string(), tool.to_string()));
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    fn peer_ctx() -> (Arc<RecordingExec>, Arc<ToolCtx>) {
+        let rec = Arc::new(RecordingExec(std::sync::Mutex::new(Vec::new())));
+        let mut ctx = ToolCtx::new(Arc::new(contract::config::Config::load().unwrap()));
+        let svc: Arc<dyn contract::RemoteExec> = rec.clone();
+        ctx.register_service(svc);
+        (rec, Arc::new(ctx))
+    }
+
+    fn with_peer_flag(cmd: Command) -> Command {
+        cmd.arg(clap::Arg::new(PEER_FLAG).long("peer").global(true))
+    }
+
+    #[test]
+    fn dispatch_diagnostics_repair_with_peer_routes_remote() {
+        let cmd = with_peer_flag(
+            Command::new("orca").subcommand(
+                Command::new("diagnostics")
+                    .subcommand_required(true)
+                    .subcommand(
+                        Command::new("repair")
+                            .arg(clap::Arg::new("provider").long("provider"))
+                            .arg(clap::Arg::new("repair_id").long("repair-id")),
+                    ),
+            ),
+        );
+        let m = cmd.get_matches_from([
+            "orca",
+            "diagnostics",
+            "repair",
+            "--provider",
+            "p",
+            "--repair-id",
+            "r1",
+            "--peer",
+            "host-x",
+        ]);
+        let (rec, ctx) = peer_ctx();
+        with_unreachable_daemon(|| dispatch_diagnostics(&m, ctx))
+            .expect("Some")
+            .unwrap();
+        assert_eq!(
+            *rec.0.lock().unwrap(),
+            vec![("host-x".to_string(), "diagnostics.repair".to_string())]
+        );
+    }
+
+    #[test]
+    fn dispatch_ups_state_with_peer_routes_remote() {
+        let m = with_peer_flag(ups_root())
+            .get_matches_from(["orca", "ups", "state", "--peer", "host-y"]);
+        let (rec, ctx) = peer_ctx();
+        with_unreachable_daemon(|| dispatch_ups(&m, ctx))
+            .expect("Some")
+            .unwrap();
+        assert_eq!(
+            *rec.0.lock().unwrap(),
+            vec![("host-y".to_string(), "ups.state".to_string())]
         );
     }
 

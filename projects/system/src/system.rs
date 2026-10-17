@@ -520,28 +520,16 @@ fn collect_health(ctx: &contract::ToolCtx) -> anyhow::Result<HealthReport> {
 /// full fat-facts snapshot. Any error / no match yields `None` so it can never
 /// fail the health call.
 fn probe_orca_disk(dir: &std::path::Path) -> Option<DiskHealth> {
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    let mut best: Option<&sysinfo::Disk> = None;
-    let mut best_len = 0usize;
-    for d in disks.list() {
-        let mp = d.mount_point();
-        if dir.starts_with(mp) && mp.as_os_str().len() > best_len {
-            best_len = mp.as_os_str().len();
-            best = Some(d);
-        }
-    }
-    let d = best?;
-    let total = d.total_space();
-    let avail = d.available_space();
-    let used_pct = if total == 0 {
+    let d = crate::system_info::probe_disk(dir)?;
+    let used_pct = if d.total == 0 {
         0
     } else {
-        (((total - avail) as f64 / total as f64) * 100.0).round() as u8
+        (((d.total - d.avail) as f64 / d.total as f64) * 100.0).round() as u8
     };
     Some(DiskHealth {
-        path: d.mount_point().display().to_string(),
-        total_gb: total / 1024 / 1024 / 1024,
-        avail_gb: avail / 1024 / 1024 / 1024,
+        path: d.mount.display().to_string(),
+        total_gb: d.total / 1024 / 1024 / 1024,
+        avail_gb: d.avail / 1024 / 1024 / 1024,
         used_pct,
     })
 }
