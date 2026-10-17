@@ -574,6 +574,7 @@ struct ReplicateAttr {
     /// intact) — the interim step until canonical uuidv7 identity converges
     /// the ids fleet-wide.
     unique: Option<String>,
+    protected: Vec<String>,
     /// Crate path the macro emits against. Defaults to `::plugin_toolkit`;
     /// domain crates pass `crate = ::macro_runtime` to anchor against the
     /// lower-level macro-runtime crate (breaks the Cargo cycle that would
@@ -598,6 +599,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
     let mut lww = None;
     let mut pk = None;
     let mut unique = None;
+    let mut protected = Vec::new();
     let mut crate_path: Option<syn::Path> = None;
     for nv in items {
         let key = nv
@@ -625,6 +627,13 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
             "lww" => lww = Some(val),
             "pk" => pk = Some(val),
             "unique" => unique = Some(val),
+            "protected" => {
+                protected = val
+                    .split(',')
+                    .map(|f| f.trim().to_string())
+                    .filter(|f| !f.is_empty())
+                    .collect()
+            }
             other => {
                 return Err(syn::Error::new_spanned(
                     &nv.path,
@@ -640,6 +649,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
             .ok_or_else(|| syn::Error::new(Span::call_site(), "#[replicate] requires `lww`"))?,
         pk: pk.unwrap_or_else(|| "id".to_string()),
         unique,
+        protected,
         crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
     })
 }
@@ -696,6 +706,17 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
             ty,
             format!("#[replicate] unique '{u}' is not a field of the struct"),
         ));
+    }
+
+    for p in &cfg.protected {
+        if !field_names.contains(p) || *p == cfg.pk || *p == cfg.lww {
+            return Err(syn::Error::new_spanned(
+                ty,
+                format!(
+                    "#[replicate] protected '{p}' must be a non-pk, non-lww field of the struct"
+                ),
+            ));
+        }
     }
 
     let table = &cfg.table;
@@ -770,6 +791,81 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
         ),
     };
 
+    let protected_vars: Vec<Ident> = cfg
+        .protected
+        .iter()
+        .map(|p| Ident::new(&format!("__local_{p}"), Span::call_site()))
+        .collect();
+    let param_exprs: Vec<TokenStream2> = field_idents
+        .iter()
+        .zip(&field_names)
+        .map(
+            |(ident, name)| match cfg.protected.iter().position(|p| p == name) {
+                Some(i) => {
+                    let var = &protected_vars[i];
+                    quote! { #var }
+                }
+                None => quote! { row.#ident },
+            },
+        )
+        .collect();
+    let protected_guard = if cfg.protected.is_empty() {
+        quote! {}
+    } else {
+        let protected_idents: Vec<Ident> = cfg
+            .protected
+            .iter()
+            .map(|p| Ident::new(p, Span::call_site()))
+            .collect();
+        let protected_tys: Vec<&syn::Type> = cfg
+            .protected
+            .iter()
+            .map(|p| {
+                &named
+                    .iter()
+                    .find(|f| f.ident.as_ref().is_some_and(|i| i == p))
+                    .expect("validated protected field")
+                    .ty
+            })
+            .collect();
+        let protected_idx: Vec<syn::Index> =
+            (0..cfg.protected.len()).map(syn::Index::from).collect();
+        let lookup_where = match &cfg.unique {
+            None => format!("{pk} = ?1"),
+            Some(unique) => format!("{pk} = ?1 OR {unique} = ?2"),
+        };
+        let protected_sql = format!(
+            "SELECT {} FROM {table} WHERE {lookup_where} ORDER BY {} DESC LIMIT 1",
+            cfg.protected.join(", "),
+            cfg.lww
+        );
+        quote! {
+            let ( #( #protected_vars, )* ) = match conn
+                .query_row(#protected_sql, #lww_lookup_params, |r| {
+                    ::std::result::Result::Ok(( #( r.get::<_, #protected_tys>(#protected_idx)?, )* ))
+                })
+                .optional()?
+            {
+                ::std::option::Option::Some(local) => local,
+                ::std::option::Option::None => {
+                    #crate_path::replicate_table::audit_reject(
+                        #table,
+                        &row.#pk_ident,
+                        "new row with protected fields from a peer",
+                    );
+                    continue;
+                }
+            };
+            if #( row.#protected_idents != #protected_vars )||* {
+                #crate_path::replicate_table::audit_reject(
+                    #table,
+                    &row.#pk_ident,
+                    "peer change to protected fields dropped",
+                );
+            }
+        }
+    };
+
     let expanded = quote! {
         const _: () = {
             // The replication bundle is a heterogeneous registry of entity rows,
@@ -798,6 +894,12 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                     let rows: ::std::vec::Vec<#ty> = #crate_path::serde_json::from_value(rows)?;
                     let mut merged = 0usize;
                     for row in &rows {
+                        if let ::std::result::Result::Err(reason) =
+                            #crate_path::replicate_table::check_incoming_lww(&row.#lww_ident)
+                        {
+                            #crate_path::replicate_table::audit_reject(#table, &row.#pk_ident, reason);
+                            continue;
+                        }
                         let existing: ::std::option::Option<::std::string::String> = conn
                             .query_row(#lww_select_sql, #lww_lookup_params, |r| r.get(0))
                             .optional()?;
@@ -807,6 +909,7 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                         {
                             continue;
                         }
+                        #protected_guard
                         // Isolate each row: a single poison collision (e.g. an
                         // incoming pk matching one local row while its unique
                         // value belongs to ANOTHER — a cross-row UNIQUE clash
@@ -817,7 +920,7 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                         // peer off rather than storming.
                         match conn.execute(
                             #insert_sql,
-                            #crate_path::rusqlite::params![ #( row.#field_idents, )* ],
+                            #crate_path::rusqlite::params![ #( #param_exprs, )* ],
                         ) {
                             ::std::result::Result::Ok(_) => { merged += 1; }
                             ::std::result::Result::Err(e) => {

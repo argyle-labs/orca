@@ -650,7 +650,7 @@ fn handle_replicate_push(peer_cn: &str, request: Request) -> Result<ReplicatePus
             )
         })?;
     let entities = crate::mesh::transport::verify_envelope(&envelope, &pinned_fp)?;
-    let merged = db::replicate_engine::merge_into_local(entities)?;
+    let merged = db::replicate_engine::merge_into_local(peer_cn, entities)?;
     if merged > 0 {
         tracing::info!("[replicate.push.recv] merged {merged} row(s) from {peer_cn}");
     }

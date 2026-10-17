@@ -349,6 +349,14 @@ pub fn upsert_mesh_row(
 ) -> Result<bool> {
     serde_json::from_str::<serde::de::IgnoredAny>(payload_json)
         .with_context(|| format!("mesh payload for {noun}/{name} is not valid JSON"))?;
+    if let Err(reason) = macro_runtime::replicate_table::check_incoming_lww(updated_at) {
+        macro_runtime::replicate_table::audit_reject(
+            "config_rows",
+            &(host_owner, noun, name),
+            reason,
+        );
+        return Ok(false);
+    }
     // An id the owner sent wins; otherwise the row keeps the one it has, and a
     // genuinely new row gets a fresh one.
     let row_id = if uuidv7.is_empty() {
@@ -1003,6 +1011,36 @@ mod tests {
         assert_eq!(
             r[0].updated_at, "2026-07-05T10:00:00Z",
             "origin ts preserved"
+        );
+    }
+
+    #[test]
+    fn mesh_row_rejects_future_and_unparseable_lww() {
+        let conn = test_conn();
+        merge_remote(
+            &conn,
+            "host-b",
+            "display",
+            "target",
+            r#"{"v":1}"#,
+            "2026-07-05T10:00:00Z",
+        );
+        for bad in ["9999-01-01T00:00:00Z", "zzzz"] {
+            assert!(!merge_remote(
+                &conn,
+                "host-b",
+                "display",
+                "target",
+                r#"{"v":9}"#,
+                bad
+            ));
+        }
+        assert!(
+            get(&conn, "display", "target")
+                .unwrap()
+                .unwrap()
+                .json
+                .contains("\"v\":1")
         );
     }
 

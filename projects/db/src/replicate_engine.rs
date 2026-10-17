@@ -400,7 +400,9 @@ pub async fn sync_now(peer_filter: Option<&str>) -> Result<Vec<PeerSyncReport>> 
         let report = match t.fetch(&p).await {
             Ok(bundle) => {
                 match crate::pool::with_pooled_or_open(|conn| {
-                    crate::replicate::merge_bundle(conn, bundle)
+                    macro_runtime::replicate_table::with_merge_peer(&p.peer_id, || {
+                        crate::replicate::merge_bundle(conn, bundle)
+                    })
                 }) {
                     Ok(0) => PeerSyncReport {
                         peer_id: p.peer_id.clone(),
@@ -538,8 +540,12 @@ pub async fn push_now() -> Result<()> {
 /// Helper for receiver-side handlers: given an already-verified bundle, merge
 /// it into the local DB and return rows merged. The signature/fp check stays
 /// in the transport — engine just owns the persistence step.
-pub fn merge_into_local(bundle: BTreeMap<String, Value>) -> Result<usize> {
-    crate::pool::with_pooled_or_open(|conn| crate::replicate::merge_bundle(conn, bundle))
+pub fn merge_into_local(peer: &str, bundle: BTreeMap<String, Value>) -> Result<usize> {
+    crate::pool::with_pooled_or_open(|conn| {
+        macro_runtime::replicate_table::with_merge_peer(peer, || {
+            crate::replicate::merge_bundle(conn, bundle)
+        })
+    })
 }
 
 #[cfg(test)]
@@ -996,7 +1002,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("orca.db");
         crate::with_db_path(db_path.clone(), async {
-            let n = merge_into_local(bundle).unwrap();
+            let n = merge_into_local("peer", bundle).unwrap();
             assert_eq!(n, 1);
             let conn = crate::open_default().unwrap();
             let id = crate::testing::fx_find(&conn, "bob").unwrap().0;

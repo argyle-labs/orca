@@ -24,10 +24,69 @@
 // `ReplicatedRegistration` already carry.
 #![allow(clippy::disallowed_types)]
 
+use ::std::cell::RefCell;
+use ::std::fmt::Debug;
+
 use ::anyhow::{Context, Result};
 use ::rusqlite::Connection;
 use ::rusqlite::types::{Value as SqlValue, ValueRef};
 use ::serde_json::{Map, Value};
+
+pub const MAX_LWW_SKEW_MILLIS: i64 = 300_000;
+
+thread_local! {
+    static MERGE_PEER: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+pub fn with_merge_peer<R>(peer: &str, f: impl FnOnce() -> R) -> R {
+    let prev = MERGE_PEER.with(|p| p.replace(Some(peer.to_string())));
+    let out = f();
+    MERGE_PEER.with(|p| *p.borrow_mut() = prev);
+    out
+}
+
+pub fn audit_reject(table: &str, key: &dyn Debug, reason: &str) {
+    let peer = MERGE_PEER
+        .with(|p| p.borrow().clone())
+        .unwrap_or_else(|| "unknown".into());
+    ::tracing::warn!(target: "audit", peer = %peer, table, key = ?key, reason, "replicated row rejected");
+}
+
+fn lww_str_millis(s: &str) -> Option<i64> {
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        return s.parse().ok();
+    }
+    if s.len() == 10 {
+        return ::utils::time::Timestamp::parse_rfc3339(&format!("{s}T00:00:00Z"))
+            .ok()
+            .map(|t| t.unix_millis());
+    }
+    ::utils::time::Timestamp::parse_rfc3339(s)
+        .ok()
+        .map(|t| t.unix_millis())
+}
+
+fn check_lww_millis(millis: Option<i64>) -> Result<(), &'static str> {
+    match millis {
+        None => Err("unparseable lww"),
+        Some(m) if m > ::utils::time::now_millis_since_epoch() + MAX_LWW_SKEW_MILLIS => {
+            Err("lww too far in the future")
+        }
+        Some(_) => Ok(()),
+    }
+}
+
+pub fn check_incoming_lww(lww: &str) -> Result<(), &'static str> {
+    check_lww_millis(lww_str_millis(lww))
+}
+
+fn check_incoming_lww_json(lww: &Value) -> Result<(), &'static str> {
+    match lww {
+        Value::String(s) => check_incoming_lww(s),
+        Value::Number(n) => check_lww_millis(n.as_i64()),
+        _ => Err("uncomparable lww"),
+    }
+}
 
 /// `SELECT <columns> FROM <table> ORDER BY <pk> ASC`, returned as a JSON array
 /// of `{column: value}` objects — the wire shape the merge side consumes.
@@ -81,7 +140,12 @@ pub fn merge_table(
     for row in &rows {
         let obj = row.as_object().context("merge row not an object")?;
         let incoming_lww = obj.get(lww).context("merge row missing lww column")?;
-        let pk_val = json_to_sql(obj.get(pk).context("merge row missing pk column")?);
+        let pk_json = obj.get(pk).context("merge row missing pk column")?;
+        if let Err(reason) = check_incoming_lww_json(incoming_lww) {
+            audit_reject(table, pk_json, reason);
+            continue;
+        }
+        let pk_val = json_to_sql(pk_json);
 
         // Last-write-wins: skip when the local copy is at least as new.
         let local_lww: Option<SqlValue> = conn
@@ -194,6 +258,10 @@ pub fn merge_table_natural(
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
+        if let Err(reason) = check_incoming_lww_json(incoming_lww) {
+            audit_reject(table, &nk_vals, reason);
+            continue;
+        }
 
         // Last-write-wins: skip when the local copy matching the natural key is
         // at least as new.
@@ -281,13 +349,13 @@ fn json_to_sql(v: &Value) -> SqlValue {
 /// Is the incoming JSON `lww` strictly newer than the local SQLite `lww`?
 /// Compares as strings when both are text (ISO timestamps sort lexically) and
 /// numerically when both are integers — the two shapes `lww` columns take.
+/// Uncomparable shapes are never newer.
 fn json_is_newer_than_sql(incoming: &Value, local: &SqlValue) -> bool {
     match (incoming, local) {
         (Value::String(i), SqlValue::Text(l)) => i.as_str() > l.as_str(),
         (Value::Number(i), SqlValue::Integer(l)) => i.as_i64().unwrap_or(i64::MIN) > *l,
         (Value::Number(i), SqlValue::Real(l)) => i.as_f64().unwrap_or(f64::MIN) > *l,
-        // Mixed/uncomparable: treat incoming as newer so a real change isn't lost.
-        _ => true,
+        _ => false,
     }
 }
 
@@ -580,5 +648,50 @@ mod tests {
             .query_row("SELECT val FROM t WHERE name='a'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, "v", "unchanged");
+    }
+
+    #[test]
+    fn merge_rejects_future_and_uncomparable_lww() {
+        let dst = setup();
+        insert(&dst, "a", "old", "2026-01-01");
+        let bundle = ::serde_json::json!([
+            {"name":"a","val":"future","enabled":1,"updated_at":"9999-01-01T00:00:00Z"},
+            {"name":"b","val":"garbage","enabled":1,"updated_at":"not-a-time"},
+            {"name":"c","val":"bool","enabled":1,"updated_at":true},
+        ]);
+        let n = merge_table(&dst, "t", COLS, "name", "updated_at", bundle).unwrap();
+        assert_eq!(n, 0);
+        let a: String = dst
+            .query_row("SELECT val FROM t WHERE name='a'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(a, "old");
+    }
+
+    #[test]
+    fn natural_merge_rejects_future_lww() {
+        let c = setup_natural();
+        insert_m(&c, "id-local", "baldur", "data", 100);
+        let future = ::utils::time::now_millis_since_epoch() + MAX_LWW_SKEW_MILLIS + 60_000;
+        let bundle = ::serde_json::json!([
+            {"id":"id-peer","host":"baldur","name":"data","updated_at":future},
+        ]);
+        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], bundle).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn uncomparable_local_is_not_newer() {
+        assert!(!json_is_newer_than_sql(
+            &Value::from("2026-01-01"),
+            &SqlValue::Integer(1)
+        ));
+    }
+
+    #[test]
+    fn check_incoming_lww_accepts_within_skew() {
+        let near = ::utils::time::now_millis_since_epoch() + MAX_LWW_SKEW_MILLIS / 2;
+        assert!(check_incoming_lww(&near.to_string()).is_ok());
+        assert!(check_incoming_lww("2026-01-01T00:00:00Z").is_ok());
+        assert!(check_incoming_lww("").is_err());
     }
 }
