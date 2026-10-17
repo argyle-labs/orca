@@ -9,6 +9,7 @@
 //! `path`, `locations` all have shapes that vary per-server and per-query.
 #![allow(clippy::disallowed_types)]
 
+#[cfg(feature = "introspection")]
 pub mod introspection;
 #[cfg(feature = "shopify")]
 pub mod shopify_proxy;
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use thiserror::Error;
+#[cfg(feature = "http")]
 use utils::http::{Client as HttpClient, HttpError};
 
 /// Standard GraphQL response envelope: `data` + optional `errors`.
@@ -43,8 +45,11 @@ pub struct GraphQlError {
 
 #[derive(Debug, Error)]
 pub enum GraphQlErrors {
+    #[cfg(feature = "http")]
     #[error(transparent)]
     Http(#[from] HttpError),
+    #[error("graphql transport: {0}")]
+    Transport(String),
     #[error("graphql server returned errors: {summary}")]
     ServerErrors {
         summary: String,
@@ -52,11 +57,13 @@ pub enum GraphQlErrors {
     },
 }
 
+#[cfg(feature = "http")]
 #[derive(Clone, Default)]
 pub struct Client {
     http: HttpClient,
 }
 
+#[cfg(feature = "http")]
 impl Client {
     pub fn new() -> Self {
         Self {
@@ -73,16 +80,7 @@ impl Client {
     /// `GraphQlErrors::ServerErrors` so callers can choose to inspect or
     /// short-circuit.
     pub async fn query(&self, req: QueryRequest<'_>) -> Result<GraphQlResponse, GraphQlErrors> {
-        let mut payload = json!({
-            "query": req.query,
-        });
-        if let Some(vars) = req.variables {
-            payload["variables"] = vars;
-        }
-        if let Some(name) = req.operation_name {
-            payload["operationName"] = Value::String(name.to_string());
-        }
-
+        let payload = req.payload();
         let mut builder = self.http.post(req.endpoint).json(payload);
         if let Some(h) = req.headers {
             builder = builder.headers(h.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -92,20 +90,7 @@ impl Client {
         }
 
         let resp = builder.send().await?;
-        let envelope: GraphQlResponse = resp.json()?;
-        if !envelope.errors.is_empty() {
-            let summary = envelope
-                .errors
-                .iter()
-                .map(|e| e.message.as_str())
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(GraphQlErrors::ServerErrors {
-                summary,
-                response: Box::new(envelope),
-            });
-        }
-        Ok(envelope)
+        check_envelope(resp.json()?)
     }
 
     /// Execute a typed [`graphql_client::GraphQLQuery`] against `endpoint`,
@@ -132,33 +117,7 @@ impl Client {
             builder = builder.insecure(true);
         }
         let resp = builder.send().await?;
-        let envelope: graphql_client::Response<Q::ResponseData> = resp.json()?;
-        if let Some(errors) = envelope.errors.filter(|e| !e.is_empty()) {
-            let summary = errors
-                .iter()
-                .map(|e| e.message.as_str())
-                .collect::<Vec<_>>()
-                .join("; ");
-            // Re-pack into the schemaless envelope so existing error-path
-            // matchers keep working. Typed callers only need `Ok` payloads.
-            let response = Box::new(GraphQlResponse {
-                data: Default::default(),
-                errors: errors
-                    .into_iter()
-                    .map(|e| GraphQlError {
-                        message: e.message,
-                        path: None,
-                        locations: None,
-                        extensions: None,
-                    })
-                    .collect(),
-                extensions: None,
-            });
-            return Err(GraphQlErrors::ServerErrors { summary, response });
-        }
-        envelope
-            .data
-            .ok_or_else(|| GraphQlErrors::Http(HttpError::Decode("missing data field".into())))
+        check_typed(resp.json()?)
     }
 
     /// Run the standard `__schema` introspection query.
@@ -178,6 +137,57 @@ impl Client {
         })
         .await
     }
+}
+
+pub fn check_envelope(envelope: GraphQlResponse) -> Result<GraphQlResponse, GraphQlErrors> {
+    if !envelope.errors.is_empty() {
+        let summary = envelope
+            .errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(GraphQlErrors::ServerErrors {
+            summary,
+            response: Box::new(envelope),
+        });
+    }
+    Ok(envelope)
+}
+
+pub fn check_typed<D>(envelope: graphql_client::Response<D>) -> Result<D, GraphQlErrors> {
+    if let Some(errors) = envelope.errors.filter(|e| !e.is_empty()) {
+        let summary = errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let response = Box::new(GraphQlResponse {
+            data: Default::default(),
+            errors: errors
+                .into_iter()
+                .map(|e| GraphQlError {
+                    message: e.message,
+                    path: None,
+                    locations: None,
+                    extensions: None,
+                })
+                .collect(),
+            extensions: None,
+        });
+        return Err(GraphQlErrors::ServerErrors { summary, response });
+    }
+    envelope.data.ok_or_else(missing_data)
+}
+
+#[cfg(feature = "http")]
+fn missing_data() -> GraphQlErrors {
+    GraphQlErrors::Http(HttpError::Decode("missing data field".into()))
+}
+
+#[cfg(not(feature = "http"))]
+fn missing_data() -> GraphQlErrors {
+    GraphQlErrors::Transport("missing data field".into())
 }
 
 #[derive(Debug, Clone)]
@@ -209,6 +219,18 @@ impl<'a> QueryRequest<'a> {
         self.headers = Some(h);
         self
     }
+    pub fn payload(&self) -> Value {
+        let mut payload = json!({
+            "query": self.query,
+        });
+        if let Some(vars) = &self.variables {
+            payload["variables"] = vars.clone();
+        }
+        if let Some(name) = self.operation_name {
+            payload["operationName"] = Value::String(name.to_string());
+        }
+        payload
+    }
 }
 
 /// Subset of the canonical GraphQL introspection query. Sufficient to
@@ -236,7 +258,7 @@ query IntrospectionQuery {
 }
 "#;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "http"))]
 mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
