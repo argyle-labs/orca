@@ -1306,8 +1306,7 @@ impl contract::RemoteExec for MeshRemoteExec {
 }
 
 /// Project fleet targets to `PeerRef`s, giving the local entry this system's
-/// real id: `Target` leaves it blank (fleet-update rows use a blank id to mean
-/// "not remote"), but a caller addressing this system by its own id must match.
+/// real id so a caller addressing this system by its own id matches.
 fn peer_refs(
     targets: Vec<crate::mesh::fleet_update::Target>,
     local_id: &str,
