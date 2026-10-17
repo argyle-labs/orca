@@ -535,7 +535,7 @@ fn peer_may_delete(conn: &Connection, row_id: &str) -> bool {
     .ok()
     .flatten()
     .is_some_and(|(noun, owner)| {
-        PEER_WRITABLE_NOUNS.contains(&noun.as_str()) && sender.as_deref().is_none_or(|s| s == owner)
+        PEER_WRITABLE_NOUNS.contains(&noun.as_str()) && sender.as_deref() == Some(owner.as_str())
     })
 }
 

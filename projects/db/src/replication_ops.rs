@@ -538,8 +538,16 @@ mod tests {
             .id;
         assert_eq!(
             replicate_merge(&dst, peer_op("config_rows", "id", &id, now)).unwrap(),
-            1
+            0,
+            "no sender: fail closed"
         );
+        let from = |sender: &str| {
+            macro_runtime::replicate_table::with_merge_peer(sender, || {
+                replicate_merge(&dst, peer_op("config_rows", "id", &id, now)).unwrap()
+            })
+        };
+        assert_eq!(from("other"), 0, "sender must own the row");
+        assert_eq!(from("h"), 1);
     }
 
     #[test]
@@ -598,28 +606,27 @@ mod tests {
     }
 
     #[test]
-    fn local_origin_migration_purges_foreign_ops_for_protected_entities() {
+    fn local_origin_migration_purges_every_unproven_op_except_config_rows() {
         let conn = test_conn();
-        crate::settings::set(&conn, "host.display_name", "me").unwrap();
         conn.execute_batch(
             "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms) VALUES
                ('a','users','username_lower','x','delete','evil',1),
-               ('b','users','username_lower','y','delete','me',1),
+               ('b','mesh_peers','peer_id','y','delete','me',1),
                ('c','config_rows','id','z','delete','evil',1);",
         )
         .unwrap();
-        let up = include_str!("../migrations/20261017000000__replication_ops_local_origin.up.sql");
-        let (_, rest) = up.split_once(";\n").unwrap();
-        conn.execute_batch(rest).unwrap();
-        let mut stmt = conn
-            .prepare("SELECT op_id, local_origin FROM replication_ops ORDER BY op_id")
-            .unwrap();
-        let rows: Vec<(String, i64)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        let purge =
+            include_str!("../migrations/20261017000001__replication_ops_purge_foreign.up.sql");
+        conn.execute_batch(purge).unwrap();
+        conn.execute_batch(purge).unwrap();
+        let ids: Vec<String> = conn
+            .prepare("SELECT op_id FROM replication_ops ORDER BY op_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(rows, vec![("b".into(), 1), ("c".into(), 0)]);
+        assert_eq!(ids, vec!["c".to_string()]);
     }
 
     #[test]
