@@ -37,7 +37,8 @@ use plugin_toolkit::endpoint_resource;
     plugin = "storage.replication",
     table = "replications",
     lww = "updated_at",
-    skip = "detail"
+    skip = "detail",
+    protected = "provider,folder"
 )]
 pub struct Replication {
     /// Canonical uuidv7 identity ([[pure-uuidv7-ids-not-composite]]). A share

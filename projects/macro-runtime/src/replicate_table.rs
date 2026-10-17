@@ -25,7 +25,9 @@
 #![allow(clippy::disallowed_types)]
 
 use ::std::cell::RefCell;
+use ::std::collections::BTreeMap;
 use ::std::fmt::Debug;
+use ::std::sync::Mutex;
 
 use ::anyhow::{Context, Result};
 use ::rusqlite::Connection;
@@ -38,11 +40,20 @@ thread_local! {
     static MERGE_PEER: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
+static REJECTIONS: Mutex<BTreeMap<(String, String, String), u64>> = Mutex::new(BTreeMap::new());
+
+struct PeerGuard(Option<String>);
+
+impl Drop for PeerGuard {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        MERGE_PEER.with(|p| *p.borrow_mut() = prev);
+    }
+}
+
 pub fn with_merge_peer<R>(peer: &str, f: impl FnOnce() -> R) -> R {
-    let prev = MERGE_PEER.with(|p| p.replace(Some(peer.to_string())));
-    let out = f();
-    MERGE_PEER.with(|p| *p.borrow_mut() = prev);
-    out
+    let _guard = PeerGuard(MERGE_PEER.with(|p| p.replace(Some(peer.to_string()))));
+    f()
 }
 
 pub fn audit_reject(table: &str, key: &dyn Debug, reason: &str) {
@@ -50,37 +61,50 @@ pub fn audit_reject(table: &str, key: &dyn Debug, reason: &str) {
         .with(|p| p.borrow().clone())
         .unwrap_or_else(|| "unknown".into());
     ::tracing::warn!(target: "audit", peer = %peer, table, key = ?key, reason, "replicated row rejected");
+    let mut counts = REJECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    *counts
+        .entry((peer, table.to_string(), reason.to_string()))
+        .or_default() += 1;
 }
 
-fn lww_str_millis(s: &str) -> Option<i64> {
-    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
-        return s.parse().ok();
-    }
-    if s.len() == 10 {
-        return ::utils::time::Timestamp::parse_rfc3339(&format!("{s}T00:00:00Z"))
-            .ok()
-            .map(|t| t.unix_millis());
-    }
-    ::utils::time::Timestamp::parse_rfc3339(s)
-        .ok()
-        .map(|t| t.unix_millis())
+pub fn rejection_counts() -> BTreeMap<(String, String, String), u64> {
+    REJECTIONS.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-fn check_lww_millis(millis: Option<i64>) -> Result<(), &'static str> {
+fn canonical_rfc3339_millis(s: &str) -> Option<i64> {
+    let ts = ::utils::time::Timestamp::parse_rfc3339(s).ok()?;
+    (ts.to_rfc3339() == s).then(|| ts.unix_millis())
+}
+
+fn check_lww_millis(millis: Option<i64>) -> Result<i64, &'static str> {
     match millis {
-        None => Err("unparseable lww"),
+        None => Err("non-canonical lww"),
         Some(m) if m > ::utils::time::now_millis_since_epoch() + MAX_LWW_SKEW_MILLIS => {
             Err("lww too far in the future")
         }
-        Some(_) => Ok(()),
+        Some(m) => Ok(m),
     }
 }
 
-pub fn check_incoming_lww(lww: &str) -> Result<(), &'static str> {
-    check_lww_millis(lww_str_millis(lww))
+pub fn check_incoming_millis(millis: i64) -> Result<i64, &'static str> {
+    check_lww_millis(Some(millis))
 }
 
-fn check_incoming_lww_json(lww: &Value) -> Result<(), &'static str> {
+pub fn check_incoming_lww(lww: &str) -> Result<i64, &'static str> {
+    check_lww_millis(canonical_rfc3339_millis(lww))
+}
+
+pub fn lww_str_is_newer(incoming: &str, local: &str) -> bool {
+    match (
+        canonical_rfc3339_millis(incoming),
+        ::utils::time::Timestamp::parse_rfc3339(local).map(|t| t.unix_millis()),
+    ) {
+        (Some(i), Ok(l)) => i > l,
+        _ => false,
+    }
+}
+
+fn check_incoming_lww_json(lww: &Value) -> Result<i64, &'static str> {
     match lww {
         Value::String(s) => check_incoming_lww(s),
         Value::Number(n) => check_lww_millis(n.as_i64()),
@@ -110,13 +134,15 @@ pub fn export_table(conn: &Connection, table: &str, columns: &[&str], pk: &str) 
 
 /// Merge a peer's exported rows into `table`, last-write-wins on `lww`. Returns
 /// the number of rows actually written (newer-than-local). Upserts on `pk`; a
-/// row whose `lww` is `<=` the local row's is skipped.
+/// row whose `lww` is `<=` the local row's is skipped. `protected` columns (or
+/// `column.key` JSON keys) never take a peer's value; see [`protect_row`].
 pub fn merge_table(
     conn: &Connection,
     table: &str,
     columns: &[&str],
     pk: &str,
     lww: &str,
+    protected: &[&str],
     rows: Value,
 ) -> Result<usize> {
     let rows: Vec<Value> = ::serde_json::from_value(rows).context("merge rows not an array")?;
@@ -135,25 +161,40 @@ pub fn merge_table(
         "INSERT INTO {table} ({cols_csv}) VALUES ({placeholders}) ON CONFLICT({pk}) DO UPDATE SET {update_set}"
     );
     let lww_sql = format!("SELECT {lww} FROM {table} WHERE {pk} = ?1");
+    let protected_sql = protected_select(table, protected, &format!("{pk} = ?1"));
 
     let mut merged = 0usize;
     for row in &rows {
-        let obj = row.as_object().context("merge row not an object")?;
-        let incoming_lww = obj.get(lww).context("merge row missing lww column")?;
-        let pk_json = obj.get(pk).context("merge row missing pk column")?;
-        if let Err(reason) = check_incoming_lww_json(incoming_lww) {
-            audit_reject(table, pk_json, reason);
+        let mut obj = row.as_object().context("merge row not an object")?.clone();
+        let incoming_lww = obj
+            .get(lww)
+            .context("merge row missing lww column")?
+            .clone();
+        let pk_json = obj.get(pk).context("merge row missing pk column")?.clone();
+        if let Err(reason) = check_incoming_lww_json(&incoming_lww) {
+            audit_reject(table, &pk_json, reason);
             continue;
         }
-        let pk_val = json_to_sql(pk_json);
+        let pk_val = json_to_sql(&pk_json);
 
         // Last-write-wins: skip when the local copy is at least as new.
         let local_lww: Option<SqlValue> = conn
             .query_row(&lww_sql, [&pk_val], |r| r.get::<_, SqlValue>(0))
             .ok();
         if let Some(local) = local_lww
-            && !json_is_newer_than_sql(incoming_lww, &local)
+            && !json_is_newer_than_sql(&incoming_lww, &local)
         {
+            continue;
+        }
+        if !protect_row(
+            conn,
+            table,
+            protected,
+            protected_sql.as_deref(),
+            std::slice::from_ref(&pk_val),
+            &pk_json,
+            &mut obj,
+        )? {
             continue;
         }
 
@@ -199,6 +240,7 @@ pub fn merge_table_natural(
     natural_key: &[&str],
     lww: &str,
     preserve: &[&str],
+    protected: &[&str],
     rows: Value,
 ) -> Result<usize> {
     let rows: Vec<Value> = ::serde_json::from_value(rows).context("merge rows not an array")?;
@@ -213,7 +255,9 @@ pub fn merge_table_natural(
         .map(|(i, c)| format!("{c} = ?{}", i + 1))
         .collect::<Vec<_>>()
         .join(" AND ");
-    let lww_sql = format!("SELECT {lww} FROM {table} WHERE {nk_conj}");
+    let target_where = format!("({nk_conj}) OR {pk} = ?{}", natural_key.len() + 1);
+    let target_sql = format!("SELECT {pk}, {lww} FROM {table} WHERE {target_where}");
+    let protected_sql = protected_select(table, protected, &target_where);
     // Read the host-local `preserve` columns of the pre-merge local row so they
     // survive the DELETE+INSERT below.
     let preserve_select_sql = (!preserve.is_empty()).then(|| {
@@ -247,8 +291,12 @@ pub fn merge_table_natural(
 
     let mut merged = 0usize;
     for row in &rows {
-        let obj = row.as_object().context("merge row not an object")?;
-        let incoming_lww = obj.get(lww).context("merge row missing lww column")?;
+        let mut obj = row.as_object().context("merge row not an object")?.clone();
+        let incoming_lww = obj
+            .get(lww)
+            .context("merge row missing lww column")?
+            .clone();
+        let pk_json = obj.get(pk).context("merge row missing pk column")?.clone();
         let nk_vals: Vec<SqlValue> = natural_key
             .iter()
             .map(|c| {
@@ -258,23 +306,39 @@ pub fn merge_table_natural(
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        if let Err(reason) = check_incoming_lww_json(incoming_lww) {
+        if let Err(reason) = check_incoming_lww_json(&incoming_lww) {
             audit_reject(table, &nk_vals, reason);
             continue;
         }
+        let mut target_params = nk_vals.clone();
+        target_params.push(json_to_sql(&pk_json));
 
-        // Last-write-wins: skip when the local copy matching the natural key is
-        // at least as new.
-        let local_lww: Option<SqlValue> = conn
-            .query_row(
-                &lww_sql,
-                ::rusqlite::params_from_iter(nk_vals.iter()),
-                |r| r.get::<_, SqlValue>(0),
-            )
-            .ok();
-        if let Some(local) = local_lww
-            && !json_is_newer_than_sql(incoming_lww, &local)
+        let targets: Vec<(SqlValue, SqlValue)> = conn
+            .prepare(&target_sql)?
+            .query_map(::rusqlite::params_from_iter(target_params.iter()), |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<::rusqlite::Result<_>>()?;
+        if targets.len() > 1 {
+            audit_reject(table, &nk_vals, "pk and natural key match different rows");
+            continue;
+        }
+
+        // Last-write-wins: skip when the local copy is at least as new.
+        if let Some((_, local)) = targets.first()
+            && !json_is_newer_than_sql(&incoming_lww, local)
         {
+            continue;
+        }
+        if !protect_row(
+            conn,
+            table,
+            protected,
+            protected_sql.as_deref(),
+            &target_params,
+            &nk_vals,
+            &mut obj,
+        )? {
             continue;
         }
 
@@ -289,11 +353,11 @@ pub fn merge_table_natural(
             .ok()
         });
 
-        let pk_val = json_to_sql(obj.get(pk).context("merge row missing pk column")?);
-        let mut del_params = nk_vals.clone();
-        del_params.push(pk_val);
-        conn.execute(&delete_sql, ::rusqlite::params_from_iter(del_params.iter()))
-            .with_context(|| format!("merge delete {table}"))?;
+        conn.execute(
+            &delete_sql,
+            ::rusqlite::params_from_iter(target_params.iter()),
+        )
+        .with_context(|| format!("merge delete {table}"))?;
 
         let vals: Vec<SqlValue> = columns
             .iter()
@@ -311,6 +375,102 @@ pub fn merge_table_natural(
         merged += 1;
     }
     Ok(merged)
+}
+
+fn protected_base(p: &str) -> &str {
+    p.split_once('.').map_or(p, |(col, _)| col)
+}
+
+fn protected_cols<'a>(protected: &[&'a str]) -> Vec<&'a str> {
+    let mut cols: Vec<&str> = protected.iter().map(|p| protected_base(p)).collect();
+    cols.sort_unstable();
+    cols.dedup();
+    cols
+}
+
+fn protected_select(table: &str, protected: &[&str], where_clause: &str) -> Option<String> {
+    if protected.is_empty() {
+        return None;
+    }
+    let cols = protected_cols(protected);
+    Some(format!(
+        "SELECT {} FROM {table} WHERE {where_clause}",
+        cols.join(", ")
+    ))
+}
+
+fn protect_row(
+    conn: &Connection,
+    table: &str,
+    protected: &[&str],
+    sql: Option<&str>,
+    params: &[SqlValue],
+    key: &dyn Debug,
+    obj: &mut Map<String, Value>,
+) -> Result<bool> {
+    let Some(sql) = sql else {
+        return Ok(true);
+    };
+    let cols = protected_cols(protected);
+    let local: Option<Map<String, Value>> = {
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = stmt.query(::rusqlite::params_from_iter(params.iter()))?;
+        match rows.next()? {
+            None => None,
+            Some(r) => {
+                let mut m = Map::new();
+                for (i, c) in cols.iter().enumerate() {
+                    m.insert((*c).to_string(), sql_to_json(r.get_ref(i)?));
+                }
+                Some(m)
+            }
+        }
+    };
+    let Some(local) = local else {
+        audit_reject(table, key, "new row with protected fields from a peer");
+        return Ok(false);
+    };
+    let mut changed = false;
+    for p in protected {
+        match p.split_once('.') {
+            None => {
+                let lv = local.get(*p).cloned().unwrap_or(Value::Null);
+                if obj.get(*p) != Some(&lv) {
+                    changed = true;
+                    obj.insert((*p).to_string(), lv);
+                }
+            }
+            Some((col, json_key)) => {
+                let lv = local.get(col).cloned().unwrap_or(Value::Null);
+                let parse = |v: Option<&Value>| match v {
+                    Some(Value::String(s)) => ::serde_json::from_str::<Map<String, Value>>(s).ok(),
+                    _ => None,
+                };
+                let (Some(mut inc), Some(loc)) = (parse(obj.get(col)), parse(Some(&lv))) else {
+                    if obj.get(col) != Some(&lv) {
+                        changed = true;
+                        obj.insert(col.to_string(), lv);
+                    }
+                    continue;
+                };
+                if inc.get(json_key) != loc.get(json_key) {
+                    changed = true;
+                    match loc.get(json_key) {
+                        Some(v) => inc.insert(json_key.to_string(), v.clone()),
+                        None => inc.remove(json_key),
+                    };
+                    obj.insert(
+                        col.to_string(),
+                        Value::String(Value::Object(inc).to_string()),
+                    );
+                }
+            }
+        }
+    }
+    if changed {
+        audit_reject(table, key, "peer change to protected fields dropped");
+    }
+    Ok(true)
 }
 
 /// Read a SQLite cell as JSON. Endpoint tables are TEXT/INTEGER only; REAL/NULL
@@ -352,7 +512,7 @@ fn json_to_sql(v: &Value) -> SqlValue {
 /// Uncomparable shapes are never newer.
 fn json_is_newer_than_sql(incoming: &Value, local: &SqlValue) -> bool {
     match (incoming, local) {
-        (Value::String(i), SqlValue::Text(l)) => i.as_str() > l.as_str(),
+        (Value::String(i), SqlValue::Text(l)) => lww_str_is_newer(i, l),
         (Value::Number(i), SqlValue::Integer(l)) => i.as_i64().unwrap_or(i64::MIN) > *l,
         (Value::Number(i), SqlValue::Real(l)) => i.as_f64().unwrap_or(f64::MIN) > *l,
         _ => false,
@@ -385,8 +545,8 @@ mod tests {
     #[test]
     fn export_round_trips_rows_ordered_by_pk() {
         let c = setup();
-        insert(&c, "b", "two", "2026-01-02");
-        insert(&c, "a", "one", "2026-01-01");
+        insert(&c, "b", "two", "2026-01-02T00:00:00Z");
+        insert(&c, "a", "one", "2026-01-01T00:00:00Z");
         let v = export_table(&c, "t", COLS, "name").unwrap();
         let arr = v.as_array().unwrap();
         assert_eq!(arr.len(), 2);
@@ -398,17 +558,17 @@ mod tests {
     #[test]
     fn merge_inserts_new_and_lww_updates_but_never_regresses() {
         let dst = setup();
-        insert(&dst, "a", "old", "2026-01-01");
-        insert(&dst, "keep", "fresh", "2026-06-01");
+        insert(&dst, "a", "old", "2026-01-01T00:00:00Z");
+        insert(&dst, "keep", "fresh", "2026-06-01T00:00:00Z");
 
         // Peer: 'a' is newer (update), 'new' is unseen (insert), 'keep' is
         // STALE (must be ignored — local is fresher).
         let bundle = ::serde_json::json!([
-            {"name":"a","val":"new","enabled":0,"updated_at":"2026-05-01"},
-            {"name":"new","val":"n","enabled":1,"updated_at":"2026-05-01"},
-            {"name":"keep","val":"STALE","enabled":1,"updated_at":"2026-02-01"},
+            {"name":"a","val":"new","enabled":0,"updated_at":"2026-05-01T00:00:00Z"},
+            {"name":"new","val":"n","enabled":1,"updated_at":"2026-05-01T00:00:00Z"},
+            {"name":"keep","val":"STALE","enabled":1,"updated_at":"2026-02-01T00:00:00Z"},
         ]);
-        let n = merge_table(&dst, "t", COLS, "name", "updated_at", bundle).unwrap();
+        let n = merge_table(&dst, "t", COLS, "name", "updated_at", &[], bundle).unwrap();
         assert_eq!(n, 2, "only 'a' (newer) and 'new' (unseen) written");
 
         let a: String = dst
@@ -440,17 +600,16 @@ mod tests {
         )
         .unwrap();
         c.execute(
-            "INSERT INTO t (name,val,deleted,updated_at) VALUES ('a','live',0,'2026-01-01')",
+            "INSERT INTO t (name,val,deleted,updated_at) VALUES ('a','live',0,'2026-01-01T00:00:00Z')",
             [],
         )
         .unwrap();
         const COLS: &[&str] = &["name", "val", "deleted", "updated_at"];
 
         // Peer deletes 'a' (tombstone, newer clock) → local converges to deleted.
-        let tomb =
-            ::serde_json::json!([{"name":"a","val":"live","deleted":1,"updated_at":"2026-02-01"}]);
+        let tomb = ::serde_json::json!([{"name":"a","val":"live","deleted":1,"updated_at":"2026-02-01T00:00:00Z"}]);
         assert_eq!(
-            merge_table(&c, "t", COLS, "name", "updated_at", tomb).unwrap(),
+            merge_table(&c, "t", COLS, "name", "updated_at", &[], tomb).unwrap(),
             1
         );
         let d: i64 = c
@@ -459,10 +618,9 @@ mod tests {
         assert_eq!(d, 1, "tombstone propagated — row is deleted locally");
 
         // A later re-create (deleted=0, newer clock still) resurrects it.
-        let res =
-            ::serde_json::json!([{"name":"a","val":"back","deleted":0,"updated_at":"2026-03-01"}]);
+        let res = ::serde_json::json!([{"name":"a","val":"back","deleted":0,"updated_at":"2026-03-01T00:00:00Z"}]);
         assert_eq!(
-            merge_table(&c, "t", COLS, "name", "updated_at", res).unwrap(),
+            merge_table(&c, "t", COLS, "name", "updated_at", &[], res).unwrap(),
             1
         );
         let (d2, v): (i64, String) = c
@@ -473,10 +631,9 @@ mod tests {
         assert_eq!((d2, v.as_str()), (0, "back"), "newer re-create resurrects");
 
         // A STALE delete (older clock) must NOT regress a resurrected row.
-        let stale =
-            ::serde_json::json!([{"name":"a","val":"live","deleted":1,"updated_at":"2026-02-15"}]);
+        let stale = ::serde_json::json!([{"name":"a","val":"live","deleted":1,"updated_at":"2026-02-15T00:00:00Z"}]);
         assert_eq!(
-            merge_table(&c, "t", COLS, "name", "updated_at", stale).unwrap(),
+            merge_table(&c, "t", COLS, "name", "updated_at", &[], stale).unwrap(),
             0
         );
         let d3: i64 = c
@@ -519,7 +676,8 @@ mod tests {
         let bundle = ::serde_json::json!([
             {"id":"id-peer","host":"baldur","name":"data","updated_at":200},
         ]);
-        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], bundle).unwrap();
+        let n =
+            merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], &[], bundle).unwrap();
         assert_eq!(n, 1, "newer peer row applied");
         // Exactly one row for (baldur, data), and its id converged to the peer's.
         let (id, cnt): (String, i64) = c
@@ -541,7 +699,8 @@ mod tests {
         let bundle = ::serde_json::json!([
             {"id":"id-peer","host":"baldur","name":"data","updated_at":200},
         ]);
-        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], bundle).unwrap();
+        let n =
+            merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], &[], bundle).unwrap();
         assert_eq!(n, 0, "stale incoming skipped");
         let id: String = c
             .query_row(
@@ -560,7 +719,8 @@ mod tests {
         let bundle = ::serde_json::json!([
             {"id":"id-peer","host":"baldur","name":"data","updated_at":200},
         ]);
-        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], bundle).unwrap();
+        let n =
+            merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], &[], bundle).unwrap();
         assert_eq!(n, 0, "equal lww is not newer — skipped");
         let id: String = c
             .query_row(
@@ -611,8 +771,8 @@ mod tests {
             {"id":"id-peer","host":"baldur","name":"data","remount_policy":"{\"new\":2}",
              "routes":"[{\"kind\":\"lan_v4\"}]","enabled":0,"updated_at":200},
         ]);
-        let n =
-            merge_table_natural(&c, "m", REPL, "id", NK, "updated_at", PRESERVE, bundle).unwrap();
+        let n = merge_table_natural(&c, "m", REPL, "id", NK, "updated_at", PRESERVE, &[], bundle)
+            .unwrap();
         assert_eq!(n, 1, "newer peer config applied");
 
         let (rp, routes, enabled, health, active): (String, String, i64, String, Option<String>) =
@@ -639,10 +799,9 @@ mod tests {
     #[test]
     fn merge_is_idempotent_on_equal_lww() {
         let dst = setup();
-        insert(&dst, "a", "v", "2026-01-01");
-        let bundle =
-            ::serde_json::json!([{"name":"a","val":"v2","enabled":1,"updated_at":"2026-01-01"}]);
-        let n = merge_table(&dst, "t", COLS, "name", "updated_at", bundle).unwrap();
+        insert(&dst, "a", "v", "2026-01-01T00:00:00Z");
+        let bundle = ::serde_json::json!([{"name":"a","val":"v2","enabled":1,"updated_at":"2026-01-01T00:00:00Z"}]);
+        let n = merge_table(&dst, "t", COLS, "name", "updated_at", &[], bundle).unwrap();
         assert_eq!(n, 0, "equal lww is not newer — skipped");
         let v: String = dst
             .query_row("SELECT val FROM t WHERE name='a'", [], |r| r.get(0))
@@ -653,13 +812,13 @@ mod tests {
     #[test]
     fn merge_rejects_future_and_uncomparable_lww() {
         let dst = setup();
-        insert(&dst, "a", "old", "2026-01-01");
+        insert(&dst, "a", "old", "2026-01-01T00:00:00Z");
         let bundle = ::serde_json::json!([
             {"name":"a","val":"future","enabled":1,"updated_at":"9999-01-01T00:00:00Z"},
             {"name":"b","val":"garbage","enabled":1,"updated_at":"not-a-time"},
             {"name":"c","val":"bool","enabled":1,"updated_at":true},
         ]);
-        let n = merge_table(&dst, "t", COLS, "name", "updated_at", bundle).unwrap();
+        let n = merge_table(&dst, "t", COLS, "name", "updated_at", &[], bundle).unwrap();
         assert_eq!(n, 0);
         let a: String = dst
             .query_row("SELECT val FROM t WHERE name='a'", [], |r| r.get(0))
@@ -675,23 +834,160 @@ mod tests {
         let bundle = ::serde_json::json!([
             {"id":"id-peer","host":"baldur","name":"data","updated_at":future},
         ]);
-        let n = merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], bundle).unwrap();
+        let n =
+            merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], &[], bundle).unwrap();
         assert_eq!(n, 0);
     }
 
     #[test]
     fn uncomparable_local_is_not_newer() {
         assert!(!json_is_newer_than_sql(
-            &Value::from("2026-01-01"),
+            &Value::from("2026-01-01T00:00:00Z"),
             &SqlValue::Integer(1)
         ));
     }
 
+    fn rfc3339_in(secs: i64) -> String {
+        ::utils::time::now()
+            .plus(::std::time::Duration::from_secs(secs as u64))
+            .to_rfc3339()
+    }
+
     #[test]
-    fn check_incoming_lww_accepts_within_skew() {
-        let near = ::utils::time::now_millis_since_epoch() + MAX_LWW_SKEW_MILLIS / 2;
-        assert!(check_incoming_lww(&near.to_string()).is_ok());
+    fn skew_boundary_300_accepted_301_rejected() {
+        assert!(check_incoming_lww(&rfc3339_in(300)).is_ok());
+        assert_eq!(
+            check_incoming_lww(&rfc3339_in(301)),
+            Err("lww too far in the future")
+        );
+        let now = ::utils::time::now_millis_since_epoch();
+        assert!(check_incoming_lww_json(&Value::from(now + 300_000)).is_ok());
+        assert!(check_incoming_lww_json(&Value::from(now + 301_000)).is_err());
+    }
+
+    #[test]
+    fn non_canonical_lww_rejected() {
+        for bad in [
+            "9",
+            "",
+            "2026-01-01",
+            "2026-01-01t00:00:00z",
+            "2026-01-01T00:00:00+14:00",
+            "2026-01-01T00:00:00.5Z",
+            "2026-01-01T00:00:00+00:00",
+        ] {
+            assert!(check_incoming_lww(bad).is_err(), "{bad} must be rejected");
+        }
         assert!(check_incoming_lww("2026-01-01T00:00:00Z").is_ok());
-        assert!(check_incoming_lww("").is_err());
+    }
+
+    #[test]
+    fn lww_compares_parsed_instants() {
+        assert!(!lww_str_is_newer("9", "2026-01-01T00:00:00Z"));
+        assert!(!lww_str_is_newer(
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T01:00:00+00:00"
+        ));
+        assert!(lww_str_is_newer(
+            "2026-01-02T00:00:00Z",
+            "2026-01-01T00:00:00Z"
+        ));
+    }
+
+    #[test]
+    fn merge_table_protects_columns_and_json_keys() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE e (id TEXT PRIMARY KEY, routes TEXT, config TEXT, note TEXT, updated_at TEXT);
+             INSERT INTO e VALUES ('a','[\"10.0.0.1\"]','{\"url\":\"https://good\",\"tz\":\"utc\"}','n','2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        const ECOLS: &[&str] = &["id", "routes", "config", "note", "updated_at"];
+        const PROT: &[&str] = &["routes", "config.url"];
+        let bundle = ::serde_json::json!([
+            {"id":"a","routes":"[\"10.0.0.66\"]","config":"{\"url\":\"https://evil\",\"tz\":\"est\"}","note":"m","updated_at":"2026-02-01T00:00:00Z"},
+            {"id":"b","routes":"[]","config":"{}","note":"x","updated_at":"2026-02-01T00:00:00Z"},
+        ]);
+        let n = with_merge_peer("peer-prot", || {
+            merge_table(&c, "e", ECOLS, "id", "updated_at", PROT, bundle).unwrap()
+        });
+        assert_eq!(n, 1);
+        let (routes, config, note): (String, String, String) = c
+            .query_row("SELECT routes, config, note FROM e WHERE id='a'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(routes, "[\"10.0.0.1\"]");
+        let cfg: Value = ::serde_json::from_str(&config).unwrap();
+        assert_eq!(cfg["url"], "https://good");
+        assert_eq!(cfg["tz"], "est");
+        assert_eq!(note, "m");
+        let b: i64 = c
+            .query_row("SELECT COUNT(*) FROM e WHERE id='b'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(b, 0, "new row with protected fields rejected");
+        let counts = rejection_counts();
+        assert!(counts.contains_key(&(
+            "peer-prot".into(),
+            "e".into(),
+            "new row with protected fields from a peer".into()
+        )));
+        assert!(counts.contains_key(&(
+            "peer-prot".into(),
+            "e".into(),
+            "peer change to protected fields dropped".into()
+        )));
+    }
+
+    #[test]
+    fn natural_merge_skips_pk_and_key_matching_different_rows() {
+        let c = setup_natural();
+        insert_m(&c, "id-1", "baldur", "data", 100);
+        insert_m(&c, "id-2", "baldur", "other", 100);
+        let bundle = ::serde_json::json!([
+            {"id":"id-2","host":"baldur","name":"data","updated_at":200},
+        ]);
+        let n =
+            merge_table_natural(&c, "m", MCOLS, "id", NK, "updated_at", &[], &[], bundle).unwrap();
+        assert_eq!(n, 0);
+        let cnt: i64 = c
+            .query_row("SELECT COUNT(*) FROM m", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 2, "neither row deleted");
+    }
+
+    #[test]
+    fn natural_merge_protects_columns() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE m (id TEXT PRIMARY KEY, host TEXT, name TEXT, target TEXT, note TEXT, updated_at INTEGER, UNIQUE(host, name));
+             INSERT INTO m VALUES ('id-1','baldur','data','/mnt/data','a',100);",
+        )
+        .unwrap();
+        const C: &[&str] = &["id", "host", "name", "target", "note", "updated_at"];
+        let bundle = ::serde_json::json!([
+            {"id":"id-1","host":"baldur","name":"data","target":"/etc","note":"b","updated_at":200},
+            {"id":"id-9","host":"baldur","name":"new","target":"/","note":"b","updated_at":200},
+        ]);
+        let n = merge_table_natural(&c, "m", C, "id", NK, "updated_at", &[], &["target"], bundle)
+            .unwrap();
+        assert_eq!(n, 1);
+        let (target, note): (String, String) = c
+            .query_row("SELECT target, note FROM m WHERE id='id-1'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((target.as_str(), note.as_str()), ("/mnt/data", "b"));
+        let cnt: i64 = c
+            .query_row("SELECT COUNT(*) FROM m", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 1);
+    }
+
+    #[test]
+    fn merge_peer_restored_after_panic() {
+        let r = ::std::panic::catch_unwind(|| with_merge_peer("p", || panic!("boom")));
+        assert!(r.is_err());
+        assert!(MERGE_PEER.with(|p| p.borrow().is_none()));
     }
 }

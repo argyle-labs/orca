@@ -31,14 +31,14 @@ pub struct UserAuth {
 
 /// Full replicable user row. `users` is ONE shared pool replicated across every
 /// paired host (last-write-wins on `updated_at`), so any admin can sign in on
-/// any machine/UI. `password_hash` and `role` are protected: a peer can never
-/// introduce or change them, so they are set only by local writes.
+/// any machine/UI. Identity and credential columns are protected: a peer can
+/// never introduce a row or change them, so they are set only by local writes.
 ///
 /// Field order mirrors the `users` table columns exactly (the `Replicated`
 /// derive maps fields ↔ columns 1:1), so `username_lower` is carried even
 /// though it is just `lower(username)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, derive::Replicated)]
-#[replicate(crate = ::macro_runtime, table = "users", lww = "updated_at", unique = "username_lower", protected = "password_hash,role")]
+#[replicate(crate = ::macro_runtime, table = "users", lww = "updated_at", unique = "username_lower", protected = "username,username_lower,password_hash,role")]
 pub struct ReplicaUser {
     pub id: String,
     pub username: String,
@@ -374,6 +374,38 @@ mod tests {
             assert_eq!(db::replicate::merge_bundle(&dst, bundle).unwrap(), 0);
             assert_eq!(find_by_id(&dst, "u1").unwrap().unwrap().email, None);
         }
+    }
+
+    #[test]
+    fn peer_cannot_rename_a_user_and_rejection_names_the_peer() {
+        let (src, dst) = two_hosts();
+        let bundle = peer_bundle(&src, |r| {
+            r.insert("username".into(), "Mallory".into());
+            r.insert("username_lower".into(), "mallory".into());
+            r.insert("updated_at".into(), "2026-02-01T00:00:00Z".into());
+        });
+        macro_runtime::replicate_table::with_merge_peer("peer-rename", || {
+            db::replicate::merge_bundle(&dst, bundle).unwrap()
+        });
+        assert!(find_auth_by_username(&dst, "mallory").unwrap().is_none());
+        assert_eq!(find_by_id(&dst, "u1").unwrap().unwrap().username, "Scott");
+        assert!(
+            macro_runtime::replicate_table::rejection_counts().contains_key(&(
+                "peer-rename".into(),
+                "users".into(),
+                "peer change to protected fields dropped".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn digit_only_lww_never_wins() {
+        let (src, dst) = two_hosts();
+        let bundle = peer_bundle(&src, |r| {
+            r.insert("email".into(), "e@example.test".into());
+            r.insert("updated_at".into(), "9".into());
+        });
+        assert_eq!(db::replicate::merge_bundle(&dst, bundle).unwrap(), 0);
     }
 
     #[test]

@@ -26,7 +26,11 @@ use plugin_toolkit::endpoint_resource;
 /// One registered service instance. `routes` is supplied by the macro as the
 /// first-class ordered set — index 0 is primary — so nothing here is a scalar
 /// URL.
-#[endpoint_resource(plugin = "service.instance", lww = "updated_at")]
+#[endpoint_resource(
+    plugin = "service.instance",
+    lww = "updated_at",
+    protected = "host,runtime"
+)]
 pub struct ServiceInstanceRow {
     /// `<backend>/<instance>` — e.g. `syncthing/willow`.
     pub name: String,

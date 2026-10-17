@@ -791,6 +791,33 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
         ),
     };
 
+    let poison_guard = match &cfg.unique {
+        None => quote! {},
+        Some(unique) => {
+            let count_sql =
+                format!("SELECT COUNT(*) FROM {table} WHERE {pk} = ?1 OR {unique} = ?2");
+            quote! {
+                let matches: i64 = conn.query_row(#count_sql, #lww_lookup_params, |r| r.get(0))?;
+                if matches > 1 {
+                    #crate_path::replicate_table::audit_reject(
+                        #table,
+                        &row.#pk_ident,
+                        "pk and unique key match different rows",
+                    );
+                    continue;
+                }
+            }
+        }
+    };
+    let key_lits: Vec<&String> = ::std::iter::once(&cfg.pk)
+        .chain(cfg.unique.as_ref())
+        .collect();
+    let peer_delete = if cfg.protected.is_empty() {
+        quote! { ::std::option::Option::Some(#crate_path::allow_peer_delete) }
+    } else {
+        quote! { ::std::option::Option::None }
+    };
+
     let protected_vars: Vec<Ident> = cfg
         .protected
         .iter()
@@ -905,10 +932,11 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                             .optional()?;
                         // Last-write-wins: skip when our copy is at least as new.
                         if let ::std::option::Option::Some(local) = &existing
-                            && row.#lww_ident <= *local
+                            && !#crate_path::replicate_table::lww_str_is_newer(&row.#lww_ident, local)
                         {
                             continue;
                         }
+                        #poison_guard
                         #protected_guard
                         // Isolate each row: a single poison collision (e.g. an
                         // incoming pk matching one local row while its unique
@@ -942,6 +970,8 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                     name: #table,
                     export: #ty::__replicate_export,
                     merge: #ty::__replicate_merge,
+                    keys: &[ #( #key_lits ),* ],
+                    peer_delete: #peer_delete,
                 }
             }
         };

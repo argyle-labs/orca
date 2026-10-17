@@ -66,6 +66,13 @@ pub struct ReplicatedRegistration {
     pub name: &'static str,
     pub export: fn(&::rusqlite::Connection) -> ::anyhow::Result<::serde_json::Value>,
     pub merge: fn(&::rusqlite::Connection, ::serde_json::Value) -> ::anyhow::Result<usize>,
+    pub keys: &'static [&'static str],
+    pub peer_delete: Option<fn(&::rusqlite::Connection, &str) -> bool>,
+}
+
+#[cfg(feature = "replication")]
+pub fn allow_peer_delete(_: &::rusqlite::Connection, _: &str) -> bool {
+    true
 }
 
 #[cfg(feature = "replication")]

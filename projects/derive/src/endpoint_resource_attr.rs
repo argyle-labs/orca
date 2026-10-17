@@ -38,6 +38,7 @@ pub(crate) struct EndpointResourceAttr {
     /// Verbs whose generated tool is withheld. See
     /// [`crate::endpoint_resource::EndpointResource::skip`].
     pub(crate) skip: std::collections::HashSet<String>,
+    pub(crate) protected: Vec<String>,
 }
 
 impl Parse for EndpointResourceAttr {
@@ -48,6 +49,7 @@ impl Parse for EndpointResourceAttr {
         let mut crate_path: Option<syn::Path> = None;
         let mut lww = None;
         let mut skip: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut protected = Vec::new();
         for nv in items {
             let key = nv
                 .path
@@ -82,10 +84,18 @@ impl Parse for EndpointResourceAttr {
                 "table" => table = Some(val.value()),
                 "lww" => lww = Some(val.value()),
                 "skip" => skip = crate::endpoint_resource::parse_skip(&val.value()),
+                "protected" => {
+                    protected = crate::endpoint_resource::parse_skip(&val.value())
+                        .into_iter()
+                        .collect();
+                    protected.sort();
+                }
                 other => {
                     return Err(syn::Error::new_spanned(
                         &nv.path,
-                        format!("unknown key `{other}`; expected: plugin, table, lww, skip, crate"),
+                        format!(
+                            "unknown key `{other}`; expected: plugin, table, lww, skip, protected, crate"
+                        ),
                     ));
                 }
             }
@@ -97,6 +107,7 @@ impl Parse for EndpointResourceAttr {
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
             lww,
             skip,
+            protected,
         })
     }
 }
@@ -159,6 +170,7 @@ pub(crate) fn expand(attr: EndpointResourceAttr, item: ItemStruct) -> syn::Resul
         lww: attr.lww,
         shared,
         skip: attr.skip,
+        protected: attr.protected,
     };
 
     // The struct definition is consumed — we emit nothing from it.

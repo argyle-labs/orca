@@ -108,6 +108,7 @@ pub(crate) struct EndpointResource {
     /// colliding with the macro's CRUD verb, or retire a tool surface while its
     /// runtime table stays populatable in-process (e.g. `managed_mounts`).
     pub(crate) skip: std::collections::HashSet<String>,
+    pub(crate) protected: Vec<String>,
 }
 
 /// Split a `skip = "list, update"` value into a set of verb names.
@@ -190,6 +191,7 @@ impl Parse for EndpointResource {
             crate_path: syn::parse_quote!(::plugin_toolkit),
             lww,
             skip,
+            protected: Vec::new(),
         })
     }
 }
@@ -582,6 +584,23 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             .map(|c| LitStr::new(c, Span::call_site()))
             .collect();
         let lww_lit = LitStr::new(lww, Span::call_site());
+        let mut protected: Vec<String> = vec!["routes".to_string()];
+        protected.extend(
+            input
+                .fields
+                .iter()
+                .filter(|f| f.secret)
+                .map(|f| f.name.to_string()),
+        );
+        protected.extend(input.protected.iter().cloned());
+        let protected_lits: Vec<LitStr> = protected
+            .iter()
+            .map(|c| LitStr::new(c, Span::call_site()))
+            .collect();
+        let mut keys = vec![LitStr::new("name", Span::call_site())];
+        if input.fields.iter().any(|f| f.name == "id") {
+            keys.push(LitStr::new("id", Span::call_site()));
+        }
         let table_slug = table.replace('-', "_");
         let export_fn = format_ident!("__replicate_export_{}", table_slug);
         let merge_fn = format_ident!("__replicate_merge_{}", table_slug);
@@ -601,7 +620,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 rows: #crate_path::serde_json::Value,
             ) -> #crate_path::anyhow::Result<usize> {
                 #crate_path::replicate_table::merge_table(
-                    conn, #table, &[#(#col_lits),*], "name", #lww_lit, rows,
+                    conn, #table, &[#(#col_lits),*], "name", #lww_lit, &[#(#protected_lits),*], rows,
                 )
             }
             #crate_path::inventory::submit! {
@@ -609,6 +628,8 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                     name: #table,
                     export: #export_fn,
                     merge: #merge_fn,
+                    keys: &[#(#keys),*],
+                    peer_delete: ::std::option::Option::None,
                 }
             }
         }

@@ -113,6 +113,7 @@ fn replicate_merge_mounts(
         &["host", "name"],
         "updated_at",
         LOCAL_ONLY_COLS,
+        &["share_id", "host", "target", "guest", "remount_policy"],
         rows,
     )
 }
@@ -122,6 +123,8 @@ plugin_toolkit::inventory::submit! {
         name: TABLE,
         export: replicate_export_mounts,
         merge: replicate_merge_mounts,
+        keys: &["id"],
+        peer_delete: None,
     }
 }
 

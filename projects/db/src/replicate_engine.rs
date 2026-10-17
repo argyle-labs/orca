@@ -1012,6 +1012,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn merge_into_local_audits_rejections_with_the_peer_id() {
+        let donor = crate::testing::test_conn();
+        crate::testing::fx_insert(&donor, "u9", "eve", "h", "9999-01-01T00:00:00Z");
+        let bundle = crate::replicate::export_all(&donor).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        crate::with_db_path(tmp.path().join("orca.db"), async {
+            assert_eq!(merge_into_local("peer-e2e", bundle).unwrap(), 0);
+        })
+        .await;
+        assert!(
+            macro_runtime::replicate_table::rejection_counts().contains_key(&(
+                "peer-e2e".into(),
+                "replica_fixture".into(),
+                "lww too far in the future".into()
+            ))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn sync_now_backs_off_peer_that_never_converges() {
         // Peer advertises a root we can't reach (its bundle is empty, so our
         // merge lands nothing and we stay diverged) — the poison-row shape.

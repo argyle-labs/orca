@@ -302,6 +302,8 @@ pub use ::macro_runtime::SharedEndpointProvider;
 // `db-incore`. A plugin's `endpoint_resource!` never references it.
 #[cfg(feature = "db-incore")]
 pub use ::macro_runtime::ReplicatedRegistration;
+#[cfg(feature = "db-incore")]
+pub use ::macro_runtime::allow_peer_delete;
 // The generic column-list replicator behind `endpoint_resource!(… lww = …)`.
 // Same rusqlite-backed, core-only footprint as `ReplicatedRegistration`.
 #[cfg(feature = "db-incore")]

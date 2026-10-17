@@ -59,6 +59,44 @@ fn is_ident(ident: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn op_target(
+    entity: &str,
+    key_col: &str,
+) -> Result<Option<&'static macro_runtime::ReplicatedRegistration>, &'static str> {
+    if entity == crate::mesh::peerdb::PEER_TOMBSTONE_ENTITY {
+        return if key_col == crate::mesh::peerdb::PEER_TOMBSTONE_KEY_COL {
+            Ok(None)
+        } else {
+            Err("key column is not a declared key")
+        };
+    }
+    let reg = crate::replicate::registrations()
+        .into_iter()
+        .find(|r| r.name == entity)
+        .ok_or("entity is not replicated")?;
+    if reg.keys.contains(&key_col) {
+        Ok(Some(reg))
+    } else {
+        Err("key column is not a declared key")
+    }
+}
+
+fn peer_op_allowed(
+    conn: &Connection,
+    entity: &str,
+    key_col: &str,
+    key_val: &str,
+) -> Result<(), &'static str> {
+    let Some(reg) = op_target(entity, key_col)? else {
+        return Ok(());
+    };
+    match reg.peer_delete {
+        Some(allowed) if allowed(conn, key_val) => Ok(()),
+        Some(_) => Err("delete not permitted for this row"),
+        None => Err("entity is not peer-deletable"),
+    }
+}
+
 /// This host's name, used as an op's `origin`. Best-effort — empty if the host
 /// hasn't been named yet (ops still work; origin is informational + a merge
 /// tiebreak input only via op_id).
@@ -180,6 +218,10 @@ pub fn apply_pending_deletes(conn: &Connection) -> Result<usize> {
         .collect::<rusqlite::Result<_>>()?;
     let mut removed = 0usize;
     for (entity, key_col, key_val) in pending {
+        if let Err(reason) = op_target(&entity, &key_col) {
+            tracing::debug!("[replication_ops] not applying delete {entity}.{key_col}: {reason}");
+            continue;
+        }
         // Defensive: entity/key_col originate from registration code, but they
         // are interpolated as identifiers — skip anything that isn't a bare
         // identifier rather than build unsafe SQL.
@@ -270,6 +312,13 @@ fn replicate_merge(conn: &Connection, rows: Value) -> Result<usize> {
         if op_id.is_empty() || entity.is_empty() || key_val.is_empty() || op.is_empty() {
             continue;
         }
+        if let Err(reason) = macro_runtime::replicate_table::check_incoming_millis(stamp_ms)
+            .map(drop)
+            .and_then(|()| peer_op_allowed(conn, &entity, &key_col, &key_val))
+        {
+            macro_runtime::replicate_table::audit_reject(ENTITY, &(&entity, &key_col), reason);
+            continue;
+        }
         let n = conn.execute(
             "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -294,6 +343,8 @@ inventory::submit! {
         name: ENTITY,
         export: replicate_export,
         merge: replicate_merge,
+        keys: &[],
+        peer_delete: None,
     }
 }
 
@@ -305,20 +356,17 @@ mod tests {
     #[test]
     fn note_delete_then_apply_removes_row() {
         let conn = test_conn();
-        crate::testing::insert_user(&conn, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z");
-        note_delete(&conn, "users", "username_lower", "scott", 1000).unwrap();
-        // Simulate a stale peer re-inserting the row, then apply pending deletes.
+        note_delete(&conn, "replica_fixture", "name_lower", "scott", 1000).unwrap();
         conn.execute(
-            "INSERT OR IGNORE INTO users
-                (id, username, username_lower, password_hash, role, created_at, password_updated_at, updated_at)
-             VALUES ('u1','scott','scott','h','admin','t','t','t')",
+            "INSERT INTO replica_fixture (id, name, name_lower, payload, updated_at)
+             VALUES ('u1','scott','scott','p','2026-01-01T00:00:00Z')",
             [],
         )
-        .ok();
+        .unwrap();
         let removed = apply_pending_deletes(&conn).unwrap();
-        assert_eq!(removed, 1, "the deleted user must be physically removed");
+        assert_eq!(removed, 1, "the deleted row must be physically removed");
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM replica_fixture", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
     }
@@ -383,20 +431,94 @@ mod tests {
     #[test]
     fn merge_applies_newer_peer_delete() {
         let src = test_conn();
-        note_delete(&src, "users", "username_lower", "bob", 9000).unwrap();
+        note_delete(&src, "replica_fixture", "name_lower", "bob", 9000).unwrap();
         let dst = test_conn();
-        note_write(&dst, "users", "username_lower", "bob", 1000).unwrap(); // no-op (no delete)
         let bundle = replicate_export(&src).unwrap();
         let n = replicate_merge(&dst, bundle).unwrap();
         assert_eq!(n, 1);
         let op: String = dst
             .query_row(
-                "SELECT op FROM replication_ops WHERE entity='users' AND key_val='bob'",
+                "SELECT op FROM replication_ops WHERE entity='replica_fixture' AND key_val='bob'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert_eq!(op, "delete", "newer peer delete propagates");
+    }
+
+    fn peer_op(entity: &str, key_col: &str, key_val: &str, stamp_ms: i64) -> Value {
+        serde_json::json!([{
+            "op_id": utils::id::new().to_string(), "entity": entity, "key_col": key_col,
+            "key_val": key_val, "op": "delete", "origin": "peer", "stamp_ms": stamp_ms,
+        }])
+    }
+
+    #[test]
+    fn merge_rejects_ops_outside_declared_entities_and_keys() {
+        let dst = test_conn();
+        let now = utils::time::now_millis_since_epoch();
+        let cases = [
+            ("settings", "key", "entity is not replicated"),
+            (
+                "replica_fixture",
+                "payload",
+                "key column is not a declared key",
+            ),
+            ("endpoints", "id", "entity is not peer-deletable"),
+            (
+                "replication_ops",
+                "op_id",
+                "key column is not a declared key",
+            ),
+        ];
+        for (entity, col, reason) in cases {
+            let n = macro_runtime::replicate_table::with_merge_peer("peer-ops", || {
+                replicate_merge(&dst, peer_op(entity, col, "x", now)).unwrap()
+            });
+            assert_eq!(n, 0, "{entity}.{col}");
+            assert!(
+                macro_runtime::replicate_table::rejection_counts().contains_key(&(
+                    "peer-ops".into(),
+                    ENTITY.into(),
+                    reason.into()
+                )),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_rejects_config_delete_for_local_only_noun() {
+        let dst = test_conn();
+        crate::config_store::set(&dst, "h", "h", "backup", "targets", "{}", "t").unwrap();
+        let id = crate::config_store::get(&dst, "backup", "targets")
+            .unwrap()
+            .unwrap()
+            .id;
+        let now = utils::time::now_millis_since_epoch();
+        assert_eq!(
+            replicate_merge(&dst, peer_op("config_rows", "id", &id, now)).unwrap(),
+            0
+        );
+        crate::config_store::set(&dst, "h", "h", "display", "target", "{}", "t").unwrap();
+        let id = crate::config_store::get(&dst, "display", "target")
+            .unwrap()
+            .unwrap()
+            .id;
+        assert_eq!(
+            replicate_merge(&dst, peer_op("config_rows", "id", &id, now)).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn merge_bounds_op_stamp_skew() {
+        let dst = test_conn();
+        let now = utils::time::now_millis_since_epoch();
+        let ok = peer_op("replica_fixture", "name_lower", "a", now + 300_000);
+        assert_eq!(replicate_merge(&dst, ok).unwrap(), 1);
+        let late = peer_op("replica_fixture", "name_lower", "b", now + 301_000);
+        assert_eq!(replicate_merge(&dst, late).unwrap(), 0);
     }
 
     #[test]
