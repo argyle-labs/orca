@@ -27,7 +27,7 @@
 //!         .serve()
 //! }
 //! ```
-#![cfg(all(feature = "tools", feature = "db"))]
+#![cfg(all(feature = "tools", feature = "endpoints"))]
 // The builder composes per-facet dispatchers that carry tool args/results as JSON
 // `Value` across the socket — the same transport-dynamic boundary serve() lives
 // on. Sanctioned escape hatch, scoped to this seam.

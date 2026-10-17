@@ -87,7 +87,7 @@ pub use tracing;
 pub use crate::hash::sha256_hex;
 // `runtime` houses the SQLite endpoint helpers `endpoint_resource!` emits;
 // gated with the `db` feature so storage-only plugins drop rusqlite.
-#[cfg(feature = "db")]
+#[cfg(feature = "endpoints")]
 pub use crate::runtime;
 
 // ── Endpoint routes + per-instance connection fallback ─────────────────

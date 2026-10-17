@@ -22,12 +22,12 @@ thiserror   = { workspace = true }
 # `config_format` for the WHOLE graph via feature unification, so every
 # graphql-shaped plugin (unraid) linked an XML parser and a TOML parser — the
 # same trap as #606/#628, one crate downstream.
-utils       = { workspace = true, features = ["http"] }
+utils       = { workspace = true }
 anyhow         = { workspace = true }
 schemars       = { workspace = true }
-graphql-parser = { workspace = true }
+graphql-parser = { workspace = true, optional = true }
 graphql_client = { workspace = true }
-utoipa         = { workspace = true }
+utoipa         = { workspace = true, optional = true }
 # `reqwest` + `toml` are used ONLY by `shopify_proxy`. The generic GraphQL path
 # goes through delegated `utils::http`, so a plugin that never proxies Shopify
 # has no reason to link an HTTP client or a TOML parser.
@@ -37,8 +37,10 @@ toml           = { workspace = true, optional = true }
 [features]
 # `shopify` is on by default so daemon-side consumers (`spec`) are unaffected;
 # `plugin-toolkit` takes this crate with `default-features = false`.
-default = ["shopify"]
-shopify = ["dep:reqwest", "dep:toml"]
+default = ["shopify", "http", "introspection"]
+shopify = ["http", "dep:reqwest", "dep:toml"]
+http = ["utils/http"]
+introspection = ["dep:graphql-parser", "dep:utoipa"]
 
 [dev-dependencies]
 tokio       = { workspace = true }

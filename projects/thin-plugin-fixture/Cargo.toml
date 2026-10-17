@@ -1,0 +1,11 @@
+[package]
+name = "orca-thin-plugin-fixture"
+version.workspace = true
+publish = false
+edition.workspace = true
+
+[dependencies]
+plugin-toolkit = { workspace = true, features = ["tools", "delegated-http", "graphql"] }
+
+[lints]
+workspace = true

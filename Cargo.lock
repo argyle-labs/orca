@@ -4818,6 +4818,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "orca-thin-plugin-fixture"
+version = "0.2.1-rc.21"
+dependencies = [
+ "orca-plugin-toolkit",
+]
+
+[[package]]
 name = "orca-utils"
 version = "0.2.1-rc.21"
 dependencies = [
