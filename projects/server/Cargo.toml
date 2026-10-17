@@ -65,7 +65,7 @@ conversation = { workspace = true }
 # `notifications` domain crate stays (it owns the dispatcher + proxy).
 
 # CLI
-clap = { workspace = true }
+clap = { workspace = true, features = ["default"] }
 
 # Async runtime
 tokio        = { workspace = true }

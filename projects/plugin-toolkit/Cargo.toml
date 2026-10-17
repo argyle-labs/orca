@@ -11,7 +11,7 @@ path = "src/lib.rs"
 # Default is the light core only; every consumer enables the features it uses.
 [features]
 default = []
-full = ["in-process", "tools", "db", "containers", "notify", "graphql", "openapi", "http", "descriptor", "jemalloc-stats"]
+full = ["in-process", "tools", "endpoints", "containers", "notify", "graphql", "openapi", "http", "descriptor", "jemalloc-stats"]
 # Host-side domain-proxy profile: the daemon/loader links this to turn on the
 # subcrate host-side JSON proxies (storage/service/deploy-target/contract/
 # dispatch `in-process`) that drive a loaded subprocess plugin's registered
@@ -48,21 +48,22 @@ tools = ["dep:contract", "dep:dispatch"]
 # reqwest/mysql/postgres/moka): the daemon owns the one connection. `macro-runtime`
 # supplies the light `SchemaFragment` target the daemon applies. See
 # [[plugins-stay-thin]].
-db = ["dep:macro-runtime"]
+endpoints = ["dep:macro-runtime"]
+db = ["endpoints"]
 # In-core (daemon-side) `endpoint_resource!` — for tables compiled INTO the
 # daemon (e.g. `system::managed_mounts`). There is no capability sink and no host
 # FFI channel in-process, so `runtime::db_op` falls back to the `db` crate's
 # pooled executor against orca's real connection; `#[derive(Replicated)]` mesh
 # sync also needs the rusqlite-backed `ReplicatedRegistration`. Enabled ONLY by
 # core crates, NEVER by a plugin.
-db-incore = ["db", "dep:db", "dep:secrets", "dep:rusqlite", "macro-runtime/replication"]
+db-incore = ["endpoints", "dep:db", "dep:secrets", "dep:rusqlite", "macro-runtime/replication"]
 containers = ["dep:containers"]
 notify = ["dep:notifications"]
 graphql = ["dep:graphql", "dep:graphql_client"]
 openapi = ["dep:openapi", "dep:progenitor-client", "dep:regress", "dep:bytes"]
 # HTTP transport facade (api_client/http modules + address reachability),
 # backed by reqwest + the utils http stack.
-http = ["utils/http", "dep:reqwest", "dep:http", "dep:rustls"]
+http = ["utils/http", "graphql?/http", "dep:reqwest", "dep:http", "dep:rustls"]
 # Socket.IO client transport (plugin_toolkit::socketio) for socket-only services
 # like dockge. Agnostic async client; the plugin owns its event vocabulary.
 socketio = ["in-process", "dep:rust_socketio", "dep:native-tls"]
@@ -84,13 +85,9 @@ delegated-ws = []
 # `plugin_toolkit_build::openapi_plugin`. Bundles the tool surface (`tools`),
 # the endpoint registry (`db`), and delegated HTTP so the generated progenitor
 # client rides orca's `http.request` capability and links no reqwest/rustls.
-openapi-plugin = ["tools", "db", "delegated-http"]
-# Live jemalloc stats (allocated/active/resident/retained/mapped) for the
-# opt-in auto-diagnostics provider, read via mallctl. OFF by default: the
-# allocator substrate is always linked (see `tikv-jemallocator` below), but a
-# plugin only pays the `tikv-jemalloc-ctl` mallctl surface when this is on.
-# Without it, stats are `None` and the provider degrades.
-jemalloc-stats = ["dep:tikv-jemalloc-ctl"]
+openapi-plugin = ["tools", "endpoints", "delegated-http"]
+jemalloc = ["dep:tikv-jemallocator"]
+jemalloc-stats = ["jemalloc", "dep:tikv-jemalloc-ctl"]
 # Serve an embedded built site (`plugin_toolkit::ui`) on a claimed web prefix,
 # plus the typed `web` BackendDef builder.
 ui = ["dep:contract", "dep:rust-embed", "dep:mime_guess"]
@@ -115,12 +112,7 @@ thiserror   = { workspace = true }
 # a purely-synchronous plugin pays only an idle current-thread runtime.
 tokio       = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process", "io-util"] }
 tracing     = { workspace = true }
-# Allocator substrate for EVERY plugin: the serve macros (and the public
-# `instrument::bootstrap!()` for hand-rolled mains) set this as the plugin's
-# `#[global_allocator]`. Inert without `MALLOC_CONF` — behaves like the system
-# allocator until orca activates profiling per-plugin (opt-in). Reused from the
-# parent daemon (`server::main`) so plugin heap dumps diff against orca's.
-tikv-jemallocator = { workspace = true }
+tikv-jemallocator = { workspace = true, optional = true }
 # Reactor-free `block_on` for the thin (`in-process`-off) `serve.rs` socket loop:
 # a subprocess plugin drives its serial-dispatch futures on a bare executor with
 # no tokio. On the `in-process` profile the loop uses tokio's current-thread

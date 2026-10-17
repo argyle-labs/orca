@@ -45,7 +45,7 @@ schedule = ["dep:cron"]
 # `utils::http` — reqwest client + rustls TLS. Pulls `rt` for tokio: the module
 # is async and `tokio-rustls` needs it, so `http` alone failed to compile until
 # now — latent because every consumer took `full`, which enables `rt` anyway.
-http = ["rt", "dep:reqwest", "dep:futures-util", "dep:rustls", "dep:rustls-pki-types", "dep:rustls-pemfile", "dep:tokio-rustls"]
+http = ["rt", "dep:url", "dep:reqwest", "dep:futures-util", "dep:rustls", "dep:rustls-pki-types", "dep:rustls-pemfile", "dep:tokio-rustls"]
 # `utils::git` — vendored static libgit2 (large).
 git = ["dep:git2"]
 # `utils::pki` — X.509 + key generation.
@@ -64,7 +64,7 @@ chrono     = { workspace = true }
 serde      = { workspace = true }
 derive     = { workspace = true }
 serde_json = { workspace = true }
-url        = { workspace = true }
+url        = { workspace = true, optional = true }
 sha2       = { workspace = true }
 tempfile   = { workspace = true }
 # ID generation (id module) — orca-owned `utils::id`, hides the UUID lib.

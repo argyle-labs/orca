@@ -26,7 +26,7 @@ secrets = { workspace = true }
 dispatch   = { workspace = true, default-features = true }
 futures    = { workspace = true }
 plugin-proto = { workspace = true }
-plugin-toolkit = { workspace = true, features = ["tools", "db", "in-process", "notify", "containers"] }
+plugin-toolkit = { workspace = true, features = ["tools", "endpoints", "in-process", "notify", "containers"] }
 rusqlite   = { workspace = true }
 serde_json = { workspace = true }
 tokio      = { workspace = true }

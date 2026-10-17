@@ -13,7 +13,7 @@
 //! thread that owns the socket. Combined with orca's serial-dispatch contract
 //! (one `Invoke` in flight per plugin), the socket needs no locking beyond the
 //! `RefCell` that lets the loop and the cap round-trip share it.
-#![cfg(all(feature = "tools", feature = "db"))]
+#![cfg(all(feature = "tools", feature = "endpoints"))]
 // serve() carries tool args/results as JSON `Value` across the socket — the same
 // transport-dynamic boundary as the FFI's `args_json`; typing happens in the
 // tools against their schemas. Sanctioned escape hatch, scoped to this seam.

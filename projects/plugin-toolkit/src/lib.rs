@@ -47,7 +47,7 @@ pub mod client;
 /// empty namespace and a literal core table name; filters/sorts the decoded
 /// rows in Rust because the `DbOp` surface carries no `WHERE`/`ORDER BY`. Rides
 /// the light `db` feature — no rusqlite, no `db` crate.
-#[cfg(feature = "db")]
+#[cfg(feature = "endpoints")]
 pub mod core_tables;
 /// Data-driven endpoint executor: run a whole REST/OpenAPI surface from an
 /// embedded [`descriptor::EndpointDescriptor`] table + one shared validating
@@ -79,7 +79,7 @@ pub mod lxc_exec;
 /// binary advertises any mix of domain backends (service + media, storage +
 /// topology, …), replacing the one-domain-per-macro constraint of the
 /// `serve_*_plugin!` family.
-#[cfg(all(feature = "tools", feature = "db"))]
+#[cfg(all(feature = "tools", feature = "endpoints"))]
 pub mod plugin;
 pub mod prelude;
 /// Root ops for a plugin on its own host through orca's verified
@@ -97,14 +97,14 @@ pub mod reactor;
 #[cfg(feature = "tools")]
 pub mod remediation;
 pub mod route;
-#[cfg(feature = "db")]
+#[cfg(feature = "endpoints")]
 pub mod runtime;
 /// Abstract, backend-agnostic secrets domain (see [`secrets`]). Gated on `db`:
 /// the inline backend and the registry live in the orca db.
-#[cfg(feature = "db")]
+#[cfg(feature = "endpoints")]
 pub mod secrets;
 pub mod serde_ext;
-#[cfg(all(feature = "tools", feature = "db"))]
+#[cfg(all(feature = "tools", feature = "endpoints"))]
 pub mod serve;
 /// Generic async Socket.IO client transport (socket-only services like dockge).
 #[cfg(feature = "socketio")]
@@ -220,6 +220,7 @@ pub use ::schemars;
 pub use ::serde;
 pub use ::serde_json;
 pub use ::thiserror;
+#[cfg(feature = "jemalloc")]
 pub use ::tikv_jemallocator;
 // NB: `tokio` is deliberately NOT re-exported. The runtime is an orca
 // implementation detail — plugins reach async through the orca-owned
@@ -292,9 +293,9 @@ pub use ::regress;
 // pulls dispatch (→axum/reqwest) + rusqlite.
 // `SchemaFragment` (name + SQL) is light — every `endpoint_resource!` plugin
 // emits one and the daemon applies it, so it rides the light `db` feature.
-#[cfg(feature = "db")]
+#[cfg(feature = "endpoints")]
 pub use ::macro_runtime::SchemaFragment;
-#[cfg(feature = "db")]
+#[cfg(feature = "endpoints")]
 pub use ::macro_runtime::SharedEndpointProvider;
 // `ReplicatedRegistration` carries `fn(&rusqlite::Connection)` and is emitted
 // only by `#[derive(Replicated)]` (a core mesh-sync primitive), so it rides
@@ -336,10 +337,96 @@ pub mod json_schema {
 #[cfg(feature = "graphql")]
 pub mod graphql {
     pub use ::graphql::*;
+    #[cfg(not(feature = "http"))]
+    pub use delegated::Client;
     // The query trait the build-time codegen implements for each operation.
     // Re-exported here so a plugin's generic bounds read `graphql::GraphQLQuery`
     // — the plugin never names the backing `graphql_client` crate.
     pub use ::graphql_client::GraphQLQuery;
+
+    #[cfg(not(feature = "http"))]
+    mod delegated {
+        use std::collections::HashMap;
+
+        use ::graphql::{GraphQlErrors, GraphQlResponse, INTROSPECTION_QUERY, QueryRequest};
+
+        #[derive(Clone, Copy, Default)]
+        pub struct Client {
+            http: crate::client::Client,
+        }
+
+        impl Client {
+            pub fn new() -> Self {
+                Self::default()
+            }
+
+            pub async fn query(
+                &self,
+                req: QueryRequest<'_>,
+            ) -> Result<GraphQlResponse, GraphQlErrors> {
+                let payload = req.payload();
+                ::graphql::check_envelope(self.post(
+                    req.endpoint,
+                    &payload,
+                    req.headers,
+                    req.insecure,
+                )?)
+            }
+
+            pub async fn query_typed<Q>(
+                &self,
+                endpoint: &str,
+                variables: Q::Variables,
+                headers: Option<&HashMap<String, String>>,
+                insecure: bool,
+            ) -> Result<Q::ResponseData, GraphQlErrors>
+            where
+                Q: ::graphql_client::GraphQLQuery,
+            {
+                let body = Q::build_query(variables);
+                ::graphql::check_typed(self.post(endpoint, &body, headers, insecure)?)
+            }
+
+            pub async fn introspect(
+                &self,
+                endpoint: &str,
+                headers: Option<&HashMap<String, String>>,
+                insecure: bool,
+            ) -> Result<GraphQlResponse, GraphQlErrors> {
+                let mut req = QueryRequest::new(endpoint, INTROSPECTION_QUERY);
+                req.operation_name = Some("IntrospectionQuery");
+                req.headers = headers;
+                req.insecure = insecure;
+                self.query(req).await
+            }
+
+            fn post<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+                &self,
+                endpoint: &str,
+                body: &B,
+                headers: Option<&HashMap<String, String>>,
+                insecure: bool,
+            ) -> Result<T, GraphQlErrors> {
+                let transport = |e: anyhow::Error| GraphQlErrors::Transport(e.to_string());
+                let mut req = crate::client::Request::new("POST", endpoint)
+                    .json(body)
+                    .map_err(transport)?
+                    .insecure(insecure);
+                for (k, v) in headers.into_iter().flatten() {
+                    req = req.header(k.clone(), v.clone());
+                }
+                let resp = self.http.send(req).map_err(transport)?;
+                if !resp.is_success() {
+                    return Err(GraphQlErrors::Transport(format!(
+                        "HTTP {}: {}",
+                        resp.status,
+                        resp.text()
+                    )));
+                }
+                resp.json().map_err(transport)
+            }
+        }
+    }
 }
 
 /// OpenAPI spec parsing + normalization helpers. Re-export of the

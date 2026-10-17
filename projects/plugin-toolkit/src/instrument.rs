@@ -70,6 +70,7 @@ pub fn enabled() -> bool {
 /// `__ORCA_PLUGIN_ALLOC` statics collide at compile time. A hybrid main (e.g.
 /// nut, which hand-rolls `main` but merges toolkit backend defs) is the
 /// hand-rolled case: it calls `bootstrap!()` once and is the single source.
+#[cfg(feature = "jemalloc")]
 #[macro_export]
 macro_rules! instrument_bootstrap {
     () => {
@@ -77,6 +78,11 @@ macro_rules! instrument_bootstrap {
         static __ORCA_PLUGIN_ALLOC: $crate::tikv_jemallocator::Jemalloc =
             $crate::tikv_jemallocator::Jemalloc;
     };
+}
+#[cfg(not(feature = "jemalloc"))]
+#[macro_export]
+macro_rules! instrument_bootstrap {
+    () => {};
 }
 #[doc(inline)]
 pub use crate::instrument_bootstrap as bootstrap;
