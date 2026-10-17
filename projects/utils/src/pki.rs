@@ -526,10 +526,24 @@ pub fn import_mesh_ca_keypair(pki_dir: &Path, cert_pem: &str, key_pem: &str) -> 
         existing_cert.trim() == cert_pem.trim(),
         "imported CA cert does not match local mesh CA — refusing to install foreign key"
     );
-    // Sanity: verify the imported key actually signs against this cert.
-    let key = KeyPair::from_pem(key_pem).context("imported CA key is not valid PEM")?;
-    Issuer::from_ca_cert_pem(cert_pem, key).context("imported key does not match CA cert")?;
+    ensure_key_matches_cert(cert_pem, key_pem).context("imported key does not match CA cert")?;
     write_pem(mesh_ca_key_path(pki_dir), key_pem)?;
+    Ok(())
+}
+
+/// Fails unless `key_pem` is the private half of the public key in `cert_pem`.
+pub fn ensure_key_matches_cert(cert_pem: &str, key_pem: &str) -> Result<()> {
+    use rustls_pemfile::certs;
+    let key = KeyPair::from_pem(key_pem).context("key is not valid PEM")?;
+    let der = certs(&mut cert_pem.as_bytes())
+        .next()
+        .context("no certificate in PEM")?
+        .context("parse cert DER")?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(der.as_ref()).context("parse cert")?;
+    anyhow::ensure!(
+        parsed.public_key().subject_public_key.data.as_ref() == key.public_key_raw(),
+        "key does not match the certificate's public key"
+    );
     Ok(())
 }
 
@@ -808,15 +822,10 @@ pub fn import_mesh_ca_state(
     previous_cert_pem: Option<&str>,
     previous_key_pem: Option<&str>,
 ) -> Result<()> {
-    // Verify current.
-    let cur_key =
-        KeyPair::from_pem(current_key_pem).context("imported current CA key is not valid PEM")?;
-    Issuer::from_ca_cert_pem(current_cert_pem, cur_key)
+    ensure_key_matches_cert(current_cert_pem, current_key_pem)
         .context("imported current key does not match current cert")?;
-    // Verify previous if present.
     if let (Some(c), Some(k)) = (previous_cert_pem, previous_key_pem) {
-        let prev_key = KeyPair::from_pem(k).context("imported previous CA key is not valid PEM")?;
-        Issuer::from_ca_cert_pem(c, prev_key)
+        ensure_key_matches_cert(c, k)
             .context("imported previous key does not match previous cert")?;
     }
 
@@ -2319,6 +2328,30 @@ mod tests {
             .err()
             .unwrap();
         assert!(format!("{err}").contains("does not match"));
+    }
+
+    #[test]
+    fn import_mesh_ca_rejects_a_key_that_is_not_the_cert_key() {
+        let src = tempfile::tempdir().unwrap();
+        init_mesh_ca(src.path(), "founder").unwrap();
+        let (cert_pem, _) = export_mesh_ca_keypair(src.path()).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        init_mesh_ca(other.path(), "founder").unwrap();
+        let (_, other_key) = export_mesh_ca_keypair(other.path()).unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(mesh_dir(dst.path())).unwrap();
+        std::fs::write(mesh_ca_cert_path(dst.path()), &cert_pem).unwrap();
+        let err = import_mesh_ca_keypair(dst.path(), &cert_pem, &other_key).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("does not match"),
+            "got: {err:#}"
+        );
+        assert!(!has_mesh_ca_key(dst.path()));
+        assert!(
+            import_mesh_ca_state(dst.path(), &cert_pem, &other_key, None, None).is_err(),
+            "state import must refuse a mismatched pair"
+        );
     }
 
     #[test]

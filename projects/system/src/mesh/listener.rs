@@ -264,7 +264,12 @@ fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
             "mesh/push-ca-key refused: peer {peer_cn} is not mutually secure with this host"
         );
     }
-    utils::pki::import_mesh_ca_keypair(&pki_dir(), &params.cert_pem, &params.key_pem)?;
+    let pki_d = pki_dir();
+    anyhow::ensure!(
+        !utils::pki::has_mesh_ca_key(&pki_d),
+        "mesh/push-ca-key refused: this host already holds a mesh CA key; a peer cannot replace it"
+    );
+    utils::pki::import_mesh_ca_keypair(&pki_d, &params.cert_pem, &params.key_pem)?;
     Ok(())
 }
 
@@ -273,9 +278,9 @@ fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
     Ok(())
 }
 
-/// Handle `mesh/peer-forget`: a mesh member (validated by the mTLS CN against the
-/// mesh CA) is telling us to purge a stale/orphan peer_id from our local
-/// roster. Hard-delete every trace of it so the eviction propagates mesh-wide.
+/// Handle `mesh/peer-forget`: a peer retiring its own identity from our roster.
+/// Forgetting any other peer is a local admin action; a remote peer may only
+/// name itself, and never this host.
 fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
     #[derive(serde::Deserialize)]
     struct ForgetParams {
@@ -285,6 +290,7 @@ fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
         Some(v) => serde_json::from_value(v).context("parse mesh/peer-forget params")?,
         None => anyhow::bail!("mesh/peer-forget requires params"),
     };
+    check_peer_forget(peer_cn, &params.peer_id, crate::host_identity::machine_id())?;
     let removed = db::pool::with_pooled_or_open(|conn| pdb::forget_peer(conn, &params.peer_id))?;
     crate::mesh::peer_info::remove(&params.peer_id);
     tracing::info!(
@@ -292,6 +298,18 @@ fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
         params.peer_id
     );
     Ok(removed)
+}
+
+fn check_peer_forget(peer_cn: &str, target: &str, own_id: &str) -> Result<()> {
+    anyhow::ensure!(
+        target != own_id,
+        "mesh/peer-forget refused: a peer cannot make this host forget itself"
+    );
+    anyhow::ensure!(
+        target == peer_cn,
+        "mesh/peer-forget refused: peer {peer_cn} may only retire itself, not {target}"
+    );
+    Ok(())
 }
 
 /// Handle `mesh/dev-sync`: if this host is in dev mode, run `cmd_dev_sync`
@@ -404,6 +422,35 @@ fn remote_ok_gate(tool: &str, remote_ok: bool, required_role: &str) -> Result<bo
     // proved a paired peer). Role-gated tools additionally require a verified
     // caller token bound to a user whose replicated role satisfies the gate.
     Ok(required_role != "any")
+}
+
+/// `role = "any"` tools that still change state, so no unauthenticated peer
+/// may drive them.
+const MESH_ANY_ROLE_DENY: &[&str] = &["auth.login"];
+
+fn is_mutating_tool(tool: &str) -> bool {
+    dispatch::tool_roles::is_data_mutation(tool)
+        || dispatch::tool_roles::plugin_execute_gated(tool)
+        || dispatch::execute_gated_names().contains(&tool)
+}
+
+/// Deny-by-default role resolution for `mesh/exec`: an unroutable tool is
+/// refused, and an `any`-role tool runs without a caller only when it is a
+/// read.
+fn remote_role_gate(
+    tool: &str,
+    known_role: Option<&'static str>,
+    mutating: bool,
+) -> Result<&'static str> {
+    let role = known_role.ok_or_else(|| {
+        anyhow::anyhow!("mesh/exec refused: tool '{tool}' is not routable on this peer")
+    })?;
+    anyhow::ensure!(
+        role != "any" || !(mutating || MESH_ANY_ROLE_DENY.contains(&tool)),
+        "mesh/exec refused: tool '{tool}' changes state and has no role gate; it cannot run \
+         for a remote peer without a signed caller"
+    );
+    Ok(role)
 }
 
 /// Per-action local-only guard for `mesh/exec`. `system.mesh.update` and `system.mesh.delete`
@@ -532,6 +579,9 @@ fn effective_role<'a>(user_role: &'a str, token_role: &'a str) -> &'a str {
 }
 
 fn role_satisfies(role: &str, required: &str) -> bool {
+    if required == "read" {
+        return matches!(role, "admin" | "read");
+    }
     role_rank(role) >= role_rank(required)
 }
 
@@ -575,7 +625,11 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> 
     // covering plugin tools through the roles their manifests declared.
     reject_remote_local_only_action(&params.tool, &params.args)?;
 
-    let required_role = dispatch::tool_roles::required_role(&params.tool);
+    let required_role = remote_role_gate(
+        &params.tool,
+        dispatch::tool_roles::known_role(&params.tool),
+        is_mutating_tool(&params.tool),
+    )?;
     let needs_auth = remote_ok_gate(
         &params.tool,
         dispatch::remote_ok::is_allowed(&params.tool),
@@ -670,8 +724,19 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
                 "mesh/push-ca-state refused: peer {peer_cn} is not mutually secure with this host"
             );
         }
+        let pki_d = pki_dir();
+        let local_current = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
+            .context("mesh/push-ca-state: read local mesh CA cert")?;
+        let local_previous =
+            std::fs::read_to_string(utils::pki::mesh_ca_previous_cert_path(&pki_d)).ok();
+        check_ca_rotation(
+            &params,
+            &local_current,
+            local_previous.as_deref(),
+            utils::time::now().unix_seconds(),
+        )?;
         utils::pki::import_mesh_ca_state(
-            &pki_dir(),
+            &pki_d,
             &params.current_cert_pem,
             &params.current_key_pem,
             params.previous_cert_pem.as_deref(),
@@ -682,6 +747,52 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
         }
         Ok(())
     })
+}
+
+const MAX_CA_OVERLAP_SECS: i64 = 90 * 86_400;
+
+/// A pushed CA state is accepted only as a forward rotation of the CA this host
+/// pins now: the pushed `previous` slot must be our current CA cert, and its key
+/// must be that cert's private key, which proves the sender holds the current
+/// CA. Any other change of CA identity, a rollback to our previous CA, or an
+/// unbounded overlap window is refused.
+fn check_ca_rotation(
+    params: &PushCaStateParams,
+    local_current: &str,
+    local_previous: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    let (Some(prev_cert), Some(prev_key)) = (
+        params.previous_cert_pem.as_deref(),
+        params.previous_key_pem.as_deref(),
+    ) else {
+        anyhow::bail!(
+            "mesh/push-ca-state refused: a CA state push must be a rotation of the current CA"
+        );
+    };
+    anyhow::ensure!(
+        prev_cert.trim() == local_current.trim(),
+        "mesh/push-ca-state refused: rotation does not chain from this host's current mesh CA"
+    );
+    utils::pki::ensure_key_matches_cert(local_current, prev_key).context(
+        "mesh/push-ca-state refused: sender did not prove possession of the current CA key",
+    )?;
+    let new_current = params.current_cert_pem.trim();
+    anyhow::ensure!(
+        new_current != local_current.trim(),
+        "mesh/push-ca-state refused: pushed CA is already this host's current CA"
+    );
+    anyhow::ensure!(
+        local_previous.is_none_or(|p| p.trim() != new_current),
+        "mesh/push-ca-state refused: pushed CA is this host's previous CA (downgrade)"
+    );
+    if let Some(exp) = params.previous_expires_at {
+        anyhow::ensure!(
+            exp > now && exp - now <= MAX_CA_OVERLAP_SECS,
+            "mesh/push-ca-state refused: previous CA overlap must end within 90 days"
+        );
+    }
+    Ok(())
 }
 
 /// Sign refreshed CSRs for a peer that doesn't hold the mesh CA key itself
@@ -1360,7 +1471,7 @@ mod tests {
             drop(conn);
 
             let removed = handle_peer_forget(
-                "asker",
+                &cn,
                 req_with_params(
                     MESH_PEER_FORGET_METHOD,
                     serde_json::json!({ "peer_id": cn }),
@@ -1379,7 +1490,7 @@ mod tests {
     fn peer_forget_unknown_peer_removes_nothing() {
         with_db(async {
             let removed = handle_peer_forget(
-                "asker",
+                "never-existed",
                 req_with_params(
                     MESH_PEER_FORGET_METHOD,
                     serde_json::json!({ "peer_id": "never-existed" }),
@@ -1738,5 +1849,376 @@ mod tests {
                 "got: {err}"
             );
         });
+    }
+
+    #[test]
+    fn peer_forget_refuses_another_peers_id_and_keeps_its_rows() {
+        with_db(async {
+            let victim = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &victim, "host-v", "127.0.0.1", 1, Some("fp-v"), "").unwrap();
+            drop(conn);
+
+            let err = handle_peer_forget(
+                &utils::id::new(),
+                req_with_params(
+                    MESH_PEER_FORGET_METHOD,
+                    serde_json::json!({ "peer_id": victim }),
+                ),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("may only retire itself"),
+                "got: {err}"
+            );
+
+            let conn = db::open_default().unwrap();
+            assert!(
+                pdb::list_peers(&conn)
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.peer_id == victim)
+            );
+        });
+    }
+
+    #[test]
+    fn peer_forget_never_forgets_the_local_host() {
+        let own = "0190a000-0000-7000-8000-000000000001";
+        let err = check_peer_forget(own, own, own).unwrap_err();
+        assert!(err.to_string().contains("forget itself"), "got: {err}");
+        assert!(check_peer_forget("peer-a", "peer-a", own).is_ok());
+    }
+
+    #[test]
+    fn notify_trust_sets_only_peer_side_and_leaves_a_pinned_peer_untouched() {
+        with_db(async {
+            let cn = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &cn, "host-p", "10.0.0.7", 7, Some("fp-p"), "").unwrap();
+            drop(conn);
+
+            handle_notify_trust(
+                &cn,
+                addr(),
+                req_with_params(
+                    MESH_NOTIFY_TRUST_METHOD,
+                    serde_json::json!({ "trust": true }),
+                ),
+            )
+            .unwrap();
+
+            let conn = db::open_default().unwrap();
+            let t = pdb::get_trust(&conn, &cn).unwrap();
+            assert!(t.peer_secure);
+            assert!(
+                !t.local_secure,
+                "a peer must not raise this host's trust in it"
+            );
+            assert!(!pdb::is_mutual_secure(t));
+            let row = pdb::list_peers(&conn)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.peer_id == cn)
+                .unwrap();
+            assert_eq!(row.pubkey_fp.as_deref(), Some("fp-p"));
+            assert_eq!(row.peer_hostname, "host-p");
+            assert_eq!(row.peer_port, 7);
+            assert_eq!(row.peer_addr, "10.0.0.7");
+        });
+    }
+
+    #[test]
+    fn notify_trust_does_not_fold_a_differently_keyed_peer_at_the_same_address() {
+        with_db(async {
+            let caller = utils::id::new();
+            let other = utils::id::new();
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(&conn, &caller, "host-c", "10.0.2.3", 1, Some("fp-c"), "").unwrap();
+            pdb::upsert_peer(&conn, &other, "host-o", "10.0.2.3", 1, Some("fp-o"), "").unwrap();
+            pdb::set_trust(&conn, &other, Some(true), Some(true)).unwrap();
+            drop(conn);
+
+            handle_notify_trust(
+                &caller,
+                addr(),
+                req_with_params(
+                    MESH_NOTIFY_TRUST_METHOD,
+                    serde_json::json!({ "trust": true }),
+                ),
+            )
+            .unwrap();
+
+            let conn = db::open_default().unwrap();
+            assert!(
+                pdb::list_peers(&conn)
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.peer_id == other)
+            );
+            assert!(!pdb::get_trust(&conn, &caller).unwrap().local_secure);
+        });
+    }
+
+    struct CaFixture {
+        old_cert: String,
+        old_key: String,
+        new_cert: String,
+        new_key: String,
+        _dir: tempfile::TempDir,
+    }
+
+    fn ca_fixture() -> CaFixture {
+        let dir = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(dir.path(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+        let (old_cert, old_key) = utils::pki::export_mesh_ca_keypair(dir.path()).unwrap();
+        utils::pki::rotate_mesh_ca(dir.path()).unwrap();
+        let (new_cert, new_key) = utils::pki::export_mesh_ca_keypair(dir.path()).unwrap();
+        CaFixture {
+            old_cert,
+            old_key,
+            new_cert,
+            new_key,
+            _dir: dir,
+        }
+    }
+
+    fn rotation(f: &CaFixture, prev_key: &str, expires_at: Option<i64>) -> PushCaStateParams {
+        PushCaStateParams {
+            current_cert_pem: f.new_cert.clone(),
+            current_key_pem: f.new_key.clone(),
+            previous_cert_pem: Some(f.old_cert.clone()),
+            previous_key_pem: Some(prev_key.to_string()),
+            previous_expires_at: expires_at,
+        }
+    }
+
+    const NOW: i64 = 1_800_000_000;
+
+    #[test]
+    fn ca_rotation_chained_from_the_current_ca_is_accepted() {
+        let f = ca_fixture();
+        let p = rotation(&f, &f.old_key, Some(NOW + 7 * 86_400));
+        check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap();
+    }
+
+    #[test]
+    fn ca_state_push_without_a_previous_slot_is_refused() {
+        let f = ca_fixture();
+        let mut p = rotation(&f, &f.old_key, None);
+        p.previous_cert_pem = None;
+        p.previous_key_pem = None;
+        let err = check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap_err();
+        assert!(
+            err.to_string().contains("rotation of the current CA"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn ca_rotation_from_a_foreign_ca_is_refused() {
+        let f = ca_fixture();
+        let foreign = ca_fixture();
+        let p = rotation(&f, &f.old_key, None);
+        let err = check_ca_rotation(&p, &foreign.old_cert, None, NOW).unwrap_err();
+        assert!(err.to_string().contains("does not chain"), "got: {err}");
+    }
+
+    #[test]
+    fn ca_rotation_without_the_current_ca_key_is_refused() {
+        let f = ca_fixture();
+        let p = rotation(&f, &f.new_key, None);
+        let err = check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap_err();
+        assert!(err.to_string().contains("possession"), "got: {err}");
+    }
+
+    #[test]
+    fn ca_rotation_back_to_the_previous_ca_is_refused() {
+        let f = ca_fixture();
+        let p = PushCaStateParams {
+            current_cert_pem: f.old_cert.clone(),
+            current_key_pem: f.old_key.clone(),
+            previous_cert_pem: Some(f.new_cert.clone()),
+            previous_key_pem: Some(f.new_key.clone()),
+            previous_expires_at: None,
+        };
+        let err = check_ca_rotation(&p, &f.new_cert, Some(&f.old_cert), NOW).unwrap_err();
+        assert!(err.to_string().contains("downgrade"), "got: {err}");
+    }
+
+    #[test]
+    fn ca_rotation_to_the_same_ca_is_refused() {
+        let f = ca_fixture();
+        let p = PushCaStateParams {
+            current_cert_pem: f.old_cert.clone(),
+            current_key_pem: f.old_key.clone(),
+            previous_cert_pem: Some(f.old_cert.clone()),
+            previous_key_pem: Some(f.old_key.clone()),
+            previous_expires_at: None,
+        };
+        let err = check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap_err();
+        assert!(err.to_string().contains("already"), "got: {err}");
+    }
+
+    #[test]
+    fn ca_rotation_with_an_unbounded_overlap_is_refused() {
+        let f = ca_fixture();
+        for exp in [NOW - 1, NOW + 91 * 86_400] {
+            let p = rotation(&f, &f.old_key, Some(exp));
+            let err = check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap_err();
+            assert!(err.to_string().contains("90 days"), "got: {err}");
+        }
+    }
+
+    fn mutual_secure_peer(cn: &str) {
+        let conn = db::open_default().unwrap();
+        pdb::upsert_peer(&conn, cn, "hc", "127.0.0.1", 1, Some("fp-c"), "").unwrap();
+        pdb::set_trust(&conn, cn, Some(true), Some(true)).unwrap();
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn push_ca_state_installs_a_rotation_from_a_mutual_secure_holder() {
+        let _env = crate::test_env::snapshot();
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::mesh::pin_home(dir.path());
+        db::with_thread_db_path(&dir.path().join("ca-state-ok.db"), || {
+            let f = ca_fixture();
+            let pki = pki_dir();
+            std::fs::create_dir_all(utils::pki::mesh_dir(&pki)).unwrap();
+            std::fs::write(utils::pki::mesh_ca_cert_path(&pki), &f.old_cert).unwrap();
+            let cn = utils::id::new();
+            mutual_secure_peer(&cn);
+
+            let exp = utils::time::now().unix_seconds() + 7 * 86_400;
+            let params = serde_json::json!({
+                "current_cert_pem": f.new_cert,
+                "current_key_pem": f.new_key,
+                "previous_cert_pem": f.old_cert,
+                "previous_key_pem": f.old_key,
+                "previous_expires_at": exp,
+            });
+            handle_push_ca_state(&cn, req_with_params(MESH_PUSH_CA_STATE_METHOD, params)).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki)).unwrap(),
+                f.new_cert
+            );
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn push_ca_state_from_a_mutual_secure_peer_cannot_swap_the_ca() {
+        let _env = crate::test_env::snapshot();
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::mesh::pin_home(dir.path());
+        db::with_thread_db_path(&dir.path().join("ca-state-swap.db"), || {
+            let ours = ca_fixture();
+            let attacker = ca_fixture();
+            let pki = pki_dir();
+            std::fs::create_dir_all(utils::pki::mesh_dir(&pki)).unwrap();
+            std::fs::write(utils::pki::mesh_ca_cert_path(&pki), &ours.old_cert).unwrap();
+            let cn = utils::id::new();
+            mutual_secure_peer(&cn);
+
+            let params = serde_json::json!({
+                "current_cert_pem": attacker.new_cert,
+                "current_key_pem": attacker.new_key,
+                "previous_cert_pem": attacker.old_cert,
+                "previous_key_pem": attacker.old_key,
+            });
+            let err = handle_push_ca_state(&cn, req_with_params(MESH_PUSH_CA_STATE_METHOD, params))
+                .unwrap_err();
+            assert!(err.to_string().contains("does not chain"), "got: {err}");
+            assert_eq!(
+                std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki)).unwrap(),
+                ours.old_cert
+            );
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn push_ca_key_installs_the_pinned_ca_key_on_a_keyless_host() {
+        let _env = crate::test_env::snapshot();
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::mesh::pin_home(dir.path());
+        db::with_thread_db_path(&dir.path().join("ca-key-ok.db"), || {
+            let f = ca_fixture();
+            let pki = pki_dir();
+            std::fs::create_dir_all(utils::pki::mesh_dir(&pki)).unwrap();
+            std::fs::write(utils::pki::mesh_ca_cert_path(&pki), &f.new_cert).unwrap();
+            let cn = utils::id::new();
+            mutual_secure_peer(&cn);
+
+            let params = serde_json::json!({ "cert_pem": f.new_cert, "key_pem": f.new_key });
+            handle_push_ca_key(&cn, req_with_params(MESH_PUSH_CA_KEY_METHOD, params)).unwrap();
+            assert!(utils::pki::has_mesh_ca_key(&pki));
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn push_ca_key_refused_when_this_host_already_holds_a_ca_key() {
+        let _env = crate::test_env::snapshot();
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::mesh::pin_home(dir.path());
+        db::with_thread_db_path(&dir.path().join("ca-key-held.db"), || {
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
+            let (cert, key) = utils::pki::export_mesh_ca_keypair(&pki).unwrap();
+            let cn = utils::id::new();
+            mutual_secure_peer(&cn);
+
+            let params = serde_json::json!({ "cert_pem": cert, "key_pem": "attacker" });
+            let err = handle_push_ca_key(&cn, req_with_params(MESH_PUSH_CA_KEY_METHOD, params))
+                .unwrap_err();
+            assert!(err.to_string().contains("already holds"), "got: {err}");
+            assert_eq!(
+                std::fs::read_to_string(utils::pki::mesh_ca_key_path(&pki)).unwrap(),
+                key
+            );
+        });
+    }
+
+    #[test]
+    fn remote_role_gate_refuses_unroutable_and_mutating_any_tools() {
+        let err = remote_role_gate("ghost.tool", None, false).unwrap_err();
+        assert!(err.to_string().contains("not routable"), "got: {err}");
+        let err = remote_role_gate("x.apply", Some("any"), true).unwrap_err();
+        assert!(err.to_string().contains("changes state"), "got: {err}");
+        let err = remote_role_gate("auth.login", Some("any"), false).unwrap_err();
+        assert!(err.to_string().contains("changes state"), "got: {err}");
+        assert_eq!(
+            remote_role_gate("system.list", Some("any"), false).unwrap(),
+            "any"
+        );
+        assert_eq!(
+            remote_role_gate("system.update.create", Some("admin"), true).unwrap(),
+            "admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_refuses_an_any_role_plugin_tool_that_is_execute_gated() {
+        install_fake_plugin();
+        let tool = "listener_test_plugin.any_apply";
+        dispatch::tool_roles::install_plugin_tools([(
+            tool.to_string(),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("any"), Some(true), None),
+        )]);
+        let params = serde_json::json!({ "tool": tool, "args": {} });
+        let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("changes state"), "got: {err}");
+    }
+
+    #[test]
+    fn read_role_needs_an_admin_or_read_caller() {
+        assert!(role_satisfies("admin", "read"));
+        assert!(role_satisfies("read", "read"));
+        assert!(!role_satisfies("member", "read"));
+        assert!(!role_satisfies("any", "read"));
     }
 }
