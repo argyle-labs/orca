@@ -84,6 +84,14 @@ pub fn export_all(conn: &Connection) -> Result<BTreeMap<String, Value>> {
 /// a stale peer row re-imported by a domain merge in this same tick is removed
 /// again — closing the resurrection race.
 pub fn merge_bundle(conn: &Connection, bundle: BTreeMap<String, Value>) -> Result<usize> {
+    let rows: usize = bundle
+        .values()
+        .map(|v| v.as_array().map_or(0, Vec::len))
+        .sum();
+    if rows > macro_runtime::replicate_table::MAX_BUNDLE_ROWS {
+        macro_runtime::replicate_table::audit_reject("*", &rows, "bundle exceeds row cap");
+        return Ok(0);
+    }
     let mut total = 0;
 
     // Phase 1: merge the op-log first, so the delete/upsert transitions it
@@ -474,4 +482,15 @@ mod tests {
     // (`notify_write_delivers_to_subscriber`, `user_insert_fires_notification`)
     // cover the positive path; for the negative path we rely on the body
     // of `merge_bundle` being trivially small and reviewable.
+
+    #[test]
+    fn bundle_over_row_cap_is_rejected() {
+        let a = test_conn();
+        let rows: Vec<Value> = (0..=macro_runtime::replicate_table::MAX_BUNDLE_ROWS)
+            .map(|i| serde_json::json!({"id": i.to_string()}))
+            .collect();
+        let mut bundle = BTreeMap::new();
+        bundle.insert("replica_fixture".to_string(), Value::Array(rows));
+        assert_eq!(merge_bundle(&a, bundle).unwrap(), 0);
+    }
 }

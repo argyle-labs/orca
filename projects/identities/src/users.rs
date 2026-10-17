@@ -31,8 +31,8 @@ pub struct UserAuth {
 
 /// Full replicable user row. `users` is ONE shared pool replicated across every
 /// paired host (last-write-wins on `updated_at`), so any admin can sign in on
-/// any machine/UI. The whole row — including `password_hash` and `role` — is
-/// shared among paired peers. See project_unified_mesh_state.md (shared policy).
+/// any machine/UI. No column is peer-writable: a peer can never introduce a row
+/// or change one, so accounts are set only by local writes.
 ///
 /// Field order mirrors the `users` table columns exactly (the `Replicated`
 /// derive maps fields ↔ columns 1:1), so `username_lower` is carried even
@@ -275,39 +275,65 @@ mod tests {
         assert_eq!(by_upper.username, "Scott");
     }
 
-    #[test]
-    fn replicated_derive_export_then_merge_lww() {
-        // Source host has one user; export the shared pool, merge into a fresh
-        // host, and confirm the row lands (any host can write the pool).
+    #[allow(clippy::disallowed_types)]
+    fn peer_bundle(
+        src: &Connection,
+        edit: impl Fn(&mut macro_runtime::serde_json::Map<String, macro_runtime::serde_json::Value>),
+    ) -> std::collections::BTreeMap<String, macro_runtime::serde_json::Value> {
+        let mut bundle = db::replicate::export_all(src).unwrap();
+        for row in bundle.get_mut("users").unwrap().as_array_mut().unwrap() {
+            edit(row.as_object_mut().unwrap());
+        }
+        bundle
+    }
+
+    fn two_hosts() -> (Connection, Connection) {
         let src = test_conn();
-        insert(
-            &src,
-            "u1",
-            "Scott",
-            "hash-v1",
-            "admin",
-            "2026-01-01T00:00:00Z",
-        )
-        .unwrap();
-        let bundle = db::replicate::export_all(&src).unwrap();
-        assert!(
-            bundle.contains_key("users"),
-            "users entity must be registered"
-        );
-
         let dst = test_conn();
-        let merged = db::replicate::merge_bundle(&dst, bundle).unwrap();
-        assert_eq!(merged, 1);
-        let got = find_auth_by_username(&dst, "scott").unwrap().unwrap();
-        assert_eq!(got.id, "u1");
-        assert_eq!(got.password_hash, "hash-v1");
-        assert_eq!(got.role, "admin");
+        for c in [&src, &dst] {
+            insert(
+                c,
+                "u1",
+                "Scott",
+                "hash-v1",
+                "member",
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+        }
+        (src, dst)
+    }
 
-        // A newer write (bumped updated_at via password change) propagates.
-        set_password_hash(&src, "u1", "hash-v2", "2026-02-01T00:00:00Z").unwrap();
+    #[test]
+    fn peer_cannot_change_any_user_column() {
+        let (src, dst) = two_hosts();
+        set_email(&src, "u1", Some("a@example.test"), "2026-02-01T00:00:00Z").unwrap();
+        let bundle = peer_bundle(&src, |r| {
+            r.insert("role".into(), "admin".into());
+            r.insert("password_hash".into(), "attacker".into());
+        });
+        db::replicate::merge_bundle(&dst, bundle).unwrap();
+        let got = find_auth_by_username(&dst, "scott").unwrap().unwrap();
+        assert_eq!(got.role, "member");
+        assert_eq!(got.password_hash, "hash-v1");
+        assert_eq!(find_by_id(&dst, "u1").unwrap().unwrap().email, None);
+    }
+
+    #[test]
+    fn peer_cannot_introduce_a_new_user() {
+        let src = test_conn();
+        insert(&src, "u9", "mallory", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        let dst = test_conn();
         let n =
             db::replicate::merge_bundle(&dst, db::replicate::export_all(&src).unwrap()).unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, 0);
+        assert!(find_auth_by_username(&dst, "mallory").unwrap().is_none());
+    }
+
+    #[test]
+    fn local_admin_write_changes_protected_fields() {
+        let (_, dst) = two_hosts();
+        assert!(set_password_hash(&dst, "u1", "hash-v2", "2026-02-01T00:00:00Z").unwrap());
         assert_eq!(
             find_auth_by_username(&dst, "scott")
                 .unwrap()
@@ -315,39 +341,67 @@ mod tests {
                 .password_hash,
             "hash-v2"
         );
+    }
 
-        // Re-merging the same (now stale) bundle is a no-op — LWW guards it.
-        let n2 =
-            db::replicate::merge_bundle(&dst, db::replicate::export_all(&src).unwrap()).unwrap();
-        assert_eq!(n2, 0);
+    #[test]
+    fn future_or_unparseable_lww_rejected() {
+        for bad in ["9999-01-01T00:00:00Z", "not-a-time"] {
+            let (src, dst) = two_hosts();
+            let bundle = peer_bundle(&src, |r| {
+                r.insert("email".into(), "e@example.test".into());
+                r.insert("updated_at".into(), bad.into());
+            });
+            assert_eq!(db::replicate::merge_bundle(&dst, bundle).unwrap(), 0);
+            assert_eq!(find_by_id(&dst, "u1").unwrap().unwrap().email, None);
+        }
+    }
+
+    #[test]
+    fn peer_cannot_rename_a_user_and_rejection_names_the_peer() {
+        let (src, dst) = two_hosts();
+        let bundle = peer_bundle(&src, |r| {
+            r.insert("username".into(), "Mallory".into());
+            r.insert("username_lower".into(), "mallory".into());
+            r.insert("updated_at".into(), "2026-02-01T00:00:00Z".into());
+        });
+        macro_runtime::replicate_table::with_merge_peer("peer-rename", || {
+            db::replicate::merge_bundle(&dst, bundle).unwrap()
+        });
+        assert!(find_auth_by_username(&dst, "mallory").unwrap().is_none());
+        assert_eq!(find_by_id(&dst, "u1").unwrap().unwrap().username, "Scott");
+        assert!(
+            macro_runtime::replicate_table::rejection_counts().contains_key(&(
+                "peer-rename".into(),
+                "users".into(),
+                "peer change to protected fields dropped".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn digit_only_lww_never_wins() {
+        let (src, dst) = two_hosts();
+        let bundle = peer_bundle(&src, |r| {
+            r.insert("email".into(), "e@example.test".into());
+            r.insert("updated_at".into(), "9".into());
+        });
+        assert_eq!(db::replicate::merge_bundle(&dst, bundle).unwrap(), 0);
     }
 
     #[test]
     fn cross_row_unique_poison_is_skipped_not_fatal() {
-        // The poison shape that used to storm the fleet: an incoming row whose
-        // pk matches one local row while its username belongs to ANOTHER local
-        // row — a cross-row UNIQUE clash `ON CONFLICT` cannot resolve. It must
-        // be skipped loudly WITHOUT aborting the merge, so clean rows in the
-        // same bundle still land.
         let dst = test_conn();
         insert(&dst, "X", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
         insert(&dst, "Y", "bob", "h", "member", "2026-01-01T00:00:00Z").unwrap();
+        insert(&dst, "Z", "carol", "h", "member", "2026-01-01T00:00:00Z").unwrap();
 
-        // Source bundle: a NEWER row (id=Y, username=scott) that collides across
-        // rows, plus a clean unrelated row (id=Z, username=carol).
         let src = test_conn();
-        insert(&src, "Y", "scott", "h2", "admin", "2026-03-01T00:00:00Z").unwrap();
+        insert(&src, "Y", "scott", "h", "admin", "2026-03-01T00:00:00Z").unwrap();
         insert(&src, "Z", "carol", "h", "member", "2026-03-01T00:00:00Z").unwrap();
         let bundle = db::replicate::export_all(&src).unwrap();
 
-        // Must NOT error, and the clean row must merge despite the poison row.
         let merged = db::replicate::merge_bundle(&dst, bundle).unwrap();
         assert_eq!(merged, 1, "clean row lands; poison row skipped");
-        assert!(
-            find_auth_by_username(&dst, "carol").unwrap().is_some(),
-            "clean row past the poison must be applied"
-        );
-        // The poison was skipped — the original scott row keeps its local id.
         assert_eq!(
             find_auth_by_username(&dst, "scott").unwrap().unwrap().id,
             "X",

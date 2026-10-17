@@ -1,0 +1,1 @@
+ALTER TABLE replication_ops ADD COLUMN local_origin INTEGER NOT NULL DEFAULT 0;

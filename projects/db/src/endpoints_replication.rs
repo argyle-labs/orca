@@ -38,6 +38,7 @@ fn merge(conn: &Connection, rows: Value) -> Result<usize> {
         COLUMNS,
         "id",
         "updated_at",
+        &[],
         rows,
     )
 }
@@ -47,5 +48,7 @@ inventory::submit! {
         name: "endpoints",
         export,
         merge,
+        keys: &["id"],
+        peer_delete: None,
     }
 }

@@ -38,6 +38,7 @@ pub(crate) struct EndpointResourceAttr {
     /// Verbs whose generated tool is withheld. See
     /// [`crate::endpoint_resource::EndpointResource::skip`].
     pub(crate) skip: std::collections::HashSet<String>,
+    pub(crate) peer_writable: Vec<String>,
 }
 
 impl Parse for EndpointResourceAttr {
@@ -48,6 +49,7 @@ impl Parse for EndpointResourceAttr {
         let mut crate_path: Option<syn::Path> = None;
         let mut lww = None;
         let mut skip: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut peer_writable = Vec::new();
         for nv in items {
             let key = nv
                 .path
@@ -82,10 +84,18 @@ impl Parse for EndpointResourceAttr {
                 "table" => table = Some(val.value()),
                 "lww" => lww = Some(val.value()),
                 "skip" => skip = crate::endpoint_resource::parse_skip(&val.value()),
+                "peer_writable" => {
+                    peer_writable = crate::endpoint_resource::parse_skip(&val.value())
+                        .into_iter()
+                        .collect();
+                    peer_writable.sort();
+                }
                 other => {
                     return Err(syn::Error::new_spanned(
                         &nv.path,
-                        format!("unknown key `{other}`; expected: plugin, table, lww, skip, crate"),
+                        format!(
+                            "unknown key `{other}`; expected: plugin, table, lww, skip, peer_writable, crate"
+                        ),
                     ));
                 }
             }
@@ -97,6 +107,7 @@ impl Parse for EndpointResourceAttr {
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
             lww,
             skip,
+            peer_writable,
         })
     }
 }
@@ -159,6 +170,7 @@ pub(crate) fn expand(attr: EndpointResourceAttr, item: ItemStruct) -> syn::Resul
         lww: attr.lww,
         shared,
         skip: attr.skip,
+        peer_writable: attr.peer_writable,
     };
 
     // The struct definition is consumed — we emit nothing from it.

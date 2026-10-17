@@ -17,6 +17,8 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+pub const PEER_WRITABLE_NOUNS: &[&str] = &["display", "graphics", "host_status"];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigRow {
     pub id: String,
@@ -349,6 +351,14 @@ pub fn upsert_mesh_row(
 ) -> Result<bool> {
     serde_json::from_str::<serde::de::IgnoredAny>(payload_json)
         .with_context(|| format!("mesh payload for {noun}/{name} is not valid JSON"))?;
+    if let Err(reason) = macro_runtime::replicate_table::check_incoming_lww(updated_at) {
+        macro_runtime::replicate_table::audit_reject(
+            "config_rows",
+            &(host_owner, noun, name),
+            reason,
+        );
+        return Ok(false);
+    }
     // An id the owner sent wins; otherwise the row keeps the one it has, and a
     // genuinely new row gets a fresh one.
     let row_id = if uuidv7.is_empty() {
@@ -357,21 +367,34 @@ pub fn upsert_mesh_row(
     } else {
         uuidv7.to_string()
     };
+    let local_updated: Option<String> = conn
+        .query_row(
+            "SELECT updated_at FROM config_rows WHERE noun = ?1 AND name = ?2 AND host_owner = ?3",
+            params![noun, name, host_owner],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let newer = local_updated
+        .as_deref()
+        .is_none_or(|l| macro_runtime::replicate_table::lww_str_is_newer(updated_at, l));
     let rep = i64::from(is_replica);
     // Insert carries the incoming uuidv7 (NULL when empty → the AFTER INSERT
     // trigger mints one for a brand-new row). The LWW gate governs the mutable
     // payload columns only.
-    let n = conn.execute(
-        "INSERT INTO config_rows (id, host_owner, noun, name, json, is_replica, updated_at, updated_by, uuidv7)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?1)
-         ON CONFLICT(noun, name, host_owner) DO UPDATE SET
-             json       = excluded.json,
-             is_replica = excluded.is_replica,
-             updated_at = excluded.updated_at,
-             updated_by = excluded.updated_by
-         WHERE excluded.updated_at > config_rows.updated_at",
-        params![row_id, host_owner, noun, name, payload_json, rep, updated_at, updated_by],
-    )?;
+    let n = if newer {
+        conn.execute(
+            "INSERT INTO config_rows (id, host_owner, noun, name, json, is_replica, updated_at, updated_by, uuidv7)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?1)
+             ON CONFLICT(noun, name, host_owner) DO UPDATE SET
+                 json       = excluded.json,
+                 is_replica = excluded.is_replica,
+                 updated_at = excluded.updated_at,
+                 updated_by = excluded.updated_by",
+            params![row_id, host_owner, noun, name, payload_json, rep, updated_at, updated_by],
+        )?
+    } else {
+        0
+    };
     // Converge the id independently of the payload LWW gate. All peers adopt
     // MIN(local, incoming): a deterministic, order-independent selection so the
     // fleet settles on ONE id per logical row even where each minted its own
@@ -448,6 +471,24 @@ fn replicate_merge(conn: &Connection, rows: serde_json::Value) -> Result<usize> 
         if host_owner.is_empty() || noun.is_empty() || name.is_empty() {
             continue;
         }
+        if !PEER_WRITABLE_NOUNS.contains(&noun.as_str()) {
+            macro_runtime::replicate_table::audit_reject(
+                "config_rows",
+                &(&host_owner, &noun, &name),
+                "noun is local-only",
+            );
+            continue;
+        }
+        if macro_runtime::replicate_table::current_merge_peer().as_deref()
+            != Some(host_owner.as_str())
+        {
+            macro_runtime::replicate_table::audit_reject(
+                "config_rows",
+                &(&host_owner, &noun, &name),
+                "host_owner is not the sending peer",
+            );
+            continue;
+        }
         let json = field("json");
         let updated_at = field("updated_at");
         let updated_by = {
@@ -478,7 +519,24 @@ inventory::submit! {
         name: "config_rows",
         export: replicate_export,
         merge: replicate_merge,
+        keys: &["id"],
+        peer_delete: Some(peer_may_delete),
     }
+}
+
+fn peer_may_delete(conn: &Connection, row_id: &str) -> bool {
+    let sender = macro_runtime::replicate_table::current_merge_peer();
+    conn.query_row(
+        "SELECT noun, host_owner FROM config_rows WHERE id = ?1",
+        params![row_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some_and(|(noun, owner)| {
+        PEER_WRITABLE_NOUNS.contains(&noun.as_str()) && sender.as_deref() == Some(owner.as_str())
+    })
 }
 
 pub fn delete(
@@ -1007,6 +1065,76 @@ mod tests {
     }
 
     #[test]
+    fn peer_merge_drops_local_only_nouns() {
+        let conn = test_conn();
+        let rows = serde_json::json!([
+            {"host_owner": "host-b", "noun": "backup", "name": "targets", "json": "{}", "updated_at": "2026-07-05T10:00:00Z", "updated_by": "peer"},
+            {"host_owner": "host-b", "noun": "ports", "name": "p", "json": "{}", "updated_at": "2026-07-05T10:00:00Z", "updated_by": "peer"},
+            {"host_owner": "host-b", "noun": "display", "name": "target", "json": "{}", "updated_at": "2026-07-05T10:00:00Z", "updated_by": "peer"},
+        ]);
+        let n = macro_runtime::replicate_table::with_merge_peer("host-b", || {
+            replicate_merge(&conn, rows).unwrap()
+        });
+        assert_eq!(n, 1);
+        assert!(get(&conn, "backup", "targets").unwrap().is_none());
+        assert!(get(&conn, "display", "target").unwrap().is_some());
+    }
+
+    #[test]
+    fn mesh_row_lww_compares_instants_not_strings() {
+        let conn = test_conn();
+        merge_remote(
+            &conn,
+            "host-b",
+            "display",
+            "target",
+            r#"{"v":1}"#,
+            "2026-07-05T10:00:00Z",
+        );
+        for bad in [
+            "9",
+            "2026-07-05t11:00:00z",
+            "2026-07-05T11:00:00+14:00",
+            "2026-07-05T11:00:00.5Z",
+        ] {
+            assert!(
+                !merge_remote(&conn, "host-b", "display", "target", r#"{"v":9}"#, bad),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn mesh_row_rejects_future_and_unparseable_lww() {
+        let conn = test_conn();
+        merge_remote(
+            &conn,
+            "host-b",
+            "display",
+            "target",
+            r#"{"v":1}"#,
+            "2026-07-05T10:00:00Z",
+        );
+        for bad in ["9999-01-01T00:00:00Z", "zzzz"] {
+            assert!(!merge_remote(
+                &conn,
+                "host-b",
+                "display",
+                "target",
+                r#"{"v":9}"#,
+                bad
+            ));
+        }
+        assert!(
+            get(&conn, "display", "target")
+                .unwrap()
+                .unwrap()
+                .json
+                .contains("\"v\":1")
+        );
+    }
+
+    #[test]
     fn mesh_row_is_last_write_wins() {
         let conn = test_conn();
         merge_remote(
@@ -1074,24 +1202,20 @@ mod tests {
     }
 
     #[test]
-    fn restore_reowns_our_own_rows_from_a_peer() {
-        // Simulate a reinstalled host that IS "host-g" (LOCAL). A peer pushes a
-        // bundle that includes rows owned by host-g (its replica of our config)
-        // plus a row owned by another host. Merge must RE-OWN ours (is_replica
-        // = 0) and keep the other as a replica.
+    fn peer_rows_must_be_owned_by_the_sender() {
         let conn = test_conn();
         crate::settings::set(&conn, LOCAL_SYSTEM_ID_SETTING, LOCAL).unwrap();
         let bundle = serde_json::json!([
             {"host_owner": LOCAL, "noun": "display", "name": "target", "json": "{\"restored\":true}", "updated_at": "2026-07-05T10:00:00Z", "updated_by": "peer"},
+            {"host_owner": "host-c", "noun": "display", "name": "other", "json": "{}", "updated_at": "2026-07-05T10:00:00Z", "updated_by": "peer"},
             {"host_owner": "host-b", "noun": "graphics", "name": "prefs", "json": "{\"x\":1}", "updated_at": "2026-07-05T10:00:00Z", "updated_by": "peer"}
         ]);
-        assert_eq!(replicate_merge(&conn, bundle).unwrap(), 2);
-        let mine = get(&conn, "display", "target").unwrap().unwrap();
-        assert_eq!(mine.host_owner, LOCAL);
-        assert!(!mine.is_replica, "our own rows must be re-owned on restore");
-        assert!(
-            get(&conn, "graphics", "prefs").unwrap().unwrap().is_replica,
-            "other hosts stay replicas"
-        );
+        let n = macro_runtime::replicate_table::with_merge_peer("host-b", || {
+            replicate_merge(&conn, bundle).unwrap()
+        });
+        assert_eq!(n, 1);
+        assert!(get(&conn, "display", "target").unwrap().is_none());
+        assert!(get(&conn, "display", "other").unwrap().is_none());
+        assert!(get(&conn, "graphics", "prefs").unwrap().unwrap().is_replica);
     }
 }

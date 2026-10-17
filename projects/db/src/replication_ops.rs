@@ -59,6 +59,67 @@ fn is_ident(ident: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn op_target(
+    entity: &str,
+    key_col: &str,
+) -> Result<Option<&'static macro_runtime::ReplicatedRegistration>, &'static str> {
+    if entity == crate::mesh::peerdb::PEER_TOMBSTONE_ENTITY {
+        return if key_col == crate::mesh::peerdb::PEER_TOMBSTONE_KEY_COL {
+            Ok(None)
+        } else {
+            Err("key column is not a declared key")
+        };
+    }
+    let reg = crate::replicate::registrations()
+        .into_iter()
+        .find(|r| r.name == entity)
+        .ok_or("entity is not replicated")?;
+    if reg.keys.contains(&key_col) {
+        Ok(Some(reg))
+    } else {
+        Err("key column is not a declared key")
+    }
+}
+
+fn peer_delete_allowed(
+    conn: &Connection,
+    entity: &str,
+    key_col: &str,
+    key_val: &str,
+) -> Result<(), &'static str> {
+    let Some(reg) = op_target(entity, key_col)? else {
+        return Ok(());
+    };
+    match reg.peer_delete {
+        Some(allowed) if allowed(conn, key_val) => Ok(()),
+        Some(_) => Err("delete not permitted for this row"),
+        None => Err("entity is not peer-deletable"),
+    }
+}
+
+fn peer_op_allowed(
+    conn: &Connection,
+    entity: &str,
+    key_col: &str,
+    key_val: &str,
+    op: &str,
+) -> Result<(), &'static str> {
+    if entity == crate::mesh::peerdb::PEER_TOMBSTONE_ENTITY {
+        op_target(entity, key_col)?;
+        if op != "delete" {
+            return Err("peers may not clear peer tombstones");
+        }
+        if key_val == crate::config_store::local_system_id(conn) {
+            return Err("tombstone targets the local host");
+        }
+        if macro_runtime::replicate_table::current_merge_peer().as_deref() != Some(key_val) {
+            return Err("peer tombstone not sent by the retiring peer");
+        }
+        return Ok(());
+    }
+    peer_delete_allowed(conn, entity, key_col, key_val)
+}
+
 /// This host's name, used as an op's `origin`. Best-effort — empty if the host
 /// hasn't been named yet (ops still work; origin is informational + a merge
 /// tiebreak input only via op_id).
@@ -149,14 +210,15 @@ fn put(
     let op_id = utils::id::new();
     let origin = origin(conn);
     conn.execute(
-        "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms, local_origin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)
          ON CONFLICT(entity, key_val) DO UPDATE SET
              op_id    = excluded.op_id,
              key_col  = excluded.key_col,
              op       = excluded.op,
              origin   = excluded.origin,
-             stamp_ms = excluded.stamp_ms
+             stamp_ms = excluded.stamp_ms,
+             local_origin = 1
          WHERE excluded.stamp_ms > replication_ops.stamp_ms
             OR (excluded.stamp_ms = replication_ops.stamp_ms
                 AND excluded.op_id > replication_ops.op_id)",
@@ -173,13 +235,23 @@ fn put(
 /// stale peer row — freshly re-imported by a domain merge in the same tick —
 /// from resurrecting. Idempotent and generic: no per-entity code.
 pub fn apply_pending_deletes(conn: &Connection) -> Result<usize> {
-    let mut stmt =
-        conn.prepare("SELECT entity, key_col, key_val FROM replication_ops WHERE op = 'delete'")?;
-    let pending: Vec<(String, String, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    let mut stmt = conn.prepare(
+        "SELECT entity, key_col, key_val, local_origin FROM replication_ops WHERE op = 'delete'",
+    )?;
+    let pending: Vec<(String, String, String, bool)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut removed = 0usize;
-    for (entity, key_col, key_val) in pending {
+    for (entity, key_col, key_val, local_origin) in pending {
+        let check = if local_origin {
+            op_target(&entity, &key_col).map(drop)
+        } else {
+            peer_delete_allowed(conn, &entity, &key_col, &key_val)
+        };
+        if let Err(reason) = check {
+            tracing::debug!("[replication_ops] not applying delete {entity}.{key_col}: {reason}");
+            continue;
+        }
         // Defensive: entity/key_col originate from registration code, but they
         // are interpolated as identifiers — skip anything that isn't a bare
         // identifier rather than build unsafe SQL.
@@ -270,15 +342,23 @@ fn replicate_merge(conn: &Connection, rows: Value) -> Result<usize> {
         if op_id.is_empty() || entity.is_empty() || key_val.is_empty() || op.is_empty() {
             continue;
         }
+        if let Err(reason) = macro_runtime::replicate_table::check_incoming_millis(stamp_ms)
+            .map(drop)
+            .and_then(|()| peer_op_allowed(conn, &entity, &key_col, &key_val, &op))
+        {
+            macro_runtime::replicate_table::audit_reject(ENTITY, &(&entity, &key_col), reason);
+            continue;
+        }
         let n = conn.execute(
-            "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms, local_origin)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
              ON CONFLICT(entity, key_val) DO UPDATE SET
                  op_id    = excluded.op_id,
                  key_col  = excluded.key_col,
                  op       = excluded.op,
                  origin   = excluded.origin,
-                 stamp_ms = excluded.stamp_ms
+                 stamp_ms = excluded.stamp_ms,
+                 local_origin = 0
              WHERE excluded.stamp_ms > replication_ops.stamp_ms
                 OR (excluded.stamp_ms = replication_ops.stamp_ms
                     AND excluded.op_id > replication_ops.op_id)",
@@ -294,6 +374,8 @@ inventory::submit! {
         name: ENTITY,
         export: replicate_export,
         merge: replicate_merge,
+        keys: &[],
+        peer_delete: None,
     }
 }
 
@@ -305,20 +387,17 @@ mod tests {
     #[test]
     fn note_delete_then_apply_removes_row() {
         let conn = test_conn();
-        crate::testing::insert_user(&conn, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z");
-        note_delete(&conn, "users", "username_lower", "scott", 1000).unwrap();
-        // Simulate a stale peer re-inserting the row, then apply pending deletes.
+        note_delete(&conn, "replica_fixture", "name_lower", "scott", 1000).unwrap();
         conn.execute(
-            "INSERT OR IGNORE INTO users
-                (id, username, username_lower, password_hash, role, created_at, password_updated_at, updated_at)
-             VALUES ('u1','scott','scott','h','admin','t','t','t')",
+            "INSERT INTO replica_fixture (id, name, name_lower, payload, updated_at)
+             VALUES ('u1','scott','scott','p','2026-01-01T00:00:00Z')",
             [],
         )
-        .ok();
+        .unwrap();
         let removed = apply_pending_deletes(&conn).unwrap();
-        assert_eq!(removed, 1, "the deleted user must be physically removed");
+        assert_eq!(removed, 1, "the deleted row must be physically removed");
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM replica_fixture", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
     }
@@ -383,20 +462,171 @@ mod tests {
     #[test]
     fn merge_applies_newer_peer_delete() {
         let src = test_conn();
-        note_delete(&src, "users", "username_lower", "bob", 9000).unwrap();
+        note_delete(&src, "replica_fixture", "name_lower", "bob", 9000).unwrap();
         let dst = test_conn();
-        note_write(&dst, "users", "username_lower", "bob", 1000).unwrap(); // no-op (no delete)
         let bundle = replicate_export(&src).unwrap();
         let n = replicate_merge(&dst, bundle).unwrap();
         assert_eq!(n, 1);
         let op: String = dst
             .query_row(
-                "SELECT op FROM replication_ops WHERE entity='users' AND key_val='bob'",
+                "SELECT op FROM replication_ops WHERE entity='replica_fixture' AND key_val='bob'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert_eq!(op, "delete", "newer peer delete propagates");
+    }
+
+    fn peer_op(entity: &str, key_col: &str, key_val: &str, stamp_ms: i64) -> Value {
+        serde_json::json!([{
+            "op_id": utils::id::new().to_string(), "entity": entity, "key_col": key_col,
+            "key_val": key_val, "op": "delete", "origin": "peer", "stamp_ms": stamp_ms,
+        }])
+    }
+
+    #[test]
+    fn merge_rejects_ops_outside_declared_entities_and_keys() {
+        let dst = test_conn();
+        let now = utils::time::now_millis_since_epoch();
+        let cases = [
+            ("settings", "key", "entity is not replicated"),
+            (
+                "replica_fixture",
+                "payload",
+                "key column is not a declared key",
+            ),
+            ("endpoints", "id", "entity is not peer-deletable"),
+            (
+                "replication_ops",
+                "op_id",
+                "key column is not a declared key",
+            ),
+        ];
+        for (entity, col, reason) in cases {
+            let n = macro_runtime::replicate_table::with_merge_peer("peer-ops", || {
+                replicate_merge(&dst, peer_op(entity, col, "x", now)).unwrap()
+            });
+            assert_eq!(n, 0, "{entity}.{col}");
+            assert!(
+                macro_runtime::replicate_table::rejection_counts().contains_key(&(
+                    "peer-ops".into(),
+                    ENTITY.into(),
+                    reason.into()
+                )),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_rejects_config_delete_for_local_only_noun() {
+        let dst = test_conn();
+        crate::config_store::set(&dst, "h", "h", "backup", "targets", "{}", "t").unwrap();
+        let id = crate::config_store::get(&dst, "backup", "targets")
+            .unwrap()
+            .unwrap()
+            .id;
+        let now = utils::time::now_millis_since_epoch();
+        assert_eq!(
+            replicate_merge(&dst, peer_op("config_rows", "id", &id, now)).unwrap(),
+            0
+        );
+        crate::config_store::set(&dst, "h", "h", "display", "target", "{}", "t").unwrap();
+        let id = crate::config_store::get(&dst, "display", "target")
+            .unwrap()
+            .unwrap()
+            .id;
+        assert_eq!(
+            replicate_merge(&dst, peer_op("config_rows", "id", &id, now)).unwrap(),
+            0,
+            "no sender: fail closed"
+        );
+        let from = |sender: &str| {
+            macro_runtime::replicate_table::with_merge_peer(sender, || {
+                replicate_merge(&dst, peer_op("config_rows", "id", &id, now)).unwrap()
+            })
+        };
+        assert_eq!(from("other"), 0, "sender must own the row");
+        assert_eq!(from("h"), 1);
+    }
+
+    #[test]
+    fn merge_bounds_op_stamp_skew() {
+        let dst = test_conn();
+        let now = utils::time::now_millis_since_epoch();
+        let ok = peer_op("replica_fixture", "name_lower", "a", now + 300_000);
+        assert_eq!(replicate_merge(&dst, ok).unwrap(), 1);
+        let late = peer_op("replica_fixture", "name_lower", "b", now + 301_000);
+        assert_eq!(replicate_merge(&dst, late).unwrap(), 0);
+    }
+
+    fn peer_mesh_op(op: &str, key_val: &str) -> Value {
+        serde_json::json!([{
+            "op_id": utils::id::new().to_string(), "entity": "mesh_peers", "key_col": "peer_id",
+            "key_val": key_val, "op": op, "origin": "peer",
+            "stamp_ms": utils::time::now_millis_since_epoch(),
+        }])
+    }
+
+    #[test]
+    fn mesh_peer_tombstone_only_from_the_retiring_peer() {
+        let dst = test_conn();
+        crate::settings::set(&dst, crate::config_store::LOCAL_SYSTEM_ID_SETTING, "me").unwrap();
+        let merge = |sender: &str, rows: Value| {
+            macro_runtime::replicate_table::with_merge_peer(sender, || {
+                replicate_merge(&dst, rows).unwrap()
+            })
+        };
+        assert_eq!(merge("p2", peer_mesh_op("delete", "p1")), 0);
+        assert_eq!(merge("p1", peer_mesh_op("upsert", "p1")), 0);
+        assert_eq!(merge("me", peer_mesh_op("delete", "me")), 0);
+        assert_eq!(merge("p1", peer_mesh_op("delete", "p1")), 1);
+    }
+
+    #[test]
+    fn apply_skips_peer_ops_for_non_deletable_entities_but_not_local_ones() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO endpoints (id, provider, name) VALUES ('e1','p','a'), ('e2','p','b')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms, local_origin)
+             VALUES ('o1','endpoints','id','e1','delete','peer',1,0)",
+            [],
+        )
+        .unwrap();
+        note_delete(&conn, "endpoints", "id", "e2", 1).unwrap();
+        assert_eq!(apply_pending_deletes(&conn).unwrap(), 1);
+        let left: String = conn
+            .query_row("SELECT id FROM endpoints", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, "e1");
+    }
+
+    #[test]
+    fn local_origin_migration_purges_every_unproven_op_except_config_rows() {
+        let conn = test_conn();
+        conn.execute_batch(
+            "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms) VALUES
+               ('a','users','username_lower','x','delete','evil',1),
+               ('b','mesh_peers','peer_id','y','delete','me',1),
+               ('c','config_rows','id','z','delete','evil',1);",
+        )
+        .unwrap();
+        let purge =
+            include_str!("../migrations/20261017000001__replication_ops_purge_foreign.up.sql");
+        conn.execute_batch(purge).unwrap();
+        conn.execute_batch(purge).unwrap();
+        let ids: Vec<String> = conn
+            .prepare("SELECT op_id FROM replication_ops ORDER BY op_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(ids, vec!["c".to_string()]);
     }
 
     #[test]

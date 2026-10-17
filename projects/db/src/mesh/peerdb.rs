@@ -1070,8 +1070,8 @@ pub fn forget_peer(conn: &Connection, peer_id: &str) -> Result<u32> {
 /// in the command-log (see [`crate::replication_ops`]). The entity is the real
 /// `mesh_peers` table so a merged tombstone's `apply_pending_deletes` also
 /// physically evicts a resurrected row on any peer.
-const PEER_TOMBSTONE_ENTITY: &str = "mesh_peers";
-const PEER_TOMBSTONE_KEY_COL: &str = "peer_id";
+pub(crate) const PEER_TOMBSTONE_ENTITY: &str = "mesh_peers";
+pub(crate) const PEER_TOMBSTONE_KEY_COL: &str = "peer_id";
 
 /// Write the durable forget-tombstone for `peer_id`. Idempotent: LWW keyed by
 /// `(entity, key_val)` in [`crate::replication_ops::note_delete`].
