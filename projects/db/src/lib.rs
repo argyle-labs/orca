@@ -1249,6 +1249,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             op        TEXT NOT NULL,
             origin    TEXT NOT NULL,
             stamp_ms  INTEGER NOT NULL,
+            local_origin INTEGER NOT NULL DEFAULT 0,
             UNIQUE (entity, key_val)
         );
         CREATE INDEX IF NOT EXISTS idx_replication_ops_pending
@@ -1831,7 +1832,7 @@ pub mod testing {
 /// is what lets the tests exercise the divergent-id / same-natural-key merge path.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, derive::Replicated)]
-#[replicate(crate = ::macro_runtime, table = "replica_fixture", lww = "updated_at", unique = "name_lower")]
+#[replicate(crate = ::macro_runtime, table = "replica_fixture", lww = "updated_at", unique = "name_lower", peer_writable = "name,name_lower,payload")]
 pub(crate) struct ReplicaFixture {
     pub id: String,
     pub name: String,

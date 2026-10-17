@@ -627,7 +627,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
             "lww" => lww = Some(val),
             "pk" => pk = Some(val),
             "unique" => unique = Some(val),
-            "protected" => {
+            "peer_writable" => {
                 protected = val
                     .split(',')
                     .map(|f| f.trim().to_string())
@@ -656,7 +656,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
 
 #[cfg(not(test))]
 fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
-    let cfg = parse_replicate_attr(&input.attrs)?;
+    let mut cfg = parse_replicate_attr(&input.attrs)?;
     let crate_path = &cfg.crate_path;
     let ty = &input.ident;
 
@@ -709,15 +709,18 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
     }
 
     for p in &cfg.protected {
-        if !field_names.contains(p) || *p == cfg.pk || *p == cfg.lww {
+        if !field_names.contains(p) {
             return Err(syn::Error::new_spanned(
                 ty,
-                format!(
-                    "#[replicate] protected '{p}' must be a non-pk, non-lww field of the struct"
-                ),
+                format!("#[replicate] peer_writable '{p}' is not a field of the struct"),
             ));
         }
     }
+    cfg.protected = field_names
+        .iter()
+        .filter(|f| **f != cfg.pk && **f != cfg.lww && !cfg.protected.contains(f))
+        .cloned()
+        .collect();
 
     let table = &cfg.table;
     let pk = &cfg.pk;

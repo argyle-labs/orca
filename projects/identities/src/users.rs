@@ -31,14 +31,14 @@ pub struct UserAuth {
 
 /// Full replicable user row. `users` is ONE shared pool replicated across every
 /// paired host (last-write-wins on `updated_at`), so any admin can sign in on
-/// any machine/UI. Identity and credential columns are protected: a peer can
-/// never introduce a row or change them, so they are set only by local writes.
+/// any machine/UI. No column is peer-writable: a peer can never introduce a row
+/// or change one, so accounts are set only by local writes.
 ///
 /// Field order mirrors the `users` table columns exactly (the `Replicated`
 /// derive maps fields ↔ columns 1:1), so `username_lower` is carried even
 /// though it is just `lower(username)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, derive::Replicated)]
-#[replicate(crate = ::macro_runtime, table = "users", lww = "updated_at", unique = "username_lower", protected = "username,username_lower,password_hash,role")]
+#[replicate(crate = ::macro_runtime, table = "users", lww = "updated_at", unique = "username_lower")]
 pub struct ReplicaUser {
     pub id: String,
     pub username: String,
@@ -305,38 +305,18 @@ mod tests {
     }
 
     #[test]
-    fn non_protected_change_replicates_by_lww() {
+    fn peer_cannot_change_any_user_column() {
         let (src, dst) = two_hosts();
         set_email(&src, "u1", Some("a@example.test"), "2026-02-01T00:00:00Z").unwrap();
-        let n =
-            db::replicate::merge_bundle(&dst, db::replicate::export_all(&src).unwrap()).unwrap();
-        assert_eq!(n, 1);
-        assert_eq!(
-            find_by_id(&dst, "u1").unwrap().unwrap().email.as_deref(),
-            Some("a@example.test")
-        );
-        let n2 =
-            db::replicate::merge_bundle(&dst, db::replicate::export_all(&src).unwrap()).unwrap();
-        assert_eq!(n2, 0);
-    }
-
-    #[test]
-    fn peer_cannot_change_role_or_password_hash() {
-        let (src, dst) = two_hosts();
         let bundle = peer_bundle(&src, |r| {
             r.insert("role".into(), "admin".into());
             r.insert("password_hash".into(), "attacker".into());
-            r.insert("email".into(), "e@example.test".into());
-            r.insert("updated_at".into(), "2026-02-01T00:00:00Z".into());
         });
         db::replicate::merge_bundle(&dst, bundle).unwrap();
         let got = find_auth_by_username(&dst, "scott").unwrap().unwrap();
         assert_eq!(got.role, "member");
         assert_eq!(got.password_hash, "hash-v1");
-        assert_eq!(
-            find_by_id(&dst, "u1").unwrap().unwrap().email.as_deref(),
-            Some("e@example.test")
-        );
+        assert_eq!(find_by_id(&dst, "u1").unwrap().unwrap().email, None);
     }
 
     #[test]

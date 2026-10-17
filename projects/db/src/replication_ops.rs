@@ -81,7 +81,7 @@ fn op_target(
     }
 }
 
-fn peer_op_allowed(
+fn peer_delete_allowed(
     conn: &Connection,
     entity: &str,
     key_col: &str,
@@ -95,6 +95,29 @@ fn peer_op_allowed(
         Some(_) => Err("delete not permitted for this row"),
         None => Err("entity is not peer-deletable"),
     }
+}
+
+fn peer_op_allowed(
+    conn: &Connection,
+    entity: &str,
+    key_col: &str,
+    key_val: &str,
+    op: &str,
+) -> Result<(), &'static str> {
+    if entity == crate::mesh::peerdb::PEER_TOMBSTONE_ENTITY {
+        op_target(entity, key_col)?;
+        if op != "delete" {
+            return Err("peers may not clear peer tombstones");
+        }
+        if key_val == crate::config_store::local_system_id(conn) {
+            return Err("tombstone targets the local host");
+        }
+        if macro_runtime::replicate_table::current_merge_peer().as_deref() != Some(key_val) {
+            return Err("peer tombstone not sent by the retiring peer");
+        }
+        return Ok(());
+    }
+    peer_delete_allowed(conn, entity, key_col, key_val)
 }
 
 /// This host's name, used as an op's `origin`. Best-effort — empty if the host
@@ -187,14 +210,15 @@ fn put(
     let op_id = utils::id::new();
     let origin = origin(conn);
     conn.execute(
-        "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms, local_origin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)
          ON CONFLICT(entity, key_val) DO UPDATE SET
              op_id    = excluded.op_id,
              key_col  = excluded.key_col,
              op       = excluded.op,
              origin   = excluded.origin,
-             stamp_ms = excluded.stamp_ms
+             stamp_ms = excluded.stamp_ms,
+             local_origin = 1
          WHERE excluded.stamp_ms > replication_ops.stamp_ms
             OR (excluded.stamp_ms = replication_ops.stamp_ms
                 AND excluded.op_id > replication_ops.op_id)",
@@ -211,14 +235,20 @@ fn put(
 /// stale peer row — freshly re-imported by a domain merge in the same tick —
 /// from resurrecting. Idempotent and generic: no per-entity code.
 pub fn apply_pending_deletes(conn: &Connection) -> Result<usize> {
-    let mut stmt =
-        conn.prepare("SELECT entity, key_col, key_val FROM replication_ops WHERE op = 'delete'")?;
-    let pending: Vec<(String, String, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    let mut stmt = conn.prepare(
+        "SELECT entity, key_col, key_val, local_origin FROM replication_ops WHERE op = 'delete'",
+    )?;
+    let pending: Vec<(String, String, String, bool)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut removed = 0usize;
-    for (entity, key_col, key_val) in pending {
-        if let Err(reason) = op_target(&entity, &key_col) {
+    for (entity, key_col, key_val, local_origin) in pending {
+        let check = if local_origin {
+            op_target(&entity, &key_col).map(drop)
+        } else {
+            peer_delete_allowed(conn, &entity, &key_col, &key_val)
+        };
+        if let Err(reason) = check {
             tracing::debug!("[replication_ops] not applying delete {entity}.{key_col}: {reason}");
             continue;
         }
@@ -314,20 +344,21 @@ fn replicate_merge(conn: &Connection, rows: Value) -> Result<usize> {
         }
         if let Err(reason) = macro_runtime::replicate_table::check_incoming_millis(stamp_ms)
             .map(drop)
-            .and_then(|()| peer_op_allowed(conn, &entity, &key_col, &key_val))
+            .and_then(|()| peer_op_allowed(conn, &entity, &key_col, &key_val, &op))
         {
             macro_runtime::replicate_table::audit_reject(ENTITY, &(&entity, &key_col), reason);
             continue;
         }
         let n = conn.execute(
-            "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms, local_origin)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
              ON CONFLICT(entity, key_val) DO UPDATE SET
                  op_id    = excluded.op_id,
                  key_col  = excluded.key_col,
                  op       = excluded.op,
                  origin   = excluded.origin,
-                 stamp_ms = excluded.stamp_ms
+                 stamp_ms = excluded.stamp_ms,
+                 local_origin = 0
              WHERE excluded.stamp_ms > replication_ops.stamp_ms
                 OR (excluded.stamp_ms = replication_ops.stamp_ms
                     AND excluded.op_id > replication_ops.op_id)",
@@ -519,6 +550,76 @@ mod tests {
         assert_eq!(replicate_merge(&dst, ok).unwrap(), 1);
         let late = peer_op("replica_fixture", "name_lower", "b", now + 301_000);
         assert_eq!(replicate_merge(&dst, late).unwrap(), 0);
+    }
+
+    fn peer_mesh_op(op: &str, key_val: &str) -> Value {
+        serde_json::json!([{
+            "op_id": utils::id::new().to_string(), "entity": "mesh_peers", "key_col": "peer_id",
+            "key_val": key_val, "op": op, "origin": "peer",
+            "stamp_ms": utils::time::now_millis_since_epoch(),
+        }])
+    }
+
+    #[test]
+    fn mesh_peer_tombstone_only_from_the_retiring_peer() {
+        let dst = test_conn();
+        crate::settings::set(&dst, crate::config_store::LOCAL_SYSTEM_ID_SETTING, "me").unwrap();
+        let merge = |sender: &str, rows: Value| {
+            macro_runtime::replicate_table::with_merge_peer(sender, || {
+                replicate_merge(&dst, rows).unwrap()
+            })
+        };
+        assert_eq!(merge("p2", peer_mesh_op("delete", "p1")), 0);
+        assert_eq!(merge("p1", peer_mesh_op("upsert", "p1")), 0);
+        assert_eq!(merge("me", peer_mesh_op("delete", "me")), 0);
+        assert_eq!(merge("p1", peer_mesh_op("delete", "p1")), 1);
+    }
+
+    #[test]
+    fn apply_skips_peer_ops_for_non_deletable_entities_but_not_local_ones() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO endpoints (id, provider, name) VALUES ('e1','p','a'), ('e2','p','b')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms, local_origin)
+             VALUES ('o1','endpoints','id','e1','delete','peer',1,0)",
+            [],
+        )
+        .unwrap();
+        note_delete(&conn, "endpoints", "id", "e2", 1).unwrap();
+        assert_eq!(apply_pending_deletes(&conn).unwrap(), 1);
+        let left: String = conn
+            .query_row("SELECT id FROM endpoints", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, "e1");
+    }
+
+    #[test]
+    fn local_origin_migration_purges_foreign_ops_for_protected_entities() {
+        let conn = test_conn();
+        crate::settings::set(&conn, "host.display_name", "me").unwrap();
+        conn.execute_batch(
+            "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms) VALUES
+               ('a','users','username_lower','x','delete','evil',1),
+               ('b','users','username_lower','y','delete','me',1),
+               ('c','config_rows','id','z','delete','evil',1);",
+        )
+        .unwrap();
+        let up = include_str!("../migrations/20261017000000__replication_ops_local_origin.up.sql");
+        let (_, rest) = up.split_once(";\n").unwrap();
+        conn.execute_batch(rest).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT op_id, local_origin FROM replication_ops ORDER BY op_id")
+            .unwrap();
+        let rows: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows, vec![("b".into(), 1), ("c".into(), 0)]);
     }
 
     #[test]

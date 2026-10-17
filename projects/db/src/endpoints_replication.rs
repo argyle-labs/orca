@@ -27,16 +27,6 @@ const COLUMNS: &[&str] = &[
     "config",
 ];
 
-const PROTECTED: &[&str] = &[
-    "provider",
-    "name",
-    "routes",
-    "auth_principal",
-    "insecure",
-    "config.url",
-    "config.host",
-];
-
 fn export(conn: &Connection) -> Result<Value> {
     macro_runtime::replicate_table::export_table(conn, "endpoints", COLUMNS, "id")
 }
@@ -48,7 +38,7 @@ fn merge(conn: &Connection, rows: Value) -> Result<usize> {
         COLUMNS,
         "id",
         "updated_at",
-        PROTECTED,
+        &[],
         rows,
     )
 }

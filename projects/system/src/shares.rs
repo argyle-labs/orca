@@ -37,8 +37,7 @@ use plugin_toolkit::endpoint_resource;
     plugin = "storage.share",
     table = "shares",
     lww = "updated_at",
-    skip = "list,update",
-    protected = "backend,fstype,options,options_rendered,replication"
+    skip = "list,update"
 )]
 pub struct Share {
     /// Canonical uuidv7 identity ([[pure-uuidv7-ids-not-composite]]). A mount

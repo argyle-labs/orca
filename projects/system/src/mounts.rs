@@ -113,7 +113,7 @@ fn replicate_merge_mounts(
         &["host", "name"],
         "updated_at",
         LOCAL_ONLY_COLS,
-        &["share_id", "host", "target", "guest", "remount_policy"],
+        &[],
         rows,
     )
 }
