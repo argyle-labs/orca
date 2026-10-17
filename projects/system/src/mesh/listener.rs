@@ -151,15 +151,15 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         }
         MESH_DEV_SYNC_METHOD => match handle_dev_sync().await {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         MESH_DEV_ENABLE_METHOD => match handle_dev_enable().await {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         MESH_DEV_DISABLE_METHOD => match handle_dev_disable().await {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         MESH_EXEC_METHOD => match handle_exec(request, peer_cn).await {
             Ok(r) => value_response(id, &r),
@@ -167,19 +167,19 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         },
         MESH_REPLICATE_EXPORT_METHOD => match handle_replicate_export() {
             Ok(env) => value_response(id, &env),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         MESH_REPLICATE_PUSH_METHOD => match handle_replicate_push(peer_cn, request) {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         MESH_REPLICATE_ROOTS_METHOD => match handle_replicate_roots() {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         MESH_NOTIFY_TRUST_METHOD => match handle_notify_trust(peer_cn, peer_addr, request) {
             Ok(()) => Response::ok(id, Value::Null),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         MESH_HAS_CA_KEY_METHOD => {
             let has = utils::pki::has_mesh_ca_key(&pki_dir());
@@ -187,11 +187,11 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         }
         MESH_PUSH_CA_KEY_METHOD => match handle_push_ca_key(peer_cn, request) {
             Ok(()) => Response::ok(id, Value::Null),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         MESH_PEER_LEAVING_METHOD => match handle_peer_leaving(peer_cn) {
             Ok(()) => Response::ok(id, Value::Null),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         MESH_PEER_REMOVED_METHOD => {
             // Caller (peer_cn) is telling us they've kicked us from their mesh.
@@ -203,15 +203,15 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         }
         MESH_PEER_FORGET_METHOD => match handle_peer_forget(peer_cn, request) {
             Ok(removed) => value_response(id, &serde_json::json!({ "rows_removed": removed })),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         MESH_REFRESH_CERT_METHOD => match handle_refresh_cert(peer_cn, request) {
             Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         MESH_PUSH_CA_STATE_METHOD => match handle_push_ca_state(peer_cn, request) {
             Ok(()) => Response::ok(id, Value::Null),
-            Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+            Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         other => Response::err(
             id,
@@ -567,7 +567,7 @@ fn effective_role<'a>(user_role: &'a str, token_role: &'a str) -> &'a str {
 }
 
 fn role_satisfies(role: &str, required: &str) -> bool {
-    role_rank(role) >= role_rank(required)
+    dispatch::tool_roles::satisfies(role, required)
 }
 
 /// A relayed tool's failure as a JSON-RPC error. A classified `OrcaError`
@@ -580,7 +580,7 @@ fn exec_error_object(e: &anyhow::Error) -> ErrorObject {
         e.chain()
             .find_map(|c| c.downcast_ref::<contract::OrcaError>())
     }) else {
-        return ErrorObject::internal(&format!("{e:#}"));
+        return peer_facing_error(MESH_EXEC_METHOD, e);
     };
     ErrorObject {
         code: if oe.kind == contract::ErrorKind::Invalid {
@@ -718,7 +718,8 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
             &params,
             &local_current,
             local_previous.as_deref(),
-            &utils::pki::retired_mesh_ca_fingerprints(&pki_d),
+            &utils::pki::retired_mesh_ca_fingerprints(&pki_d)
+                .context("mesh/push-ca-state refused: retired CA history is unreadable")?,
             utils::time::now().unix_seconds(),
         )?;
         utils::pki::import_mesh_ca_state(
@@ -841,6 +842,16 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
         server_cert_pem,
         ca_cert_pem,
     })
+}
+
+fn peer_facing_error(method: &str, e: &anyhow::Error) -> ErrorObject {
+    if e.chain()
+        .any(|c| c.downcast_ref::<std::io::Error>().is_some())
+    {
+        warn!("[mesh] {method} failed: {e:#}");
+        return ErrorObject::internal(&format!("{method} failed: local storage error"));
+    }
+    ErrorObject::internal(&format!("{e:#}"))
 }
 
 fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
@@ -1179,8 +1190,8 @@ mod tests {
         // an unknown role ranks as "any" — meets only an "any" requirement.
         assert!(role_satisfies("ghost", "any"));
         assert!(!role_satisfies("ghost", "member"));
-        // equal unknown-vs-unknown: rank 0 >= rank 0 holds.
-        assert!(role_satisfies("ghost", "phantom"));
+        assert!(!role_satisfies("ghost", "phantom"));
+        assert!(!role_satisfies("admin", "phantom"));
     }
 
     #[test]
@@ -2373,5 +2384,74 @@ mod tests {
         assert!(role_satisfies("member", "read"));
         assert!(!role_satisfies("read", "member"));
         assert!(!role_satisfies("any", "read"));
+    }
+
+    #[test]
+    fn peer_facing_error_hides_local_io_detail() {
+        let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let e = anyhow::Error::from(io).context("open tmp /secret/path/ca.key.pem.tmp");
+        let obj = peer_facing_error(MESH_PUSH_CA_KEY_METHOD, &e);
+        assert!(!obj.message.contains("/secret"), "got: {}", obj.message);
+        assert!(obj.message.contains("local storage error"));
+        let refusal = anyhow::anyhow!("mesh/push-ca-key refused: not mutual");
+        let obj = peer_facing_error(MESH_PUSH_CA_KEY_METHOD, &refusal);
+        assert!(obj.message.contains("not mutual"));
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn push_ca_state_refused_when_retired_history_is_unreadable() {
+        let _env = crate::test_env::snapshot();
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::mesh::pin_home(dir.path());
+        db::with_thread_db_path(&dir.path().join("ca-state-unreadable.db"), || {
+            let f = ca_fixture();
+            let pki = pki_dir();
+            std::fs::create_dir_all(utils::pki::mesh_ca_retired_path(&pki)).unwrap();
+            std::fs::write(utils::pki::mesh_ca_cert_path(&pki), &f.old_cert).unwrap();
+            let cn = utils::id::new();
+            mutual_secure_peer(&cn);
+
+            let exp = utils::time::now().unix_seconds() + 7 * 86_400;
+            let params = serde_json::json!({
+                "current_cert_pem": f.new_cert,
+                "current_key_pem": f.new_key,
+                "previous_cert_pem": f.old_cert,
+                "previous_key_pem": f.old_key,
+                "previous_expires_at": exp,
+            });
+            let err = handle_push_ca_state(&cn, req_with_params(MESH_PUSH_CA_STATE_METHOD, params))
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("unreadable"), "got: {err:#}");
+            assert_eq!(
+                std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki)).unwrap(),
+                f.old_cert
+            );
+            assert!(utils::pki::mesh_ca_retired_path(&pki).is_dir());
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn push_ca_key_refuses_a_retired_ca() {
+        let _env = crate::test_env::snapshot();
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::mesh::pin_home(dir.path());
+        db::with_thread_db_path(&dir.path().join("ca-key-retired.db"), || {
+            let f = ca_fixture();
+            let pki = pki_dir();
+            std::fs::create_dir_all(utils::pki::mesh_dir(&pki)).unwrap();
+            std::fs::write(utils::pki::mesh_ca_cert_path(&pki), &f.old_cert).unwrap();
+            let fp = utils::pki::cert_fingerprint(&f.old_cert).unwrap();
+            std::fs::write(utils::pki::mesh_ca_retired_path(&pki), format!("{fp}\n")).unwrap();
+            let cn = utils::id::new();
+            mutual_secure_peer(&cn);
+
+            let params = serde_json::json!({ "cert_pem": f.old_cert, "key_pem": f.old_key });
+            let err = handle_push_ca_key(&cn, req_with_params(MESH_PUSH_CA_KEY_METHOD, params))
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("retired"), "got: {err:#}");
+            assert!(!utils::pki::has_mesh_ca_key(&pki));
+        });
     }
 }

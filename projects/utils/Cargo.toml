@@ -49,7 +49,7 @@ http = ["rt", "dep:url", "dep:reqwest", "dep:futures-util", "dep:rustls", "dep:r
 # `utils::git` — vendored static libgit2 (large).
 git = ["dep:git2"]
 # `utils::pki` — X.509 + key generation.
-pki = ["dep:rcgen", "dep:ed25519-dalek", "dep:x509-parser", "dep:rustls", "dep:rustls-pemfile"]
+pki = ["dep:rcgen", "dep:ed25519-dalek", "dep:x509-parser", "dep:rustls", "dep:rustls-pemfile", "dep:libc"]
 
 [dependencies]
 # `utils` links NO intra-repo crate — it is the dependency-free leaf. The light
@@ -114,6 +114,9 @@ git2 = { workspace = true, optional = true }
 # JSON Schema model (json_schema module)
 schemars = { workspace = true }
 zeroize = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true, optional = true }
 
 [dev-dependencies]
 static_assertions = { workspace = true }

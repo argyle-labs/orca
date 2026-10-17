@@ -45,7 +45,7 @@ pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
         .mesh_ca_cert_pem
         .as_deref()
         .context("offer has no mesh CA cert")?;
-    std::fs::write(utils::pki::mesh_ca_cert_path(&pki_d), ca_pem.as_bytes())?;
+    utils::pki::install_joined_mesh_ca(&pki_d, ca_pem)?;
 
     let peer_cn = crate::host_identity::machine_id().to_string();
     let display_name = crate::host_identity::display_hostname().to_string();

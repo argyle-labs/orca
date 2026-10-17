@@ -185,22 +185,13 @@ pub fn role_rank(role: &str) -> u8 {
     }
 }
 
-/// True if the caller's identity-role satisfies the tool's required-role.
-///
-/// Role hierarchy (high → low): `admin` > `read` > `any`. Higher roles
-/// satisfy every requirement at their level or below. `"read"` exists so
-/// sensitive read-only surfaces (e.g. `fs.*`, which can exfiltrate any
-/// file an orca process can see) can be gated above `"any"` without
-/// requiring full admin to invoke. Unknown values fail closed.
+/// True if the caller's identity-role satisfies the tool's required-role,
+/// ranked by [`role_rank`]. `"read"` exists so sensitive read-only surfaces
+/// (e.g. `fs.*`) can be gated above `"any"` without requiring admin. Unknown
+/// required values fail closed, so a typo in `role = "..."` never falls open.
 pub fn satisfies(caller_role: &str, required: &str) -> bool {
-    match required {
-        "any" => true,
-        "read" => caller_role == "admin" || caller_role == "read",
-        "admin" => caller_role == "admin",
-        // Unknown required values fail closed — keeps a typo in `role = "..."`
-        // from silently degrading to fall-open.
-        _ => false,
-    }
+    let need = role_rank(required);
+    (need > 0 || required == "any") && role_rank(caller_role) >= need
 }
 
 /// Authorization decision for an authenticated surface caller, combining the
@@ -273,17 +264,19 @@ mod tests {
     }
 
     #[test]
-    fn satisfies_admin_requirement_only_passes_admin() {
+    fn satisfies_admin_requirement_passes_admin_and_super_admin() {
         assert!(satisfies("admin", "admin"));
+        assert!(satisfies("super-admin", "admin"));
         assert!(!satisfies("member", "admin"));
         assert!(!satisfies("", "admin"));
     }
 
     #[test]
-    fn satisfies_read_requirement_passes_admin_and_read_but_not_lower() {
+    fn satisfies_read_requirement_passes_read_and_above() {
         assert!(satisfies("admin", "read"));
         assert!(satisfies("read", "read"));
-        assert!(!satisfies("member", "read"));
+        assert!(satisfies("read-only", "read"));
+        assert!(satisfies("member", "read"));
         assert!(!satisfies("any", "read"));
         assert!(!satisfies("", "read"));
     }
@@ -429,7 +422,8 @@ mod tests {
             PluginToolPolicy::from_manifest(name, Some("read"), None, None),
         )]);
         assert!(authorize("read", false, required_role(name), false));
-        assert!(!authorize("member", false, required_role(name), false));
+        assert!(authorize("member", false, required_role(name), false));
+        assert!(!authorize("any", false, required_role(name), false));
         remove_plugin_tools([name]);
     }
 
