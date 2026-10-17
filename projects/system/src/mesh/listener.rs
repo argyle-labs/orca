@@ -1426,6 +1426,7 @@ mod tests {
     fn with_db<T>(body: impl std::future::Future<Output = T>) -> T {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("listener-test.db");
+        crate::host_identity::init(dir.path()).ok();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
