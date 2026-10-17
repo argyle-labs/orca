@@ -55,6 +55,11 @@ pub fn point_from(snap: &SystemInfoReport) -> Option<SystemHistoryPoint> {
             (Some(total), Some(avail)) => Some(total.saturating_sub(avail)),
             _ => None,
         },
+        fs_total_mb: snap.orca_fs_total_mb,
+        fs_used_mb: match (snap.orca_fs_total_mb, snap.orca_fs_avail_mb) {
+            (Some(total), Some(avail)) => Some(total.saturating_sub(avail)),
+            _ => None,
+        },
         gpus: snap
             .gpus
             .iter()
@@ -113,6 +118,35 @@ pub fn read_tail(n: usize) -> Vec<SystemHistoryPoint> {
         .rev()
         .filter_map(|s| serde_json::from_str::<SystemHistoryPoint>(&s.payload).ok())
         .collect()
+}
+
+/// Read every history point at or after `since` (unix seconds), oldest-first,
+/// paging past the store's per-query cap.
+pub fn read_since(since: i64) -> Vec<SystemHistoryPoint> {
+    migrate_legacy_jsonl_once();
+    let start_ms = since.saturating_mul(1000);
+    let mut end_ms = i64::MAX;
+    let mut out = Vec::new();
+    loop {
+        let page = match db::metrics::query(SERIES, start_ms, end_ms, 5000) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error=%e, "history read failed");
+                break;
+            }
+        };
+        out.extend(
+            page.samples
+                .into_iter()
+                .filter_map(|s| serde_json::from_str::<SystemHistoryPoint>(&s.payload).ok()),
+        );
+        match page.next_cursor {
+            Some(c) => end_ms = c,
+            None => break,
+        }
+    }
+    out.reverse();
+    out
 }
 
 fn legacy_jsonl_path() -> Option<PathBuf> {

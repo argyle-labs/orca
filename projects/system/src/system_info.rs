@@ -14,7 +14,7 @@ pub mod metrics;
 pub mod system_type;
 
 use crate::system_info_types::{GpuInfo, NetIfaceDto, SystemInfoReport};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -303,28 +303,14 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
     procs.truncate(10);
     report.top_processes = procs;
 
-    // Storage — the filesystem hosting ~/.orca. Pick the longest mount-point
-    // prefix so we report the right volume on hosts with separate /home or
-    // /var partitions.
     let orca_dir = orca_dir();
     if let Some(ref dir) = orca_dir {
         report.orca_dir = Some(dir.display().to_string());
-        let disks = Disks::new_with_refreshed_list();
-        let mut best: Option<&sysinfo::Disk> = None;
-        let mut best_len = 0usize;
-        for d in disks.list() {
-            let mp = d.mount_point();
-            if dir.starts_with(mp) {
-                let l = mp.as_os_str().len();
-                if l > best_len {
-                    best_len = l;
-                    best = Some(d);
-                }
-            }
-        }
-        if let Some(d) = best {
-            report.orca_fs_total_gb = Some(d.total_space() / 1024 / 1024 / 1024);
-            report.orca_fs_avail_gb = Some(d.available_space() / 1024 / 1024 / 1024);
+        if let Some(d) = probe_disk(dir) {
+            report.orca_fs_total_gb = Some(d.total / GIB);
+            report.orca_fs_avail_gb = Some(d.avail / GIB);
+            report.orca_fs_total_mb = Some(d.total / MIB);
+            report.orca_fs_avail_mb = Some(d.avail / MIB);
         }
     }
 
@@ -591,6 +577,55 @@ fn collect_intel_gpus() -> Vec<GpuInfo> {
     }
 }
 
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
+const MIN_USABLE_FS_BYTES: u64 = GIB;
+
+pub(crate) struct MountCandidate<'a> {
+    pub mount: &'a Path,
+    pub total: u64,
+    pub read_only: bool,
+}
+
+pub(crate) struct DiskUsage {
+    pub mount: PathBuf,
+    pub total: u64,
+    pub avail: u64,
+}
+
+pub(crate) fn pick_mount(dir: &Path, candidates: &[MountCandidate<'_>]) -> Option<usize> {
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let longest = |usable_only: bool| {
+        candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| dir.starts_with(c.mount))
+            .filter(|(_, c)| !usable_only || (!c.read_only && c.total >= MIN_USABLE_FS_BYTES))
+            .max_by_key(|(_, c)| c.mount.as_os_str().len())
+            .map(|(i, _)| i)
+    };
+    longest(true).or_else(|| longest(false))
+}
+
+pub(crate) fn probe_disk(dir: &Path) -> Option<DiskUsage> {
+    let disks = Disks::new_with_refreshed_list();
+    let list = disks.list();
+    let candidates: Vec<MountCandidate<'_>> = list
+        .iter()
+        .map(|d| MountCandidate {
+            mount: d.mount_point(),
+            total: d.total_space(),
+            read_only: d.is_read_only(),
+        })
+        .collect();
+    let d = &list[pick_mount(dir, &candidates)?];
+    Some(DiskUsage {
+        mount: d.mount_point().to_path_buf(),
+        total: d.total_space(),
+        avail: d.available_space(),
+    })
+}
+
 fn orca_dir() -> Option<PathBuf> {
     files::ops::orca_home()
 }
@@ -691,6 +726,45 @@ fn classify_virtualization(s: &ContainerSignals) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pick_mount_resolves_symlinked_dir_past_tiny_read_only_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path();
+        let real = tmp.join("var").join("home");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.join("home");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let real_var = std::fs::canonicalize(tmp.join("var")).unwrap();
+        let root = std::path::Path::new("/");
+        let candidates = [
+            super::MountCandidate {
+                mount: root,
+                total: 0,
+                read_only: true,
+            },
+            super::MountCandidate {
+                mount: &real_var,
+                total: 500 * super::GIB,
+                read_only: false,
+            },
+        ];
+        assert_eq!(super::pick_mount(&link, &candidates), Some(1));
+    }
+
+    #[test]
+    fn pick_mount_falls_back_to_only_match_even_if_unusable() {
+        let root = std::path::Path::new("/");
+        let candidates = [super::MountCandidate {
+            mount: root,
+            total: 0,
+            read_only: true,
+        }];
+        assert_eq!(
+            super::pick_mount(std::path::Path::new("/nope/x"), &candidates),
+            Some(0)
+        );
+    }
+
     use super::*;
 
     fn signals<'a>() -> ContainerSignals<'a> {

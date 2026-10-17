@@ -173,6 +173,10 @@ pub struct SystemInfoReport {
     pub orca_fs_total_gb: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orca_fs_avail_gb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orca_fs_total_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orca_fs_avail_mb: Option<u64>,
 
     // ── Runtime / integrations ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -298,6 +302,10 @@ pub struct SystemHistoryPoint {
     /// other `*_used_*` field in this struct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fs_used_gb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_total_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_used_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gpus: Vec<GpuPoint>,
 }
