@@ -16,30 +16,13 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  TAG: ${{ github.event.release.tag_name || inputs.version }}
   CARGO_TERM_COLOR: always
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_REGISTRIES_GITEA_INDEX: sparse+https://gitea.scottkey.me/api/packages/argyle-labs/cargo/
 
 jobs:
-  version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.v.outputs.version }}
-      tag: ${{ steps.v.outputs.tag }}
-      rel-name: ${{ steps.v.outputs.rel-name }}
-      prerelease: ${{ steps.v.outputs.prerelease }}
-      draft: ${{ steps.v.outputs.draft }}
-      mirror: ${{ steps.v.outputs.mirror }}
-    steps:
-      - name: Version
-        id: v
-        uses: argyle-labs/.github/.github/actions/job-release-from-tag@main
-        with:
-          tag: ${{ github.event.release.tag_name || inputs.version }}
-          prerelease: ${{ github.event.release.prerelease }}
-
   build-x86_64-linux-gnu:
-    needs: version
     runs-on: ubuntu-latest
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
@@ -54,8 +37,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/job-release-build@main
         with:
           target: x86_64-unknown-linux-gnu
-          version: ${{ needs.version.outputs.version }}
-          tag: ${{ needs.version.outputs.tag }}
+          tag: ${{ env.TAG }}
           asset-profile: full
           # The workspace also has a uniffi-bindgen helper bin; ship only orca.
           bins: '["orca"]'
@@ -66,7 +48,6 @@ jobs:
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 
   build-x86_64-linux-musl:
-    needs: version
     runs-on: ubuntu-latest
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
@@ -81,8 +62,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/job-release-build@main
         with:
           target: x86_64-unknown-linux-musl
-          version: ${{ needs.version.outputs.version }}
-          tag: ${{ needs.version.outputs.tag }}
+          tag: ${{ env.TAG }}
           asset-profile: full
           # The workspace also has a uniffi-bindgen helper bin; ship only orca.
           bins: '["orca"]'
@@ -93,7 +73,6 @@ jobs:
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 
   build-aarch64-linux-gnu:
-    needs: version
     runs-on: ubuntu-latest
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
@@ -108,8 +87,7 @@ jobs:
         uses: argyle-labs/.github/.github/actions/job-release-build@main
         with:
           target: aarch64-unknown-linux-gnu
-          version: ${{ needs.version.outputs.version }}
-          tag: ${{ needs.version.outputs.tag }}
+          tag: ${{ env.TAG }}
           asset-profile: full
           # The workspace also has a uniffi-bindgen helper bin; ship only orca.
           bins: '["orca"]'
@@ -120,47 +98,43 @@ jobs:
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 
   build-aarch64-apple-darwin:
-    needs: version
     runs-on: macos
     steps:
       - name: Build aarch64-apple-darwin
         uses: argyle-labs/.github/.github/actions/job-release-build-macos@main
         with:
-          version: ${{ needs.version.outputs.version }}
+          tag: ${{ env.TAG }}
           disable-lto-for-rc: 'true'
 
   package:
-    needs: [version, build-x86_64-linux-gnu, build-x86_64-linux-musl, build-aarch64-linux-gnu, build-aarch64-apple-darwin]
+    needs: [build-x86_64-linux-gnu, build-x86_64-linux-musl, build-aarch64-linux-gnu, build-aarch64-apple-darwin]
     runs-on: ubuntu-latest
     steps:
       - name: Package deb/rpm/PKGBUILD/homebrew/plg
         uses: argyle-labs/.github/.github/actions/job-release-package@main
+        with:
+          tag: ${{ env.TAG }}
 
   package-macos:
-    needs: [version, build-aarch64-apple-darwin]
+    needs: build-aarch64-apple-darwin
     runs-on: macos
     continue-on-error: true
     steps:
       - name: Package .pkg
         uses: argyle-labs/.github/.github/actions/job-release-package-macos@main
         with:
-          version: ${{ needs.version.outputs.version }}
+          tag: ${{ env.TAG }}
 
   # No `if:` on publish: Gitea's act never schedules a job whose `if` reads
   # needs.*.result, and hangs one that needs a skipped job.
   publish:
-    needs: [version, package, package-macos]
+    needs: [package, package-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Publish
         uses: argyle-labs/.github/.github/actions/job-release-publish@main
         with:
-          version: ${{ needs.version.outputs.version }}
-          tag: ${{ needs.version.outputs.tag }}
-          rel-name: ${{ needs.version.outputs.rel-name }}
-          prerelease: ${{ needs.version.outputs.prerelease }}
-          draft: ${{ needs.version.outputs.draft }}
-          mirror: ${{ needs.version.outputs.mirror }}
+          tag: ${{ env.TAG }}
           version-commit: "false"
           targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl","aarch64-unknown-linux-gnu","aarch64-apple-darwin"]'
           asset-profile: full
@@ -168,7 +142,7 @@ jobs:
           github-token: ${{ secrets.GH_RELEASE_TOKEN }}
 
   stable-draft:
-    needs: [version, publish]
+    needs: publish
     runs-on: ubuntu-latest
     concurrency:
       group: ${{ github.repository }}-stable
@@ -177,8 +151,7 @@ jobs:
       - name: Draft stable
         uses: argyle-labs/.github/.github/actions/job-release-stable-draft@main
         with:
-          version: ${{ needs.version.outputs.version }}
-          prerelease: ${{ needs.version.outputs.prerelease }}
+          tag: ${{ env.TAG }}
           release-token: ${{ secrets.ORCA_RELEASE_TOKEN }}
 
   crates:
@@ -196,4 +169,5 @@ jobs:
       - name: Publish crates
         uses: argyle-labs/.github/.github/actions/job-release-crates@main
         with:
+          tag: ${{ env.TAG }}
           registry-token: ${{ secrets.CI_REGISTRY_TOKEN }}
