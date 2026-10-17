@@ -4525,6 +4525,7 @@ dependencies = [
  "orca-plugin-toolkit",
  "orca-secrets",
  "orca-utils",
+ "orca-verb-shape",
  "rcgen",
  "rusqlite",
  "rustls",

@@ -264,13 +264,8 @@ fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
             "mesh/push-ca-key refused: peer {peer_cn} is not mutually secure with this host"
         );
     }
-    let pki_d = pki_dir();
-    anyhow::ensure!(
-        !utils::pki::has_mesh_ca_key(&pki_d),
-        "mesh/push-ca-key refused: this host already holds a mesh CA key; a peer cannot replace it"
-    );
-    utils::pki::import_mesh_ca_keypair(&pki_d, &params.cert_pem, &params.key_pem)?;
-    Ok(())
+    utils::pki::import_mesh_ca_keypair(&pki_dir(), &params.cert_pem, &params.key_pem)
+        .context("mesh/push-ca-key refused")
 }
 
 fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
@@ -431,6 +426,7 @@ const MESH_ANY_ROLE_DENY: &[&str] = &["auth.login"];
 fn is_mutating_tool(tool: &str) -> bool {
     dispatch::tool_roles::is_data_mutation(tool)
         || dispatch::tool_roles::plugin_execute_gated(tool)
+        || dispatch::tool_roles::plugin_read_unconfirmed(tool)
         || dispatch::execute_gated_names().contains(&tool)
 }
 
@@ -559,15 +555,7 @@ fn authorize_role_gated(
     })
 }
 
-/// Returns true when the user's *replicated* role meets the required role.
-/// Order: `any` < `member` < `admin`. Unknown roles compare as `any`.
-fn role_rank(role: &str) -> u8 {
-    match role {
-        "admin" => 2,
-        "member" | "user" => 1,
-        _ => 0,
-    }
-}
+use dispatch::tool_roles::role_rank;
 
 /// The lower-ranked of the replicated user role and the caller token's role.
 fn effective_role<'a>(user_role: &'a str, token_role: &'a str) -> &'a str {
@@ -579,9 +567,6 @@ fn effective_role<'a>(user_role: &'a str, token_role: &'a str) -> &'a str {
 }
 
 fn role_satisfies(role: &str, required: &str) -> bool {
-    if required == "read" {
-        return matches!(role, "admin" | "read");
-    }
     role_rank(role) >= role_rank(required)
 }
 
@@ -733,6 +718,7 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
             &params,
             &local_current,
             local_previous.as_deref(),
+            &utils::pki::retired_mesh_ca_fingerprints(&pki_d),
             utils::time::now().unix_seconds(),
         )?;
         utils::pki::import_mesh_ca_state(
@@ -752,12 +738,13 @@ const MAX_CA_OVERLAP_SECS: i64 = 90 * 86_400;
 /// A pushed CA state is accepted only as a forward rotation of the CA this host
 /// pins now: the pushed `previous` slot must be our current CA cert, and its key
 /// must be that cert's private key, which proves the sender holds the current
-/// CA. Any other change of CA identity, a rollback to our previous CA, or an
-/// unbounded overlap window is refused.
+/// CA. Any other change of CA identity, a rollback to our previous CA or to any
+/// CA in this host's retired history, or an unbounded overlap window is refused.
 fn check_ca_rotation(
     params: &PushCaStateParams,
     local_current: &str,
     local_previous: Option<&str>,
+    retired: &[String],
     now: i64,
 ) -> Result<()> {
     let (Some(prev_cert), Some(prev_key)) = (
@@ -783,6 +770,12 @@ fn check_ca_rotation(
     anyhow::ensure!(
         local_previous.is_none_or(|p| p.trim() != new_current),
         "mesh/push-ca-state refused: pushed CA is this host's previous CA (downgrade)"
+    );
+    let new_fp = utils::pki::cert_fingerprint(new_current)
+        .context("mesh/push-ca-state refused: pushed current cert is unreadable")?;
+    anyhow::ensure!(
+        !retired.contains(&new_fp),
+        "mesh/push-ca-state refused: pushed CA was previously retired by this host (downgrade)"
     );
     utils::pki::ensure_valid_ca_cert(new_current, now)
         .context("mesh/push-ca-state refused: pushed current cert is not a valid CA")?;
@@ -1005,9 +998,9 @@ mod tests {
 
     #[test]
     fn role_rank_orders_roles() {
-        assert_eq!(role_rank("admin"), 2);
-        assert_eq!(role_rank("member"), 1);
-        assert_eq!(role_rank("user"), 1);
+        assert_eq!(role_rank("admin"), 3);
+        assert_eq!(role_rank("member"), 2);
+        assert_eq!(role_rank("user"), 2);
         assert_eq!(role_rank("any"), 0);
         assert_eq!(role_rank("nonsense"), 0);
     }
@@ -1172,6 +1165,7 @@ mod tests {
         assert_eq!(effective_role("admin", "member"), "member");
         assert!(!role_satisfies(effective_role("admin", "member"), "admin"));
         assert!(!role_satisfies(effective_role("admin", "read"), "member"));
+        assert_eq!(effective_role("super-admin", "admin"), "admin");
         // A token cannot claim more than the replicated user holds.
         assert_eq!(effective_role("member", "admin"), "member");
         assert_eq!(effective_role("admin", "admin"), "admin");
@@ -1303,7 +1297,7 @@ mod tests {
                     PLUGIN_LOCAL_TOOL,
                     Some("any"),
                     Some(false),
-                    None,
+                    Some(false),
                 )
                 .local_only(Some(true)),
             ),
@@ -2015,7 +2009,7 @@ mod tests {
     fn ca_rotation_chained_from_the_current_ca_is_accepted() {
         let f = ca_fixture();
         let p = rotation(&f, &f.old_key, Some(NOW + 7 * 86_400));
-        check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap();
+        check_ca_rotation(&p, &f.old_cert, None, &[], NOW).unwrap();
     }
 
     #[test]
@@ -2024,7 +2018,7 @@ mod tests {
         let mut p = rotation(&f, &f.old_key, None);
         p.previous_cert_pem = None;
         p.previous_key_pem = None;
-        let err = check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap_err();
+        let err = check_ca_rotation(&p, &f.old_cert, None, &[], NOW).unwrap_err();
         assert!(
             err.to_string().contains("rotation of the current CA"),
             "got: {err}"
@@ -2036,7 +2030,7 @@ mod tests {
         let f = ca_fixture();
         let foreign = ca_fixture();
         let p = rotation(&f, &f.old_key, None);
-        let err = check_ca_rotation(&p, &foreign.old_cert, None, NOW).unwrap_err();
+        let err = check_ca_rotation(&p, &foreign.old_cert, None, &[], NOW).unwrap_err();
         assert!(err.to_string().contains("does not chain"), "got: {err}");
     }
 
@@ -2044,7 +2038,7 @@ mod tests {
     fn ca_rotation_without_the_current_ca_key_is_refused() {
         let f = ca_fixture();
         let p = rotation(&f, &f.new_key, None);
-        let err = check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap_err();
+        let err = check_ca_rotation(&p, &f.old_cert, None, &[], NOW).unwrap_err();
         assert!(err.to_string().contains("possession"), "got: {err}");
     }
 
@@ -2058,8 +2052,21 @@ mod tests {
             previous_key_pem: Some(f.new_key.clone()),
             previous_expires_at: None,
         };
-        let err = check_ca_rotation(&p, &f.new_cert, Some(&f.old_cert), NOW).unwrap_err();
+        let err = check_ca_rotation(&p, &f.new_cert, Some(&f.old_cert), &[], NOW).unwrap_err();
         assert!(err.to_string().contains("downgrade"), "got: {err}");
+    }
+
+    #[test]
+    fn ca_rotation_to_any_retired_ca_is_refused() {
+        let f = ca_fixture();
+        let p = rotation(&f, &f.old_key, Some(NOW + 7 * 86_400));
+        let retired = vec![
+            "00:11".to_string(),
+            utils::pki::cert_fingerprint(&f.new_cert).unwrap(),
+        ];
+        let err = check_ca_rotation(&p, &f.old_cert, None, &retired, NOW).unwrap_err();
+        assert!(err.to_string().contains("previously retired"), "got: {err}");
+        check_ca_rotation(&p, &f.old_cert, None, &retired[..1], NOW).unwrap();
     }
 
     #[test]
@@ -2072,7 +2079,7 @@ mod tests {
             previous_key_pem: Some(f.old_key.clone()),
             previous_expires_at: None,
         };
-        let err = check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap_err();
+        let err = check_ca_rotation(&p, &f.old_cert, None, &[], NOW).unwrap_err();
         assert!(err.to_string().contains("already"), "got: {err}");
     }
 
@@ -2081,7 +2088,7 @@ mod tests {
         let f = ca_fixture();
         for exp in [NOW - 1, NOW + 91 * 86_400] {
             let p = rotation(&f, &f.old_key, Some(exp));
-            let err = check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap_err();
+            let err = check_ca_rotation(&p, &f.old_cert, None, &[], NOW).unwrap_err();
             assert!(err.to_string().contains("90 days"), "got: {err}");
         }
     }
@@ -2090,7 +2097,7 @@ mod tests {
     fn ca_rotation_without_previous_expires_at_is_refused() {
         let f = ca_fixture();
         let p = rotation(&f, &f.old_key, None);
-        let err = check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap_err();
+        let err = check_ca_rotation(&p, &f.old_cert, None, &[], NOW).unwrap_err();
         assert!(
             err.to_string().contains("previous_expires_at"),
             "got: {err}"
@@ -2104,7 +2111,7 @@ mod tests {
         let mut p = rotation(&f, &f.old_key, Some(NOW + 86_400));
         p.current_cert_pem = leaf;
         p.current_key_pem = leaf_key;
-        let err = check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap_err();
+        let err = check_ca_rotation(&p, &f.old_cert, None, &[], NOW).unwrap_err();
         assert!(format!("{err:#}").contains("not a CA"), "got: {err:#}");
     }
 
@@ -2113,7 +2120,7 @@ mod tests {
         let f = ca_fixture();
         let late = i64::from(i32::MAX) * 4;
         let p = rotation(&f, &f.old_key, Some(late + 86_400));
-        let err = check_ca_rotation(&p, &f.old_cert, None, late).unwrap_err();
+        let err = check_ca_rotation(&p, &f.old_cert, None, &[], late).unwrap_err();
         assert!(format!("{err:#}").contains("validity"), "got: {err:#}");
     }
 
@@ -2199,8 +2206,15 @@ mod tests {
             mutual_secure_peer(&cn);
 
             let params = serde_json::json!({ "cert_pem": f.new_cert, "key_pem": f.new_key });
-            handle_push_ca_key(&cn, req_with_params(MESH_PUSH_CA_KEY_METHOD, params)).unwrap();
+            handle_push_ca_key(
+                &cn,
+                req_with_params(MESH_PUSH_CA_KEY_METHOD, params.clone()),
+            )
+            .unwrap();
             assert!(utils::pki::has_mesh_ca_key(&pki));
+            let err = handle_push_ca_key(&cn, req_with_params(MESH_PUSH_CA_KEY_METHOD, params))
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("already holds"), "got: {err:#}");
         });
     }
 
@@ -2217,10 +2231,10 @@ mod tests {
             let cn = utils::id::new();
             mutual_secure_peer(&cn);
 
-            let params = serde_json::json!({ "cert_pem": cert, "key_pem": "attacker" });
+            let params = serde_json::json!({ "cert_pem": cert, "key_pem": key });
             let err = handle_push_ca_key(&cn, req_with_params(MESH_PUSH_CA_KEY_METHOD, params))
                 .unwrap_err();
-            assert!(err.to_string().contains("already holds"), "got: {err}");
+            assert!(format!("{err:#}").contains("already holds"), "got: {err:#}");
             assert_eq!(
                 std::fs::read_to_string(utils::pki::mesh_ca_key_path(&pki)).unwrap(),
                 key
@@ -2282,6 +2296,48 @@ mod tests {
     }
 
     #[test]
+    fn any_role_plugin_tool_explicitly_ungated_needs_an_explicit_read_for_mesh() {
+        let unconfirmed = "listener_test_plugin.status";
+        let confirmed = "listener_test_plugin.detail";
+        dispatch::tool_roles::install_plugin_tools([
+            (
+                unconfirmed.to_string(),
+                dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                    unconfirmed,
+                    Some("any"),
+                    Some(false),
+                    None,
+                ),
+            ),
+            (
+                confirmed.to_string(),
+                dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                    confirmed,
+                    Some("any"),
+                    Some(false),
+                    Some(false),
+                ),
+            ),
+        ]);
+        let err = remote_role_gate(
+            unconfirmed,
+            dispatch::tool_roles::known_role(unconfirmed),
+            is_mutating_tool(unconfirmed),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("changes state"), "got: {err}");
+        assert_eq!(
+            remote_role_gate(
+                confirmed,
+                dispatch::tool_roles::known_role(confirmed),
+                is_mutating_tool(confirmed)
+            )
+            .unwrap(),
+            "any"
+        );
+    }
+
+    #[test]
     fn any_role_plugin_tool_with_a_read_verb_and_no_flags_is_not_gated() {
         let tool = "listener_test_plugin.list";
         let policy =
@@ -2301,10 +2357,21 @@ mod tests {
     }
 
     #[test]
-    fn read_role_needs_an_admin_or_read_caller() {
-        assert!(role_satisfies("admin", "read"));
-        assert!(role_satisfies("read", "read"));
-        assert!(!role_satisfies("member", "read"));
+    fn every_tier_meets_exactly_the_requirements_at_or_below_it() {
+        let tiers = ["any", "read-only", "user", "admin", "super-admin"];
+        for (ci, caller) in tiers.iter().enumerate() {
+            for (ri, required) in tiers.iter().enumerate() {
+                assert_eq!(
+                    role_satisfies(caller, required),
+                    ci >= ri,
+                    "{caller} vs {required}"
+                );
+            }
+        }
+        assert!(role_satisfies("read", "read-only"));
+        assert!(role_satisfies("read-only", "read"));
+        assert!(role_satisfies("member", "read"));
+        assert!(!role_satisfies("read", "member"));
         assert!(!role_satisfies("any", "read"));
     }
 }

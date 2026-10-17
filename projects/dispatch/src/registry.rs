@@ -1414,6 +1414,7 @@ mod tests {
 
     #[test]
     fn introspection_helpers_dont_panic_on_empty_inventory() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let _ = names();
         let _ = remote_ok_names();
         let _ = role_table();
@@ -1618,6 +1619,7 @@ mod tests {
 
     #[test]
     fn mcp_definitions_returns_a_vec_even_when_empty() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         // Empty inventory in this test binary: should still be a Vec, not
         // panic.
         let defs = mcp_definitions();

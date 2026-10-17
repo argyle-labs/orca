@@ -1399,21 +1399,6 @@ fn snake_to_pascal(s: &str) -> String {
     out
 }
 
-/// Does this verb only READ?
-///
-/// One predicate drives three things that must agree: `REQUIRED_ROLE`,
-/// `DATA_MUTATION`, and the dry-run gate, so a mutating verb cannot be left
-/// ungated by omission (#636).
-///
-/// The list is explicit rather than a heuristic, and deliberately conservative:
-/// a verb wrongly treated as a WRITE merely becomes admin-only and offers a
-/// `dryRun`, which is visible the first time anyone calls it. A verb wrongly
-/// treated as a READ applies changes with no audit, which is not. So anything not
-/// named here gates.
-///
-/// A noun-shaped verb is not evidence of a read: `profile` is absent because
-/// `system.profile` sets a plugin's heap-instrumentation flag (`MALLOC_CONF`
-/// injected on its next spawn), which is a write.
 #[cfg(test)]
 mod tests {
     use super::*;

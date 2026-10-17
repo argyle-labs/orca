@@ -160,6 +160,32 @@ pub fn has_mesh_ca_previous(pki_dir: &Path) -> bool {
     mesh_ca_previous_cert_path(pki_dir).exists()
 }
 
+/// Fingerprints of CAs that have left this host's current slot, newest last.
+pub fn mesh_ca_retired_path(pki_dir: &Path) -> PathBuf {
+    mesh_dir(pki_dir).join("ca.retired")
+}
+
+const MAX_RETIRED_MESH_CAS: usize = 64;
+
+/// Fingerprints of every CA this host has retired, bounded to the most recent
+/// [`MAX_RETIRED_MESH_CAS`]. Missing history reads as empty.
+pub fn retired_mesh_ca_fingerprints(pki_dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(mesh_ca_retired_path(pki_dir))
+        .map(|s| s.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn record_retired_mesh_ca(pki_dir: &Path, cert_pem: &str) -> Result<()> {
+    let fp = cert_fingerprint(cert_pem)?;
+    let mut fps = retired_mesh_ca_fingerprints(pki_dir);
+    fps.retain(|f| f != &fp);
+    fps.push(fp);
+    let skip = fps.len().saturating_sub(MAX_RETIRED_MESH_CAS);
+    let mut body = fps[skip..].join("\n");
+    body.push('\n');
+    atomic_write_pem(&mesh_ca_retired_path(pki_dir), &body)
+}
+
 /// SNI the paired-peer mTLS surface answers on, and the DNS name a mesh
 /// server cert is issued for.
 pub const MESH_SERVER_SAN: &str = "mesh.orca.local";
@@ -517,8 +543,8 @@ pub fn export_mesh_ca_keypair(pki_dir: &Path) -> Result<(String, String)> {
 
 /// Import a mesh CA keypair received from a trusted peer. Verifies the cert
 /// PEM matches what we already have on disk (so a malicious peer can't
-/// substitute a different CA), then writes the key. Idempotent if the key
-/// already exists with matching content.
+/// substitute a different CA), then creates the key file exclusively: an
+/// existing key is never replaced, and two concurrent imports cannot both win.
 pub fn import_mesh_ca_keypair(pki_dir: &Path, cert_pem: &str, key_pem: &str) -> Result<()> {
     let existing_cert = std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
         .context("import: read local mesh CA cert (run `orca mesh join` first)")?;
@@ -527,7 +553,30 @@ pub fn import_mesh_ca_keypair(pki_dir: &Path, cert_pem: &str, key_pem: &str) -> 
         "imported CA cert does not match local mesh CA — refusing to install foreign key"
     );
     ensure_key_matches_cert(cert_pem, key_pem).context("imported key does not match CA cert")?;
-    write_pem(mesh_ca_key_path(pki_dir), key_pem)?;
+    create_new_key_pem(&mesh_ca_key_path(pki_dir), key_pem)
+}
+
+fn create_new_key_pem(path: &Path, pem: &str) -> Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = match opts.open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            anyhow::bail!("this host already holds a mesh CA key; a peer cannot replace it")
+        }
+        Err(e) => return Err(e).with_context(|| format!("create {}", path.display())),
+    };
+    if let Err(e) = f.write_all(pem.as_bytes()).and_then(|()| f.sync_all()) {
+        drop(f);
+        _ = std::fs::remove_file(path);
+        return Err(e).with_context(|| format!("write {}", path.display()));
+    }
     Ok(())
 }
 
@@ -794,6 +843,7 @@ pub fn rotate_mesh_ca(pki_dir: &Path) -> Result<()> {
     // Slide current → previous (overwrites any older previous slot).
     let cur_cert_pem = std::fs::read_to_string(&cur_cert).context("read current CA cert")?;
     let cur_key_pem = std::fs::read_to_string(&cur_key).context("read current CA key")?;
+    record_retired_mesh_ca(pki_dir, &cur_cert_pem)?;
     atomic_write_pem(&prev_cert, &cur_cert_pem)?;
     atomic_write_pem(&prev_key, &cur_key_pem)?;
 
@@ -846,6 +896,16 @@ pub fn import_mesh_ca_state(
             .context("imported previous key does not match previous cert")?;
     }
 
+    for old in [
+        mesh_ca_previous_cert_path(pki_dir),
+        mesh_ca_cert_path(pki_dir),
+    ] {
+        if let Ok(pem) = std::fs::read_to_string(&old)
+            && pem.trim() != current_cert_pem.trim()
+        {
+            record_retired_mesh_ca(pki_dir, &pem)?;
+        }
+    }
     atomic_write_pem(&mesh_ca_cert_path(pki_dir), current_cert_pem)?;
     atomic_write_pem(&mesh_ca_key_path(pki_dir), current_key_pem)?;
     if let (Some(c), Some(k)) = (previous_cert_pem, previous_key_pem) {
@@ -2339,6 +2399,51 @@ mod tests {
         assert!(!has_mesh_ca_key(dst.path()));
         import_mesh_ca_keypair(dst.path(), &cert_pem, &key_pem).unwrap();
         assert!(has_mesh_ca_key(dst.path()));
+    }
+
+    #[test]
+    fn import_mesh_ca_keypair_refuses_when_a_key_already_exists() {
+        let src = tempfile::tempdir().unwrap();
+        init_mesh_ca(src.path(), "founder").unwrap();
+        let (cert_pem, key_pem) = export_mesh_ca_keypair(src.path()).unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(mesh_dir(dst.path())).unwrap();
+        std::fs::write(mesh_ca_cert_path(dst.path()), &cert_pem).unwrap();
+        import_mesh_ca_keypair(dst.path(), &cert_pem, &key_pem).unwrap();
+        let err = import_mesh_ca_keypair(dst.path(), &cert_pem, &key_pem).unwrap_err();
+        assert!(format!("{err:#}").contains("already holds"), "got: {err:#}");
+    }
+
+    #[test]
+    fn rotation_and_state_import_record_retired_cas() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        let (first, _) = export_mesh_ca_keypair(dir.path()).unwrap();
+        rotate_mesh_ca(dir.path()).unwrap();
+        let (second, second_key) = export_mesh_ca_keypair(dir.path()).unwrap();
+        assert_eq!(
+            retired_mesh_ca_fingerprints(dir.path()),
+            vec![cert_fingerprint(&first).unwrap()]
+        );
+
+        let other = tempfile::tempdir().unwrap();
+        init_mesh_ca(other.path(), "founder").unwrap();
+        let (third, third_key) = export_mesh_ca_keypair(other.path()).unwrap();
+        import_mesh_ca_state(
+            dir.path(),
+            &third,
+            &third_key,
+            Some(&second),
+            Some(&second_key),
+        )
+        .unwrap();
+        assert_eq!(
+            retired_mesh_ca_fingerprints(dir.path()),
+            vec![
+                cert_fingerprint(&first).unwrap(),
+                cert_fingerprint(&second).unwrap()
+            ]
+        );
     }
 
     #[test]

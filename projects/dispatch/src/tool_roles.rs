@@ -21,6 +21,9 @@ pub struct PluginToolPolicy {
     pub execute_gated: bool,
     pub data_mutation: bool,
     pub local_only: bool,
+    /// An `any` tool that explicitly opted out of the execute gate without
+    /// also declaring `data_mutation: false`; mesh refuses it without a caller.
+    pub read_unconfirmed: bool,
 }
 
 impl PluginToolPolicy {
@@ -45,6 +48,9 @@ impl PluginToolPolicy {
             execute_gated: execute_gated.unwrap_or(default_gated),
             data_mutation: data_mutation.unwrap_or(false),
             local_only: false,
+            read_unconfirmed: role == "any"
+                && execute_gated == Some(false)
+                && data_mutation != Some(false),
         }
     }
 
@@ -90,6 +96,11 @@ fn plugin_policy(tool: &str) -> Option<PluginToolPolicy> {
 /// plans on `dryRun` instead of applying.
 pub fn plugin_execute_gated(tool: &str) -> bool {
     plugin_policy(tool).is_some_and(|p| p.execute_gated)
+}
+
+/// Whether a loaded plugin's `any` tool lacks an explicit read declaration.
+pub fn plugin_read_unconfirmed(tool: &str) -> bool {
+    plugin_policy(tool).is_some_and(|p| p.read_unconfirmed)
 }
 
 /// Install the lookup. Idempotent — first call wins; subsequent calls are
@@ -161,6 +172,19 @@ fn fixed_surface_role(tool: &str) -> Option<&'static str> {
     )
 }
 
+/// Rank of a role in the tier order `read-only` < `user` < `admin` <
+/// `super-admin`. `read` is `read-only` and `member` is `user`; `any` and
+/// unknown roles rank lowest.
+pub fn role_rank(role: &str) -> u8 {
+    match role {
+        "super-admin" => 4,
+        "admin" => 3,
+        "user" | "member" => 2,
+        "read-only" | "read" => 1,
+        _ => 0,
+    }
+}
+
 /// True if the caller's identity-role satisfies the tool's required-role.
 ///
 /// Role hierarchy (high → low): `admin` > `read` > `any`. Higher roles
@@ -215,6 +239,31 @@ mod tests {
     // `install` writes to a process-global OnceLock and is shared across the
     // whole test binary, so we exercise its semantics through the public
     // accessors without re-installing in every test.
+
+    #[test]
+    fn role_rank_orders_the_four_tiers_above_any() {
+        let ranks: Vec<u8> = ["any", "read-only", "user", "admin", "super-admin"]
+            .into_iter()
+            .map(role_rank)
+            .collect();
+        assert_eq!(ranks, [0, 1, 2, 3, 4]);
+        assert_eq!(role_rank("read"), role_rank("read-only"));
+        assert_eq!(role_rank("member"), role_rank("user"));
+        assert_eq!(role_rank("bogus"), 0);
+    }
+
+    #[test]
+    fn explicit_ungate_without_explicit_read_is_unconfirmed() {
+        let p = |eg, dm| PluginToolPolicy::from_manifest("t.status", Some("any"), eg, dm);
+        assert!(p(Some(false), None).read_unconfirmed);
+        assert!(p(Some(false), Some(true)).read_unconfirmed);
+        assert!(!p(Some(false), Some(false)).read_unconfirmed);
+        assert!(!p(None, None).read_unconfirmed);
+        assert!(
+            !PluginToolPolicy::from_manifest("t.status", Some("admin"), Some(false), None)
+                .read_unconfirmed
+        );
+    }
 
     #[test]
     fn satisfies_any_requirement_passes_every_caller() {
@@ -295,6 +344,7 @@ mod tests {
 
     #[test]
     fn every_routable_tool_is_known() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         for def in crate::mcp_definitions() {
             let name = def["name"].as_str().expect("tool def has a name");
             assert!(known_role(name).is_some(), "{name} routes but is unknown");

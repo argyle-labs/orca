@@ -1011,6 +1011,24 @@ fn install_tool_policies(software: &str, tools: &HashMap<String, ToolDef>) {
              until the plugin is rebuilt against a toolkit that emits roles"
         );
     }
+    let mut ungated_writes: Vec<&str> = tools
+        .values()
+        .filter(|d| {
+            d.role.as_deref() == Some("any")
+                && d.execute_gated == Some(false)
+                && !verb_shape::is_read_shaped(&d.name)
+        })
+        .map(|d| d.name.as_str())
+        .collect();
+    if !ungated_writes.is_empty() {
+        ungated_writes.sort_unstable();
+        tracing::warn!(
+            plugin = %software,
+            tools = ?ungated_writes,
+            "plugin manifest opts these role-any tools out of the execute gate although \
+             their names are not read-shaped"
+        );
+    }
     dispatch::tool_roles::install_plugin_tools(tools.values().map(|d| {
         (
             d.name.clone(),
@@ -1297,6 +1315,25 @@ mod extra_domain_tests {
 
     static REGISTERED: AtomicUsize = AtomicUsize::new(0);
     static DEREGISTERED: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn data_mutation_gates_even_a_read_shaped_any_tool() {
+        let name = "policyprobe.list";
+        let def: ToolDef = sj::from_value(sj::json!({
+            "name": name,
+            "description": "",
+            "input_schema": { "type": "object" },
+            "output_schema": { "type": "object" },
+            "role": "any",
+            "execute_gated": false,
+            "data_mutation": true,
+        }))
+        .unwrap();
+        install_tool_policies("policyprobe", &HashMap::from([(name.to_string(), def)]));
+        assert!(dispatch::tool_roles::is_data_mutation(name));
+        assert!(dispatch::tool_roles::plugin_read_unconfirmed(name));
+        dispatch::tool_roles::remove_plugin_tools([name]);
+    }
 
     fn fake_register(_def: &BackendDef, _invoke: BackendInvoke) -> Result<()> {
         REGISTERED.fetch_add(1, Ordering::SeqCst);
