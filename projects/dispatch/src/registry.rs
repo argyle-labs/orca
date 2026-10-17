@@ -1705,7 +1705,7 @@ mod tests {
         let name = "registry_test_plugin.no_role";
         install_plugin_tools([(
             name.to_string(),
-            PluginToolPolicy::from_manifest(None, None, None),
+            PluginToolPolicy::from_manifest(name, None, None, None),
         )]);
         let caller = |role: &str| contract::CallerIdentity {
             user_id: "u".into(),
@@ -1812,7 +1812,12 @@ mod tests {
             );
             crate::tool_roles::install_plugin_tools([(
                 GATED_PLUGIN_TOOL.to_string(),
-                crate::tool_roles::PluginToolPolicy::from_manifest(None, Some(true), None),
+                crate::tool_roles::PluginToolPolicy::from_manifest(
+                    GATED_PLUGIN_TOOL,
+                    None,
+                    Some(true),
+                    None,
+                ),
             )]);
         });
     }

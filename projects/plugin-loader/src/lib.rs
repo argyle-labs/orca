@@ -1015,6 +1015,7 @@ fn install_tool_policies(software: &str, tools: &HashMap<String, ToolDef>) {
         (
             d.name.clone(),
             dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                &d.name,
                 d.role.as_deref(),
                 d.execute_gated,
                 d.data_mutation,

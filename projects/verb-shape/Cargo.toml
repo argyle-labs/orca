@@ -1,0 +1,12 @@
+[package]
+name = "orca-verb-shape"
+version.workspace = true
+publish = ["gitea"]
+edition.workspace = true
+
+[lib]
+name = "verb_shape"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

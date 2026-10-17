@@ -255,10 +255,12 @@ service = { path = "projects/service", version = "=0.2.1-rc.21", registry = "git
 spec = { path = "projects/spec", version = "=0.2.1-rc.21", registry = "gitea", package = "orca-spec" }
 storage = { path = "projects/storage", version = "=0.2.1-rc.21", registry = "gitea", package = "orca-storage", default-features = false }
 system = { path = "projects/system", version = "=0.2.1-rc.21", registry = "gitea", package = "orca-system" }
+verb-shape = { path = "projects/verb-shape", version = "=0.2.1-rc.21", registry = "gitea", package = "orca-verb-shape" }
 utils = { path = "projects/utils", version = "=0.2.1-rc.21", registry = "gitea", package = "orca-utils", default-features = false }
 
 [workspace]
 members = [
+    "projects/verb-shape",
     "projects/app-kit",
     "projects/db",
     "projects/server",

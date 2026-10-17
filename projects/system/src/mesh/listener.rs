@@ -742,9 +742,7 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
             params.previous_cert_pem.as_deref(),
             params.previous_key_pem.as_deref(),
         )?;
-        if let Some(exp) = params.previous_expires_at {
-            pdb::set_ca_previous_expires_at(conn, Some(exp))?;
-        }
+        pdb::set_ca_previous_expires_at(conn, params.previous_expires_at)?;
         Ok(())
     })
 }
@@ -786,12 +784,15 @@ fn check_ca_rotation(
         local_previous.is_none_or(|p| p.trim() != new_current),
         "mesh/push-ca-state refused: pushed CA is this host's previous CA (downgrade)"
     );
-    if let Some(exp) = params.previous_expires_at {
-        anyhow::ensure!(
-            exp > now && exp - now <= MAX_CA_OVERLAP_SECS,
-            "mesh/push-ca-state refused: previous CA overlap must end within 90 days"
-        );
-    }
+    utils::pki::ensure_valid_ca_cert(new_current, now)
+        .context("mesh/push-ca-state refused: pushed current cert is not a valid CA")?;
+    let Some(exp) = params.previous_expires_at else {
+        anyhow::bail!("mesh/push-ca-state refused: previous CA slot requires previous_expires_at");
+    };
+    anyhow::ensure!(
+        exp > now && exp - now <= MAX_CA_OVERLAP_SECS,
+        "mesh/push-ca-state refused: previous CA overlap must end within 90 days"
+    );
     Ok(())
 }
 
@@ -1280,16 +1281,31 @@ mod tests {
         dispatch::tool_roles::install_plugin_tools([
             (
                 PLUGIN_ADMIN_TOOL.to_string(),
-                dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("admin"), None, None),
+                dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                    PLUGIN_ADMIN_TOOL,
+                    Some("admin"),
+                    None,
+                    None,
+                ),
             ),
             (
                 PLUGIN_ANY_TOOL.to_string(),
-                dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("any"), None, None),
+                dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                    PLUGIN_ANY_TOOL,
+                    Some("any"),
+                    None,
+                    None,
+                ),
             ),
             (
                 PLUGIN_LOCAL_TOOL.to_string(),
-                dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("any"), None, None)
-                    .local_only(Some(true)),
+                dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                    PLUGIN_LOCAL_TOOL,
+                    Some("any"),
+                    Some(false),
+                    None,
+                )
+                .local_only(Some(true)),
             ),
         ]);
     }
@@ -2070,6 +2086,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ca_rotation_without_previous_expires_at_is_refused() {
+        let f = ca_fixture();
+        let p = rotation(&f, &f.old_key, None);
+        let err = check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap_err();
+        assert!(
+            err.to_string().contains("previous_expires_at"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn ca_rotation_to_a_non_ca_cert_is_refused() {
+        let f = ca_fixture();
+        let (leaf, leaf_key) = utils::pki::load_or_init_bootstrap_cert(f._dir.path()).unwrap();
+        let mut p = rotation(&f, &f.old_key, Some(NOW + 86_400));
+        p.current_cert_pem = leaf;
+        p.current_key_pem = leaf_key;
+        let err = check_ca_rotation(&p, &f.old_cert, None, NOW).unwrap_err();
+        assert!(format!("{err:#}").contains("not a CA"), "got: {err:#}");
+    }
+
+    #[test]
+    fn ca_rotation_to_a_ca_outside_its_validity_is_refused() {
+        let f = ca_fixture();
+        let late = i64::from(i32::MAX) * 4;
+        let p = rotation(&f, &f.old_key, Some(late + 86_400));
+        let err = check_ca_rotation(&p, &f.old_cert, None, late).unwrap_err();
+        assert!(format!("{err:#}").contains("validity"), "got: {err:#}");
+    }
+
     fn mutual_secure_peer(cn: &str) {
         let conn = db::open_default().unwrap();
         pdb::upsert_peer(&conn, cn, "hc", "127.0.0.1", 1, Some("fp-c"), "").unwrap();
@@ -2205,13 +2252,52 @@ mod tests {
         let tool = "listener_test_plugin.any_apply";
         dispatch::tool_roles::install_plugin_tools([(
             tool.to_string(),
-            dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("any"), Some(true), None),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                tool,
+                Some("any"),
+                Some(true),
+                None,
+            ),
         )]);
         let params = serde_json::json!({ "tool": tool, "args": {} });
         let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("changes state"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn exec_refuses_an_any_role_plugin_tool_with_a_write_verb_and_no_flags() {
+        install_fake_plugin();
+        let tool = "listener_test_plugin.update";
+        dispatch::tool_roles::install_plugin_tools([(
+            tool.to_string(),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(tool, Some("any"), None, None),
+        )]);
+        let params = serde_json::json!({ "tool": tool, "args": {} });
+        let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("changes state"), "got: {err}");
+    }
+
+    #[test]
+    fn any_role_plugin_tool_with_a_read_verb_and_no_flags_is_not_gated() {
+        let tool = "listener_test_plugin.list";
+        let policy =
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(tool, Some("any"), None, None);
+        assert!(!policy.execute_gated);
+        dispatch::tool_roles::install_plugin_tools([(tool.to_string(), policy)]);
+        assert!(!is_mutating_tool(tool));
+        assert_eq!(
+            remote_role_gate(
+                tool,
+                dispatch::tool_roles::known_role(tool),
+                is_mutating_tool(tool)
+            )
+            .unwrap(),
+            "any"
+        );
     }
 
     #[test]

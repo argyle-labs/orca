@@ -29,6 +29,7 @@ impl PluginToolPolicy {
     /// read-only, and the mesh gate ranks unknown roles lowest, so passing one
     /// through would open the tool instead.
     pub fn from_manifest(
+        name: &str,
         role: Option<&str>,
         execute_gated: Option<bool>,
         data_mutation: Option<bool>,
@@ -38,9 +39,10 @@ impl PluginToolPolicy {
             Some("read") => "read",
             None | Some(_) => "admin",
         };
+        let default_gated = role == "any" && !verb_shape::is_read_shaped(name);
         Self {
             role,
-            execute_gated: execute_gated.unwrap_or(false),
+            execute_gated: execute_gated.unwrap_or(default_gated),
             data_mutation: data_mutation.unwrap_or(false),
             local_only: false,
         }
@@ -316,7 +318,7 @@ mod tests {
 
     #[test]
     fn plugin_policy_maps_manifest_roles_and_fails_closed() {
-        let p = |r| PluginToolPolicy::from_manifest(r, None, None).role;
+        let p = |r| PluginToolPolicy::from_manifest("t.list", r, None, None).role;
         assert_eq!(p(None), "admin");
         assert_eq!(p(Some("any")), "any");
         assert_eq!(p(Some("read")), "read");
@@ -327,7 +329,7 @@ mod tests {
     #[test]
     fn plugin_local_only_is_installed_and_removed() {
         let name = "tool_roles_test_plugin.engine_update";
-        let policy = PluginToolPolicy::from_manifest(Some("admin"), None, None);
+        let policy = PluginToolPolicy::from_manifest(name, Some("admin"), None, None);
         assert!(!policy.local_only);
         assert!(!policy.local_only(None).local_only);
         install_plugin_tools([(name.to_string(), policy.local_only(Some(true)))]);
@@ -344,7 +346,7 @@ mod tests {
         assert_eq!(required_role(name), "any");
         install_plugin_tools([(
             name.to_string(),
-            PluginToolPolicy::from_manifest(Some("admin"), Some(true), Some(true)),
+            PluginToolPolicy::from_manifest(name, Some("admin"), Some(true), Some(true)),
         )]);
         assert_eq!(required_role(name), "admin");
         assert!(is_data_mutation(name));
@@ -360,7 +362,7 @@ mod tests {
         let name = "tool_roles_test_plugin.no_role";
         install_plugin_tools([(
             name.to_string(),
-            PluginToolPolicy::from_manifest(None, None, Some(false)),
+            PluginToolPolicy::from_manifest(name, None, None, Some(false)),
         )]);
         assert_eq!(required_role(name), "admin");
         assert!(!authorize("member", false, required_role(name), false));
@@ -374,7 +376,7 @@ mod tests {
         let name = "tool_roles_test_plugin.read_role";
         install_plugin_tools([(
             name.to_string(),
-            PluginToolPolicy::from_manifest(Some("read"), None, None),
+            PluginToolPolicy::from_manifest(name, Some("read"), None, None),
         )]);
         assert!(authorize("read", false, required_role(name), false));
         assert!(!authorize("member", false, required_role(name), false));

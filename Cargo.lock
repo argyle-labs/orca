@@ -4206,6 +4206,7 @@ dependencies = [
 name = "orca-derive"
 version = "0.2.1-rc.21"
 dependencies = [
+ "orca-verb-shape",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4238,6 +4239,7 @@ dependencies = [
  "futures",
  "inventory",
  "orca-contract",
+ "orca-verb-shape",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -4866,6 +4868,10 @@ dependencies = [
  "x509-parser",
  "zeroize",
 ]
+
+[[package]]
+name = "orca-verb-shape"
+version = "0.2.1-rc.21"
 
 [[package]]
 name = "ordered-float"

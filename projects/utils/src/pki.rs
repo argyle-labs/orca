@@ -547,6 +547,23 @@ pub fn ensure_key_matches_cert(cert_pem: &str, key_pem: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fails unless `cert_pem` is a CA (`basicConstraints CA:TRUE`) valid at `now`.
+pub fn ensure_valid_ca_cert(cert_pem: &str, now: i64) -> Result<()> {
+    use rustls_pemfile::certs;
+    let der = certs(&mut cert_pem.as_bytes())
+        .next()
+        .context("no certificate in PEM")?
+        .context("parse cert DER")?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(der.as_ref()).context("parse cert")?;
+    anyhow::ensure!(parsed.is_ca(), "certificate is not a CA");
+    let validity = parsed.validity();
+    anyhow::ensure!(
+        validity.not_before.timestamp() <= now && now <= validity.not_after.timestamp(),
+        "certificate is outside its validity period"
+    );
+    Ok(())
+}
+
 // ── Cert rotation primitives ─────────────────────────────────────────────────
 //
 // Short cert lifetimes (PEER_VALIDITY_DAYS = 30) require seamless rotation.
@@ -1874,6 +1891,22 @@ fn write_pem(path: PathBuf, pem: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ensure_valid_ca_cert_accepts_a_ca_and_refuses_a_leaf_or_out_of_validity() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+        let (ca, _) = export_mesh_ca_keypair(dir.path()).unwrap();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        ensure_valid_ca_cert(&ca, now).unwrap();
+        let err = ensure_valid_ca_cert(&ca, i64::from(i32::MAX) * 4).unwrap_err();
+        assert!(err.to_string().contains("validity"), "got: {err}");
+        let err = ensure_valid_ca_cert(&ca, 0).unwrap_err();
+        assert!(err.to_string().contains("validity"), "got: {err}");
+        let (leaf, _) = load_or_init_bootstrap_cert(dir.path()).unwrap();
+        let err = ensure_valid_ca_cert(&leaf, now).unwrap_err();
+        assert!(err.to_string().contains("not a CA"), "got: {err}");
+    }
 
     #[test]
     fn init_and_issue_roundtrip() {
