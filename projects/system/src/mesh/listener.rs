@@ -9,6 +9,7 @@
 //! pre-join methods (mesh/offer, mesh/join-confirm) live on a separate SNI
 //! (mesh-bootstrap.orca.local) — see super::bootstrap.
 
+use super::refusal::{PeerRefusal, refuse, refuse_unless};
 use anyhow::{Context, Result};
 use dev::mode::{cmd_dev_disable, cmd_dev_enable, cmd_dev_sync};
 use serde::{Deserialize, Serialize};
@@ -227,7 +228,7 @@ fn handle_notify_trust(
 ) -> Result<()> {
     let params: NotifyTrustParams = match request.params {
         Some(v) => serde_json::from_value(v).context("parse mesh/notify-trust params")?,
-        None => anyhow::bail!("mesh/notify-trust requires params"),
+        None => refuse!("mesh/notify-trust requires params"),
     };
     // Share one pooled connection for the whole self-heal + trust sequence.
     db::pool::with_pooled_or_open(|conn| {
@@ -237,7 +238,7 @@ fn handle_notify_trust(
         // keyed by the CN so the FK on mesh_trust.peer_id is satisfied.
         let addr_ip = peer_addr.ip().to_string();
         if pdb::is_peer_forgotten(conn, peer_cn)? {
-            anyhow::bail!("mesh/notify-trust refused: peer {peer_cn} was forgotten from this mesh");
+            refuse!("mesh/notify-trust refused: peer {peer_cn} was forgotten from this mesh");
         }
         pdb::ensure_peer_stub(conn, peer_cn, &addr_ip, db::ports::mesh_port())?;
         // Self-heal identity drift: this CN is CA-validated ground truth for the
@@ -259,16 +260,14 @@ fn handle_notify_trust(
 fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
     let params: PushCaKeyParams = match request.params {
         Some(v) => serde_json::from_value(v).context("parse mesh/push-ca-key params")?,
-        None => anyhow::bail!("mesh/push-ca-key requires params"),
+        None => refuse!("mesh/push-ca-key requires params"),
     };
     let t = db::pool::with_pooled_or_open(|conn| pdb::get_trust(conn, peer_cn))?;
     if !pdb::is_mutual_secure(t) {
-        anyhow::bail!(
-            "mesh/push-ca-key refused: peer {peer_cn} is not mutually secure with this host"
-        );
+        refuse!("mesh/push-ca-key refused: peer {peer_cn} is not mutually secure with this host");
     }
     utils::pki::import_mesh_ca_keypair(&pki_dir(), &params.cert_pem, &params.key_pem)
-        .context("mesh/push-ca-key refused")
+        .context(PeerRefusal("mesh/push-ca-key refused".into()))
 }
 
 fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
@@ -286,7 +285,7 @@ fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
     }
     let params: ForgetParams = match request.params {
         Some(v) => serde_json::from_value(v).context("parse mesh/peer-forget params")?,
-        None => anyhow::bail!("mesh/peer-forget requires params"),
+        None => refuse!("mesh/peer-forget requires params"),
     };
     check_peer_forget(peer_cn, &params.peer_id, crate::host_identity::machine_id())?;
     let removed = db::pool::with_pooled_or_open(|conn| pdb::forget_peer(conn, &params.peer_id))?;
@@ -299,11 +298,11 @@ fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
 }
 
 fn check_peer_forget(peer_cn: &str, target: &str, own_id: &str) -> Result<()> {
-    anyhow::ensure!(
+    refuse_unless!(
         target != own_id,
         "mesh/peer-forget refused: a peer cannot make this host forget itself"
     );
-    anyhow::ensure!(
+    refuse_unless!(
         target == peer_cn,
         "mesh/peer-forget refused: peer {peer_cn} may only retire itself, not {target}"
     );
@@ -414,7 +413,7 @@ async fn handle_dev_disable() -> Result<MeshDevDisableResult> {
 /// gate logic is unit-testable without a DB or PKI.
 fn remote_ok_gate(tool: &str, remote_ok: bool, required_role: &str) -> Result<bool> {
     if !remote_ok {
-        anyhow::bail!("mesh/exec refused: tool '{tool}' is local_only on this peer");
+        refuse!("mesh/exec refused: tool '{tool}' is local_only on this peer");
     }
     // "any" tools are authorized by mesh membership alone (the mTLS chain already
     // proved a paired peer). Role-gated tools additionally require a verified
@@ -442,9 +441,11 @@ fn remote_role_gate(
     mutating: bool,
 ) -> Result<&'static str> {
     let role = known_role.ok_or_else(|| {
-        anyhow::anyhow!("mesh/exec refused: tool '{tool}' is not routable on this peer")
+        PeerRefusal(format!(
+            "mesh/exec refused: tool '{tool}' is not routable on this peer"
+        ))
     })?;
-    anyhow::ensure!(
+    refuse_unless!(
         role != "any" || !(mutating || MESH_ANY_ROLE_DENY.contains(&tool)),
         "mesh/exec refused: tool '{tool}' changes state and has no role gate; it cannot run \
          for a remote peer without a signed caller"
@@ -464,7 +465,7 @@ fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
         (tool, action),
         ("system.mesh.update", Some("recover")) | ("system.mesh.delete", Some("leave"))
     );
-    anyhow::ensure!(
+    refuse_unless!(
         !forbidden,
         "mesh/exec refused: '{tool}' action '{}' is local-only and cannot be invoked by a remote peer",
         action.unwrap_or_default()
@@ -476,7 +477,7 @@ fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
             .get("tool")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        anyhow::ensure!(
+        refuse_unless!(
             dispatch::remote_ok::is_allowed(inner),
             "mesh/exec refused: plugin verb '{inner}' is local_only on this peer"
         );
@@ -513,21 +514,22 @@ fn authorize_role_gated(
     now: i64,
 ) -> Result<contract::CallerIdentity> {
     let env = caller_token.ok_or_else(|| {
-        anyhow::anyhow!(
+        PeerRefusal(format!(
             "mesh/exec refused: tool '{tool}' requires role '{required_role}' but no signed caller \
              token was presented"
-        )
+        ))
     })?;
 
-    let verified = crate::mesh::caller_token::verify(env, tool, args, now)
-        .context("mesh/exec refused: caller token verification failed")?;
+    let verified = crate::mesh::caller_token::verify(env, tool, args, now).context(PeerRefusal(
+        "mesh/exec refused: caller token verification failed".into(),
+    ))?;
 
     let pinned = db::mesh::pinned_pubkey_fp(conn, peer_cn)?.ok_or_else(|| {
-        anyhow::anyhow!(
+        PeerRefusal(format!(
             "mesh/exec refused: peer {peer_cn} has no pinned bootstrap key to verify against"
-        )
+        ))
     })?;
-    anyhow::ensure!(
+    refuse_unless!(
         verified.signer_fp == pinned,
         "mesh/exec refused: caller token signer fp does not match peer {peer_cn}'s pinned key"
     );
@@ -536,13 +538,13 @@ fn authorize_role_gated(
 
     let user =
         identities::users::find_by_id(conn, &verified.token.caller_user_id)?.ok_or_else(|| {
-            anyhow::anyhow!(
+            PeerRefusal(format!(
                 "mesh/exec refused: caller user {} is not in this host's replicated users",
                 verified.token.caller_user_id
-            )
+            ))
         })?;
     let role = effective_role(&user.role, &verified.token.role);
-    anyhow::ensure!(
+    refuse_unless!(
         role_satisfies(role, required_role),
         "mesh/exec refused: tool '{tool}' requires role '{required_role}' but user {} acts with \
          role '{role}'",
@@ -604,7 +606,7 @@ fn exec_error_object(e: &anyhow::Error) -> ErrorObject {
 async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> {
     let params: MeshExecParams = match request.params {
         Some(v) => serde_json::from_value(v).context("parse mesh/exec params")?,
-        None => anyhow::bail!("mesh/exec requires params"),
+        None => refuse!("mesh/exec requires params"),
     };
 
     // Reachability is default-allow: every tool — core, plugin, unit — is
@@ -680,16 +682,16 @@ fn handle_replicate_export() -> Result<utils::pki::SignedEnvelope> {
 fn handle_replicate_push(peer_cn: &str, request: Request) -> Result<ReplicatePushResult> {
     let envelope: utils::pki::SignedEnvelope = match request.params {
         Some(v) => serde_json::from_value(v).context("parse mesh/replicate-push params")?,
-        None => anyhow::bail!("mesh/replicate-push requires params"),
+        None => refuse!("mesh/replicate-push requires params"),
     };
     // Resolve the pinned fp under the pool, then release it BEFORE
     // `merge_into_local`, which acquires the pool itself (nesting would
     // deadlock the non-reentrant mutex).
     let pinned_fp = db::pool::with_pooled_or_open(|conn| pdb::pinned_pubkey_fp(conn, peer_cn))?
         .ok_or_else(|| {
-            anyhow::anyhow!(
+            PeerRefusal(format!(
                 "mesh/replicate-push refused: peer {peer_cn} has no pinned bootstrap fp"
-            )
+            ))
         })?;
     let entities = crate::mesh::transport::verify_envelope(&envelope, &pinned_fp)?;
     let merged = db::replicate_engine::merge_into_local(peer_cn, entities)?;
@@ -702,13 +704,13 @@ fn handle_replicate_push(peer_cn: &str, request: Request) -> Result<ReplicatePus
 fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
     let params: PushCaStateParams = match request.params {
         Some(v) => serde_json::from_value(v).context("parse mesh/push-ca-state params")?,
-        None => anyhow::bail!("mesh/push-ca-state requires params"),
+        None => refuse!("mesh/push-ca-state requires params"),
     };
     // One pooled connection for the whole trust-check + optional expiry write.
     db::pool::with_pooled_or_open(|conn| {
         let t = pdb::get_trust(conn, peer_cn)?;
         if !pdb::is_mutual_secure(t) {
-            anyhow::bail!(
+            refuse!(
                 "mesh/push-ca-state refused: peer {peer_cn} is not mutually secure with this host"
             );
         }
@@ -721,8 +723,9 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
             &params,
             &local_current,
             local_previous.as_deref(),
-            &utils::pki::retired_mesh_ca_fingerprints(&pki_d)
-                .context("mesh/push-ca-state refused: retired CA history is unreadable")?,
+            &utils::pki::retired_mesh_ca_fingerprints(&pki_d).context(PeerRefusal(
+                "mesh/push-ca-state refused: retired CA history is unreadable".into(),
+            ))?,
             utils::time::now().unix_seconds(),
         )?;
         utils::pki::import_mesh_ca_state(
@@ -755,11 +758,9 @@ fn check_ca_rotation(
         params.previous_cert_pem.as_deref(),
         params.previous_key_pem.as_deref(),
     ) else {
-        anyhow::bail!(
-            "mesh/push-ca-state refused: a CA state push must be a rotation of the current CA"
-        );
+        refuse!("mesh/push-ca-state refused: a CA state push must be a rotation of the current CA");
     };
-    anyhow::ensure!(
+    refuse_unless!(
         prev_cert.trim() == local_current.trim(),
         "mesh/push-ca-state refused: rotation does not chain from this host's current mesh CA"
     );
@@ -767,26 +768,28 @@ fn check_ca_rotation(
         "mesh/push-ca-state refused: sender did not prove possession of the current CA key",
     )?;
     let new_current = params.current_cert_pem.trim();
-    anyhow::ensure!(
+    refuse_unless!(
         new_current != local_current.trim(),
         "mesh/push-ca-state refused: pushed CA is already this host's current CA"
     );
-    anyhow::ensure!(
+    refuse_unless!(
         local_previous.is_none_or(|p| p.trim() != new_current),
         "mesh/push-ca-state refused: pushed CA is this host's previous CA (downgrade)"
     );
-    let new_fp = utils::pki::cert_fingerprint(new_current)
-        .context("mesh/push-ca-state refused: pushed current cert is unreadable")?;
-    anyhow::ensure!(
+    let new_fp = utils::pki::cert_fingerprint(new_current).context(PeerRefusal(
+        "mesh/push-ca-state refused: pushed current cert is unreadable".into(),
+    ))?;
+    refuse_unless!(
         !retired.contains(&new_fp),
         "mesh/push-ca-state refused: pushed CA was previously retired by this host (downgrade)"
     );
-    utils::pki::ensure_valid_ca_cert(new_current, now)
-        .context("mesh/push-ca-state refused: pushed current cert is not a valid CA")?;
+    utils::pki::ensure_valid_ca_cert(new_current, now).context(PeerRefusal(
+        "mesh/push-ca-state refused: pushed current cert is not a valid CA".into(),
+    ))?;
     let Some(exp) = params.previous_expires_at else {
-        anyhow::bail!("mesh/push-ca-state refused: previous CA slot requires previous_expires_at");
+        refuse!("mesh/push-ca-state refused: previous CA slot requires previous_expires_at");
     };
-    anyhow::ensure!(
+    refuse_unless!(
         exp > now && exp - now <= MAX_CA_OVERLAP_SECS,
         "mesh/push-ca-state refused: previous CA overlap must end within 90 days"
     );
@@ -806,14 +809,14 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
     );
     let params: RefreshCertParams = match request.params {
         Some(v) => serde_json::from_value(v).context("parse mesh/refresh-cert params")?,
-        None => anyhow::bail!("mesh/refresh-cert requires params"),
+        None => refuse!("mesh/refresh-cert requires params"),
     };
 
     // Enforce that the joiner identifier matches the authenticated CN. CN is
     // `<machine_id_short>`; the param is named `joiner_hostname` for wire
     // compat but now carries the stable machine_id, not the OS hostname.
     let expected_cn = params.joiner_hostname.clone();
-    anyhow::ensure!(
+    refuse_unless!(
         peer_cn == expected_cn,
         "refresh refused: cert CN ({peer_cn}) does not match joiner_hostname ({expected_cn})"
     );
@@ -822,7 +825,7 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
             && !pdb::is_peer_departed(conn, peer_cn)?
             && !pdb::is_peer_forgotten(conn, peer_cn)?)
     })?;
-    anyhow::ensure!(
+    refuse_unless!(
         active,
         "refresh refused: {peer_cn} is not a known active mesh peer"
     );
@@ -849,22 +852,13 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
 
 fn peer_facing_error(method: &str, e: &anyhow::Error) -> ErrorObject {
     if let Some(refusal) = e
-        .chain()
-        .map(ToString::to_string)
-        .find(|m| is_peer_refusal(m))
+        .downcast_ref::<PeerRefusal>()
+        .or_else(|| e.chain().find_map(|c| c.downcast_ref::<PeerRefusal>()))
     {
-        return ErrorObject::internal(&refusal);
+        return ErrorObject::internal(&refusal.0);
     }
     warn!("[mesh] {method} failed: {e:#}");
     ErrorObject::internal(&format!("{method} failed"))
-}
-
-fn is_peer_refusal(msg: &str) -> bool {
-    if let Some((head, _)) = msg.split_once(" refused") {
-        return head == "refresh" || (head.starts_with("mesh/") && !head.contains(' '));
-    }
-    msg.strip_suffix(" requires params")
-        .is_some_and(|head| head.starts_with("mesh/") && !head.contains(' '))
 }
 
 fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
@@ -2406,7 +2400,8 @@ mod tests {
         let obj = peer_facing_error(MESH_PUSH_CA_KEY_METHOD, &e);
         assert!(!obj.message.contains("/secret"), "got: {}", obj.message);
         assert_eq!(obj.message, "internal error: mesh/push-ca-key failed");
-        let refusal = anyhow::anyhow!("mesh/push-ca-key refused: not mutual");
+        let refusal =
+            anyhow::Error::new(PeerRefusal("mesh/push-ca-key refused: not mutual".into()));
         let obj = peer_facing_error(MESH_PUSH_CA_KEY_METHOD, &refusal);
         assert_eq!(
             obj.message,
@@ -2415,14 +2410,20 @@ mod tests {
         let bailed: anyhow::Result<()> = (|| anyhow::bail!("parse /etc/orca/pki/x.pem failed"))();
         let obj = peer_facing_error(MESH_EXEC_METHOD, &bailed.unwrap_err());
         assert!(!obj.message.contains("/etc"), "got: {}", obj.message);
-        let wrapped = anyhow::anyhow!("open /secret/ca.key.pem")
-            .context("mesh/push-ca-state refused: retired CA history is unreadable");
+        let wrapped = anyhow::anyhow!("open /secret/ca.key.pem").context(PeerRefusal(
+            "mesh/push-ca-state refused: retired CA history is unreadable".into(),
+        ));
         let obj = peer_facing_error(MESH_PUSH_CA_STATE_METHOD, &wrapped);
         assert_eq!(
             obj.message,
             "internal error: mesh/push-ca-state refused: retired CA history is unreadable"
         );
-        let missing = anyhow::anyhow!("mesh/exec requires params");
+        let missing = anyhow::Error::new(PeerRefusal("mesh/exec requires params".into()));
+        let untyped = anyhow::anyhow!("mesh/exec refused: forged by a plain string");
+        assert_eq!(
+            peer_facing_error(MESH_EXEC_METHOD, &untyped).message,
+            "internal error: mesh/exec failed"
+        );
         assert_eq!(
             peer_facing_error(MESH_EXEC_METHOD, &missing).message,
             "internal error: mesh/exec requires params"

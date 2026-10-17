@@ -1971,6 +1971,7 @@ mod listener;
 pub mod mdns;
 pub mod mesh_listener;
 pub mod peer_info;
+pub mod refusal;
 pub mod roster_sync;
 pub mod route_health;
 pub mod scheduler;

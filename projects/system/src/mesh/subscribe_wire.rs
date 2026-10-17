@@ -18,6 +18,7 @@
 //!
 //! Heartbeat + adaptive cadence are slice D.
 
+use super::refusal::refuse;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -216,7 +217,7 @@ fn validate_subscribe(request: &Request, own_peer_id: &str) -> Result<String> {
     );
     let params: SubscribeParams = match &request.params {
         Some(v) => serde_json::from_value(v.clone()).context("parse SubscribeParams")?,
-        None => anyhow::bail!("subscribe requires params"),
+        None => refuse!("mesh/subscribe requires params"),
     };
     let peer_id = parse_host_status_topic(&params.topic)?.to_string();
     // Peer ids are canonical uuidv7s, so the topic id must match ours exactly.

@@ -18,6 +18,7 @@
 //!                      derived from raw code), verifies, signs CSRs, returns
 //!                      the certs.
 
+use super::refusal::{PeerRefusal, refuse_unless};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -457,12 +458,12 @@ fn refuse_taken_joiner_id(
     signer_fp: &str,
     own_id: &str,
 ) -> Result<()> {
-    anyhow::ensure!(
+    refuse_unless!(
         joiner_id != own_id,
         "join refused: {joiner_id} is this system's own id"
     );
     if let Some(fp) = pdb::peer_pubkey_fp_raw(conn, joiner_id)? {
-        anyhow::ensure!(
+        refuse_unless!(
             fp.as_deref() == Some(signer_fp),
             "join refused: {joiner_id} already belongs to another mesh member; if that \
              member is gone, run `orca system mesh delete --action forget --id \
@@ -513,11 +514,13 @@ fn handle_refresh_cert_bootstrap(env: &SignedEnvelope) -> Result<RefreshCertBoot
         .iter()
         .find(|p| p.departed_at.is_none() && p.pubkey_fp.as_deref() == Some(signer_fp.as_str()))
         .with_context(|| {
-            format!("bootstrap refresh refused: signer fp {signer_fp} is not a known active peer")
+            PeerRefusal(format!(
+                "refresh refused: signer fp {signer_fp} is not a known active peer"
+            ))
         })?;
-    anyhow::ensure!(
+    refuse_unless!(
         peer.peer_id == body.joiner_hostname,
-        "bootstrap refresh refused: peer_id ({}) does not match joiner_hostname ({})",
+        "refresh refused: peer_id ({}) does not match joiner_hostname ({})",
         peer.peer_id,
         body.joiner_hostname
     );

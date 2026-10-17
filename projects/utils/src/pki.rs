@@ -1993,6 +1993,7 @@ fn write_pem(path: PathBuf, pem: &str) -> Result<()> {
 /// Reads a PKI file, refusing to follow a symlink at `path`.
 pub fn read_pki_file(path: impl AsRef<Path>) -> std::io::Result<String> {
     use std::io::Read;
+    let path = path.as_ref();
     let mut opts = std::fs::OpenOptions::new();
     opts.read(true);
     #[cfg(unix)]
@@ -2001,7 +2002,17 @@ pub fn read_pki_file(path: impl AsRef<Path>) -> std::io::Result<String> {
         opts.custom_flags(libc::O_NOFOLLOW);
     }
     let mut s = String::new();
-    opts.open(path)?.read_to_string(&mut s)?;
+    let mut f = opts.open(path).map_err(|e| {
+        #[cfg(unix)]
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            return std::io::Error::new(
+                e.kind(),
+                format!("{}: symlinked PKI files are refused", path.display()),
+            );
+        }
+        e
+    })?;
+    f.read_to_string(&mut s)?;
     Ok(s)
 }
 
@@ -2031,7 +2042,12 @@ mod tests {
         let link = dir.path().join("link.pem");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert_eq!(read_pki_file(&real).unwrap(), "pem");
-        assert!(read_pki_file(&link).is_err());
+        let err = read_pki_file(&link).unwrap_err().to_string();
+        assert!(err.contains("link.pem"), "got: {err}");
+        assert!(
+            err.contains("symlinked PKI files are refused"),
+            "got: {err}"
+        );
         init_mesh_ca(dir.path(), "24647a14a251e863cdf8dcee692f2915").unwrap();
         let ca = mesh_ca_cert_path(dir.path());
         let moved = dir.path().join("moved.pem");
