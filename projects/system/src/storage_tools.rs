@@ -1223,10 +1223,6 @@ pub struct StorageExportUpdateArgs {
     /// and clients wider than /24 (v4) or /64 (v6).
     #[arg(long)]
     pub allow_unsafe: bool,
-    #[arg(skip)]
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    #[schemars(skip)]
-    pub preview: bool,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -1236,18 +1232,6 @@ pub struct StorageExportDeleteArgs {
     pub provider: String,
     #[arg(long)]
     pub path: String,
-    #[arg(skip)]
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    #[schemars(skip)]
-    pub preview: bool,
-}
-
-fn neutralize_export_update(args: &mut StorageExportUpdateArgs) {
-    args.preview = true;
-}
-
-fn neutralize_export_delete(args: &mut StorageExportDeleteArgs) {
-    args.preview = true;
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -1306,8 +1290,7 @@ async fn current_export(
     verb = "update",
     role = "admin",
     execute_gated = false,
-    dry_run_aware = true,
-    dry_run_neutralize = neutralize_export_update
+    dry_run_aware = true
 )]
 async fn storage_export_update(
     args: StorageExportUpdateArgs,
@@ -1336,7 +1319,7 @@ async fn storage_export_update(
     }
     let before = current_export(b.as_ref(), &entry.path).await?;
     let path = entry.path.clone();
-    let dry_run = ctx.dry_run() || args.preview;
+    let dry_run = ctx.dry_run();
     let after = if dry_run {
         entry
     } else {
@@ -1358,8 +1341,7 @@ async fn storage_export_update(
     verb = "delete",
     role = "admin",
     execute_gated = false,
-    dry_run_aware = true,
-    dry_run_neutralize = neutralize_export_delete
+    dry_run_aware = true
 )]
 async fn storage_export_delete(
     args: StorageExportDeleteArgs,
@@ -1368,7 +1350,7 @@ async fn storage_export_delete(
     storage::export_policy::validate_path(&args.path)?;
     let b = export_write_backend(&args.provider)?;
     let before = current_export(b.as_ref(), &args.path).await?;
-    let dry_run = ctx.dry_run() || args.preview;
+    let dry_run = ctx.dry_run();
     if !dry_run {
         b.remove_export(&args.path).await?;
     }
@@ -5197,7 +5179,6 @@ mod tests {
             options: options.iter().map(|s| s.to_string()).collect(),
             fsid: Some("7".into()),
             allow_unsafe: false,
-            preview: false,
         }
     }
 
@@ -5249,7 +5230,6 @@ mod tests {
                 StorageExportDeleteArgs {
                     provider: "fake-exp-w".into(),
                     path: "/srv/data".into(),
-                    preview: false,
                 },
                 &ctx,
             ))
@@ -5261,17 +5241,50 @@ mod tests {
 
     #[test]
     #[serial_test::serial(storage_registry)]
-    fn export_neutralized_args_preview_without_dry_run() {
+    fn export_update_forwarded_dry_run_parses_on_the_peer() {
+        use contract::{CallerIdentity, RemoteExec};
         use plugin_toolkit::storage::StorageCapability;
-        let ctx = test_ctx();
-        let mut args = export_update_args(&["10.0.0.13"], &["ro"]);
-        neutralize_export_update(&mut args);
+        use std::sync::{Arc, Mutex};
+
+        #[allow(clippy::disallowed_types)]
+        struct Peer(Mutex<Option<(String, serde_json::Value)>>);
+        #[async_trait::async_trait]
+        impl RemoteExec for Peer {
+            #[allow(clippy::disallowed_types)]
+            async fn exec(
+                &self,
+                _peer: &str,
+                tool: &str,
+                args: serde_json::Value,
+                _caller: Option<CallerIdentity>,
+                _correlation_id: Option<String>,
+            ) -> anyhow::Result<serde_json::Value> {
+                *self.0.lock().unwrap() = Some((tool.to_string(), args));
+                Ok(serde_json::Value::Null)
+            }
+        }
+
+        let mut ctx = test_ctx();
+        let peer = Arc::new(Peer(Mutex::new(None)));
+        let svc: Arc<dyn RemoteExec> = peer.clone();
+        ctx.register_service(svc);
+        let args = export_update_args(&["10.0.0.13"], &["ro"]);
+        rt().block_on(dispatch::cli::exec_gated::<StorageExportUpdate>(
+            args,
+            true,
+            Some("willow"),
+            &ctx,
+        ))
+        .expect("forward ok");
+        let (tool, body) = peer.0.lock().unwrap().take().expect("forwarded");
+        assert_eq!(body[contract::plan::DRY_RUN_FIELD], serde_json::json!(true));
+
         let caps = [StorageCapability::Exports, StorageCapability::ExportWrite];
         let out = with_backend("fake-exp-w", &caps, || {
-            rt().block_on(storage_export_update(args, &ctx))
-                .expect("preview ok")
+            rt().block_on(dispatch::dispatch(&tool, body, &test_ctx()))
+                .expect("peer accepts forwarded args")
         });
-        assert!(out.dry_run);
+        assert_eq!(out["dryRun"], serde_json::json!(true));
     }
 
     #[test]
