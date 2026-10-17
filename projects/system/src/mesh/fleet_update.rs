@@ -221,6 +221,9 @@ pub(crate) struct Target {
 /// Enumerate the joined mesh peers (not departed) plus the local host, ordered
 /// with the LOCAL host LAST so a self-restart never orphans the fan-out.
 pub(crate) fn fleet_targets() -> Result<Vec<Target>> {
+    let local_id = crate::host_identity::try_machine_id().ok_or_else(|| {
+        anyhow::anyhow!("this system has no id: host identity was not initialized")
+    })?;
     let peers = db::pool::with_pooled_or_open(db::mesh::list_peers)?;
     let remote: Vec<(String, String)> = peers
         .into_iter()
@@ -230,12 +233,17 @@ pub(crate) fn fleet_targets() -> Result<Vec<Target>> {
     Ok(order_targets(
         remote,
         crate::host_identity::cli_hostname_or_fallback(),
+        local_id.to_string(),
     ))
 }
 
 /// Pure ordering: joined remote peers first, the LOCAL host appended LAST so a
 /// self-restart during an apply never orphans the in-flight fan-out.
-fn order_targets(remote: Vec<(String, String)>, local_host: String) -> Vec<Target> {
+fn order_targets(
+    remote: Vec<(String, String)>,
+    local_host: String,
+    local_id: String,
+) -> Vec<Target> {
     let mut targets: Vec<Target> = remote
         .into_iter()
         .map(|(host, peer_id)| Target {
@@ -247,7 +255,7 @@ fn order_targets(remote: Vec<(String, String)>, local_host: String) -> Vec<Targe
         .collect();
     targets.push(Target {
         host: local_host,
-        peer_id: String::new(),
+        peer_id: local_id,
         peer_ref: LOCAL_PEER.to_string(),
         is_local: true,
     });
@@ -1298,7 +1306,7 @@ mod tests {
             ("thor".to_string(), "id-thor".to_string()),
             ("loki".to_string(), "id-loki".to_string()),
         ];
-        let targets = order_targets(remote, "mint".to_string());
+        let targets = order_targets(remote, "mint".to_string(), "id-mint".to_string());
         // Every remote peer precedes the single local entry.
         assert_eq!(targets.len(), 3);
         assert!(targets[..targets.len() - 1].iter().all(|t| !t.is_local));
@@ -1306,7 +1314,8 @@ mod tests {
         assert!(last.is_local);
         assert_eq!(last.host, "mint");
         assert_eq!(last.peer_ref, LOCAL_PEER);
-        assert!(last.peer_id.is_empty());
+        assert_eq!(last.peer_id, "id-mint");
+        assert!(targets.iter().all(|t| !t.peer_id.is_empty()));
         // Remote entries dispatch by peer_id.
         assert_eq!(targets[0].peer_ref, "id-thor");
         assert!(!targets[0].is_local);
@@ -1378,9 +1387,10 @@ mod tests {
 
     #[test]
     fn order_targets_local_only_fleet() {
-        let targets = order_targets(vec![], "solo".to_string());
+        let targets = order_targets(vec![], "solo".to_string(), "id-solo".to_string());
         assert_eq!(targets.len(), 1);
         assert!(targets[0].is_local);
+        assert_eq!(targets[0].peer_id, "id-solo");
     }
 
     #[test]
