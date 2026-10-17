@@ -603,9 +603,8 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
 /// left to the peer forward, whose recipient authorizes it.
 fn authorize_fallback(name: &str, ctx: &ToolCtx) -> Result<()> {
     if let Some(role) = ctx.unbound_role()
-        && role != "admin"
         && let Some(required) = crate::tool_roles::known_role(name)
-        && required != "any"
+        && !crate::tool_roles::satisfies(role, required)
     {
         return Err(contract::OrcaError::forbidden(format!(
             "{name} requires role '{required}'; a token with no resolvable user has '{role}'"
@@ -2249,6 +2248,10 @@ mod tests {
         assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_err());
         assert!(authorize_fallback(crate::ups_surface::STATE_TOOL, &ctx).is_ok());
         assert!(authorize_fallback("__no_such_tool__", &ctx).is_ok());
+        ctx.set_unbound_role(Some("super-admin".into()));
+        assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_ok());
+        ctx.set_unbound_role(Some("bogus".into()));
+        assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_err());
     }
 
     #[cfg(feature = "server")]

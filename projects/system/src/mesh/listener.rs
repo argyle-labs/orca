@@ -236,6 +236,9 @@ fn handle_notify_trust(
         // landed as peer_id="unknown", or CN/peer_id drift), materialize a stub
         // keyed by the CN so the FK on mesh_trust.peer_id is satisfied.
         let addr_ip = peer_addr.ip().to_string();
+        if pdb::is_peer_forgotten(conn, peer_cn)? {
+            anyhow::bail!("mesh/notify-trust refused: peer {peer_cn} was forgotten from this mesh");
+        }
         pdb::ensure_peer_stub(conn, peer_cn, &addr_ip, db::ports::mesh_port())?;
         // Self-heal identity drift: this CN is CA-validated ground truth for the
         // host at `addr_ip`, so fold any stale sibling rows at that address (a
@@ -845,13 +848,23 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
 }
 
 fn peer_facing_error(method: &str, e: &anyhow::Error) -> ErrorObject {
-    if e.chain()
-        .any(|c| c.downcast_ref::<std::io::Error>().is_some())
+    if let Some(refusal) = e
+        .chain()
+        .map(ToString::to_string)
+        .find(|m| is_peer_refusal(m))
     {
-        warn!("[mesh] {method} failed: {e:#}");
-        return ErrorObject::internal(&format!("{method} failed: local storage error"));
+        return ErrorObject::internal(&refusal);
     }
-    ErrorObject::internal(&format!("{e:#}"))
+    warn!("[mesh] {method} failed: {e:#}");
+    ErrorObject::internal(&format!("{method} failed"))
+}
+
+fn is_peer_refusal(msg: &str) -> bool {
+    if let Some((head, _)) = msg.split_once(" refused") {
+        return head == "refresh" || (head.starts_with("mesh/") && !head.contains(' '));
+    }
+    msg.strip_suffix(" requires params")
+        .is_some_and(|head| head.starts_with("mesh/") && !head.contains(' '))
 }
 
 fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
@@ -2392,10 +2405,28 @@ mod tests {
         let e = anyhow::Error::from(io).context("open tmp /secret/path/ca.key.pem.tmp");
         let obj = peer_facing_error(MESH_PUSH_CA_KEY_METHOD, &e);
         assert!(!obj.message.contains("/secret"), "got: {}", obj.message);
-        assert!(obj.message.contains("local storage error"));
+        assert_eq!(obj.message, "internal error: mesh/push-ca-key failed");
         let refusal = anyhow::anyhow!("mesh/push-ca-key refused: not mutual");
         let obj = peer_facing_error(MESH_PUSH_CA_KEY_METHOD, &refusal);
-        assert!(obj.message.contains("not mutual"));
+        assert_eq!(
+            obj.message,
+            "internal error: mesh/push-ca-key refused: not mutual"
+        );
+        let bailed: anyhow::Result<()> = (|| anyhow::bail!("parse /etc/orca/pki/x.pem failed"))();
+        let obj = peer_facing_error(MESH_EXEC_METHOD, &bailed.unwrap_err());
+        assert!(!obj.message.contains("/etc"), "got: {}", obj.message);
+        let wrapped = anyhow::anyhow!("open /secret/ca.key.pem")
+            .context("mesh/push-ca-state refused: retired CA history is unreadable");
+        let obj = peer_facing_error(MESH_PUSH_CA_STATE_METHOD, &wrapped);
+        assert_eq!(
+            obj.message,
+            "internal error: mesh/push-ca-state refused: retired CA history is unreadable"
+        );
+        let missing = anyhow::anyhow!("mesh/exec requires params");
+        assert_eq!(
+            peer_facing_error(MESH_EXEC_METHOD, &missing).message,
+            "internal error: mesh/exec requires params"
+        );
     }
 
     #[serial_test::serial(env)]

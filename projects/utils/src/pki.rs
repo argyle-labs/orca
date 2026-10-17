@@ -171,7 +171,7 @@ const MAX_RETIRED_MESH_CAS: usize = 64;
 /// [`MAX_RETIRED_MESH_CAS`]. Only a missing history reads as empty; any other
 /// read failure is an error, so an unreadable history never passes as clean.
 pub fn retired_mesh_ca_fingerprints(pki_dir: &Path) -> Result<Vec<String>> {
-    match std::fs::read_to_string(mesh_ca_retired_path(pki_dir)) {
+    match read_pki_file(mesh_ca_retired_path(pki_dir)) {
         Ok(s) => Ok(s
             .lines()
             .map(str::trim)
@@ -404,11 +404,11 @@ fn issue_mesh_client_cert(
 /// Load this host's mesh server bundle (cert + key + mesh CA cert).
 pub fn load_mesh_server(pki_dir: &Path) -> Result<NodeBundle> {
     Ok(NodeBundle {
-        cert_pem: std::fs::read_to_string(mesh_server_cert_path(pki_dir))
+        cert_pem: read_pki_file(mesh_server_cert_path(pki_dir))
             .context("mesh server cert not found — run `orca mesh init`")?,
-        key_pem: std::fs::read_to_string(mesh_server_key_path(pki_dir))
+        key_pem: read_pki_file(mesh_server_key_path(pki_dir))
             .context("mesh server key not found — run `orca mesh init`")?,
-        ca_cert_pem: std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
+        ca_cert_pem: read_pki_file(mesh_ca_cert_path(pki_dir))
             .context("mesh CA cert not found — run `orca mesh init`")?,
     })
 }
@@ -416,11 +416,11 @@ pub fn load_mesh_server(pki_dir: &Path) -> Result<NodeBundle> {
 /// Load this host's mesh client bundle (used to dial peers).
 pub fn load_mesh_client(pki_dir: &Path) -> Result<NodeBundle> {
     Ok(NodeBundle {
-        cert_pem: std::fs::read_to_string(mesh_client_cert_path(pki_dir))
+        cert_pem: read_pki_file(mesh_client_cert_path(pki_dir))
             .context("mesh client cert not found — run `orca mesh init`")?,
-        key_pem: std::fs::read_to_string(mesh_client_key_path(pki_dir))
+        key_pem: read_pki_file(mesh_client_key_path(pki_dir))
             .context("mesh client key not found — run `orca mesh init`")?,
-        ca_cert_pem: std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
+        ca_cert_pem: read_pki_file(mesh_ca_cert_path(pki_dir))
             .context("mesh CA cert not found — run `orca mesh init`")?,
     })
 }
@@ -497,10 +497,8 @@ pub fn sign_peer_csr(
         "this host does not have the mesh CA private key — cannot sign peer CSRs"
     );
 
-    let ca_cert_pem =
-        std::fs::read_to_string(mesh_ca_cert_path(pki_dir)).context("read mesh CA cert")?;
-    let ca_key_pem =
-        std::fs::read_to_string(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
+    let ca_cert_pem = read_pki_file(mesh_ca_cert_path(pki_dir)).context("read mesh CA cert")?;
+    let ca_key_pem = read_pki_file(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
 
@@ -560,9 +558,8 @@ pub fn sign_peer_csr(
 /// just become mutually trusted. Caller is responsible for moving these over
 /// an already-authenticated mTLS channel and never persisting them in transit.
 pub fn export_mesh_ca_keypair(pki_dir: &Path) -> Result<(String, String)> {
-    let cert =
-        std::fs::read_to_string(mesh_ca_cert_path(pki_dir)).context("export: read mesh CA cert")?;
-    let key = std::fs::read_to_string(mesh_ca_key_path(pki_dir))
+    let cert = read_pki_file(mesh_ca_cert_path(pki_dir)).context("export: read mesh CA cert")?;
+    let key = read_pki_file(mesh_ca_key_path(pki_dir))
         .context("export: read mesh CA key — this host is not founder-equivalent")?;
     Ok((cert, key))
 }
@@ -572,7 +569,7 @@ pub fn export_mesh_ca_keypair(pki_dir: &Path) -> Result<(String, String)> {
 /// substitute a different CA), then creates the key file exclusively: an
 /// existing key is never replaced, and two concurrent imports cannot both win.
 pub fn import_mesh_ca_keypair(pki_dir: &Path, cert_pem: &str, key_pem: &str) -> Result<()> {
-    let existing_cert = std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
+    let existing_cert = read_pki_file(mesh_ca_cert_path(pki_dir))
         .context("import: read local mesh CA cert (run `orca mesh join` first)")?;
     anyhow::ensure!(
         existing_cert.trim() == cert_pem.trim(),
@@ -770,7 +767,7 @@ pub struct MeshCertStatus {
 /// daemon, so only a crate that knows the daemon's version may supply it.
 pub fn mesh_cert_status(pki_dir: &Path, version: &str) -> MeshCertStatus {
     let parse = |path: PathBuf| -> Option<CertInfo> {
-        let pem = std::fs::read_to_string(&path).ok()?;
+        let pem = read_pki_file(&path).ok()?;
         let days = cert_days_remaining(&pem).ok()?;
         Some(CertInfo {
             days_remaining: days,
@@ -827,8 +824,8 @@ pub fn reissue_mesh_server_cert(pki_dir: &Path, host_cn: &str) -> Result<()> {
         has_mesh_ca_key(pki_dir),
         "reissue: this host does not have the mesh CA private key"
     );
-    let ca_cert_pem = std::fs::read_to_string(mesh_ca_cert_path(pki_dir))?;
-    let ca_key_pem = std::fs::read_to_string(mesh_ca_key_path(pki_dir))?;
+    let ca_cert_pem = read_pki_file(mesh_ca_cert_path(pki_dir))?;
+    let ca_key_pem = read_pki_file(mesh_ca_key_path(pki_dir))?;
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
 
@@ -857,8 +854,8 @@ pub fn reissue_mesh_client_cert(pki_dir: &Path, host_cn: &str) -> Result<()> {
         has_mesh_ca_key(pki_dir),
         "reissue: this host does not have the mesh CA private key"
     );
-    let ca_cert_pem = std::fs::read_to_string(mesh_ca_cert_path(pki_dir))?;
-    let ca_key_pem = std::fs::read_to_string(mesh_ca_key_path(pki_dir))?;
+    let ca_cert_pem = read_pki_file(mesh_ca_cert_path(pki_dir))?;
+    let ca_key_pem = read_pki_file(mesh_ca_key_path(pki_dir))?;
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
 
@@ -901,8 +898,8 @@ pub fn rotate_mesh_ca(pki_dir: &Path) -> Result<()> {
     let prev_key = mesh_ca_previous_key_path(pki_dir);
 
     // Slide current → previous (overwrites any older previous slot).
-    let cur_cert_pem = std::fs::read_to_string(&cur_cert).context("read current CA cert")?;
-    let cur_key_pem = std::fs::read_to_string(&cur_key).context("read current CA key")?;
+    let cur_cert_pem = read_pki_file(&cur_cert).context("read current CA cert")?;
+    let cur_key_pem = read_pki_file(&cur_key).context("read current CA key")?;
     record_retired_mesh_ca(pki_dir, &cur_cert_pem)?;
     atomic_write_pem(&prev_cert, &cur_cert_pem)?;
     atomic_write_pem(&prev_key, &cur_key_pem)?;
@@ -960,7 +957,7 @@ pub fn import_mesh_ca_state(
         mesh_ca_previous_cert_path(pki_dir),
         mesh_ca_cert_path(pki_dir),
     ] {
-        if let Ok(pem) = std::fs::read_to_string(&old)
+        if let Ok(pem) = read_pki_file(&old)
             && pem.trim() != current_cert_pem.trim()
         {
             record_retired_mesh_ca(pki_dir, &pem)?;
@@ -1045,9 +1042,8 @@ pub fn verify_refreshed_peer_certs(
     use rustls::pki_types::{ServerName, UnixTime};
     use std::sync::Arc;
 
-    let mut ca_pems =
-        vec![std::fs::read_to_string(mesh_ca_cert_path(pki_dir)).context("read mesh CA cert")?];
-    if let Ok(prev) = std::fs::read_to_string(mesh_ca_previous_cert_path(pki_dir)) {
+    let mut ca_pems = vec![read_pki_file(mesh_ca_cert_path(pki_dir)).context("read mesh CA cert")?];
+    if let Ok(prev) = read_pki_file(mesh_ca_previous_cert_path(pki_dir)) {
         ca_pems.push(prev);
     }
     let roots = Arc::new(ca_root_store_multi(ca_pems.iter().map(String::as_str))?);
@@ -1097,7 +1093,7 @@ pub fn verify_refreshed_peer_certs(
     .or_else(|e| {
         const REMEDY: &str = "upgrade a CA-key holder, or run \
              `orca system mesh update --action unpin --id <this host>` on each peer";
-        let current = std::fs::read_to_string(mesh_server_cert_path(pki_dir))
+        let current = read_pki_file(mesh_server_cert_path(pki_dir))
             .context("read current server cert")
             .and_then(|p| first_cert_der(&p))
             .and_then(|d| mesh_server_identity(&d));
@@ -1261,9 +1257,9 @@ pub fn rest_server_cert_is_browser_compatible(cert_pem: &str) -> bool {
 /// lacks the `localhost` SAN (pre-upgrade cert) so the new SANs take effect
 /// without requiring a full re-init.
 pub fn refresh_rest_server_cert(pki_dir: &Path) -> Result<()> {
-    let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir))
+    let ca_cert_pem = read_pki_file(ca_cert_path(pki_dir))
         .context("CA cert not found; run `orca install` to initialize PKI")?;
-    let ca_key_pem = std::fs::read_to_string(ca_key_path(pki_dir))
+    let ca_key_pem = read_pki_file(ca_key_path(pki_dir))
         .context("CA key not found; run `orca install` to initialize PKI")?;
     let ca_key = KeyPair::from_pem(&ca_key_pem).context("parse CA key")?;
     let issuer =
@@ -1338,9 +1334,9 @@ pub fn init(pki_dir: &Path) -> Result<()> {
 /// Issue a cert for `plugin_id` signed by the CA. Errors if the CA does not
 /// exist — caller must run `init` first.
 pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<NodeBundle> {
-    let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir))
+    let ca_cert_pem = read_pki_file(ca_cert_path(pki_dir))
         .context("CA cert not found — run `orca pki ca-init` first")?;
-    let ca_key_pem = std::fs::read_to_string(ca_key_path(pki_dir))
+    let ca_key_pem = read_pki_file(ca_key_path(pki_dir))
         .context("CA key not found — run `orca pki ca-init` first")?;
 
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
@@ -1387,18 +1383,18 @@ pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<
 /// over mTLS. NOT used for mesh federation — that uses `mesh/client/*` under
 /// the mesh CA.
 pub fn issue_cli_client_cert(pki_dir: &Path, host_cn: &str) -> Result<NodeBundle> {
-    let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir))
+    let ca_cert_pem = read_pki_file(ca_cert_path(pki_dir))
         .context("CA cert not found — run `orca install` (which runs utils::pki::init) first")?;
 
     if cli_client_cert_path(pki_dir).exists() && cli_client_key_path(pki_dir).exists() {
         return Ok(NodeBundle {
-            cert_pem: std::fs::read_to_string(cli_client_cert_path(pki_dir))?,
-            key_pem: std::fs::read_to_string(cli_client_key_path(pki_dir))?,
+            cert_pem: read_pki_file(cli_client_cert_path(pki_dir))?,
+            key_pem: read_pki_file(cli_client_key_path(pki_dir))?,
             ca_cert_pem,
         });
     }
 
-    let ca_key_pem = std::fs::read_to_string(ca_key_path(pki_dir))
+    let ca_key_pem = read_pki_file(ca_key_path(pki_dir))
         .context("CA key not found — this host cannot sign new CLI client certs")?;
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
@@ -1432,9 +1428,9 @@ pub fn issue_cli_client_cert(pki_dir: &Path, host_cn: &str) -> Result<NodeBundle
 /// `client.cert.pem` or `client.key.pem` is missing — caller decides whether
 /// to attempt issuance or fall back to bearer-token auth.
 pub fn load_cli_client(pki_dir: &Path) -> Option<NodeBundle> {
-    let cert_pem = std::fs::read_to_string(cli_client_cert_path(pki_dir)).ok()?;
-    let key_pem = std::fs::read_to_string(cli_client_key_path(pki_dir)).ok()?;
-    let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir)).ok()?;
+    let cert_pem = read_pki_file(cli_client_cert_path(pki_dir)).ok()?;
+    let key_pem = read_pki_file(cli_client_key_path(pki_dir)).ok()?;
+    let ca_cert_pem = read_pki_file(ca_cert_path(pki_dir)).ok()?;
     Some(NodeBundle {
         cert_pem,
         key_pem,
@@ -1447,11 +1443,11 @@ pub fn load_cli_client(pki_dir: &Path) -> Option<NodeBundle> {
 /// Load the server's TLS material (cert chain + key + CA cert) from disk.
 pub fn load_server(pki_dir: &Path) -> Result<NodeBundle> {
     Ok(NodeBundle {
-        cert_pem: std::fs::read_to_string(server_cert_path(pki_dir))
+        cert_pem: read_pki_file(server_cert_path(pki_dir))
             .context("server cert not found — run `orca pki ca-init`")?,
-        key_pem: std::fs::read_to_string(server_key_path(pki_dir))
+        key_pem: read_pki_file(server_key_path(pki_dir))
             .context("server key not found — run `orca pki ca-init`")?,
-        ca_cert_pem: std::fs::read_to_string(ca_cert_path(pki_dir))
+        ca_cert_pem: read_pki_file(ca_cert_path(pki_dir))
             .context("CA cert not found — run `orca pki ca-init`")?,
     })
 }
@@ -1459,16 +1455,12 @@ pub fn load_server(pki_dir: &Path) -> Result<NodeBundle> {
 /// Load a plugin's TLS material from disk.
 pub fn load_plugin(pki_dir: &Path, plugin_id: &str) -> Result<NodeBundle> {
     Ok(NodeBundle {
-        cert_pem: std::fs::read_to_string(plugin_cert_path(pki_dir, plugin_id)).with_context(
-            || {
-                format!(
-                    "plugin cert not found for '{plugin_id}' — run `orca pki issue {plugin_id}`"
-                )
-            },
-        )?,
-        key_pem: std::fs::read_to_string(plugin_key_path(pki_dir, plugin_id))
+        cert_pem: read_pki_file(plugin_cert_path(pki_dir, plugin_id)).with_context(|| {
+            format!("plugin cert not found for '{plugin_id}' — run `orca pki issue {plugin_id}`")
+        })?,
+        key_pem: read_pki_file(plugin_key_path(pki_dir, plugin_id))
             .with_context(|| format!("plugin key not found for '{plugin_id}'"))?,
-        ca_cert_pem: std::fs::read_to_string(ca_cert_path(pki_dir))
+        ca_cert_pem: read_pki_file(ca_cert_path(pki_dir))
             .context("CA cert not found — run `orca pki ca-init`")?,
     })
 }
@@ -1573,7 +1565,7 @@ pub fn load_or_init_bootstrap_key(pki_dir: &Path) -> Result<ed25519_dalek::Signi
 
     let key_path = bootstrap_key_path(pki_dir);
     if key_path.exists() {
-        let pem = std::fs::read_to_string(&key_path).context("read bootstrap key")?;
+        let pem = read_pki_file(&key_path).context("read bootstrap key")?;
         let signing = SigningKey::from_pkcs8_pem(&pem).context("parse bootstrap key PEM")?;
         return Ok(signing);
     }
@@ -1638,10 +1630,10 @@ pub fn load_or_init_bootstrap_cert(pki_dir: &Path) -> Result<(String, String)> {
 
     // Ensure the key exists; the cert without the key would be useless.
     load_or_init_bootstrap_key(pki_dir)?;
-    let key_pem = std::fs::read_to_string(&key_path).context("read bootstrap key")?;
+    let key_pem = read_pki_file(&key_path).context("read bootstrap key")?;
 
     if cert_path.exists() {
-        let cert_pem = std::fs::read_to_string(&cert_path).context("read bootstrap cert")?;
+        let cert_pem = read_pki_file(&cert_path).context("read bootstrap cert")?;
         return Ok((cert_pem, key_pem));
     }
 
@@ -1995,22 +1987,58 @@ pub fn parse_peer_addr(s: &str, default_port: u16) -> Result<(String, u16)> {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn write_pem(path: PathBuf, pem: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, pem.as_bytes()).with_context(|| format!("write {}", path.display()))?;
-    // Restrict key files to owner-only read/write.
+    atomic_write_pem(&path, pem)
+}
+
+/// Reads a PKI file, refusing to follow a symlink at `path`.
+pub fn read_pki_file(path: impl AsRef<Path>) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
     #[cfg(unix)]
-    if path.to_string_lossy().contains(".key.") {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
     }
-    Ok(())
+    let mut s = String::new();
+    opts.open(path)?.read_to_string(&mut s)?;
+    Ok(s)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn write_pem_creates_owner_only_files_on_first_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["ca.cert.pem", "ca.key.pem"] {
+            let path = dir.path().join(name);
+            write_pem(path.clone(), "x").unwrap();
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_pki_file_refuses_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.pem");
+        std::fs::write(&real, "pem").unwrap();
+        let link = dir.path().join("link.pem");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(read_pki_file(&real).unwrap(), "pem");
+        assert!(read_pki_file(&link).is_err());
+        init_mesh_ca(dir.path(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+        let ca = mesh_ca_cert_path(dir.path());
+        let moved = dir.path().join("moved.pem");
+        std::fs::rename(&ca, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &ca).unwrap();
+        assert!(export_mesh_ca_keypair(dir.path()).is_err());
+    }
 
     #[test]
     fn ensure_valid_ca_cert_accepts_a_ca_and_refuses_a_leaf_or_out_of_validity() {
