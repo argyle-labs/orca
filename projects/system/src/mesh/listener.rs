@@ -9,7 +9,7 @@
 //! pre-join methods (mesh/offer, mesh/join-confirm) live on a separate SNI
 //! (mesh-bootstrap.orca.local) — see super::bootstrap.
 
-use super::refusal::{PeerRefusal, refuse, refuse_unless};
+use super::refusal::{PeerRefusal, peer_facing_error, refuse, refuse_unless};
 use anyhow::{Context, Result};
 use dev::mode::{cmd_dev_disable, cmd_dev_enable, cmd_dev_sync};
 use serde::{Deserialize, Serialize};
@@ -764,9 +764,9 @@ fn check_ca_rotation(
         prev_cert.trim() == local_current.trim(),
         "mesh/push-ca-state refused: rotation does not chain from this host's current mesh CA"
     );
-    utils::pki::ensure_key_matches_cert(local_current, prev_key).context(
-        "mesh/push-ca-state refused: sender did not prove possession of the current CA key",
-    )?;
+    utils::pki::ensure_key_matches_cert(local_current, prev_key).context(PeerRefusal(
+        "mesh/push-ca-state refused: sender did not prove possession of the current CA key".into(),
+    ))?;
     let new_current = params.current_cert_pem.trim();
     refuse_unless!(
         new_current != local_current.trim(),
@@ -848,17 +848,6 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
         server_cert_pem,
         ca_cert_pem,
     })
-}
-
-fn peer_facing_error(method: &str, e: &anyhow::Error) -> ErrorObject {
-    if let Some(refusal) = e
-        .downcast_ref::<PeerRefusal>()
-        .or_else(|| e.chain().find_map(|c| c.downcast_ref::<PeerRefusal>()))
-    {
-        return ErrorObject::internal(&refusal.0);
-    }
-    warn!("[mesh] {method} failed: {e:#}");
-    ErrorObject::internal(&format!("{method} failed"))
 }
 
 fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
@@ -2057,7 +2046,8 @@ mod tests {
         let f = ca_fixture();
         let p = rotation(&f, &f.new_key, None);
         let err = check_ca_rotation(&p, &f.old_cert, None, &[], NOW).unwrap_err();
-        assert!(err.to_string().contains("possession"), "got: {err}");
+        let msg = peer_facing_error(MESH_PUSH_CA_STATE_METHOD, &err).message;
+        assert!(msg.contains("did not prove possession"), "got: {msg}");
     }
 
     #[test]
