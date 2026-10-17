@@ -361,7 +361,7 @@ fn the_plugin_manifest_carries_each_tools_policy() {
 /// Dry-run-aware tools that forward no apply opt-in a pre-`dryRun` peer could
 /// act on, so they need no `dry_run_neutralize` hook. Adding a name here is a
 /// claim that a peer ignoring `dryRun` still changes nothing.
-const AWARE_WITHOUT_NEUTRALIZE: &[&str] = &[];
+const AWARE_WITHOUT_NEUTRALIZE: &[&str] = &["storage.export.delete", "storage.export.update"];
 
 /// A dry-run-aware tool runs its own body under a dry run, so a peer that
 /// predates `dryRun` would apply unless the forwarded args are neutralized.
