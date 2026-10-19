@@ -63,8 +63,8 @@ pub enum HttpError {
     Decode(String),
     #[error("redirect: {0}")]
     Redirect(String),
-    #[error("response body exceeded {MAX_RESPONSE_BYTES} bytes")]
-    ResponseTooLarge,
+    #[error("response body exceeded {limit} bytes")]
+    ResponseTooLarge { limit: usize },
     #[error("http {status}: {summary}")]
     Status {
         status: u16,
@@ -518,8 +518,9 @@ impl RequestBuilder {
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
         let bytes = resp.bytes().await?.to_vec();
-        if bytes.len() > self.max_body.unwrap_or(MAX_RESPONSE_BYTES) {
-            return Err(HttpError::ResponseTooLarge);
+        let limit = self.max_body.unwrap_or(MAX_RESPONSE_BYTES);
+        if bytes.len() > limit {
+            return Err(HttpError::ResponseTooLarge { limit });
         }
         if !(200..300).contains(&status) {
             let summary = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]).into_owned();
@@ -554,7 +555,7 @@ impl RequestBuilder {
         let headers = flatten_headers(resp.headers());
         let bytes = resp.bytes().await?.to_vec();
         if bytes.len() > max {
-            return Err(HttpError::ResponseTooLarge);
+            return Err(HttpError::ResponseTooLarge { limit: max });
         }
         Ok(BytesResponse {
             status,
@@ -576,8 +577,9 @@ impl RequestBuilder {
         let headers = flatten_headers(resp.headers());
 
         let bytes = resp.bytes().await?;
-        if bytes.len() > self.max_body.unwrap_or(MAX_RESPONSE_BYTES) {
-            return Err(HttpError::ResponseTooLarge);
+        let limit = self.max_body.unwrap_or(MAX_RESPONSE_BYTES);
+        if bytes.len() > limit {
+            return Err(HttpError::ResponseTooLarge { limit });
         }
         let body = ResponseBody::from_bytes(&bytes);
         let response = Response {
@@ -929,7 +931,7 @@ mod tests {
             .send()
             .await
             .unwrap_err();
-        assert!(matches!(err, HttpError::ResponseTooLarge));
+        assert!(matches!(err, HttpError::ResponseTooLarge { .. }));
     }
 
     #[tokio::test]
@@ -982,7 +984,7 @@ mod tests {
             .send_bytes()
             .await
             .unwrap_err();
-        assert!(matches!(err, HttpError::ResponseTooLarge));
+        assert!(matches!(err, HttpError::ResponseTooLarge { .. }));
     }
 
     #[tokio::test]

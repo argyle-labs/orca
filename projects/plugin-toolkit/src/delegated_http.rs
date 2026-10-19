@@ -58,6 +58,7 @@ pub mod reqwest {
         pub(crate) url: String,
         pub(crate) headers: HeaderMap,
         pub(crate) body: Vec<u8>,
+        pub(crate) max_body_bytes: Option<u64>,
     }
 
     /// A response the generated code inspects (`status()`, `headers()`) and the
@@ -137,6 +138,7 @@ pub mod reqwest {
                 // reqwest's `default_headers` behavior.
                 headers: self.default_headers.clone(),
                 body: Vec::new(),
+                max_body_bytes: None,
                 error: None,
             }
         }
@@ -155,6 +157,7 @@ pub mod reqwest {
                 body: request.body,
                 timeout_ms: None,
                 insecure: self.insecure,
+                max_body_bytes: request.max_body_bytes,
             };
             let resp = crate::capsink::http_request(&req).map_err(|e| Error(e.to_string()))?;
             let mut headers = HeaderMap::new();
@@ -216,6 +219,7 @@ pub mod reqwest {
         url: String,
         headers: HeaderMap,
         body: Vec<u8>,
+        max_body_bytes: Option<u64>,
         error: Option<String>,
     }
     impl RequestBuilder {
@@ -254,6 +258,10 @@ pub mod reqwest {
             self.body = body.into();
             self
         }
+        pub fn max_body(mut self, bytes: u64) -> Self {
+            self.max_body_bytes = Some(bytes);
+            self
+        }
         /// Set a form-urlencoded body (progenitor's `RequestBuilderExt::form`).
         pub fn form_urlencoded<T: super::serialize::ToQuery>(mut self, form: &T) -> Self {
             match form.to_query_string() {
@@ -275,6 +283,7 @@ pub mod reqwest {
                 url: self.url,
                 headers: self.headers,
                 body: self.body,
+                max_body_bytes: self.max_body_bytes,
             })
         }
         #[doc(hidden)]
@@ -796,6 +805,15 @@ mod tests {
 
     fn q<T: ::serde::Serialize>(name: &str, v: &T) -> String {
         QueryParam::new(name, v).to_query_string().unwrap()
+    }
+
+    #[test]
+    fn max_body_carried_to_request() {
+        let client = super::reqwest::Client::new();
+        let req = client.get("http://x/").max_body(1 << 26).build().unwrap();
+        assert_eq!(req.max_body_bytes, Some(1 << 26));
+        let req = client.get("http://x/").build().unwrap();
+        assert_eq!(req.max_body_bytes, None);
     }
 
     #[test]

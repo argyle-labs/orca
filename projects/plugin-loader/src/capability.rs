@@ -149,6 +149,12 @@ fn api_call_reply(outcome: spec::surfaces::Outcome) -> Result<Value> {
 /// the op payload the plugin sent (a serialized [`DbOp`] / [`SecretOp`] /
 /// [`HttpRequest`]); the returned `Value` is the reply the supervisor wraps into
 /// a `CapResult`. `db.op` / `secret.op` are confined to `principal`'s namespace.
+const MAX_BODY_CEILING: u64 = 64 * 1024 * 1024;
+
+fn clamp_max_body(requested: Option<u64>) -> Option<usize> {
+    requested.map(|n| n.min(MAX_BODY_CEILING) as usize)
+}
+
 pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
     match cap {
         "db.op" => {
@@ -171,7 +177,8 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
         "http.request" => {
             let req: HttpRequest = serde_json::from_value(args)
                 .map_err(|e| anyhow!("http.request: bad request payload: {e}"))?;
-            let builder = utils::http::shared()
+            let max_body = clamp_max_body(req.max_body_bytes);
+            let mut builder = utils::http::shared()
                 .raw_request(utils::http::RawRequest {
                     method: req.method,
                     url: req.url,
@@ -181,6 +188,9 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
                     insecure: req.insecure,
                 })
                 .map_err(|e| anyhow!("http.request: {e}"))?;
+            if let Some(n) = max_body {
+                builder = builder.max_body(n);
+            }
             let resp = run_on_cap_runtime(builder.send_raw())?
                 .map_err(|e| anyhow!("http.request: {e}"))?;
             Ok(serde_json::to_value(HttpResponse {
@@ -606,6 +616,55 @@ mod tests {
             .expect("request succeeds even for 4xx");
         let resp: HttpResponse = serde_json::from_value(reply).expect("decode HttpResponse");
         assert_eq!(resp.status, 404);
+    }
+
+    fn oversized_response(len: usize) -> &'static [u8] {
+        let mut out = format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\n\r\n").into_bytes();
+        out.resize(out.len() + len, b'x');
+        Box::leak(out.into_boxed_slice())
+    }
+
+    #[test]
+    fn http_request_over_default_cap_fails() {
+        let url = oneshot_http(oversized_response(9 * 1024 * 1024));
+        let err = handle_cap("http.request", json!({"method": "GET", "url": url}), "p")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("exceeded {} bytes", 8 * 1024 * 1024)),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn http_request_raised_cap_succeeds() {
+        let len = 9 * 1024 * 1024;
+        let url = oneshot_http(oversized_response(len));
+        let reply = handle_cap(
+            "http.request",
+            json!({"method": "GET", "url": url, "max_body_bytes": 16 * 1024 * 1024}),
+            "p",
+        )
+        .expect("request succeeds under raised cap");
+        let resp: HttpResponse = serde_json::from_value(reply).expect("decode HttpResponse");
+        assert_eq!(resp.body.len(), len);
+    }
+
+    #[test]
+    fn http_request_max_body_clamped_to_ceiling() {
+        assert_eq!(clamp_max_body(None), None);
+        assert_eq!(clamp_max_body(Some(16)), Some(16));
+        assert_eq!(
+            clamp_max_body(Some(MAX_BODY_CEILING * 4)),
+            Some(MAX_BODY_CEILING as usize)
+        );
+    }
+
+    #[test]
+    fn http_request_payload_without_max_body_deserializes() {
+        let req: HttpRequest =
+            serde_json::from_value(json!({"method": "GET", "url": "http://x/"})).expect("decode");
+        assert_eq!(req.max_body_bytes, None);
     }
 
     #[test]
