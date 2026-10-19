@@ -4656,9 +4656,12 @@ name = "orca-secrets"
 version = "0.2.1-rc.21"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "orca-contract",
  "orca-db",
  "orca-plugin-abi",
  "rusqlite",
+ "tokio",
  "tracing",
 ]
 
