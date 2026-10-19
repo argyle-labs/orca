@@ -902,6 +902,7 @@ pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
         tools.insert(abi_def.name.clone(), abi_def);
     }
     let surfaces = load_surfaces(&software, &proc.api_surfaces, |n| proc.fetch_surface(n))?;
+    check_reaches(&software, &tools, &surfaces)?;
     let surface_policies = surface_tools(&software, &surfaces, &mut tools)?;
     let mut tool_names: Vec<String> = tools.keys().cloned().collect();
     tool_names.sort();
@@ -1043,6 +1044,24 @@ fn load_surfaces(
         out.push((*surface).clone());
     }
     Ok(out)
+}
+
+fn check_reaches(
+    software: &str,
+    tools: &HashMap<String, ToolDef>,
+    surfaces: &[openapi::surface::ApiSurface],
+) -> Result<()> {
+    for def in tools.values() {
+        for op in &def.reaches {
+            if !surfaces.iter().any(|s| s.ops.iter().any(|o| &o.tool == op)) {
+                bail!(
+                    "plugin '{software}' tool '{}' reaches '{op}', which is not an op in its api surfaces",
+                    def.name
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn surface_tools(
@@ -1602,6 +1621,33 @@ mod surface_tests {
         let policies = surface_tools("floorp", &[hidden], &mut only_public).unwrap();
         assert_eq!(policies.len(), 1);
         assert!(!only_public.contains_key("floorp.make"));
+    }
+
+    #[test]
+    fn reaches_must_name_an_op_in_the_plugins_own_surfaces() {
+        let surface = openapi::surface::ApiSurface::parse(&surface_json("main", "reachp")).unwrap();
+        let tool = |reaches: &[&str]| -> HashMap<String, ToolDef> {
+            let def: ToolDef = sj::from_value(sj::json!({
+                "name": "reachp.outer",
+                "description": "",
+                "input_schema": {},
+                "output_schema": {},
+                "reaches": reaches,
+            }))
+            .unwrap();
+            HashMap::from([(def.name.clone(), def)])
+        };
+        let surfaces = std::slice::from_ref(&surface);
+        check_reaches("reachp", &tool(&["reachp.get", "reachp.make"]), surfaces).unwrap();
+        let err = check_reaches("reachp", &tool(&["reachp.nope"]), surfaces)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("reachp.outer") && err.contains("reachp.nope"),
+            "{err}"
+        );
+        assert!(check_reaches("reachp", &tool(&["get"]), surfaces).is_err());
+        assert!(check_reaches("reachp", &tool(&["reachp.get"]), &[]).is_err());
     }
 
     #[test]
