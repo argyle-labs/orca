@@ -1,0 +1,35 @@
+name: sccache pre-warm dispatch
+
+# Plugins pin plugin-toolkit to an orca tag; warming the shared sccache bucket at
+# that tag lets the first plugin CI after a bump hit cache instead of building
+# orca cold. The warm itself lives in argyle-labs/.github.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      orca_tag:
+        description: orca tag to warm.
+        type: string
+        required: true
+
+jobs:
+  dispatch:
+    if: ${{ !endsWith(github.server_url, 'github.com') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch argyle-labs/.github sccache-prewarm
+        env:
+          GITEA_TOKEN: ${{ secrets.ORCA_RELEASE_TOKEN }}
+          ORCA_TAG: ${{ github.event.release.tag_name || inputs.orca_tag }}
+        run: |
+          set -euo pipefail
+          payload=$(jq -n --arg t "$ORCA_TAG" '{ref: "main", inputs: {orca_tag: $t}}')
+          code=$(curl -sS -o /tmp/dispatch-resp.json -w '%{http_code}' \
+            -X POST "https://gitea.scottkey.me/api/v1/repos/argyle-labs/.github/actions/workflows/sccache-prewarm.yml/dispatches" \
+            -H "Authorization: token ${GITEA_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            -d "$payload")
+          echo "dispatch for ${ORCA_TAG}: HTTP $code"
+          [ "$code" = 204 ] || { cat /tmp/dispatch-resp.json; exit 1; }
