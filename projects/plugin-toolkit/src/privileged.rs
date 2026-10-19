@@ -88,6 +88,14 @@ struct Request<'a> {
 /// Run `op` with `payload` as root through `sudo -n $ORCA_BIN admin
 /// plugin-apply`. Returns the op's `detail` on success.
 pub async fn apply<P: Serialize>(plugin: &str, op: &str, payload: Option<&P>) -> Result<String> {
+    let input = request_json(plugin, op, payload)?;
+    if let Some(out) = crate::capsink::privileged_route(
+        crate::abi::PRIVILEGED_APPLY,
+        &String::from_utf8(input.clone())?,
+    ) {
+        let out = out?;
+        return parse_reply(out.success, out.code, &out.stdout, &out.stderr);
+    }
     let orca_bin = std::env::var(ORCA_BIN_ENV).with_context(|| {
         format!("{ORCA_BIN_ENV} is not set, so the orca privileged seam is unavailable")
     })?;
@@ -95,7 +103,6 @@ pub async fn apply<P: Serialize>(plugin: &str, op: &str, payload: Option<&P>) ->
         std::path::Path::new(&orca_bin).is_absolute(),
         "{ORCA_BIN_ENV} must be an absolute path, got {orca_bin:?}"
     );
-    let input = request_json(plugin, op, payload)?;
     let mut child = tokio::process::Command::new("/usr/bin/sudo")
         .arg("-n")
         .arg(&orca_bin)
@@ -334,6 +341,21 @@ mod tests {
             String::from_utf8(body).unwrap(),
             r#"{"plugin":"unraid","op":"ping"}"#
         );
+    }
+
+    #[test]
+    fn an_advertised_core_runs_apply_over_the_cap() {
+        crate::capsink::set_core_privileged(&[crate::abi::PRIVILEGED_APPLY.to_string()]);
+        let out = crate::capsink::with_cap_sink(
+            Box::new(|cap: &str, json: &str| {
+                assert_eq!(cap, crate::abi::PRIVILEGED_APPLY);
+                assert_eq!(json, r#"{"plugin":"unraid","op":"ping"}"#);
+                Ok(r#"{"success":true,"code":0,"stdout":"{\"ok\":true,\"detail\":\"pong\"}\n","stderr":""}"#.into())
+            }),
+            || crate::reactor::block_on(apply::<()>("unraid", "ping", None)),
+        );
+        crate::capsink::set_core_privileged(&[]);
+        assert_eq!(out.unwrap(), "pong");
     }
 
     #[test]

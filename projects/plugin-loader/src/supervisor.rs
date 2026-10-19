@@ -285,6 +285,8 @@ pub fn invoke_on<S: Read + Write>(
             } => {
                 let result = if cap == capability::API_CALL {
                     capability::handle_api_call(args, principal, inv)
+                } else if crate::privileged::is_privileged_cap(&cap) {
+                    crate::privileged::handle_privileged(&cap, args, principal, inv)
                 } else {
                     capability::handle_cap(&cap, args, principal)
                 };

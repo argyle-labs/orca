@@ -46,17 +46,20 @@ pub struct LxcExecResult {
 /// reached (spawn/parse failure). `argv[0]` must be on orca's lxc-exec allowlist
 /// (apt-get/apt/dpkg/dpkg-query/systemctl/true) or the op is refused.
 pub async fn lxc_exec(vmid: u32, argv: &[&str]) -> anyhow::Result<LxcExecResult> {
+    let payload = crate::serde_json::json!({ "vmid": vmid, "argv": argv }).to_string();
+    if let Some(out) = crate::capsink::privileged_route(crate::abi::LXC_EXEC, &payload) {
+        let out = out?;
+        return helper_result(out.success, out.code, out.stdout.as_bytes(), &out.stderr);
+    }
     match std::env::var(ORCA_BIN_ENV) {
-        Ok(orca_bin) if !orca_bin.is_empty() => via_orca(&orca_bin, vmid, argv).await,
+        Ok(orca_bin) if !orca_bin.is_empty() => via_orca(&orca_bin, &payload).await,
         _ => via_direct_pct(vmid, argv).await,
     }
 }
 
 /// Normal path: `sudo -n <orca> admin lxc-exec`, op piped on stdin, result JSON
 /// parsed from stdout.
-async fn via_orca(orca_bin: &str, vmid: u32, argv: &[&str]) -> anyhow::Result<LxcExecResult> {
-    let payload = crate::serde_json::json!({ "vmid": vmid, "argv": argv }).to_string();
-
+async fn via_orca(orca_bin: &str, payload: &str) -> anyhow::Result<LxcExecResult> {
     let mut child = tokio::process::Command::new("sudo")
         .arg("-n")
         .arg(orca_bin)
@@ -77,21 +80,35 @@ async fn via_orca(orca_bin: &str, vmid: u32, argv: &[&str]) -> anyhow::Result<Lx
         .wait_with_output()
         .await
         .map_err(|e| anyhow::anyhow!("wait lxc-exec helper: {e}"))?;
-    if !out.status.success() {
+    helper_result(
+        out.status.success(),
+        out.status.code(),
+        &out.stdout,
+        &String::from_utf8_lossy(&out.stderr),
+    )
+}
+
+fn helper_result(
+    success: bool,
+    code: Option<i32>,
+    stdout: &[u8],
+    stderr: &str,
+) -> anyhow::Result<LxcExecResult> {
+    if !success {
         // Non-zero from the helper itself (e.g. sudo denied) — distinct from the
         // container command failing, which comes back as a parsed result.
         anyhow::bail!(
             "lxc-exec privileged helper failed (exit {}): {}. Is the `orca admin \
              lxc-exec` sudoers grant installed on this Proxmox host? (run `system \
              create --service-user <u>` to converge it)",
-            out.status.code().map_or("signal".into(), |c| c.to_string()),
-            String::from_utf8_lossy(&out.stderr).trim()
+            code.map_or("signal".into(), |c| c.to_string()),
+            stderr.trim()
         );
     }
-    crate::serde_json::from_slice::<LxcExecResult>(&out.stdout).map_err(|e| {
+    crate::serde_json::from_slice::<LxcExecResult>(stdout).map_err(|e| {
         anyhow::anyhow!(
             "parse lxc-exec result: {e}: {}",
-            String::from_utf8_lossy(&out.stdout).trim()
+            String::from_utf8_lossy(stdout).trim()
         )
     })
 }
@@ -117,4 +134,45 @@ async fn via_direct_pct(vmid: u32, argv: &[&str]) -> anyhow::Result<LxcExecResul
         stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         error: String::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_advertised_core_runs_lxc_exec_over_the_cap() {
+        crate::capsink::set_core_privileged(&[crate::abi::LXC_EXEC.to_string()]);
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let seen = sent.clone();
+        let out = crate::capsink::with_cap_sink(
+            Box::new(move |cap: &str, json: &str| {
+                *seen.borrow_mut() = format!("{cap} {json}");
+                Ok(r#"{"success":true,"code":0,"stdout":"{\"success\":true,\"exit_code\":0,\"stdout\":\"hi\",\"stderr\":\"\",\"error\":\"\"}","stderr":""}"#.into())
+            }),
+            || crate::reactor::block_on(lxc_exec(7, &["true"])),
+        );
+        crate::capsink::set_core_privileged(&[]);
+        let out = out.unwrap();
+        assert!(out.success);
+        assert_eq!(out.stdout, "hi");
+        let sent = sent.borrow();
+        let (cap, json) = sent.split_once(' ').unwrap();
+        assert_eq!(cap, crate::abi::LXC_EXEC);
+        let op: LxcOp = crate::serde_json::from_str(json).unwrap();
+        assert_eq!((op.vmid, op.argv), (7, vec!["true".to_string()]));
+    }
+
+    #[derive(crate::serde::Deserialize)]
+    #[serde(crate = "crate::serde")]
+    struct LxcOp {
+        vmid: u32,
+        argv: Vec<String>,
+    }
+
+    #[test]
+    fn a_failed_helper_is_an_error_not_a_result() {
+        let err = helper_result(false, Some(1), b"", "sudo: a password is required").unwrap_err();
+        assert!(err.to_string().contains("password is required"));
+    }
 }

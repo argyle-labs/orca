@@ -38,6 +38,36 @@ pub type CapStreamSink = Box<
 thread_local! {
     static CORE_BODY_B64: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static CORE_NO_FOLLOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CORE_PRIVILEGED: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(any(test, all(feature = "tools", feature = "endpoints")))]
+pub(crate) fn set_core_privileged(caps: &[String]) {
+    let privileged = [
+        crate::abi::LXC_EXEC,
+        crate::abi::LXC_PUSH,
+        crate::abi::PRIVILEGED_APPLY,
+    ];
+    CORE_PRIVILEGED.with(|c| {
+        *c.borrow_mut() = caps
+            .iter()
+            .filter(|cap| privileged.contains(&cap.as_str()))
+            .cloned()
+            .collect()
+    });
+}
+
+/// Run a privileged capability through core when core advertises `cap` and a
+/// sink is installed; `None` means the caller must take its direct path.
+pub(crate) fn privileged_route(
+    cap: &str,
+    op_json: &str,
+) -> Option<Result<crate::abi::HelperOutput>> {
+    if !CORE_PRIVILEGED.with(|c| c.borrow().iter().any(|c| c == cap)) {
+        return None;
+    }
+    cap_route(cap, op_json).map(|reply| Ok(serde_json::from_str(&reply?)?))
 }
 
 #[cfg(any(test, all(feature = "tools", feature = "endpoints")))]
@@ -259,6 +289,30 @@ mod tests {
             err.contains("not running as an orca subprocess"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn privileged_route_needs_the_advertised_cap_and_a_sink() {
+        let sink = || -> CapSink {
+            Box::new(|cap: &str, _: &str| {
+                assert_eq!(cap, crate::abi::LXC_EXEC);
+                Ok(r#"{"success":true,"code":0,"stdout":"{}","stderr":""}"#.into())
+            })
+        };
+        set_core_privileged(&[]);
+        assert!(with_cap_sink(sink(), || privileged_route(crate::abi::LXC_EXEC, "{}")).is_none());
+        set_core_privileged(&[crate::abi::LXC_EXEC.to_string()]);
+        assert!(privileged_route(crate::abi::LXC_EXEC, "{}").is_none());
+        assert!(
+            with_cap_sink(sink(), || privileged_route(
+                crate::abi::PRIVILEGED_APPLY,
+                "{}"
+            ))
+            .is_none()
+        );
+        let out = with_cap_sink(sink(), || privileged_route(crate::abi::LXC_EXEC, "{}"));
+        set_core_privileged(&[]);
+        assert_eq!(out.unwrap().unwrap().code, Some(0));
     }
 
     #[test]
