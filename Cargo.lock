@@ -4661,6 +4661,7 @@ dependencies = [
  "orca-contract",
  "orca-db",
  "orca-plugin-abi",
+ "orca-utils",
  "rusqlite",
  "tokio",
  "tracing",

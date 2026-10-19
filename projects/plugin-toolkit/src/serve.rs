@@ -280,7 +280,7 @@ fn serve_session<S: Read + Write + 'static>(
                                 anyhow::anyhow!("backend '{tool}' failed: {msg}")
                             });
                         }
-                        crate::reactor::block_on(crate::dispatch::dispatch(&tool, args, &ctx))
+                        utils::reactor::block_on(crate::dispatch::dispatch(&tool, args, &ctx))
                     })
                 });
                 drop(beating);

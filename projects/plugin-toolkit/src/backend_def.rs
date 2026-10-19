@@ -921,15 +921,15 @@ mod tests {
             ..Default::default()
         };
         let launched =
-            crate::reactor::block_on(async { proxy.launch(&spec).await }).expect("launch");
+            utils::reactor::block_on(async { proxy.launch(&spec).await }).expect("launch");
         assert_eq!(launched.workload, "web");
         assert_eq!(launched.id.as_deref(), Some("42"));
         assert_eq!(launched.state.as_deref(), Some("running"));
 
-        let stopped = crate::reactor::block_on(async { proxy.stop("web").await }).expect("stop");
+        let stopped = utils::reactor::block_on(async { proxy.stop("web").await }).expect("stop");
         assert_eq!(stopped.state.as_deref(), Some("stopped"));
         let restarted =
-            crate::reactor::block_on(async { proxy.restart("web").await }).expect("restart");
+            utils::reactor::block_on(async { proxy.restart("web").await }).expect("restart");
         assert_eq!(restarted.state.as_deref(), Some("running"));
 
         assert!(deploy_target::deregister_target(&id));
@@ -1073,7 +1073,7 @@ mod tests {
             ..Default::default()
         };
         let launched =
-            crate::reactor::block_on(async { proxy.launch(&spec).await }).expect("launch");
+            utils::reactor::block_on(async { proxy.launch(&spec).await }).expect("launch");
         assert_eq!(launched.detail.as_deref(), Some("node=pve cores=4"));
 
         assert!(deploy_target::deregister_target(&id));

@@ -123,7 +123,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(crate::service::dispatch_op(
+                Some(utils::reactor::block_on(crate::service::dispatch_op(
                     &backend, op, args,
                 )))
             }));
@@ -141,7 +141,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(crate::storage::dispatch_op(
+                Some(utils::reactor::block_on(crate::storage::dispatch_op(
                     &backend, op, args,
                 )))
             }));
@@ -166,7 +166,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(crate::media::dispatch_op(
+                Some(utils::reactor::block_on(crate::media::dispatch_op(
                     &backend, op, args,
                 )))
             }));
@@ -187,7 +187,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(
+                Some(utils::reactor::block_on(
                     crate::contract::unit::dispatch_op(&provider, op, args),
                 ))
             }));
@@ -214,7 +214,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(
+                Some(utils::reactor::block_on(
                     crate::storage::replication_status::dispatch_op(&provider, op, args),
                 ))
             }));
@@ -241,7 +241,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(
+                Some(utils::reactor::block_on(
                     crate::contract::topology::dispatch_op(&collector, op, args),
                 ))
             }));
@@ -272,7 +272,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(crate::containers::dispatch_op(
+                Some(utils::reactor::block_on(crate::containers::dispatch_op(
                     &adapter, op, args,
                 )))
             }));
@@ -295,7 +295,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(crate::deploy_target::dispatch_op(
+                Some(utils::reactor::block_on(crate::deploy_target::dispatch_op(
                     &target, op, args,
                 )))
             }));
@@ -322,7 +322,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(
+                Some(utils::reactor::block_on(
                     crate::contract::subprocess_env::dispatch_op(&provider, op, args),
                 ))
             }));
@@ -347,7 +347,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(
+                Some(utils::reactor::block_on(
                     crate::contract::secrets_backend::dispatch_op(&provider, op, args),
                 ))
             }));
@@ -370,7 +370,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(crate::contract::ups::dispatch_op(
+                Some(utils::reactor::block_on(crate::contract::ups::dispatch_op(
                     &provider, op, args,
                 )))
             }));
@@ -397,7 +397,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(
+                Some(utils::reactor::block_on(
                     crate::contract::diagnostics::dispatch_op(&provider, op, args),
                 ))
             }));
@@ -425,7 +425,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(
+                Some(utils::reactor::block_on(
                     crate::contract::guest_exec::dispatch_op(&provider, op, args),
                 ))
             }));
@@ -453,7 +453,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(
+                Some(utils::reactor::block_on(
                     crate::contract::permissions::dispatch_op(&provider, op, args),
                 ))
             }));
@@ -478,7 +478,7 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(
+                Some(utils::reactor::block_on(
                     crate::contract::host_facts::dispatch_op(&provider, op, args),
                 ))
             }));
@@ -507,7 +507,7 @@ impl Plugin {
             .push(Box::new(move |tool: &str, args: Value| {
                 let rest = tool.strip_prefix("notify.__backend.")?;
                 let (endpoint, op) = rest.rsplit_once('.')?;
-                Some(crate::reactor::block_on(crate::notify::dispatch_op(
+                Some(utils::reactor::block_on(crate::notify::dispatch_op(
                     &provider, endpoint, op, args,
                 )))
             }));

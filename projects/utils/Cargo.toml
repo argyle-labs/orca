@@ -28,7 +28,9 @@ scrub_text = ["dep:regex"]
 # resolution so `utils` stays a dependency-free leaf (see route module rationale).
 state = ["rt"]
 # `utils::framing` + `utils::shutdown` — async runtime helpers (tokio).
-rt = ["dep:tokio", "dep:tokio-util"]
+rt = ["reactor", "dep:tokio-util"]
+# `utils::reactor` — the shared runtime and its sync→async `block_on` bridge.
+reactor = ["dep:tokio"]
 # `utils::search` — glob matching.
 search = ["dep:glob"]
 # `utils::config_format` — parse-check managed config files. Pulls the toml and

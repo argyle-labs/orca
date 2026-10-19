@@ -391,9 +391,15 @@ fn run_secret_op(conn: &Connection, op: &plugin_abi::SecretOp) -> Result<plugin_
                 BACKEND_INLINE => Some(read_inline_value(conn, &row.name)?.ok_or_else(|| {
                     anyhow::anyhow!("inline secret '{}' has no stored value", row.name)
                 })?),
-                other => Some(resolve_external(other, &row.ref_path).map_err(|e| {
-                    anyhow::anyhow!("secret '{}' (backend '{other}'): {e:#}", row.name)
-                })?),
+                other => Some(
+                    utils::reactor::block_on(contract::secrets_backend::resolve(
+                        other,
+                        &row.ref_path,
+                    ))
+                    .map_err(|e| {
+                        anyhow::anyhow!("secret '{}' (backend '{other}'): {e:#}", row.name)
+                    })?,
+                ),
             };
             Ok(SecretReply { value, found: true })
         }
@@ -434,19 +440,6 @@ pub fn ensure_backend_registered(backend: &str) -> Result<()> {
         "secrets backend '{backend}' is not registered on this host; registered: {}",
         registered.join(", ")
     ))
-}
-
-fn resolve_external(backend: &str, ref_path: &str) -> Result<String> {
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?
-                .block_on(contract::secrets_backend::resolve(backend, ref_path))
-        })
-        .join()
-        .map_err(|_| anyhow::anyhow!("secrets backend '{backend}' resolver panicked"))?
-    })
 }
 
 pub fn exec_secret_op_pooled(
