@@ -51,6 +51,13 @@
       "docsUrl": "https://github.com/argyle-labs/dockge#readme"
     },
     {
+      "name": "garage",
+      "status": "available",
+      "targetSoftware": "garage",
+      "repoUrl": "https://github.com/argyle-labs/garage",
+      "docsUrl": "https://github.com/argyle-labs/garage#readme"
+    },
+    {
       "name": "gitea",
       "status": "unreleased",
       "targetSoftware": "gitea",
