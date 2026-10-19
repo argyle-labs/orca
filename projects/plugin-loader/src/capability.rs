@@ -13,7 +13,7 @@
 //! so a tool behaves identically whether its plugin is loaded in-process or run
 //! as a subprocess.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -22,6 +22,7 @@ use plugin_toolkit::abi::{
     SecretOp, WsClose, WsOpen, WsRecv, WsSend,
 };
 use plugin_toolkit::serde_json::{self, Value};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::Instrument;
 
 /// Capability names the daemon serves. Advertised in the handshake `Welcome`.
@@ -150,6 +151,32 @@ fn clamp_max_body(requested: Option<u64>) -> Option<usize> {
     requested.map(|n| n.min(MAX_BODY_CEILING) as usize)
 }
 
+const BODY_BUDGET_BYTES: u32 = 256 * 1024 * 1024;
+const BODY_BUDGET_WAIT: Duration = Duration::from_secs(30);
+
+fn body_budget() -> Arc<Semaphore> {
+    static BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    BUDGET
+        .get_or_init(|| Arc::new(Semaphore::new(BODY_BUDGET_BYTES as usize)))
+        .clone()
+}
+
+async fn reserve_body_budget(
+    budget: Arc<Semaphore>,
+    bytes: usize,
+    wait: Duration,
+) -> Result<OwnedSemaphorePermit> {
+    let bytes = bytes.min(BODY_BUDGET_BYTES as usize) as u32;
+    match tokio::time::timeout(wait, budget.acquire_many_owned(bytes)).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err(anyhow!("http.request: in-flight body budget closed")),
+        Err(_) => Err(anyhow!(
+            "http.request: in-flight body budget exhausted ({BODY_BUDGET_BYTES} bytes); waited {}s for {bytes} bytes",
+            wait.as_secs()
+        )),
+    }
+}
+
 /// Execute one capability request on behalf of `principal` — the authoritative
 /// plugin id bound to this session's socket (see
 /// [`supervisor::PluginProcess`](crate::supervisor::PluginProcess)). `args` is
@@ -180,6 +207,7 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
                 .map_err(|e| anyhow!("http.request: bad request payload: {e}"))?;
             let max_body = clamp_max_body(req.max_body_bytes);
             let body_b64 = req.body_b64;
+            let reserve = max_body.unwrap_or(utils::http::MAX_RESPONSE_BYTES);
             let mut builder = utils::http::shared()
                 .raw_request(utils::http::RawRequest {
                     method: req.method,
@@ -193,8 +221,13 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
             if let Some(n) = max_body {
                 builder = builder.max_body(n);
             }
-            let resp = run_on_cap_runtime(builder.send_raw())?
-                .map_err(|e| anyhow!("http.request: {e}"))?;
+            let resp = run_on_cap_runtime(async move {
+                let _permit = reserve_body_budget(body_budget(), reserve, BODY_BUDGET_WAIT).await?;
+                builder
+                    .send_raw()
+                    .await
+                    .map_err(|e| anyhow!("http.request: {e}"))
+            })??;
             let reply = HttpResponse {
                 status: resp.status,
                 headers: resp.headers.into_iter().collect(),
@@ -721,6 +754,66 @@ mod tests {
             err.contains(&format!("exceeded {MAX_BODY_CEILING} bytes")),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn body_budget_blocks_until_released_then_times_out() {
+        let budget = Arc::new(Semaphore::new(100));
+        run_on_cap_runtime(async move {
+            let held = reserve_body_budget(budget.clone(), 80, Duration::from_millis(50))
+                .await
+                .unwrap();
+            let err = reserve_body_budget(budget.clone(), 40, Duration::from_millis(50))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("in-flight body budget exhausted"),
+                "got: {err}"
+            );
+            let waiter = tokio::spawn(reserve_body_budget(
+                budget.clone(),
+                40,
+                Duration::from_secs(5),
+            ));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(held);
+            let _reserved = waiter.await.unwrap().unwrap();
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn body_budget_allows_concurrent_reservations_within_total() {
+        let budget = Arc::new(Semaphore::new(100));
+        run_on_cap_runtime(async move {
+            let a = reserve_body_budget(budget.clone(), 50, Duration::from_millis(50));
+            let b = reserve_body_budget(budget.clone(), 50, Duration::from_millis(50));
+            let (a, b) = tokio::join!(a, b);
+            let (_a, _b) = (a.unwrap(), b.unwrap());
+            assert_eq!(budget.available_permits(), 0);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn http_request_releases_budget_on_error() {
+        for _ in 0..3 {
+            handle_cap(
+                "http.request",
+                json!({"method": "GET", "url": "http://127.0.0.1:1/", "max_body_bytes": MAX_BODY_CEILING, "timeout_ms": 2000}),
+                "p",
+            )
+            .unwrap_err();
+        }
+        let url = oneshot_http(oversized_response(9 * 1024 * 1024));
+        handle_cap("http.request", json!({"method": "GET", "url": url}), "p").unwrap_err();
+        let full = BODY_BUDGET_BYTES as usize;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while body_budget().available_permits() < full && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(body_budget().available_permits(), full);
     }
 
     #[test]
