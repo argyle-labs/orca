@@ -486,7 +486,7 @@ mod tests {
     fn plugin_table_entry_points_are_bound_to_a_principal() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let allowed = [
-            ("plugin-loader/src/capability.rs", "exec_db_op"),
+            ("db/src/plugin_db_policy.rs", "exec_db_op"),
             ("plugin-toolkit/src/runtime.rs", "exec_db_op_pooled"),
             ("system/src/plugin_manager.rs", "apply_decl"),
         ];

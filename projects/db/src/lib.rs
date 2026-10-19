@@ -39,6 +39,7 @@ pub mod openapi_specs_registry;
 #[cfg(feature = "http")]
 pub mod plugin_creds;
 pub mod plugin_data;
+pub mod plugin_db_policy;
 pub mod plugin_installs;
 /// Parses plugin manifests (TOML). Gated by the default-on `config` feature so a thin plugin —
 /// which reaches `db` via `notifications` but never reads a config file —

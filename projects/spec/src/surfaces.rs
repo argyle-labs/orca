@@ -295,9 +295,8 @@ pub async fn execute(plugin: &str, tool: &str, args: Value, inv: &Invocation) ->
 }
 
 fn endpoint_row(plugin: &str, binding: &EndpointBinding, endpoint: &str) -> Result<DbRow> {
-    let shared = binding.table == SHARED_ENDPOINTS;
-    let reply = db::plugin_tables::exec_db_op_pooled(&DbOp::Get {
-        namespace: if shared {
+    let op = DbOp::Get {
+        namespace: if binding.table == SHARED_ENDPOINTS {
             String::new()
         } else {
             plugin.to_string()
@@ -305,12 +304,14 @@ fn endpoint_row(plugin: &str, binding: &EndpointBinding, endpoint: &str) -> Resu
         table: binding.table.clone(),
         key_col: binding.key.clone(),
         key: endpoint.to_string(),
-    })?;
-    reply
-        .rows
-        .into_iter()
-        .find(|r| !shared || matches!(r.get("provider"), Some(DbValue::Text(p)) if p == plugin))
-        .ok_or_else(|| anyhow!("plugin `{plugin}` has no endpoint `{endpoint}`"))
+    };
+    db::pool::with_pooled_or_open(|conn| {
+        db::plugin_db_policy::exec_db_op_policed(conn, &op, plugin)
+    })?
+    .rows
+    .into_iter()
+    .next()
+    .ok_or_else(|| anyhow!("plugin `{plugin}` has no endpoint `{endpoint}`"))
 }
 
 fn truthy(v: &DbValue) -> bool {
