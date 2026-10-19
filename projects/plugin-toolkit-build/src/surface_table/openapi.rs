@@ -428,7 +428,10 @@ fn response_kinds(spec: &Value) -> Result<BTreeMap<(String, String), ResponseKin
             if json_media(content).is_some() {
                 continue;
             }
-            let kind = match content.keys().find(|ct| !is_text(ct)) {
+            let kind = match content
+                .keys()
+                .find(|ct| !::openapi::surface::is_text_content_type(ct))
+            {
                 Some(ct) => ResponseKind::Binary {
                     content_type: ct.clone(),
                 },
@@ -438,20 +441,6 @@ fn response_kinds(spec: &Value) -> Result<BTreeMap<(String, String), ResponseKin
         }
     }
     Ok(out)
-}
-
-fn is_text(content_type: &str) -> bool {
-    let ct = content_type.split(';').next().unwrap_or_default().trim();
-    ct.starts_with("text/")
-        || ct.ends_with("+json")
-        || ct.ends_with("+xml")
-        || matches!(
-            ct,
-            "application/xml"
-                | "application/yaml"
-                | "application/x-yaml"
-                | "application/javascript"
-        )
 }
 
 fn output_schema(op: &Value, components: &Value) -> Result<Option<Value>> {
@@ -717,6 +706,21 @@ mod tests {
         }}))
         .unwrap();
         assert_eq!(t.find("s.x").unwrap().response, ResponseKind::Text);
+    }
+
+    #[test]
+    fn wildcard_responses_defer_to_decode_time() {
+        let t = one_path(json!({"get": {
+            "operationId": "x",
+            "responses": {"200": {"description": "ok", "content": {"*/*": {"schema": {"type": "string"}}}}}
+        }}))
+        .unwrap();
+        assert_eq!(
+            t.find("s.x").unwrap().response,
+            ResponseKind::Binary {
+                content_type: "*/*".into()
+            }
+        );
     }
 
     #[test]

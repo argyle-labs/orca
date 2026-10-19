@@ -371,7 +371,11 @@ async fn run(
         .into());
     }
     surface
-        .decode_response(op, &resp.body)
+        .decode_response(
+            op,
+            resp.headers.get("content-type").map(String::as_str),
+            &resp.body,
+        )
         .map(Outcome::Response)
 }
 

@@ -506,11 +506,27 @@ impl ApiSurface {
         })
     }
 
-    pub fn decode_response(&self, op: &ApiOp, body: &[u8]) -> Result<Value> {
-        let parsed: Value = match &op.response {
-            ResponseKind::Binary { content_type } => {
+    pub fn decode_response(
+        &self,
+        op: &ApiOp,
+        content_type: Option<&str>,
+        body: &[u8],
+    ) -> Result<Value> {
+        let kind = match (&op.response, content_type) {
+            (
+                ResponseKind::Binary {
+                    content_type: declared,
+                },
+                Some(actual),
+            ) if declared.ends_with("/*") => classify_content_type(actual),
+            (kind, _) => kind.clone(),
+        };
+        let parsed: Value = match kind {
+            ResponseKind::Binary {
+                content_type: declared,
+            } => {
                 return Ok(serde_json::json!({
-                    "content_type": content_type,
+                    "content_type": content_type.unwrap_or(&declared),
                     "base64": utils::encoding::base64_encode(body),
                 }));
             }
@@ -528,6 +544,40 @@ impl ApiSurface {
             coerce_lenient(&mut out, schema, &self.defs, &self.response);
         }
         Ok(out)
+    }
+}
+
+fn media_type(content_type: &str) -> &str {
+    content_type.split(';').next().unwrap_or_default().trim()
+}
+
+pub fn is_json_content_type(content_type: &str) -> bool {
+    media_type(content_type) == "application/json"
+}
+
+pub fn is_text_content_type(content_type: &str) -> bool {
+    let ct = media_type(content_type);
+    ct.starts_with("text/")
+        || ct.ends_with("+json")
+        || ct.ends_with("+xml")
+        || matches!(
+            ct,
+            "application/xml"
+                | "application/yaml"
+                | "application/x-yaml"
+                | "application/javascript"
+        )
+}
+
+pub fn classify_content_type(content_type: &str) -> ResponseKind {
+    if is_json_content_type(content_type) {
+        ResponseKind::Json
+    } else if is_text_content_type(content_type) {
+        ResponseKind::Text
+    } else {
+        ResponseKind::Binary {
+            content_type: content_type.to_string(),
+        }
     }
 }
 
@@ -1094,7 +1144,9 @@ mod tests {
             "maxmem": "1024",
             "name": "100"
         }});
-        let out = s.decode_response(op, body.to_string().as_bytes()).unwrap();
+        let out = s
+            .decode_response(op, None, body.to_string().as_bytes())
+            .unwrap();
         assert_eq!(
             out,
             json!({"template": false, "running": true, "cpu": 0.25, "maxmem": 1024, "name": "100"})
@@ -1113,7 +1165,7 @@ mod tests {
     fn decode_text_response_as_string() {
         let (s, op) = with_response(ResponseKind::Text);
         assert_eq!(
-            s.decode_response(&op, b"plain diff").unwrap(),
+            s.decode_response(&op, None, b"plain diff").unwrap(),
             json!("plain diff")
         );
     }
@@ -1124,8 +1176,44 @@ mod tests {
             content_type: "application/zip".into(),
         });
         assert_eq!(
-            s.decode_response(&op, &[0xff, 0x00, 0x01]).unwrap(),
+            s.decode_response(&op, None, &[0xff, 0x00, 0x01]).unwrap(),
             json!({"content_type": "application/zip", "base64": "/wAB"})
+        );
+    }
+
+    #[test]
+    fn decode_binary_labels_with_actual_content_type() {
+        let (s, op) = with_response(ResponseKind::Binary {
+            content_type: "application/octet-stream".into(),
+        });
+        assert_eq!(
+            s.decode_response(&op, Some("image/png"), &[0xff]).unwrap(),
+            json!({"content_type": "image/png", "base64": "/w=="})
+        );
+    }
+
+    #[test]
+    fn decode_wildcard_classifies_by_actual_content_type() {
+        let (s, op) = with_response(ResponseKind::Binary {
+            content_type: "*/*".into(),
+        });
+        assert_eq!(
+            s.decode_response(&op, Some("application/json; charset=utf-8"), br#"{"a":1}"#)
+                .unwrap(),
+            json!({"a": 1})
+        );
+        assert_eq!(
+            s.decode_response(&op, Some("text/plain"), b"hi").unwrap(),
+            json!("hi")
+        );
+        assert_eq!(
+            s.decode_response(&op, Some("application/zip"), &[0xff])
+                .unwrap(),
+            json!({"content_type": "application/zip", "base64": "/w=="})
+        );
+        assert_eq!(
+            s.decode_response(&op, None, &[0xff]).unwrap(),
+            json!({"content_type": "*/*", "base64": "/w=="})
         );
     }
 
@@ -1133,7 +1221,7 @@ mod tests {
     fn decode_mislabeled_json_falls_back_to_text() {
         let (s, op) = with_response(ResponseKind::Json);
         assert_eq!(
-            s.decode_response(&op, b"not json {").unwrap(),
+            s.decode_response(&op, None, b"not json {").unwrap(),
             json!("not json {")
         );
     }
@@ -1158,7 +1246,9 @@ mod tests {
         let s = proxmox();
         let op = s.find("proxmox.list_vms").unwrap();
         let body = json!({"data": [{"template": 1}, {"template": 0, "cpu": "2"}]});
-        let out = s.decode_response(op, body.to_string().as_bytes()).unwrap();
+        let out = s
+            .decode_response(op, None, body.to_string().as_bytes())
+            .unwrap();
         assert_eq!(
             out,
             json!([{"template": true}, {"template": false, "cpu": 2}])
@@ -1170,7 +1260,7 @@ mod tests {
         let s = proxmox();
         let op = s.find("proxmox.create_role").unwrap();
         assert_eq!(
-            s.decode_response(op, br#"{"data": null}"#).unwrap(),
+            s.decode_response(op, None, br#"{"data": null}"#).unwrap(),
             json!({})
         );
     }
