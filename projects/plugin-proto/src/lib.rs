@@ -40,6 +40,8 @@ pub const PROTOCOL_VERSION: &str = "1.0";
 
 /// Largest frame we will read, guarding against a corrupt/hostile length
 /// prefix. Tool payloads are small JSON; 64 MiB is generous.
+pub const API_SURFACE_FORMAT: &str = "orca.api-surface/v1";
+
 pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 
 /// One tool the plugin contributes. The JSON shape matches the existing
