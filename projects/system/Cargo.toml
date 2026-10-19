@@ -34,6 +34,7 @@ notifications = { workspace = true, default-features = true }
 # state-changing actions on the host remediation policy. No cycle: `containers`
 # depends on none of the higher-level crates.
 containers = { workspace = true }
+container-runtime = { workspace = true }
 auth = { workspace = true }
 dev = { workspace = true }
 # Mesh transport (folded in from the former mesh crate): mTLS over

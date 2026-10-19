@@ -278,13 +278,8 @@ fn web_path(def: &BackendDef) -> String {
 /// `wedge_recover`. This is how docker (bollard) / proxmox (PVE API) contribute
 /// a runtime adapter without any concrete client static-linked into orca.
 fn register_container_runtime_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
-    plugin_toolkit::containers::register_from_def(
-        def.name.clone(),
-        &def.kind,
-        &def.capabilities,
-        invoke,
-    )
-    .map_err(|e| anyhow!("register container_runtime backend '{}': {e}", def.name))
+    containers::register_from_def(def.name.clone(), &def.kind, &def.capabilities, invoke)
+        .map_err(|e| anyhow!("register container_runtime backend '{}': {e}", def.name))
 }
 
 /// Agents-domain entry: register a plugin-backed [`agents::AgentProvider`] that
@@ -611,7 +606,7 @@ fn domain_deregister(domain: &str, name: &str) {
             agents::deregister_provider(name);
         }
         "container_runtime" => {
-            plugin_toolkit::containers::deregister_adapter(name);
+            containers::deregister_adapter(name);
         }
         "unit" => {
             contract::unit::deregister_provider(name);

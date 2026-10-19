@@ -12,6 +12,7 @@ platforms = [
 [final-excludes]
 workspace-members = [
     "orca-acquisition",
+    "orca-container-runtime",
     "orca-containers",
     "orca-contract",
     "orca-db",

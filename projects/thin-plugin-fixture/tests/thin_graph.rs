@@ -9,23 +9,30 @@ const FORBIDDEN: &[&str] = &[
     "tikv-jemalloc-sys",
     "tikv-jemallocator",
     "utoipa",
+    "rusqlite",
+    "libsqlite3-sys",
+    "mysql_async",
+    "lettre",
+    "openssl",
+    "openssl-sys",
+    "blake3",
+    "orca-db",
+    "orca-containers",
+    "orca-notifications",
+    "orca-secrets",
 ];
 
-#[test]
-fn thin_toolkit_graph_excludes_heavy_crates() {
+const PLUGIN_PROFILES: &[&str] = &[
+    "tools,db,delegated-http",
+    "tools,db,containers,delegated-http",
+];
+
+fn forbidden_in(selector: &[&str]) -> Vec<String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let out = Command::new(cargo)
-        .args([
-            "tree",
-            "-p",
-            env!("CARGO_PKG_NAME"),
-            "-e",
-            "normal",
-            "--prefix",
-            "none",
-            "--target",
-            "all",
-        ])
+        .arg("tree")
+        .args(selector)
+        .args(["-e", "normal", "--prefix", "none", "--target", "all"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run cargo tree");
@@ -34,13 +41,32 @@ fn thin_toolkit_graph_excludes_heavy_crates() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let tree = String::from_utf8_lossy(&out.stdout);
-    let found: Vec<&str> = tree
+    String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| l.split_whitespace().next())
         .filter(|name| FORBIDDEN.contains(name))
-        .collect();
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn thin_toolkit_graph_excludes_heavy_crates() {
+    let found = forbidden_in(&["-p", env!("CARGO_PKG_NAME")]);
     assert!(found.is_empty(), "thin plugin graph links {found:?}");
+}
+
+#[test]
+fn plugin_feature_profiles_exclude_heavy_crates() {
+    for features in PLUGIN_PROFILES {
+        let found = forbidden_in(&[
+            "-p",
+            "orca-plugin-toolkit",
+            "--no-default-features",
+            "-F",
+            features,
+        ]);
+        assert!(found.is_empty(), "toolkit [{features}] links {found:?}");
+    }
 }
 
 #[test]

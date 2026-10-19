@@ -461,7 +461,7 @@ pub mod notify {
 }
 #[cfg(feature = "containers")]
 pub mod containers {
-    pub use ::containers::*;
+    pub use ::container_runtime::*;
 }
 /// Generic storage domain. orca treats every storage provider — NFS/SMB
 /// network shares, Proxmox-managed disk storage, … — through one trait + one
