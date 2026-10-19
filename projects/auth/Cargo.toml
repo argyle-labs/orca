@@ -37,6 +37,7 @@ rpassword = { workspace = true }
 [dev-dependencies]
 db = { workspace = true, default-features = true, features = ["test-util"] }
 tempfile = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 model      = { workspace = true }
 

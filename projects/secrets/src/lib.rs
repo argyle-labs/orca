@@ -391,12 +391,9 @@ fn run_secret_op(conn: &Connection, op: &plugin_abi::SecretOp) -> Result<plugin_
                 BACKEND_INLINE => Some(read_inline_value(conn, &row.name)?.ok_or_else(|| {
                     anyhow::anyhow!("inline secret '{}' has no stored value", row.name)
                 })?),
-                other => {
-                    return Err(anyhow::anyhow!(
-                        "secret '{}' uses backend '{other}', not resolvable on this host yet",
-                        row.name
-                    ));
-                }
+                other => Some(resolve_external(other, &row.ref_path).map_err(|e| {
+                    anyhow::anyhow!("secret '{}' (backend '{other}'): {e:#}", row.name)
+                })?),
             };
             Ok(SecretReply { value, found: true })
         }
@@ -418,6 +415,38 @@ fn run_secret_op(conn: &Connection, op: &plugin_abi::SecretOp) -> Result<plugin_
             found: delete(conn, name)?,
         }),
     }
+}
+
+pub fn ensure_backend_registered(backend: &str) -> Result<()> {
+    if backend == BACKEND_INLINE {
+        return Ok(());
+    }
+    let mut registered: Vec<String> = contract::secrets_backend::providers()
+        .iter()
+        .map(|p| p.name().to_string())
+        .collect();
+    if registered.iter().any(|n| n == backend) {
+        return Ok(());
+    }
+    registered.sort();
+    registered.insert(0, BACKEND_INLINE.to_string());
+    Err(anyhow::anyhow!(
+        "secrets backend '{backend}' is not registered on this host; registered: {}",
+        registered.join(", ")
+    ))
+}
+
+fn resolve_external(backend: &str, ref_path: &str) -> Result<String> {
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(contract::secrets_backend::resolve(backend, ref_path))
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("secrets backend '{backend}' resolver panicked"))?
+    })
 }
 
 pub fn exec_secret_op_pooled(
@@ -448,6 +477,88 @@ mod tests {
         assert_eq!(list_grants(&conn).unwrap()[0].granted_by, "alice");
         assert!(revoke(&conn, "mylar", "gitea.api.token").unwrap());
         assert!(exec_secret_op(&conn, &holder, &op).is_err());
+    }
+
+    struct FakeBackend;
+
+    #[async_trait::async_trait]
+    impl contract::secrets_backend::SecretsBackend for FakeBackend {
+        fn name(&self) -> &str {
+            "fake-959"
+        }
+
+        async fn resolve(&self, ref_path: &str) -> Result<String> {
+            match ref_path {
+                "fake://vault/item/credential" => Ok("resolved".into()),
+                _ => Err(anyhow::anyhow!("unknown ref")),
+            }
+        }
+    }
+
+    #[test]
+    fn get_resolves_external_backend_for_granted_holder() {
+        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
+        let conn = test_conn();
+        upsert(
+            &conn,
+            "pve.token",
+            "fake-959",
+            "fake://vault/item/credential",
+            None,
+        )
+        .unwrap();
+        let op = plugin_abi::SecretOp::Get {
+            name: "pve.token".into(),
+        };
+        let holder = Principal::Plugin("proxmox".into());
+        assert!(exec_secret_op(&conn, &holder, &op).is_err());
+        assert!(grant_checked(&conn, "proxmox", "pve.token", "a").unwrap());
+        let reply = exec_secret_op(&conn, &holder, &op).unwrap();
+        assert_eq!(reply.value.as_deref(), Some("resolved"));
+        assert!(reply.found);
+        assert_eq!(read_inline_value(&conn, "pve.token").unwrap(), None);
+    }
+
+    #[test]
+    fn ensure_backend_registered_rejects_unknown_and_lists_registered() {
+        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
+        assert!(ensure_backend_registered("inline").is_ok());
+        assert!(ensure_backend_registered("fake-959").is_ok());
+        let err = ensure_backend_registered("op").unwrap_err().to_string();
+        assert!(err.contains("'op'"), "{err}");
+        assert!(err.contains("inline") && err.contains("fake-959"), "{err}");
+    }
+
+    #[test]
+    fn get_errors_for_unregistered_or_failing_backend() {
+        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
+        let conn = test_conn();
+        upsert(&conn, "a.tok", "absent-959", "x://y", None).unwrap();
+        upsert(&conn, "b.tok", "fake-959", "fake://other", None).unwrap();
+        for name in ["a.tok", "b.tok"] {
+            let op = plugin_abi::SecretOp::Get { name: name.into() };
+            let err = exec_secret_op(&conn, &Principal::Core, &op).unwrap_err();
+            assert!(format!("{err:#}").contains(name));
+        }
+    }
+
+    #[tokio::test]
+    async fn get_resolves_from_inside_a_runtime() {
+        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
+        let conn = test_conn();
+        upsert(
+            &conn,
+            "c.tok",
+            "fake-959",
+            "fake://vault/item/credential",
+            None,
+        )
+        .unwrap();
+        let op = plugin_abi::SecretOp::Get {
+            name: "c.tok".into(),
+        };
+        let reply = exec_secret_op(&conn, &Principal::Core, &op).unwrap();
+        assert_eq!(reply.value.as_deref(), Some("resolved"));
     }
 
     #[test]

@@ -259,6 +259,7 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
             // `op://`/`bw://` syntax is vendor knowledge, and knowing it here
             // is what put a 1Password implementation in core in the first
             // place. The owning backend plugin validates its own refs.
+            secrets::ensure_backend_registered(&args.backend)?;
             if args.ref_path.is_none() {
                 bail!(
                     "`ref_path` is required for backend={} (e.g. 'op://Vault/Item/field')",
@@ -621,10 +622,14 @@ mod tests {
             backend: "nope".into(),
             value: None,
             value_stdin: false,
-            ref_path: None,
+            ref_path: Some("x://y".into()),
             description: None,
         };
-        assert!(write_secret(args).await.is_err());
+        let Err(err) = write_secret(args).await else {
+            panic!("unregistered backend must be rejected");
+        };
+        let err = err.to_string();
+        assert!(err.contains("'nope' is not registered"), "{err}");
     }
 
     #[tokio::test]
@@ -636,10 +641,20 @@ mod tests {
         // SAFETY: single-threaded test; env is restored before returning.
         unsafe { std::env::set_var("ORCA_DB_PATH", &db_path) };
 
-        // A secret pointing at an external backend needs no local plugin to write.
+        struct Upsertable;
+        #[async_trait::async_trait]
+        impl contract::secrets_backend::SecretsBackend for Upsertable {
+            fn name(&self) -> &str {
+                "upsert-test-backend"
+            }
+            async fn resolve(&self, _ref_path: &str) -> anyhow::Result<String> {
+                anyhow::bail!("unused")
+            }
+        }
+        contract::secrets_backend::register_provider(std::sync::Arc::new(Upsertable));
         let report = write_secret(SecretWriteArgs {
             name: "gh".into(),
-            backend: "onepassword".into(),
+            backend: "upsert-test-backend".into(),
             value: None,
             value_stdin: false,
             ref_path: Some("op://Personal/orca-gh/token".into()),
@@ -647,9 +662,11 @@ mod tests {
         })
         .await
         .expect("external-backend upsert succeeds");
-        assert_eq!(report.backend, "onepassword");
+        assert_eq!(report.backend, "upsert-test-backend");
+        assert!(contract::secrets_backend::deregister_provider(
+            "upsert-test-backend"
+        ));
 
-        // With no `secrets_backend` plugin registered, resolution fails cleanly.
         let err = get_secret("gh").await.expect_err("no backend registered");
         assert!(
             err.to_string().contains("no secrets backend"),
