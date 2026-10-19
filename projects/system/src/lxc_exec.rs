@@ -12,10 +12,10 @@
 //!
 //! **Defense in depth (root side).** The privileged executor never trusts the
 //! op blindly: the target `vmid` must be numeric (it is a `u32`, so this is by
-//! construction) and the command basename (`argv[0]`) must be on
+//! construction), `argv[0]` must be a bare name or an exact system path on
 //! [`ALLOWED_COMMANDS`] — the small set the deployment-lifecycle tools actually
-//! need. A compromised or buggy plugin cannot turn this seam into arbitrary
-//! root-in-container exec.
+//! need, and its arguments pass a per-command check that refuses hook and
+//! config-injection options and sensitive read paths.
 //!
 //! Runs **root-side only**, inside the `orca admin lxc-exec` helper behind the
 //! `sudo -n` boundary. The daemon-side bridge is [`crate::autofs::run_privileged`]'s
@@ -31,7 +31,7 @@ use tokio::process::Command;
 /// watchdog. Five minutes covers a package upgrade with margin.
 const LXC_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Command basenames the seam permits as `argv[0]` inside the container. Scoped
+/// Commands the seam permits as `argv[0]`, bare or under `COMMAND_DIRS`. Scoped
 /// to the deployment-lifecycle verbs (package upgrade + service restart + a
 /// couple of read-only probes). Extend deliberately — every entry widens what a
 /// plugin can run as root inside a container.
@@ -90,11 +90,217 @@ impl LxcExecResult {
     }
 }
 
-/// The basename of a command path, for the allowlist check. `apt-get` and
-/// `/usr/bin/apt-get` both resolve to `apt-get`, so an absolute path cannot
-/// smuggle a non-allowlisted binary past the check.
-fn basename(cmd: &str) -> &str {
-    cmd.rsplit('/').next().unwrap_or(cmd)
+const COMMAND_DIRS: &[&str] = &["/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/"];
+
+const APT_SUBCOMMANDS: &[&str] = &[
+    "update",
+    "upgrade",
+    "install",
+    "dist-upgrade",
+    "full-upgrade",
+    "autoremove",
+    "remove",
+    "purge",
+    "clean",
+    "autoclean",
+    "list",
+    "show",
+    "policy",
+];
+
+const APT_DENIED_LONG: &[&str] = &["--option", "--config-file"];
+
+const DPKG_READONLY_OPTIONS: &[&str] = &[
+    "-l",
+    "--list",
+    "-L",
+    "--listfiles",
+    "-s",
+    "--status",
+    "-S",
+    "--search",
+    "-C",
+    "--audit",
+    "--get-selections",
+    "--print-architecture",
+    "--version",
+];
+
+const DPKG_DENIED_LONG: &[&str] = &[
+    "--pre-invoke",
+    "--post-invoke",
+    "--root",
+    "--admindir",
+    "--instdir",
+    "--force-script-chrootless",
+];
+
+const SYSTEMCTL_SUBCOMMANDS: &[&str] = &[
+    "start",
+    "stop",
+    "restart",
+    "reload",
+    "try-restart",
+    "reload-or-restart",
+    "enable",
+    "disable",
+    "status",
+    "is-active",
+    "is-enabled",
+    "is-failed",
+    "show",
+    "cat",
+    "list-units",
+    "list-unit-files",
+    "list-timers",
+    "daemon-reload",
+    "cancel",
+    "reset-failed",
+];
+
+const SYSTEMCTL_DENIED_LONG: &[&str] = &["--host", "--machine", "--root", "--image"];
+
+const SYSTEMCTL_DENIED_SHORT: &[char] = &['H', 'M'];
+
+const SENSITIVE_PATHS: &[&str] = &[
+    "/etc/shadow",
+    "/etc/gshadow",
+    "/etc/sudoers",
+    "/root",
+    "/proc",
+];
+
+fn resolve_command(prog: &str) -> Result<&'static str, String> {
+    let found = if prog.contains('/') {
+        ALLOWED_COMMANDS.iter().copied().find(|name| {
+            COMMAND_DIRS
+                .iter()
+                .any(|dir| prog.strip_prefix(dir) == Some(name))
+        })
+    } else {
+        ALLOWED_COMMANDS.iter().copied().find(|name| *name == prog)
+    };
+    found.ok_or_else(|| {
+        format!(
+            "refused command '{prog}': not on the lxc-exec allowlist ({})",
+            ALLOWED_COMMANDS.join(", ")
+        )
+    })
+}
+
+fn long_name(arg: &str) -> &str {
+    arg.split_once('=').map_or(arg, |(name, _)| name)
+}
+
+fn is_option(arg: &str) -> bool {
+    arg.len() > 1 && arg.starts_with('-')
+}
+
+fn short_flags(arg: &str) -> Option<&str> {
+    arg.strip_prefix('-')
+        .filter(|rest| !rest.is_empty() && !rest.starts_with('-'))
+}
+
+fn refuse(cmd: &str, arg: &str) -> Result<(), String> {
+    Err(format!("refused {cmd} argument '{arg}'"))
+}
+
+fn check_apt(cmd: &str, args: &[String]) -> Result<(), String> {
+    let mut subcommand = false;
+    for arg in args {
+        if arg.contains("::") {
+            return refuse(cmd, arg);
+        }
+        if let Some(flags) = short_flags(arg) {
+            if flags.contains(['o', 'c']) {
+                return refuse(cmd, arg);
+            }
+        } else if is_option(arg) {
+            if APT_DENIED_LONG.contains(&long_name(arg)) {
+                return refuse(cmd, arg);
+            }
+        } else if !subcommand {
+            if !APT_SUBCOMMANDS.contains(&arg.as_str()) {
+                return refuse(cmd, arg);
+            }
+            subcommand = true;
+        } else if arg.contains('/') || arg.ends_with(".deb") {
+            return refuse(cmd, arg);
+        }
+    }
+    Ok(())
+}
+
+fn check_dpkg(args: &[String]) -> Result<(), String> {
+    let mut action = false;
+    for arg in args.iter().filter(|arg| is_option(arg)) {
+        if DPKG_DENIED_LONG.contains(&long_name(arg))
+            || !DPKG_READONLY_OPTIONS.contains(&arg.as_str())
+        {
+            return refuse("dpkg", arg);
+        }
+        action = true;
+    }
+    if action {
+        Ok(())
+    } else {
+        Err("refused dpkg: only read-only query actions are allowed".to_string())
+    }
+}
+
+fn check_dpkg_query(args: &[String]) -> Result<(), String> {
+    match args
+        .iter()
+        .find(|arg| DPKG_DENIED_LONG.contains(&long_name(arg)))
+    {
+        Some(arg) => refuse("dpkg-query", arg),
+        None => Ok(()),
+    }
+}
+
+fn check_systemctl(args: &[String]) -> Result<(), String> {
+    let mut subcommand = false;
+    for arg in args {
+        if let Some(flags) = short_flags(arg) {
+            if flags.contains(SYSTEMCTL_DENIED_SHORT) {
+                return refuse("systemctl", arg);
+            }
+        } else if is_option(arg) {
+            if SYSTEMCTL_DENIED_LONG.contains(&long_name(arg)) {
+                return refuse("systemctl", arg);
+            }
+        } else if !subcommand {
+            if !SYSTEMCTL_SUBCOMMANDS.contains(&arg.as_str()) {
+                return refuse("systemctl", arg);
+            }
+            subcommand = true;
+        }
+    }
+    Ok(())
+}
+
+fn is_sensitive_path(path: &str) -> bool {
+    path.split('/').any(|seg| seg == ".." || seg == ".ssh")
+        || SENSITIVE_PATHS.iter().any(|p| {
+            path.strip_prefix(p)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '.', '-']))
+        })
+        || (path.starts_with("/etc/ssh/") && path.contains("_key") && !path.ends_with(".pub"))
+}
+
+fn check_read(cmd: &str, args: &[String]) -> Result<(), String> {
+    let path = args.iter().find(|arg| {
+        !is_option(arg)
+            && arg.as_str() != "--"
+            && arg.parse::<u64>().is_err()
+            && (!arg.starts_with('/') || is_sensitive_path(arg))
+    });
+    match path {
+        Some(arg) => Err(format!(
+            "refused {cmd} path '{arg}': must be absolute and not sensitive"
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Validate an op against the allowlist without running it. Exposed so the
@@ -105,14 +311,16 @@ pub fn validate(op: &LxcExecOp) -> Result<(), String> {
         .argv
         .first()
         .ok_or_else(|| "empty argv: no command to run".to_string())?;
-    let base = basename(prog);
-    if !ALLOWED_COMMANDS.contains(&base) {
-        return Err(format!(
-            "refused command '{base}': not on the lxc-exec allowlist ({})",
-            ALLOWED_COMMANDS.join(", ")
-        ));
+    let cmd = resolve_command(prog)?;
+    let args = &op.argv[1..];
+    match cmd {
+        "apt-get" | "apt" => check_apt(cmd, args),
+        "dpkg" => check_dpkg(args),
+        "dpkg-query" => check_dpkg_query(args),
+        "systemctl" => check_systemctl(args),
+        "cat" | "head" | "tail" => check_read(cmd, args),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Daemon-side bridge to the root helper: spawn `sudo -n <self> admin lxc-exec`
@@ -288,6 +496,28 @@ impl LxcPushResult {
     }
 }
 
+const PUSH_ALLOWED_PREFIXES: &[&str] = &["/etc/", "/opt/", "/srv/", "/var/lib/"];
+
+const PUSH_ALLOWED_FILES: &[&str] = &["/.pxarexclude"];
+
+const PUSH_DENIED_PREFIXES: &[&str] = &[
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/pam.d/",
+    "/etc/security/",
+    "/etc/ld.so.",
+    "/etc/profile",
+    "/etc/bash.bashrc",
+    "/etc/environment",
+    "/etc/cron",
+    "/etc/apt/",
+    "/etc/dpkg/",
+    "/etc/ssh/",
+    "/etc/init.d/",
+    "/etc/rc",
+    "/etc/update-motd.d/",
+];
+
 /// Split an `owner` string into `(--user, --group?)` arguments. `"u:g"` →
 /// `("u", Some("g"))`, `"u"` → `("u", None)`; empty/`None`/blank → `None` (apply
 /// no ownership). Pure so it is unit-testable without a push.
@@ -314,6 +544,17 @@ fn validate_push_path(path: &str) -> Result<(), String> {
     }
     if path.split('/').any(|seg| seg == "..") {
         return Err(format!("guest path '{path}' contains a '..' component"));
+    }
+    if !PUSH_ALLOWED_PREFIXES.iter().any(|p| path.starts_with(p))
+        && !PUSH_ALLOWED_FILES.contains(&path)
+    {
+        return Err(format!(
+            "guest path '{path}' is outside the lxc-push allowlist ({})",
+            PUSH_ALLOWED_PREFIXES.join(", ")
+        ));
+    }
+    if is_sensitive_path(path) || PUSH_DENIED_PREFIXES.iter().any(|p| path.starts_with(p)) {
+        return Err(format!("guest path '{path}' is a protected location"));
     }
     Ok(())
 }
@@ -394,6 +635,29 @@ pub async fn run_privileged_lxc_push(op: &LxcPushOp) -> LxcPushResult {
     }
 }
 
+async fn guest_path_is_symlink(vmid: u32, path: &str) -> bool {
+    let probe = Command::new("pct")
+        .args([
+            "exec",
+            &vmid.to_string(),
+            "--",
+            "stat",
+            "-c",
+            "%F",
+            "--",
+            path,
+        ])
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+    match tokio::time::timeout(LXC_PUSH_TIMEOUT, probe).await {
+        Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout).trim() == "symbolic link",
+        _ => false,
+    }
+}
+
 /// Execute an [`LxcPushOp`] as root via `pct push`. Called only from the
 /// `orca admin lxc-push` CLI path (behind `sudo -n`). SAFETY-CRITICAL: the host
 /// staging path is chosen entirely root-side (O_EXCL + 0600 in a root-owned dir),
@@ -407,6 +671,13 @@ pub async fn execute_privileged_lxc_push(op: LxcPushOp) -> LxcPushResult {
         return LxcPushResult::refused(format!(
             "contents {} bytes exceeds the {LXC_PUSH_MAX_BYTES}-byte push cap",
             op.contents.len()
+        ));
+    }
+
+    if guest_path_is_symlink(op.vmid, &op.path).await {
+        return LxcPushResult::refused(format!(
+            "guest path '{}' is a symlink; refusing to follow it",
+            op.path
         ));
     }
 
@@ -522,11 +793,11 @@ mod tests {
     #[test]
     fn allowlist_accepts_readonly_diagnostics() {
         // Read-only probes added to unblock in-guest disk/log monitoring.
-        for cmd in ["df", "cat", "ls", "stat", "head", "tail", "systemctl"] {
+        for cmd in ["df", "cat", "ls", "stat", "head", "tail"] {
             assert!(
                 validate(&LxcExecOp {
                     vmid: 100,
-                    argv: vec![cmd.into(), "example".into()],
+                    argv: vec![cmd.into(), "/etc/os-release".into()],
                 })
                 .is_ok(),
                 "{cmd} should be allowlisted"
@@ -557,6 +828,141 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.contains("empty argv"), "{err}");
+    }
+
+    fn check(argv: &[&str]) -> Result<(), String> {
+        validate(&LxcExecOp {
+            vmid: 100,
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    #[test]
+    fn legit_callers_still_pass() {
+        for argv in [
+            &["apt-get", "update"][..],
+            &[
+                "apt-get",
+                "install",
+                "-y",
+                "--only-upgrade",
+                "jellyfin",
+                "jellyfin-server",
+            ],
+            &["apt-get", "upgrade", "-y"],
+            &["systemctl", "restart", "jellyfin"],
+            &[
+                "systemctl",
+                "stop",
+                "--job-mode=fail",
+                "orca-guest-update.service",
+            ],
+            &["systemctl", "show", "-p", "ActiveState", "x.service"],
+            &["systemctl", "daemon-reload"],
+            &["head", "-c", "65536", "--", "/etc/os-release"],
+            &["tail", "-n", "50", "/var/log/syslog"],
+            &["stat", "-L", "-c", "%F|%s", "--", "/etc/inittab"],
+            &["dpkg-query", "-W", "jellyfin"],
+            &["dpkg", "-l"],
+            &["/usr/bin/systemctl", "restart", "jellyfin"],
+            &["/bin/cat", "/etc/hostname"],
+            &["true"],
+        ] {
+            assert!(check(argv).is_ok(), "{argv:?}: {:?}", check(argv));
+        }
+    }
+
+    #[test]
+    fn argv0_must_be_exact_system_path() {
+        assert!(check(&["/tmp/apt-get", "update"]).is_err());
+        assert!(check(&["/usr/local/bin/cat", "/etc/hostname"]).is_err());
+        assert!(check(&["./cat", "/etc/hostname"]).is_err());
+        assert!(check(&["/usr/bin/../../tmp/cat", "/etc/hostname"]).is_err());
+    }
+
+    #[test]
+    fn apt_option_injection_refused() {
+        assert!(check(&["apt-get", "-o", "APT::Update::Pre-Invoke::=id", "update"]).is_err());
+        assert!(check(&["apt-get", "-oAPT::Update::Pre-Invoke::=id", "update"]).is_err());
+        assert!(check(&["apt-get", "-yo", "x", "update"]).is_err());
+        assert!(check(&["apt-get", "--option=Dpkg::Pre-Invoke::=id", "update"]).is_err());
+        assert!(check(&["apt", "-c", "/tmp/evil.conf", "update"]).is_err());
+        assert!(check(&["apt-get", "--config-file", "/tmp/evil.conf", "update"]).is_err());
+        assert!(check(&["apt-get", "install", "/tmp/evil.deb"]).is_err());
+        assert!(check(&["apt-get", "install", "./evil.deb"]).is_err());
+        assert!(check(&["apt-get", "source", "jellyfin"]).is_err());
+    }
+
+    #[test]
+    fn dpkg_hooks_and_installs_refused() {
+        assert!(check(&["dpkg", "--pre-invoke=id", "-l"]).is_err());
+        assert!(check(&["dpkg", "--post-invoke", "id", "-l"]).is_err());
+        assert!(check(&["dpkg", "--root=/tmp/x", "-l"]).is_err());
+        assert!(check(&["dpkg", "--admindir", "/tmp/x", "-l"]).is_err());
+        assert!(check(&["dpkg", "--instdir=/tmp/x", "-l"]).is_err());
+        assert!(check(&["dpkg", "--force-script-chrootless", "-l"]).is_err());
+        assert!(check(&["dpkg", "-i", "/tmp/evil.deb"]).is_err());
+        assert!(check(&["dpkg", "jellyfin"]).is_err());
+        assert!(check(&["dpkg-query", "--admindir=/tmp/x", "-W"]).is_err());
+    }
+
+    #[test]
+    fn systemctl_remote_and_unknown_verbs_refused() {
+        assert!(check(&["systemctl", "-H", "host", "restart", "x"]).is_err());
+        assert!(check(&["systemctl", "--machine=other", "restart", "x"]).is_err());
+        assert!(check(&["systemctl", "--root=/tmp", "enable", "x"]).is_err());
+        assert!(check(&["systemctl", "edit", "x"]).is_err());
+        assert!(check(&["systemctl", "set-environment", "LD_PRELOAD=/tmp/x"]).is_err());
+    }
+
+    #[test]
+    fn sensitive_reads_refused() {
+        for path in [
+            "/etc/shadow",
+            "/etc/gshadow",
+            "/etc/shadow-",
+            "/etc/sudoers",
+            "/etc/sudoers.d/orca",
+            "/root/.bash_history",
+            "/home/u/.ssh/id_ed25519",
+            "/etc/ssh/ssh_host_ed25519_key",
+            "/proc/1/environ",
+            "/etc/../etc/shadow",
+            "etc/shadow",
+        ] {
+            for cmd in ["cat", "head", "tail"] {
+                assert!(check(&[cmd, path]).is_err(), "{cmd} {path}");
+            }
+        }
+        assert!(check(&["head", "-c", "10", "--", "/etc/shadow"]).is_err());
+        assert!(check(&["cat", "/etc/ssh/ssh_host_ed25519_key.pub"]).is_ok());
+    }
+
+    #[test]
+    fn push_destinations_restricted() {
+        assert!(validate_push_path("/etc/systemd/system/x.service.d/autologin.conf").is_ok());
+        assert!(validate_push_path("/etc/inittab").is_ok());
+        assert!(validate_push_path("/.pxarexclude").is_ok());
+        assert!(validate_push_path("/var/lib/app/config.yml").is_ok());
+        for path in [
+            "/usr/local/bin/apt-get",
+            "/usr/bin/systemctl",
+            "/bin/sh",
+            "/tmp/x",
+            "/root/.ssh/authorized_keys",
+            "/home/u/.ssh/authorized_keys",
+            "/etc/sudoers.d/evil",
+            "/etc/shadow",
+            "/etc/passwd",
+            "/etc/ld.so.preload",
+            "/etc/pam.d/common-auth",
+            "/etc/cron.d/evil",
+            "/etc/apt/apt.conf.d/99evil",
+            "/etc/profile.d/evil.sh",
+            "/etc/ssh/sshd_config",
+        ] {
+            assert!(validate_push_path(path).is_err(), "{path}");
+        }
     }
 
     #[test]
