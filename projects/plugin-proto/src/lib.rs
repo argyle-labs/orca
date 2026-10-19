@@ -69,6 +69,13 @@ pub struct ToolDef {
     pub local_only: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiSurfaceRef {
+    pub name: String,
+    pub sha256: String,
+    pub format: String,
+}
+
 /// The identity an [`Frame::Invoke`] acts for, resolved by the daemon from the
 /// request itself (REST session, MCP auth, or a verified mesh caller token).
 /// Never the daemon's own operator identity.
@@ -106,6 +113,8 @@ pub enum Frame {
         /// Declared SQL schema, verbatim (applied by the daemon). `null` = none.
         #[serde(default, skip_serializing_if = "Value::is_null")]
         schema: Value,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        api_surfaces: Vec<ApiSurfaceRef>,
     },
     /// orca → plugin, accepts the handshake. Lists capabilities the daemon offers.
     Welcome {
@@ -140,7 +149,11 @@ pub enum Frame {
         error_kind: Option<String>,
     },
     /// plugin → orca: call a host capability. `id` is the plugin's request id.
-    Cap { id: u64, cap: String, args: Value },
+    Cap {
+        id: u64,
+        cap: String,
+        args: Value,
+    },
     /// orca → plugin: result of a [`Frame::Cap`] with the matching `id`.
     CapResult {
         id: u64,
@@ -159,7 +172,11 @@ pub enum Frame {
     /// and the daemon only emits them for a capability the plugin opted into by
     /// name (e.g. `http.stream`). `seq` is a monotonic per-stream index so the
     /// plugin can detect a gap; the first chunk is `seq == 0`.
-    CapStreamChunk { id: u64, seq: u64, data: Value },
+    CapStreamChunk {
+        id: u64,
+        seq: u64,
+        data: Value,
+    },
     /// orca → plugin: terminates a streaming capability's chunk sequence for
     /// `id`. `ok == false` carries a mid-stream failure in `error` (the plugin
     /// treats already-delivered chunks as valid but the stream as truncated).
@@ -167,6 +184,18 @@ pub enum Frame {
     CapStreamEnd {
         id: u64,
         ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    SurfaceGet {
+        id: u64,
+        name: String,
+    },
+    Surface {
+        id: u64,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        body: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -311,6 +340,27 @@ mod tests {
                 "endpoint": "",
             })],
             schema: Value::Null,
+            api_surfaces: vec![ApiSurfaceRef {
+                name: "pve".into(),
+                sha256: "ab".repeat(32),
+                format: "orca.api-surface/v1".into(),
+            }],
+        });
+        roundtrip(&Frame::SurfaceGet {
+            id: 7,
+            name: "pve".into(),
+        });
+        roundtrip(&Frame::Surface {
+            id: 7,
+            ok: true,
+            body: "{}".into(),
+            error: None,
+        });
+        roundtrip(&Frame::Surface {
+            id: 8,
+            ok: false,
+            body: String::new(),
+            error: Some("unknown surface".into()),
         });
         roundtrip(&Frame::Invoke {
             id: 42,
@@ -409,6 +459,58 @@ mod tests {
         .unwrap();
         let OldFrame::Invoke { id, tool, args } = serde_json::from_slice(&bytes).unwrap();
         assert_eq!((id, tool.as_str(), args), (2, "t.x", json!({})));
+    }
+
+    #[test]
+    fn old_hello_decodes_with_no_api_surfaces() {
+        let old = br#"{"kind":"hello","protocol":"1.0","plugin":"p","version":"1","manifest":[],"backends":[]}"#;
+        let Frame::Hello { api_surfaces, .. } = serde_json::from_slice(old).unwrap() else {
+            panic!("not a hello")
+        };
+        assert!(api_surfaces.is_empty());
+    }
+
+    #[test]
+    fn hello_without_api_surfaces_omits_the_field() {
+        let body = serde_json::to_value(Frame::Hello {
+            protocol: "1.0".into(),
+            plugin: "p".into(),
+            version: "1".into(),
+            manifest: vec![],
+            backends: vec![],
+            schema: Value::Null,
+            api_surfaces: vec![],
+        })
+        .unwrap();
+        assert!(body.get("api_surfaces").is_none(), "{body}");
+    }
+
+    #[test]
+    fn hello_with_api_surfaces_decodes_in_an_old_shape() {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum OldFrame {
+            Hello {
+                plugin: String,
+                manifest: Vec<ToolDef>,
+            },
+        }
+        let bytes = serde_json::to_vec(&Frame::Hello {
+            protocol: "1.0".into(),
+            plugin: "p".into(),
+            version: "1".into(),
+            manifest: vec![],
+            backends: vec![],
+            schema: Value::Null,
+            api_surfaces: vec![ApiSurfaceRef {
+                name: "s".into(),
+                sha256: "00".into(),
+                format: "f".into(),
+            }],
+        })
+        .unwrap();
+        let OldFrame::Hello { plugin, manifest } = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!((plugin.as_str(), manifest.len()), ("p", 0));
     }
 
     #[test]
