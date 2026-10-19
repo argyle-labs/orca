@@ -79,6 +79,8 @@ pub mod http;
 /// X.509 + key generation. Gated by the `pki` feature.
 #[cfg(feature = "pki")]
 pub mod pki;
+#[cfg(feature = "reactor")]
+pub mod reactor;
 /// Cron scheduling. Gated by the `schedule` feature; hides the cron lib (and,
 /// with it, chrono) behind a `Timestamp`-only surface.
 #[cfg(feature = "schedule")]

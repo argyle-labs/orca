@@ -435,7 +435,15 @@ where
     }
     // Held across load→save so a concurrent sweep of the same owner cannot
     // drop this run's records.
-    let _lock = match ledger_path.as_deref().map(lock_ledger).transpose() {
+    let mut locked = ledger_path.as_deref().map(lock_ledger).transpose();
+    for _ in 0..LOCK_RETRIES {
+        if !matches!(locked, Ok(Some(None))) {
+            break;
+        }
+        crate::time::sleep(LOCK_RETRY_DELAY).await;
+        locked = ledger_path.as_deref().map(lock_ledger).transpose();
+    }
+    let _lock = match locked {
         Ok(Some(None)) => {
             merged.errors.push(format!(
                 "mount recovery sweep already in progress for {owner}"
@@ -549,6 +557,9 @@ fn stopped_ledger_file(home: &Path, owner: &str) -> PathBuf {
     home.join("state")
         .join(format!("mount_recover_stopped.{owner}.json"))
 }
+
+const LOCK_RETRIES: u32 = 20;
+const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// `Ok(None)` when another sweep holds the lock; never blocks the caller's thread.
 fn lock_ledger(path: &Path) -> std::io::Result<Option<std::fs::File>> {

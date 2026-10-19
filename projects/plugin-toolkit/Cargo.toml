@@ -152,7 +152,7 @@ macro-runtime = { workspace = true, optional = true }
 notifications = { workspace = true, optional = true }
 containers = { workspace = true, optional = true }
 # Runtime primitives — plugins reach these through the toolkit, never directly.
-utils       = { workspace = true, features = ["scrub_text"] }
+utils       = { workspace = true, features = ["scrub_text", "reactor"] }
 # `default-features = false` drops graphql's `shopify` feature, and with it
 # reqwest + toml. A plugin using the generic GraphQL client (unraid) goes
 # through delegated `utils::http`; only daemon-side `spec` proxies Shopify.
