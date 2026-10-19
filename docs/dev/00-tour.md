@@ -49,7 +49,7 @@ When you run `orca` with no subcommand, `main.rs` builds a `Session` and calls e
 ### 3. Web Server (axum)
 `orca serve` calls `serve::run()` in `projects/server/src/serve/mod.rs`. It builds an axum `Router`, binds a TCP listener, and serves:
 - `/api/*` — JSON REST endpoints for all registered features
-- `/scalar*` — API reference viewer
+- `/docs` — Scalar API reference (sign-in shell); `/docs.json` — the OpenAPI spec (auth required)
 - `/*` — proxied to the web UI, served by the out-of-process `peacock`
   plugin (repo [argyle-labs/peacock](https://github.com/argyle-labs/peacock)),
   which owns the root route `/`. If no web plugin is registered the build is

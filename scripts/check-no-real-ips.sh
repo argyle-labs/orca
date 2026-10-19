@@ -29,7 +29,7 @@ status=0
 
 # Every tracked file except this one — it must be able to name patterns.
 tracked_files() {
-  git ls-files -z | grep -zv '^scripts/check-no-real-ips.sh$'
+  git ls-files -z | grep -zvE '^(scripts/check-no-real-ips\.sh|projects/server/assets/scalar/.*)$'
 }
 
 # ── Layer 1: configured real-range patterns ──────────────────────────────────

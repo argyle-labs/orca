@@ -716,14 +716,20 @@ async fn bootstrap_status_handler(
     })
 }
 
-async fn scalar_handler(
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> axum::response::Response {
-    let spec_url = params
-        .get("url")
-        .cloned()
-        .unwrap_or_else(|| "/api/openapi.json".to_string());
-    render_scalar(&spec_url, "API Reference")
+async fn docs_handler() -> axum::response::Response {
+    render_scalar("/docs.json", "API Reference")
+}
+
+const SCALAR_JS: &[u8] = include_bytes!("../../assets/scalar/standalone-1.75.0.js");
+
+async fn scalar_asset_handler() -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{Response, header};
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/javascript; charset=utf-8")
+        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .body(Body::from(SCALAR_JS))
+        .expect("hardcoded headers are valid")
 }
 
 fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
@@ -828,8 +834,7 @@ fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
             body: JSON.stringify({{ username, password }}),
           }});
           if (r.ok) {{
-            document.getElementById('orca-p').value = '';
-            await checkMe();
+            location.reload();
           }} else {{
             const txt = await r.text();
             setStatus(`signin failed: ${{r.status}} ${{txt}}`, 'err');
@@ -840,13 +845,13 @@ fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
         try {{
           await fetch('/api/auth/web/signout', {{ method: 'POST', credentials: 'include' }});
         }} catch (_e) {{}}
-        await checkMe();
+        location.reload();
       }});
       checkMe();
     }})();
   </script>
-  <script id="api-reference" data-url="{spec_url}"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+  <script id="api-reference" data-url="{spec_url}" data-configuration='{{"withDefaultFonts":false}}'></script>
+  <script src="/docs/scalar-1.75.0.js"></script>
 </body>
 </html>"#
     );
@@ -1689,11 +1694,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // Spec endpoints — registered after split so they are not themselves
         // documented in the spec (would be circular and noisy).
         .route("/api/health", get(ping_handler))
-        .route("/api/openapi.json", get(openapi::openapi_handler))
-        .route(
-            "/api/openapi/public.json",
-            get(openapi::openapi_public_handler),
-        )
+        .route("/docs.json", get(openapi::openapi_handler))
         // Live managed-unit catalog for CLI runtime service discovery.
         .route("/api/catalog", get(openapi::unit_catalog_handler))
         // Live MCP tool catalog + daemon version. The `mcp-serve` stdio bridge
@@ -1705,11 +1706,8 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // instead of the fragile stdio bridge. Behind require_auth (like
         // /api/mcp/catalog); the tools/call path re-applies per-tool RBAC.
         .route("/api/mcp", post(mcp_jsonrpc_handler))
-        // Scalar API reference viewer — served by Rust so it works in the
-        // prerendered static build (SvelteKit SSR routes don't survive embedding).
-        // One unified spec: per-operation `x-codeSamples` render REST / CLI /
-        // MCP invocation forms as tabs on the same page.
-        .route("/scalar", get(scalar_handler))
+        .route("/docs", get(docs_handler))
+        .route("/docs/scalar-1.75.0.js", get(scalar_asset_handler))
         // Open probe: lets the browser TokenGate decide which UI to show
         // (one-click bootstrap vs. paste an existing token).
         .route("/api/auth/bootstrap", get(bootstrap_status_handler))
@@ -1968,35 +1966,27 @@ mod tests {
         );
     }
 
-    // ── scalar_handler (Query → render_scalar) ─────────────────────────────────
-
     #[tokio::test]
-    async fn scalar_handler_defaults_spec_url_when_absent() {
-        let params = std::collections::HashMap::new();
-        let resp = scalar_handler(axum::extract::Query(params)).await;
+    async fn docs_handler_points_at_docs_json() {
+        let resp = docs_handler().await;
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
         let html = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(
-            html.contains(r#"data-url="/api/openapi.json""#),
-            "default spec url missing"
-        );
+        assert!(html.contains(r#"data-url="/docs.json""#));
     }
 
     #[tokio::test]
-    async fn scalar_handler_honors_url_param() {
-        let mut params = std::collections::HashMap::new();
-        params.insert("url".to_string(), "/other/spec.json".to_string());
-        let resp = scalar_handler(axum::extract::Query(params)).await;
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+    async fn scalar_asset_handler_serves_vendored_bundle() {
+        let resp = scalar_asset_handler().await;
+        assert_eq!(
+            resp.headers()[axum::http::header::CONTENT_TYPE],
+            "text/javascript; charset=utf-8"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
             .await
             .unwrap();
-        let html = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(
-            html.contains(r#"data-url="/other/spec.json""#),
-            "url param not honoured"
-        );
+        assert_eq!(bytes.len(), SCALAR_JS.len());
     }
 
     // ── proxy_http (upstream unreachable → 502) ────────────────────────────────
@@ -2026,13 +2016,13 @@ mod tests {
     }
 
     // ── render_scalar (auth widget + Scalar wiring) ─────────────────────────────
-    // The Scalar viewer HTML carries an inline sign-in widget and the Scalar
-    // CDN bootstrap. These are load-bearing UI wiring, not decoration — assert
+    // The Scalar viewer HTML carries an inline sign-in widget and the vendored
+    // Scalar bootstrap. These are load-bearing UI wiring, not decoration — assert
     // they survive the format!().
 
     #[tokio::test]
-    async fn render_scalar_embeds_auth_widget_and_scalar_cdn() {
-        let resp = render_scalar("/api/openapi.json", "Ref");
+    async fn render_scalar_embeds_auth_widget_and_vendored_scalar() {
+        let resp = render_scalar("/docs.json", "Ref");
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
@@ -2053,9 +2043,10 @@ mod tests {
             "scalar mount missing"
         );
         assert!(
-            body.contains("@scalar/api-reference"),
-            "scalar cdn script missing"
+            body.contains(r#"src="/docs/scalar-1.75.0.js""#),
+            "vendored scalar script missing"
         );
+        assert!(!body.contains("cdn."), "no runtime CDN");
     }
 
     // ── mcp_catalog_handler ─────────────────────────────────────────────────────

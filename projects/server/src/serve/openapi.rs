@@ -76,12 +76,6 @@ pub async fn openapi_handler() -> impl axum::response::IntoResponse {
     axum::Json(orca_spec_json())
 }
 
-pub async fn openapi_public_handler() -> impl axum::response::IntoResponse {
-    axum::Json(db::openapi_specs_registry::filter_orca_public(
-        orca_spec_json(),
-    ))
-}
-
 /// Live managed-unit catalog — every `unit.<kind>.<verb|action>` op the loaded
 /// providers currently expose, with typed input/output schemas. The `orca unit`
 /// CLI fetches this to build its command tree + `--help` against what's actually

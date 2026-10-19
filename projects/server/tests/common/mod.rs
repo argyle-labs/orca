@@ -151,7 +151,7 @@ pub async fn oneshot_json(
 }
 
 /// Like [`oneshot_json`] but returns the raw body bytes (for non-JSON routes
-/// such as `/scalar`, and for asserting on error text).
+/// such as `/docs`, and for asserting on error text).
 pub async fn oneshot_raw(
     router: Router,
     method: &str,

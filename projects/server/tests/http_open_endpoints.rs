@@ -24,7 +24,7 @@ async fn health_reports_ok_true() {
 async fn mcp_catalog_has_version_and_tools() {
     let env = with_isolated_env();
     // NOTE: `/api/mcp/catalog` is NOT an open path — it is gated by `require_auth`
-    // (only `/api/health`, `/api/openapi*`, `/scalar`, `/api/auth/bootstrap`, and
+    // (only `/api/health`, `/api/auth/bootstrap`, and
     // the web-auth routes are open). The mcp-serve stdio bridge reads it with the
     // loopback bearer token, so we authenticate here too.
     let token = common::mint_admin_token(&env);
@@ -68,11 +68,19 @@ async fn bootstrap_status_unavailable_once_a_token_exists() {
 }
 
 #[tokio::test]
-async fn openapi_json_parses_and_declares_openapi_version() {
+async fn docs_json_requires_auth() {
     let env = with_isolated_env();
-    let (status, body) = oneshot_json(env.router(), "GET", "/api/openapi.json", None, None).await;
+    let _tok = common::mint_admin_token(&env);
+    let (status, _) = oneshot_raw(env.router(), "GET", "/docs.json", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn docs_json_served_to_read_role() {
+    let env = with_isolated_env();
+    let token = common::mint_token(&env, "read");
+    let (status, body) = oneshot_json(env.router(), "GET", "/docs.json", Some(&token), None).await;
     assert_eq!(status, StatusCode::OK);
-    // A valid OpenAPI document carries `openapi` + `paths`.
     assert!(
         body["openapi"].as_str().is_some(),
         "spec must declare an openapi version: {body}"
@@ -83,16 +91,57 @@ async fn openapi_json_parses_and_declares_openapi_version() {
     );
 }
 
+fn prod_router(env: &common::IsolatedEnv) -> axum::Router {
+    orca::serve::build_router(false, env.db_path.clone())
+}
+
 #[tokio::test]
-async fn openapi_public_json_parses() {
+async fn old_spec_routes_are_gone() {
     let env = with_isolated_env();
-    let (status, body) =
-        oneshot_json(env.router(), "GET", "/api/openapi/public.json", None, None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        body["openapi"].as_str().is_some(),
-        "public spec must declare an openapi version"
-    );
+    let token = common::mint_admin_token(&env);
+    for path in ["/api/openapi.json", "/api/openapi/public.json", "/scalar"] {
+        for bearer in [None, Some(token.as_str())] {
+            let (status, bytes) = oneshot_raw(prod_router(&env), "GET", path, bearer, None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("\"openapi\""),
+                "{path}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn prefix_confusion_paths_are_not_public() {
+    let env = with_isolated_env();
+    let _tok = common::mint_admin_token(&env);
+    for path in [
+        "/api/healthX",
+        "/api/health/x",
+        "/api/health/../v1/auth.token.list",
+        "/api/auth/web/signinX",
+        "/api/auth/bootstrap/x",
+        "/docs.jsonX",
+        "/docsX",
+        "/docs.json/x",
+        "/docs/../docs.json",
+    ] {
+        let (status, bytes) = oneshot_raw(prod_router(&env), "GET", path, None, None).await;
+        assert_ne!(status, StatusCode::OK, "{path}");
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("\"openapi\""),
+            "{path}"
+        );
+    }
+    let (status, _) = oneshot_raw(
+        prod_router(&env),
+        "POST",
+        "/api/health/../v1/auth.token.list",
+        None,
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -111,18 +160,23 @@ async fn catalog_returns_json_document() {
 }
 
 #[tokio::test]
-async fn scalar_serves_html_reference() {
+async fn docs_serves_html_reference_unauthenticated() {
     let env = with_isolated_env();
-    let (status, bytes) = oneshot_raw(env.router(), "GET", "/scalar", None, None).await;
+    let _tok = common::mint_admin_token(&env);
+    let (status, bytes) = oneshot_raw(env.router(), "GET", "/docs", None, None).await;
     assert_eq!(status, StatusCode::OK);
-    let html = String::from_utf8(bytes).expect("scalar body is utf-8");
-    assert!(
-        html.contains("<title>API Reference</title>"),
-        "scalar page should carry its title"
-    );
-    // The default spec URL is embedded into the page.
-    assert!(
-        html.contains("/api/openapi.json"),
-        "scalar should reference the default spec url"
-    );
+    let html = String::from_utf8(bytes).expect("docs body is utf-8");
+    assert!(html.contains("<title>API Reference</title>"));
+    assert!(html.contains(r#"data-url="/docs.json""#));
+    assert!(html.contains(r#"id="orca-signin""#));
+    assert!(!html.contains("\"paths\""), "shell must not embed the spec");
+}
+
+#[tokio::test]
+async fn docs_scalar_bundle_is_served_locally() {
+    let env = with_isolated_env();
+    let (status, bytes) =
+        oneshot_raw(env.router(), "GET", "/docs/scalar-1.75.0.js", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(bytes.len() > 1024 * 1024);
 }
