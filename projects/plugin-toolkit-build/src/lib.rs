@@ -30,5 +30,6 @@ pub mod openapi;
 mod plugin;
 pub mod prune;
 pub mod surface;
+pub mod surface_table;
 
 pub use plugin::{Auth, OpenApiPlugin, openapi_plugin};

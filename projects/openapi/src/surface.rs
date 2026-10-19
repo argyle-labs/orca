@@ -172,10 +172,18 @@ pub struct Param {
     pub name: String,
     #[serde(rename = "in")]
     pub location: ParamIn,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<String>,
     #[serde(default)]
     pub required: bool,
     #[serde(default = "open_schema")]
     pub schema: Value,
+}
+
+impl Param {
+    pub fn wire_name(&self) -> &str {
+        self.wire.as_deref().unwrap_or(&self.name)
+    }
 }
 
 fn open_schema() -> Value {
@@ -189,6 +197,8 @@ pub struct OpBody {
     pub schema: Value,
     #[serde(default = "default_content_type")]
     pub content_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
 }
 
 fn default_content_type() -> String {
@@ -280,6 +290,8 @@ impl ApiSurface {
         let mut query: Vec<(String, String)> = Vec::new();
         let mut headers: Vec<(String, String)> = Vec::new();
         let mut fields = Map::new();
+        let mut whole: Option<Value> = None;
+        let whole_body_param = op.body.as_ref().and_then(|b| b.param.as_deref());
 
         let (method, path) = match self.kind {
             SurfaceKind::Openapi => {
@@ -302,14 +314,19 @@ impl ApiSurface {
                                 );
                             }
                             path = path.replace(
-                                &format!("{{{}}}", p.name),
+                                &format!("{{{}}}", p.wire_name()),
                                 &utils::url::encode(&raw).replace('.', "%2E"),
                             );
                         }
-                        ParamIn::Query => push_query(&mut query, &p.name, v),
-                        ParamIn::Header => headers.push((p.name.clone(), wire_string(v))),
+                        ParamIn::Query => push_query(&mut query, p.wire_name(), v),
+                        ParamIn::Header => {
+                            headers.push((p.wire_name().to_string(), wire_string(v)))
+                        }
+                        ParamIn::Body if whole_body_param == Some(p.name.as_str()) => {
+                            whole = Some(v.clone());
+                        }
                         ParamIn::Body => {
-                            fields.insert(p.name.clone(), v.clone());
+                            fields.insert(p.wire_name().to_string(), v.clone());
                         }
                     }
                 }
@@ -361,7 +378,7 @@ impl ApiSurface {
                     "variables": Value::Object(fields),
                 }))?
             }
-            SurfaceKind::Openapi if fields.is_empty() => Vec::new(),
+            SurfaceKind::Openapi if fields.is_empty() && whole.is_none() => Vec::new(),
             SurfaceKind::Openapi => {
                 let content_type = op
                     .body
@@ -369,14 +386,24 @@ impl ApiSurface {
                     .map(|b| b.content_type.as_str())
                     .unwrap_or("application/json");
                 headers.push(("content-type".into(), content_type.to_string()));
-                if content_type == "application/x-www-form-urlencoded" {
-                    let mut pairs = Vec::new();
-                    for (k, v) in &fields {
-                        push_query(&mut pairs, k, v);
+                let payload = match whole {
+                    Some(Value::Object(mut map)) => {
+                        map.extend(fields);
+                        Value::Object(map)
                     }
-                    utils::url::query_string(&pairs).into_bytes()
-                } else {
-                    serde_json::to_vec(&Value::Object(fields))?
+                    Some(other) => other,
+                    None => Value::Object(fields),
+                };
+                match (content_type, payload) {
+                    ("application/x-www-form-urlencoded", Value::Object(map)) => {
+                        let mut pairs = Vec::new();
+                        for (k, v) in &map {
+                            push_query(&mut pairs, k, v);
+                        }
+                        utils::url::query_string(&pairs).into_bytes()
+                    }
+                    (ct, Value::String(text)) if !ct.contains("json") => text.into_bytes(),
+                    (_, payload) => serde_json::to_vec(&payload)?,
                 }
             }
         };
@@ -748,6 +775,70 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<Value>(&req.body).unwrap(),
             json!({"roleid": "ops"})
+        );
+    }
+
+    #[test]
+    fn wire_names_and_whole_body_param() {
+        let s = ApiSurface::parse(
+            &json!({
+                "format": FORMAT,
+                "surface": "g",
+                "kind": "openapi",
+                "ops": [{
+                    "tool": "g.edit",
+                    "method": "PATCH",
+                    "path": "/repos/{owner}/{pre-release}",
+                    "params": [
+                        {"name": "owner", "in": "path"},
+                        {"name": "pre_release", "wire": "pre-release", "in": "path"},
+                        {"name": "type_", "wire": "type", "in": "query"},
+                        {"name": "body", "in": "body", "required": true}
+                    ],
+                    "body": {"schema": {"type": "object"}, "param": "body"},
+                    "policy": {"role": "admin"}
+                }, {
+                    "tool": "g.render",
+                    "method": "POST",
+                    "path": "/markdown/raw",
+                    "params": [{"name": "body", "in": "body", "required": true}],
+                    "body": {"schema": {"type": "string"}, "content_type": "text/plain", "param": "body"},
+                    "policy": {"role": "admin"}
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let req = s
+            .build_request(
+                s.find("g.edit").unwrap(),
+                "https://h",
+                &args(json!({
+                    "owner": "o",
+                    "pre_release": "r",
+                    "type_": "x",
+                    "body": {"name": "n", "pre-release": true}
+                })),
+                None,
+            )
+            .unwrap();
+        assert_eq!(req.url, "https://h/repos/o/r?type=x");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&req.body).unwrap(),
+            json!({"name": "n", "pre-release": true})
+        );
+        let raw = s
+            .build_request(
+                s.find("g.render").unwrap(),
+                "https://h",
+                &args(json!({"body": "# hi"})),
+                None,
+            )
+            .unwrap();
+        assert_eq!(raw.body, b"# hi");
+        assert!(
+            raw.headers
+                .contains(&("content-type".into(), "text/plain".into()))
         );
     }
 

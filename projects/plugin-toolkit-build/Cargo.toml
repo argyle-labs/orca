@@ -38,6 +38,11 @@ proc-macro2 = { workspace = true }
 quote       = { workspace = true }
 regex       = { workspace = true }
 syn1        = { package = "syn", version = "1", features = ["full"] }
+plugin-proto = { workspace = true }
+verb-shape  = { workspace = true }
+heck        = "0.5"
+unicode-ident = "1"
+typify-impl = "0.6"
 
 [dev-dependencies]
 dispatch = { workspace = true }

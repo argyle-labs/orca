@@ -69,20 +69,20 @@ struct Param {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct Markers {
-    user_callable: bool,
-    admin: bool,
-    no_tool: bool,
-    data_mutation: bool,
+pub(crate) struct Markers {
+    pub(crate) user_callable: bool,
+    pub(crate) admin: bool,
+    pub(crate) no_tool: bool,
+    pub(crate) data_mutation: bool,
 }
 
-type MarkerMap = HashMap<(String, String), Markers>;
+pub(crate) type MarkerMap = HashMap<(String, String), Markers>;
 
-fn is_write(http: &str) -> bool {
+pub(crate) fn is_write(http: &str) -> bool {
     http != "GET"
 }
 
-fn tool_policy(is_write: bool, markers: Markers) -> (&'static str, bool) {
+pub(crate) fn tool_policy(is_write: bool, markers: Markers) -> (&'static str, bool) {
     let role = if is_write || markers.admin {
         "admin"
     } else {
@@ -221,7 +221,7 @@ fn merge(into: &mut Markers, mk: Markers) {
     into.data_mutation |= mk.data_mutation;
 }
 
-fn markers_from_spec_value(v: &serde_json::Value, out: &mut MarkerMap) -> Result<()> {
+pub(crate) fn markers_from_spec_value(v: &serde_json::Value, out: &mut MarkerMap) -> Result<()> {
     let Some(paths) = v.get("paths").and_then(|p| p.as_object()) else {
         return Ok(());
     };
@@ -274,7 +274,7 @@ fn client_operation_keys(file: &syn::File) -> BTreeSet<(String, String)> {
     out
 }
 
-fn check_marker_usage(
+pub(crate) fn check_marker_usage(
     markers: &MarkerMap,
     generated: &BTreeSet<(String, String)>,
     flavor: &str,
