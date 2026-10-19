@@ -488,6 +488,7 @@ pub fn tool_manifest_json() -> String {
                 "execute_gated": t.execute_gated(),
                 "data_mutation": t.data_mutation(),
                 "local_only": !t.remote_ok(),
+                "reaches": t.reaches(),
             })
         })
         .collect();
