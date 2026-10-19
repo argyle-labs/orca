@@ -76,6 +76,8 @@ pub struct ApiSurfaceRef {
     pub format: String,
 }
 
+pub const API_CALL_PLANNED: &str = "api.call planned, not executed: ";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiCall {
     #[serde(default, skip_serializing_if = "Option::is_none")]

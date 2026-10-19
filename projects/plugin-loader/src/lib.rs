@@ -1367,14 +1367,19 @@ fn surface_owner(name: &str) -> Option<String> {
         .then(|| plugin.software.clone())
 }
 
-fn invocation_for(ctx: &ToolCtx, args: &sj::Value) -> Option<spec::surfaces::Invocation> {
-    let inv = spec::surfaces::Invocation::from_ctx(ctx).ok()?;
+fn invocation_for(
+    ctx: &ToolCtx,
+    name: &str,
+    args: &sj::Value,
+) -> Option<spec::surfaces::Invocation> {
     Some(
-        if args.get(contract::plan::DRY_RUN_FIELD) == Some(&sj::Value::Bool(true)) {
-            inv.force_dry_run()
-        } else {
-            inv
-        },
+        spec::surfaces::Invocation::from_ctx(ctx)
+            .ok()?
+            .for_plugin_invoke(
+                dispatch::tool_roles::plugin_execute_gated(name),
+                dispatch::tool_roles::required_role(name),
+                args,
+            ),
     )
 }
 
@@ -1438,7 +1443,7 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
     }
     if let Some((backing, software)) = backing_for(name) {
         let owned = name.to_string();
-        let inv = invocation_for(ctx, &args);
+        let inv = invocation_for(ctx, name, &args);
         let result = tokio::task::spawn_blocking(move || backing.invoke(&owned, args, inv))
             .await
             .with_context(|| format!("plugin invoke task for '{name}' panicked"))?;
@@ -1465,7 +1470,7 @@ pub fn invoke_plugin(name: &str, args: &sj::Value, ctx: &ToolCtx) -> Option<Resu
         )));
     }
     let (backing, software) = backing_for(name)?;
-    let result = backing.invoke(name, args.clone(), invocation_for(ctx, args));
+    let result = backing.invoke(name, args.clone(), invocation_for(ctx, name, args));
     Some(parse_invoke_result(result, name, &software))
 }
 

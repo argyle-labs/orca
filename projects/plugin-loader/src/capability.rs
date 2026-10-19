@@ -116,7 +116,18 @@ pub fn handle_api_call(
         )
         .await
     })??;
-    Ok(serde_json::to_value(outcome)?)
+    api_call_reply(outcome)
+}
+
+fn api_call_reply(outcome: spec::surfaces::Outcome) -> Result<Value> {
+    match outcome {
+        spec::surfaces::Outcome::Response(value) => Ok(value),
+        spec::surfaces::Outcome::Plan(plan) => Err(anyhow!(
+            "{}{}",
+            plugin_proto::API_CALL_PLANNED,
+            serde_json::to_string(&plan)?
+        )),
+    }
 }
 
 /// Execute one capability request on behalf of `principal` — the authoritative
@@ -325,6 +336,27 @@ async fn send_within(
 mod tests {
     use super::*;
     use plugin_toolkit::serde_json::json;
+
+    #[test]
+    fn api_call_plan_is_an_error_never_a_value() {
+        let plan = spec::surfaces::Plan {
+            method: "POST".into(),
+            url: "https://h/x".into(),
+            query: vec![],
+            body: Value::Null,
+            endpoint: "main".into(),
+            route: "https://h".into(),
+        };
+        let err = api_call_reply(spec::surfaces::Outcome::Plan(plan))
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with(plugin_proto::API_CALL_PLANNED), "{err}");
+        assert!(err.contains("\"method\":\"POST\""), "{err}");
+        assert_eq!(
+            api_call_reply(spec::surfaces::Outcome::Response(json!({"a": 1}))).unwrap(),
+            json!({"a": 1})
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn cap_io_is_sound_from_inside_a_runtime() {

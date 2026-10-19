@@ -77,6 +77,7 @@ pub struct Invocation {
     dry_run: bool,
     local: bool,
     second_factor: bool,
+    execute_confirmed: bool,
 }
 
 impl Invocation {
@@ -90,6 +91,7 @@ impl Invocation {
             dry_run: ctx.dry_run(),
             local: ctx.local_transport(),
             second_factor: ctx.second_factor(),
+            execute_confirmed: false,
         })
     }
 
@@ -97,8 +99,17 @@ impl Invocation {
         &self.caller
     }
 
-    pub fn force_dry_run(mut self) -> Self {
-        self.dry_run = true;
+    pub fn for_plugin_invoke(
+        mut self,
+        outer_execute_gated: bool,
+        outer_role: &str,
+        args: &Value,
+    ) -> Self {
+        let flag = |k: &str| args.get(k) == Some(&Value::Bool(true));
+        self.dry_run |= flag(contract::plan::DRY_RUN_FIELD);
+        self.execute_confirmed =
+            outer_execute_gated && !self.dry_run && flag(contract::plan::EXECUTE_FIELD);
+        self.second_factor &= outer_role == "super-admin";
         self
     }
 }
@@ -255,7 +266,7 @@ pub async fn call(
         }
     }
     args.insert(ENDPOINT_ARG.into(), Value::String(endpoint.to_string()));
-    if !inv.dry_run {
+    if inv.execute_confirmed {
         args.insert(contract::plan::EXECUTE_FIELD.into(), Value::Bool(true));
     }
     run(plugin, &found, index, args, inv).await
@@ -916,6 +927,65 @@ mod tests {
         .unwrap();
         assert_eq!(out, Outcome::Response(json!({"id": 7})));
         deregister("callok");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn call_runs_gated_ops_only_under_a_confirmed_gated_outer_tool() {
+        let mut s = surface("gatep", "gatep.{endpoint}.token");
+        s.ops[1].policy.execute_gated = true;
+        register("gatep", s).unwrap();
+        let admin = caller("admin", false);
+        let args = || json!({"name": "n"});
+        let executing = json!({"execute": true});
+
+        let plain = inv(&admin, false).for_plugin_invoke(false, "admin", &executing);
+        let err = call("gatep", None, "gatep.create", "main", args(), &plain)
+            .await
+            .unwrap_err();
+        assert!(err.downcast_ref::<Forbidden>().is_some(), "{err}");
+
+        let unconfirmed = inv(&admin, false).for_plugin_invoke(true, "admin", &json!({}));
+        let err = call("gatep", None, "gatep.create", "main", args(), &unconfirmed)
+            .await
+            .unwrap_err();
+        assert!(err.downcast_ref::<Forbidden>().is_some(), "{err}");
+
+        let confirmed = inv(&admin, false).for_plugin_invoke(true, "admin", &executing);
+        let err = call("gatep", None, "gatep.create", "main", args(), &confirmed)
+            .await
+            .unwrap_err();
+        assert!(err.downcast_ref::<Forbidden>().is_none(), "{err}");
+
+        let dry = inv(&admin, false).for_plugin_invoke(
+            true,
+            "admin",
+            &json!({"execute": true, "dryRun": true}),
+        );
+        assert!(dry.dry_run && !dry.execute_confirmed);
+        deregister("gatep");
+    }
+
+    #[test]
+    fn second_factor_carries_only_from_a_super_admin_outer_tool() {
+        let root = caller("super-admin", false);
+        let verified = Invocation::from_ctx(&ctx(&root, false, true, true)).unwrap();
+        assert!(
+            !verified
+                .clone()
+                .for_plugin_invoke(false, "admin", &json!({}))
+                .second_factor
+        );
+        assert!(
+            !verified
+                .clone()
+                .for_plugin_invoke(false, "read", &json!({}))
+                .second_factor
+        );
+        assert!(
+            verified
+                .for_plugin_invoke(false, "super-admin", &json!({}))
+                .second_factor
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
