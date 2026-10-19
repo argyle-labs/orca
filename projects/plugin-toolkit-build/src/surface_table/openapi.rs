@@ -10,9 +10,8 @@ use ::openapi::surface::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 
-use crate::surface::openapi::{
-    MarkerMap, Markers, check_marker_usage, is_write, markers_from_spec_value, tool_policy,
-};
+use crate::surface::common::{Markers, tool_policy};
+use crate::surface::openapi::{MarkerMap, check_marker_usage, is_write, markers_from_spec_value};
 
 const METHODS: &[&str] = &["get", "put", "post", "delete", "patch"];
 const BODY_PARAM: &str = "body";

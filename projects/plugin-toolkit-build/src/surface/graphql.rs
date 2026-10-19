@@ -40,7 +40,8 @@ use anyhow::{Context, Result, bail};
 use graphql_parser::query::{Definition, OperationDefinition};
 
 use crate::surface::common::{
-    GENERATED_HEADER, derive_list, has_serde_crate_attr, push_jsonschema_anchor,
+    GENERATED_HEADER, Markers, derive_list, has_serde_crate_attr, push_jsonschema_anchor,
+    tool_policy,
 };
 
 /// GraphQL scalar type aliases `graphql_client` emits inside every operation
@@ -57,14 +58,6 @@ fn scalar_primitive(ident: &str) -> Option<&'static str> {
 }
 
 const VERSION_SCALARS: &[&str] = &["BigInt", "DateTime", "JSON", "Port", "PrefixedID", "URL"];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct Markers {
-    user_callable: bool,
-    admin: bool,
-    pub(crate) no_tool: bool,
-    data_mutation: bool,
-}
 
 /// Rust primitives a `Variables` field can already be, rendered as-is.
 const PRIMITIVES: &[&str] = &[
@@ -457,16 +450,6 @@ fn anchor_module(items: &mut [syn::Item]) -> usize {
         n += 1;
     }
     n
-}
-
-pub(crate) fn tool_policy(is_mutation: bool, markers: Markers) -> (&'static str, bool) {
-    let role = if is_mutation || markers.admin {
-        "admin"
-    } else {
-        ""
-    };
-    let opted_in = markers.user_callable || markers.data_mutation;
-    (role, is_mutation && opted_in && !markers.admin)
 }
 
 fn emit_surface(

@@ -11,7 +11,8 @@ use anyhow::{Context, Result, bail};
 use graphql_parser::query::{Definition, Document, OperationDefinition, Type, VariableDefinition};
 use serde_json::{Map, Value, json};
 
-use crate::surface::graphql::{operation_markers, tool_policy};
+use crate::surface::common::tool_policy;
+use crate::surface::graphql::operation_markers;
 
 const RUST_KEYWORDS: &[&str] = &[
     "Self", "abstract", "as", "async", "await", "become", "box", "break", "const", "continue",

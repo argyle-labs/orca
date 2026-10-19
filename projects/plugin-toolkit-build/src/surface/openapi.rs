@@ -41,7 +41,8 @@ use quote::ToTokens;
 use regex::Regex;
 
 use crate::surface::common::{
-    GENERATED_HEADER, collect_doc, first_generic, is_ident, option_inner, push_jsonschema_anchor,
+    GENERATED_HEADER, Markers, collect_doc, first_generic, is_ident, option_inner,
+    push_jsonschema_anchor, tool_policy,
 };
 
 /// Spec filename suffixes scanned for `x-orca-*` markers.
@@ -68,28 +69,10 @@ struct Param {
     call_expr: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct Markers {
-    pub(crate) user_callable: bool,
-    pub(crate) admin: bool,
-    pub(crate) no_tool: bool,
-    pub(crate) data_mutation: bool,
-}
-
 pub(crate) type MarkerMap = HashMap<(String, String), Markers>;
 
 pub(crate) fn is_write(http: &str) -> bool {
     http != "GET"
-}
-
-pub(crate) fn tool_policy(is_write: bool, markers: Markers) -> (&'static str, bool) {
-    let role = if is_write || markers.admin {
-        "admin"
-    } else {
-        ""
-    };
-    let opted_in = markers.user_callable || markers.data_mutation;
-    (role, is_write && opted_in && !markers.admin)
 }
 
 /// Generate `<flavor>_surface.rs` from the codegen'd `<flavor>_codegen.rs`.
