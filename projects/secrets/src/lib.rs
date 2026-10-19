@@ -417,6 +417,25 @@ fn run_secret_op(conn: &Connection, op: &plugin_abi::SecretOp) -> Result<plugin_
     }
 }
 
+pub fn ensure_backend_registered(backend: &str) -> Result<()> {
+    if backend == BACKEND_INLINE {
+        return Ok(());
+    }
+    let mut registered: Vec<String> = contract::secrets_backend::providers()
+        .iter()
+        .map(|p| p.name().to_string())
+        .collect();
+    if registered.iter().any(|n| n == backend) {
+        return Ok(());
+    }
+    registered.sort();
+    registered.insert(0, BACKEND_INLINE.to_string());
+    Err(anyhow::anyhow!(
+        "secrets backend '{backend}' is not registered on this host; registered: {}",
+        registered.join(", ")
+    ))
+}
+
 fn resolve_external(backend: &str, ref_path: &str) -> Result<String> {
     std::thread::scope(|s| {
         s.spawn(|| {
@@ -498,6 +517,16 @@ mod tests {
         assert_eq!(reply.value.as_deref(), Some("resolved"));
         assert!(reply.found);
         assert_eq!(read_inline_value(&conn, "pve.token").unwrap(), None);
+    }
+
+    #[test]
+    fn ensure_backend_registered_rejects_unknown_and_lists_registered() {
+        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
+        assert!(ensure_backend_registered("inline").is_ok());
+        assert!(ensure_backend_registered("fake-959").is_ok());
+        let err = ensure_backend_registered("op").unwrap_err().to_string();
+        assert!(err.contains("'op'"), "{err}");
+        assert!(err.contains("inline") && err.contains("fake-959"), "{err}");
     }
 
     #[test]
