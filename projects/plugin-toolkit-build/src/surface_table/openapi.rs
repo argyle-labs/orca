@@ -89,6 +89,8 @@ pub fn build(
             .emit_cargo_warnings(surface);
     }
     let non_json = non_json_responses(&value)?;
+    let lowered = value.clone();
+    let lowered_components = lowered.get("components").unwrap_or(&Value::Null);
     let mut typed: openapiv3::OpenAPI =
         serde_json::from_value(value).with_context(|| format!("parse {surface} as openapiv3"))?;
     ::openapi::normalize::for_progenitor(&mut typed).emit_cargo_warnings(surface);
@@ -99,6 +101,7 @@ pub fn build(
     let mut seen = BTreeSet::new();
     let mut ops: Vec<(ApiOp, Markers)> = Vec::new();
     let mut raw_responses = 0usize;
+    let mut unsupported_bodies = 0usize;
     let empty = Map::new();
     let paths = spec
         .get("paths")
@@ -127,8 +130,17 @@ pub fn build(
             let tail = progenitor_ident(op_id);
             let params =
                 op_params(item, op, &components).with_context(|| format!("{http} {path}"))?;
-            let (params, body) =
-                with_body(params, op, &components).with_context(|| format!("{http} {path}"))?;
+            let raw_op = lowered
+                .get("paths")
+                .and_then(|p| p.get(path))
+                .and_then(|i| i.get(*method))
+                .unwrap_or(op);
+            let Some((params, body)) = with_body(params, raw_op, lowered_components)
+                .with_context(|| format!("{http} {path}"))?
+            else {
+                unsupported_bodies += 1;
+                continue;
+            };
             ops.push((
                 ApiOp {
                     tool: tail.clone(),
@@ -139,7 +151,7 @@ pub fn build(
                     output: output.map(|schema| OpOutput { schema }),
                     policy: {
                         let (role, data_mutation) = tool_policy(is_write(&http), mk);
-                        super::derived_policy(&tail, role, data_mutation)
+                        super::derived_policy(&tail, is_write(&http), role, data_mutation)
                     },
                     internal: mk.no_tool,
                 },
@@ -148,6 +160,11 @@ pub fn build(
         }
     }
     check_marker_usage(&markers, &seen, surface)?;
+    if unsupported_bodies > 0 {
+        warnings.push(format!(
+            "{unsupported_bodies} op(s) with a multipart/binary request body omitted"
+        ));
+    }
     if raw_responses > 0 {
         warnings.push(format!(
             "{raw_responses} op(s) with a non-JSON response omitted"
@@ -280,7 +297,7 @@ fn resolve<'a>(components: &'a Value, v: &'a Value) -> Result<&'a Value> {
 }
 
 fn op_params(item: &Value, op: &Value, components: &Value) -> Result<Vec<Param>> {
-    let mut by_name: BTreeMap<String, &Value> = BTreeMap::new();
+    let mut by_key: BTreeMap<(String, String), &Value> = BTreeMap::new();
     for list in [item.get("parameters"), op.get("parameters")] {
         for p in list.and_then(Value::as_array).into_iter().flatten() {
             let p = resolve(components, p)?;
@@ -288,18 +305,23 @@ fn op_params(item: &Value, op: &Value, components: &Value) -> Result<Vec<Param>>
                 .get("name")
                 .and_then(Value::as_str)
                 .context("parameter without a name")?;
-            by_name.insert(name.to_string(), p);
+            let location = p.get("in").and_then(Value::as_str).unwrap_or_default();
+            by_key.insert((name.to_string(), location.to_string()), p);
         }
     }
-    let mut out = Vec::with_capacity(by_name.len());
-    for (wire, p) in by_name {
-        let location = match p.get("in").and_then(Value::as_str) {
-            Some("path") => ParamIn::Path,
-            Some("query") => ParamIn::Query,
-            Some("header") => ParamIn::Header,
-            other => bail!("parameter `{wire}`: unsupported location {other:?}"),
+    let mut names = BTreeSet::new();
+    let mut out = Vec::with_capacity(by_key.len());
+    for ((wire, location), p) in by_key {
+        let location = match location.as_str() {
+            "path" => ParamIn::Path,
+            "query" => ParamIn::Query,
+            "header" => ParamIn::Header,
+            other => bail!("parameter `{wire}`: unsupported location `{other}`"),
         };
         let name = progenitor_ident(&wire);
+        if !names.insert(name.clone()) {
+            bail!("parameters collide on argument name `{name}`");
+        }
         out.push(Param {
             wire: (name != wire).then_some(wire),
             name,
@@ -315,21 +337,34 @@ fn op_params(item: &Value, op: &Value, components: &Value) -> Result<Vec<Param>>
     Ok(out)
 }
 
+fn body_media(content: &Map<String, Value>) -> Option<(&String, &Value)> {
+    let pick = |want: &dyn Fn(&str) -> bool| content.iter().find(|(ct, _)| want(ct));
+    pick(&|ct| {
+        ct == "application/json" || ct.starts_with("application/json;") || ct.ends_with("+json")
+    })
+    .or_else(|| pick(&|ct| ct == "application/x-www-form-urlencoded"))
+    .or_else(|| pick(&|ct| ct.starts_with("text/")))
+}
+
+#[allow(clippy::type_complexity)]
 fn with_body(
     mut params: Vec<Param>,
     op: &Value,
     components: &Value,
-) -> Result<(Vec<Param>, Option<OpBody>)> {
+) -> Result<Option<(Vec<Param>, Option<OpBody>)>> {
     let Some(body) = op.get("requestBody") else {
-        return Ok((params, None));
+        return Ok(Some((params, None)));
     };
     let body = resolve(components, body)?;
-    let Some((content_type, media)) = body
+    let Some(content) = body
         .get("content")
         .and_then(Value::as_object)
-        .and_then(|c| c.iter().next())
+        .filter(|c| !c.is_empty())
     else {
-        return Ok((params, None));
+        return Ok(Some((params, None)));
+    };
+    let Some((content_type, media)) = body_media(content) else {
+        return Ok(None);
     };
     if params.iter().any(|p| p.name == BODY_PARAM) {
         bail!("a parameter named `{BODY_PARAM}` collides with the request body");
@@ -338,20 +373,23 @@ fn with_body(
         name: BODY_PARAM.to_string(),
         location: ParamIn::Body,
         wire: None,
-        required: true,
+        required: body
+            .get("required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         schema: media
             .get("schema")
             .cloned()
             .unwrap_or_else(|| Value::Object(Map::new())),
     });
-    Ok((
+    Ok(Some((
         params,
         Some(OpBody {
             schema: Value::Object(Map::new()),
             content_type: content_type.clone(),
             param: Some(BODY_PARAM.to_string()),
         }),
-    ))
+    )))
 }
 
 fn success_content<'a>(
@@ -589,6 +627,56 @@ mod tests {
         assert!(t.find("pve.list_vms").is_some());
         opts.renames.insert("missing".into(), "x".into());
         assert!(build(&spec(), "pve", &opts, None).is_err());
+    }
+
+    fn one_path(item: serde_json::Value) -> Result<ApiSurface> {
+        let spec = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "t", "version": "1"},
+            "paths": {"/x": item}
+        });
+        build(&spec.to_string(), "s", &Options::default(), None).map(|(t, _)| t)
+    }
+
+    #[test]
+    fn colliding_argument_names_fail() {
+        let item = json!({"get": {
+            "operationId": "x",
+            "parameters": [
+                {"name": "foo-bar", "in": "query", "schema": {"type": "string"}},
+                {"name": "foo_bar", "in": "query", "schema": {"type": "string"}}
+            ],
+            "responses": {"204": {"description": "ok"}}
+        }});
+        assert!(one_path(item).is_err());
+    }
+
+    #[test]
+    fn body_prefers_json_skips_multipart_and_keeps_optional() {
+        let op = |content: serde_json::Value, required: bool| {
+            json!({"post": {
+                "operationId": "x",
+                "requestBody": {"required": required, "content": content},
+                "responses": {"204": {"description": "ok"}}
+            }})
+        };
+        let t = one_path(op(
+            json!({
+                "text/plain": {"schema": {"type": "string"}},
+                "application/json": {"schema": {"type": "object"}}
+            }),
+            false,
+        ))
+        .unwrap();
+        let x = t.find("s.x").unwrap();
+        assert_eq!(x.body.as_ref().unwrap().content_type, "application/json");
+        assert!(!x.params[0].required);
+        let t = one_path(op(
+            json!({"multipart/form-data": {"schema": {"type": "object"}}}),
+            true,
+        ))
+        .unwrap();
+        assert!(t.ops.is_empty());
     }
 
     #[test]

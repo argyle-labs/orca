@@ -1,3 +1,8 @@
+//! Golden check against the full vendored specs (run after any spec bump):
+//! `ORCA_GOLDEN_PROXMOX_SPECS=../proxmox/specs ORCA_GOLDEN_GITEA_SPECS=../gitea/specs
+//! cargo test -p orca-plugin-toolkit-build --lib full_specs -- --ignored`
+//! and `ORCA_GOLDEN_UNRAID=../unraid cargo test -p orca-plugin-toolkit-build --lib full_unraid -- --ignored`.
+
 pub mod graphql;
 pub mod openapi;
 
@@ -35,7 +40,12 @@ pub fn write(surface: &ApiSurface, out_dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-pub(crate) fn derived_policy(tail: &str, role: &str, data_mutation: bool) -> Policy {
+pub(crate) fn derived_policy(
+    tail: &str,
+    is_write: bool,
+    role: &str,
+    data_mutation: bool,
+) -> Policy {
     let read_shaped = verb_shape::is_read_shaped(tail);
     let role = match role {
         "" if read_shaped => "read",
@@ -44,7 +54,7 @@ pub(crate) fn derived_policy(tail: &str, role: &str, data_mutation: bool) -> Pol
     };
     Policy {
         role: role.to_string(),
-        execute_gated: !read_shaped,
+        execute_gated: is_write || !read_shaped,
         data_mutation,
         local_only: false,
     }

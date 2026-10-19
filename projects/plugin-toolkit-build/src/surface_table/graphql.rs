@@ -118,7 +118,7 @@ pub fn build(
                 None => tail.clone(),
             };
             ops.push(ApiOp {
-                policy: super::derived_policy(&tool, role, data_mutation),
+                policy: super::derived_policy(&tool, is_mutation, role, data_mutation),
                 tool,
                 method: "POST".to_string(),
                 path: Document {
