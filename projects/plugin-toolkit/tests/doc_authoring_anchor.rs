@@ -34,6 +34,25 @@ pub async fn server_info(_args: ServerInfoArgs, _ctx: &ToolCtx) -> anyhow::Resul
     })
 }
 
+#[orca_tool(domain = "doc_anchor", verb = "vm_list", reaches = ["doc_anchor.vms_get"])]
+pub async fn vm_list(_args: ServerInfoArgs, _ctx: &ToolCtx) -> anyhow::Result<ServerInfoOut> {
+    Ok(ServerInfoOut {
+        version: "0".into(),
+    })
+}
+
+#[test]
+fn reaches_rides_the_tool_manifest() {
+    let manifest: Vec<plugin_toolkit::abi::ToolDef> =
+        serde_json::from_str(&plugin_toolkit::tool_manifest::manifest_for_prefixes(&[
+            "doc_anchor.",
+        ]))
+        .unwrap();
+    let def = |n: &str| manifest.iter().find(|d| d.name == n).unwrap();
+    assert_eq!(def("doc_anchor.vm_list").reaches, ["doc_anchor.vms_get"]);
+    assert!(def("doc_anchor.server_info").reaches.is_empty());
+}
+
 // ── Pins the CRUD attribute + its documented `plugin =`/`table =` form. It is
 //    a #[proc_macro_attribute] on a struct — NOT a function-like macro. ───────
 #[endpoint_resource(plugin = "doc_anchor", table = "doc_anchor_endpoints")]
