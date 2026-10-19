@@ -16,9 +16,10 @@
 //! facet's backend, and anything unmatched falls through to the `#[orca_tool]`
 //! surface.
 //!
-//! ```rust,ignore
+//! ```text
+//! plugin_toolkit::instrument::bootstrap!();
+//!
 //! fn main() -> anyhow::Result<()> {
-//!     plugin_toolkit::instrument::bootstrap!();
 //!     plugin_toolkit::plugin::Plugin::named("audiobookshelf")
 //!         .version(env!("CARGO_PKG_VERSION"))
 //!         .service(AudiobookshelfBackend::new("audiobookshelf"))

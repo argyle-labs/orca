@@ -5,19 +5,17 @@
 //!
 //! Used from a plugin `build.rs`:
 //!
-//! ```rust,ignore
-//! // build.rs (OpenAPI):
-//! fn main() {
-//!     plugin_toolkit_build::openapi::generate_all("specs", "arr").unwrap();
-//! }
+//! ```no_run
+//! // build.rs main (OpenAPI):
+//! plugin_toolkit_build::openapi::generate_all("specs", "arr").unwrap();
+//! ```
 //!
-//! // build.rs (GraphQL):
-//! fn main() {
-//!     plugin_toolkit_build::graphql::generate(
-//!         "../unraid/schemas",
-//!         "queries",
-//!     ).unwrap();
-//! }
+//! ```no_run
+//! // build.rs main (GraphQL):
+//! plugin_toolkit_build::graphql::generate(
+//!     "../unraid/schemas",
+//!     "queries",
+//! ).unwrap();
 //! ```
 //!
 //! Per [[feedback-plugin-toolkit-is-the-gateway]]: the toolkit is the

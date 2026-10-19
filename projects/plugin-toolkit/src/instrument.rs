@@ -58,10 +58,12 @@ pub fn enabled() -> bool {
 /// `main`** (a plugin that does not use a `serve_*_plugin!` macro) calls it at
 /// module scope instead:
 ///
-/// ```rust,ignore
+/// ```
 /// plugin_toolkit::instrument::bootstrap!();
 ///
-/// fn main() -> anyhow::Result<()> { /* … */ }
+/// fn main() -> anyhow::Result<()> {
+///     Ok(())
+/// }
 /// ```
 ///
 /// **Single-declaration rule:** a `#[global_allocator]` may be declared exactly
