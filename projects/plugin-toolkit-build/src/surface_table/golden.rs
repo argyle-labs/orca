@@ -13,15 +13,15 @@ use super::openapi::{GetLists, Options, build, parse_list};
 mod ungate;
 
 #[derive(Debug, PartialEq, Eq)]
-struct Field {
-    required: bool,
+pub(super) struct Field {
+    pub(super) required: bool,
     kind: Option<&'static str>,
 }
 
 #[derive(Debug)]
-struct Tool {
-    fields: BTreeMap<String, Field>,
-    policy: Policy,
+pub(super) struct Tool {
+    pub(super) fields: BTreeMap<String, Field>,
+    pub(super) policy: Policy,
 }
 
 fn fixture_dir() -> PathBuf {
@@ -86,7 +86,7 @@ fn schema_kind(schema: &Value, defs: &Map<String, Value>) -> Option<&'static str
     }
 }
 
-fn existing_tools(src: &str, flavor: &str) -> BTreeMap<String, Tool> {
+pub(super) fn existing_tools(src: &str, flavor: &str) -> BTreeMap<String, Tool> {
     let file = syn::parse_file(src).unwrap();
     let mut structs: BTreeMap<String, BTreeMap<String, Field>> = BTreeMap::new();
     let mut out = BTreeMap::new();

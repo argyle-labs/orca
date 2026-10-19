@@ -1,0 +1,10 @@
+query Vms($filter: VmFilter) {
+  vms(filter: $filter) {
+    ...VmFields
+  }
+}
+
+fragment VmFields on Vm {
+  id
+  name
+}

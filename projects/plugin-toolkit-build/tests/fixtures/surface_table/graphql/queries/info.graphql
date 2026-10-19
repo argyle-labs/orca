@@ -1,0 +1,6 @@
+# @orca:no-tool
+query Info {
+  info {
+    version
+  }
+}

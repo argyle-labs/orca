@@ -1,11 +1,14 @@
+pub mod graphql;
 pub mod openapi;
 
 #[cfg(test)]
 mod golden;
+#[cfg(test)]
+mod golden_graphql;
 
 use std::path::{Path, PathBuf};
 
-use ::openapi::surface::ApiSurface;
+use ::openapi::surface::{ApiSurface, Policy};
 use anyhow::{Context, Result, bail};
 
 pub fn write(surface: &ApiSurface, out_dir: &Path) -> Result<PathBuf> {
@@ -30,4 +33,19 @@ pub fn write(surface: &ApiSurface, out_dir: &Path) -> Result<PathBuf> {
         text.len()
     );
     Ok(path)
+}
+
+pub(crate) fn derived_policy(tail: &str, role: &str, data_mutation: bool) -> Policy {
+    let read_shaped = verb_shape::is_read_shaped(tail);
+    let role = match role {
+        "" if read_shaped => "read",
+        "" => "admin",
+        declared => declared,
+    };
+    Policy {
+        role: role.to_string(),
+        execute_gated: !read_shaped,
+        data_mutation,
+        local_only: false,
+    }
 }

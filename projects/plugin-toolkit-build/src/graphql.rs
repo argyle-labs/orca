@@ -44,7 +44,13 @@ pub fn generate(schemas_dir: impl AsRef<Path>, queries_dir: impl AsRef<Path>) ->
     let out_dir = std::env::var_os("OUT_DIR")
         .map(PathBuf::from)
         .context("OUT_DIR not set — generate must be called from build.rs")?;
+    let combined = render_modules(schemas_dir, queries_dir)?;
+    let dest = out_dir.join("modules.rs");
+    std::fs::write(&dest, combined).with_context(|| format!("write {}", dest.display()))?;
+    Ok(())
+}
 
+pub(crate) fn render_modules(schemas_dir: &Path, queries_dir: &Path) -> Result<String> {
     println!("cargo:rerun-if-changed={}", schemas_dir.display());
     println!("cargo:rerun-if-changed={}", queries_dir.display());
 
@@ -53,15 +59,7 @@ pub fn generate(schemas_dir: impl AsRef<Path>, queries_dir: impl AsRef<Path>) ->
         println!("cargo:rerun-if-changed={}", q.display());
     }
 
-    let mut versions: Vec<(String, PathBuf)> = collect_files(schemas_dir, "json")
-        .into_iter()
-        .filter_map(|p| {
-            let name = p.file_name()?.to_string_lossy().to_string();
-            let stripped = name.strip_suffix(".introspection.json")?;
-            Some((stripped.to_string(), p))
-        })
-        .collect();
-    versions.sort_by(|a, b| a.0.cmp(&b.0));
+    let versions = schema_versions(schemas_dir);
     if versions.is_empty() {
         anyhow::bail!("no schemas in {}", schemas_dir.display());
     }
@@ -105,10 +103,20 @@ pub fn generate(schemas_dir: impl AsRef<Path>, queries_dir: impl AsRef<Path>) ->
         combined.push_str(&format!("(\"{version}\", include_str!(\"{escaped}\")),"));
     }
     combined.push_str("];\n");
+    Ok(combined)
+}
 
-    let dest = out_dir.join("modules.rs");
-    std::fs::write(&dest, combined).with_context(|| format!("write {}", dest.display()))?;
-    Ok(())
+pub(crate) fn schema_versions(schemas_dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut versions: Vec<(String, PathBuf)> = collect_files(schemas_dir, "json")
+        .into_iter()
+        .filter_map(|p| {
+            let name = p.file_name()?.to_string_lossy().to_string();
+            let stripped = name.strip_suffix(".introspection.json")?;
+            Some((stripped.to_string(), p))
+        })
+        .collect();
+    versions.sort_by(|a, b| a.0.cmp(&b.0));
+    versions
 }
 
 fn collect_files(dir: &Path, ext: &str) -> Vec<PathBuf> {

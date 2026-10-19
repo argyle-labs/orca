@@ -41,6 +41,7 @@ syn1        = { package = "syn", version = "1", features = ["full"] }
 plugin-proto = { workspace = true }
 verb-shape  = { workspace = true }
 heck        = "0.5"
+heck04      = { package = "heck", version = "0.4" }
 unicode-ident = "1"
 typify-impl = "0.6"
 
