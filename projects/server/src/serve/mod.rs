@@ -1,4 +1,5 @@
 pub mod auth_routes;
+mod inline_csp;
 pub mod middleware;
 pub mod openapi;
 #[cfg(feature = "pdf")]
@@ -1387,9 +1388,14 @@ async fn static_handler(req: axum::extract::Request) -> axum::response::Response
             builder = builder.header(header::CONTENT_TYPE, "application/octet-stream");
         }
         let body = utils::encoding::base64_decode(&wr.body_b64).unwrap_or_default();
-        builder
-            .body(Body::from(body))
-            .unwrap_or_else(|_| Response::builder().status(502).body(Body::empty()).unwrap())
+        let mut resp = builder
+            .body(Body::from(body.clone()))
+            .unwrap_or_else(|_| Response::builder().status(502).body(Body::empty()).unwrap());
+        if inline_csp::is_html(resp.headers()) {
+            let additions = inline_csp::from_html(&String::from_utf8_lossy(&body));
+            resp.extensions_mut().insert(additions);
+        }
+        resp
     };
 
     if cacheable
@@ -1506,7 +1512,30 @@ fn dev_origins(path: &str) -> (String, String) {
 
 async fn dev_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
     let (http_origin, ws_origin) = dev_origins(req.uri().path());
-    proxy_to(req, http_origin, ws_origin).await
+    let mut additions = vec![
+        ("script-src", http_origin.clone()),
+        ("connect-src", http_origin.clone()),
+        ("connect-src", ws_origin.clone()),
+        ("style-src", http_origin.clone()),
+        ("style-src", "'unsafe-inline'".to_string()),
+        ("img-src", http_origin.clone()),
+        ("font-src", http_origin.clone()),
+    ];
+    let resp = proxy_to(req, http_origin, ws_origin).await;
+    let resp = if inline_csp::is_html(resp.headers()) {
+        let (parts, body) = resp.into_parts();
+        let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        additions.extend(inline_csp::from_html(&String::from_utf8_lossy(&bytes)).0);
+        axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
+    } else {
+        resp
+    };
+    let mut resp = resp;
+    resp.extensions_mut()
+        .insert(inline_csp::CspAdditions(additions));
+    resp
 }
 
 async fn storybook_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
@@ -1779,6 +1808,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     let csp = middleware::CspPolicies {
         default: Arc::from(system::csp::compose(&[], &relax)),
         docs: Arc::from(system::csp::compose(DOCS_CSP_EXTRA, &relax)),
+        relax: Arc::new(relax),
     };
     tracing::info!(policy = %csp.default, "content-security-policy");
 
@@ -2440,6 +2470,48 @@ mod tests {
             .uri(uri)
             .body(axum::body::Body::empty())
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn html_shell_csp_carries_exact_inline_script_hash() {
+        use tower::ServiceExt;
+        let path = "/__csp_fixture_index__";
+        register_mock(
+            "csp-fixture",
+            path,
+            false,
+            None,
+            MockBehavior::Fixed {
+                status: 200,
+                headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                body: b"<!doctype html><html><head><script>window.x=1</script>\
+                    <script src=\"/_app/a.js\"></script></head><body></body></html>"
+                    .to_vec(),
+            },
+        );
+        let relax = system::csp::Relaxations::default();
+        let csp = middleware::CspPolicies {
+            default: Arc::from(system::csp::compose(&[], &relax)),
+            docs: Arc::from(system::csp::compose(DOCS_CSP_EXTRA, &relax)),
+            relax: Arc::new(relax),
+        };
+        let router = axum::Router::new().fallback(static_handler).layer(
+            axum::middleware::from_fn_with_state(csp, middleware::security_headers),
+        );
+        let resp = router.oneshot(get(path)).await.unwrap();
+        let policy = resp.headers()[axum::http::header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let expected = format!(
+            "'sha256-{}'",
+            utils::encoding::base64_encode(&utils::hash::sha256(b"window.x=1"))
+        );
+        assert!(
+            policy.contains(&format!("script-src 'self' {expected}")),
+            "{policy}"
+        );
+        assert!(!policy.contains("unsafe-inline"), "{policy}");
     }
 
     #[tokio::test]

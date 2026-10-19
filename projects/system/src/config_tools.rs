@@ -206,3 +206,69 @@ async fn config_delete(
     let removed = db::config_store::delete(&conn, &local, &owner, &args.noun, &args.name, "cli")?;
     Ok(ConfigDeleteOutput { removed })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_ctx(dir: &std::path::Path) -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        contract::ToolCtx::new(std::sync::Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: dir.to_path_buf(),
+            memory_root: dir.to_path_buf(),
+            db_path: dir.join("ctx.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    fn detail(noun: &str, name: &str, ctx: &contract::ToolCtx) -> ConfigGetOutput {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(config_get(
+                ConfigGetArgs {
+                    noun: noun.into(),
+                    name: name.into(),
+                },
+                ctx,
+            ))
+            .unwrap()
+    }
+
+    #[test]
+    fn detail_reports_effective_csp_only_for_server_csp() {
+        let dir = tempfile::tempdir().unwrap();
+        db::with_thread_db_path(&dir.path().join("cfg.db"), || {
+            let ctx = test_ctx(dir.path());
+            let strict = crate::csp::compose(&[], &crate::csp::Relaxations::default());
+            assert_eq!(
+                detail("server", "csp", &ctx).effective_csp,
+                Some(strict.clone())
+            );
+            assert_eq!(detail("service", "plex", &ctx).effective_csp, None);
+
+            let conn = db::open_default().unwrap();
+            db::config_store::set(
+                &conn,
+                "h",
+                "h",
+                "server",
+                "csp",
+                r#"{"img-src":["https://img.example"]}"#,
+                "test",
+            )
+            .unwrap();
+            assert_eq!(
+                detail("server", "csp", &ctx).effective_csp,
+                Some(format!("{strict}; img-src 'self' https://img.example"))
+            );
+        });
+    }
+}

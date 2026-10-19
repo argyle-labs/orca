@@ -209,6 +209,7 @@ pub enum AuthKind {
 pub struct CspPolicies {
     pub default: std::sync::Arc<str>,
     pub docs: std::sync::Arc<str>,
+    pub relax: std::sync::Arc<system::csp::Relaxations>,
 }
 
 pub async fn security_headers(
@@ -222,6 +223,16 @@ pub async fn security_headers(
         csp.default.clone()
     };
     let mut resp = next.run(req).await;
+    let policy: std::sync::Arc<str> =
+        match resp.extensions().get::<super::inline_csp::CspAdditions>() {
+            Some(add) => {
+                let grouped = add.grouped();
+                let extra: Vec<(&str, &[&str])> =
+                    grouped.iter().map(|(d, v)| (*d, v.as_slice())).collect();
+                std::sync::Arc::from(system::csp::compose(&extra, &csp.relax))
+            }
+            None => policy,
+        };
     let h = resp.headers_mut();
     if let Ok(v) = axum::http::HeaderValue::from_str(&policy) {
         h.insert(axum::http::header::CONTENT_SECURITY_POLICY, v);
