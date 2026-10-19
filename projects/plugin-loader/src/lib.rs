@@ -1123,7 +1123,7 @@ fn surface_tools(
                 "input_schema": input,
                 "output_schema": output,
                 "role": role,
-                "execute_gated": op.policy.execute_gated,
+                "execute_gated": surface.execute_gated(op),
                 "data_mutation": false,
                 "local_only": op.policy.local_only,
             }))
@@ -1133,7 +1133,7 @@ fn surface_tools(
                 op.tool.clone(),
                 dispatch::tool_roles::PluginToolPolicy {
                     role,
-                    execute_gated: op.policy.execute_gated,
+                    execute_gated: surface.execute_gated(op),
                     data_mutation: false,
                     local_only: op.policy.local_only,
                     read_unconfirmed: false,

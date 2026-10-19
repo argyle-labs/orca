@@ -152,6 +152,8 @@ pub struct ApiOp {
     pub body: Option<OpBody>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<OpOutput>,
+    #[serde(default, skip_serializing_if = "ResponseKind::is_json")]
+    pub response: ResponseKind,
     pub policy: Policy,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub internal: bool,
@@ -211,6 +213,23 @@ pub struct OpOutput {
     pub schema: Value,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ResponseKind {
+    #[default]
+    Json,
+    Text,
+    Binary {
+        content_type: String,
+    },
+}
+
+impl ResponseKind {
+    pub fn is_json(&self) -> bool {
+        *self == ResponseKind::Json
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
@@ -262,7 +281,77 @@ impl ApiSurface {
                 surface.format
             );
         }
+        for op in &surface.ops {
+            surface.check_wires(op)?;
+        }
         Ok(surface)
+    }
+
+    fn check_wires(&self, op: &ApiOp) -> Result<()> {
+        let auth_header = self
+            .auth
+            .as_ref()
+            .filter(|a| a.scheme == AuthScheme::Header)
+            .map(|a| a.header.as_str());
+        for p in op.params.iter().filter(|p| p.location == ParamIn::Header) {
+            let wire = p.wire_name();
+            let token = !wire.is_empty()
+                && wire
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+            let reserved = ["authorization", "content-type", "host"]
+                .iter()
+                .copied()
+                .chain(auth_header)
+                .any(|r| r.eq_ignore_ascii_case(wire));
+            if !token || reserved {
+                bail!(
+                    "api-surface: {} header parameter `{wire}` is not allowed",
+                    op.tool
+                );
+            }
+        }
+        if self.kind != SurfaceKind::Openapi {
+            return Ok(());
+        }
+        let mut placeholders = Vec::new();
+        let mut rest = op.path.as_str();
+        while let Some(open) = rest.find('{') {
+            let Some(len) = rest[open..].find('}') else {
+                bail!("api-surface: {} has an unclosed path template", op.tool);
+            };
+            placeholders.push(&rest[open + 1..open + len]);
+            rest = &rest[open + len + 1..];
+        }
+        let mut wires: Vec<&str> = op
+            .params
+            .iter()
+            .filter(|p| p.location == ParamIn::Path)
+            .map(Param::wire_name)
+            .collect();
+        placeholders.sort_unstable();
+        wires.sort_unstable();
+        if placeholders != wires {
+            bail!(
+                "api-surface: {} path parameters {wires:?} do not match template {placeholders:?}",
+                op.tool
+            );
+        }
+        Ok(())
+    }
+
+    pub fn is_write(&self, op: &ApiOp) -> bool {
+        match self.kind {
+            SurfaceKind::Openapi => !op.method.eq_ignore_ascii_case("GET"),
+            SurfaceKind::Graphql => {
+                let doc = op.path.trim_start();
+                !(doc.starts_with('{') || doc.starts_with("query"))
+            }
+        }
+    }
+
+    pub fn execute_gated(&self, op: &ApiOp) -> bool {
+        op.policy.execute_gated || self.is_write(op)
     }
 
     pub fn find(&self, tool: &str) -> Option<&ApiOp> {
@@ -402,8 +491,9 @@ impl ApiSurface {
                         }
                         utils::url::query_string(&pairs).into_bytes()
                     }
-                    (ct, Value::String(text)) if !ct.contains("json") => text.into_bytes(),
-                    (_, payload) => serde_json::to_vec(&payload)?,
+                    (ct, Value::String(text)) if ct.starts_with("text/") => text.into_bytes(),
+                    (ct, payload) if ct.contains("json") => serde_json::to_vec(&payload)?,
+                    (ct, _) => bail!("{}: body does not fit content type `{ct}`", op.tool),
                 }
             }
         };
@@ -417,11 +507,21 @@ impl ApiSurface {
     }
 
     pub fn decode_response(&self, op: &ApiOp, body: &[u8]) -> Result<Value> {
-        let parsed: Value = if body.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(body)
-                .map_err(|e| anyhow!("{}: response is not JSON: {e}", op.tool))?
+        let parsed: Value = match &op.response {
+            ResponseKind::Binary { content_type } => {
+                return Ok(serde_json::json!({
+                    "content_type": content_type,
+                    "base64": utils::encoding::base64_encode(body),
+                }));
+            }
+            ResponseKind::Text => {
+                return Ok(Value::String(String::from_utf8_lossy(body).into_owned()));
+            }
+            ResponseKind::Json if body.is_empty() => Value::Null,
+            ResponseKind::Json => match serde_json::from_slice(body) {
+                Ok(v) => v,
+                Err(_) => return Ok(Value::String(String::from_utf8_lossy(body).into_owned())),
+            },
         };
         let mut out = peel_envelope(&self.response, parsed);
         if let Some(schema) = op.output.as_ref().map(|o| &o.schema) {
@@ -842,6 +942,109 @@ mod tests {
         );
     }
 
+    fn one_op(op: Value) -> Result<ApiSurface> {
+        ApiSurface::parse(
+            &json!({
+                "format": FORMAT, "surface": "s", "kind": "openapi",
+                "auth": {"scheme": "header", "header": "X-Api-Key", "secret": "s.key"},
+                "ops": [op]
+            })
+            .to_string(),
+        )
+    }
+
+    #[test]
+    fn parse_rejects_bad_header_wires_and_mismatched_path_params() {
+        let header = |wire: &str| {
+            one_op(json!({
+                "tool": "s.t", "method": "GET", "path": "/",
+                "params": [{"name": "h", "wire": wire, "in": "header"}],
+                "policy": {"role": "admin"}
+            }))
+        };
+        assert!(header("X-Trace").is_ok());
+        for bad in [
+            "Authorization",
+            "content-type",
+            "Host",
+            "x-api-key",
+            "a b",
+            "",
+            "x:y",
+        ] {
+            assert!(header(bad).is_err(), "{bad}");
+        }
+        let path = |path: &str, names: &[&str]| {
+            let params: Vec<Value> = names
+                .iter()
+                .map(|n| json!({"name": n, "in": "path"}))
+                .collect();
+            one_op(json!({
+                "tool": "s.t", "method": "GET", "path": path,
+                "params": params, "policy": {"role": "admin"}
+            }))
+        };
+        assert!(path("/a/{x}/{y}", &["y", "x"]).is_ok());
+        assert!(path("/a/{x}/{y}", &["x"]).is_err());
+        assert!(path("/a/{x}", &["x", "z"]).is_err());
+        assert!(path("/a/{x", &["x"]).is_err());
+    }
+
+    #[test]
+    fn body_shape_must_fit_content_type() {
+        let s = one_op(json!({
+            "tool": "s.t", "method": "POST", "path": "/",
+            "params": [{"name": "body", "in": "body"}],
+            "body": {"content_type": "application/x-www-form-urlencoded", "param": "body"},
+            "policy": {"role": "admin"}
+        }))
+        .unwrap();
+        let op = s.find("s.t").unwrap();
+        assert!(
+            s.build_request(op, "https://h", &args(json!({"body": "x"})), Some("k"))
+                .is_err()
+        );
+        assert!(
+            s.build_request(op, "https://h", &args(json!({"body": {"a": 1}})), Some("k"))
+                .is_ok()
+        );
+        let mut text = op.clone();
+        text.body.as_mut().unwrap().content_type = "text/plain".into();
+        assert!(
+            s.build_request(
+                &text,
+                "https://h",
+                &args(json!({"body": {"a": 1}})),
+                Some("k")
+            )
+            .is_err()
+        );
+        let mut octet = op.clone();
+        octet.body.as_mut().unwrap().content_type = "application/octet-stream".into();
+        assert!(
+            s.build_request(&octet, "https://h", &args(json!({"body": "x"})), Some("k"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn writes_and_mutations_are_always_execute_gated() {
+        let s = one_op(json!({
+            "tool": "s.t", "method": "DELETE", "path": "/", "policy": {"role": "admin"}
+        }))
+        .unwrap();
+        assert!(s.execute_gated(&s.ops[0]));
+        let mut get = s.ops[0].clone();
+        get.method = "get".into();
+        assert!(!s.execute_gated(&get));
+        let mut g = s.clone();
+        g.kind = SurfaceKind::Graphql;
+        get.path = "query Q { a }".into();
+        assert!(!g.execute_gated(&get));
+        get.path = "mutation M { a }".into();
+        assert!(g.execute_gated(&get));
+    }
+
     #[test]
     fn builds_graphql_request() {
         let s = ApiSurface::parse(
@@ -896,6 +1099,58 @@ mod tests {
             out,
             json!({"template": false, "running": true, "cpu": 0.25, "maxmem": 1024, "name": "100"})
         );
+    }
+
+    fn with_response(kind: ResponseKind) -> (ApiSurface, ApiOp) {
+        let s = proxmox();
+        let mut op = s.ops[0].clone();
+        op.output = None;
+        op.response = kind;
+        (s, op)
+    }
+
+    #[test]
+    fn decode_text_response_as_string() {
+        let (s, op) = with_response(ResponseKind::Text);
+        assert_eq!(
+            s.decode_response(&op, b"plain diff").unwrap(),
+            json!("plain diff")
+        );
+    }
+
+    #[test]
+    fn decode_binary_response_as_base64() {
+        let (s, op) = with_response(ResponseKind::Binary {
+            content_type: "application/zip".into(),
+        });
+        assert_eq!(
+            s.decode_response(&op, &[0xff, 0x00, 0x01]).unwrap(),
+            json!({"content_type": "application/zip", "base64": "/wAB"})
+        );
+    }
+
+    #[test]
+    fn decode_mislabeled_json_falls_back_to_text() {
+        let (s, op) = with_response(ResponseKind::Json);
+        assert_eq!(
+            s.decode_response(&op, b"not json {").unwrap(),
+            json!("not json {")
+        );
+    }
+
+    #[test]
+    fn response_kind_round_trips_and_json_is_omitted() {
+        let (_, mut op) = with_response(ResponseKind::Json);
+        assert!(!serde_json::to_string(&op).unwrap().contains("\"response\""));
+        op.response = ResponseKind::Binary {
+            content_type: "image/png".into(),
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(
+            v["response"],
+            json!({"kind": "binary", "content_type": "image/png"})
+        );
+        assert_eq!(serde_json::from_value::<ApiOp>(v).unwrap(), op);
     }
 
     #[test]

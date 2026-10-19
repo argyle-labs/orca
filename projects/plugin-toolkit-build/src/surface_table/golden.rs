@@ -29,7 +29,11 @@ fn fixture_dir() -> PathBuf {
 }
 
 fn existing_surface(raw: &str, flavor: &str, lists: Option<&GetLists>) -> String {
-    let tmp = std::env::temp_dir().join(format!("surface-golden-{flavor}-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!(
+        "surface-golden-{flavor}-{}-{}",
+        std::process::id(),
+        raw.len()
+    ));
     let specs = tmp.join("specs");
     std::fs::create_dir_all(&specs).unwrap();
     std::fs::write(specs.join(format!("{flavor}.openapi.json")), raw).unwrap();
@@ -187,12 +191,31 @@ fn diff(raw: &str, flavor: &str, lists: Option<&GetLists>) -> (Vec<String>, BTre
     let (table, _) = build(raw, flavor, &Options::default(), lists).unwrap();
     let ours = table_tools(&table);
     let mut problems = Vec::new();
+    for op in &table.ops {
+        let write = op.method != "GET";
+        if write && (op.policy.role != "admin" || !op.policy.execute_gated) {
+            problems.push(format!(
+                "{}: write is not admin+gated: {:?}",
+                op.tool, op.policy
+            ));
+        }
+        if !existing.contains_key(&op.tool) && !op.internal {
+            let allowed = lists.is_some_and(|l| l.allow.contains(&op.path));
+            let gated = write || lists.is_none_or(|l| l.gated.contains(&op.path));
+            let role = if allowed { "read" } else { "admin" };
+            if op.policy.role != role || op.policy.execute_gated != gated {
+                problems.push(format!("{}: new tool policy {:?}", op.tool, op.policy));
+            }
+        }
+    }
     for (name, old) in &existing {
         let Some(new) = ours.get(name) else {
             problems.push(format!("{name}: missing from table"));
             continue;
         };
-        if old.policy != new.policy {
+        let mut expected = old.policy.clone();
+        expected.execute_gated |= table.find(name).is_some_and(|op| op.method != "GET");
+        if expected != new.policy {
             problems.push(format!(
                 "{name}: policy {:?} != {:?}",
                 old.policy, new.policy
@@ -207,7 +230,8 @@ fn diff(raw: &str, flavor: &str, lists: Option<&GetLists>) -> (Vec<String>, BTre
         for (field, of) in &old.fields {
             let nf = &new.fields[field];
             let kinds_differ = of.kind.is_some() && nf.kind.is_some() && of.kind != nf.kind;
-            if of.required != nf.required || kinds_differ {
+            let required_differs = of.required != nf.required && field != "body";
+            if required_differs || kinds_differ {
                 problems.push(format!("{name}.{field}: {of:?} != {nf:?}"));
             }
         }

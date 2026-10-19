@@ -28,6 +28,26 @@ fn diff(schemas: &Path, queries: &Path, name: &str) -> (Vec<String>, BTreeSet<St
         .filter(|op| !op.internal)
         .map(|op| op.tool.as_str())
         .collect();
+    for op in &table.ops {
+        let mutation = table.is_write(op);
+        if mutation && (op.policy.role != "admin" || !op.policy.execute_gated) {
+            problems.push(format!(
+                "{}: mutation is not admin+gated: {:?}",
+                op.tool, op.policy
+            ));
+        }
+        if !existing.contains_key(&op.tool) && !op.internal {
+            let read_shaped = verb_shape::is_read_shaped(op.tool.rsplit('.').next().unwrap());
+            let role = if !mutation && read_shaped {
+                "read"
+            } else {
+                "admin"
+            };
+            if op.policy.role != role || op.policy.execute_gated != (mutation || !read_shaped) {
+                problems.push(format!("{}: new tool policy {:?}", op.tool, op.policy));
+            }
+        }
+    }
     let old_names: BTreeSet<&str> = existing.keys().map(String::as_str).collect();
     if let Some(missing) = old_names.difference(&public).next() {
         problems.push(format!("{missing}: missing from table"));
@@ -38,7 +58,9 @@ fn diff(schemas: &Path, queries: &Path, name: &str) -> (Vec<String>, BTreeSet<St
         .collect();
     for (tool, old) in &existing {
         let Some(op) = table.find(tool) else { continue };
-        if old.policy != op.policy {
+        let mut expected = old.policy.clone();
+        expected.execute_gated |= table.is_write(op);
+        if expected != op.policy {
             problems.push(format!(
                 "{tool}: policy {:?} != {:?}",
                 old.policy, op.policy
