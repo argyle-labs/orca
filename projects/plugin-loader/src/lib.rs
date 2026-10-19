@@ -2185,6 +2185,7 @@ mod loader_tests {
                 .expect("backend def serializes"),
             ],
             schema: sj::Value::Null,
+            api_surfaces: Vec::new(),
         };
         // Serve until the daemon sends Shutdown (on unload/drop). The tool echoes
         // its args so the driver can assert the round-trip; anything else errors.

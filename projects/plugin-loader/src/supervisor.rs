@@ -132,6 +132,7 @@ pub fn handshake<S: Read + Write>(stream: &mut S, capabilities: &[&str]) -> Resu
         manifest,
         backends,
         schema,
+        ..
     } = hello
     else {
         bail!("first plugin frame was not Hello");
@@ -936,6 +937,7 @@ mod tests {
             manifest: vec![],
             backends: vec![],
             schema: Value::Null,
+            api_surfaces: Vec::new(),
         }
     }
 
@@ -1070,6 +1072,7 @@ mod tests {
                     manifest: vec![],
                     backends: vec![],
                     schema: Value::Null,
+                    api_surfaces: Vec::new(),
                 },
             )
             .unwrap();

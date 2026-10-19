@@ -213,6 +213,7 @@ fn serve_session<S: Read + Write + 'static>(
         manifest,
         backends,
         schema,
+        api_surfaces: Vec::new(),
     };
     write_frame(&mut *stream.borrow_mut(), &hello)?;
 

@@ -204,6 +204,17 @@ where
                 };
                 write_frame(&mut stream, &reply)?;
             }
+            Frame::SurfaceGet { id, name } => {
+                write_frame(
+                    &mut stream,
+                    &Frame::Surface {
+                        id,
+                        ok: false,
+                        body: String::new(),
+                        error: Some(format!("no api surface `{name}`")),
+                    },
+                )?;
+            }
             Frame::Shutdown => break,
             // Stray frames (a late CapResult, an unexpected Hello) — ignore.
             _ => {}
@@ -222,6 +233,8 @@ fn frame_kind(f: &Frame) -> &'static str {
         Frame::CapResult { .. } => "CapResult",
         Frame::CapStreamChunk { .. } => "CapStreamChunk",
         Frame::CapStreamEnd { .. } => "CapStreamEnd",
+        Frame::SurfaceGet { .. } => "SurfaceGet",
+        Frame::Surface { .. } => "Surface",
         Frame::Log { .. } => "Log",
         Frame::Shutdown => "Shutdown",
     }
@@ -243,6 +256,7 @@ mod tests {
             manifest: vec![],
             backends: vec![],
             schema: Value::Null,
+            api_surfaces: Vec::new(),
         }
     }
 
@@ -279,6 +293,44 @@ mod tests {
         };
         let err = serve(mock, hello(), |_, _, _| Ok(Value::Null)).unwrap_err();
         assert!(matches!(err, ProtoError::Handshake(_)));
+    }
+
+    #[test]
+    fn surface_get_without_surfaces_is_refused() {
+        let (plugin_end, orca_end) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || serve(plugin_end, hello(), |_, a, _| Ok(a)));
+        let mut orca = orca_end;
+        read_frame(&mut orca).unwrap().unwrap();
+        write_frame(
+            &mut orca,
+            &Frame::Welcome {
+                protocol: "1.0".into(),
+                capabilities: vec![],
+            },
+        )
+        .unwrap();
+        write_frame(
+            &mut orca,
+            &Frame::SurfaceGet {
+                id: 3,
+                name: "pve".into(),
+            },
+        )
+        .unwrap();
+        match read_frame(&mut orca).unwrap().unwrap() {
+            Frame::Surface {
+                id,
+                ok,
+                body,
+                error,
+            } => {
+                assert_eq!((id, ok, body.as_str()), (3, false, ""));
+                assert!(error.unwrap().contains("pve"));
+            }
+            f => panic!("expected Surface, got {f:?}"),
+        }
+        write_frame(&mut orca, &Frame::Shutdown).unwrap();
+        plugin.join().unwrap().unwrap();
     }
 
     #[test]
