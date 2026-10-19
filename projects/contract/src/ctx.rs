@@ -42,6 +42,8 @@ pub struct ToolCtx {
     /// body that runs outside the central gate plan instead of apply.
     dry_run: bool,
     unbound_role: Option<String>,
+    local_transport: bool,
+    second_factor: bool,
     services: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
@@ -55,6 +57,8 @@ impl ToolCtx {
             correlation_id: None,
             dry_run: false,
             unbound_role: None,
+            local_transport: false,
+            second_factor: false,
             services: HashMap::new(),
         }
     }
@@ -129,6 +133,22 @@ impl ToolCtx {
 
     pub fn unbound_role(&self) -> Option<&str> {
         self.unbound_role.as_deref()
+    }
+
+    pub fn set_local_transport(&mut self, local: bool) {
+        self.local_transport = local;
+    }
+
+    pub fn local_transport(&self) -> bool {
+        self.local_transport
+    }
+
+    pub fn set_second_factor(&mut self, verified: bool) {
+        self.second_factor = verified;
+    }
+
+    pub fn second_factor(&self) -> bool {
+        self.second_factor
     }
 
     /// Mark this invocation as a dry run (or not).
