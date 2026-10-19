@@ -143,18 +143,18 @@ fn api_call_reply(outcome: spec::surfaces::Outcome) -> Result<Value> {
     }
 }
 
-/// Execute one capability request on behalf of `principal` — the authoritative
-/// plugin id bound to this session's socket (see
-/// [`supervisor::PluginProcess`](crate::supervisor::PluginProcess)). `args` is
-/// the op payload the plugin sent (a serialized [`DbOp`] / [`SecretOp`] /
-/// [`HttpRequest`]); the returned `Value` is the reply the supervisor wraps into
-/// a `CapResult`. `db.op` / `secret.op` are confined to `principal`'s namespace.
 const MAX_BODY_CEILING: u64 = 64 * 1024 * 1024;
 
 fn clamp_max_body(requested: Option<u64>) -> Option<usize> {
     requested.map(|n| n.min(MAX_BODY_CEILING) as usize)
 }
 
+/// Execute one capability request on behalf of `principal` — the authoritative
+/// plugin id bound to this session's socket (see
+/// [`supervisor::PluginProcess`](crate::supervisor::PluginProcess)). `args` is
+/// the op payload the plugin sent (a serialized [`DbOp`] / [`SecretOp`] /
+/// [`HttpRequest`]); the returned `Value` is the reply the supervisor wraps into
+/// a `CapResult`. `db.op` / `secret.op` are confined to `principal`'s namespace.
 pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
     match cap {
         "db.op" => {
@@ -657,6 +657,26 @@ mod tests {
         assert_eq!(
             clamp_max_body(Some(MAX_BODY_CEILING * 4)),
             Some(MAX_BODY_CEILING as usize)
+        );
+    }
+
+    #[test]
+    fn http_request_max_body_above_ceiling_is_clamped_end_to_end() {
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY_CEILING + 1
+        );
+        let url = oneshot_http(Box::leak(header.into_bytes().into_boxed_slice()));
+        let err = handle_cap(
+            "http.request",
+            json!({"method": "GET", "url": url, "max_body_bytes": u64::MAX}),
+            "p",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains(&format!("exceeded {MAX_BODY_CEILING} bytes")),
+            "got: {err}"
         );
     }
 
