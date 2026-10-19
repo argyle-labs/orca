@@ -33,6 +33,7 @@ pub mod abi;
 /// plugin contributes its composition into core's `agents` domain over the
 /// `agents.register` capability.
 pub mod agents;
+pub mod api;
 #[cfg(all(feature = "http", not(feature = "delegated-http")))]
 pub mod api_client;
 /// Out-of-process capability sink (dependency-light: no rusqlite). Home of

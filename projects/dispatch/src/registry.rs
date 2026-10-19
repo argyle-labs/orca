@@ -765,28 +765,24 @@ async fn http_dispatch(
             .with_code("tool.unknown");
         return Err(orca_error_response(oe));
     }
-    let ctx_owned =
-        if caller.is_some() || unbound.is_some() || peer.is_some() || correlation_id.is_some() {
-            let mut ctx = (*state.ctx).clone();
-            if let Some(Extension(u)) = unbound {
-                ctx.set_caller(None);
-                ctx.set_unbound_role(Some(u.role));
-            }
-            if let Some(Extension(c)) = caller {
-                ctx.set_verified_caller(Some(c.clone()));
-                ctx.set_caller(Some(c));
-            }
-            if let Some(p) = peer {
-                ctx.set_peer(Some(p));
-            }
-            if let Some(cid) = correlation_id {
-                ctx.set_correlation_id(Some(cid));
-            }
-            Some(ctx)
-        } else {
-            None
-        };
-    let ctx_ref: &ToolCtx = ctx_owned.as_ref().unwrap_or(&state.ctx);
+    let mut ctx = (*state.ctx).clone();
+    ctx.set_local_transport(false);
+    ctx.set_second_factor(false);
+    if let Some(Extension(u)) = unbound {
+        ctx.set_caller(None);
+        ctx.set_unbound_role(Some(u.role));
+    }
+    if let Some(Extension(c)) = caller {
+        ctx.set_verified_caller(Some(c.clone()));
+        ctx.set_caller(Some(c));
+    }
+    if let Some(p) = peer {
+        ctx.set_peer(Some(p));
+    }
+    if let Some(cid) = correlation_id {
+        ctx.set_correlation_id(Some(cid));
+    }
+    let ctx_ref: &ToolCtx = &ctx;
     dispatch(&name, args, ctx_ref).await.map(Json).map_err(|e| {
         if let Some(oe) = find_orca_error(&e) {
             let kind = oe.kind;
@@ -1771,6 +1767,7 @@ mod tests {
 
     /// Callers the fake plugin saw, by username (`None` = no caller).
     static SEEN: std::sync::Mutex<Vec<Option<String>>> = std::sync::Mutex::new(Vec::new());
+    static SEEN_LOCAL: std::sync::Mutex<Vec<bool>> = std::sync::Mutex::new(Vec::new());
 
     /// Args the fake plugin saw.
     static SEEN_ARGS: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
@@ -1799,6 +1796,7 @@ mod tests {
                         return Some(Ok(args.clone()));
                     }
                     (name == FAKE_PLUGIN_TOOL).then(|| {
+                        SEEN_LOCAL.lock().unwrap().push(ctx.local_transport());
                         SEEN.lock()
                             .unwrap()
                             .push(caller.map(|c| c.username.clone()));
@@ -1854,6 +1852,37 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn http_requests_never_carry_local_transport() {
+        use axum::body::Body;
+        use axum::http::Request as AxumReq;
+        use tower::ServiceExt;
+
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        SEEN_LOCAL.lock().unwrap().clear();
+        let mut local = make_ctx();
+        local.set_local_transport(true);
+        local.set_second_factor(true);
+        for forwarded in [None, Some("127.0.0.1"), Some("10.0.0.5")] {
+            let mut req = AxumReq::builder()
+                .method("POST")
+                .uri(format!("/{FAKE_PLUGIN_TOOL}"))
+                .header("content-type", "application/json");
+            if let Some(ip) = forwarded {
+                req = req.header("x-forwarded-for", ip).header("x-real-ip", ip);
+            }
+            let resp = axum_router(Arc::new(local.clone()))
+                .oneshot(req.body(Body::from("{}")).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        assert_eq!(*SEEN_LOCAL.lock().unwrap(), vec![false, false, false]);
     }
 
     #[cfg(feature = "server")]

@@ -54,6 +54,7 @@ impl<S: std::io::Read + std::io::Write> Caps<'_, S> {
                     ok,
                     value,
                     error,
+                    ..
                 }) if rid == id => {
                     return if ok {
                         Ok(value)
@@ -120,6 +121,7 @@ impl<S: std::io::Read + std::io::Write> Caps<'_, S> {
                     ok,
                     value,
                     error,
+                    ..
                 }) if rid == id => {
                     return if ok {
                         on_chunk(0, value)
@@ -404,6 +406,7 @@ mod tests {
                         ok: true,
                         value: json!({"status": 200}),
                         error: None,
+                        error_kind: None,
                     },
                 )
                 .unwrap();

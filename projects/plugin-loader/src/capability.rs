@@ -38,7 +38,10 @@ pub const CAPABILITIES: &[&str] = &[
     "ws.send",
     "ws.close",
     "agents.register",
+    API_CALL,
 ];
+
+pub const API_CALL: &str = "api.call";
 
 /// Whether `cap` is a STREAMING capability — one the supervisor drives through
 /// [`handle_cap_stream`] (emitting `CapStreamChunk`/`CapStreamEnd`) rather than
@@ -91,12 +94,67 @@ pub(crate) fn agent_provider_owned(name: &str, principal: &str) -> bool {
             .is_some_and(|(owner, id)| !owner.is_empty() && id == principal)
 }
 
+pub fn handle_api_call(
+    args: Value,
+    principal: &str,
+    inv: Option<&spec::surfaces::Invocation>,
+) -> Result<Value> {
+    let inv = inv
+        .cloned()
+        .ok_or_else(|| anyhow!("api.call requires an authenticated caller"))?;
+    let call: plugin_proto::ApiCall =
+        serde_json::from_value(args).map_err(|e| anyhow!("api.call: bad payload: {e}"))?;
+    let principal = principal.to_string();
+    let outcome = run_on_cap_runtime(async move {
+        spec::surfaces::call(
+            &principal,
+            call.surface.as_deref(),
+            &call.op,
+            &call.endpoint,
+            call.args,
+            &inv,
+        )
+        .await
+    })??;
+    api_call_reply(outcome)
+}
+
+#[derive(Debug)]
+pub struct PlannedCall(pub plugin_proto::ApiCallPlan);
+
+impl std::fmt::Display for PlannedCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "api.call planned, not executed: {} {}",
+            self.0.method, self.0.url
+        )
+    }
+}
+
+impl std::error::Error for PlannedCall {}
+
+fn api_call_reply(outcome: spec::surfaces::Outcome) -> Result<Value> {
+    match outcome {
+        spec::surfaces::Outcome::Response(value) => Ok(value),
+        spec::surfaces::Outcome::Plan(plan) => {
+            Err(PlannedCall(serde_json::from_value(serde_json::to_value(plan)?)?).into())
+        }
+    }
+}
+
 /// Execute one capability request on behalf of `principal` — the authoritative
 /// plugin id bound to this session's socket (see
 /// [`supervisor::PluginProcess`](crate::supervisor::PluginProcess)). `args` is
 /// the op payload the plugin sent (a serialized [`DbOp`] / [`SecretOp`] /
 /// [`HttpRequest`]); the returned `Value` is the reply the supervisor wraps into
 /// a `CapResult`. `db.op` / `secret.op` are confined to `principal`'s namespace.
+const MAX_BODY_CEILING: u64 = 64 * 1024 * 1024;
+
+fn clamp_max_body(requested: Option<u64>) -> Option<usize> {
+    requested.map(|n| n.min(MAX_BODY_CEILING) as usize)
+}
+
 pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
     match cap {
         "db.op" => {
@@ -119,7 +177,8 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
         "http.request" => {
             let req: HttpRequest = serde_json::from_value(args)
                 .map_err(|e| anyhow!("http.request: bad request payload: {e}"))?;
-            let builder = utils::http::shared()
+            let max_body = clamp_max_body(req.max_body_bytes);
+            let mut builder = utils::http::shared()
                 .raw_request(utils::http::RawRequest {
                     method: req.method,
                     url: req.url,
@@ -129,6 +188,9 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
                     insecure: req.insecure,
                 })
                 .map_err(|e| anyhow!("http.request: {e}"))?;
+            if let Some(n) = max_body {
+                builder = builder.max_body(n);
+            }
             let resp = run_on_cap_runtime(builder.send_raw())?
                 .map_err(|e| anyhow!("http.request: {e}"))?;
             Ok(serde_json::to_value(HttpResponse {
@@ -297,6 +359,26 @@ async fn send_within(
 mod tests {
     use super::*;
     use plugin_toolkit::serde_json::json;
+
+    #[test]
+    fn api_call_plan_is_an_error_never_a_value() {
+        let plan = spec::surfaces::Plan {
+            method: "POST".into(),
+            url: "https://h/x".into(),
+            query: vec![],
+            body: Value::Null,
+            endpoint: "main".into(),
+            route: "https://h".into(),
+        };
+        let err = api_call_reply(spec::surfaces::Outcome::Plan(plan)).unwrap_err();
+        let planned = err.downcast_ref::<PlannedCall>().expect("typed plan");
+        assert_eq!(planned.0.method, "POST");
+        assert_eq!(planned.0.endpoint, "main");
+        assert_eq!(
+            api_call_reply(spec::surfaces::Outcome::Response(json!({"a": 1}))).unwrap(),
+            json!({"a": 1})
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn cap_io_is_sound_from_inside_a_runtime() {
@@ -534,6 +616,55 @@ mod tests {
             .expect("request succeeds even for 4xx");
         let resp: HttpResponse = serde_json::from_value(reply).expect("decode HttpResponse");
         assert_eq!(resp.status, 404);
+    }
+
+    fn oversized_response(len: usize) -> &'static [u8] {
+        let mut out = format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\n\r\n").into_bytes();
+        out.resize(out.len() + len, b'x');
+        Box::leak(out.into_boxed_slice())
+    }
+
+    #[test]
+    fn http_request_over_default_cap_fails() {
+        let url = oneshot_http(oversized_response(9 * 1024 * 1024));
+        let err = handle_cap("http.request", json!({"method": "GET", "url": url}), "p")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("exceeded {} bytes", 8 * 1024 * 1024)),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn http_request_raised_cap_succeeds() {
+        let len = 9 * 1024 * 1024;
+        let url = oneshot_http(oversized_response(len));
+        let reply = handle_cap(
+            "http.request",
+            json!({"method": "GET", "url": url, "max_body_bytes": 16 * 1024 * 1024}),
+            "p",
+        )
+        .expect("request succeeds under raised cap");
+        let resp: HttpResponse = serde_json::from_value(reply).expect("decode HttpResponse");
+        assert_eq!(resp.body.len(), len);
+    }
+
+    #[test]
+    fn http_request_max_body_clamped_to_ceiling() {
+        assert_eq!(clamp_max_body(None), None);
+        assert_eq!(clamp_max_body(Some(16)), Some(16));
+        assert_eq!(
+            clamp_max_body(Some(MAX_BODY_CEILING * 4)),
+            Some(MAX_BODY_CEILING as usize)
+        );
+    }
+
+    #[test]
+    fn http_request_payload_without_max_body_deserializes() {
+        let req: HttpRequest =
+            serde_json::from_value(json!({"method": "GET", "url": "http://x/"})).expect("decode");
+        assert_eq!(req.max_body_bytes, None);
     }
 
     #[test]
