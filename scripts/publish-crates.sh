@@ -6,8 +6,10 @@
 # version is skipped, so a rerun after a partial failure resumes where it
 # stopped.
 #
-# Requires CARGO_REGISTRIES_GITEA_TOKEN ("Bearer <token>"). `--dry-run` prints
-# the order and each crate's index state without publishing.
+# Requires CARGO_REGISTRIES_GITEA_TOKEN ("Bearer <token>") and
+# ORCA_RELEASE_VERSION (the tag version); fails if the workspace version
+# differs, so an unbumped tree can't skip every crate as already published.
+# `--dry-run` prints the order and each crate's index state without publishing.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -17,6 +19,13 @@ dry_run=false
 index="${CARGO_REGISTRIES_GITEA_INDEX:-$(sed -n '/^\[registries.gitea\]/,/^\[/s/^index = "\(.*\)"$/\1/p' .cargo/config.toml)}"
 index="${index#sparse+}"
 [ -n "$index" ] || { echo "no [registries.gitea] index configured" >&2; exit 1; }
+
+ws_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+if [ -n "${ORCA_RELEASE_VERSION:-}" ]; then
+  [ "$ws_version" = "$ORCA_RELEASE_VERSION" ] || { echo "workspace version $ws_version != release version $ORCA_RELEASE_VERSION" >&2; exit 1; }
+elif ! $dry_run; then
+  echo "ORCA_RELEASE_VERSION not set" >&2; exit 1
+fi
 
 meta="$(cargo metadata --format-version 1 --no-deps --locked)"
 
