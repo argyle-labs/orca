@@ -158,6 +158,7 @@ pub mod reqwest {
                 timeout_ms: None,
                 insecure: self.insecure,
                 max_body_bytes: request.max_body_bytes,
+                body_b64: true,
             };
             let resp = crate::capsink::http_request(&req).map_err(|e| Error(e.to_string()))?;
             let mut headers = HeaderMap::new();

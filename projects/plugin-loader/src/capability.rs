@@ -39,6 +39,7 @@ pub const CAPABILITIES: &[&str] = &[
     "ws.close",
     "agents.register",
     API_CALL,
+    plugin_toolkit::abi::HTTP_BODY_B64,
 ];
 
 pub const API_CALL: &str = "api.call";
@@ -143,18 +144,18 @@ fn api_call_reply(outcome: spec::surfaces::Outcome) -> Result<Value> {
     }
 }
 
-/// Execute one capability request on behalf of `principal` — the authoritative
-/// plugin id bound to this session's socket (see
-/// [`supervisor::PluginProcess`](crate::supervisor::PluginProcess)). `args` is
-/// the op payload the plugin sent (a serialized [`DbOp`] / [`SecretOp`] /
-/// [`HttpRequest`]); the returned `Value` is the reply the supervisor wraps into
-/// a `CapResult`. `db.op` / `secret.op` are confined to `principal`'s namespace.
 const MAX_BODY_CEILING: u64 = 64 * 1024 * 1024;
 
 fn clamp_max_body(requested: Option<u64>) -> Option<usize> {
     requested.map(|n| n.min(MAX_BODY_CEILING) as usize)
 }
 
+/// Execute one capability request on behalf of `principal` — the authoritative
+/// plugin id bound to this session's socket (see
+/// [`supervisor::PluginProcess`](crate::supervisor::PluginProcess)). `args` is
+/// the op payload the plugin sent (a serialized [`DbOp`] / [`SecretOp`] /
+/// [`HttpRequest`]); the returned `Value` is the reply the supervisor wraps into
+/// a `CapResult`. `db.op` / `secret.op` are confined to `principal`'s namespace.
 pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
     match cap {
         "db.op" => {
@@ -178,6 +179,7 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
             let req: HttpRequest = serde_json::from_value(args)
                 .map_err(|e| anyhow!("http.request: bad request payload: {e}"))?;
             let max_body = clamp_max_body(req.max_body_bytes);
+            let body_b64 = req.body_b64;
             let mut builder = utils::http::shared()
                 .raw_request(utils::http::RawRequest {
                     method: req.method,
@@ -193,11 +195,16 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
             }
             let resp = run_on_cap_runtime(builder.send_raw())?
                 .map_err(|e| anyhow!("http.request: {e}"))?;
-            Ok(serde_json::to_value(HttpResponse {
+            let reply = HttpResponse {
                 status: resp.status,
                 headers: resp.headers.into_iter().collect(),
                 body: resp.body,
-            })?)
+            };
+            Ok(if body_b64 {
+                serde_json::to_value(reply)?
+            } else {
+                serde_json::to_value(reply.legacy())?
+            })
         }
         "ws.open" => {
             let req: WsOpen = serde_json::from_value(args)
@@ -608,6 +615,42 @@ mod tests {
     }
 
     #[test]
+    fn http_request_replies_legacy_array_to_old_plugin() {
+        let url = oneshot_http(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi");
+        let reply = handle_cap("http.request", json!({"method": "GET", "url": url}), "p").unwrap();
+        assert_eq!(reply["body"], json!([104, 105]));
+    }
+
+    #[test]
+    fn http_request_replies_base64_when_plugin_advertises() {
+        let url = oneshot_http(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi");
+        let reply = handle_cap(
+            "http.request",
+            json!({"method": "GET", "url": url, "body_b64": true}),
+            "p",
+        )
+        .unwrap();
+        assert_eq!(reply["body"], json!("aGk="));
+        let resp: HttpResponse = serde_json::from_value(reply).unwrap();
+        assert_eq!(resp.body, b"hi");
+    }
+
+    #[test]
+    fn http_request_accepts_base64_and_legacy_request_body() {
+        for body in [json!("aGk="), json!([104, 105])] {
+            let req: HttpRequest =
+                serde_json::from_value(json!({"method": "POST", "url": "http://x/", "body": body}))
+                    .unwrap();
+            assert_eq!(req.body, b"hi");
+        }
+    }
+
+    #[test]
+    fn capabilities_advertise_base64_body() {
+        assert!(CAPABILITIES.contains(&plugin_toolkit::abi::HTTP_BODY_B64));
+    }
+
+    #[test]
     fn http_request_relays_error_status_verbatim() {
         // A 4xx is returned as a normal response, not an Err — a delegating
         // plugin sees the status verbatim.
@@ -657,6 +700,26 @@ mod tests {
         assert_eq!(
             clamp_max_body(Some(MAX_BODY_CEILING * 4)),
             Some(MAX_BODY_CEILING as usize)
+        );
+    }
+
+    #[test]
+    fn http_request_max_body_above_ceiling_is_clamped_end_to_end() {
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY_CEILING + 1
+        );
+        let url = oneshot_http(Box::leak(header.into_bytes().into_boxed_slice()));
+        let err = handle_cap(
+            "http.request",
+            json!({"method": "GET", "url": url, "max_body_bytes": u64::MAX}),
+            "p",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains(&format!("exceeded {MAX_BODY_CEILING} bytes")),
+            "got: {err}"
         );
     }
 
