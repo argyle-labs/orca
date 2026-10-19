@@ -27,6 +27,8 @@ secrets = { workspace = true }
 dispatch   = { workspace = true, default-features = true }
 futures    = { workspace = true }
 plugin-proto = { workspace = true }
+openapi    = { workspace = true }
+spec       = { workspace = true }
 plugin-toolkit = { workspace = true, features = ["tools", "endpoints", "in-process", "notify", "containers"] }
 rusqlite   = { workspace = true }
 serde_json = { workspace = true }

@@ -58,10 +58,9 @@ pub async fn dispatch(
             .ok_or_else(|| anyhow::anyhow!("mesh dispatcher not installed yet"))?
             .clone()
     };
-    if correlation_id.is_none() && caller.is_none() {
-        return dispatch::dispatch(name, args, &ctx).await;
-    }
     let mut local = (*ctx).clone();
+    local.set_local_transport(false);
+    local.set_second_factor(false);
     // Inherit the originator's correlation_id so this peer's logs join the
     // same trace as the host that initiated the request.
     if correlation_id.is_some() {
