@@ -46,7 +46,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Mirror of the rest plugin's 8 MiB response cap. Larger responses are
 /// rejected with `HttpError::ResponseTooLarge`.
-const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 10;
 /// Default-deny: the only request headers carried to a different origin on a
 /// redirect. Anything else may be a credential.
