@@ -34,6 +34,7 @@ pub struct Request {
     timeout_ms: Option<u64>,
     max_body_bytes: Option<u64>,
     insecure: bool,
+    follow_redirects: Option<bool>,
 }
 
 impl Request {
@@ -47,6 +48,7 @@ impl Request {
             timeout_ms: None,
             max_body_bytes: None,
             insecure: false,
+            follow_redirects: None,
         }
     }
 
@@ -81,6 +83,11 @@ impl Request {
         self
     }
 
+    pub fn follow_redirects(mut self, on: bool) -> Self {
+        self.follow_redirects = Some(on);
+        self
+    }
+
     /// Skip TLS verification (self-signed upstreams).
     pub fn insecure(mut self, on: bool) -> Self {
         self.insecure = on;
@@ -97,6 +104,7 @@ impl Request {
             insecure: self.insecure,
             max_body_bytes: self.max_body_bytes,
             body_b64: true,
+            follow_redirects: self.follow_redirects,
         }
     }
 
@@ -452,6 +460,12 @@ mod tests {
         assert!(w.body.is_empty());
         assert_eq!(w.timeout_ms, None);
         assert!(!w.insecure);
+        assert_eq!(w.follow_redirects, None);
+        let w = Request::new("POST", "http://h/")
+            .follow_redirects(false)
+            .to_wire();
+        assert_eq!(w.follow_redirects, Some(false));
+        assert!(w.body_b64);
     }
 
     #[test]

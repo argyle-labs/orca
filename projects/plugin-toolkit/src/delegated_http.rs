@@ -59,6 +59,7 @@ pub mod reqwest {
         pub(crate) headers: HeaderMap,
         pub(crate) body: Vec<u8>,
         pub(crate) max_body_bytes: Option<u64>,
+        pub(crate) follow_redirects: Option<bool>,
     }
 
     /// A response the generated code inspects (`status()`, `headers()`) and the
@@ -139,6 +140,7 @@ pub mod reqwest {
                 headers: self.default_headers.clone(),
                 body: Vec::new(),
                 max_body_bytes: None,
+                follow_redirects: None,
                 error: None,
             }
         }
@@ -159,6 +161,7 @@ pub mod reqwest {
                 insecure: self.insecure,
                 max_body_bytes: request.max_body_bytes,
                 body_b64: true,
+                follow_redirects: request.follow_redirects,
             };
             let resp = crate::capsink::http_request(&req).map_err(|e| Error(e.to_string()))?;
             let mut headers = HeaderMap::new();
@@ -221,6 +224,7 @@ pub mod reqwest {
         headers: HeaderMap,
         body: Vec<u8>,
         max_body_bytes: Option<u64>,
+        follow_redirects: Option<bool>,
         error: Option<String>,
     }
     impl RequestBuilder {
@@ -263,6 +267,10 @@ pub mod reqwest {
             self.max_body_bytes = Some(bytes);
             self
         }
+        pub fn follow_redirects(mut self, on: bool) -> Self {
+            self.follow_redirects = Some(on);
+            self
+        }
         /// Set a form-urlencoded body (progenitor's `RequestBuilderExt::form`).
         pub fn form_urlencoded<T: super::serialize::ToQuery>(mut self, form: &T) -> Self {
             match form.to_query_string() {
@@ -285,6 +293,7 @@ pub mod reqwest {
                 headers: self.headers,
                 body: self.body,
                 max_body_bytes: self.max_body_bytes,
+                follow_redirects: self.follow_redirects,
             })
         }
         #[doc(hidden)]
@@ -815,6 +824,16 @@ mod tests {
         assert_eq!(req.max_body_bytes, Some(1 << 26));
         let req = client.get("http://x/").build().unwrap();
         assert_eq!(req.max_body_bytes, None);
+        let req = client
+            .get("http://x/")
+            .follow_redirects(false)
+            .build()
+            .unwrap();
+        assert_eq!(req.follow_redirects, Some(false));
+        assert_eq!(
+            client.get("http://x/").build().unwrap().follow_redirects,
+            None
+        );
     }
 
     #[test]
