@@ -109,6 +109,7 @@ pub mod reqwest {
     pub struct Client {
         pub(crate) insecure: bool,
         pub(crate) default_headers: HeaderMap,
+        pub(crate) base_origin: std::sync::Arc<std::sync::OnceLock<String>>,
     }
     impl Client {
         pub fn new() -> Self {
@@ -130,14 +131,18 @@ pub mod reqwest {
             self.request("DELETE", url)
         }
         fn request(&self, method: &str, url: impl Into<String>) -> RequestBuilder {
+            let url = url.into();
+            let same_origin = super::origin(&url)
+                .is_some_and(|o| self.base_origin.get_or_init(|| o.clone()) == &o);
             RequestBuilder {
                 insecure: self.insecure,
                 method: method.to_string(),
-                url: url.into(),
-                // Seed the per-connection default headers (e.g. an API-token
-                // Authorization) so every generated call carries auth, matching
-                // reqwest's `default_headers` behavior.
-                headers: self.default_headers.clone(),
+                url,
+                headers: if same_origin {
+                    self.default_headers.clone()
+                } else {
+                    HeaderMap::new()
+                },
                 body: Vec::new(),
                 max_body_bytes: None,
                 follow_redirects: None,
@@ -210,6 +215,7 @@ pub mod reqwest {
             Ok(Client {
                 insecure: self.insecure,
                 default_headers: self.default_headers,
+                base_origin: Default::default(),
             })
         }
     }
@@ -310,7 +316,7 @@ pub mod reqwest {
             let request = self.build()?;
             Client {
                 insecure,
-                default_headers: HeaderMap::new(),
+                ..Client::default()
             }
             .execute(request)
             .await
@@ -808,6 +814,31 @@ pub mod api_client {
     }
 }
 
+fn origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if host_port.is_empty() {
+        return None;
+    }
+    let host_port = host_port.to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "http" => ":80",
+        "https" => ":443",
+        _ => "",
+    };
+    let host_port = if !default_port.is_empty() && !host_port.ends_with(']') {
+        host_port
+            .strip_suffix(default_port)
+            .map(str::to_string)
+            .unwrap_or(host_port)
+    } else {
+        host_port
+    };
+    Some(format!("{scheme}://{host_port}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::progenitor_client::QueryParam;
@@ -834,6 +865,66 @@ mod tests {
             client.get("http://x/").build().unwrap().follow_redirects,
             None
         );
+    }
+
+    fn authed_client() -> super::reqwest::Client {
+        super::api_client::ApiClientBuilder::new()
+            .bearer("t0k")
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn auth_of(client: &super::reqwest::Client, url: &str) -> Option<String> {
+        client
+            .get(url)
+            .build()
+            .unwrap()
+            .headers
+            .get("authorization")
+            .map(|v| v.to_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn default_auth_sent_same_origin() {
+        let client = authed_client();
+        assert_eq!(
+            auth_of(&client, "https://api.lan/v1/a").as_deref(),
+            Some("Bearer t0k")
+        );
+        assert_eq!(
+            auth_of(&client, "HTTPS://API.lan:443/v1/b?x=1").as_deref(),
+            Some("Bearer t0k")
+        );
+    }
+
+    #[test]
+    fn default_auth_withheld_off_origin() {
+        let client = authed_client();
+        auth_of(&client, "https://api.lan/v1/a");
+        for url in [
+            "https://evil.example/steal",
+            "http://api.lan/v1/a",
+            "https://api.lan:8443/v1/a",
+            "https://api.lan.evil.example/",
+            "https://api.lan@evil.example/",
+            "/relative",
+        ] {
+            assert_eq!(auth_of(&client, url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn origin_normalizes() {
+        assert_eq!(
+            super::origin("https://u:p@Host.lan:443/p").as_deref(),
+            Some("https://host.lan")
+        );
+        assert_eq!(
+            super::origin("http://[::1]:80/").as_deref(),
+            Some("http://[::1]")
+        );
+        assert_eq!(super::origin("nope"), None);
     }
 
     #[test]
