@@ -59,10 +59,10 @@ fn scalar_primitive(ident: &str) -> Option<&'static str> {
 const VERSION_SCALARS: &[&str] = &["BigInt", "DateTime", "JSON", "Port", "PrefixedID", "URL"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct Markers {
+pub(crate) struct Markers {
     user_callable: bool,
     admin: bool,
-    no_tool: bool,
+    pub(crate) no_tool: bool,
     data_mutation: bool,
 }
 
@@ -169,7 +169,7 @@ pub fn generate(out_dir: &Path, queries_dir: &Path, plugin_name: &str) -> Result
     Ok(())
 }
 
-fn operation_markers(queries_dir: &Path) -> Result<HashMap<String, Markers>> {
+pub(crate) fn operation_markers(queries_dir: &Path) -> Result<HashMap<String, Markers>> {
     let mut out = HashMap::new();
     let mut seen: HashMap<String, std::path::PathBuf> = HashMap::new();
     let rd = std::fs::read_dir(queries_dir)
@@ -459,7 +459,7 @@ fn anchor_module(items: &mut [syn::Item]) -> usize {
     n
 }
 
-fn tool_policy(is_mutation: bool, markers: Markers) -> (&'static str, bool) {
+pub(crate) fn tool_policy(is_mutation: bool, markers: Markers) -> (&'static str, bool) {
     let role = if is_mutation || markers.admin {
         "admin"
     } else {

@@ -137,7 +137,10 @@ pub fn build(
                     params,
                     body,
                     output: output.map(|schema| OpOutput { schema }),
-                    policy: derived_policy(&tail, &http, mk),
+                    policy: {
+                        let (role, data_mutation) = tool_policy(is_write(&http), mk);
+                        super::derived_policy(&tail, role, data_mutation)
+                    },
                     internal: mk.no_tool,
                 },
                 mk,
@@ -205,22 +208,6 @@ pub(crate) fn progenitor_ident(input: &str) -> String {
         out
     } else {
         format!("{out}_")
-    }
-}
-
-fn derived_policy(tail: &str, http: &str, mk: Markers) -> Policy {
-    let (role, data_mutation) = tool_policy(is_write(http), mk);
-    let read_shaped = verb_shape::is_read_shaped(tail);
-    let role = match role {
-        "" if read_shaped => "read",
-        "" => "admin",
-        declared => declared,
-    };
-    Policy {
-        role: role.to_string(),
-        execute_gated: !read_shaped,
-        data_mutation,
-        local_only: false,
     }
 }
 

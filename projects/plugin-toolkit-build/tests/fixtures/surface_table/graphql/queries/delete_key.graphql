@@ -1,0 +1,3 @@
+mutation DeleteKey($keyId: PrefixedID!, $type: KeyType) {
+  deleteKey(keyId: $keyId, type: $type)
+}

@@ -1,0 +1,460 @@
+{
+ "data": {
+  "__schema": {
+   "queryType": {
+    "name": "Query"
+   },
+   "mutationType": {
+    "name": "Mutation"
+   },
+   "subscriptionType": null,
+   "types": [
+    {
+     "kind": "SCALAR",
+     "name": "String",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "SCALAR",
+     "name": "Int",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "SCALAR",
+     "name": "Boolean",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "SCALAR",
+     "name": "ID",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "SCALAR",
+     "name": "Float",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "SCALAR",
+     "name": "PrefixedID",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "SCALAR",
+     "name": "BigInt",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "SCALAR",
+     "name": "DateTime",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "SCALAR",
+     "name": "JSON",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "SCALAR",
+     "name": "Port",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "SCALAR",
+     "name": "URL",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "OBJECT",
+     "name": "Query",
+     "description": null,
+     "fields": [
+      {
+       "name": "info",
+       "description": null,
+       "args": [],
+       "type": {
+        "kind": "OBJECT",
+        "name": "Info",
+        "ofType": null
+       },
+       "isDeprecated": false,
+       "deprecationReason": null
+      },
+      {
+       "name": "vms",
+       "description": null,
+       "args": [
+        {
+         "name": "filter",
+         "description": null,
+         "type": {
+          "kind": "INPUT_OBJECT",
+          "name": "VmFilter",
+          "ofType": null
+         },
+         "defaultValue": null
+        }
+       ],
+       "type": {
+        "kind": "NON_NULL",
+        "name": null,
+        "ofType": {
+         "kind": "LIST",
+         "name": null,
+         "ofType": {
+          "kind": "NON_NULL",
+          "name": null,
+          "ofType": {
+           "kind": "OBJECT",
+           "name": "Vm",
+           "ofType": null
+          }
+         }
+        }
+       },
+       "isDeprecated": false,
+       "deprecationReason": null
+      }
+     ],
+     "inputFields": null,
+     "interfaces": [],
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "OBJECT",
+     "name": "Mutation",
+     "description": null,
+     "fields": [
+      {
+       "name": "setState",
+       "description": null,
+       "args": [
+        {
+         "name": "input",
+         "description": null,
+         "type": {
+          "kind": "NON_NULL",
+          "name": null,
+          "ofType": {
+           "kind": "INPUT_OBJECT",
+           "name": "ArrayStateInput",
+           "ofType": null
+          }
+         },
+         "defaultValue": null
+        }
+       ],
+       "type": {
+        "kind": "OBJECT",
+        "name": "Array",
+        "ofType": null
+       },
+       "isDeprecated": false,
+       "deprecationReason": null
+      },
+      {
+       "name": "deleteKey",
+       "description": null,
+       "args": [
+        {
+         "name": "keyId",
+         "description": null,
+         "type": {
+          "kind": "NON_NULL",
+          "name": null,
+          "ofType": {
+           "kind": "SCALAR",
+           "name": "PrefixedID",
+           "ofType": null
+          }
+         },
+         "defaultValue": null
+        },
+        {
+         "name": "type",
+         "description": null,
+         "type": {
+          "kind": "ENUM",
+          "name": "KeyType",
+          "ofType": null
+         },
+         "defaultValue": null
+        }
+       ],
+       "type": {
+        "kind": "SCALAR",
+        "name": "Boolean",
+        "ofType": null
+       },
+       "isDeprecated": false,
+       "deprecationReason": null
+      }
+     ],
+     "inputFields": null,
+     "interfaces": [],
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "OBJECT",
+     "name": "Info",
+     "description": null,
+     "fields": [
+      {
+       "name": "version",
+       "description": null,
+       "args": [],
+       "type": {
+        "kind": "SCALAR",
+        "name": "String",
+        "ofType": null
+       },
+       "isDeprecated": false,
+       "deprecationReason": null
+      }
+     ],
+     "inputFields": null,
+     "interfaces": [],
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "OBJECT",
+     "name": "Vm",
+     "description": null,
+     "fields": [
+      {
+       "name": "id",
+       "description": null,
+       "args": [],
+       "type": {
+        "kind": "NON_NULL",
+        "name": null,
+        "ofType": {
+         "kind": "SCALAR",
+         "name": "ID",
+         "ofType": null
+        }
+       },
+       "isDeprecated": false,
+       "deprecationReason": null
+      },
+      {
+       "name": "name",
+       "description": null,
+       "args": [],
+       "type": {
+        "kind": "SCALAR",
+        "name": "String",
+        "ofType": null
+       },
+       "isDeprecated": false,
+       "deprecationReason": null
+      }
+     ],
+     "inputFields": null,
+     "interfaces": [],
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "OBJECT",
+     "name": "Array",
+     "description": null,
+     "fields": [
+      {
+       "name": "state",
+       "description": null,
+       "args": [],
+       "type": {
+        "kind": "ENUM",
+        "name": "ArrayState",
+        "ofType": null
+       },
+       "isDeprecated": false,
+       "deprecationReason": null
+      }
+     ],
+     "inputFields": null,
+     "interfaces": [],
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "ENUM",
+     "name": "ArrayState",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": [
+      {
+       "name": "START",
+       "description": null,
+       "isDeprecated": false,
+       "deprecationReason": null
+      },
+      {
+       "name": "STOP",
+       "description": null,
+       "isDeprecated": false,
+       "deprecationReason": null
+      }
+     ],
+     "possibleTypes": null
+    },
+    {
+     "kind": "ENUM",
+     "name": "KeyType",
+     "description": null,
+     "fields": null,
+     "inputFields": null,
+     "interfaces": null,
+     "enumValues": [
+      {
+       "name": "API",
+       "description": null,
+       "isDeprecated": false,
+       "deprecationReason": null
+      },
+      {
+       "name": "SSH",
+       "description": null,
+       "isDeprecated": false,
+       "deprecationReason": null
+      }
+     ],
+     "possibleTypes": null
+    },
+    {
+     "kind": "INPUT_OBJECT",
+     "name": "VmFilter",
+     "description": null,
+     "fields": null,
+     "inputFields": [
+      {
+       "name": "nameLike",
+       "description": null,
+       "type": {
+        "kind": "SCALAR",
+        "name": "String",
+        "ofType": null
+       },
+       "defaultValue": null
+      },
+      {
+       "name": "limit",
+       "description": null,
+       "type": {
+        "kind": "SCALAR",
+        "name": "Int",
+        "ofType": null
+       },
+       "defaultValue": null
+      }
+     ],
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    },
+    {
+     "kind": "INPUT_OBJECT",
+     "name": "ArrayStateInput",
+     "description": null,
+     "fields": null,
+     "inputFields": [
+      {
+       "name": "desiredState",
+       "description": null,
+       "type": {
+        "kind": "NON_NULL",
+        "name": null,
+        "ofType": {
+         "kind": "ENUM",
+         "name": "ArrayState",
+         "ofType": null
+        }
+       },
+       "defaultValue": null
+      },
+      {
+       "name": "force",
+       "description": null,
+       "type": {
+        "kind": "NON_NULL",
+        "name": null,
+        "ofType": {
+         "kind": "SCALAR",
+         "name": "Boolean",
+         "ofType": null
+        }
+       },
+       "defaultValue": "false"
+      }
+     ],
+     "interfaces": null,
+     "enumValues": null,
+     "possibleTypes": null
+    }
+   ],
+   "directives": []
+  }
+ }
+}

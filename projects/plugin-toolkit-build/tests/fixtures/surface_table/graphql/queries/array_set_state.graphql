@@ -1,0 +1,6 @@
+# @orca:data-mutation
+mutation ArraySetState($input: ArrayStateInput!) {
+  setState(input: $input) {
+    state
+  }
+}
