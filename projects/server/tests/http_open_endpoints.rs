@@ -102,7 +102,12 @@ async fn old_spec_routes_are_gone() {
     for path in ["/api/openapi.json", "/api/openapi/public.json", "/scalar"] {
         for bearer in [None, Some(token.as_str())] {
             let (status, bytes) = oneshot_raw(prod_router(&env), "GET", path, bearer, None).await;
-            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            let expected = if bearer.is_none() && path.starts_with("/api/") {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            assert_eq!(status, expected, "{path}");
             assert!(
                 !String::from_utf8_lossy(&bytes).contains("\"openapi\""),
                 "{path}"
@@ -186,13 +191,70 @@ async fn unmatched_api_paths_never_reach_the_ui_fallback() {
     let token = common::mint_admin_token(&env);
     for router in [env.router(), prod_router(&env)] {
         for bearer in [None, Some(token.as_str())] {
-            for path in ["/api/nope", "/api/openapi.json", "/api/health/x", "/api"] {
+            for path in ["/api/nope", "/api/openapi.json", "/api/health/x", "/api/"] {
                 let (status, _) = oneshot_raw(router.clone(), "GET", path, bearer, None).await;
-                assert!(
-                    status == StatusCode::NOT_FOUND || status == StatusCode::UNAUTHORIZED,
-                    "{path}: {status}"
-                );
+                let expected = if bearer.is_none() {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::NOT_FOUND
+                };
+                assert_eq!(status, expected, "{path}");
             }
         }
     }
+}
+
+const STRICT_CSP: &str = "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+
+async fn headers_for(router: axum::Router, path: &str) -> axum::http::HeaderMap {
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::builder()
+        .uri(path)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:9999".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    router.oneshot(req).await.unwrap().headers().clone()
+}
+
+#[tokio::test]
+async fn strict_csp_on_api_web_shell_and_docs() {
+    let env = with_isolated_env();
+    for path in ["/api/health", "/", "/api/nope"] {
+        let h = headers_for(prod_router(&env), path).await;
+        assert_eq!(h["content-security-policy"], STRICT_CSP, "{path}");
+        assert_eq!(h["x-content-type-options"], "nosniff", "{path}");
+        assert_eq!(h["referrer-policy"], "no-referrer", "{path}");
+    }
+    let h = headers_for(prod_router(&env), "/docs").await;
+    let csp = h["content-security-policy"].to_str().unwrap();
+    assert!(csp.starts_with(STRICT_CSP), "{csp}");
+    assert!(csp.contains(
+        "script-src 'self' https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.75.0/dist/browser/standalone.js"
+    ));
+}
+
+fn set_csp_config(json: &str) {
+    let conn = db::open_default().unwrap();
+    db::config_store::set(&conn, "h", "h", "server", "csp", json, "test").unwrap();
+}
+
+#[tokio::test]
+async fn csp_config_relaxation_is_applied() {
+    let env = with_isolated_env();
+    set_csp_config(r#"{"connect-src":["https://api.example"]}"#);
+    let h = headers_for(prod_router(&env), "/api/health").await;
+    assert_eq!(
+        h["content-security-policy"],
+        format!("{STRICT_CSP}; connect-src 'self' https://api.example").as_str()
+    );
+}
+
+#[tokio::test]
+async fn invalid_csp_config_falls_back_to_strict() {
+    let env = with_isolated_env();
+    set_csp_config(r#"{"script-src":["* ; frame-ancestors *"]}"#);
+    let h = headers_for(prod_router(&env), "/api/health").await;
+    assert_eq!(h["content-security-policy"], STRICT_CSP);
 }

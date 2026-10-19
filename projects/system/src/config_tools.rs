@@ -69,8 +69,11 @@ pub struct ConfigGetArgs {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigGetOutput {
     pub row: Option<ConfigRowOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_csp: Option<String>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -165,7 +168,10 @@ async fn config_get(
 ) -> anyhow::Result<ConfigGetOutput> {
     let conn = db::open_default()?;
     let row = db::config_store::get(&conn, &args.noun, &args.name)?.map(Into::into);
-    Ok(ConfigGetOutput { row })
+    let effective_csp = (args.noun == crate::csp::CONFIG_NOUN
+        && args.name == crate::csp::CONFIG_NAME)
+        .then(|| crate::csp::compose(&[], &crate::csp::Relaxations::load(&conn)));
+    Ok(ConfigGetOutput { row, effective_csp })
 }
 
 /// [MUTATES STATE] Upsert a config row. Refuses to write rows owned by a different host

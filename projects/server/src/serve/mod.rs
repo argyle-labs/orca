@@ -724,7 +724,12 @@ const SCALAR_URL: &str =
     "https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.75.0/dist/browser/standalone.js";
 const SCALAR_SRI: &str = "sha384-xgelKlDcc+BYp0O+ZYzFesLnWCgGpEbXVVZWNQT6WyZYygN01tbEMygnjPXb5OPI";
 
-const DOCS_CSP: &str = "default-src 'none'; script-src 'self' https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.75.0/dist/browser/standalone.js; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+const DOCS_CSP_EXTRA: &[(&str, &[&str])] = &[
+    ("script-src", &[SCALAR_URL]),
+    ("style-src", &["'unsafe-inline'"]),
+    ("img-src", &["data:"]),
+    ("font-src", &["data:"]),
+];
 
 const DOCS_AUTH_JS: &str = r#"    (function () {
       const status = document.getElementById('orca-status');
@@ -796,7 +801,6 @@ async fn docs_auth_js_handler() -> axum::response::Response {
     use axum::http::{Response, header};
     Response::builder()
         .header(header::CONTENT_TYPE, "text/javascript; charset=utf-8")
-        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .body(Body::from(DOCS_AUTH_JS))
         .expect("hardcoded headers are valid")
 }
@@ -863,9 +867,6 @@ fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
 
     Response::builder()
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CONTENT_SECURITY_POLICY, DOCS_CSP)
-        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .header(header::REFERRER_POLICY, "no-referrer")
         .body(Body::from(html))
         .expect("hardcoded headers are valid")
 }
@@ -1761,17 +1762,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     // Outermost to innermost (last added = outermost): CORS → log_requests →
     // require_auth → handler. Logging sits OUTSIDE auth so 401s are still
     // logged — otherwise rejected requests vanish silently from the log.
-    let api = api
-        // Cap request bodies so a malicious or runaway client can't OOM the
-        // daemon by streaming an unbounded payload at a `Bytes`/raw-body
-        // extractor. Tool payloads are JSON and fit comfortably under this.
-        .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
-        .layer(axum::middleware::from_fn(middleware::require_tool_role))
-        .layer(axum::middleware::from_fn(middleware::require_auth))
-        .layer(axum::middleware::from_fn(middleware::log_requests))
-        .layer(cors);
-
-    if dev {
+    let api = if dev {
         // Storybook lives at <baseUrl>/storybook in dev — see .storybook/main.ts
         // (viteFinal sets base = '/storybook/') and scripts/dev.sh which launches
         // it on :12002. The Rust proxy forwards both HTTP and HMR WebSockets.
@@ -1780,7 +1771,30 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             .fallback(|req| api_not_found_or(req, dev_proxy_handler))
     } else {
         api.fallback(|req| api_not_found_or(req, static_handler))
-    }
+    };
+
+    let relax = db::open_default()
+        .map(|c| system::csp::Relaxations::load(&c))
+        .unwrap_or_default();
+    let csp = middleware::CspPolicies {
+        default: Arc::from(system::csp::compose(&[], &relax)),
+        docs: Arc::from(system::csp::compose(DOCS_CSP_EXTRA, &relax)),
+    };
+    tracing::info!(policy = %csp.default, "content-security-policy");
+
+    api
+        // Cap request bodies so a malicious or runaway client can't OOM the
+        // daemon by streaming an unbounded payload at a `Bytes`/raw-body
+        // extractor. Tool payloads are JSON and fit comfortably under this.
+        .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
+        .layer(axum::middleware::from_fn(middleware::require_tool_role))
+        .layer(axum::middleware::from_fn(middleware::require_auth))
+        .layer(axum::middleware::from_fn(middleware::log_requests))
+        .layer(axum::middleware::from_fn_with_state(
+            csp,
+            middleware::security_headers,
+        ))
+        .layer(cors)
 }
 
 /// Write orca's generated OpenAPI spec to ~/.orca/specs/orca.json so it
@@ -2049,10 +2063,6 @@ mod tests {
     #[tokio::test]
     async fn render_scalar_embeds_auth_widget_and_pinned_scalar() {
         let resp = render_scalar("/docs.json", "Ref");
-        let h = resp.headers();
-        assert_eq!(h[axum::http::header::CONTENT_SECURITY_POLICY], DOCS_CSP);
-        assert_eq!(h[axum::http::header::X_CONTENT_TYPE_OPTIONS], "nosniff");
-        assert_eq!(h[axum::http::header::REFERRER_POLICY], "no-referrer");
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();

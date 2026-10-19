@@ -205,6 +205,38 @@ pub enum AuthKind {
     Bootstrap,
 }
 
+#[derive(Clone)]
+pub struct CspPolicies {
+    pub default: std::sync::Arc<str>,
+    pub docs: std::sync::Arc<str>,
+}
+
+pub async fn security_headers(
+    axum::extract::State(csp): axum::extract::State<CspPolicies>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let policy = if req.uri().path() == "/docs" {
+        csp.docs.clone()
+    } else {
+        csp.default.clone()
+    };
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&policy) {
+        h.insert(axum::http::header::CONTENT_SECURITY_POLICY, v);
+    }
+    h.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("no-referrer"),
+    );
+    resp
+}
+
 /// Name of the HTTP-only cookie carrying the web-UI session id.
 pub const SESSION_COOKIE: &str = "orca_session";
 
