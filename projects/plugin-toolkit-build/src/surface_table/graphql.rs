@@ -11,7 +11,8 @@ use anyhow::{Context, Result, bail};
 use graphql_parser::query::{Definition, Document, OperationDefinition, Type, VariableDefinition};
 use serde_json::{Map, Value, json};
 
-use crate::surface::graphql::{operation_markers, tool_policy};
+use crate::surface::common::tool_policy;
+use crate::surface::graphql::operation_markers;
 
 const RUST_KEYWORDS: &[&str] = &[
     "Self", "abstract", "as", "async", "await", "become", "box", "break", "const", "continue",
@@ -118,7 +119,7 @@ pub fn build(
                 None => tail.clone(),
             };
             ops.push(ApiOp {
-                policy: super::derived_policy(&tool, role, data_mutation),
+                policy: super::derived_policy(&tool, is_mutation, role, data_mutation),
                 tool,
                 method: "POST".to_string(),
                 path: Document {

@@ -1427,9 +1427,9 @@ mod tests {
                 "kind": "openapi",
                 "ops": [{
                     "tool": "apip.make",
-                    "method": "POST",
+                    "method": "GET",
                     "path": "/x",
-                    "policy": {"role": "read", "data_mutation": true},
+                    "policy": {"role": "admin"},
                     "internal": true
                 }]
             })

@@ -109,3 +109,21 @@ pub(crate) fn first_generic<'a>(ty: &'a syn::Type, name: &str) -> Option<&'a syn
         _ => None,
     })
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Markers {
+    pub(crate) user_callable: bool,
+    pub(crate) admin: bool,
+    pub(crate) no_tool: bool,
+    pub(crate) data_mutation: bool,
+}
+
+pub(crate) fn tool_policy(is_write: bool, markers: Markers) -> (&'static str, bool) {
+    let role = if is_write || markers.admin {
+        "admin"
+    } else {
+        ""
+    };
+    let opted_in = markers.user_callable || markers.data_mutation;
+    (role, is_write && opted_in && !markers.admin)
+}

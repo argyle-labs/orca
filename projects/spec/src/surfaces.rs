@@ -231,7 +231,7 @@ fn gate(
     if required == "super-admin" && !inv.second_factor {
         return deny("requires a verified second factor".into());
     }
-    if op.policy.execute_gated && !dry_run && !execute_confirmed {
+    if surface.execute_gated(op) && !dry_run && !execute_confirmed {
         return deny("requires explicit execute confirmation".into());
     }
     Ok(())
@@ -259,7 +259,7 @@ pub async fn call(
     let (found, index) = lookup_in(plugin, surface, op)?;
     let target = &found.ops[index];
     let sensitive =
-        target.policy.execute_gated || required_role(found.kind, target) == "super-admin";
+        found.execute_gated(target) || required_role(found.kind, target) == "super-admin";
     if sensitive && !inv.reaches.contains(&target.tool) {
         return Err(Forbidden {
             tool: target.tool.clone(),
@@ -526,6 +526,12 @@ mod tests {
         Invocation::from_ctx(&ctx(caller, dry_run, true, false)).unwrap()
     }
 
+    fn reached(caller: &CallerIdentity) -> Invocation {
+        let mut i = inv(caller, true);
+        i.reaches = vec!["callp.create".into()];
+        i
+    }
+
     fn op(method: &str, role: &str, data_mutation: bool) -> ApiOp {
         serde_json::from_value(json!({
             "tool": "p.t",
@@ -646,6 +652,38 @@ mod tests {
         assert!(gate(&s, &sensitive, &verified, true, false).is_ok());
         let admin_2fa = Invocation::from_ctx(&ctx(&admin, true, true, true)).unwrap();
         assert!(gate(&s, &sensitive, &admin_2fa, true, false).is_err());
+    }
+
+    #[test]
+    fn writes_are_gated_whatever_the_table_says() {
+        let s = surface("g", "g.{endpoint}.token");
+        let admin = caller("admin", false);
+        for method in ["POST", "PUT", "DELETE", "PATCH"] {
+            let write = op(method, "admin", false);
+            assert!(!write.policy.execute_gated);
+            assert!(gate(&s, &write, &inv(&admin, false), false, false).is_err());
+            assert!(gate(&s, &write, &inv(&admin, false), false, true).is_ok());
+        }
+        assert!(
+            gate(
+                &s,
+                &op("GET", "admin", false),
+                &inv(&admin, false),
+                false,
+                false
+            )
+            .is_ok()
+        );
+        let mut g = s.clone();
+        g.kind = SurfaceKind::Graphql;
+        let mut mutation = op("POST", "admin", false);
+        mutation.path = "mutation M { x }".into();
+        assert!(gate(&g, &mutation, &inv(&admin, false), false, false).is_err());
+        mutation.path = "fragment F on X { y } mutation M { x }".into();
+        assert!(gate(&g, &mutation, &inv(&admin, false), false, false).is_err());
+        let mut query = op("POST", "admin", false);
+        query.path = "query Q { x }".into();
+        assert!(gate(&g, &query, &inv(&admin, false), false, false).is_ok());
     }
 
     #[test]
@@ -1034,7 +1072,7 @@ mod tests {
             "callp",
             "callp.create",
             json!({"endpoint": "main", "name": "n"}),
-            &inv(&admin, true),
+            &reached(&admin),
         )
         .await;
         assert!(
@@ -1051,7 +1089,7 @@ mod tests {
                 "callp.create",
                 "main",
                 args,
-                &inv(&admin, true),
+                &reached(&admin),
             )
             .await;
             assert!(
@@ -1066,7 +1104,7 @@ mod tests {
                 "callp.create",
                 "main",
                 json!({}),
-                &inv(&admin, true)
+                &reached(&admin)
             )
             .await
             .is_err()
@@ -1078,7 +1116,7 @@ mod tests {
                 "callp.create",
                 "main",
                 json!({}),
-                &inv(&admin, true)
+                &reached(&admin)
             )
             .await
             .is_err()
@@ -1089,7 +1127,7 @@ mod tests {
             "callp.create",
             "main",
             json!({"name": "n"}),
-            &inv(&caller("read", true), true),
+            &reached(&caller("read", true)),
         )
         .await;
         assert!(reader.unwrap_err().downcast_ref::<Forbidden>().is_some());
