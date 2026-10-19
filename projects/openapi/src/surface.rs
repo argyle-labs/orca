@@ -22,6 +22,8 @@ pub struct ApiSurface {
     #[serde(default)]
     pub response: ResponseRules,
     #[serde(default)]
+    pub endpoint: EndpointBinding,
+    #[serde(default)]
     pub defs: Map<String, Value>,
     pub ops: Vec<ApiOp>,
 }
@@ -40,6 +42,68 @@ pub struct Base {
     pub api_root: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphql_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointBinding {
+    #[serde(default = "default_endpoint_table")]
+    pub table: String,
+    #[serde(default = "default_endpoint_key")]
+    pub key: String,
+    #[serde(default)]
+    pub fields: EndpointFields,
+}
+
+impl Default for EndpointBinding {
+    fn default() -> Self {
+        Self {
+            table: default_endpoint_table(),
+            key: default_endpoint_key(),
+            fields: EndpointFields::default(),
+        }
+    }
+}
+
+fn default_endpoint_table() -> String {
+    "endpoints".to_string()
+}
+
+fn default_endpoint_key() -> String {
+    "name".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointFields {
+    #[serde(default = "default_routes_field")]
+    pub routes: String,
+    #[serde(default = "default_insecure_field")]
+    pub insecure: String,
+    #[serde(default = "default_enabled_field")]
+    pub enabled: String,
+}
+
+impl Default for EndpointFields {
+    fn default() -> Self {
+        Self {
+            routes: default_routes_field(),
+            insecure: default_insecure_field(),
+            enabled: default_enabled_field(),
+        }
+    }
+}
+
+fn default_routes_field() -> String {
+    "routes".to_string()
+}
+
+fn default_insecure_field() -> String {
+    "insecure".to_string()
+}
+
+fn default_enabled_field() -> String {
+    "enabled".to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,9 +291,17 @@ impl ApiSurface {
                     };
                     match p.location {
                         ParamIn::Path => {
+                            let raw = wire_string(v);
+                            if raw.is_empty() || raw == "." || raw == ".." {
+                                bail!(
+                                    "{}: path parameter `{}` may not be `{raw}`",
+                                    op.tool,
+                                    p.name
+                                );
+                            }
                             path = path.replace(
                                 &format!("{{{}}}", p.name),
-                                &utils::url::encode(&wire_string(v)),
+                                &utils::url::encode(&raw).replace('.', "%2E"),
                             );
                         }
                         ParamIn::Query => push_query(&mut query, &p.name, v),
@@ -525,6 +597,28 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_binding_defaults_to_shared_table_and_parses_overrides() {
+        assert_eq!(proxmox().endpoint, EndpointBinding::default());
+        let s = ApiSurface::parse(
+            &json!({
+                "format": FORMAT, "surface": "s", "kind": "openapi", "ops": [],
+                "endpoint": {"table": "hosts", "key": "id", "fields": {"routes": "addrs"}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(s.endpoint.table, "hosts");
+        assert_eq!(s.endpoint.key, "id");
+        assert_eq!(s.endpoint.fields.routes, "addrs");
+        assert_eq!(s.endpoint.fields.insecure, "insecure");
+        let bad = json!({
+            "format": FORMAT, "surface": "s", "kind": "openapi", "ops": [],
+            "endpoint": {"fields": {"bogus": "x"}}
+        });
+        assert!(ApiSurface::parse(&bad.to_string()).is_err());
+    }
+
+    #[test]
     fn parse_reads_policy_and_defaults() {
         let s = proxmox();
         let op = s.find("proxmox.create_role").unwrap();
@@ -574,6 +668,41 @@ mod tests {
                 None
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn path_params_cannot_climb_segments() {
+        let s = proxmox();
+        let op = s.find("proxmox.vm_status").unwrap();
+        for (node, vmid) in [
+            (json!(".."), json!(1)),
+            (json!("."), json!(1)),
+            (json!(""), json!(1)),
+            (json!("n"), json!("..")),
+            (json!(".."), json!("..")),
+        ] {
+            assert!(
+                s.build_request(
+                    op,
+                    "https://h",
+                    &args(json!({"node": node, "vmid": vmid})),
+                    Some("x")
+                )
+                .is_err()
+            );
+        }
+        let req = s
+            .build_request(
+                op,
+                "https://h",
+                &args(json!({"node": "../..", "vmid": "a.b"})),
+                Some("x"),
+            )
+            .unwrap();
+        assert_eq!(
+            req.url,
+            "https://h/api2/json/nodes/%2E%2E%2F%2E%2E/qemu/a%2Eb/status/current"
         );
     }
 

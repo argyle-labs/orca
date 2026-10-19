@@ -6,6 +6,7 @@
 //! [[feedback_no_indirection]].
 
 mod schema;
+pub mod surfaces;
 
 use anyhow::{Context, Result, anyhow};
 use derive::orca_tool;
