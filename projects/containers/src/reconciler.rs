@@ -1691,7 +1691,7 @@ fn filtered_adapters(runtime: Option<&str>) -> Vec<Arc<dyn RuntimeAdapter>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
+    use container_runtime::{
         AdapterError, ContainerMount, ContainerPort, ContainerState, LogTail, RestartPolicy,
         RuntimeKind,
     };
@@ -1710,7 +1710,7 @@ mod tests {
         started: Mutex<Vec<String>>,
         list_err: Mutex<Option<AdapterError>>,
         start_err: Mutex<HashMap<String, AdapterError>>,
-        observation: Mutex<crate::breaker::HostObservation>,
+        observation: Mutex<crate::HostObservation>,
     }
 
     impl FakeAdapter {
@@ -1721,7 +1721,7 @@ mod tests {
                 started: Mutex::new(Vec::new()),
                 list_err: Mutex::new(None),
                 start_err: Mutex::new(HashMap::new()),
-                observation: Mutex::new(crate::breaker::HostObservation::default()),
+                observation: Mutex::new(crate::HostObservation::default()),
             }
         }
         fn started_ids(&self) -> Vec<String> {
@@ -1749,7 +1749,7 @@ mod tests {
         }
         /// Test hook — override the `HostObservation` returned by
         /// `observe()`. Default is `HostObservation::default()`.
-        fn set_observation(&self, obs: crate::breaker::HostObservation) {
+        fn set_observation(&self, obs: crate::HostObservation) {
             *self.observation.lock().expect("mutex poisoned") = obs;
         }
     }
@@ -1787,7 +1787,7 @@ mod tests {
         async fn logs(&self, _id: &str, _tail: LogTail) -> Result<String, AdapterError> {
             Ok(String::new())
         }
-        async fn observe(&self, _c: &Container) -> crate::breaker::HostObservation {
+        async fn observe(&self, _c: &Container) -> crate::HostObservation {
             self.observation.lock().expect("mutex poisoned").clone()
         }
     }
@@ -3276,7 +3276,7 @@ mod tests {
         // whose journal shows recent flap should be held.
         let c = mk_lxc("ct104", ContainerState::Running, RestartPolicy::Always);
         let adapter = Arc::new(FakeAdapter::new(RuntimeKind::Lxc, vec![c.clone()]));
-        adapter.set_observation(crate::breaker::HostObservation {
+        adapter.set_observation(crate::HostObservation {
             // 4 failure lines — strictly greater than the threshold of 3.
             lxc_journal_tail: Some(["Failed to start pve-container@104.service"; 4].join("\n")),
             lxc_previous_state: None,
@@ -3308,8 +3308,8 @@ mod tests {
     // applies the returned `NextAction` (save / delete / attempt) and
     // dispatches the emitted `WedgeEvent`s.
 
-    use crate::WedgeRecoverer;
     use crate::wedge::{WedgeError, WedgeRecord, WedgeStore};
+    use container_runtime::WedgeRecoverer;
 
     /// In-memory `WedgeStore` with fault-injection toggles.
     struct FakeWedgeStore {

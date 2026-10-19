@@ -9,6 +9,17 @@ const FORBIDDEN: &[&str] = &[
     "tikv-jemalloc-sys",
     "tikv-jemallocator",
     "utoipa",
+    "rusqlite",
+    "libsqlite3-sys",
+    "mysql_async",
+    "lettre",
+    "openssl",
+    "openssl-sys",
+    "blake3",
+    "orca-db",
+    "orca-containers",
+    "orca-notifications",
+    "orca-secrets",
 ];
 
 #[test]

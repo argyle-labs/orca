@@ -20,14 +20,15 @@
 
 use std::sync::Arc;
 
-use derive::orca_async;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-
-use crate::{
-    AdapterError, Container, ContainerExecOutput, HostObservation, ListFilter, Liveness, LogTail,
-    RuntimeAdapter, RuntimeKind, WedgeRecoverer, register_entry,
+use container_runtime::{
+    AdapterError, CAP_WEDGE_RECOVER, Container, ContainerExecOutput, ExecArg, HostObservation,
+    IdArg, ListFilter, Liveness, LogTail, LogsArg, RuntimeAdapter, RuntimeKind, WedgeRecoverer,
 };
+use derive::orca_async;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+use crate::register_entry;
 
 /// The op→`Value` thunk a proxy drives to reach the plugin. Identical shape to
 /// the loader's `BackendInvoke` and the storage/service thunks, so it passes
@@ -39,26 +40,6 @@ pub type InvokeThunk = Arc<
         + Sync
         + 'static,
 >;
-
-// ── Wire arg shapes (the designated FFI dispatch seam) ───────────────────────
-
-#[derive(Serialize, Deserialize)]
-struct IdArg {
-    id: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct LogsArg {
-    id: String,
-    tail: LogTail,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ExecArg {
-    id: String,
-    cmd: Vec<String>,
-    stdin: Option<String>,
-}
 
 // ── Host-side proxy ──────────────────────────────────────────────────────────
 
@@ -178,10 +159,6 @@ impl WedgeRecoverer for ContainerRuntimeProxy {
     }
 }
 
-/// Capability string a `container_runtime` backend sets in its `BackendDef` to
-/// declare it can attempt in-place wedge recovery.
-pub const CAP_WEDGE_RECOVER: &str = "wedge_recover";
-
 /// Register a plugin-backed runtime adapter from a loaded backend descriptor.
 /// Mirrors `storage::register_from_def` — the loader calls this for a
 /// `domain = "container_runtime"` backend. `kind` is the [`RuntimeKind`] string
@@ -204,112 +181,4 @@ pub fn register_from_def(
         }),
     );
     Ok(())
-}
-
-// ── Plugin-side dispatch ──────────────────────────────────────────────────────
-
-/// Route a proxied `op` to a plugin's own `dyn RuntimeAdapter` and encode the
-/// result for the FFI boundary. Symmetric with [`ContainerRuntimeProxy`] — a
-/// plugin's `backend_dispatch` delegates here so it never hand-writes the op
-/// match. Errors are JSON-encoded [`AdapterError`]s so the host proxy can
-/// reconstruct the variant.
-pub async fn dispatch_op(
-    adapter: &dyn RuntimeAdapter,
-    op: &str,
-    args: serde_json::Value,
-) -> Result<serde_json::Value, serde_json::Value> {
-    fn dec<T: DeserializeOwned>(op: &str, args: serde_json::Value) -> Result<T, serde_json::Value> {
-        serde_json::from_value(args)
-            .map_err(|e| enc_err(&AdapterError::Malformed(format!("decode {op} args: {e}"))))
-    }
-    fn enc<T: Serialize>(v: &T) -> Result<serde_json::Value, serde_json::Value> {
-        serde_json::to_value(v)
-            .map_err(|e| serde_json::Value::String(format!("encode result: {e}")))
-    }
-    fn enc_err(e: &AdapterError) -> serde_json::Value {
-        serde_json::to_value(e).unwrap_or_else(|_| serde_json::Value::String(e.to_string()))
-    }
-
-    match op {
-        "list" => {
-            let filter: ListFilter = dec(op, args)?;
-            adapter
-                .list(&filter)
-                .await
-                .map_err(|e| enc_err(&e))
-                .and_then(|v| enc(&v))
-        }
-        "inspect" => {
-            let a: IdArg = dec(op, args)?;
-            adapter
-                .inspect(&a.id)
-                .await
-                .map_err(|e| enc_err(&e))
-                .and_then(|v| enc(&v))
-        }
-        "start" => {
-            let a: IdArg = dec(op, args)?;
-            adapter
-                .start(&a.id)
-                .await
-                .map_err(|e| enc_err(&e))
-                .and_then(|()| enc(&()))
-        }
-        "stop" => {
-            let a: IdArg = dec(op, args)?;
-            adapter
-                .stop(&a.id)
-                .await
-                .map_err(|e| enc_err(&e))
-                .and_then(|()| enc(&()))
-        }
-        "restart" => {
-            let a: IdArg = dec(op, args)?;
-            adapter
-                .restart(&a.id)
-                .await
-                .map_err(|e| enc_err(&e))
-                .and_then(|()| enc(&()))
-        }
-        "logs" => {
-            let a: LogsArg = dec(op, args)?;
-            adapter
-                .logs(&a.id, a.tail)
-                .await
-                .map_err(|e| enc_err(&e))
-                .and_then(|v| enc(&v))
-        }
-        "exec" => {
-            let a: ExecArg = dec(op, args)?;
-            adapter
-                .exec(&a.id, &a.cmd, a.stdin)
-                .await
-                .map_err(|e| enc_err(&e))
-                .and_then(|v| enc(&v))
-        }
-        "observe" => {
-            let c: Container = dec(op, args)?;
-            enc(&adapter.observe(&c).await)
-        }
-        "probe_liveness" => {
-            let c: Container = dec(op, args)?;
-            enc(&adapter.probe_liveness(&c).await)
-        }
-        "attempt_unwedge" => {
-            let c: Container = dec(op, args)?;
-            match adapter.wedge_recoverer() {
-                Some(r) => r
-                    .attempt_unwedge(&c)
-                    .await
-                    .map_err(|e| enc_err(&e))
-                    .and_then(|()| enc(&())),
-                None => Err(enc_err(&AdapterError::Refused(
-                    "wedge recovery not supported by this runtime adapter".into(),
-                ))),
-            }
-        }
-        other => Err(enc_err(&AdapterError::Refused(format!(
-            "unknown container_runtime op: {other}"
-        )))),
-    }
 }
