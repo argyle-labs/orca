@@ -19,28 +19,13 @@
 
 use serde::{Deserialize, Deserializer, de::Error as _};
 
-/// Coerce a JSON value that *means* a boolean into one. Accepts a real boolean,
-/// integer `0`/`1`, and the strings `"0"/"1"/"true"/"false"/"yes"/"no"/"on"/"off"`
-/// (case-insensitive). Returns `None` for anything else (including JSON null).
-fn coerce(v: &serde_json::Value) -> Option<bool> {
-    match v {
-        serde_json::Value::Bool(b) => Some(*b),
-        serde_json::Value::Number(n) => n.as_i64().map(|i| i != 0),
-        serde_json::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Some(true),
-            "0" | "false" | "no" | "off" => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// Deserialize a `bool` that may arrive as a boolean, integer `0`/`1`, or a
 /// boolean-ish string. Errors only when the value can't be read as a boolean at
 /// all — a stricter contract than "accept anything truthy".
 pub fn bool_lenient<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
-    coerce(&v).ok_or_else(|| D::Error::custom(format!("expected a boolean-ish value, got {v}")))
+    ::utils::json_wire::bool_ish(&v)
+        .ok_or_else(|| D::Error::custom(format!("expected a boolean-ish value, got {v}")))
 }
 
 /// [`bool_lenient`] for `Option<bool>` fields. JSON `null` (and, with
@@ -51,29 +36,16 @@ pub fn opt_bool_lenient<'de, D: Deserializer<'de>>(d: D) -> Result<Option<bool>,
     if v.is_null() {
         return Ok(None);
     }
-    coerce(&v)
+    ::utils::json_wire::bool_ish(&v)
         .map(Some)
         .ok_or_else(|| D::Error::custom(format!("expected a boolean-ish value, got {v}")))
-}
-
-/// Coerce a JSON value that *means* a number into `f64`. Accepts a real JSON
-/// number and a numeric string (`"0.00"`, `"42"`). Proxmox VE documents its PSI
-/// `pressure*` fields as `number` but serializes them as quoted strings — the
-/// declared type stays `f64` and the reconciliation lands here, at the seam.
-/// Returns `None` for anything that isn't number-ish (including JSON null).
-fn coerce_number(v: &serde_json::Value) -> Option<f64> {
-    match v {
-        serde_json::Value::Number(n) => n.as_f64(),
-        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
-        _ => None,
-    }
 }
 
 /// Deserialize an `f64` that may arrive as a JSON number or a numeric string.
 /// Errors only when the value can't be read as a number at all.
 pub fn f64_lenient<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
-    coerce_number(&v)
+    ::utils::json_wire::number_ish(&v)
         .ok_or_else(|| D::Error::custom(format!("expected a number-ish value, got {v}")))
 }
 
@@ -85,7 +57,7 @@ pub fn opt_f64_lenient<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D
     if v.is_null() {
         return Ok(None);
     }
-    coerce_number(&v)
+    ::utils::json_wire::number_ish(&v)
         .map(Some)
         .ok_or_else(|| D::Error::custom(format!("expected a number-ish value, got {v}")))
 }
