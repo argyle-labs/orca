@@ -195,16 +195,16 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
             }
             let resp = run_on_cap_runtime(builder.send_raw())?
                 .map_err(|e| anyhow!("http.request: {e}"))?;
-            let legacy_body = (!body_b64).then(|| Value::from(resp.body.clone()));
-            let mut reply = serde_json::to_value(HttpResponse {
+            let reply = HttpResponse {
                 status: resp.status,
                 headers: resp.headers.into_iter().collect(),
                 body: resp.body,
-            })?;
-            if let Some(body) = legacy_body {
-                reply["body"] = body;
-            }
-            Ok(reply)
+            };
+            Ok(if body_b64 {
+                serde_json::to_value(reply)?
+            } else {
+                serde_json::to_value(reply.legacy())?
+            })
         }
         "ws.open" => {
             let req: WsOpen = serde_json::from_value(args)

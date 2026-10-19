@@ -449,6 +449,60 @@ pub struct HttpRequest {
 /// `HttpRequest.body`.
 pub const HTTP_BODY_B64: &str = "http.body_b64";
 
+/// Borrowed wire form of an [`HttpRequest`] whose body is a number array, for
+/// a core that does not advertise [`HTTP_BODY_B64`].
+#[derive(serde::Serialize)]
+pub struct LegacyHttpRequest<'a> {
+    pub method: &'a str,
+    pub url: &'a str,
+    pub headers: &'a [(String, String)],
+    #[serde(serialize_with = "bytes_as_seq")]
+    pub body: &'a [u8],
+    pub timeout_ms: Option<u64>,
+    pub insecure: bool,
+    pub max_body_bytes: Option<u64>,
+    pub body_b64: bool,
+}
+
+impl HttpRequest {
+    pub fn legacy(&self) -> LegacyHttpRequest<'_> {
+        LegacyHttpRequest {
+            method: &self.method,
+            url: &self.url,
+            headers: &self.headers,
+            body: &self.body,
+            timeout_ms: self.timeout_ms,
+            insecure: self.insecure,
+            max_body_bytes: self.max_body_bytes,
+            body_b64: self.body_b64,
+        }
+    }
+}
+
+/// Borrowed wire form of an [`HttpResponse`] whose body is a number array, for
+/// a plugin that did not set [`HttpRequest::body_b64`].
+#[derive(serde::Serialize)]
+pub struct LegacyHttpResponse<'a> {
+    pub status: u16,
+    pub headers: &'a [(String, String)],
+    #[serde(serialize_with = "bytes_as_seq")]
+    pub body: &'a [u8],
+}
+
+impl HttpResponse {
+    pub fn legacy(&self) -> LegacyHttpResponse<'_> {
+        LegacyHttpResponse {
+            status: self.status,
+            headers: &self.headers,
+            body: &self.body,
+        }
+    }
+}
+
+fn bytes_as_seq<S: serde::Serializer>(bytes: &&[u8], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(bytes.iter())
+}
+
 /// The reply to an [`HttpRequest`]. Carries the response for **any** status —
 /// core does not treat 4xx/5xx as an error, so the plugin's own client applies
 /// its status semantics exactly as it would against a direct connection.
@@ -625,6 +679,16 @@ pub struct WsClose {
 mod b64 {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+    const DECODE: [u8; 256] = {
+        let mut t = [0xFF; 256];
+        let mut i = 0;
+        while i < 64 {
+            t[ALPHABET[i] as usize] = i as u8;
+            i += 1;
+        }
+        t
+    };
+
     pub fn serialize<S: serde::Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
         let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
         for chunk in bytes.chunks(3) {
@@ -664,7 +728,10 @@ mod b64 {
                 let v = if i >= 4 - pad {
                     0
                 } else {
-                    ALPHABET.iter().position(|&a| a == c)? as u32
+                    match DECODE[c as usize] {
+                        0xFF => return None,
+                        v => u32::from(v),
+                    }
                 };
                 n |= v << (18 - 6 * i);
             }
@@ -748,6 +815,53 @@ mod tests {
         assert!(
             serde_json::from_value::<HttpResponse>(json!({"status": 200, "body": [256]})).is_err()
         );
+    }
+
+    #[test]
+    fn legacy_forms_match_typed_shape_with_array_body() {
+        let req = HttpRequest {
+            method: "POST".into(),
+            url: "http://x/".into(),
+            headers: vec![("a".into(), "b".into())],
+            body: vec![1, 2, 255],
+            timeout_ms: Some(5),
+            insecure: true,
+            max_body_bytes: Some(9),
+            body_b64: true,
+        };
+        let mut typed = serde_json::to_value(&req).unwrap();
+        typed["body"] = json!([1, 2, 255]);
+        assert_eq!(serde_json::to_value(req.legacy()).unwrap(), typed);
+        let resp = HttpResponse {
+            status: 201,
+            headers: vec![("c".into(), "d".into())],
+            body: vec![0, 7],
+        };
+        let mut typed = serde_json::to_value(&resp).unwrap();
+        typed["body"] = json!([0, 7]);
+        assert_eq!(serde_json::to_value(resp.legacy()).unwrap(), typed);
+    }
+
+    #[test]
+    fn base64_decoder_rejects_malformed_and_round_trips_all_bytes() {
+        for bad in ["a", "ab=c", "a===", "ab!d", "=abc", "\u{e9}ab"] {
+            assert!(
+                serde_json::from_value::<HttpResponse>(json!({"status": 200, "body": bad}))
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        let all: Vec<u8> = (0..=255).collect();
+        for n in 0..4 {
+            let resp = HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: all[n..].to_vec(),
+            };
+            let back: HttpResponse =
+                serde_json::from_value(serde_json::to_value(&resp).unwrap()).unwrap();
+            assert_eq!(back.body, resp.body);
+        }
     }
 
     #[test]

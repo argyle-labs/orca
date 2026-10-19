@@ -16,8 +16,6 @@
 //! no rusqlite): the delegated-HTTP shim reaches [`http_request`] without pulling
 //! the `db` feature.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use anyhow::{Result, anyhow};
 
 use crate::abi::{HttpRequest, HttpResponse};
@@ -37,19 +35,20 @@ pub type CapStreamSink = Box<
     ) -> std::result::Result<(), String>,
 >;
 
-static CORE_BODY_B64: AtomicBool = AtomicBool::new(false);
-
-pub(crate) fn set_core_body_b64(on: bool) {
-    CORE_BODY_B64.store(on, Ordering::Relaxed);
+thread_local! {
+    static CORE_BODY_B64: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[allow(clippy::disallowed_types)] // transport-layer body rewrite for a core without base64 bodies
+pub(crate) fn set_core_body_b64(on: bool) {
+    CORE_BODY_B64.with(|c| c.set(on));
+}
+
 fn request_wire(req: &HttpRequest) -> Result<String> {
-    let mut wire = serde_json::to_value(req)?;
-    if !CORE_BODY_B64.load(Ordering::Relaxed) {
-        wire["body"] = serde_json::Value::from(req.body.clone());
-    }
-    Ok(serde_json::to_string(&wire)?)
+    Ok(if CORE_BODY_B64.with(|c| c.get()) {
+        serde_json::to_string(req)?
+    } else {
+        serde_json::to_string(&req.legacy())?
+    })
 }
 
 thread_local! {
