@@ -14,9 +14,6 @@
 
 pub use ::utils::route::{Route, Routes};
 
-#[cfg(feature = "http")]
-use std::time::Duration;
-
 #[cfg(any(feature = "http", feature = "delegated-http"))]
 use anyhow::Result;
 
@@ -84,28 +81,9 @@ fn split_url(url: &str) -> Option<(String, String, Option<u16>, Option<String>)>
     Some((scheme.to_string(), host, port, path))
 }
 
-/// Probe a base URL: any HTTP response (even 401/404) proves the host is
-/// reachable; only a transport error (connect refused, DNS failure, timeout)
-/// counts as down — which lets resolution survive a broken DNS path by falling
-/// through to a raw-IP route.
-#[cfg(feature = "http")]
-async fn reachable(client: &utils::http::Client, url: &str, insecure: bool) -> bool {
-    match client
-        .get(url)
-        .insecure(insecure)
-        .timeout(Duration::from_secs(3))
-        .send()
-        .await
-    {
-        Ok(_) => true,
-        Err(utils::http::HttpError::Status { .. }) => true,
-        Err(_) => false,
-    }
-}
-
 #[cfg(feature = "http")]
 async fn probe(url: &str, insecure: bool) -> bool {
-    reachable(&utils::http::Client::new(), url, insecure).await
+    ::utils::route::probe_http(url, insecure).await
 }
 
 #[cfg(all(feature = "delegated-http", not(feature = "http")))]

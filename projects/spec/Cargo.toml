@@ -19,6 +19,10 @@ derive   = { workspace = true }
 db       = { workspace = true, default-features = true }
 graphql  = { workspace = true, default-features = true }
 mcp      = { workspace = true }
+openapi  = { workspace = true }
+secrets  = { workspace = true }
+dispatch = { workspace = true }
+plugin-abi = { workspace = true }
 
 
 schemars   = { workspace = true }
@@ -28,6 +32,11 @@ anyhow     = { workspace = true }
 utils      = { workspace = true, default-features = true }
 clap       = { workspace = true }
 orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = { workspace = true }
+wiremock = { workspace = true }
 
 [lints]
 workspace = true

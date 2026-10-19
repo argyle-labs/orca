@@ -4762,14 +4762,21 @@ dependencies = [
  "orca-contract",
  "orca-db",
  "orca-derive",
+ "orca-dispatch",
  "orca-graphql",
  "orca-mcp",
+ "orca-openapi",
+ "orca-plugin-abi",
  "orca-plugin-toolkit",
+ "orca-secrets",
  "orca-utils",
  "orca-workspace-hack",
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]

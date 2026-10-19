@@ -177,6 +177,11 @@ pub fn ensure_crypto_provider() {
         .ok();
 }
 
+pub fn shared() -> &'static Client {
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(Client::new)
+}
+
 impl Client {
     pub fn new() -> Self {
         ensure_crypto_provider();

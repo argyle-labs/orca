@@ -303,6 +303,25 @@ impl<'a> IntoIterator for &'a Routes {
     }
 }
 
+/// Probe a base URL: any HTTP response (even 401/404) proves the host is
+/// reachable; only a transport error (connect refused, DNS failure, timeout)
+/// counts as down — which lets resolution survive a broken DNS path by falling
+/// through to a raw-IP route.
+#[cfg(feature = "http")]
+pub async fn probe_http(url: &str, insecure: bool) -> bool {
+    match crate::http::shared()
+        .get(url)
+        .insecure(insecure)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+    {
+        Ok(_) => true,
+        Err(crate::http::HttpError::Status { .. }) => true,
+        Err(_) => false,
+    }
+}
+
 fn last_good() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
         std::sync::OnceLock::new();
