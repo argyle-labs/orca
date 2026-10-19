@@ -279,6 +279,9 @@ fn serve_session<S: Read + Write + 'static>(
             crate::capsink::set_core_body_b64(
                 capabilities.iter().any(|c| c == crate::abi::HTTP_BODY_B64),
             );
+            crate::capsink::set_core_no_follow(
+                capabilities.iter().any(|c| c == crate::abi::HTTP_NO_FOLLOW),
+            );
         }
         Some(other) => bail!("expected Welcome, got {other:?}"),
         None => bail!("daemon closed before Welcome"),

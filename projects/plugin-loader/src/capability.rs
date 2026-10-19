@@ -41,6 +41,7 @@ pub const CAPABILITIES: &[&str] = &[
     "agents.register",
     API_CALL,
     plugin_toolkit::abi::HTTP_BODY_B64,
+    plugin_toolkit::abi::HTTP_NO_FOLLOW,
 ];
 
 pub const API_CALL: &str = "api.call";
@@ -459,6 +460,46 @@ mod tests {
         assert_eq!(run_on_cap_runtime(async { 7 }).unwrap(), 7);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn http_request_no_follow_relays_redirect_with_every_cookie() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "/home")
+                    .append_header("set-cookie", "a=1")
+                    .append_header("set-cookie", "b=2"),
+            )
+            .mount(&server)
+            .await;
+        let url = format!("{}/login", server.uri());
+        for body_b64 in [true, false] {
+            let args = json!({
+                "method": "POST",
+                "url": url,
+                "follow_redirects": false,
+                "body_b64": body_b64,
+            });
+            let reply = tokio::task::spawn_blocking(move || handle_cap("http.request", args, "p"))
+                .await
+                .unwrap()
+                .unwrap();
+            let resp: HttpResponse = serde_json::from_value(reply.clone()).unwrap();
+            assert_eq!(resp.status, 302, "b64={body_b64}");
+            let cookies: Vec<&str> = resp
+                .headers
+                .iter()
+                .filter(|(k, _)| k == "set-cookie")
+                .map(|(_, v)| v.as_str())
+                .collect();
+            assert_eq!(cookies, ["a=1", "b=2"], "b64={body_b64}");
+            assert_eq!(reply["body"].is_string(), body_b64);
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn stream_send_gives_up_on_a_stalled_consumer() {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -715,6 +756,7 @@ mod tests {
     #[test]
     fn capabilities_advertise_base64_body() {
         assert!(CAPABILITIES.contains(&plugin_toolkit::abi::HTTP_BODY_B64));
+        assert!(CAPABILITIES.contains(&plugin_toolkit::abi::HTTP_NO_FOLLOW));
     }
 
     #[test]

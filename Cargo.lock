@@ -4550,6 +4550,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.29.0",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]
