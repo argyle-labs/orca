@@ -92,6 +92,15 @@ impl Invocation {
             second_factor: ctx.second_factor(),
         })
     }
+
+    pub fn caller(&self) -> &CallerIdentity {
+        &self.caller
+    }
+
+    pub fn force_dry_run(mut self) -> Self {
+        self.dry_run = true;
+        self
+    }
 }
 
 pub fn register(plugin: &str, surface: ApiSurface) -> Result<()> {
@@ -142,12 +151,17 @@ pub fn deregister(plugin: &str) -> Vec<String> {
 }
 
 fn lookup(plugin: &str, tool: &str) -> Result<(Arc<ApiSurface>, usize)> {
+    lookup_in(plugin, None, tool)
+}
+
+fn lookup_in(plugin: &str, surface: Option<&str>, tool: &str) -> Result<(Arc<ApiSurface>, usize)> {
     let reg = SURFACES
         .read()
         .map_err(|_| anyhow!("surface registry poisoned"))?;
     reg.get(plugin)
         .into_iter()
         .flat_map(|s| s.values())
+        .filter(|s| surface.is_none_or(|name| s.surface == name))
         .find_map(|s| {
             s.ops
                 .iter()
@@ -210,14 +224,56 @@ fn gate(
 
 pub async fn execute(plugin: &str, tool: &str, args: Value, inv: &Invocation) -> Result<Outcome> {
     let (surface, index) = lookup(plugin, tool)?;
-    let op = &surface.ops[index];
-    let Value::Object(mut args) = args else {
+    if surface.ops[index].internal {
+        bail!("plugin `{plugin}` has no api-surface tool `{tool}`");
+    }
+    let Value::Object(args) = args else {
         bail!("{tool}: arguments must be an object");
     };
+    run(plugin, &surface, index, args, inv).await
+}
+
+pub async fn call(
+    plugin: &str,
+    surface: Option<&str>,
+    op: &str,
+    endpoint: &str,
+    args: Value,
+    inv: &Invocation,
+) -> Result<Outcome> {
+    let (found, index) = lookup_in(plugin, surface, op)?;
+    let Value::Object(mut args) = args else {
+        bail!("{op}: arguments must be an object");
+    };
+    for reserved in [
+        ENDPOINT_ARG,
+        contract::plan::EXECUTE_FIELD,
+        contract::plan::DRY_RUN_FIELD,
+    ] {
+        if args.contains_key(reserved) {
+            bail!("{op}: `{reserved}` is set by core, not the caller");
+        }
+    }
+    args.insert(ENDPOINT_ARG.into(), Value::String(endpoint.to_string()));
+    if !inv.dry_run {
+        args.insert(contract::plan::EXECUTE_FIELD.into(), Value::Bool(true));
+    }
+    run(plugin, &found, index, args, inv).await
+}
+
+async fn run(
+    plugin: &str,
+    surface: &ApiSurface,
+    index: usize,
+    mut args: serde_json::Map<String, Value>,
+    inv: &Invocation,
+) -> Result<Outcome> {
+    let op = &surface.ops[index];
+    let tool = op.tool.as_str();
     let execute_confirmed = args.remove(contract::plan::EXECUTE_FIELD) == Some(Value::Bool(true));
     let dry_run =
         inv.dry_run || args.remove(contract::plan::DRY_RUN_FIELD) == Some(Value::Bool(true));
-    gate(&surface, op, inv, dry_run, execute_confirmed)?;
+    gate(surface, op, inv, dry_run, execute_confirmed)?;
 
     let endpoint = match args.remove(ENDPOINT_ARG) {
         Some(Value::String(e)) => e,
@@ -832,6 +888,106 @@ mod tests {
                 .contains("unexpected property `x`")
         );
         deregister("args");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn call_executes_end_to_end() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/items/7"))
+            .and(header("Authorization", "Bearer k"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"id": 7}})))
+            .mount(&server)
+            .await;
+        register("callok", surface("callok", "callok.{endpoint}.token")).unwrap();
+        let out = in_temp_db(async {
+            seed("callok", &server, "k");
+            call(
+                "callok",
+                Some("main"),
+                "callok.item",
+                "main",
+                json!({"id": 7}),
+                &inv(&caller("read", false), false),
+            )
+            .await
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, Outcome::Response(json!({"id": 7})));
+        deregister("callok");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn call_scopes_to_the_plugin_reserves_core_args_and_reaches_internal_ops() {
+        let mut s = surface("callp", "callp.{endpoint}.token");
+        s.ops[1].internal = true;
+        register("callp", s).unwrap();
+        let admin = caller("admin", false);
+        let tool = execute(
+            "callp",
+            "callp.create",
+            json!({"endpoint": "main", "name": "n"}),
+            &inv(&admin, true),
+        )
+        .await;
+        assert!(
+            tool.unwrap_err()
+                .to_string()
+                .contains("no api-surface tool")
+        );
+        for reserved in ["endpoint", "execute", "dryRun"] {
+            let mut args = json!({"name": "n"});
+            args[reserved] = json!(true);
+            let err = call(
+                "callp",
+                None,
+                "callp.create",
+                "main",
+                args,
+                &inv(&admin, true),
+            )
+            .await;
+            assert!(
+                err.unwrap_err().to_string().contains("set by core"),
+                "{reserved}"
+            );
+        }
+        assert!(
+            call(
+                "other",
+                None,
+                "callp.create",
+                "main",
+                json!({}),
+                &inv(&admin, true)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            call(
+                "callp",
+                Some("nope"),
+                "callp.create",
+                "main",
+                json!({}),
+                &inv(&admin, true)
+            )
+            .await
+            .is_err()
+        );
+        let reader = call(
+            "callp",
+            None,
+            "callp.create",
+            "main",
+            json!({"name": "n"}),
+            &inv(&caller("read", true), true),
+        )
+        .await;
+        assert!(reader.unwrap_err().downcast_ref::<Forbidden>().is_some());
+        deregister("callp");
     }
 
     #[test]

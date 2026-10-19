@@ -38,7 +38,10 @@ pub const CAPABILITIES: &[&str] = &[
     "ws.send",
     "ws.close",
     "agents.register",
+    API_CALL,
 ];
+
+pub const API_CALL: &str = "api.call";
 
 /// Whether `cap` is a STREAMING capability — one the supervisor drives through
 /// [`handle_cap_stream`] (emitting `CapStreamChunk`/`CapStreamEnd`) rather than
@@ -89,6 +92,31 @@ pub(crate) fn agent_provider_owned(name: &str, principal: &str) -> bool {
         || name
             .rsplit_once('/')
             .is_some_and(|(owner, id)| !owner.is_empty() && id == principal)
+}
+
+pub fn handle_api_call(
+    args: Value,
+    principal: &str,
+    inv: Option<&spec::surfaces::Invocation>,
+) -> Result<Value> {
+    let inv = inv
+        .cloned()
+        .ok_or_else(|| anyhow!("api.call requires an authenticated caller"))?;
+    let call: plugin_proto::ApiCall =
+        serde_json::from_value(args).map_err(|e| anyhow!("api.call: bad payload: {e}"))?;
+    let principal = principal.to_string();
+    let outcome = run_on_cap_runtime(async move {
+        spec::surfaces::call(
+            &principal,
+            call.surface.as_deref(),
+            &call.op,
+            &call.endpoint,
+            call.args,
+            &inv,
+        )
+        .await
+    })??;
+    Ok(serde_json::to_value(outcome)?)
 }
 
 /// Execute one capability request on behalf of `principal` — the authoritative

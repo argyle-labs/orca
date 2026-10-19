@@ -94,10 +94,10 @@ impl Backing {
         &self,
         tool: &str,
         args: sj::Value,
-        caller: Option<plugin_proto::VerifiedCaller>,
+        inv: Option<spec::surfaces::Invocation>,
     ) -> Result<sj::Value> {
         match self {
-            Backing::Process(proc) => proc.invoke(tool, args, caller),
+            Backing::Process(proc) => proc.invoke(tool, args, inv),
         }
     }
 
@@ -108,7 +108,7 @@ impl Backing {
         &self,
         _tool: &str,
         _args: sj::Value,
-        _caller: Option<plugin_proto::VerifiedCaller>,
+        _inv: Option<spec::surfaces::Invocation>,
     ) -> Result<sj::Value> {
         match *self {}
     }
@@ -1052,7 +1052,7 @@ fn surface_tools(
 ) -> Result<Vec<(String, dispatch::tool_roles::PluginToolPolicy)>> {
     let mut policies = Vec::new();
     for surface in surfaces {
-        for op in &surface.ops {
+        for op in surface.ops.iter().filter(|op| !op.internal) {
             if tools.contains_key(&op.tool) {
                 bail!(
                     "plugin '{software}' api surface '{}' tool '{}' duplicates a declared tool",
@@ -1367,6 +1367,17 @@ fn surface_owner(name: &str) -> Option<String> {
         .then(|| plugin.software.clone())
 }
 
+fn invocation_for(ctx: &ToolCtx, args: &sj::Value) -> Option<spec::surfaces::Invocation> {
+    let inv = spec::surfaces::Invocation::from_ctx(ctx).ok()?;
+    Some(
+        if args.get(contract::plan::DRY_RUN_FIELD) == Some(&sj::Value::Bool(true)) {
+            inv.force_dry_run()
+        } else {
+            inv
+        },
+    )
+}
+
 async fn execute_surface(
     software: &str,
     name: &str,
@@ -1427,8 +1438,8 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
     }
     if let Some((backing, software)) = backing_for(name) {
         let owned = name.to_string();
-        let caller = ctx.verified_caller().map(wire_caller);
-        let result = tokio::task::spawn_blocking(move || backing.invoke(&owned, args, caller))
+        let inv = invocation_for(ctx, &args);
+        let result = tokio::task::spawn_blocking(move || backing.invoke(&owned, args, inv))
             .await
             .with_context(|| format!("plugin invoke task for '{name}' panicked"))?;
         return parse_invoke_result(result, name, &software);
@@ -1454,7 +1465,7 @@ pub fn invoke_plugin(name: &str, args: &sj::Value, ctx: &ToolCtx) -> Option<Resu
         )));
     }
     let (backing, software) = backing_for(name)?;
-    let result = backing.invoke(name, args.clone(), ctx.verified_caller().map(wire_caller));
+    let result = backing.invoke(name, args.clone(), invocation_for(ctx, args));
     Some(parse_invoke_result(result, name, &software))
 }
 
@@ -1547,7 +1558,14 @@ mod surface_tests {
         );
 
         let mut manifest = HashMap::from([("floorp.get".to_string(), tools["floorp.get"].clone())]);
-        assert!(surface_tools("floorp", &[surface], &mut manifest).is_err());
+        assert!(surface_tools("floorp", std::slice::from_ref(&surface), &mut manifest).is_err());
+
+        let mut hidden = surface;
+        hidden.ops[1].internal = true;
+        let mut only_public = HashMap::new();
+        let policies = surface_tools("floorp", &[hidden], &mut only_public).unwrap();
+        assert_eq!(policies.len(), 1);
+        assert!(!only_public.contains_key("floorp.make"));
     }
 
     #[test]

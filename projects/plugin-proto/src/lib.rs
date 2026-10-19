@@ -76,6 +76,20 @@ pub struct ApiSurfaceRef {
     pub format: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApiCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
+    pub op: String,
+    pub endpoint: String,
+    #[serde(default = "empty_args")]
+    pub args: Value,
+}
+
+fn empty_args() -> Value {
+    Value::Object(serde_json::Map::new())
+}
+
 /// The identity an [`Frame::Invoke`] acts for, resolved by the daemon from the
 /// request itself (REST session, MCP auth, or a verified mesh caller token).
 /// Never the daemon's own operator identity.

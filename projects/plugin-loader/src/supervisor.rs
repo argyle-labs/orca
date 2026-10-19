@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use plugin_proto::{
-    ApiSurfaceRef, Frame, HEARTBEAT_MSG, PROTOCOL_VERSION, ProtoError, ToolDef, VerifiedCaller,
+    ApiSurfaceRef, Frame, HEARTBEAT_MSG, PROTOCOL_VERSION, ProtoError, ToolDef,
     protocol_compatible, read_frame, write_frame,
 };
 use serde_json::Value;
@@ -192,7 +192,7 @@ pub fn invoke_on<S: Read + Write>(
     id: u64,
     tool: &str,
     args: Value,
-    caller: Option<VerifiedCaller>,
+    inv: Option<&spec::surfaces::Invocation>,
     principal: &str,
 ) -> Result<Value> {
     write_frame(
@@ -201,7 +201,7 @@ pub fn invoke_on<S: Read + Write>(
             id,
             tool: tool.to_string(),
             args,
-            caller,
+            caller: inv.map(|i| crate::wire_caller(i.caller())),
         },
     )
     .with_context(|| format!("sending Invoke for '{tool}'"))?;
@@ -283,7 +283,12 @@ pub fn invoke_on<S: Read + Write>(
                 cap,
                 args,
             } => {
-                let reply = match capability::handle_cap(&cap, args, principal) {
+                let result = if cap == capability::API_CALL {
+                    capability::handle_api_call(args, principal, inv)
+                } else {
+                    capability::handle_cap(&cap, args, principal)
+                };
+                let reply = match result {
                     Ok(value) => Frame::CapResult {
                         id: cap_id,
                         ok: true,
@@ -474,7 +479,12 @@ impl PluginProcess {
     /// host-side between socket operations and is bounded only by its own
     /// timeouts, so it can overrun `max_invoke` by that much. A stale session is drained first, and
     /// a broken one (failed exchange, poisoned by a panic) respawned.
-    pub fn invoke(&self, tool: &str, args: Value, caller: Option<VerifiedCaller>) -> Result<Value> {
+    pub fn invoke(
+        &self,
+        tool: &str,
+        args: Value,
+        inv: Option<spec::surfaces::Invocation>,
+    ) -> Result<Value> {
         let mut session = self.lock_session()?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         if let SessionState::Stale(stale) = session.state {
@@ -500,7 +510,7 @@ impl PluginProcess {
         };
         let deadline = stream.deadline;
         let result = crate::ws::with_invoke_deadline(deadline, || {
-            invoke_on(&mut stream, id, tool, args, caller, &self.software)
+            invoke_on(&mut stream, id, tool, args, inv.as_ref(), &self.software)
         });
         // A tool error arrives as a well-formed `Result` frame; an idle timeout
         // may still be followed by one; anything else (including the ceiling)
@@ -1342,15 +1352,99 @@ mod tests {
             )
             .unwrap();
         });
-        let alice = VerifiedCaller {
-            user_id: "u1".into(),
-            username: "alice".into(),
-            role: "admin".into(),
-            can_mutate: false,
-        };
-        let out = invoke_on(&mut orca_end, 1, "who", Value::Null, Some(alice), "p").unwrap();
+        let alice = invocation("alice", "admin");
+        let out = invoke_on(&mut orca_end, 1, "who", Value::Null, Some(&alice), "p").unwrap();
         assert_eq!(out["username"], "alice");
         plugin.join().unwrap();
+    }
+
+    fn invocation(username: &str, role: &str) -> spec::surfaces::Invocation {
+        let mut ctx = contract::ToolCtx::new(std::sync::Arc::new(
+            contract::config::Config::load().unwrap(),
+        ));
+        ctx.set_verified_caller(Some(contract::CallerIdentity {
+            user_id: format!("u-{username}"),
+            username: username.into(),
+            role: role.into(),
+            can_mutate: true,
+        }));
+        spec::surfaces::Invocation::from_ctx(&ctx).unwrap()
+    }
+
+    fn api_call_reply(inv: Option<&spec::surfaces::Invocation>, call: Value) -> (bool, String) {
+        let (plugin_end, mut orca_end) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || {
+            let mut s = plugin_end;
+            let Some(Frame::Invoke { id, .. }) = read_frame(&mut s).unwrap() else {
+                panic!("expected Invoke")
+            };
+            write_frame(
+                &mut s,
+                &Frame::Cap {
+                    id: 9,
+                    cap: capability::API_CALL.into(),
+                    args: call,
+                },
+            )
+            .unwrap();
+            let Some(Frame::CapResult { ok, error, .. }) = read_frame(&mut s).unwrap() else {
+                panic!("expected CapResult")
+            };
+            write_frame(
+                &mut s,
+                &Frame::Result {
+                    id,
+                    ok: true,
+                    value: Value::Null,
+                    error: None,
+                    error_kind: None,
+                },
+            )
+            .unwrap();
+            (ok, error.unwrap_or_default())
+        });
+        invoke_on(&mut orca_end, 1, "apip.tool", Value::Null, inv, "apip").unwrap();
+        plugin.join().unwrap()
+    }
+
+    #[test]
+    fn api_call_needs_a_caller_the_floor_and_its_own_surface() {
+        let surface = openapi::surface::ApiSurface::parse(
+            &json!({
+                "format": openapi::surface::FORMAT,
+                "surface": "main",
+                "kind": "openapi",
+                "ops": [{
+                    "tool": "apip.make",
+                    "method": "POST",
+                    "path": "/x",
+                    "policy": {"role": "read", "data_mutation": true},
+                    "internal": true
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        spec::surfaces::register("apip", surface).unwrap();
+        let call = json!({"op": "apip.make", "endpoint": "main", "args": {}});
+
+        let (ok, err) = api_call_reply(None, call.clone());
+        assert!(!ok && err.contains("authenticated caller"), "{err}");
+
+        let reader = invocation("bob", "read");
+        let (ok, err) = api_call_reply(Some(&reader), call);
+        assert!(!ok && err.contains("requires role `admin`"), "{err}");
+
+        let admin = invocation("ann", "admin");
+        let foreign = json!({"op": "other.get", "endpoint": "main", "args": {}});
+        let (ok, err) = api_call_reply(Some(&admin), foreign);
+        assert!(!ok && err.contains("no api-surface tool"), "{err}");
+
+        let wrong_surface =
+            json!({"surface": "nope", "op": "apip.make", "endpoint": "main", "args": {}});
+        let (ok, _) = api_call_reply(Some(&admin), wrong_surface);
+        assert!(!ok);
+        spec::surfaces::deregister("apip");
     }
 
     #[test]
