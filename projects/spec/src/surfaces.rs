@@ -95,7 +95,7 @@ impl Invocation {
 }
 
 pub fn register(plugin: &str, surface: ApiSurface) -> Result<()> {
-    db::plugin_tables::validate_segment("plugin", plugin)?;
+    db::plugin_tables::validate_principal(plugin)?;
     let prefix = format!("{plugin}.");
     let mut seen = std::collections::BTreeSet::new();
     for op in &surface.ops {
