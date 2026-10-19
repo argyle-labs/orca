@@ -30,6 +30,14 @@ pub fn join(base: &str, path: &str) -> String {
     )
 }
 
+pub fn query_string(pairs: &[(String, String)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", encode(k), encode(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +67,15 @@ mod tests {
             join("https://api.example.com", "/pets/42"),
             "https://api.example.com/pets/42"
         );
+    }
+
+    #[test]
+    fn query_string_encodes_pairs() {
+        let pairs = vec![
+            ("a b".to_string(), "x/y".to_string()),
+            ("k".into(), "1".into()),
+        ];
+        assert_eq!(query_string(&pairs), "a%20b=x%2Fy&k=1");
+        assert_eq!(query_string(&[]), "");
     }
 }

@@ -20,6 +20,7 @@ use std::path::Path;
 
 pub mod lower_31;
 pub mod normalize;
+pub mod surface;
 
 /// Lightweight per-operation view used by the spec registry / MCP / UI.
 #[derive(Debug, Clone, Serialize)]
