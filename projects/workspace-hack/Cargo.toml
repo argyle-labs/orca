@@ -8,7 +8,6 @@ publish = false
 
 ### BEGIN HAKARI SECTION
 [dependencies]
-arrayvec = { version = "0.7" }
 base64 = { version = "0.23" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 camino = { version = "1", default-features = false, features = ["serde1"] }
@@ -91,7 +90,6 @@ zerofrom = { version = "0.1", default-features = false, features = ["alloc", "de
 zerovec = { version = "0.11", default-features = false, features = ["alloc", "derive", "yoke"] }
 
 [build-dependencies]
-arrayvec = { version = "0.7" }
 base64 = { version = "0.23" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 camino = { version = "1", default-features = false, features = ["serde1"] }

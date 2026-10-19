@@ -57,7 +57,7 @@ db = ["endpoints"]
 # sync also needs the rusqlite-backed `ReplicatedRegistration`. Enabled ONLY by
 # core crates, NEVER by a plugin.
 db-incore = ["endpoints", "dep:db", "dep:secrets", "dep:rusqlite", "macro-runtime/replication"]
-containers = ["dep:containers"]
+containers = ["dep:container-runtime"]
 notify = ["dep:notifications"]
 graphql = ["dep:graphql", "dep:graphql_client"]
 openapi = ["dep:openapi", "dep:progenitor-client", "dep:regress", "dep:bytes"]
@@ -150,7 +150,7 @@ secrets = { workspace = true, optional = true }
 dispatch    = { workspace = true, optional = true }
 macro-runtime = { workspace = true, optional = true }
 notifications = { workspace = true, optional = true }
-containers = { workspace = true, optional = true }
+container-runtime = { workspace = true, optional = true }
 # Runtime primitives — plugins reach these through the toolkit, never directly.
 utils       = { workspace = true, features = ["scrub_text", "reactor"] }
 # `default-features = false` drops graphql's `shopify` feature, and with it

@@ -20,6 +20,7 @@ path = "src/lib.rs"
 [dependencies]
 agents     = { workspace = true, default-features = true }
 anyhow     = { workspace = true }
+containers = { workspace = true }
 contract   = { workspace = true, default-features = true }
 db         = { workspace = true, default-features = true }
 secrets = { workspace = true }

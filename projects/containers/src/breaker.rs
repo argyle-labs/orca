@@ -50,7 +50,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use utils::time::Timestamp;
 
-use crate::{Container, ContainerState, RuntimeKind};
+use crate::{Container, ContainerState, HostObservation, RuntimeKind};
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -195,26 +195,6 @@ pub enum BreakerDecision {
         /// notifications without a second `store.load()` after arm.
         notified_at: Option<Timestamp>,
     },
-}
-
-/// Per-tick observation captured by the caller. Runtime-specific signals
-/// the classifier can't synthesize from a single `Container` row land
-/// here. Optional fields stay `None` when the runtime doesn't have a
-/// corresponding signal cheap enough to gather every tick.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct HostObservation {
-    /// Raw output of `journalctl -u pve-container@<vmid>.service
-    /// --since "5 min ago" --no-pager -o cat`. Populated by the LXC
-    /// arming path only.
-    ///
-    /// Filter (case-insensitive, matched per line):
-    /// - contains `failed to start`
-    /// - OR contains `exited with status`
-    pub lxc_journal_tail: Option<String>,
-    /// Previous observed state of the LXC, if known. The reconciler
-    /// passes this in so the classifier can detect a stopped→running
-    /// transition without owning a separate persistent state field.
-    pub lxc_previous_state: Option<ContainerState>,
 }
 
 // ── Storage trait ──────────────────────────────────────────────────────────
@@ -939,7 +919,7 @@ fn classify_lxc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ContainerMount, ContainerPort, ContainerState, RestartPolicy};
+    use container_runtime::{ContainerMount, ContainerPort, ContainerState, RestartPolicy};
     use std::path::PathBuf;
     use tempfile::TempDir;
 

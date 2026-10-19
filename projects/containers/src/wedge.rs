@@ -874,7 +874,7 @@ pub fn process_recovery_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
+    use container_runtime::{
         ContainerState, HostObservation, ListFilter, LogTail, RestartPolicy, RuntimeKind,
         WedgeRecoverer,
     };

@@ -101,9 +101,6 @@ time = { workspace = true }
 base64 = { workspace = true }
 x509-parser = { workspace = true, optional = true }
 
-# Hashing (hash module)
-blake3 = { workspace = true }
-
 # Regex (scrub::scrub_line) — gated behind the `scrub_text` feature.
 regex  = { workspace = true, optional = true }
 
