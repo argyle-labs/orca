@@ -495,11 +495,21 @@ fn install_fake_plugin() {
     dispatch::tool_roles::install_plugin_tools([
         (
             PLUGIN_ANY_TOOL.to_string(),
-            dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("any"), None, None),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                PLUGIN_ANY_TOOL,
+                Some("any"),
+                None,
+                None,
+            ),
         ),
         (
             PLUGIN_ADMIN_TOOL.to_string(),
-            dispatch::tool_roles::PluginToolPolicy::from_manifest(Some("admin"), None, None),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                PLUGIN_ADMIN_TOOL,
+                Some("admin"),
+                None,
+                None,
+            ),
         ),
     ]);
 }

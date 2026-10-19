@@ -603,9 +603,8 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
 /// left to the peer forward, whose recipient authorizes it.
 fn authorize_fallback(name: &str, ctx: &ToolCtx) -> Result<()> {
     if let Some(role) = ctx.unbound_role()
-        && role != "admin"
         && let Some(required) = crate::tool_roles::known_role(name)
-        && required != "any"
+        && !crate::tool_roles::satisfies(role, required)
     {
         return Err(contract::OrcaError::forbidden(format!(
             "{name} requires role '{required}'; a token with no resolvable user has '{role}'"
@@ -1166,6 +1165,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_tool_returns_error() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let err = dispatch("ghost.tool", serde_json::json!({}), &make_ctx())
             .await
             .unwrap_err();
@@ -1174,6 +1174,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_tool_with_peer_forwards_over_mesh() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         // A tool this host never loaded (a peer-only plugin) must forward to
         // the named peer instead of 404ing — router-level peer pass-through.
         use contract::{CallerIdentity, RemoteExec};
@@ -1255,6 +1256,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_system_id_remote_forwards_and_strips_it() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let out = dispatch(
             "docker.ps",
             serde_json::json!({ "systemId": REMOTE_ID, "all": true }),
@@ -1269,6 +1271,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_system_id_local_runs_here() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         // Local target → not forwarded; no local owner, so it is unknown here.
         let err = dispatch(
             "docker.ps",
@@ -1282,6 +1285,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_system_id_unknown_errors() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let id = "0190a1b2-0000-7000-8000-0000000000ff";
         let err = dispatch(
             "docker.ps",
@@ -1295,6 +1299,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_system_id_rejects_non_uuid() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         for bad in [
             serde_json::json!("there"),
             serde_json::json!(""),
@@ -1327,6 +1332,7 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_is_refused_on_paths_that_bypass_the_gate() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let _serial = SEEN_TESTS.lock().await;
         install_fake_plugin();
         use contract::{CallerIdentity, RemoteExec};
@@ -1377,6 +1383,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_tool_without_peer_still_errors() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         // No peer + no transport → genuine unknown-tool error, not a forward.
         let err = dispatch("proxmox.cluster_list", serde_json::json!({}), &make_ctx())
             .await
@@ -1386,6 +1393,7 @@ mod tests {
 
     #[tokio::test]
     async fn cli_dispatch_unknown_tool_errors() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let err = cli_dispatch("ghost.tool", CliArgs::Json("{}".into()), &make_ctx())
             .await
             .unwrap_err();
@@ -1402,6 +1410,7 @@ mod tests {
 
     #[tokio::test]
     async fn cli_dispatch_pair_missing_equals_errors() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let err = cli_dispatch(
             "ghost.tool",
             CliArgs::Pairs(vec!["no-equals".into()]),
@@ -1414,6 +1423,7 @@ mod tests {
 
     #[test]
     fn introspection_helpers_dont_panic_on_empty_inventory() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let _ = names();
         let _ = remote_ok_names();
         let _ = role_table();
@@ -1483,6 +1493,7 @@ mod tests {
     #[cfg(feature = "server")]
     #[tokio::test]
     async fn rest_body_correlation_id_never_reaches_the_tool() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         use axum::body::Body;
         use axum::http::Request as AxumReq;
         use tower::ServiceExt;
@@ -1618,6 +1629,7 @@ mod tests {
 
     #[test]
     fn mcp_definitions_returns_a_vec_even_when_empty() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         // Empty inventory in this test binary: should still be a Vec, not
         // panic.
         let defs = mcp_definitions();
@@ -1701,11 +1713,12 @@ mod tests {
 
     #[tokio::test]
     async fn fallback_dispatch_refuses_caller_below_plugin_tool_role() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         use crate::tool_roles::{PluginToolPolicy, install_plugin_tools, remove_plugin_tools};
         let name = "registry_test_plugin.no_role";
         install_plugin_tools([(
             name.to_string(),
-            PluginToolPolicy::from_manifest(None, None, None),
+            PluginToolPolicy::from_manifest(name, None, None, None),
         )]);
         let caller = |role: &str| contract::CallerIdentity {
             user_id: "u".into(),
@@ -1728,6 +1741,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_text_unknown_tool_propagates_error() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let err = dispatch_text("ghost.tool", serde_json::json!({}), &make_ctx())
             .await
             .unwrap_err();
@@ -1744,6 +1758,7 @@ mod tests {
     #[cfg(feature = "server")]
     #[tokio::test]
     async fn http_dispatch_returns_404_for_unknown_tool() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         use axum::body::{Body, to_bytes};
         use axum::http::Request as AxumReq;
         use tower::ServiceExt;
@@ -1812,7 +1827,12 @@ mod tests {
             );
             crate::tool_roles::install_plugin_tools([(
                 GATED_PLUGIN_TOOL.to_string(),
-                crate::tool_roles::PluginToolPolicy::from_manifest(None, Some(true), None),
+                crate::tool_roles::PluginToolPolicy::from_manifest(
+                    GATED_PLUGIN_TOOL,
+                    None,
+                    Some(true),
+                    None,
+                ),
             )]);
         });
     }
@@ -1847,6 +1867,7 @@ mod tests {
     #[cfg(feature = "server")]
     #[tokio::test]
     async fn dry_run_query_on_a_plugin_tool_is_refused_unless_it_is_gated() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let _serial = SEEN_TESTS.lock().await;
         install_fake_plugin();
         let (status, body) =
@@ -1864,6 +1885,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_gated_plugin_is_told_to_execute_unless_it_is_a_dry_run() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let _serial = SEEN_TESTS.lock().await;
         install_fake_plugin();
         GATED_SEEN.lock().unwrap().clear();
@@ -1889,6 +1911,7 @@ mod tests {
     #[cfg(feature = "server")]
     #[tokio::test]
     async fn dry_run_query_must_be_a_boolean() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         for q in ["1", "yes", "True", ""] {
             let (status, body) = post_json(&format!("/ghost.tool?dryRun={q}"), json!({})).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{q}: {body}");
@@ -1918,6 +1941,7 @@ mod tests {
     #[cfg(feature = "server")]
     #[tokio::test]
     async fn a_repeated_dry_run_query_is_refused() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         for q in ["dryRun=true&dryRun=false", "dryRun=true&dryRun=true"] {
             let (status, body) = post_json(&format!("/ghost.tool?{q}"), json!({})).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{q}: {body}");
@@ -1927,6 +1951,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_dry_run_of_a_tool_absent_here_names_why_it_cannot_be_checked() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let err = dispatch("ghost.tool", json!({ "dryRun": true }), &make_ctx())
             .await
             .unwrap_err();
@@ -1962,6 +1987,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_dry_run_of_a_tool_absent_here_is_refused_not_sent_to_the_peer() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let remote = Arc::new(RecordingRemote(std::sync::Mutex::new(Vec::new())));
         let mut ctx = make_ctx();
         ctx.register_service::<Arc<dyn contract::RemoteExec>>(remote.clone());
@@ -1981,6 +2007,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_normal_call_forwarded_to_a_peer_carries_execute_only_when_gated() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let _serial = SEEN_TESTS.lock().await;
         install_fake_plugin();
         let remote = Arc::new(RecordingRemote(std::sync::Mutex::new(Vec::new())));
@@ -2009,6 +2036,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_non_boolean_dry_run_is_refused_off_the_static_registry() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         for v in [json!("true"), json!(1), Value::Null] {
             let err = dispatch("ghost.tool", json!({ "dryRun": v }), &make_ctx())
                 .await
@@ -2022,6 +2050,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_system_id_declared_by_op_passes_through() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         install_fake_plugin();
         let args = json!({ "systemId": "not-a-uuid" });
         let out = dispatch(OWN_SYSTEM_TOOL, args.clone(), &roster_ctx())
@@ -2032,6 +2061,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_system_id_dry_run_of_gated_tool_forwards_without_execute() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let _serial = SEEN_TESTS.lock().await;
         install_fake_plugin();
         let out = dispatch(
@@ -2055,6 +2085,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_system_id_dry_run_of_ungated_tool_is_refused() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let err = dispatch(
             "docker.ps",
             json!({ "systemId": REMOTE_ID, "dryRun": true }),
@@ -2068,6 +2099,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_system_id_with_peer_errors() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let mut ctx = roster_ctx();
         ctx.set_peer(Some("there".into()));
         let err = dispatch("docker.ps", json!({ "systemId": REMOTE_ID }), &ctx)
@@ -2081,6 +2113,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_system_id_without_transport_errors() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let err = dispatch("docker.ps", json!({ "systemId": REMOTE_ID }), &make_ctx())
             .await
             .unwrap_err();
@@ -2089,6 +2122,7 @@ mod tests {
 
     #[test]
     fn dispatchable_waives_unknown_name_when_system_id_present() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         assert!(!dispatchable("ghost.tool", &json!({})));
         assert!(dispatchable(
             "ghost.tool",
@@ -2099,6 +2133,7 @@ mod tests {
     #[cfg(feature = "server")]
     #[tokio::test]
     async fn http_dispatch_forwards_unknown_tool_with_system_id() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         use axum::body::{Body, to_bytes};
         use axum::http::Request as AxumReq;
         use tower::ServiceExt;
@@ -2125,6 +2160,7 @@ mod tests {
     #[cfg(feature = "in-process")]
     #[tokio::test(flavor = "multi_thread")]
     async fn plugin_invoke_that_blocks_on_a_runtime_runs_off_the_async_worker() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         install_fake_plugin();
         let out = dispatch(NESTED_RUNTIME_TOOL, json!({}), &make_ctx())
             .await
@@ -2185,6 +2221,7 @@ mod tests {
     /// operator never rides an `Invoke`.
     #[tokio::test]
     async fn plugin_invoke_carries_the_verified_caller_never_the_host_operator() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let _serial = SEEN_TESTS.lock().await;
         install_fake_plugin();
         SEEN.lock().unwrap().clear();
@@ -2211,11 +2248,16 @@ mod tests {
         assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_err());
         assert!(authorize_fallback(crate::ups_surface::STATE_TOOL, &ctx).is_ok());
         assert!(authorize_fallback("__no_such_tool__", &ctx).is_ok());
+        ctx.set_unbound_role(Some("super-admin".into()));
+        assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_ok());
+        ctx.set_unbound_role(Some("bogus".into()));
+        assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_err());
     }
 
     #[cfg(feature = "server")]
     #[tokio::test]
     async fn rest_fallback_never_forwards_the_daemon_identity() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         use axum::body::Body;
         use axum::http::Request as AxumReq;
         use tower::ServiceExt;
@@ -2253,6 +2295,7 @@ mod tests {
     #[cfg(feature = "server")]
     #[tokio::test]
     async fn rest_unbound_caller_forwards_to_a_peer_without_the_host_operator() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         use axum::body::Body;
         use axum::http::Request as AxumReq;
         use contract::{CallerIdentity, RemoteExec};

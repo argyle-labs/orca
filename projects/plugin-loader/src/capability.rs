@@ -614,14 +614,17 @@ mod tests {
 
     #[test]
     fn secret_op_refuses_foreign_name() {
-        let err = handle_cap(
-            "secret.op",
-            serde_json::to_value(SecretOp::Get {
-                name: "jellyfin.api_key".into(),
-            })
-            .unwrap(),
-            "proxmox",
-        )
+        let dir = tempfile::tempdir().unwrap();
+        let err = db::with_thread_db_path(&dir.path().join("secret-op.db"), || {
+            handle_cap(
+                "secret.op",
+                serde_json::to_value(SecretOp::Get {
+                    name: "jellyfin.api_key".into(),
+                })
+                .unwrap(),
+                "proxmox",
+            )
+        })
         .unwrap_err()
         .to_string();
         assert!(err.contains("outside its namespace"), "got: {err}");

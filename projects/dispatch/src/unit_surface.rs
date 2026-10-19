@@ -913,6 +913,7 @@ mod tests {
 
     #[test]
     fn a_missing_or_malformed_unit_id_is_invalid() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let err = parse_id("test.unit", &serde_json::json!({})).unwrap_err();
         crate::erased::assert_invalid(&err, "missing field `id`");
         let err = parse_id("test.unit", &serde_json::json!({ "id": "" })).unwrap_err();
@@ -1021,6 +1022,7 @@ mod tests {
 
     #[test]
     fn ops_cover_every_verb_and_action() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let (name, kind) = setup("ops");
         let names: Vec<String> = unit_ops().into_iter().map(|o| o.name).collect();
         for want in ["list", "detail", "delete", "spin", "forge"] {
@@ -1035,6 +1037,7 @@ mod tests {
 
     #[test]
     fn mcp_defs_carry_typed_input_schema() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let (name, kind) = setup("mcp");
         let defs = unit_mcp_defs();
         let want = format!("{kind}.spin");
@@ -1052,6 +1055,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_list_routes_and_scopes_kind() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let (name, kind) = setup("list");
         let out = unit_dispatch(&format!("{kind}.list"), &json!({}), None)
             .await
@@ -1069,6 +1073,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_update_routes_to_owner_by_id() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let (name, kind) = setup("upd");
         let out = unit_dispatch(
             &format!("{kind}.spin"),
@@ -1085,6 +1090,7 @@ mod tests {
 
     #[test]
     fn mutating_unit_ops_require_admin_and_reads_stay_open() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let (name, kind) = setup("role");
         for op in ["spin", "forge", "delete"] {
             let tool = format!("{kind}.{op}");
@@ -1112,6 +1118,7 @@ mod tests {
 
     #[tokio::test]
     async fn unit_update_and_create_carry_the_verified_caller_never_the_host_operator() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let (name, kind) = setup("caller");
         let who = |n: &str| contract::CallerIdentity {
             user_id: format!("u_{n}"),
@@ -1154,6 +1161,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_create_infers_sole_provider() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let (name, kind) = setup("crt");
         let out = unit_dispatch(&format!("{kind}.forge"), &json!({}), None)
             .await
@@ -1165,6 +1173,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_name_returns_none() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         assert!(
             unit_dispatch("not.a.unit.op", &json!({}), None)
                 .await
@@ -1179,6 +1188,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_update_missing_id_errors() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let (name, kind) = setup("mis");
         let err = unit_dispatch(&format!("{kind}.spin"), &json!({}), None)
             .await
@@ -1190,6 +1200,7 @@ mod tests {
 
     #[test]
     fn unit_owns_matches_only_registered_ops() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let (name, kind) = setup("own");
         assert!(unit_owns(&format!("{kind}.list")));
         assert!(!unit_owns(&format!("{kind}.nonexistent")));
@@ -1285,6 +1296,7 @@ mod tests {
 
     #[test]
     fn create_op_carries_declared_payload_and_response_schemas() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let (name, kind) = setup_rich("schema");
         let ops = unit_ops();
         let build = ops
@@ -1301,6 +1313,7 @@ mod tests {
 
     #[test]
     fn list_schema_merges_plugin_query_fields() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let (name, kind) = setup_rich("query");
         let ops = unit_ops();
         let list = ops
@@ -1314,6 +1327,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_detail_routes_and_returns_item() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let (name, kind) = setup_rich("detail");
         let out = unit_dispatch(
             &format!("{kind}.detail"),
@@ -1329,6 +1343,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_detail_invalid_query_errors() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let (name, kind) = setup_rich("badq");
         let err = unit_dispatch(
             &format!("{kind}.detail"),
@@ -1344,6 +1359,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_upsert_routes_with_action() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let (name, kind) = setup_rich("ups");
         let out = unit_dispatch(
             &format!("{kind}.sync"),
@@ -1362,6 +1378,7 @@ mod tests {
 
     #[test]
     fn create_input_requires_provider_when_multiple() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let name_a = "multi-a".to_string();
         let name_b = "multi-b".to_string();
         let kind = "mid_create".to_string();
@@ -1386,6 +1403,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_create_multi_provider_needs_selector() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let name_a = "sel-a".to_string();
         let name_b = "sel-b".to_string();
         let kind = "sid_create".to_string();
@@ -1421,6 +1439,7 @@ mod tests {
 
     #[test]
     fn cli_commands_expose_kind_and_leaf_subcommands() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let (name, kind) = setup("cli");
         let cmds = unit_cli_commands();
         let kind_cmd = cmds
@@ -1436,6 +1455,7 @@ mod tests {
 
     #[test]
     fn a_static_kind_gains_only_the_unit_leaves_it_lacks() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let (name, kind) = setup("collide");
         let root = clap::Command::new("orca").subcommand(
             clap::Command::new(&*Box::leak(kind.clone().into_boxed_str()))
@@ -1460,6 +1480,7 @@ mod tests {
 
     #[test]
     fn a_new_kind_routes_every_leaf() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let (name, kind) = setup("lockstep");
         let (root, routes) = register_unit_commands(clap::Command::new("orca"), unit_ops());
         let kind_cmd = root.find_subcommand(&kind).expect("kind command");
@@ -1472,6 +1493,7 @@ mod tests {
 
     #[test]
     fn kinds_from_dedups_and_lists_kinds() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let (name, kind) = setup("kinds");
         let ops = unit_ops();
         let kinds = unit_kinds_from(&ops);
@@ -1484,6 +1506,7 @@ mod tests {
 
     #[test]
     fn catalog_json_is_array_of_ops() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let (name, kind) = setup("catjson");
         let cat = unit_catalog_json();
         let arr = cat.as_array().expect("array");
@@ -1604,6 +1627,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_provider_claiming_a_foreign_managers_unit_is_ignored() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let kind = "own_foreign";
         owner("unraid-f", "tower", kind, &[("abc", "plex")]);
         let claimed = units_of("unraid-f@tower", kind, &[("abc", "plex"), ("zzz", "ghost")]);
@@ -1625,6 +1649,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreachable_manager_refuses_mutations_but_not_detail() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let kind = "own_down";
         owner("unraid-d2", "tower", kind, &[("abc", "plex")]);
         owner_with("docker-d2", kind, vec![], true, None);
@@ -1656,6 +1681,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolution_follows_pages_until_total() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let kind = "own_page";
         let units = units_of(
             "unraid-p@tower",
@@ -1673,6 +1699,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_gate_checks_the_verified_caller_over_the_ambient_operator() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let kind = "own_gate";
         owner("unraid-g", "tower", kind, &[("abc", "plex")]);
         let who = |n: &str, role: &str| contract::CallerIdentity {
@@ -1692,6 +1719,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_bare_name_routes_to_the_manager_that_owns_it() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let kind = "own_route";
         owner("unraid-r", "tower", kind, &[("abc123", "plex")]);
         owner("docker-r", "willow", kind, &[("def456", "sonarr")]);
@@ -1712,6 +1740,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_name_two_managers_own_is_ambiguous_and_lists_them() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let kind = "own_amb";
         owner("unraid-a", "tower", kind, &[("abc", "plex")]);
         owner("docker-a", "willow", kind, &[("def", "plex")]);
@@ -1729,6 +1758,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_name_no_manager_owns_lists_the_managers_checked() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let kind = "own_none";
         owner("unraid-n", "tower", kind, &[("abc", "plex")]);
         let err = unit_dispatch(&format!("{kind}.start"), &json!({ "id": "ghost" }), None)
@@ -1760,6 +1790,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_dry_run_resolves_the_owner_and_deletes_nothing() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let kind = "own_del";
         let deleted = owner("unraid-d", "tower", kind, &[("abc", "plex")]);
         let tool = format!("{kind}.delete");
@@ -1784,6 +1815,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_dry_run_of_a_missing_unit_is_not_found() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let kind = "own_delx";
         owner("unraid-x", "tower", kind, &[("abc", "plex")]);
         let ghost = UnitId {
@@ -1805,6 +1837,7 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_on_a_non_delete_unit_op_is_still_refused() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let kind = "own_upd";
         owner("unraid-u", "tower", kind, &[("abc", "plex")]);
         let err = crate::dispatch(
@@ -1820,6 +1853,7 @@ mod tests {
 
     #[test]
     fn delete_schema_advertises_dry_run_and_a_name_target() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         let (name, kind) = setup("delschema");
         let ops = unit_ops();
         let del = ops
@@ -1863,6 +1897,7 @@ mod tests {
 
     #[tokio::test]
     async fn listed_stops_paging_a_provider_that_never_ends_and_dedupes() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let provider = EndlessProvider {
             calls: calls.clone(),

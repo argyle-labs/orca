@@ -21,6 +21,9 @@ pub struct PluginToolPolicy {
     pub execute_gated: bool,
     pub data_mutation: bool,
     pub local_only: bool,
+    /// An `any` tool that explicitly opted out of the execute gate without
+    /// also declaring `data_mutation: false`; mesh refuses it without a caller.
+    pub read_unconfirmed: bool,
 }
 
 impl PluginToolPolicy {
@@ -29,6 +32,7 @@ impl PluginToolPolicy {
     /// read-only, and the mesh gate ranks unknown roles lowest, so passing one
     /// through would open the tool instead.
     pub fn from_manifest(
+        name: &str,
         role: Option<&str>,
         execute_gated: Option<bool>,
         data_mutation: Option<bool>,
@@ -38,11 +42,15 @@ impl PluginToolPolicy {
             Some("read") => "read",
             None | Some(_) => "admin",
         };
+        let default_gated = role == "any" && !verb_shape::is_read_shaped(name);
         Self {
             role,
-            execute_gated: execute_gated.unwrap_or(false),
+            execute_gated: execute_gated.unwrap_or(default_gated),
             data_mutation: data_mutation.unwrap_or(false),
             local_only: false,
+            read_unconfirmed: role == "any"
+                && execute_gated == Some(false)
+                && data_mutation != Some(false),
         }
     }
 
@@ -88,6 +96,11 @@ fn plugin_policy(tool: &str) -> Option<PluginToolPolicy> {
 /// plans on `dryRun` instead of applying.
 pub fn plugin_execute_gated(tool: &str) -> bool {
     plugin_policy(tool).is_some_and(|p| p.execute_gated)
+}
+
+/// Whether a loaded plugin's `any` tool lacks an explicit read declaration.
+pub fn plugin_read_unconfirmed(tool: &str) -> bool {
+    plugin_policy(tool).is_some_and(|p| p.read_unconfirmed)
 }
 
 /// Install the lookup. Idempotent — first call wins; subsequent calls are
@@ -159,22 +172,26 @@ fn fixed_surface_role(tool: &str) -> Option<&'static str> {
     )
 }
 
-/// True if the caller's identity-role satisfies the tool's required-role.
-///
-/// Role hierarchy (high → low): `admin` > `read` > `any`. Higher roles
-/// satisfy every requirement at their level or below. `"read"` exists so
-/// sensitive read-only surfaces (e.g. `fs.*`, which can exfiltrate any
-/// file an orca process can see) can be gated above `"any"` without
-/// requiring full admin to invoke. Unknown values fail closed.
-pub fn satisfies(caller_role: &str, required: &str) -> bool {
-    match required {
-        "any" => true,
-        "read" => caller_role == "admin" || caller_role == "read",
-        "admin" => caller_role == "admin",
-        // Unknown required values fail closed — keeps a typo in `role = "..."`
-        // from silently degrading to fall-open.
-        _ => false,
+/// Rank of a role in the tier order `read-only` < `user` < `admin` <
+/// `super-admin`. `read` is `read-only` and `member` is `user`; `any` and
+/// unknown roles rank lowest.
+pub fn role_rank(role: &str) -> u8 {
+    match role {
+        "super-admin" => 4,
+        "admin" => 3,
+        "user" | "member" => 2,
+        "read-only" | "read" => 1,
+        _ => 0,
     }
+}
+
+/// True if the caller's identity-role satisfies the tool's required-role,
+/// ranked by [`role_rank`]. `"read"` exists so sensitive read-only surfaces
+/// (e.g. `fs.*`) can be gated above `"any"` without requiring admin. Unknown
+/// required values fail closed, so a typo in `role = "..."` never falls open.
+pub fn satisfies(caller_role: &str, required: &str) -> bool {
+    let need = role_rank(required);
+    (need > 0 || required == "any") && role_rank(caller_role) >= need
 }
 
 /// Authorization decision for an authenticated surface caller, combining the
@@ -215,6 +232,31 @@ mod tests {
     // accessors without re-installing in every test.
 
     #[test]
+    fn role_rank_orders_the_four_tiers_above_any() {
+        let ranks: Vec<u8> = ["any", "read-only", "user", "admin", "super-admin"]
+            .into_iter()
+            .map(role_rank)
+            .collect();
+        assert_eq!(ranks, [0, 1, 2, 3, 4]);
+        assert_eq!(role_rank("read"), role_rank("read-only"));
+        assert_eq!(role_rank("member"), role_rank("user"));
+        assert_eq!(role_rank("bogus"), 0);
+    }
+
+    #[test]
+    fn explicit_ungate_without_explicit_read_is_unconfirmed() {
+        let p = |eg, dm| PluginToolPolicy::from_manifest("t.status", Some("any"), eg, dm);
+        assert!(p(Some(false), None).read_unconfirmed);
+        assert!(p(Some(false), Some(true)).read_unconfirmed);
+        assert!(!p(Some(false), Some(false)).read_unconfirmed);
+        assert!(!p(None, None).read_unconfirmed);
+        assert!(
+            !PluginToolPolicy::from_manifest("t.status", Some("admin"), Some(false), None)
+                .read_unconfirmed
+        );
+    }
+
+    #[test]
     fn satisfies_any_requirement_passes_every_caller() {
         assert!(satisfies("admin", "any"));
         assert!(satisfies("member", "any"));
@@ -222,17 +264,19 @@ mod tests {
     }
 
     #[test]
-    fn satisfies_admin_requirement_only_passes_admin() {
+    fn satisfies_admin_requirement_passes_admin_and_super_admin() {
         assert!(satisfies("admin", "admin"));
+        assert!(satisfies("super-admin", "admin"));
         assert!(!satisfies("member", "admin"));
         assert!(!satisfies("", "admin"));
     }
 
     #[test]
-    fn satisfies_read_requirement_passes_admin_and_read_but_not_lower() {
+    fn satisfies_read_requirement_passes_read_and_above() {
         assert!(satisfies("admin", "read"));
         assert!(satisfies("read", "read"));
-        assert!(!satisfies("member", "read"));
+        assert!(satisfies("read-only", "read"));
+        assert!(satisfies("member", "read"));
         assert!(!satisfies("any", "read"));
         assert!(!satisfies("", "read"));
     }
@@ -293,6 +337,7 @@ mod tests {
 
     #[test]
     fn every_routable_tool_is_known() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         for def in crate::mcp_definitions() {
             let name = def["name"].as_str().expect("tool def has a name");
             assert!(known_role(name).is_some(), "{name} routes but is unknown");
@@ -316,7 +361,7 @@ mod tests {
 
     #[test]
     fn plugin_policy_maps_manifest_roles_and_fails_closed() {
-        let p = |r| PluginToolPolicy::from_manifest(r, None, None).role;
+        let p = |r| PluginToolPolicy::from_manifest("t.list", r, None, None).role;
         assert_eq!(p(None), "admin");
         assert_eq!(p(Some("any")), "any");
         assert_eq!(p(Some("read")), "read");
@@ -327,7 +372,7 @@ mod tests {
     #[test]
     fn plugin_local_only_is_installed_and_removed() {
         let name = "tool_roles_test_plugin.engine_update";
-        let policy = PluginToolPolicy::from_manifest(Some("admin"), None, None);
+        let policy = PluginToolPolicy::from_manifest(name, Some("admin"), None, None);
         assert!(!policy.local_only);
         assert!(!policy.local_only(None).local_only);
         install_plugin_tools([(name.to_string(), policy.local_only(Some(true)))]);
@@ -344,7 +389,7 @@ mod tests {
         assert_eq!(required_role(name), "any");
         install_plugin_tools([(
             name.to_string(),
-            PluginToolPolicy::from_manifest(Some("admin"), Some(true), Some(true)),
+            PluginToolPolicy::from_manifest(name, Some("admin"), Some(true), Some(true)),
         )]);
         assert_eq!(required_role(name), "admin");
         assert!(is_data_mutation(name));
@@ -360,7 +405,7 @@ mod tests {
         let name = "tool_roles_test_plugin.no_role";
         install_plugin_tools([(
             name.to_string(),
-            PluginToolPolicy::from_manifest(None, None, Some(false)),
+            PluginToolPolicy::from_manifest(name, None, None, Some(false)),
         )]);
         assert_eq!(required_role(name), "admin");
         assert!(!authorize("member", false, required_role(name), false));
@@ -374,10 +419,11 @@ mod tests {
         let name = "tool_roles_test_plugin.read_role";
         install_plugin_tools([(
             name.to_string(),
-            PluginToolPolicy::from_manifest(Some("read"), None, None),
+            PluginToolPolicy::from_manifest(name, Some("read"), None, None),
         )]);
         assert!(authorize("read", false, required_role(name), false));
-        assert!(!authorize("member", false, required_role(name), false));
+        assert!(authorize("member", false, required_role(name), false));
+        assert!(!authorize("any", false, required_role(name), false));
         remove_plugin_tools([name]);
     }
 

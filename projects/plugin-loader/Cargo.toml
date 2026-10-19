@@ -34,6 +34,7 @@ tokio      = { workspace = true }
 # `http.request` capability instead of linking their own reqwest — the capability
 # host executes it here on orca's one client. (`utils::http` = the ONE HTTP home.)
 utils      = { workspace = true, default-features = true }
+verb-shape = { workspace = true }
 # Host side of the `ws.*` capabilities, on the same rustls + platform-verifier
 # trust stack `utils::http` uses.
 tokio-tungstenite = { workspace = true }
