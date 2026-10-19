@@ -523,6 +523,7 @@ impl RequestBuilder {
         let resp = self.dispatch(&[], true).await?;
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
+        let header_pairs = header_pairs(resp.headers());
         let bytes = read_capped(resp, self.max_body.unwrap_or(MAX_RESPONSE_BYTES)).await?;
         if !(200..300).contains(&status) {
             let summary = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]).into_owned();
@@ -538,7 +539,7 @@ impl RequestBuilder {
         }
         Ok(BytesResponse {
             status,
-            header_pairs: Vec::new(),
+            header_pairs,
             headers,
             body: bytes,
         })

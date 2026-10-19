@@ -453,6 +453,8 @@ pub struct HttpRequest {
 /// `HttpRequest.body`.
 pub const HTTP_BODY_B64: &str = "http.body_b64";
 
+pub const HTTP_NO_FOLLOW: &str = "http.no_follow";
+
 /// Borrowed wire form of an [`HttpRequest`] whose body is a number array, for
 /// a core that does not advertise [`HTTP_BODY_B64`].
 #[derive(serde::Serialize)]

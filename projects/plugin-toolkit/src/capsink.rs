@@ -37,10 +37,17 @@ pub type CapStreamSink = Box<
 
 thread_local! {
     static CORE_BODY_B64: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CORE_NO_FOLLOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(any(test, all(feature = "tools", feature = "endpoints")))]
 pub(crate) fn set_core_body_b64(on: bool) {
     CORE_BODY_B64.with(|c| c.set(on));
+}
+
+#[cfg(any(test, all(feature = "tools", feature = "endpoints")))]
+pub(crate) fn set_core_no_follow(on: bool) {
+    CORE_NO_FOLLOW.with(|c| c.set(on));
 }
 
 fn request_wire(req: &HttpRequest) -> Result<String> {
@@ -125,6 +132,12 @@ pub(crate) fn cap_route_stream(
 /// socket. This is the seam the delegated-HTTP shim (and Phase B'd progenitor
 /// clients) execute through.
 pub fn http_request(req: &HttpRequest) -> Result<HttpResponse> {
+    if req.follow_redirects == Some(false) && !CORE_NO_FOLLOW.with(|c| c.get()) {
+        return Err(anyhow!(
+            "http.request: follow_redirects=false needs a core advertising {}; upgrade orca",
+            crate::abi::HTTP_NO_FOLLOW
+        ));
+    }
     match cap_route("http.request", &request_wire(req)?) {
         Some(reply_json) => Ok(serde_json::from_str(&reply_json?)?),
         None => Err(anyhow!(
@@ -246,5 +259,31 @@ mod tests {
             err.contains("not running as an orca subprocess"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn no_follow_requires_core_capability() {
+        let req = HttpRequest {
+            follow_redirects: Some(false),
+            ..post(b"")
+        };
+        let reply = || {
+            with_cap_sink(
+                Box::new(|_: &str, _: &str| Ok(r#"{"status":302,"headers":[],"body":[]}"#.into())),
+                || http_request(&req),
+            )
+        };
+        set_core_no_follow(false);
+        let err = reply().unwrap_err().to_string();
+        assert!(err.contains(crate::abi::HTTP_NO_FOLLOW), "got: {err}");
+        set_core_no_follow(true);
+        let out = reply();
+        set_core_no_follow(false);
+        assert_eq!(out.unwrap().status, 302);
+        let followed = with_cap_sink(
+            Box::new(|_: &str, _: &str| Ok(r#"{"status":200,"headers":[],"body":[]}"#.into())),
+            || http_request(&post(b"")),
+        );
+        assert_eq!(followed.unwrap().status, 200);
     }
 }
