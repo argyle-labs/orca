@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 serde_json    = { workspace = true }
+orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 dispatch = { workspace = true, default-features = true }

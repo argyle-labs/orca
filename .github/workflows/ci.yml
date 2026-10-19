@@ -1,20 +1,15 @@
 name: CI
 
-# Required checks are exactly `build`, `test` and `lint`. Each crate is hashed
-# with its workspace dependency closure (crate-hashes). The build and clippy
-# always compile --workspace so feature unification matches a full build; they
-# are skipped only when every crate already has a recorded pass. `test` runs
-# just the crates without a pass, via a nextest package() filterset (no filter
-# when every crate is selected: nightly schedule, workflow_dispatch, or a
-# pass-cache backend failure). Coverage is report-only.
-# Compilation is cached through sccache (rust-setup). crate-hashes requires
-# every argyle-labs/.github action on the same ref.
-#
-# CI runs on GITEA (canonical), executed by our self-hosted Gitea act_runner.
-# `runs-on` labels map to local Docker runners, NOT GitHub-hosted VMs.
+# Each job is one shared job action from argyle-labs/.github; add no steps
+# here. CI runs on Gitea, on our self-hosted act_runner.
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Ignore the pass cache'
+        type: boolean
+        default: false
   schedule:
     - cron: "17 9 * * *"
 
@@ -26,146 +21,35 @@ permissions:
   contents: read
 
 env:
-  CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # Disable per-target incremental files. Pointless on CI and MANDATORY for
-  # sccache — incremental compilation and sccache are mutually exclusive
-  # (leaving it on silently disables every cache hit).
-  CARGO_INCREMENTAL: 0
-  # Cheap KDF for the test/coverage build only. Honored solely when
-  # cfg!(debug_assertions) is true (test/coverage builds) — release binaries
-  # ignore it — so it never weakens production. Skips the memory-hard Argon2 +
-  # SQLCipher PBKDF2 cost that otherwise makes auth/secrets tests run tens of
-  # seconds each under coverage instrumentation.
+  # Cheap KDF for test builds only; release binaries ignore it.
   ORCA_TEST_FAST_KDF: "1"
-  # No DWARF on CI: less compile, link and cache weight. Trade-off:
-  # RUST_BACKTRACE frames lose file:line, but a panic still prints its
-  # location. Coverage is unaffected (-Cinstrument-coverage emits its own
-  # mapping sections). Local dev keeps line tables.
-  CARGO_PROFILE_DEV_DEBUG: "0"
-  CARGO_PROFILE_TEST_DEBUG: "0"
-
-  # ── Kill vendored OpenSSL on the PR gate (biggest cold-compile win) ────────
-  # OpenSSL is pulled in vendored TWICE — via git2's `vendored-openssl` and via
-  # rusqlite's `bundled-sqlcipher-vendored-openssl` — so a cold build compiles
-  # the whole OpenSSL C source from scratch, the single largest crate cost.
-  # OPENSSL_NO_VENDOR=1 overrides the vendored feature at build-script time and
-  # links the system OpenSSL (libssl-dev, baked into the ci-rust image) instead.
-  # This is CI-ONLY: the release/cross (musl) workflow deliberately does NOT set
-  # it, so production keeps statically vendoring OpenSSL for portable binaries.
-  OPENSSL_NO_VENDOR: "1"
 
 jobs:
   build:
-    name: build
     runs-on: ci-large
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
       credentials:
         username: ${{ secrets.CI_REGISTRY_USER }}
         password: ${{ secrets.CI_REGISTRY_TOKEN }}
-    defaults:
-      run:
-        shell: bash
-    outputs:
-      hashes: ${{ steps.src.outputs.hashes }}
-      missing: ${{ steps.pass.outputs.missing }}
-      selection: ${{ steps.select.outputs.selection }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      - name: Crate hashes
-        id: src
-        uses: argyle-labs/.github/.github/actions/crate-hashes@main
+      - name: Build
+        uses: argyle-labs/.github/.github/actions/job-rust-build@main
         with:
-          image: ci-rust:1.95.0
-          workflow-file: .github/workflows/ci.yml
           extra-paths: "orca-inventory-tests: README.md CRATE_RESPONSIBILITIES.md projects docs"
-      - name: Check pass cache
-        id: pass
-        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
-        with:
-          mode: check-batch
-          job: build
-          also-require: test
-          hashes: ${{ steps.src.outputs.hashes }}
-          force: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
-          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
-          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
-          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-      # `selection` is empty when every crate already passed, `all` when every
-      # crate is missing, otherwise a nextest filterset over the missing crates.
-      - name: Select crates
-        id: select
-        env:
-          HASHES: ${{ steps.src.outputs.hashes }}
-          MISSING: ${{ steps.pass.outputs.missing }}
-        run: |
-          set -euo pipefail
-          n=$(jq length <<< "$MISSING")
-          if [ "$n" -eq 0 ]; then
-            sel=""
-          elif [ "$n" -eq "$(jq length <<< "$HASHES")" ]; then
-            sel="all"
-          else
-            sel=$(jq -r 'map("package(=\(.))") | join("|")' <<< "$MISSING")
-          fi
-          echo "selection=$sel" >> "$GITHUB_OUTPUT"
-          echo "Selected ($n crate(s)): ${sel:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Reuse recorded pass
-        if: ${{ steps.select.outputs.selection == '' }}
-        run: echo "Unchanged — reusing build + test pass for every crate" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Set up Rust
-        if: ${{ steps.select.outputs.selection != '' }}
-        uses: argyle-labs/.github/.github/actions/rust-setup@main
-        with:
+          features: ""
+          force: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
           drop-cargo-config: 'false'
-          wrap-cc: 'true'
+          version-env: ORCA_RELEASE_VERSION
+          doctests: 'false'
+          size-check: 'false'
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-      # server/system build scripts derive ORCA_VERSION from git; a fixed
-      # version keeps them cached. The -dev suffix keeps dev-build behaviour.
-      - name: Pin orca version
-        if: ${{ steps.select.outputs.selection != '' }}
-        run: |
-          v="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
-          [ -n "$v" ] || exit 1
-          echo "ORCA_RELEASE_VERSION=${v}-dev+gci" >> "$GITHUB_ENV"
-      - name: Fetch dependencies
-        if: ${{ steps.select.outputs.selection != '' }}
-        uses: argyle-labs/.github/.github/actions/cargo-fetch@main
-      # One coverage-instrumented compile; `test` runs this archive instead of
-      # rebuilding. Covers lib/bin/test targets, not examples or benches.
-      - name: Build (coverage-instrumented test archive)
-        if: ${{ steps.select.outputs.selection != '' }}
-        run: |
-          cargo llvm-cov nextest-archive --locked --workspace --archive-file nextest-archive.tar.zst
-      - name: Upload test archive
-        if: ${{ steps.select.outputs.selection != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: nextest-archive
-          path: nextest-archive.tar.zst
-          retention-days: 1
-      - name: Record pass
-        if: ${{ success() && steps.select.outputs.selection != '' }}
-        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
-        with:
-          mode: record-batch
-          job: build
-          hashes: ${{ steps.src.outputs.hashes }}
-          crates: ${{ steps.pass.outputs.missing }}
-          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
-          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
-          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-      - name: CI summary
-        uses: argyle-labs/.github/.github/actions/ci-summary@main
-        if: ${{ !cancelled() }}
 
   test:
-    name: test
     needs: build
     runs-on: ci-large
     container:
@@ -173,164 +57,40 @@ jobs:
       credentials:
         username: ${{ secrets.CI_REGISTRY_USER }}
         password: ${{ secrets.CI_REGISTRY_TOKEN }}
-    defaults:
-      run:
-        shell: bash
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      - name: Reuse recorded pass
-        if: ${{ needs.build.outputs.selection == '' }}
-        run: echo "Unchanged — reusing test pass for every crate" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Set up Rust
-        if: ${{ needs.build.outputs.selection != '' }}
-        uses: argyle-labs/.github/.github/actions/rust-setup@main
+      - name: Test
+        uses: argyle-labs/.github/.github/actions/job-rust-test@main
         with:
+          extra-paths: "orca-inventory-tests: README.md CRATE_RESPONSIBILITIES.md projects docs"
+          force: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
           drop-cargo-config: 'false'
-          wrap-cc: 'true'
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-      - name: Download test archive
-        if: ${{ needs.build.outputs.selection != '' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: nextest-archive
-      - name: Test + coverage
-        if: ${{ needs.build.outputs.selection != '' }}
-        uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
-        with:
-          nextest-args: --no-fail-fast --no-tests=pass ${{ needs.build.outputs.selection != 'all' && format('-E {0}', needs.build.outputs.selection) || '' }}
-      # One failing test withholds the marker from every selected crate.
-      - name: Record pass
-        if: ${{ success() && needs.build.outputs.selection != '' }}
-        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
-        with:
-          mode: record-batch
-          job: test
-          hashes: ${{ needs.build.outputs.hashes }}
-          crates: ${{ needs.build.outputs.missing }}
-          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
-          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
-          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-      - name: CI summary
-        uses: argyle-labs/.github/.github/actions/ci-summary@main
-        if: ${{ !cancelled() }}
 
   lint:
-    name: lint
     runs-on: ci-large
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
       credentials:
         username: ${{ secrets.CI_REGISTRY_USER }}
         password: ${{ secrets.CI_REGISTRY_TOKEN }}
-    defaults:
-      run:
-        shell: bash
+    env:
+      ORCA_FORBIDDEN_IP_PATTERNS: ${{ secrets.FORBIDDEN_IP_PATTERNS }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      # Fails if a real fleet address returns (the repo mirrors to a PUBLIC
-      # GitHub). The patterns are a secret so the guard does not leak the range
-      # it protects; unset, the allowlist sweep still runs.
-      - name: Check for forbidden real-fleet addresses
-        env:
-          ORCA_FORBIDDEN_IP_PATTERNS: ${{ secrets.FORBIDDEN_IP_PATTERNS }}
-        run: ./scripts/check-no-real-ips.sh
-      - name: Crate hashes
-        id: src
-        uses: argyle-labs/.github/.github/actions/crate-hashes@main
+      - name: Lint
+        uses: argyle-labs/.github/.github/actions/job-rust-lint@main
         with:
-          image: ci-rust:1.95.0
-          workflow-file: .github/workflows/ci.yml
-          extra-paths: |
-            *: clippy.toml
-            orca-inventory-tests: README.md CRATE_RESPONSIBILITIES.md projects docs
-      - name: Check pass cache
-        id: pass
-        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
-        with:
-          mode: check-batch
-          job: lint
-          hashes: ${{ steps.src.outputs.hashes }}
-          force: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
-          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
-          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
-          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-      - name: Select crates
-        id: select
-        env:
-          HASHES: ${{ steps.src.outputs.hashes }}
-          MISSING: ${{ steps.pass.outputs.missing }}
-        run: |
-          set -euo pipefail
-          n=$(jq length <<< "$MISSING")
-          if [ "$n" -eq 0 ]; then
-            sel=""
-          elif [ "$n" -eq "$(jq length <<< "$HASHES")" ]; then
-            sel="all"
-          else
-            sel=$(jq -r 'map("package(=\(.))") | join("|")' <<< "$MISSING")
-          fi
-          echo "selection=$sel" >> "$GITHUB_OUTPUT"
-          echo "Selected ($n crate(s)): ${sel:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Reuse recorded pass
-        if: ${{ steps.select.outputs.selection == '' }}
-        run: echo "Unchanged — reusing clippy + package pass for every crate" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Set up Rust
-        if: ${{ !cancelled() }}
-        uses: argyle-labs/.github/.github/actions/rust-setup@main
-        with:
+          extra-paths: "orca-inventory-tests: README.md CRATE_RESPONSIBILITIES.md projects docs"
+          features: ""
+          force: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
           drop-cargo-config: 'false'
-          wrap-cc: 'true'
+          scripts: ./scripts/check-no-real-ips.sh
+          cargo-checks: |
+            check -p orca-notifications --no-default-features
+            check -p orca-plugin-toolkit --no-default-features --features tools,notify
+            test -p orca-plugin-toolkit --features full --test doc_authoring_anchor
+          package-publishable: 'true'
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-      - name: Format
-        uses: argyle-labs/.github/.github/actions/cargo-fmt@main
-        if: ${{ !cancelled() }}
-      - name: Clippy
-        uses: argyle-labs/.github/.github/actions/cargo-clippy@main
-        if: ${{ !cancelled() && steps.select.outputs.selection != '' }}
-        with:
-          args: --workspace --all-targets
-      - name: Check feature profiles
-        if: ${{ !cancelled() && steps.select.outputs.selection != '' }}
-        run: |
-          cargo check -p orca-notifications --no-default-features
-          cargo check -p orca-plugin-toolkit --no-default-features --features tools,notify
-          cargo test -p orca-plugin-toolkit --features full --test doc_authoring_anchor
-      # Checks each publishable crate's manifest and file list. The full
-      # build-from-tarball verify runs once, at release, in `cargo publish`.
-      - name: Package publishable crates
-        if: ${{ !cancelled() && steps.select.outputs.selection != '' }}
-        run: |
-          set -o pipefail
-          mapfile -t pkgs < <(cargo metadata --format-version 1 --no-deps --locked \
-            | jq -r '.packages[] | select(.publish | index("gitea")) | "-p", .name')
-          # pipefail can't see into the process substitution; empty means it failed.
-          [ "${#pkgs[@]}" -gt 0 ] || { echo "no publishable crates found" >&2; exit 1; }
-          cargo package --no-verify --locked --registry gitea "${pkgs[@]}"
-      - name: actionlint
-        uses: argyle-labs/.github/.github/actions/actionlint@main
-        if: ${{ !cancelled() }}
-      # Last: it deletes .cargo/config.toml, which the cargo steps above need.
-      - name: Lock file check
-        uses: argyle-labs/.github/.github/actions/cargo-lock-check@main
-        if: ${{ !cancelled() }}
-      - name: Record pass
-        if: ${{ success() && steps.select.outputs.selection != '' }}
-        uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
-        with:
-          mode: record-batch
-          job: lint
-          hashes: ${{ steps.src.outputs.hashes }}
-          crates: ${{ steps.pass.outputs.missing }}
-          endpoint: ${{ vars.SCCACHE_ENDPOINT }}
-          access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
-          secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-      - name: CI summary
-        uses: argyle-labs/.github/.github/actions/ci-summary@main
-        if: ${{ !cancelled() }}

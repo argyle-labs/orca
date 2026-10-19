@@ -1,0 +1,38 @@
+hakari-package = "orca-workspace-hack"
+
+dep-format-version = "4"
+
+resolver = "2"
+
+platforms = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+
+[final-excludes]
+workspace-members = [
+    "orca-acquisition",
+    "orca-containers",
+    "orca-contract",
+    "orca-db",
+    "orca-deploy-target",
+    "orca-derive",
+    "orca-dispatch",
+    "orca-graphql",
+    "orca-macro-runtime",
+    "orca-media",
+    "orca-notifications",
+    "orca-openapi",
+    "orca-plugin-abi",
+    "orca-plugin-proto",
+    "orca-plugin-toolkit",
+    "orca-plugin-toolkit-build",
+    "orca-secrets",
+    "orca-service",
+    "orca-storage",
+    "orca-thin-plugin-fixture",
+    "orca-utils",
+    "orca-verb-shape",
+    "plugin-toolkit",
+    "plugin-toolkit-build",
+]

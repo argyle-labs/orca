@@ -30,6 +30,7 @@ thiserror   = { workspace = true }
 schemars    = { workspace = true }
 # In-process only: the loaded-plugin JSON proxy's `spawn_blocking`.
 tokio       = { workspace = true, optional = true }
+orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

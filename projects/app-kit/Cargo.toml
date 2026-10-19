@@ -61,6 +61,7 @@ contract = { workspace = true, default-features = true }
 uniffi    = { workspace = true, features = ["cli"] }
 tokio     = { workspace = true }
 anyhow    = { workspace = true }
+orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [lints]
 workspace = true
