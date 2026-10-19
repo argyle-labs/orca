@@ -1367,6 +1367,31 @@ fn surface_owner(name: &str) -> Option<String> {
         .then(|| plugin.software.clone())
 }
 
+fn tool_reaches(name: &str) -> Vec<String> {
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
+    reg.by_tool
+        .get(name)
+        .and_then(|idx| reg.plugins[*idx].tools.get(name))
+        .map(|d| d.reaches.clone())
+        .unwrap_or_default()
+}
+
+fn plan_with_reaches(result: Result<sj::Value>, name: &str, dry_run: bool) -> Result<sj::Value> {
+    let mut value = result?;
+    let reaches = tool_reaches(name);
+    if dry_run
+        && !reaches.is_empty()
+        && let Some(obj) = value.as_object_mut()
+    {
+        obj.insert("reaches".into(), sj::json!(reaches));
+    }
+    Ok(value)
+}
+
+fn dry_run_args(args: &sj::Value) -> bool {
+    args.get(contract::plan::DRY_RUN_FIELD) == Some(&sj::Value::Bool(true))
+}
+
 fn invocation_for(
     ctx: &ToolCtx,
     name: &str,
@@ -1378,6 +1403,7 @@ fn invocation_for(
             .for_plugin_invoke(
                 dispatch::tool_roles::plugin_execute_gated(name),
                 dispatch::tool_roles::required_role(name),
+                &tool_reaches(name),
                 args,
             ),
     )
@@ -1444,10 +1470,11 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
     if let Some((backing, software)) = backing_for(name) {
         let owned = name.to_string();
         let inv = invocation_for(ctx, name, &args);
+        let dry_run = dry_run_args(&args);
         let result = tokio::task::spawn_blocking(move || backing.invoke(&owned, args, inv))
             .await
             .with_context(|| format!("plugin invoke task for '{name}' panicked"))?;
-        return parse_invoke_result(result, name, &software);
+        return plan_with_reaches(parse_invoke_result(result, name, &software), name, dry_run);
     }
     dispatch::dispatch(name, args, ctx).await
 }
@@ -1471,7 +1498,11 @@ pub fn invoke_plugin(name: &str, args: &sj::Value, ctx: &ToolCtx) -> Option<Resu
     }
     let (backing, software) = backing_for(name)?;
     let result = backing.invoke(name, args.clone(), invocation_for(ctx, name, args));
-    Some(parse_invoke_result(result, name, &software))
+    Some(plan_with_reaches(
+        parse_invoke_result(result, name, &software),
+        name,
+        dry_run_args(args),
+    ))
 }
 
 /// Serializes tests that load the shared `loaderfakeplugin` id.
@@ -2469,6 +2500,7 @@ mod loader_tests {
                     execute_gated: Some(false),
                     data_mutation: Some(true),
                     local_only: Some(true),
+                    reaches: Vec::new(),
                 },
                 plugin_proto::ToolDef {
                     name: "loaderfakeplugin.fetch".into(),
@@ -2479,6 +2511,7 @@ mod loader_tests {
                     execute_gated: None,
                     data_mutation: None,
                     local_only: None,
+                    reaches: Vec::new(),
                 },
             ],
             backends: vec![

@@ -294,12 +294,23 @@ pub fn invoke_on<S: Read + Write>(
                         ok: true,
                         value,
                         error: None,
+                        error_kind: None,
                     },
-                    Err(e) => Frame::CapResult {
-                        id: cap_id,
-                        ok: false,
-                        value: Value::Null,
-                        error: Some(e.to_string()),
+                    Err(e) => match e.downcast::<capability::PlannedCall>() {
+                        Ok(planned) => Frame::CapResult {
+                            id: cap_id,
+                            ok: false,
+                            value: serde_json::to_value(&planned.0)?,
+                            error: Some(planned.to_string()),
+                            error_kind: Some(plugin_proto::API_CALL_PLANNED.into()),
+                        },
+                        Err(e) => Frame::CapResult {
+                            id: cap_id,
+                            ok: false,
+                            value: Value::Null,
+                            error: Some(e.to_string()),
+                            error_kind: None,
+                        },
                     },
                 };
                 write_frame(stream, &reply)

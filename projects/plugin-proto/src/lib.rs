@@ -67,6 +67,8 @@ pub struct ToolDef {
     /// run it on this host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reaches: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,7 +78,18 @@ pub struct ApiSurfaceRef {
     pub format: String,
 }
 
-pub const API_CALL_PLANNED: &str = "api.call planned, not executed: ";
+pub const API_CALL_PLANNED: &str = "api_call_planned";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ApiCallPlan {
+    pub method: String,
+    pub url: String,
+    pub query: Vec<(String, String)>,
+    pub body: Value,
+    pub endpoint: String,
+    pub route: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiCall {
@@ -178,6 +191,8 @@ pub enum Frame {
         value: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_kind: Option<String>,
     },
     /// orca → plugin: one chunk of a STREAMING capability's result, correlated
     /// to the plugin's [`Frame::Cap`] by `id`. A streaming capability answers a
@@ -346,6 +361,7 @@ mod tests {
                 execute_gated: Some(true),
                 data_mutation: Some(true),
                 local_only: Some(true),
+                reaches: vec!["proxmox.vm_stop".into()],
             }],
             backends: vec![json!({
                 "domain": "host_facts",

@@ -119,14 +119,27 @@ pub fn handle_api_call(
     api_call_reply(outcome)
 }
 
+#[derive(Debug)]
+pub struct PlannedCall(pub plugin_proto::ApiCallPlan);
+
+impl std::fmt::Display for PlannedCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "api.call planned, not executed: {} {}",
+            self.0.method, self.0.url
+        )
+    }
+}
+
+impl std::error::Error for PlannedCall {}
+
 fn api_call_reply(outcome: spec::surfaces::Outcome) -> Result<Value> {
     match outcome {
         spec::surfaces::Outcome::Response(value) => Ok(value),
-        spec::surfaces::Outcome::Plan(plan) => Err(anyhow!(
-            "{}{}",
-            plugin_proto::API_CALL_PLANNED,
-            serde_json::to_string(&plan)?
-        )),
+        spec::surfaces::Outcome::Plan(plan) => {
+            Err(PlannedCall(serde_json::from_value(serde_json::to_value(plan)?)?).into())
+        }
     }
 }
 
@@ -347,11 +360,10 @@ mod tests {
             endpoint: "main".into(),
             route: "https://h".into(),
         };
-        let err = api_call_reply(spec::surfaces::Outcome::Plan(plan))
-            .unwrap_err()
-            .to_string();
-        assert!(err.starts_with(plugin_proto::API_CALL_PLANNED), "{err}");
-        assert!(err.contains("\"method\":\"POST\""), "{err}");
+        let err = api_call_reply(spec::surfaces::Outcome::Plan(plan)).unwrap_err();
+        let planned = err.downcast_ref::<PlannedCall>().expect("typed plan");
+        assert_eq!(planned.0.method, "POST");
+        assert_eq!(planned.0.endpoint, "main");
         assert_eq!(
             api_call_reply(spec::surfaces::Outcome::Response(json!({"a": 1}))).unwrap(),
             json!({"a": 1})

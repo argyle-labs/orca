@@ -78,6 +78,7 @@ pub struct Invocation {
     local: bool,
     second_factor: bool,
     execute_confirmed: bool,
+    reaches: Vec<String>,
 }
 
 impl Invocation {
@@ -92,6 +93,7 @@ impl Invocation {
             local: ctx.local_transport(),
             second_factor: ctx.second_factor(),
             execute_confirmed: false,
+            reaches: Vec::new(),
         })
     }
 
@@ -103,8 +105,10 @@ impl Invocation {
         mut self,
         outer_execute_gated: bool,
         outer_role: &str,
+        outer_reaches: &[String],
         args: &Value,
     ) -> Self {
+        self.reaches = outer_reaches.to_vec();
         let flag = |k: &str| args.get(k) == Some(&Value::Bool(true));
         self.dry_run |= flag(contract::plan::DRY_RUN_FIELD);
         self.execute_confirmed =
@@ -253,6 +257,16 @@ pub async fn call(
     inv: &Invocation,
 ) -> Result<Outcome> {
     let (found, index) = lookup_in(plugin, surface, op)?;
+    let target = &found.ops[index];
+    let sensitive =
+        target.policy.execute_gated || required_role(found.kind, target) == "super-admin";
+    if sensitive && !inv.reaches.contains(&target.tool) {
+        return Err(Forbidden {
+            tool: target.tool.clone(),
+            reason: "not declared in the invoking tool's reaches".into(),
+        }
+        .into());
+    }
     let Value::Object(mut args) = args else {
         bail!("{op}: arguments must be an object");
     };
@@ -937,20 +951,21 @@ mod tests {
         let admin = caller("admin", false);
         let args = || json!({"name": "n"});
         let executing = json!({"execute": true});
+        let reach = vec!["gatep.create".to_string()];
 
-        let plain = inv(&admin, false).for_plugin_invoke(false, "admin", &executing);
+        let plain = inv(&admin, false).for_plugin_invoke(false, "admin", &reach, &executing);
         let err = call("gatep", None, "gatep.create", "main", args(), &plain)
             .await
             .unwrap_err();
         assert!(err.downcast_ref::<Forbidden>().is_some(), "{err}");
 
-        let unconfirmed = inv(&admin, false).for_plugin_invoke(true, "admin", &json!({}));
+        let unconfirmed = inv(&admin, false).for_plugin_invoke(true, "admin", &reach, &json!({}));
         let err = call("gatep", None, "gatep.create", "main", args(), &unconfirmed)
             .await
             .unwrap_err();
         assert!(err.downcast_ref::<Forbidden>().is_some(), "{err}");
 
-        let confirmed = inv(&admin, false).for_plugin_invoke(true, "admin", &executing);
+        let confirmed = inv(&admin, false).for_plugin_invoke(true, "admin", &reach, &executing);
         let err = call("gatep", None, "gatep.create", "main", args(), &confirmed)
             .await
             .unwrap_err();
@@ -959,9 +974,30 @@ mod tests {
         let dry = inv(&admin, false).for_plugin_invoke(
             true,
             "admin",
+            &reach,
             &json!({"execute": true, "dryRun": true}),
         );
         assert!(dry.dry_run && !dry.execute_confirmed);
+
+        let outside = vec!["gatep.item".to_string()];
+        let unreached = inv(&admin, false).for_plugin_invoke(true, "admin", &outside, &executing);
+        let err = call("gatep", None, "gatep.create", "main", args(), &unreached)
+            .await
+            .unwrap_err();
+        let forbidden = err.downcast_ref::<Forbidden>().expect("forbidden");
+        assert!(forbidden.reason.contains("reaches"), "{err}");
+
+        let ungated = call(
+            "gatep",
+            None,
+            "gatep.item",
+            "main",
+            json!({"id": 1}),
+            &unreached,
+        )
+        .await
+        .unwrap_err();
+        assert!(ungated.downcast_ref::<Forbidden>().is_none(), "{ungated}");
         deregister("gatep");
     }
 
@@ -972,18 +1008,18 @@ mod tests {
         assert!(
             !verified
                 .clone()
-                .for_plugin_invoke(false, "admin", &json!({}))
+                .for_plugin_invoke(false, "admin", &[], &json!({}))
                 .second_factor
         );
         assert!(
             !verified
                 .clone()
-                .for_plugin_invoke(false, "read", &json!({}))
+                .for_plugin_invoke(false, "read", &[], &json!({}))
                 .second_factor
         );
         assert!(
             verified
-                .for_plugin_invoke(false, "super-admin", &json!({}))
+                .for_plugin_invoke(false, "super-admin", &[], &json!({}))
                 .second_factor
         );
     }

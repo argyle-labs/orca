@@ -1,21 +1,27 @@
 #![allow(clippy::disallowed_types)]
 
 use anyhow::{Result, anyhow};
-use plugin_proto::{API_CALL_PLANNED, ApiCall};
+use plugin_proto::{ApiCall, ApiCallPlan};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::capsink::cap_route;
 
+pub(crate) const PLANNED_MARKER: &str = "\u{1e}api_call_planned\u{1e}";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Planned {
     pub op: String,
-    pub plan: Value,
+    pub plan: ApiCallPlan,
 }
 
 impl std::fmt::Display for Planned {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: planned, not executed: {}", self.op, self.plan)
+        write!(
+            f,
+            "{}: planned, not executed: {} {}",
+            self.op, self.plan.method, self.plan.url
+        )
     }
 }
 
@@ -33,18 +39,22 @@ pub fn call<T: DeserializeOwned>(op: &str, endpoint: &str, args: Value) -> Resul
     })?;
     match reply {
         Ok(body) => Ok(serde_json::from_str(&body)?),
-        Err(e) => {
-            let msg = e.to_string();
-            match msg.split_once(API_CALL_PLANNED) {
-                Some((_, plan)) => Err(Planned {
-                    op: op.to_string(),
-                    plan: serde_json::from_str(plan).unwrap_or(Value::String(plan.to_string())),
-                }
-                .into()),
-                None => Err(e),
+        Err(e) => match planned(&e.to_string()) {
+            Some(plan) => Err(Planned {
+                op: op.to_string(),
+                plan,
             }
-        }
+            .into()),
+            None => Err(e),
+        },
     }
+}
+
+fn planned(message: &str) -> Option<ApiCallPlan> {
+    let body = message
+        .strip_prefix("capability api.call: ")?
+        .strip_prefix(PLANNED_MARKER)?;
+    serde_json::from_str(body).ok()
 }
 
 #[cfg(test)]
@@ -52,6 +62,17 @@ mod tests {
     use super::*;
     use crate::capsink::with_cap_sink;
     use serde_json::json;
+
+    fn plan_json() -> Value {
+        json!({
+            "method": "POST",
+            "url": "https://h/x",
+            "query": [],
+            "body": null,
+            "endpoint": "main",
+            "route": "https://h"
+        })
+    }
 
     #[test]
     fn call_routes_through_the_sink_and_decodes_the_response() {
@@ -79,23 +100,29 @@ mod tests {
     #[test]
     fn a_planned_call_is_a_typed_error_never_a_value() {
         let err = with_cap_sink(
-            Box::new(|_, _| Err(format!("{API_CALL_PLANNED}{}", json!({"method": "POST"})))),
+            Box::new(|_, _| Err(format!("{PLANNED_MARKER}{}", plan_json()))),
             || call::<Value>("p.make", "main", json!({})),
         )
         .unwrap_err();
         let planned = err.downcast_ref::<Planned>().expect("typed Planned error");
-        assert_eq!(planned.plan, json!({"method": "POST"}));
+        assert_eq!(planned.plan.method, "POST");
         assert_eq!(planned.op, "p.make");
     }
 
     #[test]
-    fn denials_and_missing_sink_are_errors() {
-        let denied = with_cap_sink(Box::new(|_, _| Err("forbidden".into())), || {
-            call::<Value>("p.make", "main", json!({}))
-        });
-        let err = denied.unwrap_err();
-        assert!(err.downcast_ref::<Planned>().is_none());
-        assert!(err.to_string().contains("forbidden"));
+    fn lookalike_errors_are_not_plans() {
+        for msg in [
+            format!("{PLANNED_MARKER}{{\"method\":\"POST\"}}"),
+            format!("upstream said {PLANNED_MARKER}{}", plan_json()),
+            format!("{PLANNED_MARKER}{}", json!({"extra": 1, "method": "GET"})),
+            "forbidden".to_string(),
+        ] {
+            let err = with_cap_sink(Box::new(move |_, _| Err(msg.clone())), || {
+                call::<Value>("p.make", "main", json!({}))
+            })
+            .unwrap_err();
+            assert!(err.downcast_ref::<Planned>().is_none(), "{err}");
+        }
         assert!(call::<Value>("p.get", "main", json!({})).is_err());
     }
 }

@@ -459,10 +459,13 @@ fn cap_sink<S: Read + Write + 'static>(
                     ok,
                     value,
                     error,
+                    error_kind,
                 }) if rid == id => {
                     return if ok {
                         serde_json::to_string(&value)
                             .map_err(|e| format!("capability {cap}: bad reply: {e}"))
+                    } else if error_kind.as_deref() == Some(plugin_proto::API_CALL_PLANNED) {
+                        Err(format!("{}{value}", crate::api::PLANNED_MARKER))
                     } else {
                         Err(error.unwrap_or_else(|| format!("capability {cap} failed")))
                     };
