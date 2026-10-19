@@ -71,6 +71,8 @@ struct LoadedPlugin {
     /// The backend descriptors behind `domain_backends`, kept so a failed reload
     /// can re-register them.
     backend_defs: Vec<BackendDef>,
+    surfaces: Vec<openapi::surface::ApiSurface>,
+    surface_policies: Vec<(String, dispatch::tool_roles::PluginToolPolicy)>,
 }
 
 /// How a loaded plugin's tools are invoked: an out-of-process subprocess spoken
@@ -899,6 +901,8 @@ pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
             })?;
         tools.insert(abi_def.name.clone(), abi_def);
     }
+    let surfaces = load_surfaces(&software, &proc.api_surfaces, |n| proc.fetch_surface(n))?;
+    let surface_policies = surface_tools(&software, &surfaces, &mut tools)?;
     let mut tool_names: Vec<String> = tools.keys().cloned().collect();
     tool_names.sort();
 
@@ -929,7 +933,14 @@ pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
     if !previous.is_empty() {
         tracing::info!(plugin = %software, "reloading plugin (same software already loaded)");
     }
-    let registered = match attach_checked(&reg, &software, &tool_names, &backing, &backend_defs) {
+    let registered = match attach_checked(&reg, &software, &tool_names, &backing, &backend_defs)
+        .and_then(|registered| match register_surfaces(&software, &surfaces) {
+            Ok(()) => Ok(registered),
+            Err(e) => {
+                rollback_domain_backends(&software, &registered);
+                Err(e)
+            }
+        }) {
         Ok(registered) => registered,
         Err(e) => {
             for old in previous {
@@ -952,6 +963,8 @@ pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
             tools,
             domain_backends: registered,
             backend_defs,
+            surfaces,
+            surface_policies,
         },
     );
     drop(reg);
@@ -970,6 +983,132 @@ pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
         tools: tool_names,
         declared_schema,
     })
+}
+
+type SurfaceCache = HashMap<(String, String), Arc<openapi::surface::ApiSurface>>;
+
+static SURFACE_CACHE: std::sync::LazyLock<RwLock<SurfaceCache>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn load_surfaces(
+    software: &str,
+    refs: &[plugin_proto::ApiSurfaceRef],
+    fetch: impl Fn(&str) -> Result<String>,
+) -> Result<Vec<openapi::surface::ApiSurface>> {
+    let mut out = Vec::with_capacity(refs.len());
+    for r in refs {
+        if r.format != openapi::surface::FORMAT {
+            bail!(
+                "plugin '{software}' api surface '{}' has unsupported format '{}'",
+                r.name,
+                r.format
+            );
+        }
+        let key = (software.to_string(), r.sha256.to_ascii_lowercase());
+        let cached = SURFACE_CACHE
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned();
+        let surface = match cached {
+            Some(hit) => hit,
+            None => {
+                let body = fetch(&r.name)?;
+                let got = utils::hash::sha256_hex(body.as_bytes());
+                if got != key.1 {
+                    bail!(
+                        "plugin '{software}' api surface '{}' sha256 mismatch: declared {}, got {got}",
+                        r.name,
+                        key.1
+                    );
+                }
+                let parsed =
+                    Arc::new(openapi::surface::ApiSurface::parse(&body).with_context(|| {
+                        format!("plugin '{software}' api surface '{}'", r.name)
+                    })?);
+                SURFACE_CACHE
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(key, parsed.clone());
+                parsed
+            }
+        };
+        if surface.surface != r.name {
+            bail!(
+                "plugin '{software}' api surface '{}' declares name '{}'",
+                r.name,
+                surface.surface
+            );
+        }
+        out.push((*surface).clone());
+    }
+    Ok(out)
+}
+
+fn surface_tools(
+    software: &str,
+    surfaces: &[openapi::surface::ApiSurface],
+    tools: &mut HashMap<String, ToolDef>,
+) -> Result<Vec<(String, dispatch::tool_roles::PluginToolPolicy)>> {
+    let mut policies = Vec::new();
+    for surface in surfaces {
+        for op in &surface.ops {
+            if tools.contains_key(&op.tool) {
+                bail!(
+                    "plugin '{software}' api surface '{}' tool '{}' duplicates a declared tool",
+                    surface.surface,
+                    op.tool
+                );
+            }
+            let role = spec::surfaces::required_role(surface.kind, op);
+            let mut input = op.input_schema();
+            input["properties"][spec::surfaces::ENDPOINT_ARG] = sj::json!({"type": "string"});
+            if let Some(required) = input["required"].as_array_mut() {
+                required.push(sj::Value::String(spec::surfaces::ENDPOINT_ARG.into()));
+            }
+            let output = op
+                .output
+                .as_ref()
+                .map(|o| o.schema.clone())
+                .unwrap_or_else(|| sj::json!({}));
+            let def: ToolDef = sj::from_value(sj::json!({
+                "name": op.tool,
+                "description": format!("{} {}", op.method.to_ascii_uppercase(), op.path),
+                "input_schema": input,
+                "output_schema": output,
+                "role": role,
+                "execute_gated": op.policy.execute_gated,
+                "data_mutation": false,
+                "local_only": op.policy.local_only,
+            }))
+            .with_context(|| format!("plugin '{software}' api surface tool '{}'", op.tool))?;
+            tools.insert(op.tool.clone(), def);
+            policies.push((
+                op.tool.clone(),
+                dispatch::tool_roles::PluginToolPolicy {
+                    role,
+                    execute_gated: op.policy.execute_gated,
+                    data_mutation: false,
+                    local_only: op.policy.local_only,
+                    read_unconfirmed: false,
+                },
+            ));
+        }
+    }
+    Ok(policies)
+}
+
+fn register_surfaces(software: &str, surfaces: &[openapi::surface::ApiSurface]) -> Result<()> {
+    for surface in surfaces {
+        if let Err(e) = spec::surfaces::register(software, surface.clone()) {
+            spec::surfaces::deregister(software);
+            return Err(e.context(format!(
+                "plugin '{software}' api surface '{}'",
+                surface.surface
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Install each tool's declared role into [`dispatch::tool_roles`], so REST,
@@ -1143,6 +1282,9 @@ fn detach_plugins(reg: &mut Registry, software: &str) -> Vec<LoadedPlugin> {
         rollback_domain_backends(software, &p.domain_backends);
         dispatch::tool_roles::remove_plugin_tools(p.tools.keys().map(String::as_str));
     }
+    if !detached.is_empty() {
+        spec::surfaces::deregister(software);
+    }
     rebuild_tool_index(reg);
     detached
 }
@@ -1179,6 +1321,7 @@ fn attach_checked(
 
 fn attach_plugin(reg: &mut Registry, plugin: LoadedPlugin) {
     install_tool_policies(&plugin.software, &plugin.tools);
+    dispatch::tool_roles::install_plugin_tools(plugin.surface_policies.iter().cloned());
     let idx = reg.plugins.len();
     for name in plugin.tools.keys() {
         reg.by_tool.insert(name.clone(), idx);
@@ -1197,6 +1340,9 @@ fn restore_plugin(reg: &mut Registry, mut plugin: LoadedPlugin) {
             plugin.domain_backends = Vec::new();
         }
     }
+    if let Err(e) = register_surfaces(&plugin.software, &plugin.surfaces) {
+        tracing::error!(plugin = %plugin.software, error = %format!("{e:#}"), "restoring the previous plugin's api surfaces failed");
+    }
     attach_plugin(reg, plugin);
 }
 
@@ -1209,6 +1355,29 @@ fn backing_for(name: &str) -> Option<(Backing, String)> {
     let idx = *reg.by_tool.get(name)?;
     let plugin = &reg.plugins[idx];
     Some((plugin.backing.clone(), plugin.software.clone()))
+}
+
+fn surface_owner(name: &str) -> Option<String> {
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
+    let plugin = &reg.plugins[*reg.by_tool.get(name)?];
+    plugin
+        .surface_policies
+        .iter()
+        .any(|(t, _)| t == name)
+        .then(|| plugin.software.clone())
+}
+
+async fn execute_surface(
+    software: &str,
+    name: &str,
+    args: sj::Value,
+    ctx: &ToolCtx,
+) -> Result<sj::Value> {
+    let invocation = spec::surfaces::Invocation::from_ctx(ctx)?;
+    match spec::surfaces::execute(software, name, args, &invocation).await? {
+        spec::surfaces::Outcome::Response(value) => Ok(value),
+        spec::surfaces::Outcome::Plan(plan) => Ok(sj::to_value(plan)?),
+    }
 }
 
 /// Marshal an invoke result into the caller's `Result<Value>`. The value is
@@ -1253,6 +1422,9 @@ fn parse_invoke_result(
 /// on capability round-trips. Keeping it off the async worker pool stops one
 /// plugin's latency from starving the scheduler.
 pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::Value> {
+    if let Some(software) = surface_owner(name) {
+        return execute_surface(&software, name, args, ctx).await;
+    }
     if let Some((backing, software)) = backing_for(name) {
         let owned = name.to_string();
         let caller = ctx.verified_caller().map(wire_caller);
@@ -1272,19 +1444,123 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
 /// This blocks the calling thread on the plugin's socket I/O, so it must not
 /// run on an async worker. As the `dispatch` dynamic fallback it is already
 /// moved onto a bounded invoke thread there; prefer async [`dispatch`] elsewhere.
-pub fn invoke_plugin(
-    name: &str,
-    args: &sj::Value,
-    caller: Option<&contract::CallerIdentity>,
-) -> Option<Result<sj::Value>> {
+pub fn invoke_plugin(name: &str, args: &sj::Value, ctx: &ToolCtx) -> Option<Result<sj::Value>> {
+    if let Some(software) = surface_owner(name) {
+        return Some(utils::reactor::block_on(execute_surface(
+            &software,
+            name,
+            args.clone(),
+            ctx,
+        )));
+    }
     let (backing, software) = backing_for(name)?;
-    let result = backing.invoke(name, args.clone(), caller.map(wire_caller));
+    let result = backing.invoke(name, args.clone(), ctx.verified_caller().map(wire_caller));
     Some(parse_invoke_result(result, name, &software))
 }
 
 /// Serializes tests that load the shared `loaderfakeplugin` id.
 #[cfg(test)]
 static FAKE_PLUGIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn surface_json(name: &str, plugin: &str) -> String {
+        sj::json!({
+            "format": openapi::surface::FORMAT,
+            "surface": name,
+            "kind": "openapi",
+            "ops": [
+                {
+                    "tool": format!("{plugin}.get"),
+                    "method": "GET",
+                    "path": "/x",
+                    "policy": {"role": "read"}
+                },
+                {
+                    "tool": format!("{plugin}.make"),
+                    "method": "POST",
+                    "path": "/x",
+                    "policy": {"role": "read", "data_mutation": true, "local_only": true}
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    fn surface_ref(name: &str, body: &str) -> plugin_proto::ApiSurfaceRef {
+        plugin_proto::ApiSurfaceRef {
+            name: name.into(),
+            sha256: utils::hash::sha256_hex(body.as_bytes()),
+            format: openapi::surface::FORMAT.into(),
+        }
+    }
+
+    #[test]
+    fn load_surfaces_verifies_and_caches_per_plugin() {
+        let body = surface_json("main", "cachea");
+        let refs = [surface_ref("main", &body)];
+        let calls = Cell::new(0);
+        let fetch = |_: &str| {
+            calls.set(calls.get() + 1);
+            Ok(body.clone())
+        };
+        assert_eq!(load_surfaces("cachea", &refs, fetch).unwrap().len(), 1);
+        assert_eq!(load_surfaces("cachea", &refs, fetch).unwrap().len(), 1);
+        assert_eq!(calls.get(), 1);
+        load_surfaces("cacheb", &refs, fetch).unwrap();
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn load_surfaces_rejects_bad_hash_format_and_name() {
+        let body = surface_json("main", "badsurf");
+        let mut wrong_hash = surface_ref("main", &body);
+        wrong_hash.sha256 = "00".repeat(32);
+        assert!(load_surfaces("badsurf", &[wrong_hash], |_| Ok(body.clone())).is_err());
+        let mut wrong_format = surface_ref("main", &body);
+        wrong_format.format = "x/v0".into();
+        assert!(load_surfaces("badsurf", &[wrong_format], |_| Ok(body.clone())).is_err());
+        let renamed = surface_ref("other", &body);
+        assert!(load_surfaces("badsurf", &[renamed], |_| Ok(body.clone())).is_err());
+    }
+
+    #[test]
+    fn surface_tools_apply_the_floor_and_reject_manifest_duplicates() {
+        let surface = openapi::surface::ApiSurface::parse(&surface_json("main", "floorp")).unwrap();
+        let mut tools = HashMap::new();
+        let policies = surface_tools("floorp", std::slice::from_ref(&surface), &mut tools).unwrap();
+        let policy = |n: &str| policies.iter().find(|(t, _)| t == n).unwrap().1;
+        assert_eq!(policy("floorp.get").role, "read");
+        assert_eq!(policy("floorp.make").role, "admin");
+        assert!(!policy("floorp.make").data_mutation);
+        assert!(policy("floorp.make").local_only);
+        let schema = sj::to_value(&tools["floorp.get"].input_schema).unwrap();
+        assert_eq!(schema["properties"]["endpoint"]["type"], "string");
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&sj::json!("endpoint"))
+        );
+
+        let mut manifest = HashMap::from([("floorp.get".to_string(), tools["floorp.get"].clone())]);
+        assert!(surface_tools("floorp", &[surface], &mut manifest).is_err());
+    }
+
+    #[test]
+    fn register_surfaces_rolls_back_on_failure() {
+        let good = openapi::surface::ApiSurface::parse(&surface_json("good", "rollp")).unwrap();
+        let foreign =
+            openapi::surface::ApiSurface::parse(&surface_json("bad", "elsewhere")).unwrap();
+        assert!(register_surfaces("rollp", &[good.clone(), foreign]).is_err());
+        assert!(spec::surfaces::deregister("rollp").is_empty());
+        register_surfaces("rollp", &[good]).unwrap();
+        assert_eq!(spec::surfaces::deregister("rollp").len(), 2);
+    }
+}
 
 #[cfg(test)]
 mod extra_domain_tests {
@@ -1724,7 +2000,14 @@ mod loader_tests {
         assert!(!is_loaded(sw));
         assert_eq!(unload_plugin(sw), 0);
         assert!(backing_for("loader-test-never-a-tool-xyz").is_none());
-        assert!(invoke_plugin("loader-test-never-a-tool-xyz", &sj::json!({}), None).is_none());
+        assert!(
+            invoke_plugin(
+                "loader-test-never-a-tool-xyz",
+                &sj::json!({}),
+                &ToolCtx::new(Arc::new(contract::config::Config::load().unwrap()))
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2314,7 +2597,7 @@ mod loader_tests {
         assert_eq!(out, sj::json!({ "x": 1 }), "plugin echoed the args");
 
         // Sync invoke_plugin routes to the same subprocess.
-        let sync = invoke_plugin("loaderfakeplugin.ping", &sj::json!({ "y": 2 }), None)
+        let sync = invoke_plugin("loaderfakeplugin.ping", &sj::json!({ "y": 2 }), &ctx)
             .expect("a loaded plugin owns the tool")
             .expect("sync invoke succeeds");
         assert_eq!(sync, sj::json!({ "y": 2 }), "sync path echoed the args");
@@ -2338,7 +2621,7 @@ mod loader_tests {
         assert_eq!(removed, 1, "exactly the one fake plugin was unloaded");
         assert!(!is_loaded("loaderfakeplugin"));
         assert!(
-            invoke_plugin("loaderfakeplugin.ping", &sj::json!({}), None).is_none(),
+            invoke_plugin("loaderfakeplugin.ping", &sj::json!({}), &ctx).is_none(),
             "tool route freed after unload"
         );
         assert_eq!(
@@ -2393,6 +2676,8 @@ mod loader_tests {
                     tools,
                     domain_backends: Vec::new(),
                     backend_defs: Vec::new(),
+                    surfaces: Vec::new(),
+                    surface_policies: Vec::new(),
                 },
             );
         }
@@ -2402,7 +2687,12 @@ mod loader_tests {
         assert!(is_loaded("loaderfakeplugin"), "previous load restored");
         assert!(fake_agents_registered(), "previous backends restored");
         assert!(
-            invoke_plugin("loaderfakeplugin.fetch", &sj::json!({}), None).is_some(),
+            invoke_plugin(
+                "loaderfakeplugin.fetch",
+                &sj::json!({}),
+                &ToolCtx::new(Arc::new(contract::config::Config::load().unwrap()))
+            )
+            .is_some(),
             "previous tool routes restored"
         );
 

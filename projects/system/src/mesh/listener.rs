@@ -1260,6 +1260,7 @@ mod tests {
 
     /// Callers the fake plugin saw, by username (`None` = no caller).
     static SEEN_CALLERS: std::sync::Mutex<Vec<Option<String>>> = std::sync::Mutex::new(Vec::new());
+    static SEEN_TRANSPORT: std::sync::Mutex<Vec<(bool, bool)>> = std::sync::Mutex::new(Vec::new());
 
     /// Load a fake plugin owning two tools whose manifest declared `admin` and
     /// `any`, recording the caller each invoke carries.
@@ -1267,12 +1268,16 @@ mod tests {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             dispatch::set_dynamic_dispatch(
-                Box::new(|name, _args, caller| {
+                Box::new(|name, _args, ctx: &contract::ToolCtx| {
                     name.starts_with("listener_test_plugin.").then(|| {
                         SEEN_CALLERS
                             .lock()
                             .unwrap()
-                            .push(caller.map(|c| c.username.clone()));
+                            .push(ctx.verified_caller().map(|c| c.username.clone()));
+                        SEEN_TRANSPORT
+                            .lock()
+                            .unwrap()
+                            .push((ctx.local_transport(), ctx.second_factor()));
                         Ok(serde_json::json!({ "ran": name }))
                     })
                 }),
@@ -1363,7 +1368,7 @@ mod tests {
         install_fake_plugin();
         crate::mesh::dispatcher::reset_for_tests();
         // The shared ctx carries the host operator; a peer must never inherit it.
-        let host = (*crate::mesh::dispatcher::tests::make_ctx())
+        let mut host = (*crate::mesh::dispatcher::tests::make_ctx())
             .clone()
             .with_auth(contract::CallerIdentity {
                 user_id: "u_host".into(),
@@ -1371,8 +1376,11 @@ mod tests {
                 role: "admin".into(),
                 can_mutate: true,
             });
+        host.set_local_transport(true);
+        host.set_second_factor(true);
         crate::mesh::dispatcher::install(std::sync::Arc::new(host));
         SEEN_CALLERS.lock().unwrap().clear();
+        SEEN_TRANSPORT.lock().unwrap().clear();
 
         let params = serde_json::json!({ "tool": PLUGIN_ANY_TOOL, "args": {} });
         let out = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
@@ -1380,6 +1388,7 @@ mod tests {
             .expect("an any-role plugin tool needs no token");
         assert_eq!(out.result["ran"], PLUGIN_ANY_TOOL);
         assert_eq!(*SEEN_CALLERS.lock().unwrap(), vec![None]);
+        assert_eq!(*SEEN_TRANSPORT.lock().unwrap(), vec![(false, false)]);
         crate::mesh::dispatcher::reset_for_tests();
     }
 

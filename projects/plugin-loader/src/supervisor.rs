@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use plugin_proto::{
-    Frame, HEARTBEAT_MSG, PROTOCOL_VERSION, ProtoError, ToolDef, VerifiedCaller,
+    ApiSurfaceRef, Frame, HEARTBEAT_MSG, PROTOCOL_VERSION, ProtoError, ToolDef, VerifiedCaller,
     protocol_compatible, read_frame, write_frame,
 };
 use serde_json::Value;
@@ -117,6 +117,7 @@ pub struct Handshake {
     pub backends: Vec<Value>,
     /// Declared SQL schema, verbatim (applied by the caller that owns the db).
     pub schema: Value,
+    pub api_surfaces: Vec<ApiSurfaceRef>,
 }
 
 /// Read the child's `Hello`, reply `Welcome` (advertising `capabilities`), and
@@ -132,7 +133,7 @@ pub fn handshake<S: Read + Write>(stream: &mut S, capabilities: &[&str]) -> Resu
         manifest,
         backends,
         schema,
-        ..
+        api_surfaces,
     } = hello
     else {
         bail!("first plugin frame was not Hello");
@@ -156,6 +157,7 @@ pub fn handshake<S: Read + Write>(stream: &mut S, capabilities: &[&str]) -> Resu
         manifest,
         backends,
         schema,
+        api_surfaces,
     })
 }
 
@@ -312,6 +314,41 @@ pub fn invoke_on<S: Read + Write>(
     }
 }
 
+pub fn surface_get_on<S: Read + Write>(stream: &mut S, id: u64, name: &str) -> Result<String> {
+    write_frame(
+        stream,
+        &Frame::SurfaceGet {
+            id,
+            name: name.to_string(),
+        },
+    )
+    .with_context(|| format!("requesting api surface '{name}'"))?;
+    loop {
+        match read_frame(stream)
+            .with_context(|| format!("awaiting api surface '{name}'"))?
+            .ok_or_else(|| anyhow!("plugin closed the socket during api surface '{name}'"))?
+        {
+            Frame::Surface {
+                id: rid,
+                ok,
+                body,
+                error,
+            } if rid == id => {
+                return if ok {
+                    Ok(body)
+                } else {
+                    Err(anyhow!(
+                        "api surface '{name}': {}",
+                        error.unwrap_or_else(|| "unknown error".into())
+                    ))
+                };
+            }
+            Frame::Log { .. } => {}
+            other => bail!("api surface '{name}': unexpected frame {other:?}"),
+        }
+    }
+}
+
 /// Bind the session principal to the id orca launched the plugin under. The
 /// self-declared `Hello` id is never trusted: a mismatch is refused so a plugin
 /// cannot claim another plugin's namespace. An empty or reserved
@@ -346,6 +383,7 @@ pub struct PluginProcess {
     pub manifest: Vec<ToolDef>,
     pub backends: Vec<Value>,
     pub schema: Value,
+    pub api_surfaces: Vec<ApiSurfaceRef>,
     exe: PathBuf,
     session: Mutex<Session>,
     idle_timeout: Duration,
@@ -410,6 +448,7 @@ impl PluginProcess {
             manifest: hs.manifest,
             backends: hs.backends,
             schema: hs.schema,
+            api_surfaces: hs.api_surfaces,
             exe: exe.to_path_buf(),
             session: Mutex::new(Session {
                 child,
@@ -486,6 +525,22 @@ impl PluginProcess {
         result
     }
 
+    pub fn fetch_surface(&self, name: &str) -> Result<String> {
+        let mut session = self.lock_session()?;
+        if session.state != SessionState::Healthy {
+            self.respawn(&mut session)?;
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        session.stream.set_read_timeout(Some(self.idle_timeout))?;
+        session.stream.set_write_timeout(Some(self.idle_timeout))?;
+        session.state = SessionState::Broken;
+        let result = surface_get_on(&mut session.stream, id, name);
+        if result.is_ok() {
+            session.state = SessionState::Healthy;
+        }
+        result
+    }
+
     /// Take the session lock, polling for at most `session_wait`. A poisoned
     /// lock is recovered with the session marked broken.
     fn lock_session(&self) -> Result<std::sync::MutexGuard<'_, Session>> {
@@ -526,7 +581,10 @@ impl PluginProcess {
         };
         // The registered tools, roles, and backends describe the binary loaded
         // at spawn; a different binary on disk must be reloaded, not served.
-        if hs.semver != self.semver || hs.manifest != self.manifest {
+        if hs.semver != self.semver
+            || hs.manifest != self.manifest
+            || hs.api_surfaces != self.api_surfaces
+        {
             fresh.stop();
             tracing::error!(
                 plugin = %self.software,
@@ -1056,6 +1114,84 @@ mod tests {
             }
             f => panic!("expected Welcome, got {f:?}"),
         }
+    }
+
+    #[test]
+    fn surface_get_returns_body_error_or_refuses_stray_frames() {
+        let (mut orca_end, plugin_end) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || {
+            let mut s = plugin_end;
+            for reply in [
+                |id| Frame::Surface {
+                    id,
+                    ok: true,
+                    body: "{}".into(),
+                    error: None,
+                },
+                |id| Frame::Surface {
+                    id,
+                    ok: false,
+                    body: String::new(),
+                    error: Some("nope".into()),
+                },
+                |_| Frame::Shutdown,
+            ] {
+                let Some(Frame::SurfaceGet { id, .. }) = read_frame(&mut s).unwrap() else {
+                    panic!("expected SurfaceGet")
+                };
+                write_frame(&mut s, &Frame::heartbeat()).unwrap();
+                write_frame(&mut s, &reply(id)).unwrap();
+            }
+        });
+        assert_eq!(surface_get_on(&mut orca_end, 1, "a").unwrap(), "{}");
+        let err = surface_get_on(&mut orca_end, 2, "b")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nope"), "{err}");
+        assert!(surface_get_on(&mut orca_end, 3, "c").is_err());
+        plugin.join().unwrap();
+    }
+
+    #[test]
+    fn handshake_reads_declared_api_surfaces() {
+        let (mut orca_end, plugin_end) = UnixStream::pair().unwrap();
+        thread::spawn(move || {
+            let mut s = plugin_end;
+            let Frame::Hello {
+                protocol,
+                plugin,
+                version,
+                manifest,
+                backends,
+                schema,
+                ..
+            } = fake_hello()
+            else {
+                unreachable!()
+            };
+            let refs = vec![plugin_proto::ApiSurfaceRef {
+                name: "main".into(),
+                sha256: "ab".into(),
+                format: "f".into(),
+            }];
+            write_frame(
+                &mut s,
+                &Frame::Hello {
+                    protocol,
+                    plugin,
+                    version,
+                    manifest,
+                    backends,
+                    schema,
+                    api_surfaces: refs,
+                },
+            )
+            .unwrap();
+            read_frame(&mut s).unwrap();
+        });
+        let hs = handshake(&mut orca_end, CAPABILITIES).unwrap();
+        assert_eq!(hs.api_surfaces.len(), 1);
+        assert_eq!(hs.api_surfaces[0].name, "main");
     }
 
     #[test]
@@ -1630,6 +1766,8 @@ mod tests {
                     tools: std::collections::HashMap::new(),
                     domain_backends: Vec::new(),
                     backend_defs: Vec::new(),
+                    surfaces: Vec::new(),
+                    surface_policies: Vec::new(),
                 },
             );
         }

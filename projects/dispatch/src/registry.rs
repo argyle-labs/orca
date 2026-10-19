@@ -103,10 +103,9 @@ pub(crate) fn find(name: &str) -> Option<&'static dyn ErasedTool> {
 // rather than re-exporting plugin-loader.
 
 /// Returns `Some(result)` iff a dynamically-loaded plugin owns `name`. The
-/// caller is the request's verified identity ([`ToolCtx::verified_caller`]),
-/// never the host operator.
-type DynamicInvoker =
-    dyn Fn(&str, &Value, Option<&contract::CallerIdentity>) -> Option<Result<Value>> + Send + Sync;
+/// identity a plugin may act for is the ctx's verified caller
+/// ([`ToolCtx::verified_caller`]), never the host operator.
+type DynamicInvoker = dyn Fn(&str, &Value, &ToolCtx) -> Option<Result<Value>> + Send + Sync;
 
 /// Returns the JSON tool defs (`{name, description, input_schema, output_schema}`)
 /// of every dynamically-loaded plugin, for merging into list surfaces.
@@ -138,15 +137,11 @@ pub fn set_dynamic_dispatch(invoke: Box<DynamicInvoker>, defs: Box<DynamicDefs>)
 /// bounds the call itself: socket silence by [`plugin_idle_timeout`], total
 /// time by [`plugin_max_invoke`].
 #[cfg(feature = "in-process")]
-async fn dynamic_dispatch(
-    name: &str,
-    args: &Value,
-    caller: Option<&contract::CallerIdentity>,
-) -> Option<Result<Value>> {
+async fn dynamic_dispatch(name: &str, args: &Value, ctx: &ToolCtx) -> Option<Result<Value>> {
     let invoker = DYNAMIC_INVOKER.get()?;
-    let (owned, args, caller) = (name.to_string(), args.clone(), caller.cloned());
+    let (owned, args, ctx) = (name.to_string(), args.clone(), ctx.clone());
     let result = run_off_worker(invoke_permits(), plugin_permit_wait(), move || {
-        invoker(&owned, &args, caller.as_ref())
+        invoker(&owned, &args, &ctx)
     })
     .await;
     match result {
@@ -157,12 +152,8 @@ async fn dynamic_dispatch(
 
 /// Without `in-process` no host installs an invoker, so nothing to bound.
 #[cfg(not(feature = "in-process"))]
-async fn dynamic_dispatch(
-    name: &str,
-    args: &Value,
-    caller: Option<&contract::CallerIdentity>,
-) -> Option<Result<Value>> {
-    DYNAMIC_INVOKER.get().and_then(|f| f(name, args, caller))
+async fn dynamic_dispatch(name: &str, args: &Value, ctx: &ToolCtx) -> Option<Result<Value>> {
+    DYNAMIC_INVOKER.get().and_then(|f| f(name, args, ctx))
 }
 
 pub(crate) fn secs_from_env(var: &str, default: u64) -> Duration {
@@ -573,7 +564,7 @@ pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Valu
     // On a static miss, try the dynamic loaded-plugin fallback, then the live
     // unit surface, before giving up — so loaded plugin tools AND the
     // universal `unit.<kind>.<verb>` surface share this one entrypoint.
-    match dynamic_dispatch(name, &args, ctx.verified_caller()).await {
+    match dynamic_dispatch(name, &args, ctx).await {
         Some(result) => result,
         None => {
             match crate::unit_surface::unit_dispatch(name, &args, ctx.verified_caller()).await {
@@ -1791,7 +1782,8 @@ mod tests {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             set_dynamic_dispatch(
-                Box::new(|name, args: &Value, caller| {
+                Box::new(|name, args: &Value, ctx: &ToolCtx| {
+                    let caller = ctx.verified_caller();
                     if name == NESTED_RUNTIME_TOOL {
                         // What a plugin's `http.request` capability does.
                         let rt = tokio::runtime::Builder::new_current_thread()

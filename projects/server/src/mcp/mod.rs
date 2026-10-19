@@ -19,6 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let mut ctx = ToolCtx::new(config);
+    ctx.set_local_transport(true);
     // Host-addressing refresh hook: host.refresh tool calls into this to
     // trigger a fresh detect + persist before reading host_addressing rows.
     let host_refresh: Arc<dyn system::host::HostRefreshHook + Send + Sync> =
@@ -867,7 +868,9 @@ mod tests {
         // the host/remote/cluster services. After it runs, the dispatch
         // inventory must be populated (the tables it installs are process-global).
         let cfg = Arc::new(Config::load().expect("config load"));
-        let _ctx = build_tool_ctx(cfg);
+        let ctx = build_tool_ctx(cfg);
+        assert!(ctx.local_transport());
+        assert!(!ctx.second_factor());
         assert!(
             !dispatch::names().is_empty(),
             "dispatch inventory must be non-empty after build_tool_ctx"
