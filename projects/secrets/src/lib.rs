@@ -376,34 +376,60 @@ pub fn exec_secret_op(
     principal: &Principal,
     op: &plugin_abi::SecretOp,
 ) -> Result<plugin_abi::SecretReply> {
-    authorize(conn, principal, op)?;
-    run_secret_op(conn, op)
+    exec_secret_op_via(principal, op, |f| f(conn))
 }
 
-fn run_secret_op(conn: &Connection, op: &plugin_abi::SecretOp) -> Result<plugin_abi::SecretReply> {
+enum Prepared {
+    Reply(plugin_abi::SecretReply),
+    External(SecretRecord),
+}
+
+fn exec_secret_op_via(
+    principal: &Principal,
+    op: &plugin_abi::SecretOp,
+    with_conn: impl FnOnce(&dyn Fn(&Connection) -> Result<Prepared>) -> Result<Prepared>,
+) -> Result<plugin_abi::SecretReply> {
+    let prepared = with_conn(&|conn| {
+        authorize(conn, principal, op)?;
+        prepare_secret_op(conn, op)
+    })?;
+    match prepared {
+        Prepared::Reply(reply) => Ok(reply),
+        Prepared::External(row) => {
+            let value = utils::reactor::off_async_worker(|| {
+                utils::reactor::block_on(contract::secrets_backend::resolve(
+                    &row.backend,
+                    &row.ref_path,
+                ))
+            })
+            .map_err(|e| {
+                anyhow::anyhow!("secret '{}' (backend '{}'): {e:#}", row.name, row.backend)
+            })?;
+            Ok(plugin_abi::SecretReply {
+                value: Some(value),
+                found: true,
+            })
+        }
+    }
+}
+
+fn prepare_secret_op(conn: &Connection, op: &plugin_abi::SecretOp) -> Result<Prepared> {
     use plugin_abi::{SecretOp, SecretReply};
-    match op {
+    let reply = match op {
         SecretOp::Get { name } => {
             let Some(row) = get(conn, name)? else {
-                return Ok(SecretReply::default());
+                return Ok(Prepared::Reply(SecretReply::default()));
             };
-            let value = match row.backend.as_str() {
-                BACKEND_INLINE => Some(read_inline_value(conn, &row.name)?.ok_or_else(|| {
-                    anyhow::anyhow!("inline secret '{}' has no stored value", row.name)
-                })?),
-                other => Some(
-                    utils::reactor::off_async_worker(|| {
-                        utils::reactor::block_on(contract::secrets_backend::resolve(
-                            other,
-                            &row.ref_path,
-                        ))
-                    })
-                    .map_err(|e| {
-                        anyhow::anyhow!("secret '{}' (backend '{other}'): {e:#}", row.name)
-                    })?,
-                ),
-            };
-            Ok(SecretReply { value, found: true })
+            if row.backend != BACKEND_INLINE {
+                return Ok(Prepared::External(row));
+            }
+            let value = read_inline_value(conn, &row.name)?.ok_or_else(|| {
+                anyhow::anyhow!("inline secret '{}' has no stored value", row.name)
+            })?;
+            SecretReply {
+                value: Some(value),
+                found: true,
+            }
         }
         SecretOp::Set {
             name,
@@ -412,17 +438,18 @@ fn run_secret_op(conn: &Connection, op: &plugin_abi::SecretOp) -> Result<plugin_
         } => {
             upsert(conn, name, BACKEND_INLINE, "", description.as_deref())?;
             write_inline_value(conn, name, value)?;
-            Ok(SecretReply::default())
+            SecretReply::default()
         }
-        SecretOp::Exists { name } => Ok(SecretReply {
+        SecretOp::Exists { name } => SecretReply {
             value: None,
             found: get(conn, name)?.is_some(),
-        }),
-        SecretOp::Delete { name } => Ok(SecretReply {
+        },
+        SecretOp::Delete { name } => SecretReply {
             value: None,
             found: delete(conn, name)?,
-        }),
-    }
+        },
+    };
+    Ok(Prepared::Reply(reply))
 }
 
 pub fn ensure_backend_registered(backend: &str) -> Result<()> {
@@ -448,7 +475,7 @@ pub fn exec_secret_op_pooled(
     principal: &Principal,
     op: &plugin_abi::SecretOp,
 ) -> Result<plugin_abi::SecretReply> {
-    db::pool::with_pooled_or_open(|conn| exec_secret_op(conn, principal, op))
+    exec_secret_op_via(principal, op, |f| db::pool::with_pooled_or_open(f))
 }
 
 #[cfg(test)]
@@ -573,6 +600,49 @@ mod tests {
         };
         let reply = exec_secret_op(&conn, &Principal::Core, &op).unwrap();
         assert_eq!(reply.value.as_deref(), Some("resolved"));
+    }
+
+    static ONE_CONN: std::sync::LazyLock<std::sync::Mutex<Connection>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(test_conn()));
+
+    struct CallsBackIntoDb;
+
+    #[async_trait::async_trait]
+    impl contract::secrets_backend::SecretsBackend for CallsBackIntoDb {
+        fn name(&self) -> &str {
+            "callback-db"
+        }
+
+        async fn resolve(&self, _ref_path: &str) -> Result<String> {
+            let conn = ONE_CONN.lock().unwrap();
+            Ok(list(&conn)?.len().to_string())
+        }
+    }
+
+    #[test]
+    fn external_resolve_runs_after_the_connection_is_released() {
+        contract::secrets_backend::register_provider(std::sync::Arc::new(CallsBackIntoDb));
+        upsert(
+            &ONE_CONN.lock().unwrap(),
+            "cb.tok",
+            "callback-db",
+            "x://y",
+            None,
+        )
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let op = plugin_abi::SecretOp::Get {
+                name: "cb.tok".into(),
+            };
+            let reply = exec_secret_op_via(&Principal::Core, &op, |f| f(&ONE_CONN.lock().unwrap()));
+            tx.send(reply.map(|r| r.value)).unwrap();
+        });
+        let value = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("resolve deadlocked holding the connection")
+            .unwrap();
+        assert_eq!(value.as_deref(), Some("1"));
     }
 
     #[test]
