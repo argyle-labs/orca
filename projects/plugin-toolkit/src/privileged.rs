@@ -166,8 +166,7 @@ pub fn requested() -> bool {
     std::env::args().nth(1).as_deref() == Some(PRIVILEGED_FLAG)
 }
 
-type Handler =
-    Box<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> + Send + Sync>;
+type Handler = Box<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<String>>>>>;
 
 /// The closed set of ops a plugin accepts in `--privileged-op` mode.
 #[derive(Default)]
@@ -192,16 +191,16 @@ impl PrivilegedOps {
     /// is `null`, so a no-payload op takes `()`.
     pub fn op<T, F, Fut>(mut self, name: &str, handler: F) -> Self
     where
-        T: DeserializeOwned + Send + 'static,
-        F: Fn(T) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<String>> + Send + 'static,
+        T: DeserializeOwned + 'static,
+        F: Fn(T) -> Fut + 'static,
+        Fut: Future<Output = Result<String>> + 'static,
     {
         let name_owned = name.to_string();
-        let handler = std::sync::Arc::new(handler);
+        let handler = std::rc::Rc::new(handler);
         self.ops.insert(
             name.to_string(),
             Box::new(move |payload: Value| {
-                let handler = std::sync::Arc::clone(&handler);
+                let handler = std::rc::Rc::clone(&handler);
                 let name = name_owned.clone();
                 Box::pin(async move {
                     let args: T = serde_json::from_value(payload)

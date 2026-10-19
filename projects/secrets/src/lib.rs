@@ -535,7 +535,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn get_resolves_from_inside_a_runtime() {
         contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
         let conn = test_conn();

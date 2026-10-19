@@ -1,8 +1,8 @@
 //! The shared, orca-owned async reactor — the generic surface a dynamic
 //! (subprocess) plugin registers its async work against.
 //!
-//! Plugins reach async execution through `utils::reactor::block_on`, this
-//! module's `spawn_detached` / `join_all`, and the [`crate::process`] / [`crate::io`] / [`crate::time`]
+//! Plugins reach async execution through this module (`block_on`,
+//! `spawn_detached`, `join_all`) and the [`crate::process`] / [`crate::io`] / [`crate::time`]
 //! seams, never by naming the runtime. The executor behind them (tokio today) is
 //! an orca implementation detail: one process-wide runtime backs the `serve`
 //! loop and every seam. See
@@ -10,7 +10,7 @@
 
 use std::future::Future;
 
-pub use ::utils::reactor::spawn_detached;
+pub use ::utils::reactor::{block_on, spawn_detached};
 
 /// Drive a collection of futures concurrently to completion, returning their
 /// outputs in input order — the orca-owned async fan-out a plugin reaches for
@@ -40,7 +40,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use utils::reactor::block_on;
 
     #[test]
     fn join_all_preserves_input_order_and_runs_concurrently() {
