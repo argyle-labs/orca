@@ -435,6 +435,8 @@ pub struct HttpRequest {
     /// Skip TLS verification (self-signed upstreams, e.g. a PVE node's cert).
     #[serde(default)]
     pub insecure: bool,
+    #[serde(default)]
+    pub max_body_bytes: Option<u64>,
 }
 
 /// The reply to an [`HttpRequest`]. Carries the response for **any** status —

@@ -154,6 +154,7 @@ mod tests {
             body: Vec::new(),
             timeout_ms: None,
             insecure: false,
+            max_body_bytes: None,
         };
         let out = with_cap_sink(
             Box::new(|cap: &str, json: &str| {
@@ -175,6 +176,7 @@ mod tests {
             body: vec![],
             timeout_ms: None,
             insecure: false,
+            max_body_bytes: None,
         };
         let err = http_request(&req).unwrap_err().to_string();
         assert!(
