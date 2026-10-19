@@ -4504,6 +4504,7 @@ dependencies = [
  "indexmap",
  "oas3",
  "openapiv3",
+ "orca-plugin-proto",
  "orca-utils",
  "reqwest 0.13.4",
  "serde",

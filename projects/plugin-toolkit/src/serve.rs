@@ -39,6 +39,8 @@ use crate::tool_manifest::{manifest_for_prefixes, minimal_ctx};
 
 /// What a plugin declares about itself when it starts serving. The tool manifest
 /// is derived from the linked `#[orca_tool]` inventory filtered to `prefixes`.
+#[derive(Default)]
+#[non_exhaustive]
 pub struct PluginSpec {
     /// Plugin name (== `target_software`).
     pub name: String,

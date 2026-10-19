@@ -17,6 +17,7 @@ path = "src/lib.rs"
 anyhow      = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
+plugin-proto = { workspace = true }
 utils       = { workspace = true, features = ["yaml"] }
 reqwest     = { workspace = true, features = ["blocking"] }
 oas3        = { workspace = true }
