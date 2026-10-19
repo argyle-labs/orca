@@ -14,15 +14,11 @@
 
 pub use ::utils::route::{Route, Routes};
 
-#[cfg(any(feature = "http", feature = "delegated-http"))]
-use std::collections::HashMap;
-#[cfg(any(feature = "http", feature = "delegated-http"))]
-use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "http")]
 use std::time::Duration;
 
 #[cfg(any(feature = "http", feature = "delegated-http"))]
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 /// clap `value_parser` for the repeatable `--route` flag. Accepts either a full
 /// JSON object (`{"kind":"lan_v4","scheme":"http","value":"10.0.0.5","port":8989}`)
@@ -88,12 +84,6 @@ fn split_url(url: &str) -> Option<(String, String, Option<u16>, Option<String>)>
     Some((scheme.to_string(), host, port, path))
 }
 
-#[cfg(any(feature = "http", feature = "delegated-http"))]
-fn last_good() -> &'static Mutex<HashMap<String, String>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// Probe a base URL: any HTTP response (even 401/404) proves the host is
 /// reachable; only a transport error (connect refused, DNS failure, timeout)
 /// counts as down — which lets resolution survive a broken DNS path by falling
@@ -134,57 +124,14 @@ async fn probe(url: &str, insecure: bool) -> bool {
     client.execute(request).await.is_ok()
 }
 
-/// Resolve the first reachable base URL for an endpoint, trying the
-/// last-known-good path first, then every enabled [`Route`] with a scheme in
-/// registered order. Errors only when *no* path answers.
-///
-/// `key` scopes the last-good cache (use the endpoint name). `insecure` disables
-/// TLS verification on the probe — pass the endpoint's `insecure` flag so a
-/// self-signed host is probed the way the plugin will later call it.
 #[cfg(any(feature = "http", feature = "delegated-http"))]
 pub async fn resolve_reachable(key: &str, routes: &[Route], insecure: bool) -> Result<String> {
-    // Only URL-addressable routes (those with a scheme) are probable.
-    let candidates: Vec<(String, &Route)> = routes
-        .iter()
-        .filter(|r| r.enabled)
-        .filter_map(|r| r.base_url().map(|u| (u, r)))
-        .collect();
-    if candidates.is_empty() {
-        bail!(
-            "endpoint '{key}' has no enabled URL-addressable routes; register one with `--route kind=scheme://value[:port]`"
-        );
-    }
-
-    // Order: last-good first (if still present + enabled), then the rest in
-    // registered order, de-duplicated by URL.
-    let cached = last_good().lock().ok().and_then(|m| m.get(key).cloned());
-    let mut order: Vec<&(String, &Route)> = Vec::with_capacity(candidates.len());
-    if let Some(url) = &cached
-        && let Some(hit) = candidates.iter().find(|(u, _)| u == url)
-    {
-        order.push(hit);
-    }
-    for c in &candidates {
-        if !order.iter().any(|(u, _)| *u == c.0) {
-            order.push(c);
-        }
-    }
-
-    let mut tried: Vec<String> = Vec::new();
-    for (url, route) in order {
-        if probe(url, insecure).await {
-            if let Ok(mut m) = last_good().lock() {
-                m.insert(key.to_string(), url.clone());
-            }
-            return Ok(url.clone());
-        }
-        tried.push(format!("{}={}", route.kind, url));
-    }
-    bail!(
-        "endpoint '{key}' unreachable on all {} registered path(s): {}",
-        tried.len(),
-        tried.join(", ")
-    );
+    ::utils::route::resolve_reachable(
+        key,
+        routes,
+        |url| async move { probe(&url, insecure).await },
+    )
+    .await
 }
 
 #[cfg(test)]

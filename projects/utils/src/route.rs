@@ -303,6 +303,62 @@ impl<'a> IntoIterator for &'a Routes {
     }
 }
 
+fn last_good() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+pub async fn resolve_reachable<F, Fut>(
+    key: &str,
+    routes: &[Route],
+    probe: F,
+) -> anyhow::Result<String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let candidates: Vec<(String, &Route)> = routes
+        .iter()
+        .filter(|r| r.enabled)
+        .filter_map(|r| r.base_url().map(|u| (u, r)))
+        .collect();
+    if candidates.is_empty() {
+        anyhow::bail!(
+            "endpoint '{key}' has no enabled URL-addressable routes; register one with `--route kind=scheme://value[:port]`"
+        );
+    }
+
+    let cached = last_good().lock().ok().and_then(|m| m.get(key).cloned());
+    let mut order: Vec<&(String, &Route)> = Vec::with_capacity(candidates.len());
+    if let Some(url) = &cached
+        && let Some(hit) = candidates.iter().find(|(u, _)| u == url)
+    {
+        order.push(hit);
+    }
+    for c in &candidates {
+        if !order.iter().any(|(u, _)| *u == c.0) {
+            order.push(c);
+        }
+    }
+
+    let mut tried: Vec<String> = Vec::new();
+    for (url, route) in order {
+        if probe(url.clone()).await {
+            if let Ok(mut m) = last_good().lock() {
+                m.insert(key.to_string(), url.clone());
+            }
+            return Ok(url.clone());
+        }
+        tried.push(format!("{}={}", route.kind, url));
+    }
+    anyhow::bail!(
+        "endpoint '{key}' unreachable on all {} registered path(s): {}",
+        tried.len(),
+        tried.join(", ")
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +432,54 @@ mod tests {
         assert!(json.starts_with('['), "expected bare array, got {json}");
         let back: Routes = serde_json::from_str(&json).unwrap();
         assert_eq!(back, routes);
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        let mut f = std::pin::pin!(f);
+        loop {
+            if let std::task::Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_no_enabled_routes_errors() {
+        let routes = vec![Route {
+            enabled: false,
+            ..Route::new("lan_v4", "http", "127.0.0.1", Some(1))
+        }];
+        assert!(block_on(resolve_reachable("none", &routes, |_| async { true })).is_err());
+    }
+
+    #[test]
+    fn resolve_first_reachable_wins_and_is_cached() {
+        let routes = vec![
+            Route::new("lan_v4", "http", "10.0.0.1", Some(1)),
+            Route::new("fqdn", "https", "x.example.com", None),
+        ];
+        let url = block_on(resolve_reachable("cache", &routes, |u| async move {
+            u.starts_with("https")
+        }))
+        .unwrap();
+        assert_eq!(url, "https://x.example.com");
+        let probed = std::cell::RefCell::new(Vec::new());
+        block_on(resolve_reachable("cache", &routes, |u| {
+            probed.borrow_mut().push(u);
+            async { true }
+        }))
+        .unwrap();
+        assert_eq!(probed.borrow()[0], "https://x.example.com");
+    }
+
+    #[test]
+    fn resolve_all_down_lists_tried_paths() {
+        let routes = vec![Route::new("lan_v4", "http", "10.0.0.1", Some(1))];
+        let err = block_on(resolve_reachable("down", &routes, |_| async { false }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("lan_v4=http://10.0.0.1:1"), "got: {err}");
     }
 }
