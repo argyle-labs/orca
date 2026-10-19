@@ -1849,6 +1849,30 @@ mod tests {
     }
 
     #[test]
+    fn a_respawn_refuses_changed_reaches_or_surfaces() {
+        for change in [
+            |p: &mut PluginProcess| p.manifest[0].reaches = vec!["loaderfakeplugin.x".into()],
+            |p: &mut PluginProcess| {
+                p.api_surfaces = vec![ApiSurfaceRef {
+                    name: "main".into(),
+                    sha256: "00".repeat(32),
+                    format: plugin_proto::API_SURFACE_FORMAT.into(),
+                }]
+            },
+        ] {
+            let Some(mut proc) = spawn_fake_plugin() else {
+                return;
+            };
+            change(&mut proc);
+            proc.session.lock().unwrap().state = SessionState::Broken;
+            let err = proc
+                .invoke("loaderfakeplugin.ping", json!({}), None)
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("reload"), "got: {err:#}");
+        }
+    }
+
+    #[test]
     fn a_changed_binary_unloads_the_plugin() {
         let Some(mut proc) = spawn_fake_plugin() else {
             return;

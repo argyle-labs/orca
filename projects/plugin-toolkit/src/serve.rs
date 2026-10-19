@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use plugin_proto::{
-    API_SURFACE_FORMAT, ApiSurfaceRef, Frame, PROTOCOL_VERSION, ToolDef, VerifiedCaller,
-    protocol_compatible, read_frame, write_frame,
+    API_SURFACE_FORMAT, ApiSurfaceRef, Frame, MAX_API_SURFACE_BYTES, MAX_API_SURFACES,
+    PROTOCOL_VERSION, ToolDef, VerifiedCaller, protocol_compatible, read_frame, write_frame,
 };
 use serde_json::Value;
 
@@ -127,10 +127,19 @@ fn declared_surface(spec: &PluginSpec) -> Result<Value> {
 }
 
 fn surface_refs(surfaces: &[(String, &'static [u8])]) -> Result<Vec<ApiSurfaceRef>> {
+    if surfaces.len() > MAX_API_SURFACES {
+        bail!(
+            "{} api surfaces registered; at most {MAX_API_SURFACES}",
+            surfaces.len()
+        );
+    }
     let mut refs: Vec<ApiSurfaceRef> = Vec::with_capacity(surfaces.len());
     for (name, body) in surfaces {
         if name.is_empty() {
             bail!("api surface name is empty");
+        }
+        if body.len() > MAX_API_SURFACE_BYTES {
+            bail!("api surface `{name}` exceeds {MAX_API_SURFACE_BYTES} bytes");
         }
         if refs.iter().any(|r| &r.name == name) {
             bail!("api surface `{name}` registered twice");
@@ -967,5 +976,16 @@ mod tests {
         assert!(surface_refs(&[("a".into(), SURFACE), ("a".into(), SURFACE)]).is_err());
         assert!(surface_refs(&[(String::new(), SURFACE)]).is_err());
         assert!(surface_refs(&[("a".into(), &[0xff])]).is_err());
+    }
+
+    #[test]
+    fn surface_count_and_size_are_capped() {
+        let too_many: Vec<(String, &'static [u8])> = (0..=MAX_API_SURFACES)
+            .map(|i| (format!("s{i}"), SURFACE))
+            .collect();
+        assert!(surface_refs(&too_many).is_err());
+        assert!(surface_refs(&too_many[..MAX_API_SURFACES]).is_ok());
+        let big: &'static [u8] = vec![b' '; MAX_API_SURFACE_BYTES + 1].leak();
+        assert!(surface_refs(&[("big".into(), big)]).is_err());
     }
 }
