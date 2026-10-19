@@ -72,31 +72,6 @@ jobs:
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 
-  build-aarch64-linux-gnu:
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
-      credentials:
-        username: ${{ secrets.CI_REGISTRY_USER }}
-        password: ${{ secrets.CI_REGISTRY_TOKEN }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Build aarch64-unknown-linux-gnu
-        uses: argyle-labs/.github/.github/actions/job-release-build@main
-        with:
-          target: aarch64-unknown-linux-gnu
-          tag: ${{ env.TAG }}
-          asset-profile: full
-          # The workspace also has a uniffi-bindgen helper bin; ship only orca.
-          bins: '["orca"]'
-          disable-lto-for-rc: 'true'
-          orca-fetch-token: ${{ secrets.ORCA_FETCH_TOKEN }}
-          sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
-          sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
-          sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-
   build-aarch64-apple-darwin:
     runs-on: macos
     steps:
@@ -107,7 +82,7 @@ jobs:
           disable-lto-for-rc: 'true'
 
   package:
-    needs: [build-x86_64-linux-gnu, build-x86_64-linux-musl, build-aarch64-linux-gnu, build-aarch64-apple-darwin]
+    needs: [build-x86_64-linux-gnu, build-x86_64-linux-musl, build-aarch64-apple-darwin]
     runs-on: ubuntu-latest
     steps:
       - name: Package deb/rpm/PKGBUILD/homebrew/plg
@@ -136,7 +111,7 @@ jobs:
         with:
           tag: ${{ env.TAG }}
           version-commit: "false"
-          targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl","aarch64-unknown-linux-gnu","aarch64-apple-darwin"]'
+          targets: '["x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl","aarch64-apple-darwin"]'
           asset-profile: full
           release-token: ${{ secrets.ORCA_RELEASE_TOKEN }}
           github-token: ${{ secrets.GH_RELEASE_TOKEN }}
