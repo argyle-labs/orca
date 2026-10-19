@@ -146,9 +146,15 @@ impl ToolCtx {
     /// `Clone`, which is everything the registry needs.
     ///
     /// Coerce the concrete impl at the call site:
-    /// ```ignore
+    /// ```
+    /// # use std::sync::Arc;
+    /// # trait FooService: Send + Sync {}
+    /// # struct ConcreteFoo;
+    /// # impl FooService for ConcreteFoo {}
+    /// # fn demo(ctx: &mut contract::ToolCtx) {
     /// let svc: Arc<dyn FooService> = Arc::new(ConcreteFoo);
     /// ctx.register_service(svc);
+    /// # }
     /// ```
     pub fn register_service<T: Clone + Send + Sync + 'static>(&mut self, svc: T) -> &mut Self {
         self.services.insert(TypeId::of::<T>(), Arc::new(svc));

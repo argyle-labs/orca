@@ -19,7 +19,7 @@
 //!
 //! Expands to:
 //!
-//! ```rust,ignore
+//! ```text
 //! #[derive(
 //!     ::plugin_toolkit::serde::Serialize,
 //!     ::plugin_toolkit::serde::Deserialize,

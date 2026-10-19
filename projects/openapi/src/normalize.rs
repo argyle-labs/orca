@@ -5,10 +5,14 @@
 //!
 //! Each fix lives here so a new consumer crate only writes a thin build.rs:
 //!
-//! ```ignore
+//! ```
+//! # fn main() -> anyhow::Result<()> {
+//! # let raw = r#"{"openapi":"3.0.3","info":{"title":"t","version":"1"},"paths":{}}"#;
 //! let mut spec: openapiv3::OpenAPI = serde_json::from_str(&raw)?;
 //! openapi::normalize::for_progenitor(&mut spec);
-//! let tokens = progenitor::Generator::default().generate_tokens(&spec)?;
+//! // `spec` now feeds `progenitor::Generator::generate_tokens`.
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Add new preprocessors here as we discover more upstream-spec edge cases;
