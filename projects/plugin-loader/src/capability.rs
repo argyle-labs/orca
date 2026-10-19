@@ -153,6 +153,7 @@ fn clamp_max_body(requested: Option<u64>) -> Option<usize> {
 
 const BODY_BUDGET_BYTES: u32 = 256 * 1024 * 1024;
 const BODY_BUDGET_WAIT: Duration = Duration::from_secs(30);
+const PLUGIN_BODY_SHARE_BYTES: u32 = MAX_BODY_CEILING as u32;
 
 fn body_budget() -> Arc<Semaphore> {
     static BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -161,20 +162,47 @@ fn body_budget() -> Arc<Semaphore> {
         .clone()
 }
 
+fn plugin_body_share(principal: &str) -> Arc<Semaphore> {
+    static SHARES: OnceLock<std::sync::Mutex<std::collections::HashMap<String, Arc<Semaphore>>>> =
+        OnceLock::new();
+    SHARES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(principal.to_string())
+        .or_insert_with(|| Arc::new(Semaphore::new(PLUGIN_BODY_SHARE_BYTES as usize)))
+        .clone()
+}
+
 async fn reserve_body_budget(
     budget: Arc<Semaphore>,
     bytes: usize,
     wait: Duration,
 ) -> Result<OwnedSemaphorePermit> {
+    let total = u32::try_from(budget.available_permits()).unwrap_or(u32::MAX);
     let bytes = bytes.min(BODY_BUDGET_BYTES as usize) as u32;
     match tokio::time::timeout(wait, budget.acquire_many_owned(bytes)).await {
         Ok(Ok(permit)) => Ok(permit),
         Ok(Err(_)) => Err(anyhow!("http.request: in-flight body budget closed")),
         Err(_) => Err(anyhow!(
-            "http.request: in-flight body budget exhausted ({BODY_BUDGET_BYTES} bytes); waited {}s for {bytes} bytes",
+            "http.request: in-flight body budget exhausted; waited {}s for {bytes} bytes ({total} were free)",
             wait.as_secs()
         )),
     }
+}
+
+async fn reserve_plugin_body_budget(
+    share: Arc<Semaphore>,
+    global: Arc<Semaphore>,
+    bytes: usize,
+    wait: Duration,
+) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
+    let deadline = tokio::time::Instant::now() + wait;
+    let bytes = bytes.min(PLUGIN_BODY_SHARE_BYTES as usize);
+    let own = reserve_body_budget(share, bytes, wait).await?;
+    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let all = reserve_body_budget(global, bytes, left).await?;
+    Ok((own, all))
 }
 
 /// Execute one capability request on behalf of `principal` — the authoritative
@@ -208,6 +236,7 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
             let max_body = clamp_max_body(req.max_body_bytes);
             let body_b64 = req.body_b64;
             let reserve = max_body.unwrap_or(utils::http::MAX_RESPONSE_BYTES);
+            let share = plugin_body_share(principal);
             let mut builder = utils::http::shared()
                 .raw_request(utils::http::RawRequest {
                     method: req.method,
@@ -222,7 +251,9 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
                 builder = builder.max_body(n);
             }
             let resp = run_on_cap_runtime(async move {
-                let _permit = reserve_body_budget(body_budget(), reserve, BODY_BUDGET_WAIT).await?;
+                let _permits =
+                    reserve_plugin_body_budget(share, body_budget(), reserve, BODY_BUDGET_WAIT)
+                        .await?;
                 builder
                     .send_raw()
                     .await
@@ -797,6 +828,41 @@ mod tests {
     }
 
     #[test]
+    fn plugin_share_caps_one_plugin_without_starving_others() {
+        let global = Arc::new(Semaphore::new(100));
+        let hog = Arc::new(Semaphore::new(40));
+        let other = Arc::new(Semaphore::new(40));
+        run_on_cap_runtime(async move {
+            let wait = Duration::from_millis(50);
+            let _a = reserve_plugin_body_budget(hog.clone(), global.clone(), 40, wait)
+                .await
+                .unwrap();
+            let err = reserve_plugin_body_budget(hog.clone(), global.clone(), 10, wait)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("exhausted"), "got: {err}");
+            let _b = reserve_plugin_body_budget(other.clone(), global.clone(), 40, wait)
+                .await
+                .unwrap();
+            assert_eq!(global.available_permits(), 20);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn plugin_shares_are_per_principal() {
+        assert!(Arc::ptr_eq(
+            &plugin_body_share("a"),
+            &plugin_body_share("a")
+        ));
+        assert!(!Arc::ptr_eq(
+            &plugin_body_share("a"),
+            &plugin_body_share("b")
+        ));
+    }
+
+    #[test]
     fn http_request_releases_budget_on_error() {
         for _ in 0..3 {
             handle_cap(
@@ -814,6 +880,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(body_budget().available_permits(), full);
+        assert_eq!(
+            plugin_body_share("p").available_permits(),
+            PLUGIN_BODY_SHARE_BYTES as usize
+        );
     }
 
     #[test]
