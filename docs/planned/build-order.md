@@ -203,7 +203,7 @@ Design of record: [`../design/unified-media-acquisition.md`](../design/unified-m
   provider registry, the `/` proxy handler, persisted-owner replay, and the
   OpenAPI 3.1 tool surface the UI generates its TypeScript SDK from
   (`projects/server/src/serve/mod.rs`, `projects/contract/src/web.rs`). Core emits
-  the spec at `/api/openapi.json` with per-operation `x-codeSamples` (REST/CLI/MCP
+  the spec at `/docs.json` with per-operation `x-codeSamples` (REST/CLI/MCP
   tabs) and `x-tagGroups` so **one Scalar page renders all three surfaces**
   (`projects/server/src/serve/openapi.rs`); serving that Scalar page is peacock's
   responsibility (core emits the spec, does not host the viewer). The UI is a
@@ -213,7 +213,7 @@ Design of record: [`../design/unified-media-acquisition.md`](../design/unified-m
   backend tiers rather than following them. Milestone ladder:
   - **Now** — read-oriented dashboard over the current tool surface (fleet, hosts,
     mounts, services) **plus the Scalar API-docs viewer** over
-    `/api/openapi.json`; cookie-session auth against `:12000`. Keeps a workable UI
+    `/docs.json`; cookie-session auth against `:12000`. Keeps a workable UI
     and live API docs through the whole build.
   - **On B1/M3 (forward_auth)** — migrate sign-in from the standalone cookie
     session to the mesh-signed-JWT session; on B1/M4, add the federated-login and

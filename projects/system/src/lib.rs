@@ -95,6 +95,7 @@ pub mod sysadmin;
 // Tool surfaces relocated from `db` (db is a primitive, not a tool host —
 // see [[feedback-plugin-toolkit-is-the-gateway]]).
 pub mod config_tools;
+pub mod csp;
 
 /// Core diagnostics provider reporting config-parse failures found in orca's
 /// own logs — the read side of the `config_format` write guard.

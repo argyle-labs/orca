@@ -716,20 +716,99 @@ async fn bootstrap_status_handler(
     })
 }
 
-async fn scalar_handler(
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> axum::response::Response {
-    let spec_url = params
-        .get("url")
-        .cloned()
-        .unwrap_or_else(|| "/api/openapi.json".to_string());
-    render_scalar(&spec_url, "API Reference")
+async fn docs_handler() -> axum::response::Response {
+    render_scalar("/docs.json", "API Reference")
+}
+
+const SCALAR_URL: &str =
+    "https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.75.0/dist/browser/standalone.js";
+const SCALAR_SRI: &str = "sha384-xgelKlDcc+BYp0O+ZYzFesLnWCgGpEbXVVZWNQT6WyZYygN01tbEMygnjPXb5OPI";
+
+const DOCS_CSP_EXTRA: &[(&str, &[&str])] = &[
+    ("script-src", &[SCALAR_URL]),
+    ("style-src", &["'unsafe-inline'"]),
+    ("img-src", &["data:"]),
+    ("font-src", &["data:"]),
+];
+
+const DOCS_AUTH_JS: &str = r#"    (function () {
+      const status = document.getElementById('orca-status');
+      const u = document.getElementById('orca-u');
+      const p = document.getElementById('orca-p');
+      const signinBtn = document.getElementById('orca-signin');
+      const signoutBtn = document.getElementById('orca-signout');
+      const setStatus = (msg, cls) => {
+        status.textContent = msg;
+        status.className = 'status ' + (cls || '');
+      };
+      const setSignedIn = (signedIn) => {
+        u.style.display = signedIn ? 'none' : '';
+        p.style.display = signedIn ? 'none' : '';
+        signinBtn.style.display = signedIn ? 'none' : '';
+        signoutBtn.style.display = signedIn ? '' : 'none';
+      };
+      const checkMe = async () => {
+        try {
+          const r = await fetch('/api/auth/web/me', {
+            credentials: 'include',
+            headers: { 'Accept': 'application/json' },
+          });
+          if (r.ok) {
+            const j = await r.json();
+            setSignedIn(true);
+            setStatus(`signed in as ${j.username} (${j.role})`, 'ok');
+          } else {
+            setSignedIn(false);
+            setStatus('not signed in', 'err');
+          }
+        } catch (e) {
+          setSignedIn(false);
+          setStatus(`probe error: ${e}`, 'err');
+        }
+      };
+      document.getElementById('orca-signin').addEventListener('click', async () => {
+        const username = document.getElementById('orca-u').value.trim();
+        const password = document.getElementById('orca-p').value;
+        if (!username || !password) { setStatus('need username + password', 'err'); return; }
+        setStatus('signing in…');
+        try {
+          const r = await fetch('/api/auth/web/signin', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+          });
+          if (r.ok) {
+            location.reload();
+          } else {
+            const txt = await r.text();
+            setStatus(`signin failed: ${r.status} ${txt}`, 'err');
+          }
+        } catch (e) { setStatus(`signin error: ${e}`, 'err'); }
+      });
+      document.getElementById('orca-signout').addEventListener('click', async () => {
+        try {
+          await fetch('/api/auth/web/signout', { method: 'POST', credentials: 'include' });
+        } catch (_e) {}
+        location.reload();
+      });
+      checkMe();
+    })();
+"#;
+
+async fn docs_auth_js_handler() -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{Response, header};
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/javascript; charset=utf-8")
+        .body(Body::from(DOCS_AUTH_JS))
+        .expect("hardcoded headers are valid")
 }
 
 fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{Response, header};
-    // Inline sign-in widget. Scalar runs same-origin with the API, so the
+    // Sign-in widget (`/docs/auth.js`). Scalar runs same-origin with the API, so the
     // browser auto-attaches the `orca_session` cookie to every "try it"
     // request once you sign in here. The widget lives in a fixed banner so
     // it's visible regardless of which operation is open. It calls
@@ -779,74 +858,9 @@ fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
     <button id="orca-signout" type="button" style="display:none">Sign out</button>
     <span class="status" id="orca-status">checking session…</span>
   </div>
-  <script>
-    (function () {{
-      const status = document.getElementById('orca-status');
-      const u = document.getElementById('orca-u');
-      const p = document.getElementById('orca-p');
-      const signinBtn = document.getElementById('orca-signin');
-      const signoutBtn = document.getElementById('orca-signout');
-      const setStatus = (msg, cls) => {{
-        status.textContent = msg;
-        status.className = 'status ' + (cls || '');
-      }};
-      const setSignedIn = (signedIn) => {{
-        u.style.display = signedIn ? 'none' : '';
-        p.style.display = signedIn ? 'none' : '';
-        signinBtn.style.display = signedIn ? 'none' : '';
-        signoutBtn.style.display = signedIn ? '' : 'none';
-      }};
-      const checkMe = async () => {{
-        try {{
-          const r = await fetch('/api/auth/web/me', {{
-            credentials: 'include',
-            headers: {{ 'Accept': 'application/json' }},
-          }});
-          if (r.ok) {{
-            const j = await r.json();
-            setSignedIn(true);
-            setStatus(`signed in as ${{j.username}} (${{j.role}})`, 'ok');
-          }} else {{
-            setSignedIn(false);
-            setStatus('not signed in', 'err');
-          }}
-        }} catch (e) {{
-          setSignedIn(false);
-          setStatus(`probe error: ${{e}}`, 'err');
-        }}
-      }};
-      document.getElementById('orca-signin').addEventListener('click', async () => {{
-        const username = document.getElementById('orca-u').value.trim();
-        const password = document.getElementById('orca-p').value;
-        if (!username || !password) {{ setStatus('need username + password', 'err'); return; }}
-        setStatus('signing in…');
-        try {{
-          const r = await fetch('/api/auth/web/signin', {{
-            method: 'POST',
-            credentials: 'include',
-            headers: {{ 'Content-Type': 'application/json' }},
-            body: JSON.stringify({{ username, password }}),
-          }});
-          if (r.ok) {{
-            document.getElementById('orca-p').value = '';
-            await checkMe();
-          }} else {{
-            const txt = await r.text();
-            setStatus(`signin failed: ${{r.status}} ${{txt}}`, 'err');
-          }}
-        }} catch (e) {{ setStatus(`signin error: ${{e}}`, 'err'); }}
-      }});
-      document.getElementById('orca-signout').addEventListener('click', async () => {{
-        try {{
-          await fetch('/api/auth/web/signout', {{ method: 'POST', credentials: 'include' }});
-        }} catch (_e) {{}}
-        await checkMe();
-      }});
-      checkMe();
-    }})();
-  </script>
-  <script id="api-reference" data-url="{spec_url}"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+  <script src="/docs/auth.js"></script>
+  <script id="api-reference" data-url="{spec_url}" data-configuration='{{"withDefaultFonts":false}}'></script>
+  <script src="{SCALAR_URL}" integrity="{SCALAR_SRI}" crossorigin="anonymous"></script>
 </body>
 </html>"#
     );
@@ -1300,15 +1314,22 @@ fn apply_persisted_web_owners() {
     }
 }
 
-/// Fallback handler in prod: route the request to the matching registered
-/// [`contract::web::WebProvider`], applying SPA fallback and a short-TTL cache.
+async fn api_not_found_or<F, Fut>(req: axum::extract::Request, next: F) -> axum::response::Response
+where
+    F: FnOnce(axum::extract::Request) -> Fut,
+    Fut: std::future::Future<Output = axum::response::Response>,
+{
+    if req.uri().path() == "/api" || req.uri().path().starts_with("/api/") {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    next(req).await
+}
+
 async fn static_handler(req: axum::extract::Request) -> axum::response::Response {
     use axum::body::Body;
-    use axum::http::{Response, header};
+    use axum::http::Response;
 
-    let uri_path = req.uri().path().to_string();
-
-    let Some(provider) = contract::web::resolve(&uri_path) else {
+    let Some(provider) = contract::web::resolve(req.uri().path()) else {
         return Response::builder()
             .status(404)
             .header("content-type", "text/plain")
@@ -1317,6 +1338,35 @@ async fn static_handler(req: axum::extract::Request) -> axum::response::Response
             ))
             .expect("hardcoded response is valid");
     };
+    let route = provider.route();
+    let additions = middleware::CspAdditions(
+        route
+            .csp_script_hashes
+            .iter()
+            .map(|h| ("script-src", h.clone()))
+            .chain(
+                route
+                    .csp_style_hashes
+                    .iter()
+                    .map(|h| ("style-src", h.clone())),
+            )
+            .collect(),
+    );
+    let mut resp = render_static(req, provider).await;
+    resp.extensions_mut().insert(additions);
+    resp
+}
+
+/// Fallback handler in prod: route the request to the matching registered
+/// [`contract::web::WebProvider`], applying SPA fallback and a short-TTL cache.
+async fn render_static(
+    req: axum::extract::Request,
+    provider: std::sync::Arc<dyn contract::web::WebProvider>,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{Response, header};
+
+    let uri_path = req.uri().path().to_string();
 
     // The `ui.enabled` gate applies only to the root (`/`) owner — the SPA.
     // Non-root asset/viewer providers are not toggled by it.
@@ -1481,7 +1531,26 @@ fn dev_origins(path: &str) -> (String, String) {
 
 async fn dev_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
     let (http_origin, ws_origin) = dev_origins(req.uri().path());
-    proxy_to(req, http_origin, ws_origin).await
+    let additions = if system::csp::valid_dev_origin(&http_origin)
+        && system::csp::valid_dev_origin(&ws_origin)
+    {
+        vec![
+            ("script-src", http_origin.clone()),
+            ("connect-src", http_origin.clone()),
+            ("connect-src", ws_origin.clone()),
+            ("style-src", http_origin.clone()),
+            ("style-src", "'unsafe-inline'".to_string()),
+            ("img-src", http_origin.clone()),
+            ("font-src", http_origin.clone()),
+        ]
+    } else {
+        tracing::warn!(%http_origin, "dev upstream is not a plain origin; strict CSP applies");
+        Vec::new()
+    };
+    let mut resp = proxy_to(req, http_origin, ws_origin).await;
+    resp.extensions_mut()
+        .insert(middleware::CspAdditions(additions));
+    resp
 }
 
 async fn storybook_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
@@ -1677,7 +1746,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             .allow_credentials(true)
     };
 
-    let mcp_pool = Arc::new(::mcp::client::McpPool::new_with_db(db_path));
+    let mcp_pool = Arc::new(::mcp::client::McpPool::new_with_db(db_path.clone()));
 
     let (api, spec) = openapi::openapi_router().split_for_parts();
     // Stash the assembled spec so the spec-serving handlers can read it.
@@ -1689,11 +1758,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // Spec endpoints — registered after split so they are not themselves
         // documented in the spec (would be circular and noisy).
         .route("/api/health", get(ping_handler))
-        .route("/api/openapi.json", get(openapi::openapi_handler))
-        .route(
-            "/api/openapi/public.json",
-            get(openapi::openapi_public_handler),
-        )
+        .route("/docs.json", get(openapi::openapi_handler))
         // Live managed-unit catalog for CLI runtime service discovery.
         .route("/api/catalog", get(openapi::unit_catalog_handler))
         // Live MCP tool catalog + daemon version. The `mcp-serve` stdio bridge
@@ -1705,11 +1770,8 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // instead of the fragile stdio bridge. Behind require_auth (like
         // /api/mcp/catalog); the tools/call path re-applies per-tool RBAC.
         .route("/api/mcp", post(mcp_jsonrpc_handler))
-        // Scalar API reference viewer — served by Rust so it works in the
-        // prerendered static build (SvelteKit SSR routes don't survive embedding).
-        // One unified spec: per-operation `x-codeSamples` render REST / CLI /
-        // MCP invocation forms as tabs on the same page.
-        .route("/scalar", get(scalar_handler))
+        .route("/docs", get(docs_handler))
+        .route("/docs/auth.js", get(docs_auth_js_handler))
         // Open probe: lets the browser TokenGate decide which UI to show
         // (one-click bootstrap vs. paste an existing token).
         .route("/api/auth/bootstrap", get(bootstrap_status_handler))
@@ -1744,7 +1806,36 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     // Outermost to innermost (last added = outermost): CORS → log_requests →
     // require_auth → handler. Logging sits OUTSIDE auth so 401s are still
     // logged — otherwise rejected requests vanish silently from the log.
-    let api = api
+    let api = if dev {
+        // Storybook lives at <baseUrl>/storybook in dev — see .storybook/main.ts
+        // (viteFinal sets base = '/storybook/') and scripts/dev.sh which launches
+        // it on :12002. The Rust proxy forwards both HTTP and HMR WebSockets.
+        api.route("/storybook", any(storybook_proxy_handler))
+            .route("/storybook/{*path}", any(storybook_proxy_handler))
+            .fallback(|req| api_not_found_or(req, dev_proxy_handler))
+    } else {
+        api.fallback(|req| api_not_found_or(req, static_handler))
+    };
+
+    let relax = match open_router_db(&db_path) {
+        Ok(c) => system::csp::Relaxations::load(&c),
+        Err(e) => {
+            tracing::warn!(
+                "csp: cannot open {}: {e:#}; using strict policy",
+                db_path.display()
+            );
+            system::csp::Relaxations::default()
+        }
+    };
+    let csp = middleware::CspPolicies {
+        default: Arc::from(system::csp::compose(&[], &relax)),
+        docs: Arc::from(system::csp::compose(DOCS_CSP_EXTRA, &relax)),
+        relax: Arc::new(relax),
+    };
+    tracing::info!(policy = %csp.default, "content-security-policy");
+    system::csp::set_enforced(&csp.default);
+
+    api
         // Cap request bodies so a malicious or runaway client can't OOM the
         // daemon by streaming an unbounded payload at a `Bytes`/raw-body
         // extractor. Tool payloads are JSON and fit comfortably under this.
@@ -1752,18 +1843,19 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         .layer(axum::middleware::from_fn(middleware::require_tool_role))
         .layer(axum::middleware::from_fn(middleware::require_auth))
         .layer(axum::middleware::from_fn(middleware::log_requests))
-        .layer(cors);
+        .layer(cors)
+        .layer(axum::middleware::from_fn_with_state(
+            csp,
+            middleware::security_headers,
+        ))
+}
 
-    if dev {
-        // Storybook lives at <baseUrl>/storybook in dev — see .storybook/main.ts
-        // (viteFinal sets base = '/storybook/') and scripts/dev.sh which launches
-        // it on :12002. The Rust proxy forwards both HTTP and HMR WebSockets.
-        api.route("/storybook", any(storybook_proxy_handler))
-            .route("/storybook/{*path}", any(storybook_proxy_handler))
-            .fallback(dev_proxy_handler)
-    } else {
-        api.fallback(static_handler)
+fn open_router_db(path: &std::path::Path) -> anyhow::Result<db::Conn> {
+    if std::env::var_os("ORCA_DB_PATH").is_some_and(|p| std::path::Path::new(&p) == path) {
+        return db::open_unencrypted(path);
     }
+    anyhow::ensure!(path.exists(), "no database at {}", path.display());
+    db::open(path)
 }
 
 /// Write orca's generated OpenAPI spec to ~/.orca/specs/orca.json so it
@@ -1968,35 +2060,34 @@ mod tests {
         );
     }
 
-    // ── scalar_handler (Query → render_scalar) ─────────────────────────────────
-
     #[tokio::test]
-    async fn scalar_handler_defaults_spec_url_when_absent() {
-        let params = std::collections::HashMap::new();
-        let resp = scalar_handler(axum::extract::Query(params)).await;
+    async fn docs_handler_points_at_docs_json() {
+        let resp = docs_handler().await;
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
         let html = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(
-            html.contains(r#"data-url="/api/openapi.json""#),
-            "default spec url missing"
-        );
+        assert!(html.contains(r#"data-url="/docs.json""#));
     }
 
     #[tokio::test]
-    async fn scalar_handler_honors_url_param() {
-        let mut params = std::collections::HashMap::new();
-        params.insert("url".to_string(), "/other/spec.json".to_string());
-        let resp = scalar_handler(axum::extract::Query(params)).await;
+    async fn docs_auth_js_is_plain_javascript() {
+        let resp = docs_auth_js_handler().await;
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
-        let html = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(
-            html.contains(r#"data-url="/other/spec.json""#),
-            "url param not honoured"
-        );
+        let js = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(js.contains("/api/auth/web/signin"));
+        assert!(!js.contains("{{"));
+    }
+
+    #[tokio::test]
+    async fn api_fallback_is_404() {
+        let req = axum::extract::Request::builder()
+            .uri("/api/nope")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(api_not_found_or(req, static_handler).await.status(), 404);
     }
 
     // ── proxy_http (upstream unreachable → 502) ────────────────────────────────
@@ -2026,13 +2117,13 @@ mod tests {
     }
 
     // ── render_scalar (auth widget + Scalar wiring) ─────────────────────────────
-    // The Scalar viewer HTML carries an inline sign-in widget and the Scalar
-    // CDN bootstrap. These are load-bearing UI wiring, not decoration — assert
+    // The Scalar viewer HTML carries an inline sign-in widget and the vendored
+    // Scalar bootstrap. These are load-bearing UI wiring, not decoration — assert
     // they survive the format!().
 
     #[tokio::test]
-    async fn render_scalar_embeds_auth_widget_and_scalar_cdn() {
-        let resp = render_scalar("/api/openapi.json", "Ref");
+    async fn render_scalar_embeds_auth_widget_and_pinned_scalar() {
+        let resp = render_scalar("/docs.json", "Ref");
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
@@ -2042,20 +2133,15 @@ mod tests {
             body.contains(r#"id="orca-signin""#),
             "signin button missing"
         );
-        assert!(
-            body.contains("/api/auth/web/signin"),
-            "signin endpoint missing"
-        );
-        assert!(body.contains("/api/auth/web/me"), "me probe missing");
         // Scalar renderer bootstrap.
         assert!(
             body.contains(r#"id="api-reference""#),
             "scalar mount missing"
         );
-        assert!(
-            body.contains("@scalar/api-reference"),
-            "scalar cdn script missing"
-        );
+        assert!(body.contains(&format!(
+            r#"src="{SCALAR_URL}" integrity="{SCALAR_SRI}" crossorigin="anonymous""#
+        )));
+        assert!(body.contains(r#"src="/docs/auth.js""#));
     }
 
     // ── mcp_catalog_handler ─────────────────────────────────────────────────────
@@ -2402,6 +2488,8 @@ mod tests {
                 prefix: prefix.to_string(),
                 spa_fallback,
                 dev_upstream,
+                csp_script_hashes: Vec::new(),
+                csp_style_hashes: Vec::new(),
             },
             behavior,
             counter: std::sync::atomic::AtomicUsize::new(0),
@@ -2415,6 +2503,69 @@ mod tests {
             .uri(uri)
             .body(axum::body::Body::empty())
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn provider_declared_hashes_widen_only_its_own_pages() {
+        use tower::ServiceExt;
+        let declared = "'sha256-RFWPLDbv2BY+rCkDzsE+0fr8ylGr2R2faWMhq4lfEQc='";
+        let path = "/__csp_fixture_declared__";
+        let provider: Arc<dyn contract::web::WebProvider> = Arc::new(MockProvider {
+            name: "csp-declared".to_string(),
+            route: contract::web::WebRoute::from_def_axes(
+                path,
+                &[
+                    format!("csp_script_hash={declared}"),
+                    "csp_script_hash='unsafe-inline'".to_string(),
+                    "csp_script_hash=https://evil.example".to_string(),
+                    "csp_style_hash=*".to_string(),
+                ],
+            ),
+            behavior: MockBehavior::Fixed {
+                status: 200,
+                headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                body: b"<html><script>window.undeclared=1</script></html>".to_vec(),
+            },
+            counter: std::sync::atomic::AtomicUsize::new(0),
+        });
+        contract::web::register_provider(provider).expect("register");
+        let plain = "/__csp_fixture_plain__";
+        register_mock(
+            "csp-plain",
+            plain,
+            false,
+            None,
+            MockBehavior::Fixed {
+                status: 200,
+                headers: vec![("content-type".into(), "text/html".into())],
+                body: b"<html><script>x()</script></html>".to_vec(),
+            },
+        );
+        let relax = system::csp::Relaxations::default();
+        let csp = middleware::CspPolicies {
+            default: Arc::from(system::csp::strict()),
+            docs: Arc::from(system::csp::compose(DOCS_CSP_EXTRA, &relax)),
+            relax: Arc::new(relax),
+        };
+        let router = axum::Router::new().fallback(static_handler).layer(
+            axum::middleware::from_fn_with_state(csp, middleware::security_headers),
+        );
+        let policy_for = |p: &'static str| {
+            let router = router.clone();
+            async move {
+                let resp = router.oneshot(get(p)).await.unwrap();
+                resp.headers()[axum::http::header::CONTENT_SECURITY_POLICY]
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            }
+        };
+        let policy = policy_for(path).await;
+        assert_eq!(
+            policy,
+            format!("{}; script-src 'self' {declared}", system::csp::strict())
+        );
+        assert_eq!(policy_for(plain).await, system::csp::strict());
     }
 
     #[tokio::test]

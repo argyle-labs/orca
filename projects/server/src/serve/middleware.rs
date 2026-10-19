@@ -17,7 +17,7 @@ pub struct CorrelationId(pub String);
 
 /// Paths where we skip body logging — response is too large to be useful in logs.
 /// Prefix-matched: any path that starts with one of these is skipped.
-const SKIP_BODY_PREFIXES: &[&str] = &["/api/openapi", "/api/specs"];
+const SKIP_BODY_PREFIXES: &[&str] = &["/docs.json", "/api/specs"];
 
 /// Paths to skip logging entirely (no request/response log lines).
 const SKIP_LOG_PREFIXES: &[&str] = &["/api/health", "/assets/", "/favicon"];
@@ -205,17 +205,67 @@ pub enum AuthKind {
     Bootstrap,
 }
 
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct CspAdditions(pub Vec<(&'static str, String)>);
+
+#[derive(Clone)]
+pub struct CspPolicies {
+    pub default: std::sync::Arc<str>,
+    pub docs: std::sync::Arc<str>,
+    pub relax: std::sync::Arc<system::csp::Relaxations>,
+}
+
+fn compose_with(add: &CspAdditions, relax: &system::csp::Relaxations) -> String {
+    let mut grouped: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (d, s) in &add.0 {
+        match grouped.iter_mut().find(|(k, _)| k == d) {
+            Some((_, v)) => v.push(s),
+            None => grouped.push((d, vec![s])),
+        }
+    }
+    let extra: Vec<(&str, &[&str])> = grouped.iter().map(|(d, v)| (*d, v.as_slice())).collect();
+    system::csp::compose(&extra, relax)
+}
+
+pub async fn security_headers(
+    axum::extract::State(csp): axum::extract::State<CspPolicies>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let is_docs = req.uri().path() == "/docs";
+    let mut resp = next.run(req).await;
+    let policy = match resp.extensions().get::<CspAdditions>() {
+        Some(add) => compose_with(add, &csp.relax),
+        None if is_docs => csp.docs.to_string(),
+        None => csp.default.to_string(),
+    };
+    let value = axum::http::HeaderValue::from_str(&policy).unwrap_or_else(|e| {
+        tracing::warn!("csp: composed policy is not a valid header ({e}); using strict policy");
+        axum::http::HeaderValue::from_str(&system::csp::strict())
+            .expect("strict policy is a valid header")
+    });
+    let h = resp.headers_mut();
+    h.insert(axum::http::header::CONTENT_SECURITY_POLICY, value);
+    h.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("no-referrer"),
+    );
+    resp
+}
+
 /// Name of the HTTP-only cookie carrying the web-UI session id.
 pub const SESSION_COOKIE: &str = "orca_session";
 
 /// 30 days, the sliding-expiry horizon refreshed on every authenticated request.
 pub const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 86_400);
 
-/// Routes reachable without auth. Keep this list short.
-const AUTH_OPEN_PREFIXES: &[&str] = &[
+/// Routes reachable without auth, matched exactly. Keep this list short.
+const AUTH_OPEN_PATHS: &[&str] = &[
     "/api/health",
-    "/api/openapi",
-    "/scalar",
     // Bootstrap probe: the TokenGate UI hits this before any token exists to
     // decide which sign-in flow to show. Handler enforces loopback + zero-tokens
     // itself, so leaving it open in middleware is safe.
@@ -244,12 +294,14 @@ const BOOTSTRAP_ALLOWED_TOOL: &str = "/api/v1/auth.token.create";
 /// self-validates + throttles. MUST name the real registered `auth.login` tool.
 const LOGIN_TOOL_PATH: &str = "/api/v1/auth.login";
 
+const AUTH_REQUIRED_PATHS: &[&str] = &["/docs.json"];
+
 fn is_open_path(path: &str) -> bool {
-    AUTH_OPEN_PREFIXES.iter().any(|p| path.starts_with(p))
+    AUTH_OPEN_PATHS.contains(&path)
 }
 
 fn is_api_path(path: &str) -> bool {
-    path.starts_with("/api/")
+    path.starts_with("/api/") || AUTH_REQUIRED_PATHS.contains(&path)
 }
 
 use utils::hash::sha256_hex;
@@ -483,7 +535,7 @@ fn bootstrap_allowed_with(conn: &db::Conn, path: &str, peer: SocketAddr) -> bool
 }
 
 /// Auth gate for `/api/*`. Order:
-///   1. Open paths (`/api/health`, `/api/openapi`) — pass through.
+///   1. Open paths (`/api/health`, `/api/auth/web/signin`, …) — pass through.
 ///   2. `Authorization: Bearer <token>` matched against `api_tokens` — pass.
 ///   3. Loopback + zero tokens in DB + path == `auth.token_create` — bootstrap
 ///      pass, identity = Bootstrap/admin. Closes as soon as any token exists.
@@ -830,7 +882,7 @@ mod tests {
 
     #[test]
     fn skip_body_matches_prefix() {
-        assert!(skip_body("/api/openapi/spec.json"));
+        assert!(skip_body("/docs.json"));
         assert!(skip_body("/api/specs/acme"));
         assert!(!skip_body("/api/health"));
         assert!(!skip_body("/api/agents"));
@@ -1150,7 +1202,6 @@ mod tests {
     #[test]
     fn is_open_path_matches_known_open_prefixes() {
         assert!(is_open_path("/api/health"));
-        assert!(is_open_path("/api/openapi/spec.json"));
         assert!(is_open_path("/api/auth/web/signin"));
         assert!(is_open_path("/api/auth/web/signup"));
         assert!(is_open_path("/api/auth/web/signup_status"));
@@ -1161,7 +1212,23 @@ mod tests {
         // 2026-06-07 to disambiguate from the `auth.login` orca-tool surface.
         assert!(!is_open_path("/api/auth/signin"));
         assert!(is_open_path("/api/auth/bootstrap"));
-        assert!(is_open_path("/scalar"));
+    }
+
+    #[test]
+    fn is_open_path_is_exact_not_prefix() {
+        assert!(!is_open_path("/api/healthX"));
+        assert!(!is_open_path("/api/health/../v1/x"));
+        assert!(!is_open_path("/api/auth/web/signin/../../v1/x"));
+        assert!(!is_open_path("/api/openapi.json"));
+        assert!(!is_open_path("/scalar"));
+        assert!(!is_open_path("/docs.json"));
+    }
+
+    #[test]
+    fn docs_json_requires_auth_but_docs_shell_does_not() {
+        assert!(is_api_path("/docs.json"));
+        assert!(!is_api_path("/docs"));
+        assert!(!is_api_path("/docsX"));
     }
 
     #[test]
@@ -1174,7 +1241,7 @@ mod tests {
     fn is_api_path_only_true_for_api_prefix() {
         assert!(is_api_path("/api/x"));
         assert!(is_api_path("/api/"));
-        assert!(!is_api_path("/scalar"));
+        assert!(!is_api_path("/docs"));
         assert!(!is_api_path("/"));
     }
 
@@ -1575,7 +1642,7 @@ mod tests {
                 }),
             )
             .route(
-                "/api/openapi/spec.json",
+                "/docs.json",
                 axum::routing::get(|| async {
                     (axum::http::StatusCode::OK, "{\"openapi\":\"3.1.0\"}")
                 }),
@@ -1620,11 +1687,10 @@ mod tests {
 
     #[tokio::test]
     async fn log_requests_skips_skip_log_paths_silently() {
-        // /api/openapi/* matches skip_log → no info!() emitted, but the
-        // request still routes successfully.
+        // /docs.json matches skip_body; the request still routes successfully.
         let req = AxumReq::builder()
             .method("GET")
-            .uri("/api/openapi/spec.json")
+            .uri("/docs.json")
             .body(Body::empty())
             .unwrap();
         let resp = log_router().oneshot(req).await.unwrap();
@@ -1671,12 +1737,10 @@ mod tests {
                 .with_test_writer()
                 .finish(),
         );
-        // /api/openapi/* matches BOTH skip_log AND skip_body — exercise the
-        // `if at_trace && !no_log` false branch (no_log true) → INFO branch
-        // gets skipped silently.
+        // /docs.json matches skip_body on the trace branch.
         let req = AxumReq::builder()
             .method("GET")
-            .uri("/api/openapi/spec.json")
+            .uri("/docs.json")
             .body(Body::empty())
             .unwrap();
         let resp = log_router().oneshot(req).await.unwrap();
@@ -1724,18 +1788,15 @@ mod tests {
                 axum::routing::get(|| async { (axum::http::StatusCode::OK, "auth_ok") }),
             )
             .route(
-                "/scalar",
-                axum::routing::get(|| async { (axum::http::StatusCode::OK, "scalar") }),
+                "/docs",
+                axum::routing::get(|| async { (axum::http::StatusCode::OK, "docs") }),
             )
             .layer(axum::middleware::from_fn(require_auth))
     }
 
     #[tokio::test]
     async fn require_auth_passes_non_api_paths() {
-        let req = AxumReq::builder()
-            .uri("/scalar")
-            .body(Body::empty())
-            .unwrap();
+        let req = AxumReq::builder().uri("/docs").body(Body::empty()).unwrap();
         let resp = auth_router().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
     }

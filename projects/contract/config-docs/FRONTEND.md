@@ -19,7 +19,7 @@ The conventions below govern the frontend source wherever it lives (`peacock/ui`
 
 ## hey-api SDK is the only API surface
 
-All API access goes through the hey-api-generated TypeScript SDK in `peacock/ui/src/lib/sdk/`. The SDK is regenerated from the live OpenAPI 3.1 spec at `http://localhost:12000/api/openapi.json` via `npm run gen:client`. Every tool method is emitted automatically from `#[orca_tool]` annotations across the domain crates.
+All API access goes through the hey-api-generated TypeScript SDK in `peacock/ui/src/lib/sdk/`. The SDK is regenerated from the OpenAPI 3.1 spec emitted by `orca openapi emit` (served authenticated at `/docs.json`) via `npm run gen:client`. Every tool method is emitted automatically from `#[orca_tool]` annotations across the domain crates.
 
 Raw `fetch()` is never acceptable in app code. If a tool isn't on the SDK, add a `#[orca_tool]`-annotated function in the relevant domain crate — the typed method appears on the SDK after `gen:client`.
 

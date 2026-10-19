@@ -214,85 +214,6 @@ pub mod scaffold {
     }
 }
 
-// Public-spec filter operates on opaque OpenAPI Value documents.
-#[allow(clippy::disallowed_types)]
-mod filter {
-    use serde_json::Value;
-
-    const METHODS: &[&str] = &[
-        "get", "put", "post", "delete", "options", "head", "patch", "trace",
-    ];
-
-    /// Domain tags in orca's own spec that are publicly accessible.
-    const BRAIN_PUBLIC_DOMAINS: &[&str] = &["docs", "library"];
-
-    fn filter_ops(mut spec: Value, keep: impl Fn(&Value) -> bool) -> Value {
-        if let Some(paths) = spec["paths"].as_object_mut() {
-            let keys: Vec<String> = paths.keys().cloned().collect();
-            for key in &keys {
-                if let Some(item) = paths.get_mut(key).and_then(|v| v.as_object_mut()) {
-                    for method in METHODS {
-                        if let Some(op) = item.get(*method)
-                            && !keep(op)
-                        {
-                            item.remove(*method);
-                        }
-                    }
-                }
-            }
-            let empty: Vec<String> = paths
-                .iter()
-                .filter(|(_, v)| !METHODS.iter().any(|m| v.get(m).is_some()))
-                .map(|(k, _)| k.clone())
-                .collect();
-            for p in empty {
-                paths.remove(&p);
-            }
-        }
-        spec
-    }
-
-    /// Filter orca's own spec to only operations in publicly accessible domain groups.
-    pub fn filter_orca_public(spec: Value) -> Value {
-        let mut filtered = filter_ops(spec, |op| {
-            op["tags"]
-                .as_array()
-                .map(|tags| {
-                    tags.iter()
-                        .any(|t| BRAIN_PUBLIC_DOMAINS.contains(&t.as_str().unwrap_or("")))
-                })
-                .unwrap_or(false)
-        });
-
-        let used_tags: std::collections::HashSet<String> = filtered["paths"]
-            .as_object()
-            .into_iter()
-            .flat_map(|paths| paths.values())
-            .flat_map(|item| METHODS.iter().filter_map(|m| item.get(*m)))
-            .flat_map(|op| op["tags"].as_array().into_iter().flatten())
-            .filter_map(|t| t.as_str().map(String::from))
-            .collect();
-
-        if let Some(tags) = filtered["tags"].as_array() {
-            let pruned: Vec<Value> = tags
-                .iter()
-                .filter(|t| {
-                    t["name"]
-                        .as_str()
-                        .map(|n| used_tags.contains(n))
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect();
-            filtered["tags"] = Value::Array(pruned);
-        }
-
-        filtered
-    }
-}
-
-pub use filter::filter_orca_public;
-
 // ── Registry-level operations ─────────────────────────────────────────────
 // `serde_json::Value` here is legitimate: spec_json blobs are arbitrary
 // upstream OpenAPI documents.
@@ -592,7 +513,7 @@ pub use ops::{list_db_specs, list_specs, refresh_spec, register_spec, unregister
 #[allow(clippy::disallowed_types)] // tests construct opaque OpenAPI Value docs
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::Value;
 
     // ORCA_SPECS_DIR / ORCA_DB_PATH are process-global; serialize every test
     // that mutates them so parallel `cargo test` runs stay deterministic.
@@ -802,66 +723,6 @@ mod tests {
         let tags = spec["tags"].as_array().unwrap();
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0]["name"], "public");
-    }
-
-    // ── filter_orca_public ─────────────────────────────────────────────────
-
-    #[test]
-    fn filter_orca_public_keeps_public_removes_internal_and_prunes() {
-        let spec = json!({
-            "openapi": "3.1.0",
-            "paths": {
-                "/docs": { "get": { "tags": ["docs"], "summary": "public docs" } },
-                "/library": { "get": { "tags": ["library"] } },
-                "/admin": { "get": { "tags": ["internal"] } },
-                "/mixed": {
-                    "get": { "tags": ["docs"] },
-                    "post": { "tags": ["internal"] }
-                }
-            },
-            "tags": [
-                { "name": "docs" },
-                { "name": "library" },
-                { "name": "internal" }
-            ]
-        });
-        let filtered = filter_orca_public(spec);
-        let paths = filtered["paths"].as_object().unwrap();
-        // internal-only path removed entirely
-        assert!(!paths.contains_key("/admin"));
-        // public paths retained
-        assert!(paths.contains_key("/docs"));
-        assert!(paths.contains_key("/library"));
-        // mixed path kept but internal op stripped
-        assert!(paths.contains_key("/mixed"));
-        assert!(paths["/mixed"].get("post").is_none());
-        assert!(paths["/mixed"].get("get").is_some());
-        // unused "internal" tag pruned; public tags kept
-        let tag_names: Vec<&str> = filtered["tags"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
-        assert!(tag_names.contains(&"docs"));
-        assert!(tag_names.contains(&"library"));
-        assert!(!tag_names.contains(&"internal"));
-    }
-
-    #[test]
-    fn filter_orca_public_handles_untagged_and_missing_paths() {
-        // op with no tags is dropped
-        let spec = json!({
-            "paths": { "/x": { "get": { "summary": "no tags" } } },
-            "tags": []
-        });
-        let filtered = filter_orca_public(spec);
-        assert!(filtered["paths"].as_object().unwrap().is_empty());
-
-        // spec without a paths object survives untouched
-        let no_paths = json!({ "openapi": "3.1.0" });
-        let filtered2 = filter_orca_public(no_paths);
-        assert_eq!(filtered2["openapi"], "3.1.0");
     }
 
     // ── SpecRegistry ───────────────────────────────────────────────────────

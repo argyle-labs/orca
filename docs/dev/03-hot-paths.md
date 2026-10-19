@@ -62,7 +62,7 @@ axum.
 
 ### Step 1: axum router
 
-`build_router(dev, db_path)` assembles the route tree: a handful of fixed routes (`/api/health`, `/api/openapi.json`, `/api/catalog`, auth, …) plus — the important part — the **entire tool surface** mounted under `/api/v1` via `dispatch::axum_router(ctx)`. That call emits one POST route per `#[orca_tool]`, so the same inventory that backs the MCP and CLI surfaces backs HTTP too. The router carries shared state (the `McpPool`) and CORS + correlation-id layers.
+`build_router(dev, db_path)` assembles the route tree: a handful of fixed routes (`/api/health`, `/docs`, `/docs.json`, `/api/catalog`, auth, …) plus — the important part — the **entire tool surface** mounted under `/api/v1` via `dispatch::axum_router(ctx)`. That call emits one POST route per `#[orca_tool]`, so the same inventory that backs the MCP and CLI surfaces backs HTTP too. The router carries shared state (the `McpPool`) and CORS + correlation-id layers.
 
 ### Step 2: Middleware runs
 

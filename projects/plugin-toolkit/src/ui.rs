@@ -7,7 +7,10 @@
 
 use std::marker::PhantomData;
 
-use contract::web::{CAP_DEV_UPSTREAM, CAP_SPA_FALLBACK, WebRequest, WebResponse};
+use contract::web::{
+    CAP_CSP_SCRIPT_HASH, CAP_CSP_STYLE_HASH, CAP_DEV_UPSTREAM, CAP_SPA_FALLBACK, WebRequest,
+    WebResponse,
+};
 use rust_embed::RustEmbed;
 
 /// CSP applied to html responses unless overridden. SvelteKit/Vite emit an
@@ -207,6 +210,8 @@ pub fn web_backend(name: impl Into<String>, prefix: impl Into<String>) -> WebBac
         prefix: prefix.into(),
         spa_fallback: false,
         dev_upstream: None,
+        csp_script_hashes: Vec::new(),
+        csp_style_hashes: Vec::new(),
     }
 }
 
@@ -218,6 +223,8 @@ pub struct WebBackend {
     spa_fallback: bool,
     dev_upstream: Option<String>,
     invoke_prefix: String,
+    csp_script_hashes: Vec<String>,
+    csp_style_hashes: Vec<String>,
 }
 
 impl WebBackend {
@@ -230,6 +237,16 @@ impl WebBackend {
     /// Dev-mode upstream origin orca proxies to instead of calling `render`.
     pub fn dev_upstream(mut self, url: impl Into<String>) -> Self {
         self.dev_upstream = Some(url.into());
+        self
+    }
+
+    pub fn csp_script_hash(mut self, hash: impl Into<String>) -> Self {
+        self.csp_script_hashes.push(hash.into());
+        self
+    }
+
+    pub fn csp_style_hash(mut self, hash: impl Into<String>) -> Self {
+        self.csp_style_hashes.push(hash.into());
         self
     }
 
@@ -246,6 +263,12 @@ impl WebBackend {
         }
         if let Some(url) = self.dev_upstream {
             capabilities.push(format!("{CAP_DEV_UPSTREAM}{url}"));
+        }
+        for h in self.csp_script_hashes {
+            capabilities.push(format!("{CAP_CSP_SCRIPT_HASH}{h}"));
+        }
+        for h in self.csp_style_hashes {
+            capabilities.push(format!("{CAP_CSP_STYLE_HASH}{h}"));
         }
         crate::abi::BackendDef {
             domain: "web".to_string(),
@@ -458,6 +481,11 @@ mod tests {
         let def = web_backend("peacock", "/")
             .spa_fallback()
             .dev_upstream("http://127.0.0.1:12004")
+            .csp_script_hash("'sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI='")
+            .csp_script_hash("'unsafe-inline'")
+            .csp_style_hash(
+                "'sha384-xgelKlDcc+BYp0O+ZYzFesLnWCgGpEbXVVZWNQT6WyZYygN01tbEMygnjPXb5OPI'",
+            )
             .invoke_prefix("pk")
             .build();
         let json = serde_json::to_string(&vec![def]).unwrap();
@@ -471,6 +499,13 @@ mod tests {
                 prefix: "/".to_string(),
                 spa_fallback: true,
                 dev_upstream: Some("http://127.0.0.1:12004".to_string()),
+                csp_script_hashes: vec![
+                    "'sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI='".to_string()
+                ],
+                csp_style_hashes: vec![
+                    "'sha384-xgelKlDcc+BYp0O+ZYzFesLnWCgGpEbXVVZWNQT6WyZYygN01tbEMygnjPXb5OPI'"
+                        .to_string()
+                ],
             }
         );
 
@@ -482,6 +517,8 @@ mod tests {
                 prefix: "/docs".to_string(),
                 spa_fallback: false,
                 dev_upstream: None,
+                csp_script_hashes: Vec::new(),
+                csp_style_hashes: Vec::new(),
             }
         );
     }

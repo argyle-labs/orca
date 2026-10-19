@@ -69,8 +69,13 @@ pub struct ConfigGetArgs {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigGetOutput {
     pub row: Option<ConfigRowOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_csp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub csp_restart_pending: Option<bool>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -131,6 +136,10 @@ mod native_support {
     }
 }
 
+fn is_csp_row(noun: &str, name: &str) -> bool {
+    noun == crate::csp::CONFIG_NOUN && name == crate::csp::CONFIG_NAME
+}
+
 // ── Tools ────────────────────────────────────────────────────────────────────
 
 /// List config rows. Optionally filter by noun and/or host_owner.
@@ -165,7 +174,23 @@ async fn config_get(
 ) -> anyhow::Result<ConfigGetOutput> {
     let conn = db::open_default()?;
     let row = db::config_store::get(&conn, &args.noun, &args.name)?.map(Into::into);
-    Ok(ConfigGetOutput { row })
+    let (effective_csp, csp_restart_pending) = if is_csp_row(&args.noun, &args.name) {
+        let configured = crate::csp::compose(&[], &crate::csp::Relaxations::load(&conn));
+        match crate::csp::enforced() {
+            Some(enforced) => {
+                let pending = enforced != configured;
+                (Some(enforced), Some(pending))
+            }
+            None => (Some(configured), None),
+        }
+    } else {
+        (None, None)
+    };
+    Ok(ConfigGetOutput {
+        row,
+        effective_csp,
+        csp_restart_pending,
+    })
 }
 
 /// [MUTATES STATE] Upsert a config row. Refuses to write rows owned by a different host
@@ -174,11 +199,22 @@ async fn config_get(
 #[orca_tool(domain = "config", verb = "upsert")]
 async fn config_set(
     args: ConfigSetArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ConfigSetOutput> {
+    if is_csp_row(&args.noun, &args.name) {
+        let caller = ctx.verified_caller().cloned().or_else(|| ctx.caller());
+        let admin = caller.is_some_and(|c| dispatch::tool_roles::satisfies(&c.role, "admin"));
+        anyhow::ensure!(admin, "config server/csp requires role 'admin'");
+        crate::csp::Relaxations::parse(&args.json)
+            .map_err(|e| anyhow::anyhow!("invalid server/csp: {e:#}"))?;
+    }
     let conn = db::open_default()?;
     let local = native_support::local_system(&conn);
     let owner = args.host.unwrap_or_else(|| local.clone());
+    anyhow::ensure!(
+        !is_csp_row(&args.noun, &args.name) || owner == local,
+        "config server/csp can only be set on the local host"
+    );
     let created = db::config_store::set(
         &conn, &local, &owner, &args.noun, &args.name, &args.json, "cli",
     )?;
@@ -199,4 +235,137 @@ async fn config_delete(
     let owner = args.host.unwrap_or_else(|| local.clone());
     let removed = db::config_store::delete(&conn, &local, &owner, &args.noun, &args.name, "cli")?;
     Ok(ConfigDeleteOutput { removed })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_ctx(dir: &std::path::Path) -> contract::ToolCtx {
+        use contract::config::{Config, Model};
+        contract::ToolCtx::new(std::sync::Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: dir.to_path_buf(),
+            memory_root: dir.to_path_buf(),
+            db_path: dir.join("ctx.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    fn detail(noun: &str, name: &str, ctx: &contract::ToolCtx) -> ConfigGetOutput {
+        run(config_get(
+            ConfigGetArgs {
+                noun: noun.into(),
+                name: name.into(),
+            },
+            ctx,
+        ))
+        .unwrap()
+    }
+
+    fn run<T>(f: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    #[test]
+    fn detail_reports_enforced_csp_and_pending_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        db::with_thread_db_path(&dir.path().join("cfg.db"), || {
+            let ctx = test_ctx(dir.path());
+            let strict = crate::csp::strict();
+            let out = detail("server", "csp", &ctx);
+            assert_eq!(out.effective_csp, Some(strict.clone()));
+            assert_eq!(out.csp_restart_pending, None);
+            assert_eq!(detail("service", "plex", &ctx).effective_csp, None);
+
+            let conn = db::open_default().unwrap();
+            conn.execute(
+                "INSERT INTO config_rows (id, host_owner, noun, name, json, is_replica)
+                 VALUES ('r1', 'other', 'server', 'csp', ?1, 1)",
+                [r#"{"img-src":["https://replica.example"]}"#],
+            )
+            .unwrap();
+            let local = crate::csp::Relaxations::load(&conn);
+            assert!(local.img_src.is_empty(), "replica row must not apply");
+            drop(conn);
+
+            crate::csp::set_enforced(&strict);
+            let conn = db::open_default().unwrap();
+            db::config_store::set(
+                &conn,
+                "h",
+                "h",
+                "server",
+                "csp",
+                r#"{"img-src":["https://img.example"]}"#,
+                "test",
+            )
+            .unwrap();
+            let out = detail("server", "csp", &ctx);
+            assert_eq!(out.effective_csp, Some(strict));
+            assert_eq!(out.csp_restart_pending, Some(true));
+        });
+    }
+
+    fn upsert(json: &str, ctx: &contract::ToolCtx) -> anyhow::Result<ConfigSetOutput> {
+        run(config_set(
+            ConfigSetArgs {
+                noun: "server".into(),
+                name: "csp".into(),
+                json: json.into(),
+                host: None,
+            },
+            ctx,
+        ))
+    }
+
+    fn caller(role: &str) -> contract::CallerIdentity {
+        contract::CallerIdentity {
+            user_id: "u".into(),
+            username: "u".into(),
+            role: role.into(),
+            can_mutate: true,
+        }
+    }
+
+    #[test]
+    fn upsert_server_csp_requires_admin_and_valid_relaxations() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::host_identity::init(dir.path()).ok();
+        db::with_thread_db_path(&dir.path().join("cfg.db"), || {
+            let ok = r#"{"img-src":["https://img.example"]}"#;
+            assert!(upsert(ok, &test_ctx(dir.path())).is_err());
+            let user = test_ctx(dir.path()).with_auth(caller("user"));
+            assert!(upsert(ok, &user).is_err());
+            let admin = test_ctx(dir.path()).with_auth(caller("admin"));
+            assert!(upsert(r#"{"script-src":["*"]}"#, &admin).is_err());
+            assert!(upsert(r#"{"frame-ancestors":["*"]}"#, &admin).is_err());
+            assert!(upsert(ok, &admin).is_ok());
+            let mut verified_user = test_ctx(dir.path()).with_auth(caller("admin"));
+            verified_user.set_verified_caller(Some(caller("user")));
+            assert!(upsert(ok, &verified_user).is_err());
+            let mut verified_admin = test_ctx(dir.path()).with_auth(caller("user"));
+            verified_admin.set_verified_caller(Some(caller("admin")));
+            assert!(upsert(ok, &verified_admin).is_ok());
+            let remote = run(config_set(
+                ConfigSetArgs {
+                    noun: "server".into(),
+                    name: "csp".into(),
+                    json: ok.into(),
+                    host: Some("other-host".into()),
+                },
+                &admin,
+            ));
+            assert!(remote.is_err());
+        });
+    }
 }
