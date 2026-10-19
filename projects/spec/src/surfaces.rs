@@ -60,16 +60,25 @@ impl std::error::Error for UpstreamError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Forbidden {
     pub tool: String,
-    pub required: &'static str,
+    pub reason: String,
 }
 
 impl std::fmt::Display for Forbidden {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: requires role `{}`", self.tool, self.required)
+        write!(f, "{}: {}", self.tool, self.reason)
     }
 }
 
 impl std::error::Error for Forbidden {}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Invocation<'a> {
+    pub caller: &'a CallerIdentity,
+    pub dry_run: bool,
+    pub execute_confirmed: bool,
+    pub local: bool,
+    pub second_factor: bool,
+}
 
 pub fn register(plugin: &str, surface: ApiSurface) -> Result<()> {
     db::plugin_tables::validate_segment("plugin", plugin)?;
@@ -144,47 +153,63 @@ fn canonical_role(role: &str) -> Option<&'static str> {
     }
 }
 
-pub fn effective_policy(kind: SurfaceKind, op: &ApiOp) -> (&'static str, bool) {
+pub fn required_role(kind: SurfaceKind, op: &ApiOp) -> &'static str {
     let declared = canonical_role(&op.policy.role);
     if kind == SurfaceKind::Openapi && op.method.eq_ignore_ascii_case("GET") {
-        return (declared.unwrap_or("admin"), false);
+        return declared.unwrap_or("admin");
     }
-    let role = match declared {
+    match declared {
         Some("super-admin") => "super-admin",
         _ => "admin",
+    }
+}
+
+fn gate(surface: &ApiSurface, op: &ApiOp, inv: &Invocation<'_>) -> Result<()> {
+    let required = required_role(surface.kind, op);
+    let deny = |reason: String| -> Result<()> {
+        Err(Forbidden {
+            tool: op.tool.clone(),
+            reason,
+        }
+        .into())
     };
-    (role, op.policy.data_mutation && role == "admin")
+    if !dispatch::tool_roles::satisfies(&inv.caller.role, required) {
+        return deny(format!("requires role `{required}`"));
+    }
+    if op.policy.local_only && !inv.local {
+        return deny("local callers only".into());
+    }
+    if required == "super-admin" && !inv.second_factor {
+        return deny("requires a verified second factor".into());
+    }
+    if op.policy.execute_gated && !inv.dry_run && !inv.execute_confirmed {
+        return deny("requires explicit execute confirmation".into());
+    }
+    Ok(())
 }
 
 pub async fn execute(
     plugin: &str,
     tool: &str,
     args: Value,
-    caller: &CallerIdentity,
-    dry_run: bool,
+    inv: &Invocation<'_>,
 ) -> Result<Outcome> {
     let (surface, index) = lookup(plugin, tool)?;
     let op = &surface.ops[index];
-
-    let (required, data_mutation) = effective_policy(surface.kind, op);
-    if !dispatch::tool_roles::authorize(&caller.role, caller.can_mutate, required, data_mutation) {
-        return Err(Forbidden {
-            tool: op.tool.clone(),
-            required,
-        }
-        .into());
-    }
+    gate(&surface, op, inv)?;
 
     let Value::Object(mut args) = args else {
         bail!("{tool}: arguments must be an object");
     };
     let endpoint = match args.remove(ENDPOINT_ARG) {
-        Some(Value::String(e)) if !e.is_empty() => e,
+        Some(Value::String(e)) => e,
         _ => bail!("{tool}: missing `{ENDPOINT_ARG}`"),
     };
+    db::plugin_tables::validate_segment(ENDPOINT_ARG, &endpoint)?;
     surface.validate_args(op, &Value::Object(args.clone()))?;
 
-    let row = endpoint_row(plugin, &surface.endpoint, &endpoint)?;
+    let row =
+        utils::reactor::off_async_worker(|| endpoint_row(plugin, &surface.endpoint, &endpoint))?;
     let fields = &surface.endpoint.fields;
     if row.get(&fields.enabled).is_some_and(|v| !truthy(v)) {
         bail!("{tool}: endpoint `{endpoint}` is disabled");
@@ -193,22 +218,36 @@ pub async fn execute(
     let routes = routes_of(&row, &fields.routes)
         .with_context(|| format!("{tool}: endpoint `{endpoint}`"))?;
     let route_key = format!("{plugin}.{endpoint}");
+    let secret_name = surface
+        .auth
+        .as_ref()
+        .map(|auth| auth.secret.replace("{endpoint}", &endpoint));
 
-    if dry_run {
+    if inv.dry_run {
+        if let Some(name) = &secret_name {
+            let op = SecretOp::Exists { name: name.clone() };
+            if !utils::reactor::off_async_worker(|| secret_op(plugin, &op))?.found {
+                bail!("no secret named '{name}'");
+            }
+        }
         let base = utils::route::resolve_reachable(&route_key, &routes, |_| async { true }).await?;
-        let secret = surface.auth.as_ref().map(|_| REDACTED);
+        let secret = secret_name.as_ref().map(|_| REDACTED);
         let req = surface.build_request(op, &base, &args, secret)?;
         return Ok(Outcome::Plan(plan(req, endpoint, &base)));
     }
 
-    let secret = match &surface.auth {
-        Some(auth) => Some(read_secret(
-            plugin,
-            &auth.secret.replace("{endpoint}", &endpoint),
-        )?),
+    let secret = match &secret_name {
+        Some(name) => {
+            let op = SecretOp::Get { name: name.clone() };
+            let value = utils::reactor::off_async_worker(|| secret_op(plugin, &op))?.value;
+            Some(value.ok_or_else(|| anyhow!("no secret named '{name}'"))?)
+        }
         None => None,
     };
-    let base = plugin_toolkit::route::resolve_reachable(&route_key, &routes, insecure).await?;
+    let base = utils::route::resolve_reachable(&route_key, &routes, |url| async move {
+        utils::route::probe_http(&url, insecure).await
+    })
+    .await?;
     let req = surface.build_request(op, &base, &args, secret.as_deref())?;
     let builder = http_client()
         .raw_request(utils::http::RawRequest {
@@ -279,15 +318,8 @@ fn routes_of(row: &DbRow, column: &str) -> Result<Vec<Route>> {
     }
 }
 
-fn read_secret(plugin: &str, name: &str) -> Result<String> {
-    secrets::exec_secret_op_pooled(
-        &secrets::Principal::Plugin(plugin.to_string()),
-        &SecretOp::Get {
-            name: name.to_string(),
-        },
-    )?
-    .value
-    .ok_or_else(|| anyhow!("no secret named '{name}'"))
+fn secret_op(plugin: &str, op: &SecretOp) -> Result<plugin_abi::SecretReply> {
+    secrets::exec_secret_op_pooled(&secrets::Principal::Plugin(plugin.to_string()), op)
 }
 
 fn plan(req: openapi::surface::BuiltRequest, endpoint: String, base: &str) -> Plan {
@@ -336,7 +368,16 @@ fn strip_userinfo(url: &str) -> String {
 fn scrub_body(body: &[u8], secret: Option<&str>) -> String {
     let mut text = String::from_utf8_lossy(body).into_owned();
     if let Some(s) = secret.filter(|s| !s.is_empty()) {
-        text = text.replace(s, REDACTED);
+        let b64 = utils::encoding::base64_encode(s.as_bytes());
+        let b64url = utils::encoding::base64url_encode(s.as_bytes());
+        for form in [
+            s.to_string(),
+            utils::url::encode(s),
+            b64.trim_end_matches('=').to_string(),
+            b64url.trim_end_matches('=').to_string(),
+        ] {
+            text = text.replace(&form, REDACTED);
+        }
     }
     let text = match serde_json::from_str::<Value>(&text) {
         Ok(v) => utils::scrub::redact_json(v).to_string(),
@@ -361,6 +402,16 @@ mod tests {
             username: "u".into(),
             role: role.into(),
             can_mutate,
+        }
+    }
+
+    fn inv(caller: &CallerIdentity, dry_run: bool) -> Invocation<'_> {
+        Invocation {
+            caller,
+            dry_run,
+            execute_confirmed: false,
+            local: true,
+            second_factor: false,
         }
     }
 
@@ -445,38 +496,63 @@ mod tests {
     #[test]
     fn floor_forces_admin_on_writes_and_unknown_get_roles() {
         let k = SurfaceKind::Openapi;
+        assert_eq!(required_role(k, &op("GET", "read", false)), "read");
+        assert_eq!(required_role(k, &op("get", "user", false)), "user");
+        assert_eq!(required_role(k, &op("GET", "any", false)), "admin");
+        assert_eq!(required_role(k, &op("GET", "", false)), "admin");
+        assert_eq!(required_role(k, &op("POST", "read", true)), "admin");
+        assert_eq!(required_role(k, &op("DELETE", "any", true)), "admin");
         assert_eq!(
-            effective_policy(k, &op("GET", "read", false)),
-            ("read", false)
+            required_role(k, &op("PUT", "super-admin", true)),
+            "super-admin"
         );
         assert_eq!(
-            effective_policy(k, &op("get", "user", false)),
-            ("user", false)
+            required_role(SurfaceKind::Graphql, &op("POST", "read", false)),
+            "admin"
         );
-        assert_eq!(
-            effective_policy(k, &op("GET", "any", false)),
-            ("admin", false)
-        );
-        assert_eq!(effective_policy(k, &op("GET", "", false)), ("admin", false));
-        assert_eq!(
-            effective_policy(k, &op("GET", "read", true)),
-            ("read", false)
-        );
-        assert_eq!(
-            effective_policy(k, &op("POST", "read", false)),
-            ("admin", false)
-        );
-        assert_eq!(
-            effective_policy(k, &op("DELETE", "any", true)),
-            ("admin", true)
-        );
-        assert_eq!(
-            effective_policy(k, &op("PUT", "super-admin", true)),
-            ("super-admin", false)
-        );
-        assert_eq!(
-            effective_policy(SurfaceKind::Graphql, &op("POST", "read", false)),
-            ("admin", false)
+    }
+
+    #[test]
+    fn gate_denies_by_default_for_flagged_ops() {
+        let s = surface("g", "g.{endpoint}.token");
+        let admin = caller("admin", false);
+        let mut gated = op("POST", "admin", false);
+        gated.policy.execute_gated = true;
+        assert!(gate(&s, &gated, &inv(&admin, true)).is_ok());
+        assert!(gate(&s, &gated, &inv(&admin, false)).is_err());
+        let confirmed = Invocation {
+            execute_confirmed: true,
+            ..inv(&admin, false)
+        };
+        assert!(gate(&s, &gated, &confirmed).is_ok());
+
+        let mut local = op("GET", "read", false);
+        local.policy.local_only = true;
+        let remote = Invocation {
+            local: false,
+            ..inv(&admin, true)
+        };
+        assert!(gate(&s, &local, &remote).is_err());
+        assert!(gate(&s, &local, &inv(&admin, true)).is_ok());
+
+        let sensitive = op("POST", "super-admin", false);
+        let root = caller("super-admin", false);
+        assert!(gate(&s, &sensitive, &inv(&root, true)).is_err());
+        let verified = Invocation {
+            second_factor: true,
+            ..inv(&root, true)
+        };
+        assert!(gate(&s, &sensitive, &verified).is_ok());
+        assert!(
+            gate(
+                &s,
+                &sensitive,
+                &Invocation {
+                    caller: &admin,
+                    ..verified
+                }
+            )
+            .is_err()
         );
     }
 
@@ -499,7 +575,7 @@ mod tests {
         assert!(deregister("regp").is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn executes_end_to_end_against_upstream() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -515,8 +591,7 @@ mod tests {
                 "e2e",
                 "e2e.item",
                 json!({"endpoint": "main", "id": 5}),
-                &caller("read", false),
-                false,
+                &inv(&caller("read", false), false),
             )
             .await
         })
@@ -526,7 +601,7 @@ mod tests {
         deregister("e2e");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn upstream_error_carries_status_and_scrubbed_body() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -544,8 +619,7 @@ mod tests {
                 "uperr",
                 "uperr.item",
                 json!({"endpoint": "main", "id": 1}),
-                &caller("admin", false),
-                false,
+                &inv(&caller("admin", false), false),
             )
             .await
         })
@@ -561,7 +635,7 @@ mod tests {
         deregister("uperr");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dry_run_plans_without_sending() {
         let server = MockServer::start().await;
         register("dry", surface("dry", "dry.{endpoint}.token")).unwrap();
@@ -571,8 +645,7 @@ mod tests {
                 "dry",
                 "dry.create",
                 json!({"endpoint": "main", "name": "n", "password": "pw"}),
-                &caller("admin", false),
-                true,
+                &inv(&caller("admin", false), true),
             )
             .await
         })
@@ -591,7 +664,7 @@ mod tests {
         deregister("dry");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn floor_denies_before_any_work() {
         let server = MockServer::start().await;
         register("deny", surface("deny", "deny.{endpoint}.token")).unwrap();
@@ -601,28 +674,34 @@ mod tests {
                 "deny",
                 "deny.create",
                 json!({"endpoint": "main", "name": "n"}),
-                &caller("read", false),
-                true,
+                &inv(&caller("read", false), true),
             )
             .await;
             let mutate = execute(
                 "deny",
                 "deny.create",
                 json!({"endpoint": "main", "name": "n"}),
-                &caller("member", true),
-                true,
+                &inv(&caller("member", true), true),
             )
             .await;
-            (write, mutate)
+            let read_mutate = execute(
+                "deny",
+                "deny.create",
+                json!({"endpoint": "main", "name": "n"}),
+                &inv(&caller("read", true), false),
+            )
+            .await;
+            (write, mutate, read_mutate)
         })
         .await;
         assert!(res.0.unwrap_err().downcast_ref::<Forbidden>().is_some());
-        assert!(matches!(res.1.unwrap(), Outcome::Plan(_)));
+        assert!(res.1.unwrap_err().downcast_ref::<Forbidden>().is_some());
+        assert!(res.2.unwrap_err().downcast_ref::<Forbidden>().is_some());
         assert!(server.received_requests().await.unwrap().is_empty());
         deregister("deny");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn foreign_secret_and_endpoint_are_refused() {
         let server = MockServer::start().await;
         register("own", surface("own", "other.{endpoint}.token")).unwrap();
@@ -632,21 +711,40 @@ mod tests {
                 "own",
                 "own.item",
                 json!({"endpoint": "main", "id": 1}),
-                &caller("admin", false),
-                false,
+                &inv(&caller("admin", false), false),
             )
             .await;
             let endpoint = execute(
                 "own",
                 "own.item",
                 json!({"endpoint": "missing", "id": 1}),
-                &caller("admin", false),
-                false,
+                &inv(&caller("admin", false), false),
             )
             .await;
-            (secret, endpoint)
+            let planned = execute(
+                "own",
+                "own.item",
+                json!({"endpoint": "main", "id": 1}),
+                &inv(&caller("admin", false), true),
+            )
+            .await;
+            let bad_name = execute(
+                "own",
+                "own.item",
+                json!({"endpoint": "../x", "id": 1}),
+                &inv(&caller("admin", false), true),
+            )
+            .await;
+            (secret, endpoint, planned, bad_name)
         })
         .await;
+        assert!(
+            res.2
+                .unwrap_err()
+                .downcast_ref::<secrets::SecretAccessDenied>()
+                .is_some()
+        );
+        assert!(res.3.is_err());
         assert!(
             res.0
                 .unwrap_err()
@@ -663,11 +761,11 @@ mod tests {
         deregister("own");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn rejects_missing_endpoint_and_unknown_args() {
         register("args", surface("args", "args.{endpoint}.token")).unwrap();
         let c = caller("admin", false);
-        let missing = execute("args", "args.item", json!({"id": 1}), &c, true).await;
+        let missing = execute("args", "args.item", json!({"id": 1}), &inv(&c, true)).await;
         assert!(
             missing
                 .unwrap_err()
@@ -678,8 +776,7 @@ mod tests {
             "args",
             "args.item",
             json!({"endpoint": "main", "id": 1, "x": 1}),
-            &c,
-            true,
+            &inv(&c, true),
         )
         .await;
         assert!(
@@ -699,6 +796,21 @@ mod tests {
         );
         assert_eq!(strip_userinfo("http://h/x@y"), "http://h/x@y");
         assert!(!scrub_body(b"Authorization: Bearer zzz9", None).contains("zzz9"));
+        let echoed = format!(
+            "k=a%2Fb%3Dc&b={}&u={}",
+            utils::encoding::base64_encode(b"a/b=c"),
+            utils::encoding::base64url_encode(b"a/b=c")
+        );
+        let out = scrub_body(echoed.as_bytes(), Some("a/b=c"));
+        assert!(!out.contains("a%2Fb%3Dc"), "{out}");
+        assert!(
+            !out.contains(utils::encoding::base64_encode(b"a/b=c").trim_end_matches('=')),
+            "{out}"
+        );
+        assert!(
+            !out.contains(utils::encoding::base64url_encode(b"a/b=c").trim_end_matches('=')),
+            "{out}"
+        );
         assert_eq!(
             scrub_body(&vec![b'a'; 5000], None).chars().count(),
             MAX_ERROR_BODY + 1

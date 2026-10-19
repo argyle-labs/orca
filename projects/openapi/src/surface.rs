@@ -291,9 +291,17 @@ impl ApiSurface {
                     };
                     match p.location {
                         ParamIn::Path => {
+                            let raw = wire_string(v);
+                            if raw.is_empty() || raw == "." || raw == ".." {
+                                bail!(
+                                    "{}: path parameter `{}` may not be `{raw}`",
+                                    op.tool,
+                                    p.name
+                                );
+                            }
                             path = path.replace(
                                 &format!("{{{}}}", p.name),
-                                &utils::url::encode(&wire_string(v)),
+                                &utils::url::encode(&raw).replace('.', "%2E"),
                             );
                         }
                         ParamIn::Query => push_query(&mut query, &p.name, v),
@@ -660,6 +668,41 @@ mod tests {
                 None
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn path_params_cannot_climb_segments() {
+        let s = proxmox();
+        let op = s.find("proxmox.vm_status").unwrap();
+        for (node, vmid) in [
+            (json!(".."), json!(1)),
+            (json!("."), json!(1)),
+            (json!(""), json!(1)),
+            (json!("n"), json!("..")),
+            (json!(".."), json!("..")),
+        ] {
+            assert!(
+                s.build_request(
+                    op,
+                    "https://h",
+                    &args(json!({"node": node, "vmid": vmid})),
+                    Some("x")
+                )
+                .is_err()
+            );
+        }
+        let req = s
+            .build_request(
+                op,
+                "https://h",
+                &args(json!({"node": "../..", "vmid": "a.b"})),
+                Some("x"),
+            )
+            .unwrap();
+        assert_eq!(
+            req.url,
+            "https://h/api2/json/nodes/%2E%2E%2F%2E%2E/qemu/a%2Eb/status/current"
         );
     }
 
