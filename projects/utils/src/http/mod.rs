@@ -526,7 +526,7 @@ impl RequestBuilder {
         let header_pairs = header_pairs(resp.headers());
         let bytes = read_capped(resp, self.max_body.unwrap_or(MAX_RESPONSE_BYTES)).await?;
         if !(200..300).contains(&status) {
-            let summary = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]).into_owned();
+            let summary = error_summary(&String::from_utf8_lossy(&bytes[..bytes.len().min(256)]));
             return Err(HttpError::Status {
                 status,
                 summary: summary.clone(),
@@ -701,12 +701,31 @@ impl Response {
         }
     }
     fn summary(&self) -> String {
-        let s = self.text();
-        if s.len() <= 256 {
-            s
-        } else {
-            format!("{}…", &s[..256])
+        error_summary(&self.text())
+    }
+}
+
+fn error_summary(body: &str) -> String {
+    let cut = body.floor_char_boundary(256);
+    let scrubbed = crate::scrub::scrub_line(&body[..cut]).into_owned();
+    if cut < body.len() {
+        format!("{scrubbed}…")
+    } else {
+        scrubbed
+    }
+}
+
+pub fn redact_url(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(mut u) => {
+            u.set_query(None);
+            u.set_fragment(None);
+            u.set_username("")
+                .and_then(|()| u.set_password(None))
+                .unwrap_or_default();
+            u.to_string()
         }
+        Err(_) => raw.split(['?', '#']).next().unwrap_or_default().to_string(),
     }
 }
 
@@ -1053,6 +1072,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status, 200);
+    }
+
+    #[test]
+    fn response_summary_scrubs_secrets() {
+        let r = Response {
+            status: 401,
+            headers: HashMap::new(),
+            body: ResponseBody::Text {
+                text: r#"{"token":"s3cr3t","msg":"denied"}"#.into(),
+            },
+        };
+        let s = r.summary();
+        assert!(!s.contains("s3cr3t"), "{s}");
+        assert!(s.contains("denied"), "{s}");
+    }
+
+    #[test]
+    fn response_summary_truncates_on_char_boundary() {
+        let r = Response {
+            status: 500,
+            headers: HashMap::new(),
+            body: ResponseBody::Text {
+                text: "é".repeat(200),
+            },
+        };
+        assert!(r.summary().ends_with('…'));
+    }
+
+    #[test]
+    fn redact_url_drops_query_and_userinfo() {
+        assert_eq!(
+            redact_url("wss://u:pw@h.lan:8443/ws?token=abc#f"),
+            "wss://h.lan:8443/ws"
+        );
+        assert_eq!(redact_url("not a url?key=1"), "not a url");
     }
 
     #[test]
