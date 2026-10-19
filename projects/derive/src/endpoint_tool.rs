@@ -6,7 +6,7 @@
 //! resolve-and-enable-check, and an `#[orca_tool]` wrapper. `#[endpoint_tool]`
 //! collapses all of it — the author writes only the endpoint call:
 //!
-//! ```rust,ignore
+//! ```text
 //! #[endpoint_tool(domain = "home-assistant", verb = "entities")]
 //! /// List entities (optionally domain-filtered).
 //! async fn ha_entities(client: Client, #[arg(long)] domain: Option<String>) -> Result<JsonAny> {

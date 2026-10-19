@@ -7,7 +7,7 @@
 //! (`Arc<dyn StorageBackend>`, the whole plug-in registry model), which native
 //! `async fn`-in-trait still can't express.
 //!
-//! ```rust,ignore
+//! ```text
 //! #[orca_async]
 //! impl StorageBackend for MyBackend {
 //!     async fn mount(&self, id: &str) -> Result<MountOutcome> { /* just await */ }

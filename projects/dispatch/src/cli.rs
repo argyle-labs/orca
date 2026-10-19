@@ -1209,7 +1209,31 @@ async fn post_daemon_raw(
 
 /// Register one op with the unified CLI surface.
 ///
-/// ```ignore
+/// ```
+/// # extern crate self as plugin_toolkit;
+/// # pub extern crate dispatch;
+/// # pub use ::{anyhow, clap, contract, inventory, serde_json};
+/// # use contract::{OrcaTool, OrcaToolDef, ToolCtx};
+/// # use dispatch::register_op;
+/// # use schemars::JsonSchema;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Serialize, Deserialize, JsonSchema)]
+/// # pub struct Engine { name: String, url: String }
+/// # #[derive(Serialize, Deserialize, JsonSchema)]
+/// # pub struct Engines(Vec<Engine>);
+/// # #[derive(Serialize, Deserialize, JsonSchema, clap::Args)]
+/// # pub struct NoArgs {}
+/// # pub struct EngineList;
+/// # impl OrcaToolDef for EngineList {
+/// #     const NAME: &'static str = "engine_list";
+/// #     const DESCRIPTION: &'static str = "List engines.";
+/// #     type Args = NoArgs;
+/// #     type Output = Engines;
+/// # }
+/// # #[async_trait::async_trait]
+/// # impl OrcaTool for EngineList {
+/// #     async fn run(_: NoArgs, _: &ToolCtx) -> anyhow::Result<Engines> { Ok(Engines(vec![])) }
+/// # }
 /// register_op! {
 ///     tool: EngineList,
 ///     domain: "engine",
@@ -1219,6 +1243,7 @@ async fn post_daemon_raw(
 ///         for p in out.0 { println!("{} {}", p.name, p.url); }
 ///     }
 /// }
+/// # fn main() {}
 /// ```
 ///
 /// Requires `Tool::Args: clap::Args` so the macro can auto-derive the

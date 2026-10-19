@@ -20,7 +20,10 @@
 //! The reply is one `{ok, detail | error}` JSON line ([`PrivilegedReply`]) on
 //! stdout, and success needs both exit 0 and `ok: true`.
 //!
-//! ```ignore
+//! ```no_run
+//! # #[derive(serde::Deserialize)]
+//! # struct SetAutostart;
+//! # async fn set_autostart(_: SetAutostart) -> anyhow::Result<String> { Ok(String::new()) }
 //! fn main() -> anyhow::Result<()> {
 //!     if plugin_toolkit::privileged::requested() {
 //!         plugin_toolkit::privileged::PrivilegedOps::new()
@@ -28,6 +31,7 @@
 //!             .serve_stdin();
 //!     }
 //!     // ... normal plugin serve
+//! #   Ok(())
 //! }
 //! ```
 

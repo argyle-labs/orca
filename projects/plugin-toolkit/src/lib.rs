@@ -8,16 +8,18 @@
 //!
 //! ## Usage
 //!
-//! ```rust,ignore
+//! ```
+//! # #[cfg(all(feature = "tools", feature = "endpoints"))]
+//! # mod dockge {
 //! use plugin_toolkit::prelude::*;
 //!
-//! endpoint_resource! {
-//!     plugin: "dockge",
-//!     fields: {
-//!         base_url: String,
-//!         token:    String,
-//!     }
+//! #[endpoint_resource(plugin = "dockge")]
+//! pub struct DockgeEndpoint {
+//!     pub base_url: String,
+//!     #[secret]
+//!     pub token: String,
 //! }
+//! # }
 //! ```
 //!
 //! Generates `dockge.{list,detail,create,update,delete}` over a

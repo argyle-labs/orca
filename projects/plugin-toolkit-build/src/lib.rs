@@ -5,12 +5,14 @@
 //!
 //! Used from a plugin `build.rs`:
 //!
-//! ```rust,ignore
+//! ```no_run
 //! // build.rs (OpenAPI):
 //! fn main() {
 //!     plugin_toolkit_build::openapi::generate_all("specs", "arr").unwrap();
 //! }
+//! ```
 //!
+//! ```no_run
 //! // build.rs (GraphQL):
 //! fn main() {
 //!     plugin_toolkit_build::graphql::generate(
