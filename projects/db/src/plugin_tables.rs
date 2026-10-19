@@ -160,15 +160,50 @@ fn column_ddl(c: &ColumnSpec) -> Result<String> {
         ddl.push_str(" NOT NULL");
     }
     if let Some(d) = &c.default {
-        // Default is raw SQL by design (CURRENT_TIMESTAMP, 0, ''); it is not an
-        // identifier. Keep it to a conservative shape so it can't carry a
-        // statement terminator or comment.
-        if d.contains(';') || d.contains("--") {
-            bail!("column `{}` default contains illegal characters", c.name);
-        }
-        ddl.push_str(&format!(" DEFAULT {d}"));
+        let Some(lit) = default_literal(d) else {
+            bail!("column `{}` default `{d}` is not a literal", c.name);
+        };
+        ddl.push_str(&format!(" DEFAULT {lit}"));
     }
     Ok(ddl)
+}
+
+fn default_literal(d: &str) -> Option<String> {
+    let d = d.trim();
+    let upper = d.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "NULL" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME"
+    ) {
+        return Some(upper);
+    }
+    if is_numeric_literal(d) {
+        return Some(d.to_string());
+    }
+    let inner = d.strip_prefix('\'')?.strip_suffix('\'')?;
+    let mut value = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' && chars.next() != Some('\'') {
+            return None;
+        }
+        value.push(ch);
+    }
+    Some(format!("'{}'", value.replace('\'', "''")))
+}
+
+fn is_numeric_literal(d: &str) -> bool {
+    let body = d.strip_prefix(['-', '+']).unwrap_or(d);
+    let (mantissa, exponent) = match body.split_once(['e', 'E']) {
+        Some((m, e)) => (m, Some(e.strip_prefix(['-', '+']).unwrap_or(e))),
+        None => (body, None),
+    };
+    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    (!int.is_empty() || !frac.is_empty())
+        && digits(int)
+        && digits(frac)
+        && exponent.is_none_or(|e| !e.is_empty() && digits(e))
 }
 
 /// Materialize / converge one plugin-declared table. Idempotent: re-applying an
@@ -415,6 +450,57 @@ mod tests {
             .unwrap();
         assert_eq!(url, "http://x");
         assert_eq!(enabled, 1);
+    }
+
+    #[test]
+    fn default_accepts_only_literals() {
+        for (input, want) in [
+            ("0", "0"),
+            ("-12", "-12"),
+            ("3.5", "3.5"),
+            ("1e-3", "1e-3"),
+            ("null", "NULL"),
+            ("current_timestamp", "CURRENT_TIMESTAMP"),
+            ("CURRENT_DATE", "CURRENT_DATE"),
+            ("CURRENT_TIME", "CURRENT_TIME"),
+            ("''", "''"),
+            ("'pending'", "'pending'"),
+            ("'it''s'", "'it''s'"),
+        ] {
+            assert_eq!(default_literal(input).as_deref(), Some(want), "{input}");
+        }
+        for bad in [
+            "",
+            "'unterminated",
+            "'a' || 'b'",
+            "'x'' ",
+            "'a'b'",
+            "1 + 1",
+            "(SELECT 1)",
+            "abs(1)",
+            "x'00'",
+            "TRUE",
+            "1e",
+            ".",
+            "0) CHECK (1",
+        ] {
+            assert_eq!(default_literal(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn non_literal_default_is_refused() {
+        let c = conn();
+        let mut bad = schema_v1();
+        bad.columns.push(ColumnSpec {
+            name: "evil".into(),
+            sql_type: "TEXT".into(),
+            not_null: false,
+            primary_key: false,
+            default: Some("(SELECT value FROM secrets)".into()),
+            secret: false,
+        });
+        assert!(apply(&c, "mcp", &bad).is_err());
     }
 
     #[test]
