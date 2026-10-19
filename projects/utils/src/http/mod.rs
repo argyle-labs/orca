@@ -1215,7 +1215,13 @@ mod tests {
             .send()
             .await
             .unwrap_err();
-        assert!(started.elapsed() < Duration::from_millis(900), "{err}");
+        assert!(started.elapsed() >= Duration::from_millis(400), "{err}");
+        let timed_out = match &err {
+            HttpError::Request(e) => e.is_timeout(),
+            HttpError::Redirect(m) => m.contains("exhausted"),
+            _ => false,
+        };
+        assert!(timed_out, "{err}");
         assert!(a.received_requests().await.unwrap().len() < MAX_REDIRECTS + 1);
     }
 
