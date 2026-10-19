@@ -81,12 +81,6 @@ where
         .map_err(|_| anyhow!("capability I/O task panicked"))
 }
 
-/// The daemon's shared HTTP client for capability requests.
-fn http_client() -> &'static utils::http::Client {
-    static CLIENT: OnceLock<utils::http::Client> = OnceLock::new();
-    CLIENT.get_or_init(utils::http::Client::new)
-}
-
 /// An agents provider name belongs to `principal` when it is the plugin id or its
 /// owner-qualified form (`argyle-labs/agents` for plugin `agents`). Provider
 /// names key the registry, so this stops one plugin replacing another's roster.
@@ -301,7 +295,7 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
         "http.request" => {
             let req: HttpRequest = serde_json::from_value(args)
                 .map_err(|e| anyhow!("http.request: bad request payload: {e}"))?;
-            let builder = http_client()
+            let builder = utils::http::shared()
                 .raw_request(utils::http::RawRequest {
                     method: req.method,
                     url: req.url,
@@ -396,7 +390,7 @@ fn exec_http_stream(
     req: HttpStreamRequest,
     on_chunk: &mut dyn FnMut(u64, Value) -> Result<()>,
 ) -> Result<()> {
-    let builder = http_client()
+    let builder = utils::http::shared()
         .raw_request(utils::http::RawRequest {
             method: req.method,
             url: req.url,

@@ -1,10 +1,10 @@
 #![allow(clippy::disallowed_types)]
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, anyhow, bail};
-use contract::CallerIdentity;
+use contract::{CallerIdentity, ToolCtx};
 use openapi::surface::{ApiOp, ApiSurface, EndpointBinding, SurfaceKind};
 use plugin_abi::{DbOp, DbRow, DbValue, SecretOp};
 use serde::Serialize;
@@ -71,13 +71,27 @@ impl std::fmt::Display for Forbidden {
 
 impl std::error::Error for Forbidden {}
 
-#[derive(Debug, Clone, Copy)]
-pub struct Invocation<'a> {
-    pub caller: &'a CallerIdentity,
-    pub dry_run: bool,
-    pub execute_confirmed: bool,
-    pub local: bool,
-    pub second_factor: bool,
+#[derive(Debug, Clone)]
+pub struct Invocation {
+    caller: CallerIdentity,
+    dry_run: bool,
+    local: bool,
+    second_factor: bool,
+}
+
+impl Invocation {
+    pub fn from_ctx(ctx: &ToolCtx) -> Result<Self> {
+        let caller = ctx
+            .verified_caller()
+            .cloned()
+            .ok_or_else(|| anyhow!("api-surface calls require an authenticated caller"))?;
+        Ok(Self {
+            caller,
+            dry_run: ctx.dry_run(),
+            local: ctx.local_transport(),
+            second_factor: ctx.second_factor(),
+        })
+    }
 }
 
 pub fn register(plugin: &str, surface: ApiSurface) -> Result<()> {
@@ -164,7 +178,13 @@ pub fn required_role(kind: SurfaceKind, op: &ApiOp) -> &'static str {
     }
 }
 
-fn gate(surface: &ApiSurface, op: &ApiOp, inv: &Invocation<'_>) -> Result<()> {
+fn gate(
+    surface: &ApiSurface,
+    op: &ApiOp,
+    inv: &Invocation,
+    dry_run: bool,
+    execute_confirmed: bool,
+) -> Result<()> {
     let required = required_role(surface.kind, op);
     let deny = |reason: String| -> Result<()> {
         Err(Forbidden {
@@ -182,25 +202,23 @@ fn gate(surface: &ApiSurface, op: &ApiOp, inv: &Invocation<'_>) -> Result<()> {
     if required == "super-admin" && !inv.second_factor {
         return deny("requires a verified second factor".into());
     }
-    if op.policy.execute_gated && !inv.dry_run && !inv.execute_confirmed {
+    if op.policy.execute_gated && !dry_run && !execute_confirmed {
         return deny("requires explicit execute confirmation".into());
     }
     Ok(())
 }
 
-pub async fn execute(
-    plugin: &str,
-    tool: &str,
-    args: Value,
-    inv: &Invocation<'_>,
-) -> Result<Outcome> {
+pub async fn execute(plugin: &str, tool: &str, args: Value, inv: &Invocation) -> Result<Outcome> {
     let (surface, index) = lookup(plugin, tool)?;
     let op = &surface.ops[index];
-    gate(&surface, op, inv)?;
-
     let Value::Object(mut args) = args else {
         bail!("{tool}: arguments must be an object");
     };
+    let execute_confirmed = args.remove(contract::plan::EXECUTE_FIELD) == Some(Value::Bool(true));
+    let dry_run =
+        inv.dry_run || args.remove(contract::plan::DRY_RUN_FIELD) == Some(Value::Bool(true));
+    gate(&surface, op, inv, dry_run, execute_confirmed)?;
+
     let endpoint = match args.remove(ENDPOINT_ARG) {
         Some(Value::String(e)) => e,
         _ => bail!("{tool}: missing `{ENDPOINT_ARG}`"),
@@ -223,7 +241,7 @@ pub async fn execute(
         .as_ref()
         .map(|auth| auth.secret.replace("{endpoint}", &endpoint));
 
-    if inv.dry_run {
+    if dry_run {
         if let Some(name) = &secret_name {
             let op = SecretOp::Exists { name: name.clone() };
             if !utils::reactor::off_async_worker(|| secret_op(plugin, &op))?.found {
@@ -249,7 +267,7 @@ pub async fn execute(
     })
     .await?;
     let req = surface.build_request(op, &base, &args, secret.as_deref())?;
-    let builder = http_client()
+    let builder = utils::http::shared()
         .raw_request(utils::http::RawRequest {
             method: req.method,
             url: req.url,
@@ -274,11 +292,6 @@ pub async fn execute(
     surface
         .decode_response(op, &resp.body)
         .map(Outcome::Response)
-}
-
-fn http_client() -> &'static utils::http::Client {
-    static CLIENT: OnceLock<utils::http::Client> = OnceLock::new();
-    CLIENT.get_or_init(utils::http::Client::new)
 }
 
 fn endpoint_row(plugin: &str, binding: &EndpointBinding, endpoint: &str) -> Result<DbRow> {
@@ -405,14 +418,30 @@ mod tests {
         }
     }
 
-    fn inv(caller: &CallerIdentity, dry_run: bool) -> Invocation<'_> {
-        Invocation {
-            caller,
-            dry_run,
-            execute_confirmed: false,
-            local: true,
-            second_factor: false,
-        }
+    fn ctx(caller: &CallerIdentity, dry_run: bool, local: bool, second_factor: bool) -> ToolCtx {
+        use contract::config::{Config, Model};
+        let mut ctx = ToolCtx::new(std::sync::Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: "/tmp".into(),
+            memory_root: "/tmp".into(),
+            db_path: "/tmp/test.db".into(),
+            ports: Default::default(),
+        }));
+        ctx.set_verified_caller(Some(caller.clone()));
+        ctx.set_dry_run(dry_run);
+        ctx.set_local_transport(local);
+        ctx.set_second_factor(second_factor);
+        ctx
+    }
+
+    fn inv(caller: &CallerIdentity, dry_run: bool) -> Invocation {
+        Invocation::from_ctx(&ctx(caller, dry_run, true, false)).unwrap()
     }
 
     fn op(method: &str, role: &str, data_mutation: bool) -> ApiOp {
@@ -518,42 +547,58 @@ mod tests {
         let admin = caller("admin", false);
         let mut gated = op("POST", "admin", false);
         gated.policy.execute_gated = true;
-        assert!(gate(&s, &gated, &inv(&admin, true)).is_ok());
-        assert!(gate(&s, &gated, &inv(&admin, false)).is_err());
-        let confirmed = Invocation {
-            execute_confirmed: true,
-            ..inv(&admin, false)
-        };
-        assert!(gate(&s, &gated, &confirmed).is_ok());
+        assert!(gate(&s, &gated, &inv(&admin, false), true, false).is_ok());
+        assert!(gate(&s, &gated, &inv(&admin, false), false, false).is_err());
+        assert!(gate(&s, &gated, &inv(&admin, false), false, true).is_ok());
 
         let mut local = op("GET", "read", false);
         local.policy.local_only = true;
-        let remote = Invocation {
-            local: false,
-            ..inv(&admin, true)
-        };
-        assert!(gate(&s, &local, &remote).is_err());
-        assert!(gate(&s, &local, &inv(&admin, true)).is_ok());
+        let remote = Invocation::from_ctx(&ctx(&admin, false, false, false)).unwrap();
+        assert!(gate(&s, &local, &remote, false, false).is_err());
+        assert!(gate(&s, &local, &inv(&admin, false), false, false).is_ok());
 
         let sensitive = op("POST", "super-admin", false);
         let root = caller("super-admin", false);
-        assert!(gate(&s, &sensitive, &inv(&root, true)).is_err());
-        let verified = Invocation {
-            second_factor: true,
-            ..inv(&root, true)
-        };
-        assert!(gate(&s, &sensitive, &verified).is_ok());
-        assert!(
-            gate(
-                &s,
-                &sensitive,
-                &Invocation {
-                    caller: &admin,
-                    ..verified
-                }
-            )
-            .is_err()
-        );
+        assert!(gate(&s, &sensitive, &inv(&root, true), true, false).is_err());
+        let verified = Invocation::from_ctx(&ctx(&root, true, true, true)).unwrap();
+        assert!(gate(&s, &sensitive, &verified, true, false).is_ok());
+        let admin_2fa = Invocation::from_ctx(&ctx(&admin, true, true, true)).unwrap();
+        assert!(gate(&s, &sensitive, &admin_2fa, true, false).is_err());
+    }
+
+    #[test]
+    fn invocation_requires_verified_caller_and_defaults_closed() {
+        let mut bare = ctx(&caller("admin", false), false, true, true);
+        bare.set_verified_caller(None);
+        assert!(Invocation::from_ctx(&bare).is_err());
+        let mut fresh = ctx(&caller("admin", false), false, false, false);
+        fresh.set_local_transport(false);
+        let inv = Invocation::from_ctx(&fresh).unwrap();
+        assert!(!inv.local && !inv.second_factor);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn args_cannot_grant_local_or_second_factor() {
+        let mut s = surface("spoof", "spoof.{endpoint}.token");
+        s.ops[0].policy.local_only = true;
+        s.ops[1].policy.role = "super-admin".into();
+        register("spoof", s).unwrap();
+        let root = caller("super-admin", false);
+        let remote = Invocation::from_ctx(&ctx(&root, true, false, false)).unwrap();
+        for (tool, extra) in [
+            (
+                "spoof.item",
+                json!({"endpoint": "main", "id": 1, "local": true, "localTransport": true}),
+            ),
+            (
+                "spoof.create",
+                json!({"endpoint": "main", "name": "n", "secondFactor": true, "second_factor": true}),
+            ),
+        ] {
+            let err = execute("spoof", tool, extra, &remote).await.unwrap_err();
+            assert!(err.downcast_ref::<Forbidden>().is_some(), "{tool}: {err}");
+        }
+        deregister("spoof");
     }
 
     #[test]

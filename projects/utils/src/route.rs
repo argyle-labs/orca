@@ -309,7 +309,7 @@ impl<'a> IntoIterator for &'a Routes {
 /// through to a raw-IP route.
 #[cfg(feature = "http")]
 pub async fn probe_http(url: &str, insecure: bool) -> bool {
-    match crate::http::Client::new()
+    match crate::http::shared()
         .get(url)
         .insecure(insecure)
         .timeout(std::time::Duration::from_secs(3))
