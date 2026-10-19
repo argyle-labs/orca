@@ -341,7 +341,7 @@ impl ApiSurface {
                 for p in &op.params {
                     match args.get(&p.name).filter(|v| !v.is_null()) {
                         Some(v) => {
-                            fields.insert(p.name.clone(), v.clone());
+                            fields.insert(p.wire_name().to_string(), v.clone());
                         }
                         None if p.required => {
                             bail!("{}: missing required `{}`", op.tool, p.name)
@@ -853,8 +853,11 @@ mod tests {
                 "ops": [{
                     "tool": "unraid.array",
                     "method": "POST",
-                    "path": "query($id: ID!) { array(id: $id) { state } }",
-                    "params": [{"name": "id", "in": "body", "required": true}],
+                    "path": "query($id: ID!, $diskId: ID) { array(id: $id) { state } }",
+                    "params": [
+                        {"name": "id", "in": "body", "required": true},
+                        {"name": "disk_id", "wire": "diskId", "in": "body"}
+                    ],
                     "policy": {"role": "user"}
                 }]
             })
@@ -863,12 +866,17 @@ mod tests {
         .unwrap();
         let op = s.find("unraid.array").unwrap();
         let req = s
-            .build_request(op, "http://tower", &args(json!({"id": "a1"})), None)
+            .build_request(
+                op,
+                "http://tower",
+                &args(json!({"id": "a1", "disk_id": "d1"})),
+                None,
+            )
             .unwrap();
         assert_eq!(req.method, "POST");
         assert_eq!(req.url, "http://tower/graphql");
         let body: Value = serde_json::from_slice(&req.body).unwrap();
-        assert_eq!(body["variables"], json!({"id": "a1"}));
+        assert_eq!(body["variables"], json!({"id": "a1", "diskId": "d1"}));
         assert_eq!(body["query"], json!(op.path));
     }
 
