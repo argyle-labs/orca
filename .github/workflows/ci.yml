@@ -1,6 +1,7 @@
 name: CI
 
-# Required checks are exactly `build`, `test` and `lint`. Each crate is hashed
+# Required checks are exactly `build`, `test` and `lint`; `test` gates on four
+# nextest hash shards (`test-shard`), each with its own test-<k>-of-4 marker. Each crate is hashed
 # with its workspace dependency closure (crate-hashes). The build and clippy
 # always compile --workspace so feature unification matches a full build; they
 # are skipped only when every crate already has a recorded pass. `test` runs
@@ -88,7 +89,7 @@ jobs:
         with:
           mode: check-batch
           job: build
-          also-require: test
+          also-require: test-1-of-4 test-2-of-4 test-3-of-4 test-4-of-4
           hashes: ${{ steps.src.outputs.hashes }}
           force: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
           endpoint: ${{ vars.SCCACHE_ENDPOINT }}
@@ -164,10 +165,14 @@ jobs:
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
 
-  test:
-    name: test
+  test-shard:
+    name: test (${{ matrix.shard }}/4)
     needs: build
     runs-on: ci-large
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
       credentials:
@@ -201,13 +206,14 @@ jobs:
         uses: argyle-labs/.github/.github/actions/cargo-llvm-cov@main
         with:
           nextest-args: --no-fail-fast --no-tests=pass ${{ needs.build.outputs.selection != 'all' && format('-E {0}', needs.build.outputs.selection) || '' }}
+          partition: ${{ matrix.shard }}/4
       # One failing test withholds the marker from every selected crate.
       - name: Record pass
         if: ${{ success() && needs.build.outputs.selection != '' }}
         uses: argyle-labs/.github/.github/actions/ci-pass-cache@main
         with:
           mode: record-batch
-          job: test
+          job: test-${{ matrix.shard }}-of-4
           hashes: ${{ needs.build.outputs.hashes }}
           crates: ${{ needs.build.outputs.missing }}
           endpoint: ${{ vars.SCCACHE_ENDPOINT }}
@@ -216,6 +222,21 @@ jobs:
       - name: CI summary
         uses: argyle-labs/.github/.github/actions/ci-summary@main
         if: ${{ !cancelled() }}
+
+  # Keeps the required `test` check: passes only when every shard passed.
+  test:
+    name: test
+    needs: [build, test-shard]
+    if: ${{ always() }}
+    runs-on: ci-large
+    steps:
+      - name: All shards passed
+        env:
+          BUILD: ${{ needs.build.result }}
+          SHARDS: ${{ needs.test-shard.result }}
+        run: |
+          echo "build=$BUILD test-shard=$SHARDS"
+          [ "$BUILD" = success ] && [ "$SHARDS" = success ]
 
   lint:
     name: lint
