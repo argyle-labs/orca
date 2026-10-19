@@ -32,6 +32,7 @@ pub struct Request {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     timeout_ms: Option<u64>,
+    max_body_bytes: Option<u64>,
     insecure: bool,
 }
 
@@ -44,6 +45,7 @@ impl Request {
             headers: Vec::new(),
             body: Vec::new(),
             timeout_ms: None,
+            max_body_bytes: None,
             insecure: false,
         }
     }
@@ -74,6 +76,11 @@ impl Request {
         self
     }
 
+    pub fn max_body(mut self, bytes: u64) -> Self {
+        self.max_body_bytes = Some(bytes);
+        self
+    }
+
     /// Skip TLS verification (self-signed upstreams).
     pub fn insecure(mut self, on: bool) -> Self {
         self.insecure = on;
@@ -88,6 +95,7 @@ impl Request {
             body: self.body.clone(),
             timeout_ms: self.timeout_ms,
             insecure: self.insecure,
+            max_body_bytes: self.max_body_bytes,
         }
     }
 
