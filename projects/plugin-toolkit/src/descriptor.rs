@@ -240,11 +240,11 @@ pub fn execute(
         }
         match p.loc {
             ParamLoc::Path => {
-                let raw = scalar_to_string(v);
+                let raw = ::utils::json_wire::wire_string(v);
                 let placeholder = format!("{{{}}}", p.name);
                 path = path.replace(&placeholder, &crate::url::encode(&raw));
             }
-            ParamLoc::Query => push_query(&mut query, p.name, v),
+            ParamLoc::Query => ::utils::json_wire::push_query(&mut query, p.name, v),
             ParamLoc::Body => {
                 body.insert(p.name.to_string(), v.clone());
             }
@@ -254,13 +254,8 @@ pub fn execute(
 
     let mut url = crate::url::join(&target.base_url, &path);
     if !query.is_empty() {
-        let qs = query
-            .iter()
-            .map(|(k, v)| format!("{}={}", crate::url::encode(k), crate::url::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
         url.push('?');
-        url.push_str(&qs);
+        url.push_str(&crate::url::query_string(&query));
     }
 
     // 4. Header params + resolved auth headers.
@@ -269,7 +264,7 @@ pub fn execute(
         if p.loc == ParamLoc::Header
             && let Some(v) = obj.get(p.name).filter(|v| !v.is_null())
         {
-            headers.push((p.name.to_string(), scalar_to_string(v)));
+            headers.push((p.name.to_string(), ::utils::json_wire::wire_string(v)));
         }
     }
     let body_bytes = if body.is_empty() {
@@ -320,31 +315,6 @@ pub fn execute(
         );
     }
     Ok(out)
-}
-
-/// Render a scalar JSON value as its wire string (path/query/header form).
-/// Objects/arrays are JSON-encoded (rare for path/query, but well-defined).
-fn scalar_to_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
-/// Append a query param. Arrays expand to repeated keys (`k=a&k=b`), matching
-/// the common OpenAPI `explode` default.
-fn push_query(out: &mut Vec<(String, String)>, key: &str, v: &Value) {
-    match v {
-        Value::Array(items) => {
-            for it in items {
-                out.push((key.to_string(), scalar_to_string(it)));
-            }
-        }
-        other => out.push((key.to_string(), scalar_to_string(other))),
-    }
 }
 
 // ── Dependency-free JSON-Schema validator ────────────────────────────────────
@@ -762,30 +732,6 @@ mod tests {
         );
         let m: Vec<Value> = serde_json::from_str(&T.manifest_json()).unwrap();
         assert_eq!(m[0]["input_schema"]["$defs"]["Node"]["type"], "object");
-    }
-
-    #[test]
-    fn scalar_to_string_covers_all_kinds() {
-        assert_eq!(scalar_to_string(&json!("x")), "x");
-        assert_eq!(scalar_to_string(&json!(true)), "true");
-        assert_eq!(scalar_to_string(&json!(5)), "5");
-        assert_eq!(scalar_to_string(&Value::Null), "");
-        assert_eq!(scalar_to_string(&json!([1, 2])), "[1,2]");
-    }
-
-    #[test]
-    fn push_query_expands_arrays_and_scalars() {
-        let mut out = Vec::new();
-        push_query(&mut out, "k", &json!("a"));
-        push_query(&mut out, "tags", &json!(["x", "y"]));
-        assert_eq!(
-            out,
-            vec![
-                ("k".to_string(), "a".to_string()),
-                ("tags".to_string(), "x".to_string()),
-                ("tags".to_string(), "y".to_string()),
-            ]
-        );
     }
 
     #[test]

@@ -22,6 +22,7 @@ pub mod hash;
 pub mod home;
 pub mod id;
 pub mod json_schema;
+pub mod json_wire;
 pub mod jsonrpc;
 pub mod mesh_compat;
 pub mod mesh_status;
