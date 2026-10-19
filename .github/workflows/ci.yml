@@ -43,7 +43,7 @@ jobs:
           force: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
           drop-cargo-config: 'false'
           version-env: ORCA_RELEASE_VERSION
-          doctests: 'false'
+          doctests: 'true'
           size-check: 'false'
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
