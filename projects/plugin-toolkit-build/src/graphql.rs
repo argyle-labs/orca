@@ -6,7 +6,7 @@
 //!
 //! Emitted module layout (per schema version `v_1`):
 //!
-//! ```rust,ignore
+//! ```text
 //! pub mod v_1 {
 //!     pub type BigInt = String;
 //!     pub type PrefixedID = String;

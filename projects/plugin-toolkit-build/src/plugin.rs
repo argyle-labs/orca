@@ -19,7 +19,9 @@
 //! fully-covered plugin becomes a spec file plus a handful of lines, with no
 //! hand-written client to break under `delegated-http` ever again.
 //!
-//! ```rust,ignore
+//! ```no_run
+//! # use plugin_toolkit_build::{Auth, OpenApiPlugin};
+//! # fn main() -> anyhow::Result<()> {
 //! // build.rs — the entire plugin build
 //! plugin_toolkit_build::openapi_plugin(OpenApiPlugin {
 //!     domain: "jellyfin",
@@ -27,10 +29,12 @@
 //!     keep_paths: &[],                 // empty = the full API surface
 //!     auth: Auth::header("authorization", r#"MediaBrowser Token="{token}""#),
 //! })?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! The plugin then stitches the three emitted files (all under `OUT_DIR`) with:
-//! ```rust,ignore
+//! ```text
 //! pub mod generated { include!(concat!(env!("OUT_DIR"), "/jellyfin_codegen.rs")); }
 //! pub mod surface   { include!(concat!(env!("OUT_DIR"), "/jellyfin_surface.rs")); }
 //! pub mod tools     { include!(concat!(env!("OUT_DIR"), "/jellyfin_wiring.rs")); /* + specials */ }

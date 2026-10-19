@@ -9,8 +9,13 @@
 //! linking neither progenitor nor a compiled type per operation.
 //!
 //! Run from a plugin `build.rs`:
-//! ```rust,ignore
+//! ```no_run
+//! # fn main() -> anyhow::Result<()> {
+//! # let specs_dir = std::path::PathBuf::from("specs");
+//! # let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
 //! plugin_toolkit_build::descriptor::generate(&specs_dir, &out_dir, "proxmox")?;
+//! # Ok(())
+//! # }
 //! ```
 //! Emits `<out_dir>/<flavor>_descriptors.rs`, exposing `pub static TABLE` and
 //! `pub static DESCRIPTORS`. The plugin `include!`s it.

@@ -111,10 +111,14 @@ pub fn generate_all_with_options(
 /// `keep` is codegenned whole (same as [`generate_all`]). Pruning runs *after*
 /// any 3.1→3.0 lowering so the keep-list is matched against the final path set.
 ///
-/// ```rust,ignore
+/// ```no_run
+/// # use plugin_toolkit_build::openapi::generate_selected;
+/// # fn main() -> anyhow::Result<()> {
 /// generate_selected("specs", "jellyfin", &[
 ///     ("jellyfin", &["/System/Info", "/Sessions", "/Library/VirtualFolders"]),
 /// ])?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn generate_selected(
     specs_dir: impl AsRef<Path>,
