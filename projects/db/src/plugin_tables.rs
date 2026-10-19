@@ -73,6 +73,26 @@ pub fn validate_segment(kind: &str, s: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_principal(s: &str) -> Result<()> {
+    let ok = s.len() <= 64
+        && s.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+        && s.bytes()
+            .all(|b| b == b'-' || b.is_ascii_lowercase() || b.is_ascii_digit())
+        && !s.ends_with('-')
+        && !s.contains("--");
+    if !ok {
+        bail!(
+            "invalid principal `{s}`: must match [a-z][a-z0-9-]* without trailing or doubled `-` (max 64)"
+        );
+    }
+    Ok(())
+}
+
+pub fn namespace_segment(namespace: &str) -> Result<String> {
+    validate_principal(namespace)?;
+    Ok(namespace.replace('-', "_"))
+}
+
 /// Allow-list of column types. Keeps the declared type to SQLite's real storage
 /// classes so a plugin can't smuggle a constraint clause through the type field.
 fn validate_type(t: &str) -> Result<()> {
@@ -86,14 +106,13 @@ fn validate_type(t: &str) -> Result<()> {
 /// prefix + namespace segment is what keeps a plugin's tables in their own
 /// space and unable to collide with core orca tables or another plugin's.
 pub fn physical_table_name(namespace: &str, table: &str) -> Result<String> {
-    validate_segment("namespace", namespace)?;
+    let ns = namespace_segment(namespace)?;
     validate_segment("table", table)?;
-    Ok(format!("plug__{namespace}__{table}"))
+    Ok(format!("plug__{ns}__{table}"))
 }
 
 pub fn drop_namespace(conn: &Connection, namespace: &str) -> Result<Vec<String>> {
-    validate_segment("namespace", namespace)?;
-    let prefix = format!("plug__{namespace}__");
+    let prefix = format!("plug__{}__", namespace_segment(namespace)?);
     let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
     let mut tables: Vec<String> = stmt
         .query_map([], |r| r.get::<_, String>(0))?
@@ -253,7 +272,7 @@ pub fn apply_decl(
     if decl.namespace.is_empty() {
         bail!("schema declaration lists tables but no namespace");
     }
-    validate_segment("principal", principal)?;
+    validate_principal(principal)?;
     if decl.namespace != principal {
         bail!(
             "plugin '{principal}' declared schema namespace '{}' — refusing foreign namespace",
@@ -307,7 +326,7 @@ mod tests {
     #[test]
     fn drop_namespace_touches_only_that_exact_id() {
         let c = conn();
-        for ns in ["foo", "foo_bar", "foox", "fo"] {
+        for ns in ["foo", "foo-bar", "foox", "fo"] {
             apply(&c, ns, &schema_v1()).unwrap();
         }
         c.execute_batch("CREATE TABLE plug_foo__x (id TEXT)")
@@ -1493,6 +1512,51 @@ mod segment_tests {
         assert!(physical_table_name("a", "b").is_ok());
         assert!(physical_table_name("a__b", "c").is_err());
         assert!(physical_table_name("a", "b__c").is_err());
-        assert!(physical_table_name("a_b", "c_d").is_ok());
+        assert!(physical_table_name("a_b", "c_d").is_err());
+        assert!(physical_table_name("a", "c_d").is_ok());
+    }
+
+    #[test]
+    fn hyphenated_namespace_maps_to_underscore() {
+        assert_eq!(
+            physical_table_name("calibre-web", "books").unwrap(),
+            "plug__calibre_web__books"
+        );
+        assert_eq!(
+            physical_table_name("zwave-js-ui", "nodes").unwrap(),
+            "plug__zwave_js_ui__nodes"
+        );
+    }
+
+    #[test]
+    fn principal_rules() {
+        for ok in ["calibre-web", "uptime-kuma", "zwave-js-ui", "mcp", "a1"] {
+            assert!(validate_principal(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "-a",
+            "a-",
+            "a--b",
+            "calibre_web",
+            "1a",
+            "A",
+            "a.b",
+            "a b",
+            "a\"",
+            &"a".repeat(65),
+        ] {
+            assert!(validate_principal(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn mapping_is_injective() {
+        assert!(physical_table_name("calibre_web", "t").is_err());
+        assert!(physical_table_name("a--b", "t").is_err());
+        assert_ne!(
+            physical_table_name("a-b", "c").unwrap(),
+            physical_table_name("a", "b_c").unwrap()
+        );
     }
 }
