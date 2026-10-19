@@ -28,7 +28,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use plugin_proto::{
-    Frame, PROTOCOL_VERSION, ToolDef, VerifiedCaller, protocol_compatible, read_frame, write_frame,
+    API_SURFACE_FORMAT, ApiSurfaceRef, Frame, PROTOCOL_VERSION, ToolDef, VerifiedCaller,
+    protocol_compatible, read_frame, write_frame,
 };
 use serde_json::Value;
 
@@ -38,6 +39,8 @@ use crate::tool_manifest::{manifest_for_prefixes, minimal_ctx};
 
 /// What a plugin declares about itself when it starts serving. The tool manifest
 /// is derived from the linked `#[orca_tool]` inventory filtered to `prefixes`.
+#[derive(Default)]
+#[non_exhaustive]
 pub struct PluginSpec {
     /// Plugin name (== `target_software`).
     pub name: String,
@@ -57,6 +60,9 @@ pub struct PluginSpec {
     /// to the `#[orca_tool]` dispatch surface. `None` here means a pure tool
     /// plugin. Same signature as `export_tool_plugin!`'s `backend_dispatch`.
     pub backend_dispatch: Option<BackendDispatch>,
+    /// Embedded `orca.api-surface/v1` documents, `(name, body)`, advertised in
+    /// the Hello and served on `SurfaceGet`.
+    pub api_surfaces: Vec<(String, &'static [u8])>,
 }
 
 /// Hybrid backend dispatch: `(tool, args) -> Option<Result<result, error>>`,
@@ -118,6 +124,42 @@ fn declared_surface(spec: &PluginSpec) -> Result<Value> {
         "tools": derive_manifest(&spec.prefixes)?,
         "backends": backends,
     }))
+}
+
+fn surface_refs(surfaces: &[(String, &'static [u8])]) -> Result<Vec<ApiSurfaceRef>> {
+    let mut refs: Vec<ApiSurfaceRef> = Vec::with_capacity(surfaces.len());
+    for (name, body) in surfaces {
+        if name.is_empty() {
+            bail!("api surface name is empty");
+        }
+        if refs.iter().any(|r| &r.name == name) {
+            bail!("api surface `{name}` registered twice");
+        }
+        std::str::from_utf8(body).with_context(|| format!("api surface `{name}` is not UTF-8"))?;
+        refs.push(ApiSurfaceRef {
+            name: name.clone(),
+            sha256: crate::hash::sha256_hex(body),
+            format: API_SURFACE_FORMAT.to_string(),
+        });
+    }
+    Ok(refs)
+}
+
+fn surface_reply(surfaces: &[(String, &'static [u8])], id: u64, name: &str) -> Frame {
+    match surfaces.iter().find(|(n, _)| n == name) {
+        Some((_, body)) => Frame::Surface {
+            id,
+            ok: true,
+            body: String::from_utf8_lossy(body).into_owned(),
+            error: None,
+        },
+        None => Frame::Surface {
+            id,
+            ok: false,
+            body: String::new(),
+            error: Some(format!("no api surface `{name}`")),
+        },
+    }
 }
 
 /// Connect the orca-provided socket and serve until shutdown. A plugin's
@@ -213,7 +255,7 @@ fn serve_session<S: Read + Write + 'static>(
         manifest,
         backends,
         schema,
-        api_surfaces: Vec::new(),
+        api_surfaces: surface_refs(&spec.api_surfaces)?,
     };
     write_frame(&mut *stream.borrow_mut(), &hello)?;
 
@@ -302,6 +344,12 @@ fn serve_session<S: Read + Write + 'static>(
                     },
                 };
                 write_frame(&mut *stream.borrow_mut(), &reply)?;
+            }
+            Frame::SurfaceGet { id, name } => {
+                write_frame(
+                    &mut *stream.borrow_mut(),
+                    &surface_reply(&spec.api_surfaces, id, &name),
+                )?;
             }
             Frame::Shutdown => break,
             // Stray frames outside an active capability round-trip — ignore.
@@ -571,6 +619,7 @@ mod tests {
             backends_json: "[]".into(),
             schema_json: r#"{"namespace":"","tables":[]}"#.into(),
             backend_dispatch: None,
+            api_surfaces: Vec::new(),
         }
     }
 
@@ -784,6 +833,7 @@ mod tests {
                 .into(),
             schema_json: String::new(),
             backend_dispatch: None,
+            api_surfaces: Vec::new(),
         };
 
         let surface = declared_surface(&spec).expect("surface builds");
@@ -803,5 +853,119 @@ mod tests {
             "the capability that stranded the fleet is visible: {caps:?}"
         );
         assert!(surface.get("tools").is_some(), "tools still included");
+    }
+
+    const SURFACE: &[u8] =
+        br#"{"format":"orca.api-surface/v1","surface":"main","kind":"rest","ops":[]}"#;
+
+    fn welcomed(
+        surfaces: Vec<(String, &'static [u8])>,
+    ) -> (
+        thread::JoinHandle<Result<()>>,
+        UnixStream,
+        Vec<ApiSurfaceRef>,
+    ) {
+        let (plugin_end, mut orca) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || {
+            serve_on(
+                plugin_end,
+                PluginSpec {
+                    api_surfaces: surfaces,
+                    ..spec()
+                },
+            )
+        });
+        let Frame::Hello { api_surfaces, .. } = read_frame(&mut orca).unwrap().unwrap() else {
+            panic!("expected Hello")
+        };
+        write_frame(
+            &mut orca,
+            &Frame::Welcome {
+                protocol: PROTOCOL_VERSION.into(),
+                capabilities: vec![],
+            },
+        )
+        .unwrap();
+        (plugin, orca, api_surfaces)
+    }
+
+    #[test]
+    fn hello_advertises_embedded_surfaces_with_their_sha256() {
+        let (plugin, mut orca, refs) = welcomed(vec![("main".into(), SURFACE)]);
+        assert_eq!(
+            refs,
+            vec![ApiSurfaceRef {
+                name: "main".into(),
+                sha256: crate::hash::sha256_hex(SURFACE),
+                format: API_SURFACE_FORMAT.into(),
+            }]
+        );
+        write_frame(&mut orca, &Frame::Shutdown).unwrap();
+        plugin.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn surface_get_returns_the_embedded_body() {
+        let (plugin, mut orca, _) = welcomed(vec![("main".into(), SURFACE)]);
+        write_frame(
+            &mut orca,
+            &Frame::SurfaceGet {
+                id: 3,
+                name: "main".into(),
+            },
+        )
+        .unwrap();
+        let Frame::Surface {
+            id,
+            ok,
+            body,
+            error,
+        } = read_frame(&mut orca).unwrap().unwrap()
+        else {
+            panic!("expected Surface")
+        };
+        assert_eq!((id, ok, error), (3, true, None));
+        assert_eq!(body.as_bytes(), SURFACE);
+        assert_eq!(
+            crate::hash::sha256_hex(body.as_bytes()),
+            crate::hash::sha256_hex(SURFACE)
+        );
+        write_frame(&mut orca, &Frame::Shutdown).unwrap();
+        plugin.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn surface_get_for_an_unknown_name_errors() {
+        let (plugin, mut orca, _) = welcomed(vec![("main".into(), SURFACE)]);
+        write_frame(
+            &mut orca,
+            &Frame::SurfaceGet {
+                id: 4,
+                name: "other".into(),
+            },
+        )
+        .unwrap();
+        let Frame::Surface {
+            id,
+            ok,
+            body,
+            error,
+        } = read_frame(&mut orca).unwrap().unwrap()
+        else {
+            panic!("expected Surface")
+        };
+        assert_eq!(id, 4);
+        assert!(!ok);
+        assert!(body.is_empty());
+        assert!(error.unwrap().contains("other"));
+        write_frame(&mut orca, &Frame::Shutdown).unwrap();
+        plugin.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn duplicate_or_empty_surface_names_are_rejected() {
+        assert!(surface_refs(&[("a".into(), SURFACE), ("a".into(), SURFACE)]).is_err());
+        assert!(surface_refs(&[(String::new(), SURFACE)]).is_err());
+        assert!(surface_refs(&[("a".into(), &[0xff])]).is_err());
     }
 }
