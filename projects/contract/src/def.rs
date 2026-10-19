@@ -58,6 +58,8 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     /// must report what it would do without applying it. An ungated tool that
     /// is not aware refuses `dryRun` rather than ignoring it.
     const DRY_RUN_AWARE: bool = false;
+    /// The api-surface ops this tool's body may drive through `api.call`.
+    const REACHES: &'static [&'static str] = &[];
     /// Whether this tool must run in the calling process (pre-daemon ops only:
     /// `install`, `daemon`, `system bootstrap`, `--version`). When false (the
     /// default), CLI + MCP-stdio invocations are proxied to the local daemon's
