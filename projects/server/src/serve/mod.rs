@@ -720,22 +720,91 @@ async fn docs_handler() -> axum::response::Response {
     render_scalar("/docs.json", "API Reference")
 }
 
-const SCALAR_JS: &[u8] = include_bytes!("../../assets/scalar/standalone-1.75.0.js");
+const SCALAR_URL: &str =
+    "https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.75.0/dist/browser/standalone.js";
+const SCALAR_SRI: &str = "sha384-xgelKlDcc+BYp0O+ZYzFesLnWCgGpEbXVVZWNQT6WyZYygN01tbEMygnjPXb5OPI";
 
-async fn scalar_asset_handler() -> axum::response::Response {
+const DOCS_CSP: &str = "default-src 'none'; script-src 'self' https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.75.0/dist/browser/standalone.js; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+const DOCS_AUTH_JS: &str = r#"    (function () {
+      const status = document.getElementById('orca-status');
+      const u = document.getElementById('orca-u');
+      const p = document.getElementById('orca-p');
+      const signinBtn = document.getElementById('orca-signin');
+      const signoutBtn = document.getElementById('orca-signout');
+      const setStatus = (msg, cls) => {
+        status.textContent = msg;
+        status.className = 'status ' + (cls || '');
+      };
+      const setSignedIn = (signedIn) => {
+        u.style.display = signedIn ? 'none' : '';
+        p.style.display = signedIn ? 'none' : '';
+        signinBtn.style.display = signedIn ? 'none' : '';
+        signoutBtn.style.display = signedIn ? '' : 'none';
+      };
+      const checkMe = async () => {
+        try {
+          const r = await fetch('/api/auth/web/me', {
+            credentials: 'include',
+            headers: { 'Accept': 'application/json' },
+          });
+          if (r.ok) {
+            const j = await r.json();
+            setSignedIn(true);
+            setStatus(`signed in as ${j.username} (${j.role})`, 'ok');
+          } else {
+            setSignedIn(false);
+            setStatus('not signed in', 'err');
+          }
+        } catch (e) {
+          setSignedIn(false);
+          setStatus(`probe error: ${e}`, 'err');
+        }
+      };
+      document.getElementById('orca-signin').addEventListener('click', async () => {
+        const username = document.getElementById('orca-u').value.trim();
+        const password = document.getElementById('orca-p').value;
+        if (!username || !password) { setStatus('need username + password', 'err'); return; }
+        setStatus('signing in…');
+        try {
+          const r = await fetch('/api/auth/web/signin', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+          });
+          if (r.ok) {
+            location.reload();
+          } else {
+            const txt = await r.text();
+            setStatus(`signin failed: ${r.status} ${txt}`, 'err');
+          }
+        } catch (e) { setStatus(`signin error: ${e}`, 'err'); }
+      });
+      document.getElementById('orca-signout').addEventListener('click', async () => {
+        try {
+          await fetch('/api/auth/web/signout', { method: 'POST', credentials: 'include' });
+        } catch (_e) {}
+        location.reload();
+      });
+      checkMe();
+    })();
+"#;
+
+async fn docs_auth_js_handler() -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{Response, header};
     Response::builder()
         .header(header::CONTENT_TYPE, "text/javascript; charset=utf-8")
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-        .body(Body::from(SCALAR_JS))
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(Body::from(DOCS_AUTH_JS))
         .expect("hardcoded headers are valid")
 }
 
 fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{Response, header};
-    // Inline sign-in widget. Scalar runs same-origin with the API, so the
+    // Sign-in widget (`/docs/auth.js`). Scalar runs same-origin with the API, so the
     // browser auto-attaches the `orca_session` cookie to every "try it"
     // request once you sign in here. The widget lives in a fixed banner so
     // it's visible regardless of which operation is open. It calls
@@ -785,79 +854,18 @@ fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
     <button id="orca-signout" type="button" style="display:none">Sign out</button>
     <span class="status" id="orca-status">checking session…</span>
   </div>
-  <script>
-    (function () {{
-      const status = document.getElementById('orca-status');
-      const u = document.getElementById('orca-u');
-      const p = document.getElementById('orca-p');
-      const signinBtn = document.getElementById('orca-signin');
-      const signoutBtn = document.getElementById('orca-signout');
-      const setStatus = (msg, cls) => {{
-        status.textContent = msg;
-        status.className = 'status ' + (cls || '');
-      }};
-      const setSignedIn = (signedIn) => {{
-        u.style.display = signedIn ? 'none' : '';
-        p.style.display = signedIn ? 'none' : '';
-        signinBtn.style.display = signedIn ? 'none' : '';
-        signoutBtn.style.display = signedIn ? '' : 'none';
-      }};
-      const checkMe = async () => {{
-        try {{
-          const r = await fetch('/api/auth/web/me', {{
-            credentials: 'include',
-            headers: {{ 'Accept': 'application/json' }},
-          }});
-          if (r.ok) {{
-            const j = await r.json();
-            setSignedIn(true);
-            setStatus(`signed in as ${{j.username}} (${{j.role}})`, 'ok');
-          }} else {{
-            setSignedIn(false);
-            setStatus('not signed in', 'err');
-          }}
-        }} catch (e) {{
-          setSignedIn(false);
-          setStatus(`probe error: ${{e}}`, 'err');
-        }}
-      }};
-      document.getElementById('orca-signin').addEventListener('click', async () => {{
-        const username = document.getElementById('orca-u').value.trim();
-        const password = document.getElementById('orca-p').value;
-        if (!username || !password) {{ setStatus('need username + password', 'err'); return; }}
-        setStatus('signing in…');
-        try {{
-          const r = await fetch('/api/auth/web/signin', {{
-            method: 'POST',
-            credentials: 'include',
-            headers: {{ 'Content-Type': 'application/json' }},
-            body: JSON.stringify({{ username, password }}),
-          }});
-          if (r.ok) {{
-            location.reload();
-          }} else {{
-            const txt = await r.text();
-            setStatus(`signin failed: ${{r.status}} ${{txt}}`, 'err');
-          }}
-        }} catch (e) {{ setStatus(`signin error: ${{e}}`, 'err'); }}
-      }});
-      document.getElementById('orca-signout').addEventListener('click', async () => {{
-        try {{
-          await fetch('/api/auth/web/signout', {{ method: 'POST', credentials: 'include' }});
-        }} catch (_e) {{}}
-        location.reload();
-      }});
-      checkMe();
-    }})();
-  </script>
+  <script src="/docs/auth.js"></script>
   <script id="api-reference" data-url="{spec_url}" data-configuration='{{"withDefaultFonts":false}}'></script>
-  <script src="/docs/scalar-1.75.0.js"></script>
+  <script src="{SCALAR_URL}" integrity="{SCALAR_SRI}" crossorigin="anonymous"></script>
 </body>
 </html>"#
     );
 
     Response::builder()
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CONTENT_SECURITY_POLICY, DOCS_CSP)
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::REFERRER_POLICY, "no-referrer")
         .body(Body::from(html))
         .expect("hardcoded headers are valid")
 }
@@ -1307,6 +1315,17 @@ fn apply_persisted_web_owners() {
 
 /// Fallback handler in prod: route the request to the matching registered
 /// [`contract::web::WebProvider`], applying SPA fallback and a short-TTL cache.
+async fn api_not_found_or<F, Fut>(req: axum::extract::Request, next: F) -> axum::response::Response
+where
+    F: FnOnce(axum::extract::Request) -> Fut,
+    Fut: std::future::Future<Output = axum::response::Response>,
+{
+    if req.uri().path() == "/api" || req.uri().path().starts_with("/api/") {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    next(req).await
+}
+
 async fn static_handler(req: axum::extract::Request) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{Response, header};
@@ -1707,7 +1726,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // /api/mcp/catalog); the tools/call path re-applies per-tool RBAC.
         .route("/api/mcp", post(mcp_jsonrpc_handler))
         .route("/docs", get(docs_handler))
-        .route("/docs/scalar-1.75.0.js", get(scalar_asset_handler))
+        .route("/docs/auth.js", get(docs_auth_js_handler))
         // Open probe: lets the browser TokenGate decide which UI to show
         // (one-click bootstrap vs. paste an existing token).
         .route("/api/auth/bootstrap", get(bootstrap_status_handler))
@@ -1758,9 +1777,9 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // it on :12002. The Rust proxy forwards both HTTP and HMR WebSockets.
         api.route("/storybook", any(storybook_proxy_handler))
             .route("/storybook/{*path}", any(storybook_proxy_handler))
-            .fallback(dev_proxy_handler)
+            .fallback(|req| api_not_found_or(req, dev_proxy_handler))
     } else {
-        api.fallback(static_handler)
+        api.fallback(|req| api_not_found_or(req, static_handler))
     }
 }
 
@@ -1977,16 +1996,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scalar_asset_handler_serves_vendored_bundle() {
-        let resp = scalar_asset_handler().await;
-        assert_eq!(
-            resp.headers()[axum::http::header::CONTENT_TYPE],
-            "text/javascript; charset=utf-8"
-        );
-        let bytes = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
+    async fn docs_auth_js_is_plain_javascript() {
+        let resp = docs_auth_js_handler().await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
-        assert_eq!(bytes.len(), SCALAR_JS.len());
+        let js = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(js.contains("/api/auth/web/signin"));
+        assert!(!js.contains("{{"));
+    }
+
+    #[tokio::test]
+    async fn api_fallback_is_404() {
+        let req = axum::extract::Request::builder()
+            .uri("/api/nope")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(api_not_found_or(req, static_handler).await.status(), 404);
     }
 
     // ── proxy_http (upstream unreachable → 502) ────────────────────────────────
@@ -2021,8 +2047,12 @@ mod tests {
     // they survive the format!().
 
     #[tokio::test]
-    async fn render_scalar_embeds_auth_widget_and_vendored_scalar() {
+    async fn render_scalar_embeds_auth_widget_and_pinned_scalar() {
         let resp = render_scalar("/docs.json", "Ref");
+        let h = resp.headers();
+        assert_eq!(h[axum::http::header::CONTENT_SECURITY_POLICY], DOCS_CSP);
+        assert_eq!(h[axum::http::header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(h[axum::http::header::REFERRER_POLICY], "no-referrer");
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
@@ -2032,21 +2062,15 @@ mod tests {
             body.contains(r#"id="orca-signin""#),
             "signin button missing"
         );
-        assert!(
-            body.contains("/api/auth/web/signin"),
-            "signin endpoint missing"
-        );
-        assert!(body.contains("/api/auth/web/me"), "me probe missing");
         // Scalar renderer bootstrap.
         assert!(
             body.contains(r#"id="api-reference""#),
             "scalar mount missing"
         );
-        assert!(
-            body.contains(r#"src="/docs/scalar-1.75.0.js""#),
-            "vendored scalar script missing"
-        );
-        assert!(!body.contains("cdn."), "no runtime CDN");
+        assert!(body.contains(&format!(
+            r#"src="{SCALAR_URL}" integrity="{SCALAR_SRI}" crossorigin="anonymous""#
+        )));
+        assert!(body.contains(r#"src="/docs/auth.js""#));
     }
 
     // ── mcp_catalog_handler ─────────────────────────────────────────────────────

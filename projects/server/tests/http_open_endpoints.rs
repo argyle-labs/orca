@@ -173,10 +173,26 @@ async fn docs_serves_html_reference_unauthenticated() {
 }
 
 #[tokio::test]
-async fn docs_scalar_bundle_is_served_locally() {
+async fn docs_auth_script_is_served() {
     let env = with_isolated_env();
-    let (status, bytes) =
-        oneshot_raw(env.router(), "GET", "/docs/scalar-1.75.0.js", None, None).await;
+    let (status, bytes) = oneshot_raw(env.router(), "GET", "/docs/auth.js", None, None).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(bytes.len() > 1024 * 1024);
+    assert!(String::from_utf8_lossy(&bytes).contains("/api/auth/web/signin"));
+}
+
+#[tokio::test]
+async fn unmatched_api_paths_never_reach_the_ui_fallback() {
+    let env = with_isolated_env();
+    let token = common::mint_admin_token(&env);
+    for router in [env.router(), prod_router(&env)] {
+        for bearer in [None, Some(token.as_str())] {
+            for path in ["/api/nope", "/api/openapi.json", "/api/health/x", "/api"] {
+                let (status, _) = oneshot_raw(router.clone(), "GET", path, bearer, None).await;
+                assert!(
+                    status == StatusCode::NOT_FOUND || status == StatusCode::UNAUTHORIZED,
+                    "{path}: {status}"
+                );
+            }
+        }
+    }
 }
