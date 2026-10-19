@@ -19,7 +19,6 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let mut ctx = ToolCtx::new(config);
-    ctx.set_local_transport(true);
     // Host-addressing refresh hook: host.refresh tool calls into this to
     // trigger a fresh detect + persist before reading host_addressing rows.
     let host_refresh: Arc<dyn system::host::HostRefreshHook + Send + Sync> =
@@ -124,6 +123,12 @@ fn resolve_host_operator() -> Option<contract::CallerIdentity> {
     })
 }
 
+pub fn build_local_tool_ctx(config: Arc<Config>) -> ToolCtx {
+    let mut ctx = build_tool_ctx(config);
+    ctx.set_local_transport(true);
+    ctx
+}
+
 /// Servers whose tools orca already exposes natively or that must not be proxied back.
 /// - orca-local: orca itself — proxying would spawn a recursive child
 const FEDERATION_SKIP: &[&str] = &["orca-local"];
@@ -137,7 +142,7 @@ pub async fn serve(config: &Config) -> Result<()> {
     let pool = ::mcp::client::McpPool::new_with_db(config.db_path.clone());
 
     let config_arc = Arc::new(config.clone());
-    let tool_ctx = build_tool_ctx(config_arc);
+    let tool_ctx = build_local_tool_ctx(config_arc);
 
     // Maps exposed tool name → (server_name, internal_tool_name).
     // For universal-mapped tools: exposed name differs from internal name.
@@ -868,9 +873,12 @@ mod tests {
         // the host/remote/cluster services. After it runs, the dispatch
         // inventory must be populated (the tables it installs are process-global).
         let cfg = Arc::new(Config::load().expect("config load"));
-        let ctx = build_tool_ctx(cfg);
-        assert!(ctx.local_transport());
+        let ctx = build_tool_ctx(cfg.clone());
+        assert!(!ctx.local_transport());
         assert!(!ctx.second_factor());
+        let local = build_local_tool_ctx(cfg);
+        assert!(local.local_transport());
+        assert!(!local.second_factor());
         assert!(
             !dispatch::names().is_empty(),
             "dispatch inventory must be non-empty after build_tool_ctx"
