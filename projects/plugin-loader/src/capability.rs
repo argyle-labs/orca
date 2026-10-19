@@ -38,7 +38,10 @@ pub const CAPABILITIES: &[&str] = &[
     "ws.send",
     "ws.close",
     "agents.register",
+    API_CALL,
 ];
+
+pub const API_CALL: &str = "api.call";
 
 /// Whether `cap` is a STREAMING capability — one the supervisor drives through
 /// [`handle_cap_stream`] (emitting `CapStreamChunk`/`CapStreamEnd`) rather than
@@ -89,6 +92,55 @@ pub(crate) fn agent_provider_owned(name: &str, principal: &str) -> bool {
         || name
             .rsplit_once('/')
             .is_some_and(|(owner, id)| !owner.is_empty() && id == principal)
+}
+
+pub fn handle_api_call(
+    args: Value,
+    principal: &str,
+    inv: Option<&spec::surfaces::Invocation>,
+) -> Result<Value> {
+    let inv = inv
+        .cloned()
+        .ok_or_else(|| anyhow!("api.call requires an authenticated caller"))?;
+    let call: plugin_proto::ApiCall =
+        serde_json::from_value(args).map_err(|e| anyhow!("api.call: bad payload: {e}"))?;
+    let principal = principal.to_string();
+    let outcome = run_on_cap_runtime(async move {
+        spec::surfaces::call(
+            &principal,
+            call.surface.as_deref(),
+            &call.op,
+            &call.endpoint,
+            call.args,
+            &inv,
+        )
+        .await
+    })??;
+    api_call_reply(outcome)
+}
+
+#[derive(Debug)]
+pub struct PlannedCall(pub plugin_proto::ApiCallPlan);
+
+impl std::fmt::Display for PlannedCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "api.call planned, not executed: {} {}",
+            self.0.method, self.0.url
+        )
+    }
+}
+
+impl std::error::Error for PlannedCall {}
+
+fn api_call_reply(outcome: spec::surfaces::Outcome) -> Result<Value> {
+    match outcome {
+        spec::surfaces::Outcome::Response(value) => Ok(value),
+        spec::surfaces::Outcome::Plan(plan) => {
+            Err(PlannedCall(serde_json::from_value(serde_json::to_value(plan)?)?).into())
+        }
+    }
 }
 
 /// Execute one capability request on behalf of `principal` — the authoritative
@@ -307,6 +359,26 @@ async fn send_within(
 mod tests {
     use super::*;
     use plugin_toolkit::serde_json::json;
+
+    #[test]
+    fn api_call_plan_is_an_error_never_a_value() {
+        let plan = spec::surfaces::Plan {
+            method: "POST".into(),
+            url: "https://h/x".into(),
+            query: vec![],
+            body: Value::Null,
+            endpoint: "main".into(),
+            route: "https://h".into(),
+        };
+        let err = api_call_reply(spec::surfaces::Outcome::Plan(plan)).unwrap_err();
+        let planned = err.downcast_ref::<PlannedCall>().expect("typed plan");
+        assert_eq!(planned.0.method, "POST");
+        assert_eq!(planned.0.endpoint, "main");
+        assert_eq!(
+            api_call_reply(spec::surfaces::Outcome::Response(json!({"a": 1}))).unwrap(),
+            json!({"a": 1})
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn cap_io_is_sound_from_inside_a_runtime() {

@@ -153,6 +153,8 @@ pub struct ApiOp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<OpOutput>,
     pub policy: Policy,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub internal: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

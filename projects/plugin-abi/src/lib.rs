@@ -53,6 +53,8 @@ pub struct ToolDef {
     /// run it on this host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reaches: Vec<String>,
 }
 
 /// JSON shape of a single domain backend a plugin contributes, in the plugin's

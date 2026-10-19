@@ -94,10 +94,10 @@ impl Backing {
         &self,
         tool: &str,
         args: sj::Value,
-        caller: Option<plugin_proto::VerifiedCaller>,
+        inv: Option<spec::surfaces::Invocation>,
     ) -> Result<sj::Value> {
         match self {
-            Backing::Process(proc) => proc.invoke(tool, args, caller),
+            Backing::Process(proc) => proc.invoke(tool, args, inv),
         }
     }
 
@@ -108,7 +108,7 @@ impl Backing {
         &self,
         _tool: &str,
         _args: sj::Value,
-        _caller: Option<plugin_proto::VerifiedCaller>,
+        _inv: Option<spec::surfaces::Invocation>,
     ) -> Result<sj::Value> {
         match *self {}
     }
@@ -1052,7 +1052,7 @@ fn surface_tools(
 ) -> Result<Vec<(String, dispatch::tool_roles::PluginToolPolicy)>> {
     let mut policies = Vec::new();
     for surface in surfaces {
-        for op in &surface.ops {
+        for op in surface.ops.iter().filter(|op| !op.internal) {
             if tools.contains_key(&op.tool) {
                 bail!(
                     "plugin '{software}' api surface '{}' tool '{}' duplicates a declared tool",
@@ -1367,6 +1367,48 @@ fn surface_owner(name: &str) -> Option<String> {
         .then(|| plugin.software.clone())
 }
 
+fn tool_reaches(name: &str) -> Vec<String> {
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
+    reg.by_tool
+        .get(name)
+        .and_then(|idx| reg.plugins[*idx].tools.get(name))
+        .map(|d| d.reaches.clone())
+        .unwrap_or_default()
+}
+
+fn plan_with_reaches(result: Result<sj::Value>, name: &str, dry_run: bool) -> Result<sj::Value> {
+    let mut value = result?;
+    let reaches = tool_reaches(name);
+    if dry_run
+        && !reaches.is_empty()
+        && let Some(obj) = value.as_object_mut()
+    {
+        obj.insert("reaches".into(), sj::json!(reaches));
+    }
+    Ok(value)
+}
+
+fn dry_run_args(args: &sj::Value) -> bool {
+    args.get(contract::plan::DRY_RUN_FIELD) == Some(&sj::Value::Bool(true))
+}
+
+fn invocation_for(
+    ctx: &ToolCtx,
+    name: &str,
+    args: &sj::Value,
+) -> Option<spec::surfaces::Invocation> {
+    Some(
+        spec::surfaces::Invocation::from_ctx(ctx)
+            .ok()?
+            .for_plugin_invoke(
+                dispatch::tool_roles::plugin_execute_gated(name),
+                dispatch::tool_roles::required_role(name),
+                &tool_reaches(name),
+                args,
+            ),
+    )
+}
+
 async fn execute_surface(
     software: &str,
     name: &str,
@@ -1427,11 +1469,12 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
     }
     if let Some((backing, software)) = backing_for(name) {
         let owned = name.to_string();
-        let caller = ctx.verified_caller().map(wire_caller);
-        let result = tokio::task::spawn_blocking(move || backing.invoke(&owned, args, caller))
+        let inv = invocation_for(ctx, name, &args);
+        let dry_run = dry_run_args(&args);
+        let result = tokio::task::spawn_blocking(move || backing.invoke(&owned, args, inv))
             .await
             .with_context(|| format!("plugin invoke task for '{name}' panicked"))?;
-        return parse_invoke_result(result, name, &software);
+        return plan_with_reaches(parse_invoke_result(result, name, &software), name, dry_run);
     }
     dispatch::dispatch(name, args, ctx).await
 }
@@ -1454,8 +1497,12 @@ pub fn invoke_plugin(name: &str, args: &sj::Value, ctx: &ToolCtx) -> Option<Resu
         )));
     }
     let (backing, software) = backing_for(name)?;
-    let result = backing.invoke(name, args.clone(), ctx.verified_caller().map(wire_caller));
-    Some(parse_invoke_result(result, name, &software))
+    let result = backing.invoke(name, args.clone(), invocation_for(ctx, name, args));
+    Some(plan_with_reaches(
+        parse_invoke_result(result, name, &software),
+        name,
+        dry_run_args(args),
+    ))
 }
 
 /// Serializes tests that load the shared `loaderfakeplugin` id.
@@ -1547,7 +1594,14 @@ mod surface_tests {
         );
 
         let mut manifest = HashMap::from([("floorp.get".to_string(), tools["floorp.get"].clone())]);
-        assert!(surface_tools("floorp", &[surface], &mut manifest).is_err());
+        assert!(surface_tools("floorp", std::slice::from_ref(&surface), &mut manifest).is_err());
+
+        let mut hidden = surface;
+        hidden.ops[1].internal = true;
+        let mut only_public = HashMap::new();
+        let policies = surface_tools("floorp", &[hidden], &mut only_public).unwrap();
+        assert_eq!(policies.len(), 1);
+        assert!(!only_public.contains_key("floorp.make"));
     }
 
     #[test]
@@ -2446,6 +2500,7 @@ mod loader_tests {
                     execute_gated: Some(false),
                     data_mutation: Some(true),
                     local_only: Some(true),
+                    reaches: Vec::new(),
                 },
                 plugin_proto::ToolDef {
                     name: "loaderfakeplugin.fetch".into(),
@@ -2456,6 +2511,7 @@ mod loader_tests {
                     execute_gated: None,
                     data_mutation: None,
                     local_only: None,
+                    reaches: Vec::new(),
                 },
             ],
             backends: vec![
