@@ -205,6 +205,9 @@ pub enum AuthKind {
     Bootstrap,
 }
 
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct CspAdditions(pub Vec<(&'static str, String)>);
+
 #[derive(Clone)]
 pub struct CspPolicies {
     pub default: std::sync::Arc<str>,
@@ -212,31 +215,37 @@ pub struct CspPolicies {
     pub relax: std::sync::Arc<system::csp::Relaxations>,
 }
 
+fn compose_with(add: &CspAdditions, relax: &system::csp::Relaxations) -> String {
+    let mut grouped: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (d, s) in &add.0 {
+        match grouped.iter_mut().find(|(k, _)| k == d) {
+            Some((_, v)) => v.push(s),
+            None => grouped.push((d, vec![s])),
+        }
+    }
+    let extra: Vec<(&str, &[&str])> = grouped.iter().map(|(d, v)| (*d, v.as_slice())).collect();
+    system::csp::compose(&extra, relax)
+}
+
 pub async fn security_headers(
     axum::extract::State(csp): axum::extract::State<CspPolicies>,
     req: Request,
     next: Next,
 ) -> Response {
-    let policy = if req.uri().path() == "/docs" {
-        csp.docs.clone()
-    } else {
-        csp.default.clone()
-    };
+    let is_docs = req.uri().path() == "/docs";
     let mut resp = next.run(req).await;
-    let policy: std::sync::Arc<str> =
-        match resp.extensions().get::<super::inline_csp::CspAdditions>() {
-            Some(add) => {
-                let grouped = add.grouped();
-                let extra: Vec<(&str, &[&str])> =
-                    grouped.iter().map(|(d, v)| (*d, v.as_slice())).collect();
-                std::sync::Arc::from(system::csp::compose(&extra, &csp.relax))
-            }
-            None => policy,
-        };
+    let policy = match resp.extensions().get::<CspAdditions>() {
+        Some(add) => compose_with(add, &csp.relax),
+        None if is_docs => csp.docs.to_string(),
+        None => csp.default.to_string(),
+    };
+    let value = axum::http::HeaderValue::from_str(&policy).unwrap_or_else(|e| {
+        tracing::warn!("csp: composed policy is not a valid header ({e}); using strict policy");
+        axum::http::HeaderValue::from_str(&system::csp::strict())
+            .expect("strict policy is a valid header")
+    });
     let h = resp.headers_mut();
-    if let Ok(v) = axum::http::HeaderValue::from_str(&policy) {
-        h.insert(axum::http::header::CONTENT_SECURITY_POLICY, v);
-    }
+    h.insert(axum::http::header::CONTENT_SECURITY_POLICY, value);
     h.insert(
         axum::http::header::X_CONTENT_TYPE_OPTIONS,
         axum::http::HeaderValue::from_static("nosniff"),
@@ -285,7 +294,6 @@ const BOOTSTRAP_ALLOWED_TOOL: &str = "/api/v1/auth.token.create";
 /// self-validates + throttles. MUST name the real registered `auth.login` tool.
 const LOGIN_TOOL_PATH: &str = "/api/v1/auth.login";
 
-/// Non-`/api/` routes that still require auth.
 const AUTH_REQUIRED_PATHS: &[&str] = &["/docs.json"];
 
 fn is_open_path(path: &str) -> bool {

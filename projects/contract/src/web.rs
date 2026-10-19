@@ -149,6 +149,10 @@ pub struct WebRoute {
     /// `render`. `None` in prod builds where the plugin serves rendered assets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dev_upstream: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub csp_script_hashes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub csp_style_hashes: Vec<String>,
 }
 
 impl WebRoute {
@@ -166,8 +170,34 @@ impl WebRoute {
                 .iter()
                 .find_map(|c| c.strip_prefix(CAP_DEV_UPSTREAM))
                 .map(str::to_string),
+            csp_script_hashes: csp_hashes(capabilities, CAP_CSP_SCRIPT_HASH),
+            csp_style_hashes: csp_hashes(capabilities, CAP_CSP_STYLE_HASH),
         }
     }
+}
+
+fn csp_hashes(capabilities: &[String], prefix: &str) -> Vec<String> {
+    capabilities
+        .iter()
+        .filter_map(|c| c.strip_prefix(prefix))
+        .filter(|h| is_csp_hash(h))
+        .map(str::to_string)
+        .collect()
+}
+
+pub fn is_csp_hash(s: &str) -> bool {
+    let Some(inner) = s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')) else {
+        return false;
+    };
+    ["sha256-", "sha384-", "sha512-"].iter().any(|p| {
+        inner.strip_prefix(p).is_some_and(|b64| {
+            !b64.is_empty()
+                && b64.len() <= 128
+                && b64
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+        })
+    })
 }
 
 /// `settings`-table key prefix for user-chosen web-route owners: the row
@@ -184,6 +214,10 @@ pub const CAP_SPA_FALLBACK: &str = "spa_fallback";
 /// e.g. `"dev_upstream=http://127.0.0.1:12004"`. Parsed into
 /// [`WebRoute::dev_upstream`] by the loader.
 pub const CAP_DEV_UPSTREAM: &str = "dev_upstream=";
+
+pub const CAP_CSP_SCRIPT_HASH: &str = "csp_script_hash=";
+
+pub const CAP_CSP_STYLE_HASH: &str = "csp_style_hash=";
 
 /// One request the server hands a [`WebProvider`]. Body is base64 so the typed
 /// contract carries arbitrary bytes without a `serde_json::Value` escape hatch.
@@ -487,6 +521,8 @@ mod tests {
             prefix: prefix.to_string(),
             spa_fallback: spa,
             dev_upstream: None,
+            csp_script_hashes: Vec::new(),
+            csp_style_hashes: Vec::new(),
         }
     }
 
@@ -731,6 +767,8 @@ mod tests {
             prefix: "/".to_string(),
             spa_fallback: false,
             dev_upstream: Some("http://127.0.0.1:12004".to_string()),
+            csp_script_hashes: Vec::new(),
+            csp_style_hashes: Vec::new(),
         };
         let json2 = serde_json::to_string(&with).unwrap();
         assert!(json2.contains("dev_upstream"));

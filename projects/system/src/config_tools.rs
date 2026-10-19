@@ -74,6 +74,8 @@ pub struct ConfigGetOutput {
     pub row: Option<ConfigRowOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effective_csp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub csp_restart_pending: Option<bool>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -134,6 +136,10 @@ mod native_support {
     }
 }
 
+fn is_csp_row(noun: &str, name: &str) -> bool {
+    noun == crate::csp::CONFIG_NOUN && name == crate::csp::CONFIG_NAME
+}
+
 // ── Tools ────────────────────────────────────────────────────────────────────
 
 /// List config rows. Optionally filter by noun and/or host_owner.
@@ -168,10 +174,23 @@ async fn config_get(
 ) -> anyhow::Result<ConfigGetOutput> {
     let conn = db::open_default()?;
     let row = db::config_store::get(&conn, &args.noun, &args.name)?.map(Into::into);
-    let effective_csp = (args.noun == crate::csp::CONFIG_NOUN
-        && args.name == crate::csp::CONFIG_NAME)
-        .then(|| crate::csp::compose(&[], &crate::csp::Relaxations::load(&conn)));
-    Ok(ConfigGetOutput { row, effective_csp })
+    let (effective_csp, csp_restart_pending) = if is_csp_row(&args.noun, &args.name) {
+        let configured = crate::csp::compose(&[], &crate::csp::Relaxations::load(&conn));
+        match crate::csp::enforced() {
+            Some(enforced) => {
+                let pending = enforced != configured;
+                (Some(enforced), Some(pending))
+            }
+            None => (Some(configured), None),
+        }
+    } else {
+        (None, None)
+    };
+    Ok(ConfigGetOutput {
+        row,
+        effective_csp,
+        csp_restart_pending,
+    })
 }
 
 /// [MUTATES STATE] Upsert a config row. Refuses to write rows owned by a different host
@@ -180,8 +199,16 @@ async fn config_get(
 #[orca_tool(domain = "config", verb = "upsert")]
 async fn config_set(
     args: ConfigSetArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ConfigSetOutput> {
+    if is_csp_row(&args.noun, &args.name) {
+        let admin = ctx
+            .caller()
+            .is_some_and(|c| dispatch::tool_roles::satisfies(&c.role, "admin"));
+        anyhow::ensure!(admin, "config server/csp requires role 'admin'");
+        crate::csp::Relaxations::parse(&args.json)
+            .map_err(|e| anyhow::anyhow!("invalid server/csp: {e:#}"))?;
+    }
     let conn = db::open_default()?;
     let local = native_support::local_system(&conn);
     let owner = args.host.unwrap_or_else(|| local.clone());
@@ -229,31 +256,35 @@ mod tests {
     }
 
     fn detail(noun: &str, name: &str, ctx: &contract::ToolCtx) -> ConfigGetOutput {
+        run(config_get(
+            ConfigGetArgs {
+                noun: noun.into(),
+                name: name.into(),
+            },
+            ctx,
+        ))
+        .unwrap()
+    }
+
+    fn run<T>(f: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
-            .block_on(config_get(
-                ConfigGetArgs {
-                    noun: noun.into(),
-                    name: name.into(),
-                },
-                ctx,
-            ))
-            .unwrap()
+            .block_on(f)
     }
 
     #[test]
-    fn detail_reports_effective_csp_only_for_server_csp() {
+    fn detail_reports_enforced_csp_and_pending_restart() {
         let dir = tempfile::tempdir().unwrap();
         db::with_thread_db_path(&dir.path().join("cfg.db"), || {
             let ctx = test_ctx(dir.path());
-            let strict = crate::csp::compose(&[], &crate::csp::Relaxations::default());
-            assert_eq!(
-                detail("server", "csp", &ctx).effective_csp,
-                Some(strict.clone())
-            );
+            let strict = crate::csp::strict();
+            let out = detail("server", "csp", &ctx);
+            assert_eq!(out.effective_csp, Some(strict.clone()));
+            assert_eq!(out.csp_restart_pending, None);
             assert_eq!(detail("service", "plex", &ctx).effective_csp, None);
 
+            crate::csp::set_enforced(&strict);
             let conn = db::open_default().unwrap();
             db::config_store::set(
                 &conn,
@@ -265,10 +296,46 @@ mod tests {
                 "test",
             )
             .unwrap();
-            assert_eq!(
-                detail("server", "csp", &ctx).effective_csp,
-                Some(format!("{strict}; img-src 'self' https://img.example"))
-            );
+            let out = detail("server", "csp", &ctx);
+            assert_eq!(out.effective_csp, Some(strict));
+            assert_eq!(out.csp_restart_pending, Some(true));
+        });
+    }
+
+    fn upsert(json: &str, ctx: &contract::ToolCtx) -> anyhow::Result<ConfigSetOutput> {
+        run(config_set(
+            ConfigSetArgs {
+                noun: "server".into(),
+                name: "csp".into(),
+                json: json.into(),
+                host: None,
+            },
+            ctx,
+        ))
+    }
+
+    fn caller(role: &str) -> contract::CallerIdentity {
+        contract::CallerIdentity {
+            user_id: "u".into(),
+            username: "u".into(),
+            role: role.into(),
+            can_mutate: true,
+        }
+    }
+
+    #[test]
+    fn upsert_server_csp_requires_admin_and_valid_relaxations() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::host_identity::init(dir.path()).ok();
+        db::with_thread_db_path(&dir.path().join("cfg.db"), || {
+            let ok = r#"{"img-src":["https://img.example"]}"#;
+            assert!(upsert(ok, &test_ctx(dir.path())).is_err());
+            let user = test_ctx(dir.path()).with_auth(caller("user"));
+            assert!(upsert(ok, &user).is_err());
+            let admin = test_ctx(dir.path()).with_auth(caller("admin"));
+            assert!(upsert(r#"{"script-src":["*"]}"#, &admin).is_err());
+            assert!(upsert(r#"{"frame-ancestors":["*"]}"#, &admin).is_err());
+            assert!(upsert(ok, &admin).is_ok());
         });
     }
 }

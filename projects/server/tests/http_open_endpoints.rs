@@ -235,16 +235,19 @@ async fn strict_csp_on_api_web_shell_and_docs() {
     ));
 }
 
-fn set_csp_config(json: &str) {
-    let conn = db::open_default().unwrap();
+fn router_with_csp_config(env: &common::IsolatedEnv, json: &str) -> axum::Router {
+    let path = env.db_path.with_file_name("csp-router.db");
+    let conn = db::open(&path).unwrap();
     db::config_store::set(&conn, "h", "h", "server", "csp", json, "test").unwrap();
+    drop(conn);
+    orca::serve::build_router(false, path)
 }
 
 #[tokio::test]
 async fn csp_config_relaxation_is_applied() {
     let env = with_isolated_env();
-    set_csp_config(r#"{"connect-src":["https://api.example"]}"#);
-    let h = headers_for(prod_router(&env), "/api/health").await;
+    let router = router_with_csp_config(&env, r#"{"connect-src":["https://api.example"]}"#);
+    let h = headers_for(router, "/api/health").await;
     assert_eq!(
         h["content-security-policy"],
         format!("{STRICT_CSP}; connect-src 'self' https://api.example").as_str()
@@ -254,7 +257,26 @@ async fn csp_config_relaxation_is_applied() {
 #[tokio::test]
 async fn invalid_csp_config_falls_back_to_strict() {
     let env = with_isolated_env();
-    set_csp_config(r#"{"script-src":["* ; frame-ancestors *"]}"#);
-    let h = headers_for(prod_router(&env), "/api/health").await;
+    let router = router_with_csp_config(&env, r#"{"script-src":["* ; frame-ancestors *"]}"#);
+    let h = headers_for(router, "/api/health").await;
     assert_eq!(h["content-security-policy"], STRICT_CSP);
+}
+
+#[tokio::test]
+async fn cors_preflight_gets_security_headers() {
+    use tower::ServiceExt;
+    let env = with_isolated_env();
+    let mut req = axum::http::Request::builder()
+        .method("OPTIONS")
+        .uri("/api/health")
+        .header("origin", "http://localhost:12000")
+        .header("access-control-request-method", "GET")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:9999".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let resp = prod_router(&env).oneshot(req).await.unwrap();
+    assert_eq!(resp.headers()["content-security-policy"], STRICT_CSP);
+    assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
 }

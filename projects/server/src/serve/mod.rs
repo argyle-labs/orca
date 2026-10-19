@@ -1,5 +1,4 @@
 pub mod auth_routes;
-mod inline_csp;
 pub mod middleware;
 pub mod openapi;
 #[cfg(feature = "pdf")]
@@ -1315,8 +1314,6 @@ fn apply_persisted_web_owners() {
     }
 }
 
-/// Fallback handler in prod: route the request to the matching registered
-/// [`contract::web::WebProvider`], applying SPA fallback and a short-TTL cache.
 async fn api_not_found_or<F, Fut>(req: axum::extract::Request, next: F) -> axum::response::Response
 where
     F: FnOnce(axum::extract::Request) -> Fut,
@@ -1329,6 +1326,32 @@ where
 }
 
 async fn static_handler(req: axum::extract::Request) -> axum::response::Response {
+    let additions = contract::web::resolve(req.uri().path()).map(|p| {
+        let route = p.route();
+        middleware::CspAdditions(
+            route
+                .csp_script_hashes
+                .iter()
+                .map(|h| ("script-src", h.clone()))
+                .chain(
+                    route
+                        .csp_style_hashes
+                        .iter()
+                        .map(|h| ("style-src", h.clone())),
+                )
+                .collect(),
+        )
+    });
+    let mut resp = render_static(req).await;
+    if let Some(a) = additions {
+        resp.extensions_mut().insert(a);
+    }
+    resp
+}
+
+/// Fallback handler in prod: route the request to the matching registered
+/// [`contract::web::WebProvider`], applying SPA fallback and a short-TTL cache.
+async fn render_static(req: axum::extract::Request) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{Response, header};
 
@@ -1388,14 +1411,9 @@ async fn static_handler(req: axum::extract::Request) -> axum::response::Response
             builder = builder.header(header::CONTENT_TYPE, "application/octet-stream");
         }
         let body = utils::encoding::base64_decode(&wr.body_b64).unwrap_or_default();
-        let mut resp = builder
-            .body(Body::from(body.clone()))
-            .unwrap_or_else(|_| Response::builder().status(502).body(Body::empty()).unwrap());
-        if inline_csp::is_html(resp.headers()) {
-            let additions = inline_csp::from_html(&String::from_utf8_lossy(&body));
-            resp.extensions_mut().insert(additions);
-        }
-        resp
+        builder
+            .body(Body::from(body))
+            .unwrap_or_else(|_| Response::builder().status(502).body(Body::empty()).unwrap())
     };
 
     if cacheable
@@ -1512,29 +1530,25 @@ fn dev_origins(path: &str) -> (String, String) {
 
 async fn dev_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
     let (http_origin, ws_origin) = dev_origins(req.uri().path());
-    let mut additions = vec![
-        ("script-src", http_origin.clone()),
-        ("connect-src", http_origin.clone()),
-        ("connect-src", ws_origin.clone()),
-        ("style-src", http_origin.clone()),
-        ("style-src", "'unsafe-inline'".to_string()),
-        ("img-src", http_origin.clone()),
-        ("font-src", http_origin.clone()),
-    ];
-    let resp = proxy_to(req, http_origin, ws_origin).await;
-    let resp = if inline_csp::is_html(resp.headers()) {
-        let (parts, body) = resp.into_parts();
-        let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024)
-            .await
-            .unwrap_or_default();
-        additions.extend(inline_csp::from_html(&String::from_utf8_lossy(&bytes)).0);
-        axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
+    let additions = if system::csp::valid_dev_origin(&http_origin)
+        && system::csp::valid_dev_origin(&ws_origin)
+    {
+        vec![
+            ("script-src", http_origin.clone()),
+            ("connect-src", http_origin.clone()),
+            ("connect-src", ws_origin.clone()),
+            ("style-src", http_origin.clone()),
+            ("style-src", "'unsafe-inline'".to_string()),
+            ("img-src", http_origin.clone()),
+            ("font-src", http_origin.clone()),
+        ]
     } else {
-        resp
+        tracing::warn!(%http_origin, "dev upstream is not a plain origin; strict CSP applies");
+        Vec::new()
     };
-    let mut resp = resp;
+    let mut resp = proxy_to(req, http_origin, ws_origin).await;
     resp.extensions_mut()
-        .insert(inline_csp::CspAdditions(additions));
+        .insert(middleware::CspAdditions(additions));
     resp
 }
 
@@ -1731,7 +1745,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             .allow_credentials(true)
     };
 
-    let mcp_pool = Arc::new(::mcp::client::McpPool::new_with_db(db_path));
+    let mcp_pool = Arc::new(::mcp::client::McpPool::new_with_db(db_path.clone()));
 
     let (api, spec) = openapi::openapi_router().split_for_parts();
     // Stash the assembled spec so the spec-serving handlers can read it.
@@ -1802,15 +1816,23 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         api.fallback(|req| api_not_found_or(req, static_handler))
     };
 
-    let relax = db::open_default()
-        .map(|c| system::csp::Relaxations::load(&c))
-        .unwrap_or_default();
+    let relax = match open_router_db(&db_path) {
+        Ok(c) => system::csp::Relaxations::load(&c),
+        Err(e) => {
+            tracing::warn!(
+                "csp: cannot open {}: {e:#}; using strict policy",
+                db_path.display()
+            );
+            system::csp::Relaxations::default()
+        }
+    };
     let csp = middleware::CspPolicies {
         default: Arc::from(system::csp::compose(&[], &relax)),
         docs: Arc::from(system::csp::compose(DOCS_CSP_EXTRA, &relax)),
         relax: Arc::new(relax),
     };
     tracing::info!(policy = %csp.default, "content-security-policy");
+    system::csp::set_enforced(&csp.default);
 
     api
         // Cap request bodies so a malicious or runaway client can't OOM the
@@ -1820,11 +1842,19 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         .layer(axum::middleware::from_fn(middleware::require_tool_role))
         .layer(axum::middleware::from_fn(middleware::require_auth))
         .layer(axum::middleware::from_fn(middleware::log_requests))
+        .layer(cors)
         .layer(axum::middleware::from_fn_with_state(
             csp,
             middleware::security_headers,
         ))
-        .layer(cors)
+}
+
+fn open_router_db(path: &std::path::Path) -> anyhow::Result<db::Conn> {
+    if std::env::var_os("ORCA_DB_PATH").is_some_and(|p| std::path::Path::new(&p) == path) {
+        return db::open_unencrypted(path);
+    }
+    anyhow::ensure!(path.exists(), "no database at {}", path.display());
+    db::open(path)
 }
 
 /// Write orca's generated OpenAPI spec to ~/.orca/specs/orca.json so it
@@ -2457,6 +2487,8 @@ mod tests {
                 prefix: prefix.to_string(),
                 spa_fallback,
                 dev_upstream,
+                csp_script_hashes: Vec::new(),
+                csp_style_hashes: Vec::new(),
             },
             behavior,
             counter: std::sync::atomic::AtomicUsize::new(0),
@@ -2473,45 +2505,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn html_shell_csp_carries_exact_inline_script_hash() {
+    async fn provider_declared_hashes_widen_only_its_own_pages() {
         use tower::ServiceExt;
-        let path = "/__csp_fixture_index__";
+        let declared = "'sha256-RFWPLDbv2BY+rCkDzsE+0fr8ylGr2R2faWMhq4lfEQc='";
+        let path = "/__csp_fixture_declared__";
+        let provider: Arc<dyn contract::web::WebProvider> = Arc::new(MockProvider {
+            name: "csp-declared".to_string(),
+            route: contract::web::WebRoute::from_def_axes(
+                path,
+                &[
+                    format!("csp_script_hash={declared}"),
+                    "csp_script_hash='unsafe-inline'".to_string(),
+                    "csp_script_hash=https://evil.example".to_string(),
+                    "csp_style_hash=*".to_string(),
+                ],
+            ),
+            behavior: MockBehavior::Fixed {
+                status: 200,
+                headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                body: b"<html><script>window.undeclared=1</script></html>".to_vec(),
+            },
+            counter: std::sync::atomic::AtomicUsize::new(0),
+        });
+        contract::web::register_provider(provider).expect("register");
+        let plain = "/__csp_fixture_plain__";
         register_mock(
-            "csp-fixture",
-            path,
+            "csp-plain",
+            plain,
             false,
             None,
             MockBehavior::Fixed {
                 status: 200,
-                headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
-                body: b"<!doctype html><html><head><script>window.x=1</script>\
-                    <script src=\"/_app/a.js\"></script></head><body></body></html>"
-                    .to_vec(),
+                headers: vec![("content-type".into(), "text/html".into())],
+                body: b"<html><script>x()</script></html>".to_vec(),
             },
         );
         let relax = system::csp::Relaxations::default();
         let csp = middleware::CspPolicies {
-            default: Arc::from(system::csp::compose(&[], &relax)),
+            default: Arc::from(system::csp::strict()),
             docs: Arc::from(system::csp::compose(DOCS_CSP_EXTRA, &relax)),
             relax: Arc::new(relax),
         };
         let router = axum::Router::new().fallback(static_handler).layer(
             axum::middleware::from_fn_with_state(csp, middleware::security_headers),
         );
-        let resp = router.oneshot(get(path)).await.unwrap();
-        let policy = resp.headers()[axum::http::header::CONTENT_SECURITY_POLICY]
-            .to_str()
-            .unwrap()
-            .to_string();
-        let expected = format!(
-            "'sha256-{}'",
-            utils::encoding::base64_encode(&utils::hash::sha256(b"window.x=1"))
+        let policy_for = |p: &'static str| {
+            let router = router.clone();
+            async move {
+                let resp = router.oneshot(get(p)).await.unwrap();
+                resp.headers()[axum::http::header::CONTENT_SECURITY_POLICY]
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            }
+        };
+        let policy = policy_for(path).await;
+        assert_eq!(
+            policy,
+            format!("{}; script-src 'self' {declared}", system::csp::strict())
         );
-        assert!(
-            policy.contains(&format!("script-src 'self' {expected}")),
-            "{policy}"
-        );
-        assert!(!policy.contains("unsafe-inline"), "{policy}");
+        assert_eq!(policy_for(plain).await, system::csp::strict());
     }
 
     #[tokio::test]
