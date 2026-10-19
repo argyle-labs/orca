@@ -429,7 +429,7 @@ pub struct HttpRequest {
     #[serde(default)]
     pub headers: Vec<(String, String)>,
     /// Raw request body. Empty = no body.
-    #[serde(default)]
+    #[serde(default, with = "b64_or_bytes")]
     pub body: Vec<u8>,
     /// Per-request timeout in milliseconds. `None` = core's default.
     #[serde(default)]
@@ -439,7 +439,15 @@ pub struct HttpRequest {
     pub insecure: bool,
     #[serde(default)]
     pub max_body_bytes: Option<u64>,
+    /// The plugin accepts a base64 `HttpResponse.body`; core replies with a
+    /// number array otherwise.
+    #[serde(default)]
+    pub body_b64: bool,
 }
+
+/// Capability name core advertises in `Welcome` when it accepts a base64
+/// `HttpRequest.body`.
+pub const HTTP_BODY_B64: &str = "http.body_b64";
 
 /// The reply to an [`HttpRequest`]. Carries the response for **any** status —
 /// core does not treat 4xx/5xx as an error, so the plugin's own client applies
@@ -449,7 +457,7 @@ pub struct HttpResponse {
     pub status: u16,
     #[serde(default)]
     pub headers: Vec<(String, String)>,
-    #[serde(default)]
+    #[serde(default, with = "b64_or_bytes")]
     pub body: Vec<u8>,
 }
 
@@ -640,7 +648,7 @@ mod b64 {
         decode(&text).ok_or_else(|| serde::de::Error::custom("invalid base64"))
     }
 
-    fn decode(text: &str) -> Option<Vec<u8>> {
+    pub(super) fn decode(text: &str) -> Option<Vec<u8>> {
         let raw = text.as_bytes();
         if !raw.len().is_multiple_of(4) {
             return None;
@@ -666,10 +674,100 @@ mod b64 {
     }
 }
 
+/// Serializes as [`b64`]; deserializes either base64 or a legacy number array.
+mod b64_or_bytes {
+    pub use super::b64::serialize;
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        d.deserialize_any(Visitor)
+    }
+
+    struct Visitor;
+
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a base64 string or an array of bytes")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Vec<u8>, E> {
+            super::b64::decode(v).ok_or_else(|| E::custom("invalid base64"))
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(b) = seq.next_element::<u8>()? {
+                out.push(b);
+            }
+            Ok(out)
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Vec<u8>, E> {
+            Ok(Vec::new())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn http_response_body_serializes_base64() {
+        let resp = HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: b"hello".to_vec(),
+        };
+        assert_eq!(
+            serde_json::to_value(&resp).unwrap()["body"],
+            json!("aGVsbG8=")
+        );
+    }
+
+    #[test]
+    fn http_response_body_accepts_base64_and_legacy_array() {
+        let b64: HttpResponse =
+            serde_json::from_value(json!({"status": 200, "body": "aGVsbG8="})).unwrap();
+        let legacy: HttpResponse =
+            serde_json::from_value(json!({"status": 200, "body": [104, 101, 108, 108, 111]}))
+                .unwrap();
+        let absent: HttpResponse = serde_json::from_value(json!({"status": 204})).unwrap();
+        assert_eq!(b64.body, b"hello");
+        assert_eq!(legacy.body, b"hello");
+        assert!(absent.body.is_empty());
+    }
+
+    #[test]
+    fn http_response_body_rejects_bad_input() {
+        assert!(
+            serde_json::from_value::<HttpResponse>(json!({"status": 200, "body": "a"})).is_err()
+        );
+        assert!(
+            serde_json::from_value::<HttpResponse>(json!({"status": 200, "body": [256]})).is_err()
+        );
+    }
+
+    #[test]
+    fn http_request_body_and_flag_round_trip() {
+        let legacy: HttpRequest = serde_json::from_value(
+            json!({"method": "POST", "url": "http://x/", "body": [1, 2, 255]}),
+        )
+        .unwrap();
+        assert_eq!(legacy.body, vec![1, 2, 255]);
+        assert!(!legacy.body_b64);
+        let wire = serde_json::to_value(HttpRequest {
+            body_b64: true,
+            ..legacy
+        })
+        .unwrap();
+        assert_eq!(wire["body"], json!("AQL/"));
+        let back: HttpRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.body, vec![1, 2, 255]);
+        assert!(back.body_b64);
+    }
 
     #[test]
     fn ws_open_defaults_optional_fields() {

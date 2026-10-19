@@ -39,6 +39,7 @@ pub const CAPABILITIES: &[&str] = &[
     "ws.close",
     "agents.register",
     API_CALL,
+    plugin_toolkit::abi::HTTP_BODY_B64,
 ];
 
 pub const API_CALL: &str = "api.call";
@@ -178,6 +179,7 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
             let req: HttpRequest = serde_json::from_value(args)
                 .map_err(|e| anyhow!("http.request: bad request payload: {e}"))?;
             let max_body = clamp_max_body(req.max_body_bytes);
+            let body_b64 = req.body_b64;
             let mut builder = utils::http::shared()
                 .raw_request(utils::http::RawRequest {
                     method: req.method,
@@ -193,11 +195,16 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
             }
             let resp = run_on_cap_runtime(builder.send_raw())?
                 .map_err(|e| anyhow!("http.request: {e}"))?;
-            Ok(serde_json::to_value(HttpResponse {
+            let legacy_body = (!body_b64).then(|| Value::from(resp.body.clone()));
+            let mut reply = serde_json::to_value(HttpResponse {
                 status: resp.status,
                 headers: resp.headers.into_iter().collect(),
                 body: resp.body,
-            })?)
+            })?;
+            if let Some(body) = legacy_body {
+                reply["body"] = body;
+            }
+            Ok(reply)
         }
         "ws.open" => {
             let req: WsOpen = serde_json::from_value(args)
@@ -605,6 +612,42 @@ mod tests {
             "missing relayed header: {:?}",
             resp.headers
         );
+    }
+
+    #[test]
+    fn http_request_replies_legacy_array_to_old_plugin() {
+        let url = oneshot_http(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi");
+        let reply = handle_cap("http.request", json!({"method": "GET", "url": url}), "p").unwrap();
+        assert_eq!(reply["body"], json!([104, 105]));
+    }
+
+    #[test]
+    fn http_request_replies_base64_when_plugin_advertises() {
+        let url = oneshot_http(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi");
+        let reply = handle_cap(
+            "http.request",
+            json!({"method": "GET", "url": url, "body_b64": true}),
+            "p",
+        )
+        .unwrap();
+        assert_eq!(reply["body"], json!("aGk="));
+        let resp: HttpResponse = serde_json::from_value(reply).unwrap();
+        assert_eq!(resp.body, b"hi");
+    }
+
+    #[test]
+    fn http_request_accepts_base64_and_legacy_request_body() {
+        for body in [json!("aGk="), json!([104, 105])] {
+            let req: HttpRequest =
+                serde_json::from_value(json!({"method": "POST", "url": "http://x/", "body": body}))
+                    .unwrap();
+            assert_eq!(req.body, b"hi");
+        }
+    }
+
+    #[test]
+    fn capabilities_advertise_base64_body() {
+        assert!(CAPABILITIES.contains(&plugin_toolkit::abi::HTTP_BODY_B64));
     }
 
     #[test]

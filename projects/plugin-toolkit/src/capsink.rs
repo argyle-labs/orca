@@ -16,6 +16,8 @@
 //! no rusqlite): the delegated-HTTP shim reaches [`http_request`] without pulling
 //! the `db` feature.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::{Result, anyhow};
 
 use crate::abi::{HttpRequest, HttpResponse};
@@ -34,6 +36,21 @@ pub type CapStreamSink = Box<
         &mut dyn FnMut(u64, String) -> std::result::Result<(), String>,
     ) -> std::result::Result<(), String>,
 >;
+
+static CORE_BODY_B64: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_core_body_b64(on: bool) {
+    CORE_BODY_B64.store(on, Ordering::Relaxed);
+}
+
+#[allow(clippy::disallowed_types)] // transport-layer body rewrite for a core without base64 bodies
+fn request_wire(req: &HttpRequest) -> Result<String> {
+    let mut wire = serde_json::to_value(req)?;
+    if !CORE_BODY_B64.load(Ordering::Relaxed) {
+        wire["body"] = serde_json::Value::from(req.body.clone());
+    }
+    Ok(serde_json::to_string(&wire)?)
+}
 
 thread_local! {
     static CAP_SINK: std::cell::RefCell<Option<CapSink>> =
@@ -109,7 +126,7 @@ pub(crate) fn cap_route_stream(
 /// socket. This is the seam the delegated-HTTP shim (and Phase B'd progenitor
 /// clients) execute through.
 pub fn http_request(req: &HttpRequest) -> Result<HttpResponse> {
-    match cap_route("http.request", &serde_json::to_string(req)?) {
+    match cap_route("http.request", &request_wire(req)?) {
         Some(reply_json) => Ok(serde_json::from_str(&reply_json?)?),
         None => Err(anyhow!(
             "http.request capability unavailable: this plugin is not running as an orca subprocess"
@@ -155,6 +172,7 @@ mod tests {
             timeout_ms: None,
             insecure: false,
             max_body_bytes: None,
+            body_b64: true,
         };
         let out = with_cap_sink(
             Box::new(|cap: &str, json: &str| {
@@ -167,6 +185,48 @@ mod tests {
         assert_eq!(out.unwrap().status, 204);
     }
 
+    fn post(body: &[u8]) -> HttpRequest {
+        HttpRequest {
+            method: "POST".into(),
+            url: "https://example.test/x".into(),
+            headers: vec![],
+            body: body.to_vec(),
+            timeout_ms: None,
+            insecure: false,
+            max_body_bytes: None,
+            body_b64: true,
+        }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_types)] // inspects the raw wire JSON
+    fn request_body_encoding_follows_core_support() {
+        set_core_body_b64(false);
+        let old: serde_json::Value =
+            serde_json::from_str(&request_wire(&post(b"hi")).unwrap()).unwrap();
+        assert_eq!(old["body"], serde_json::json!([104, 105]));
+        assert_eq!(old["body_b64"], serde_json::json!(true));
+        set_core_body_b64(true);
+        let new: serde_json::Value =
+            serde_json::from_str(&request_wire(&post(b"hi")).unwrap()).unwrap();
+        set_core_body_b64(false);
+        assert_eq!(new["body"], serde_json::json!("aGk="));
+    }
+
+    #[test]
+    fn http_request_accepts_legacy_and_base64_replies() {
+        for reply in [
+            r#"{"status":200,"headers":[],"body":[104,105]}"#,
+            r#"{"status":200,"headers":[],"body":"aGk="}"#,
+        ] {
+            let out = with_cap_sink(
+                Box::new(move |_: &str, _: &str| Ok(reply.to_string())),
+                || http_request(&post(b"")),
+            );
+            assert_eq!(out.unwrap().body, b"hi");
+        }
+    }
+
     #[test]
     fn http_request_without_sink_errors() {
         let req = HttpRequest {
@@ -177,6 +237,7 @@ mod tests {
             timeout_ms: None,
             insecure: false,
             max_body_bytes: None,
+            body_b64: true,
         };
         let err = http_request(&req).unwrap_err().to_string();
         assert!(

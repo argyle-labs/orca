@@ -96,6 +96,7 @@ impl Request {
             timeout_ms: self.timeout_ms,
             insecure: self.insecure,
             max_body_bytes: self.max_body_bytes,
+            body_b64: true,
         }
     }
 
