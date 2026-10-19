@@ -250,6 +250,9 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
             if let Some(n) = max_body {
                 builder = builder.max_body(n);
             }
+            if let Some(follow) = req.follow_redirects {
+                builder = builder.follow_redirects(follow);
+            }
             let resp = run_on_cap_runtime(async move {
                 let _permits =
                     reserve_plugin_body_budget(share, body_budget(), reserve, BODY_BUDGET_WAIT)
@@ -261,7 +264,7 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
             })??;
             let reply = HttpResponse {
                 status: resp.status,
-                headers: resp.headers.into_iter().collect(),
+                headers: resp.header_pairs,
                 body: resp.body,
             };
             Ok(if body_b64 {

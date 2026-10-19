@@ -172,6 +172,7 @@ mod tests {
             insecure: false,
             max_body_bytes: None,
             body_b64: true,
+            follow_redirects: None,
         };
         let out = with_cap_sink(
             Box::new(|cap: &str, json: &str| {
@@ -194,6 +195,7 @@ mod tests {
             insecure: false,
             max_body_bytes: None,
             body_b64: true,
+            follow_redirects: None,
         }
     }
 
@@ -237,6 +239,7 @@ mod tests {
             insecure: false,
             max_body_bytes: None,
             body_b64: true,
+            follow_redirects: None,
         };
         let err = http_request(&req).unwrap_err().to_string();
         assert!(

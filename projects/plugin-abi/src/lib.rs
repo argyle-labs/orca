@@ -443,6 +443,10 @@ pub struct HttpRequest {
     /// number array otherwise.
     #[serde(default)]
     pub body_b64: bool,
+    /// `Some(false)` returns the first response (e.g. a 302 + `Set-Cookie`)
+    /// unfollowed; `None` follows redirects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_redirects: Option<bool>,
 }
 
 /// Capability name core advertises in `Welcome` when it accepts a base64
@@ -462,6 +466,8 @@ pub struct LegacyHttpRequest<'a> {
     pub insecure: bool,
     pub max_body_bytes: Option<u64>,
     pub body_b64: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_redirects: Option<bool>,
 }
 
 impl HttpRequest {
@@ -475,6 +481,7 @@ impl HttpRequest {
             insecure: self.insecure,
             max_body_bytes: self.max_body_bytes,
             body_b64: self.body_b64,
+            follow_redirects: self.follow_redirects,
         }
     }
 }
@@ -828,6 +835,7 @@ mod tests {
             insecure: true,
             max_body_bytes: Some(9),
             body_b64: true,
+            follow_redirects: Some(false),
         };
         let mut typed = serde_json::to_value(&req).unwrap();
         typed["body"] = json!([1, 2, 255]);
@@ -872,6 +880,7 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.body, vec![1, 2, 255]);
         assert!(!legacy.body_b64);
+        assert_eq!(legacy.follow_redirects, None);
         let wire = serde_json::to_value(HttpRequest {
             body_b64: true,
             ..legacy
@@ -881,6 +890,49 @@ mod tests {
         let back: HttpRequest = serde_json::from_value(wire).unwrap();
         assert_eq!(back.body, vec![1, 2, 255]);
         assert!(back.body_b64);
+    }
+
+    #[test]
+    fn follow_redirects_is_omitted_by_default_and_round_trips() {
+        let req: HttpRequest =
+            serde_json::from_value(json!({"method": "GET", "url": "http://x/"})).unwrap();
+        assert!(
+            serde_json::to_value(&req)
+                .unwrap()
+                .get("follow_redirects")
+                .is_none()
+        );
+        assert!(
+            serde_json::to_value(req.legacy())
+                .unwrap()
+                .get("follow_redirects")
+                .is_none()
+        );
+        let wire = serde_json::to_value(HttpRequest {
+            follow_redirects: Some(false),
+            ..req
+        })
+        .unwrap();
+        assert_eq!(wire["follow_redirects"], json!(false));
+        let back: HttpRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.follow_redirects, Some(false));
+    }
+
+    #[test]
+    fn response_with_repeated_set_cookie_keeps_old_shape() {
+        let old: HttpResponse = serde_json::from_value(json!({
+            "status": 302,
+            "headers": [["location", "/"], ["set-cookie", "a=1"], ["set-cookie", "b=2"]],
+            "body": []
+        }))
+        .unwrap();
+        assert_eq!(old.headers.len(), 3);
+        let wire = serde_json::to_value(old.legacy()).unwrap();
+        assert_eq!(wire["headers"][2], json!(["set-cookie", "b=2"]));
+        let back: HttpResponse = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.headers, old.headers);
+        let bare: HttpResponse = serde_json::from_value(json!({"status": 204})).unwrap();
+        assert!(bare.headers.is_empty());
     }
 
     #[test]

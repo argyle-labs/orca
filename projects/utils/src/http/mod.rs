@@ -251,6 +251,7 @@ impl Client {
             insecure: false,
             timeout: DEFAULT_TIMEOUT,
             max_body: None,
+            follow_redirects: true,
         }
     }
 
@@ -300,6 +301,7 @@ pub struct RequestBuilder {
     insecure: bool,
     timeout: Duration,
     max_body: Option<usize>,
+    follow_redirects: bool,
 }
 
 enum Body {
@@ -367,6 +369,10 @@ impl RequestBuilder {
     /// payloads (binary releases, container images, backup archives).
     pub fn max_body(mut self, n: usize) -> Self {
         self.max_body = Some(n);
+        self
+    }
+    pub fn follow_redirects(mut self, on: bool) -> Self {
+        self.follow_redirects = on;
         self
     }
 
@@ -450,7 +456,7 @@ impl RequestBuilder {
                 .send()
                 .await?;
             let status = resp.status().as_u16();
-            if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+            if !self.follow_redirects || !matches!(status, 301 | 302 | 303 | 307 | 308) {
                 return Ok(resp);
             }
             let Some(next) = resp
@@ -532,6 +538,7 @@ impl RequestBuilder {
         }
         Ok(BytesResponse {
             status,
+            header_pairs: Vec::new(),
             headers,
             body: bytes,
         })
@@ -549,10 +556,12 @@ impl RequestBuilder {
         let resp = self.dispatch(&[], true).await?;
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
+        let header_pairs = header_pairs(resp.headers());
         let bytes = read_capped(resp, max).await?;
         Ok(BytesResponse {
             status,
             headers,
+            header_pairs,
             body: bytes,
         })
     }
@@ -603,6 +612,9 @@ pub struct RawRequest {
 pub struct BytesResponse {
     pub status: u16,
     pub headers: HashMap<String, String>,
+    /// Every header in wire order with repeats kept (`Set-Cookie`); filled by
+    /// [`RequestBuilder::send_raw`] only.
+    pub header_pairs: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
@@ -734,6 +746,12 @@ async fn read_capped(mut resp: reqwest::Response, limit: usize) -> Result<Vec<u8
         out.extend_from_slice(&chunk);
     }
     Ok(out)
+}
+
+fn header_pairs(h: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    h.iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect()
 }
 
 fn flatten_headers(h: &reqwest::header::HeaderMap) -> HashMap<String, String> {
@@ -1302,5 +1320,66 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, HttpError::Redirect(_)), "{err}");
         assert!(b.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_follow_returns_first_response_with_every_set_cookie() {
+        let a = MockServer::start().await;
+        Mock::given(path("/login"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", "/")
+                    .append_header("Set-Cookie", "session=s1; Path=/; HttpOnly")
+                    .append_header(
+                        "Set-Cookie",
+                        "remember_token=r1; Expires=Wed, 21 Oct 2026 07:28:00 GMT",
+                    ),
+            )
+            .mount(&a)
+            .await;
+        let r = Client::new()
+            .post(format!("{}/login", a.uri()))
+            .raw_body(b"u=x".to_vec())
+            .follow_redirects(false)
+            .send_raw()
+            .await
+            .unwrap();
+        assert_eq!(r.status, 302);
+        let cookies: Vec<&str> = r
+            .header_pairs
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(
+            cookies,
+            [
+                "session=s1; Path=/; HttpOnly",
+                "remember_token=r1; Expires=Wed, 21 Oct 2026 07:28:00 GMT"
+            ]
+        );
+        assert!(
+            r.header_pairs
+                .iter()
+                .any(|(k, v)| k == "location" && v == "/")
+        );
+        assert_eq!(a.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn send_raw_follows_by_default() {
+        let a = MockServer::start().await;
+        redirect_to(&a, "/land".into(), 302).await;
+        Mock::given(path("/land"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&a)
+            .await;
+        let r = Client::new()
+            .get(format!("{}/start", a.uri()))
+            .send_raw()
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, b"ok");
     }
 }

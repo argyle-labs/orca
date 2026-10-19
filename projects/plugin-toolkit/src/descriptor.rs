@@ -284,6 +284,7 @@ pub fn execute(
         insecure: target.insecure,
         max_body_bytes: None,
         body_b64: true,
+        follow_redirects: None,
     };
     let resp = crate::capsink::http_request(&req)?;
 
