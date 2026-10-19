@@ -1635,13 +1635,17 @@ mod tests {
     }
 
     /// Spawn this test binary as the `loaderfakeplugin` subprocess (see
-    /// `plugin_child_serve_entrypoint` in lib.rs). `None` inside that child.
+    /// `plugin_child_serve_entrypoint` in lib.rs). `None` only inside that
+    /// child, which re-runs every test; in the parent a failed spawn panics.
     fn spawn_fake_plugin() -> Option<PluginProcess> {
         if std::env::var(SOCKET_ENV).is_ok() {
             return None;
         }
-        let exe = std::env::current_exe().unwrap();
-        Some(PluginProcess::spawn(&exe, "loaderfakeplugin").unwrap())
+        let exe = std::env::current_exe().expect("test binary path");
+        let proc = PluginProcess::spawn(&exe, "loaderfakeplugin")
+            .unwrap_or_else(|e| panic!("fake plugin failed to spawn from {exe:?}: {e:#}"));
+        assert_eq!(proc.software, "loaderfakeplugin");
+        Some(proc)
     }
 
     fn child_pid(proc: &PluginProcess) -> u32 {
