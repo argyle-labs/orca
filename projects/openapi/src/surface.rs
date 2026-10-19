@@ -155,6 +155,28 @@ pub struct BuiltRequest {
     pub body: Vec<u8>,
 }
 
+impl ApiOp {
+    pub fn input_schema(&self) -> Value {
+        let properties: Map<String, Value> = self
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), p.schema.clone()))
+            .collect();
+        let required: Vec<Value> = self
+            .params
+            .iter()
+            .filter(|p| p.required || p.location == ParamIn::Path)
+            .map(|p| Value::String(p.name.clone()))
+            .collect();
+        serde_json::json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false,
+        })
+    }
+}
+
 impl ApiSurface {
     pub fn parse(text: &str) -> Result<Self> {
         let surface: Self = serde_json::from_str(text).context("api-surface: invalid document")?;
@@ -169,6 +191,12 @@ impl ApiSurface {
 
     pub fn find(&self, tool: &str) -> Option<&ApiOp> {
         self.ops.iter().find(|op| op.tool == tool)
+    }
+
+    pub fn validate_args(&self, op: &ApiOp, args: &Value) -> Result<()> {
+        let defs = Value::Object(self.defs.clone());
+        utils::json_validate::validate(args, &op.input_schema(), &defs)
+            .map_err(|errs| anyhow!("{}: invalid arguments: {}", op.tool, errs.join("; ")))
     }
 
     pub fn build_request(
@@ -706,5 +734,81 @@ mod tests {
             &rules,
         );
         assert_eq!(v, json!("7"));
+    }
+
+    #[test]
+    fn input_schema_lists_params_and_required() {
+        let s = proxmox();
+        let schema = s.find("proxmox.vm_status").unwrap().input_schema();
+        assert_eq!(schema["required"], json!(["node", "vmid"]));
+        assert_eq!(schema["additionalProperties"], json!(false));
+        assert_eq!(schema["properties"]["full"], json!({"type": "boolean"}));
+    }
+
+    #[test]
+    fn validate_args_accepts_well_formed() {
+        let s = proxmox();
+        let op = s.find("proxmox.vm_status").unwrap();
+        assert!(
+            s.validate_args(op, &json!({"node": "pve", "vmid": 100, "full": true}))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_args_rejects_unknown_keys() {
+        let s = proxmox();
+        let op = s.find("proxmox.vm_status").unwrap();
+        let err = s
+            .validate_args(op, &json!({"node": "pve", "vmid": 100, "bogus": 1}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unexpected property `bogus`"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_args_rejects_unknown_keys_on_param_less_op() {
+        let mut op = proxmox().find("proxmox.vm_status").unwrap().clone();
+        op.params.clear();
+        let s = proxmox();
+        assert!(s.validate_args(&op, &json!({})).is_ok());
+        assert!(s.validate_args(&op, &json!({"x": 1})).is_err());
+    }
+
+    #[test]
+    fn validate_args_rejects_missing_required_and_wrong_type() {
+        let s = proxmox();
+        let op = s.find("proxmox.vm_status").unwrap();
+        let err = s
+            .validate_args(op, &json!({"vmid": "abc"}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing required `node`"), "got: {err}");
+        assert!(err.contains("$.vmid: expected type"), "got: {err}");
+        assert!(s.validate_args(op, &json!("not-an-object")).is_err());
+    }
+
+    #[test]
+    fn validate_args_resolves_refs_into_defs() {
+        let s = ApiSurface::parse(
+            &json!({
+                "format": FORMAT,
+                "surface": "s",
+                "kind": "openapi",
+                "defs": {"Id": {"type": "integer"}},
+                "ops": [{
+                    "tool": "s.get",
+                    "method": "GET",
+                    "path": "/x/{id}",
+                    "params": [{"name": "id", "in": "path", "schema": {"$ref": "#/components/schemas/Id"}}],
+                    "policy": {"role": "user"}
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let op = s.find("s.get").unwrap();
+        assert!(s.validate_args(op, &json!({"id": 3})).is_ok());
+        assert!(s.validate_args(op, &json!({"id": "3"})).is_err());
     }
 }
