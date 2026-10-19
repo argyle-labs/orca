@@ -1635,13 +1635,17 @@ mod tests {
     }
 
     /// Spawn this test binary as the `loaderfakeplugin` subprocess (see
-    /// `plugin_child_serve_entrypoint` in lib.rs). `None` inside that child.
+    /// `plugin_child_serve_entrypoint` in lib.rs). `None` only inside that
+    /// child, which re-runs every test; in the parent a failed spawn panics.
     fn spawn_fake_plugin() -> Option<PluginProcess> {
         if std::env::var(SOCKET_ENV).is_ok() {
             return None;
         }
-        let exe = std::env::current_exe().unwrap();
-        Some(PluginProcess::spawn(&exe, "loaderfakeplugin").unwrap())
+        let exe = std::env::current_exe().expect("test binary path");
+        let proc = PluginProcess::spawn(&exe, "loaderfakeplugin")
+            .unwrap_or_else(|e| panic!("fake plugin failed to spawn from {exe:?}: {e:#}"));
+        assert_eq!(proc.software, "loaderfakeplugin");
+        Some(proc)
     }
 
     fn child_pid(proc: &PluginProcess) -> u32 {
@@ -1846,6 +1850,30 @@ mod tests {
             .invoke("loaderfakeplugin.ping", json!({}), None)
             .unwrap_err();
         assert!(format!("{err:#}").contains("reload"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_respawn_refuses_changed_reaches_or_surfaces() {
+        for change in [
+            |p: &mut PluginProcess| p.manifest[0].reaches = vec!["loaderfakeplugin.x".into()],
+            |p: &mut PluginProcess| {
+                p.api_surfaces = vec![ApiSurfaceRef {
+                    name: "main".into(),
+                    sha256: "00".repeat(32),
+                    format: plugin_proto::API_SURFACE_FORMAT.into(),
+                }]
+            },
+        ] {
+            let Some(mut proc) = spawn_fake_plugin() else {
+                return;
+            };
+            change(&mut proc);
+            proc.session.lock().unwrap().state = SessionState::Broken;
+            let err = proc
+                .invoke("loaderfakeplugin.ping", json!({}), None)
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("reload"), "got: {err:#}");
+        }
     }
 
     #[test]

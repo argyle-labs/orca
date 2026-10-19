@@ -996,6 +996,13 @@ fn load_surfaces(
     refs: &[plugin_proto::ApiSurfaceRef],
     fetch: impl Fn(&str) -> Result<String>,
 ) -> Result<Vec<openapi::surface::ApiSurface>> {
+    if refs.len() > plugin_proto::MAX_API_SURFACES {
+        bail!(
+            "plugin '{software}' declares {} api surfaces; at most {}",
+            refs.len(),
+            plugin_proto::MAX_API_SURFACES
+        );
+    }
     let mut out = Vec::with_capacity(refs.len());
     for r in refs {
         if r.format != openapi::surface::FORMAT {
@@ -1015,6 +1022,13 @@ fn load_surfaces(
             Some(hit) => hit,
             None => {
                 let body = fetch(&r.name)?;
+                if body.len() > plugin_proto::MAX_API_SURFACE_BYTES {
+                    bail!(
+                        "plugin '{software}' api surface '{}' exceeds {} bytes",
+                        r.name,
+                        plugin_proto::MAX_API_SURFACE_BYTES
+                    );
+                }
                 let got = utils::hash::sha256_hex(body.as_bytes());
                 if got != key.1 {
                     bail!(
@@ -1043,6 +1057,12 @@ fn load_surfaces(
         }
         out.push((*surface).clone());
     }
+    SURFACE_CACHE
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(s, sha), _| {
+            s != software || refs.iter().any(|r| r.sha256.eq_ignore_ascii_case(sha))
+        });
     Ok(out)
 }
 
@@ -1062,6 +1082,13 @@ fn check_reaches(
         }
     }
     Ok(())
+}
+
+fn evict_surfaces(software: &str) {
+    SURFACE_CACHE
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(s, _), _| s != software);
 }
 
 fn surface_tools(
@@ -1272,6 +1299,7 @@ pub fn is_loaded(software: &str) -> bool {
 /// number of plugins removed.
 pub fn unload_plugin(software: &str) -> usize {
     let mut reg = registry().write().unwrap_or_else(|e| e.into_inner());
+    evict_surfaces(software);
     detach_plugins(&mut reg, software).len()
 }
 
@@ -1286,6 +1314,9 @@ pub(crate) fn unload_if_backed_by(software: &str, proc_addr: usize) -> bool {
                 Backing::Process(proc) => Arc::as_ptr(proc) as usize == proc_addr,
             }
     });
+    if current {
+        evict_surfaces(software);
+    }
     current && !detach_plugins(&mut reg, software).is_empty()
 }
 
@@ -1648,6 +1679,48 @@ mod surface_tests {
         );
         assert!(check_reaches("reachp", &tool(&["get"]), surfaces).is_err());
         assert!(check_reaches("reachp", &tool(&["reachp.get"]), &[]).is_err());
+    }
+
+    #[test]
+    fn load_surfaces_caps_count_and_size_before_hashing() {
+        let body = surface_json("main", "capp");
+        let too_many: Vec<_> = (0..=plugin_proto::MAX_API_SURFACES)
+            .map(|i| surface_ref(&format!("s{i}"), &body))
+            .collect();
+        let fetched = Cell::new(false);
+        let err = load_surfaces("capp", &too_many, |_| {
+            fetched.set(true);
+            Ok(body.clone())
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("at most"), "{err}");
+        assert!(!fetched.get());
+
+        let big = " ".repeat(plugin_proto::MAX_API_SURFACE_BYTES + 1);
+        let err =
+            load_surfaces("capp", &[surface_ref("main", &big)], |_| Ok(big.clone())).unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn the_surface_cache_drops_stale_and_unloaded_entries() {
+        let cached = |p: &str| {
+            SURFACE_CACHE
+                .read()
+                .unwrap()
+                .keys()
+                .filter(|(s, _)| s == p)
+                .count()
+        };
+        let v1 = surface_json("main", "evictp");
+        load_surfaces("evictp", &[surface_ref("main", &v1)], |_| Ok(v1.clone())).unwrap();
+        let mut v2 = sj::from_str::<sj::Value>(&v1).unwrap();
+        v2["ops"][0]["path"] = sj::json!("/y");
+        let v2 = v2.to_string();
+        load_surfaces("evictp", &[surface_ref("main", &v2)], |_| Ok(v2.clone())).unwrap();
+        assert_eq!(cached("evictp"), 1);
+        evict_surfaces("evictp");
+        assert_eq!(cached("evictp"), 0);
     }
 
     #[test]
