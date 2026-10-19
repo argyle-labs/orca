@@ -30,6 +30,7 @@ serde      = { workspace = true }
 anyhow      = { workspace = true }
 clap        = { workspace = true }
 tracing     = { workspace = true }
+orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [lints]
 workspace = true

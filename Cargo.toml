@@ -310,6 +310,7 @@ members = [
     "projects/compat/plugin-toolkit",
     "projects/thin-plugin-fixture",
     "projects/compat/plugin-toolkit-build",
+    "projects/workspace-hack",
 ]
 default-members = [
     "projects/db",

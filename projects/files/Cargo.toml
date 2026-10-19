@@ -45,6 +45,7 @@ tempfile    = { workspace = true }
 
 # Filesystem watch
 notify      = { workspace = true }
+orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 # Glob ignore patterns
 

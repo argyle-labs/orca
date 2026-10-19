@@ -26,6 +26,7 @@ futures-util = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 clap          = { workspace = true }
+orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [lints]
 workspace = true

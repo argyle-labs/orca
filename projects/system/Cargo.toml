@@ -66,6 +66,7 @@ regex        = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 base64 = { workspace = true }
+orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 # macOS self-restart detaches the launchctl-kickstart helper into its own
 # session via `setsid(2)` so the supervisor killing THIS daemon's job (which

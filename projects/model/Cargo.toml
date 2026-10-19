@@ -36,6 +36,7 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 tokio        = { workspace = true }
 tokio-util   = { workspace = true }
+orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 db = { workspace = true, default-features = true, features = ["test-util"] }
