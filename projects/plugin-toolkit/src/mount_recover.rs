@@ -435,15 +435,7 @@ where
     }
     // Held across load→save so a concurrent sweep of the same owner cannot
     // drop this run's records.
-    let mut locked = ledger_path.as_deref().map(lock_ledger).transpose();
-    for _ in 0..LOCK_RETRIES {
-        if !matches!(locked, Ok(Some(None))) {
-            break;
-        }
-        crate::time::sleep(LOCK_RETRY_DELAY).await;
-        locked = ledger_path.as_deref().map(lock_ledger).transpose();
-    }
-    let _lock = match locked {
+    let _lock = match ledger_path.as_deref().map(lock_ledger).transpose() {
         Ok(Some(None)) => {
             merged.errors.push(format!(
                 "mount recovery sweep already in progress for {owner}"
@@ -558,23 +550,74 @@ fn stopped_ledger_file(home: &Path, owner: &str) -> PathBuf {
         .join(format!("mount_recover_stopped.{owner}.json"))
 }
 
-const LOCK_RETRIES: u32 = 20;
-const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
+struct LedgerLock {
+    file: std::fs::File,
+    held: std::sync::atomic::AtomicBool,
+}
 
-/// `Ok(None)` when another sweep holds the lock; never blocks the caller's thread.
-fn lock_ledger(path: &Path) -> std::io::Result<Option<std::fs::File>> {
+struct LedgerGuard {
+    lock: &'static LedgerLock,
+}
+
+impl LedgerGuard {
+    #[cfg(test)]
+    fn file(&self) -> &std::fs::File {
+        &self.lock.file
+    }
+}
+
+impl Drop for LedgerGuard {
+    fn drop(&mut self) {
+        self.lock.file.unlock().ok();
+        self.lock
+            .held
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn ledger_lock_handle(path: &Path) -> std::io::Result<&'static LedgerLock> {
+    static HANDLES: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, &'static LedgerLock>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let mut handles = HANDLES.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(h) = handles.get(path) {
+        return Ok(h);
+    }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let f = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(path.with_extension("json.lock"))?;
-    match f.try_lock() {
-        Ok(()) => Ok(Some(f)),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    let h: &'static LedgerLock = Box::leak(Box::new(LedgerLock {
+        file,
+        held: std::sync::atomic::AtomicBool::new(false),
+    }));
+    handles.insert(path.to_path_buf(), h);
+    Ok(h)
+}
+
+/// `Ok(None)` when another sweep holds the lock; never blocks the caller's thread.
+fn lock_ledger(path: &Path) -> std::io::Result<Option<LedgerGuard>> {
+    let h = ledger_lock_handle(path)?;
+    use std::sync::atomic::Ordering;
+    if h.held
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return Ok(None);
+    }
+    match h.file.try_lock() {
+        Ok(()) => Ok(Some(LedgerGuard { lock: h })),
+        Err(e) => {
+            h.held.store(false, Ordering::Release);
+            match e {
+                std::fs::TryLockError::WouldBlock => Ok(None),
+                std::fs::TryLockError::Error(e) => Err(e),
+            }
+        }
     }
 }
 
@@ -1764,6 +1807,42 @@ mod tests {
             "mount recovery sweep already in progress for {OWNER}"
         ))));
         drop(held);
+    }
+
+    #[test]
+    fn ledger_lock_excludes_concurrent_holders_in_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = stopped_ledger_file(dir.path(), OWNER);
+        let barrier = std::sync::Barrier::new(8);
+        let acquired = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    barrier.wait();
+                    if let Some(g) = lock_ledger(&path).unwrap() {
+                        acquired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        barrier.wait();
+                        drop(g);
+                    } else {
+                        barrier.wait();
+                    }
+                });
+            }
+        });
+        assert_eq!(acquired.into_inner(), 1);
+        assert!(lock_ledger(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn ledger_lock_releases_despite_an_inherited_fd() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = stopped_ledger_file(dir.path(), OWNER);
+        let held = lock_ledger(&path).unwrap().unwrap();
+        let inherited = held.file().try_clone().unwrap();
+        drop(held);
+        let other = std::fs::File::open(path.with_extension("json.lock")).unwrap();
+        other.try_lock().unwrap();
+        drop(inherited);
     }
 
     #[tokio::test]
