@@ -1,6 +1,6 @@
 //! Attribute form of `endpoint_resource`:
 //!
-//! ```rust,ignore
+//! ```text
 //! #[endpoint_resource(plugin = "ntfy")]
 //! pub struct NtfyEndpoint {
 //!     pub name: String,

@@ -106,8 +106,12 @@ fn record_run(
 
 /// Convenience: wrap an async fn into a `TickFn`.
 ///
-/// ```ignore
+/// ```
+/// # use system::periodic::{self, PeriodicSpec};
+/// # async fn my_tick() -> anyhow::Result<()> { Ok(()) }
+/// # fn start(spec: PeriodicSpec) {
 /// periodic::spawn(spec, periodic::boxed(my_tick));
+/// # }
 /// ```
 pub fn boxed<F, Fut>(f: F) -> TickFn
 where

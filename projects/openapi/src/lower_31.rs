@@ -11,14 +11,18 @@
 //! `openapiv3::OpenAPI` and runs the existing
 //! [`crate::normalize::for_progenitor`] + progenitor.
 //!
-//! ```ignore
-//! let mut value: serde_json::value::Value = serde_yaml::from_str(&raw)?;
+//! ```
+//! # fn main() -> anyhow::Result<()> {
+//! # let raw = r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"#;
+//! let mut value: serde_json::value::Value = utils::yaml::from_str(&raw)?;
 //! if openapi::lower_31::is_31(&value) {
 //!     let report = openapi::lower_31::lower_to_30(&mut value)?;
 //!     report.emit_cargo_warnings("plex");
 //! }
 //! let mut spec: openapiv3::OpenAPI = serde_json::value::from_value(value)?;
 //! openapi::normalize::for_progenitor(&mut spec);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! `Value` is the right model here: this is a *transformation over arbitrary
