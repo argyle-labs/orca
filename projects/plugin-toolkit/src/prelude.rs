@@ -1,7 +1,7 @@
 //! The plugin gateway — the *only* import line a plugin source file
 //! ever writes:
 //!
-//! ```rust,ignore
+//! ```
 //! use plugin_toolkit::prelude::*;
 //! ```
 //!

@@ -8,7 +8,7 @@
 //! `std::error::Error` (+ `From`) impls directly — no dependency on any
 //! external error crate leaks into the plugin.
 //!
-//! ```rust,ignore
+//! ```text
 //! #[plugin_error]
 //! pub enum SmbError {
 //!     #[plugin(display = "required tool not found on PATH: {0}")]

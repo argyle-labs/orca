@@ -9,7 +9,7 @@
 //! Annotate an async function with the standard tool signature and the macro
 //! emits the four-surface scaffolding inline next to the body:
 //!
-//! ```rust,ignore
+//! ```text
 //! #[orca_tool(domain = "host", verb = "info")]
 //! /// Doc comment becomes OrcaToolDef::DESCRIPTION.
 //! async fn host_info(args: EmptyArgs, ctx: &ToolCtx) -> Result<HostInfoOutput> { /* … */ }
@@ -72,7 +72,7 @@ mod snake_aliases;
 /// domain traits (`StorageBackend`, `RuntimeAdapter`, notifications `Backend`,
 /// …) and every plugin's impl of them.
 ///
-/// ```rust,ignore
+/// ```text
 /// #[orca_async]
 /// pub trait StorageBackend: Send + Sync {
 ///     async fn mount(&self, id: &str) -> Result<MountOutcome, StorageError>;
@@ -97,7 +97,7 @@ pub fn orca_async(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// wrapper that resolves the client (via an in-scope `make_client`, or
 /// `resolve = <path>`) and runs the body. See `endpoint_tool.rs`.
 ///
-/// ```rust,ignore
+/// ```text
 /// #[endpoint_tool(domain = "home-assistant", verb = "entities")]
 /// async fn ha_entities(client: Client, #[arg(long)] domain: Option<String>) -> Result<JsonAny> {
 ///     Ok(client.entity_list(domain.as_deref()).await?.into())
@@ -112,7 +112,7 @@ pub fn endpoint_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `#[endpoint_resource(plugin = "...")]` — annotate a struct to generate the
 /// full 5-verb endpoint-registry surface with zero SQL in the plugin.
 ///
-/// ```rust,ignore
+/// ```text
 /// #[endpoint_resource(plugin = "ntfy")]
 /// pub struct NtfyEndpoint {
 ///     pub name: String,
@@ -532,7 +532,7 @@ fn expand_to_tokens(attr: ToolAttr, item: ItemFn) -> TokenStream2 {
 
 /// `#[derive(Replicated)]` — opt a row struct into mesh replication.
 ///
-/// ```rust,ignore
+/// ```text
 /// #[derive(Serialize, Deserialize, Replicated)]
 /// #[replicate(table = "users", lww = "updated_at")]   // pk defaults to "id"
 /// pub struct ReplicaUser { pub id: String, /* … one field per column … */ }
