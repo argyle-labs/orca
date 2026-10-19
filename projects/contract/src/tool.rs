@@ -3,11 +3,16 @@
 //!
 //! # Implementing
 //!
-//! ```rust,ignore
-//! #[derive(Deserialize, JsonSchema)]
+//! ```
+//! # use anyhow::Result;
+//! # use async_trait::async_trait;
+//! # use contract::{OrcaTool, OrcaToolDef, ToolCtx};
+//! # use schemars::JsonSchema;
+//! # use serde::{Deserialize, Serialize};
+//! #[derive(Serialize, Deserialize, JsonSchema)]
 //! pub struct Args { pub mode: String }
 //!
-//! #[derive(Serialize, JsonSchema)]
+//! #[derive(Serialize, Deserialize, JsonSchema)]
 //! pub struct Output { pub mode: String, pub applied: bool }
 //!
 //! pub struct MyTool;

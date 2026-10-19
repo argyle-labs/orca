@@ -3,7 +3,10 @@
 //! A row type opts into mesh replication with `#[derive(Replicated)]`
 //! (see `orca-macro`):
 //!
-//! ```ignore
+//! ```
+//! # extern crate macro_runtime as plugin_toolkit;
+//! # use derive::Replicated;
+//! # use serde::{Deserialize, Serialize};
 //! #[derive(Serialize, Deserialize, Replicated)]
 //! #[replicate(table = "users", lww = "updated_at")]
 //! pub struct ReplicaUser { pub id: String, /* … */ pub updated_at: String }

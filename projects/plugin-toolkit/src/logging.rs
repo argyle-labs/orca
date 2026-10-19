@@ -39,7 +39,9 @@ use std::time::{Duration, Instant};
 /// Wraps a secret-bearing value so `Debug`/`Display` never reveal it.
 /// Memory is zeroed on drop.
 ///
-/// ```ignore
+/// ```
+/// # use plugin_toolkit::logging::Redacted;
+/// # let api_key = String::from("secret");
 /// tracing::info!(token = ?Redacted::new(api_key), "calling upstream");
 /// // emits: token=Redacted(***)
 /// ```

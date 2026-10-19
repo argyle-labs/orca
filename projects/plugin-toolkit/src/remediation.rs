@@ -6,7 +6,9 @@ pub use contract::{Blocked, ManualStep, ManualSteps, Remediation};
 
 /// A tool error saying the capability is unavailable and how to unblock it.
 ///
-/// ```rust,ignore
+/// ```
+/// # use plugin_toolkit::remediation::{ManualSteps, blocked};
+/// # fn enable_vms() -> anyhow::Result<()> {
 /// return Err(blocked(
 ///     "unraid.vm_service_disabled",
 ///     "the VM service is disabled",
@@ -14,6 +16,8 @@ pub use contract::{Blocked, ManualStep, ManualSteps, Remediation};
 ///         .step("Enable VMs", "Settings → VM Manager → Enable VMs: Yes")
 ///         .verify("`orca vm list` returns without this error"),
 /// ));
+/// # }
+/// # assert!(enable_vms().is_err());
 /// ```
 pub fn blocked(
     reason_code: impl Into<String>,

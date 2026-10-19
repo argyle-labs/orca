@@ -10,12 +10,21 @@
 //!
 //! Usage from a plugin:
 //!
-//! ```rust,ignore
+//! ```no_run
+//! # use plugin_toolkit::api_client::ApiClientBuilder;
+//! # mod generated { pub struct Client; impl Client {
+//! #     pub fn new_with_client(_: &str, _: plugin_toolkit::reqwest::Client) -> Self { Client }
+//! # } }
+//! # struct Cfg { insecure: bool }
+//! # fn client(cfg: Cfg, base_url: String, tid: &str, tsec: &str) -> anyhow::Result<generated::Client> {
 //! let http = ApiClientBuilder::new()
 //!     .header("authorization", format!("PVEAPIToken={tid}={tsec}"))?
 //!     .insecure(cfg.insecure)
 //!     .build()?;
+//! # Ok(
 //! generated::Client::new_with_client(&base_url, http)
+//! # )
+//! # }
 //! ```
 //!
 //! Sensitive header values are flagged with `set_sensitive(true)` so a
@@ -217,9 +226,9 @@ where
 /// envelope (Proxmox VE's `{"data": …}`, many others). A plugin that peels a
 /// single top-level key hands codegen a one-line unwrapper:
 ///
-/// ```rust,ignore
+/// ```
 /// pub async fn unwrap_data(
-///     client: &::plugin_toolkit::api_client::Client,
+///     client: &::plugin_toolkit::reqwest::Client,
 ///     request: ::plugin_toolkit::reqwest::Request,
 /// ) -> ::plugin_toolkit::reqwest::Result<::plugin_toolkit::reqwest::Response> {
 ///     ::plugin_toolkit::api_client::exec_unwrap_envelope(client, request, "data").await
