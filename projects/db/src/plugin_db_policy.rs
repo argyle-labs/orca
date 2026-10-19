@@ -8,6 +8,8 @@ enum CoreTableAccess {
     SharedByProvider,
     ReadWrite,
     ReadOnly,
+    /// Read-only; rows confined to enabled, non-reserved installed plugins.
+    InstalledPluginCredentials,
 }
 
 /// Default-deny policy for `db.op` with namespace "": a core table is reachable
@@ -20,8 +22,11 @@ const CORE_TABLE_POLICY: &[(&str, Option<&str>, CoreTableAccess)] = &[
     ("mcp_tool_mappings", Some("mcp"), CoreTableAccess::ReadWrite),
     ("openapi_specs", Some("mcp"), CoreTableAccess::ReadWrite),
     ("plugins", Some("mcp"), CoreTableAccess::ReadOnly),
-    // Temporary: mcp reads credentials directly until a dedicated capability replaces this.
-    ("plugin_credentials", Some("mcp"), CoreTableAccess::ReadOnly),
+    (
+        "plugin_credentials",
+        Some("mcp"),
+        CoreTableAccess::InstalledPluginCredentials,
+    ),
 ];
 
 fn core_table_access(table: &str, principal: &str) -> Option<CoreTableAccess> {
@@ -94,6 +99,14 @@ fn key_text(v: Option<&DbValue>) -> Result<Option<String>> {
     }
 }
 
+fn enabled_plugin_ids(conn: &crate::Conn) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM plugins WHERE enabled = 1")?;
+    let ids = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(ids)
+}
+
 /// Run `op` for `principal` under the namespace policy: its own `plug__`
 /// namespace freely, core tables only per [`core_table_access`], nothing else.
 pub fn exec_db_op_policed(conn: &crate::Conn, op: &DbOp, principal: &str) -> Result<DbReply> {
@@ -116,6 +129,18 @@ pub fn exec_db_op_policed(conn: &crate::Conn, op: &DbOp, principal: &str) -> Res
         CoreTableAccess::ReadWrite => crate::plugin_tables::exec_db_op(conn, op),
         CoreTableAccess::ReadOnly if is_read => crate::plugin_tables::exec_db_op(conn, op),
         CoreTableAccess::ReadOnly => Err(deny(principal, op, table, "table is read-only")),
+        CoreTableAccess::InstalledPluginCredentials if is_read => {
+            let enabled = enabled_plugin_ids(conn)?;
+            let mut reply = crate::plugin_tables::exec_db_op(conn, op)?;
+            reply.rows.retain(|r| {
+                matches!(r.get("plugin_id"), Some(DbValue::Text(id))
+                    if enabled.contains(id) && !contract::plugin::is_reserved_plugin_id(id))
+            });
+            Ok(reply)
+        }
+        CoreTableAccess::InstalledPluginCredentials => {
+            Err(deny(principal, op, table, "table is read-only"))
+        }
         CoreTableAccess::SharedByProvider if is_read => {
             let mut reply = crate::plugin_tables::exec_db_op(conn, op)?;
             reply.rows.retain(|r| row_provider_is(r, principal));
@@ -194,7 +219,11 @@ mod tests {
              INSERT INTO endpoints VALUES ('a1', 'alpha', 'one'), ('b1', 'beta', 'two');
              CREATE TABLE ntfy_endpoints (name TEXT PRIMARY KEY);
              CREATE TABLE mcp_servers (name TEXT PRIMARY KEY);
-             CREATE TABLE plugin_credentials (name TEXT PRIMARY KEY);",
+             CREATE TABLE plugins (id TEXT PRIMARY KEY, enabled INTEGER NOT NULL);
+             INSERT INTO plugins VALUES ('alpha', 1), ('beta', 0), ('orca', 1);
+             CREATE TABLE plugin_credentials (name TEXT PRIMARY KEY, plugin_id TEXT, value TEXT);
+             INSERT INTO plugin_credentials VALUES
+               ('a', 'alpha', 'x'), ('b', 'beta', 'y'), ('o', 'orca', 'z'), ('g', 'ghost', 'w');",
         )
         .unwrap();
         conn
@@ -410,7 +439,13 @@ mod tests {
     #[test]
     fn plugin_credentials_read_only_for_mcp() {
         let conn = policy_conn();
-        assert!(exec_db_op_policed(&conn, &list("plugin_credentials"), "mcp").is_ok());
+        let reply = exec_db_op_policed(&conn, &list("plugin_credentials"), "mcp").unwrap();
+        let ids: Vec<_> = reply
+            .rows
+            .iter()
+            .map(|r| r.get("plugin_id").cloned())
+            .collect();
+        assert_eq!(ids, vec![Some(DbValue::Text("alpha".into()))]);
         assert!(exec_db_op_policed(&conn, &list("plugin_credentials"), "alpha").is_err());
         let ins = DbOp::Insert {
             namespace: String::new(),
