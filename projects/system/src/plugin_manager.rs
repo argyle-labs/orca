@@ -1699,7 +1699,7 @@ fn purge_plugin_data(
     software: &str,
 ) -> Result<(Vec<String>, Vec<String>)> {
     let tx = conn.unchecked_transaction()?;
-    let dropped = if db::plugin_tables::validate_segment("namespace", software).is_ok() {
+    let dropped = if db::plugin_tables::validate_principal(software).is_ok() {
         db::plugin_tables::drop_namespace(&tx, software)?
     } else {
         Vec::new()
@@ -2727,6 +2727,8 @@ mod tests {
             })
             .unwrap();
         }
+        let (_, dropped) = purge_plugin_data(&conn, "foo-bar").unwrap();
+        assert_eq!(dropped, vec!["plug__foo_bar__items"]);
         let (revoked, dropped) = purge_plugin_data(&conn, "my-plugin").unwrap();
         assert!(revoked.is_empty() && dropped.is_empty());
     }

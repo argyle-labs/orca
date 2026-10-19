@@ -98,7 +98,7 @@ fn key_text(v: Option<&DbValue>) -> Result<Option<String>> {
 /// namespace freely, core tables only per [`core_table_access`], nothing else.
 pub fn exec_db_op_policed(conn: &crate::Conn, op: &DbOp, principal: &str) -> Result<DbReply> {
     let table = op_table(op);
-    if crate::plugin_tables::validate_segment("principal", principal).is_err() {
+    if crate::plugin_tables::validate_principal(principal).is_err() {
         return Err(deny(principal, op, table, "invalid principal"));
     }
     let ns = op.namespace();
@@ -248,6 +248,49 @@ mod tests {
             row: name_row(),
         };
         assert!(exec_db_op_policed(&conn, &op, "mcp").is_err());
+    }
+
+    #[test]
+    fn hyphenated_principal_lists_own_endpoints() {
+        let conn = policy_conn();
+        conn.execute(
+            "INSERT INTO endpoints VALUES ('c1', 'calibre-web', 'cw')",
+            [],
+        )
+        .unwrap();
+        let reply = exec_db_op_policed(&conn, &list("endpoints"), "calibre-web").unwrap();
+        assert_eq!(reply.rows.len(), 1);
+        assert!(row_provider_is(&reply.rows[0], "calibre-web"));
+    }
+
+    #[test]
+    fn hyphenated_principal_uses_own_namespace() {
+        let conn = policy_conn();
+        let mut row = DbRow::new();
+        row.insert("id".into(), DbValue::Text("k".into()));
+        let op = DbOp::Insert {
+            namespace: "calibre-web".into(),
+            table: "books".into(),
+            row,
+        };
+        exec_db_op_policed(&conn, &op, "calibre-web").unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM plug__calibre_web__books", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn malformed_principals_refused() {
+        let conn = policy_conn();
+        for p in ["calibre_web", "-a", "a-", "a--b", "a\"b"] {
+            let err = exec_db_op_policed(&conn, &list("endpoints"), p)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("invalid principal"), "{p}: {err}");
+        }
     }
 
     #[test]

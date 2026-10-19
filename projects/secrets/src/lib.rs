@@ -247,10 +247,7 @@ pub struct SecretGrant {
 }
 
 fn valid_principal(plugin: &str) -> bool {
-    let mut bytes = plugin.bytes();
-    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
-        && plugin.len() <= 64
-        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    db::plugin_tables::validate_principal(plugin).is_ok()
 }
 
 fn in_namespace(name: &str, plugin: &str) -> bool {
@@ -851,6 +848,13 @@ mod tests {
         seed(&conn, "gitea.token", "t");
         let r = exec_secret_op(&conn, &Principal::Core, &get_op("gitea.token")).unwrap();
         assert_eq!(r.value.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn principal_rules_match_db() {
+        assert!(valid_principal("calibre-web"));
+        assert!(!valid_principal("calibre_web"));
+        assert!(!valid_principal("a--b"));
     }
 
     #[test]
