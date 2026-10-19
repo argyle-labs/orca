@@ -392,10 +392,12 @@ fn run_secret_op(conn: &Connection, op: &plugin_abi::SecretOp) -> Result<plugin_
                     anyhow::anyhow!("inline secret '{}' has no stored value", row.name)
                 })?),
                 other => Some(
-                    utils::reactor::block_on(contract::secrets_backend::resolve(
-                        other,
-                        &row.ref_path,
-                    ))
+                    utils::reactor::off_async_worker(|| {
+                        utils::reactor::block_on(contract::secrets_backend::resolve(
+                            other,
+                            &row.ref_path,
+                        ))
+                    })
                     .map_err(|e| {
                         anyhow::anyhow!("secret '{}' (backend '{other}'): {e:#}", row.name)
                     })?,
@@ -535,7 +537,7 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn get_resolves_from_inside_a_runtime() {
         contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
         let conn = test_conn();
@@ -549,6 +551,25 @@ mod tests {
         .unwrap();
         let op = plugin_abi::SecretOp::Get {
             name: "c.tok".into(),
+        };
+        let reply = exec_secret_op(&conn, &Principal::Core, &op).unwrap();
+        assert_eq!(reply.value.as_deref(), Some("resolved"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_resolves_from_inside_a_multi_thread_runtime() {
+        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
+        let conn = test_conn();
+        upsert(
+            &conn,
+            "d.tok",
+            "fake-959",
+            "fake://vault/item/credential",
+            None,
+        )
+        .unwrap();
+        let op = plugin_abi::SecretOp::Get {
+            name: "d.tok".into(),
         };
         let reply = exec_secret_op(&conn, &Principal::Core, &op).unwrap();
         assert_eq!(reply.value.as_deref(), Some("resolved"));

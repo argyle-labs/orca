@@ -241,7 +241,7 @@ impl PrivilegedOps {
     pub fn serve_stdin(&self) -> ! {
         let mut input = String::new();
         let reply = match std::io::Read::read_to_string(&mut std::io::stdin(), &mut input) {
-            Ok(_) => utils::reactor::block_on(self.dispatch(&input)),
+            Ok(_) => crate::reactor::block_on(self.dispatch(&input)),
             Err(e) => PrivilegedReply {
                 ok: false,
                 detail: None,

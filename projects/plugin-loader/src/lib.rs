@@ -777,26 +777,9 @@ fn make_backend_invoke(backing: Backing, invoke_prefix: String) -> BackendInvoke
         // Domain ops are daemon-originated; no request identity rides them.
         // Domain registries call this thunk directly, often from async code, so
         // this layer keeps it off the async worker itself.
-        off_async_worker(|| backing.invoke(&tool, args, None))
+        utils::reactor::off_async_worker(|| backing.invoke(&tool, args, None))
             .map_err(|e| sj::Value::String(format!("{e:#}")))
     })
-}
-
-/// Run a blocking plugin invoke so it is sound even when the caller is a tokio
-/// async worker (#798): `block_in_place` on a multi-thread runtime, a scoped
-/// thread on a current-thread one (where `block_in_place` panics), inline
-/// anywhere else.
-fn off_async_worker<R: Send>(f: impl FnOnce() -> R + Send) -> R {
-    use tokio::runtime::{Handle, RuntimeFlavor};
-    match Handle::try_current().map(|h| h.runtime_flavor()) {
-        Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
-        Ok(_) => std::thread::scope(|s| {
-            s.spawn(f)
-                .join()
-                .unwrap_or_else(|p| std::panic::resume_unwind(p))
-        }),
-        Err(_) => f(),
-    }
 }
 
 /// Register every backend a plugin declares into its domain registry, routing
@@ -1665,31 +1648,6 @@ mod loader_tests {
         assert_eq!(name_scope("deploy_target"), NameScope::Claimed);
         assert_eq!(name_scope("agents"), NameScope::Agent);
         assert_eq!(name_scope("secrets_backend"), NameScope::Own);
-    }
-
-    /// A nested `block_on` panics on an async worker, so running one inside
-    /// `off_async_worker` proves `f` left the worker.
-    fn nested_block_on() -> i32 {
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap()
-            .block_on(async { 7 })
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn off_async_worker_leaves_a_multi_thread_worker() {
-        assert_eq!(off_async_worker(nested_block_on), 7);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn off_async_worker_leaves_a_current_thread_runtime() {
-        assert_eq!(off_async_worker(nested_block_on), 7);
-    }
-
-    #[test]
-    fn off_async_worker_runs_inline_without_a_runtime() {
-        let caller = std::thread::current().id();
-        assert_eq!(off_async_worker(|| std::thread::current().id()), caller);
     }
 
     #[test]

@@ -79,7 +79,6 @@ pub mod http;
 /// X.509 + key generation. Gated by the `pki` feature.
 #[cfg(feature = "pki")]
 pub mod pki;
-/// Cooperative shutdown token (tokio). Gated by the `rt` feature.
 #[cfg(feature = "reactor")]
 pub mod reactor;
 /// Cron scheduling. Gated by the `schedule` feature; hides the cron lib (and,
@@ -89,6 +88,7 @@ pub mod schedule;
 /// Glob matching. Gated by the `search` feature.
 #[cfg(feature = "search")]
 pub mod search;
+/// Cooperative shutdown token (tokio). Gated by the `rt` feature.
 #[cfg(feature = "rt")]
 pub mod shutdown;
 /// Daemon state file. Gated by the `state` feature (pulls `contract` + tokio).
