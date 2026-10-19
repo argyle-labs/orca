@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use utils::json_wire::{bool_ish, number_ish, push_query, wire_string};
 
-pub const FORMAT: &str = "orca.api-surface/v1";
+pub use plugin_proto::API_SURFACE_FORMAT as FORMAT;
 
 const MAX_DEPTH: usize = 128;
 

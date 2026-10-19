@@ -57,6 +57,7 @@ pub struct Plugin {
     defs: Vec<BackendDef>,
     dispatchers: Vec<Dispatcher>,
     schema_json: String,
+    api_surfaces: Vec<(String, &'static [u8])>,
 }
 
 impl Plugin {
@@ -71,6 +72,7 @@ impl Plugin {
             defs: Vec::new(),
             dispatchers: Vec::new(),
             schema_json: crate::backend_def::EMPTY_SCHEMAS.to_string(),
+            api_surfaces: Vec::new(),
         }
     }
 
@@ -110,6 +112,14 @@ impl Plugin {
     #[must_use]
     pub fn schema_json(mut self, schema_json: impl Into<String>) -> Self {
         self.schema_json = schema_json.into();
+        self
+    }
+
+    /// Embed an `orca.api-surface/v1` document (e.g. `include_bytes!`) that
+    /// orca's generic executor drives; advertised by name and content hash.
+    #[must_use]
+    pub fn api_surface(mut self, name: impl Into<String>, body: &'static [u8]) -> Self {
+        self.api_surfaces.push((name.into(), body));
         self
     }
 
@@ -598,6 +608,7 @@ impl Plugin {
             backends_json: crate::backend_def::backends_json(self.defs),
             schema_json: self.schema_json,
             backend_dispatch,
+            api_surfaces: self.api_surfaces,
         })
     }
 
@@ -625,6 +636,7 @@ impl Plugin {
             backends_json: crate::backend_def::backends_json(self.defs),
             schema_json: self.schema_json,
             backend_dispatch,
+            api_surfaces: self.api_surfaces,
         }
     }
 }
