@@ -64,29 +64,11 @@ pub fn to_paths(spec: &mut Value, keep_paths: &[&str]) -> Result<Vec<String>> {
     }
     paths.retain(|k, _| keep.contains(k.as_str()));
 
-    // --- 2. seed roots: every component $ref reachable from the kept paths ---
-    let paths_val = spec.get("paths").cloned().unwrap_or(Value::Null);
-    let mut reachable: BTreeSet<CompRef> = BTreeSet::new();
-    let mut frontier: Vec<CompRef> = Vec::new();
-    collect_refs(&paths_val, &mut frontier)?;
-
-    // --- 3. transitive closure over every referenced component section ---
-    let components_owned = spec
-        .get("components")
-        .cloned()
-        .unwrap_or_else(|| Value::Object(Default::default()));
-
-    while let Some(comp) = frontier.pop() {
-        if !reachable.insert(comp.clone()) {
-            continue;
-        }
-        let (section, name) = &comp;
-        if let Some(def) = components_owned.get(section).and_then(|s| s.get(name)) {
-            let mut child = Vec::new();
-            collect_refs(def, &mut child)?;
-            frontier.extend(child);
-        }
-    }
+    // --- 2+3. every component transitively $ref'd from the kept paths ---
+    let reachable = closure(
+        spec.get("paths").unwrap_or(&Value::Null),
+        spec.get("components").unwrap_or(&Value::Null),
+    )?;
 
     // --- 4. delete unreachable members of every referenced section ---
     // Only sections that appear in a $ref are pruned; sections never reached
@@ -109,6 +91,26 @@ pub fn to_paths(spec: &mut Value, keep_paths: &[&str]) -> Result<Vec<String>> {
         .filter(|(section, _)| section == "schemas")
         .map(|(_, name)| name)
         .collect())
+}
+
+/// Every `(section, name)` component transitively `$ref`'d from `root`,
+/// resolved against `components`.
+pub(crate) fn closure(root: &Value, components: &Value) -> Result<BTreeSet<CompRef>> {
+    let mut reachable: BTreeSet<CompRef> = BTreeSet::new();
+    let mut frontier: Vec<CompRef> = Vec::new();
+    collect_refs(root, &mut frontier)?;
+    while let Some(comp) = frontier.pop() {
+        if !reachable.insert(comp.clone()) {
+            continue;
+        }
+        let (section, name) = &comp;
+        if let Some(def) = components.get(section).and_then(|s| s.get(name)) {
+            let mut child = Vec::new();
+            collect_refs(def, &mut child)?;
+            frontier.extend(child);
+        }
+    }
+    Ok(reachable)
 }
 
 /// Walk `value` and push every `#/components/<section>/<name>` `$ref` into

@@ -34,7 +34,7 @@ const SPEC_SUFFIXES: &[&str] = &[".openapi.json", ".openapi.yaml", ".openapi.yml
 /// Detection mirrors `openapi::parse_str`: a document starting with `{` is
 /// JSON, everything else is YAML. YAML maps cleanly onto the same value model,
 /// so a 3.1 YAML spec rides the same lower -> prune -> normalize path as JSON.
-fn parse_spec_value(raw: &str, flavor: &str) -> Result<Value> {
+pub(crate) fn parse_spec_value(raw: &str, flavor: &str) -> Result<Value> {
     if raw.trim_start().starts_with('{') {
         serde_json::from_str(raw).with_context(|| format!("parse {flavor} as JSON"))
     } else {
@@ -216,7 +216,7 @@ fn generate_inner(
 
 /// Run the full lower → prune → normalize → progenitor pipeline for one spec
 /// and return the formatted Rust source.
-fn codegen_one(
+pub(crate) fn codegen_one(
     raw: &str,
     flavor: &str,
     plugin_tag: &str,
