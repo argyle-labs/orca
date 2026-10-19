@@ -23,6 +23,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_tungstenite::{WebSocketStream, client_async_with_config};
+use utils::http::redact_url;
 
 use crate::capability::{cap_runtime, run_on_cap_runtime};
 
@@ -237,7 +238,7 @@ pub(crate) fn open(req: WsOpen, principal: &str) -> Result<WsChunk> {
         );
     }
     let wait = wait_limit(req.timeout_ms);
-    let url = req.url.clone();
+    let url = redact_url(&req.url);
     let ws = run_on_cap_runtime(async move { timeout(wait, connect(req, max_message)).await })?
         .map_err(|_| anyhow!("ws.open: '{url}' timed out after {wait:?}"))??;
 
@@ -424,7 +425,7 @@ async fn connect(req: WsOpen, max_message: usize) -> Result<WebSocketStream<Box<
         .url
         .as_str()
         .into_client_request()
-        .map_err(|e| anyhow!("ws.open: bad URL '{}': {e}", req.url))?;
+        .map_err(|e| anyhow!("ws.open: bad URL '{}': {e}", redact_url(&req.url)))?;
     for (k, v) in &req.headers {
         let name = HeaderName::from_bytes(k.as_bytes())
             .map_err(|e| anyhow!("ws.open: bad header name '{k}': {e}"))?;
@@ -439,11 +440,14 @@ async fn connect(req: WsOpen, max_message: usize) -> Result<WebSocketStream<Box<
     let tls = match uri.scheme_str() {
         Some("wss") => true,
         Some("ws") => false,
-        _ => bail!("ws.open: '{}' is not a ws:// or wss:// URL", req.url),
+        _ => bail!(
+            "ws.open: '{}' is not a ws:// or wss:// URL",
+            redact_url(&req.url)
+        ),
     };
     let host = uri
         .host()
-        .ok_or_else(|| anyhow!("ws.open: '{}' has no host", req.url))?
+        .ok_or_else(|| anyhow!("ws.open: '{}' has no host", redact_url(&req.url)))?
         .trim_matches(['[', ']'])
         .to_string();
     let port = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
@@ -790,6 +794,19 @@ mod tests {
             assert!(err.starts_with("ws.open:"), "{url}: {err}");
         }
         assert_eq!(session_count("ws-bad"), 0);
+    }
+
+    #[test]
+    fn open_errors_omit_url_query() {
+        for url in [
+            "http://127.0.0.1:1/x?token=s3cr3t",
+            "not a url?token=s3cr3t",
+        ] {
+            let err = handle_cap("ws.open", json!({"url": url}), "ws-bad-q")
+                .unwrap_err()
+                .to_string();
+            assert!(!err.contains("s3cr3t"), "{url}: {err}");
+        }
     }
 
     #[test]
