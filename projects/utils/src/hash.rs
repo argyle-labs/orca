@@ -1,16 +1,9 @@
 //! Content hashing — the one place in the workspace that knows how to
-//! compute SHA-256 and BLAKE3 digests. **Every callsite that used to inline
+//! compute SHA-256 digests. **Every callsite that used to inline
 //! `Sha256::new()` should call through here** (see
 //! `project_crate_audit_2026_05_29` P1 #3). Lives at top-level
 //! `utils::hash` (not under `utils::fs`) because the algorithm is
 //! generic — files are just one possible input.
-//!
-//! Picking a flavor:
-//! - SHA-256 — interop default, matches `sha256sum` etc. Use for any
-//!   bytes you also expect to verify outside orca (download checksums,
-//!   token hashes, pairing-code hashes, args-hash bound into caller tokens).
-//! - BLAKE3 — orca-internal content addressing where speed matters and
-//!   nothing external needs to recompute the digest.
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -51,22 +44,6 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex_encode(&h.finalize()))
 }
 
-/// Lowercase-hex BLAKE3 of the file at `path`.
-pub fn blake3_file(path: &Path) -> Result<String> {
-    let mut h = blake3::Hasher::new();
-    let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut r = BufReader::new(f);
-    let mut buf = [0u8; READ_BUF];
-    loop {
-        let n = r.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(h.finalize().to_hex().to_string())
-}
-
 /// Lowercase-hex encode a byte slice. Exposed so callers needing only the
 /// hex step (e.g. random-token serialization) don't reinvent it.
 pub fn hex_encode(b: &[u8]) -> String {
@@ -104,18 +81,6 @@ mod tests {
         let p = dir.path().join("a.bin");
         std::fs::write(&p, b"hello").unwrap();
         assert_eq!(sha256_file(&p).unwrap(), HELLO_SHA256_HEX);
-    }
-
-    #[test]
-    fn blake3_streams_files() {
-        let dir = tempdir().unwrap();
-        let p = dir.path().join("a.bin");
-        std::fs::write(&p, b"").unwrap();
-        // blake3("") = af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
-        assert_eq!(
-            blake3_file(&p).unwrap(),
-            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
-        );
     }
 
     #[test]

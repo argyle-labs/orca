@@ -5,7 +5,7 @@ publish = false
 edition.workspace = true
 
 [dependencies]
-plugin-toolkit = { workspace = true, features = ["tools", "delegated-http", "graphql"] }
+plugin-toolkit = { workspace = true, features = ["tools", "db", "containers", "delegated-http", "graphql"] }
 
 [lints]
 workspace = true

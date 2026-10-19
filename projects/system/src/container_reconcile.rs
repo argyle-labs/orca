@@ -137,7 +137,7 @@ pub struct PassOutcome {
 /// notification raised by [`notify_pass`].
 pub async fn reconcile_pass(
     policy: RemediationPolicy,
-    adapters: Vec<Arc<dyn containers::RuntimeAdapter>>,
+    adapters: Vec<Arc<dyn container_runtime::RuntimeAdapter>>,
     breaker_store: &dyn BreakerStore,
 ) -> ReconcileOutput {
     let plan = plan_from_policy(policy);
@@ -173,7 +173,7 @@ pub fn notify_pass(policy: RemediationPolicy, out: &ReconcileOutput) -> bool {
 /// [`tick`] instead sequences [`reconcile_pass`] then [`notify_pass`] directly.
 pub async fn run_pass(
     policy: RemediationPolicy,
-    adapters: Vec<Arc<dyn containers::RuntimeAdapter>>,
+    adapters: Vec<Arc<dyn container_runtime::RuntimeAdapter>>,
     breaker_store: &dyn BreakerStore,
 ) -> anyhow::Result<PassOutcome> {
     let reconcile = reconcile_pass(policy, adapters, breaker_store).await;
@@ -292,7 +292,7 @@ pub fn spawn() -> JoinHandle<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use containers::{
+    use container_runtime::{
         AdapterError, Container, ContainerState, ListFilter, LogTail, RestartPolicy,
         RuntimeAdapter, RuntimeKind,
     };
