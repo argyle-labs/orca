@@ -219,6 +219,22 @@ impl Client {
         Ok(self.request(m, url))
     }
 
+    pub fn raw_request(&self, req: RawRequest) -> Result<RequestBuilder, HttpError> {
+        let mut builder = self
+            .request_str(&req.method, req.url)?
+            .insecure(req.insecure);
+        for (k, v) in &req.headers {
+            builder = builder.header(k, v);
+        }
+        if !req.body.is_empty() {
+            builder = builder.raw_body(req.body);
+        }
+        if let Some(ms) = req.timeout_ms {
+            builder = builder.timeout(Duration::from_millis(ms));
+        }
+        Ok(builder)
+    }
+
     fn request(&self, method: reqwest::Method, url: impl Into<String>) -> RequestBuilder {
         RequestBuilder {
             client: self.clone(),
@@ -574,6 +590,16 @@ impl RequestBuilder {
         }
         Ok(response)
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RawRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub timeout_ms: Option<u64>,
+    pub insecure: bool,
 }
 
 /// Response from [`RequestBuilder::send_bytes`]. Body is the raw byte stream.

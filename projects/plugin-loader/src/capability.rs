@@ -301,8 +301,23 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
         "http.request" => {
             let req: HttpRequest = serde_json::from_value(args)
                 .map_err(|e| anyhow!("http.request: bad request payload: {e}"))?;
-            let reply = exec_http(req)?;
-            Ok(serde_json::to_value(reply)?)
+            let builder = http_client()
+                .raw_request(utils::http::RawRequest {
+                    method: req.method,
+                    url: req.url,
+                    headers: req.headers,
+                    body: req.body,
+                    timeout_ms: req.timeout_ms,
+                    insecure: req.insecure,
+                })
+                .map_err(|e| anyhow!("http.request: {e}"))?;
+            let resp = run_on_cap_runtime(builder.send_raw())?
+                .map_err(|e| anyhow!("http.request: {e}"))?;
+            Ok(serde_json::to_value(HttpResponse {
+                status: resp.status,
+                headers: resp.headers.into_iter().collect(),
+                body: resp.body,
+            })?)
         }
         "ws.open" => {
             let req: WsOpen = serde_json::from_value(args)
@@ -349,32 +364,6 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
     }
 }
 
-/// Perform an [`HttpRequest`] on the daemon's single HTTP/TLS stack and return
-/// the response for any status (a delegating plugin sees 4xx/5xx verbatim).
-fn exec_http(req: HttpRequest) -> Result<HttpResponse> {
-    let mut builder = http_client()
-        .request_str(&req.method, &req.url)
-        .map_err(|e| anyhow!("http.request: {e}"))?
-        .insecure(req.insecure);
-    for (k, v) in &req.headers {
-        builder = builder.header(k, v);
-    }
-    if !req.body.is_empty() {
-        // The plugin's own Content-Type header (relayed above) applies; the
-        // capability passes the byte body through verbatim.
-        builder = builder.raw_body(req.body);
-    }
-    if let Some(ms) = req.timeout_ms {
-        builder = builder.timeout(Duration::from_millis(ms));
-    }
-    let resp = run_on_cap_runtime(builder.send_raw())?.map_err(|e| anyhow!("http.request: {e}"))?;
-    Ok(HttpResponse {
-        status: resp.status,
-        headers: resp.headers.into_iter().collect(),
-        body: resp.body,
-    })
-}
-
 /// Execute one STREAMING capability request, invoking `on_chunk` for each chunk
 /// as it is produced. `on_chunk(seq, data)` is the supervisor's frame-writer: it
 /// emits a `CapStreamChunk{ id, seq, data }`. `seq` starts at 0 (the stream
@@ -407,19 +396,16 @@ fn exec_http_stream(
     req: HttpStreamRequest,
     on_chunk: &mut dyn FnMut(u64, Value) -> Result<()>,
 ) -> Result<()> {
-    let mut builder = http_client()
-        .request_str(&req.method, &req.url)
-        .map_err(|e| anyhow!("http.stream: {e}"))?
-        .insecure(req.insecure);
-    for (k, v) in &req.headers {
-        builder = builder.header(k, v);
-    }
-    if !req.body.is_empty() {
-        builder = builder.raw_body(req.body);
-    }
-    if let Some(ms) = req.timeout_ms {
-        builder = builder.timeout(Duration::from_millis(ms));
-    }
+    let builder = http_client()
+        .raw_request(utils::http::RawRequest {
+            method: req.method,
+            url: req.url,
+            headers: req.headers,
+            body: req.body,
+            timeout_ms: req.timeout_ms,
+            insecure: req.insecure,
+        })
+        .map_err(|e| anyhow!("http.stream: {e}"))?;
 
     // `on_chunk` is borrowed and not `Send`, so the stream is driven on the cap
     // runtime and each chunk is relayed back to run `on_chunk` on this thread.
