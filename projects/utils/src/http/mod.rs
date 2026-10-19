@@ -517,11 +517,7 @@ impl RequestBuilder {
         let resp = self.dispatch(&[], true).await?;
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
-        let bytes = resp.bytes().await?.to_vec();
-        let limit = self.max_body.unwrap_or(MAX_RESPONSE_BYTES);
-        if bytes.len() > limit {
-            return Err(HttpError::ResponseTooLarge { limit });
-        }
+        let bytes = read_capped(resp, self.max_body.unwrap_or(MAX_RESPONSE_BYTES)).await?;
         if !(200..300).contains(&status) {
             let summary = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]).into_owned();
             return Err(HttpError::Status {
@@ -553,10 +549,7 @@ impl RequestBuilder {
         let resp = self.dispatch(&[], true).await?;
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
-        let bytes = resp.bytes().await?.to_vec();
-        if bytes.len() > max {
-            return Err(HttpError::ResponseTooLarge { limit: max });
-        }
+        let bytes = read_capped(resp, max).await?;
         Ok(BytesResponse {
             status,
             headers,
@@ -576,11 +569,7 @@ impl RequestBuilder {
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
 
-        let bytes = resp.bytes().await?;
-        let limit = self.max_body.unwrap_or(MAX_RESPONSE_BYTES);
-        if bytes.len() > limit {
-            return Err(HttpError::ResponseTooLarge { limit });
-        }
+        let bytes = read_capped(resp, self.max_body.unwrap_or(MAX_RESPONSE_BYTES)).await?;
         let body = ResponseBody::from_bytes(&bytes);
         let response = Response {
             status,
@@ -731,6 +720,20 @@ fn check_redirect_scheme(from: &url::Url, to: &url::Url) -> Result<(), HttpError
         return Err(HttpError::Redirect("refused https→http redirect".into()));
     }
     Ok(())
+}
+
+async fn read_capped(mut resp: reqwest::Response, limit: usize) -> Result<Vec<u8>, HttpError> {
+    if resp.content_length().is_some_and(|n| n > limit as u64) {
+        return Err(HttpError::ResponseTooLarge { limit });
+    }
+    let mut out = Vec::with_capacity(resp.content_length().map_or(0, |n| n as usize));
+    while let Some(chunk) = resp.chunk().await? {
+        if out.len() + chunk.len() > limit {
+            return Err(HttpError::ResponseTooLarge { limit });
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 fn flatten_headers(h: &reqwest::header::HeaderMap) -> HashMap<String, String> {
@@ -985,6 +988,34 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, HttpError::ResponseTooLarge { .. }));
+    }
+
+    #[tokio::test]
+    async fn send_raw_caps_chunked_body_without_content_length() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let mut reply =
+                    String::from("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+                for _ in 0..4 {
+                    reply.push_str(&format!("40\r\n{}\r\n", "y".repeat(64)));
+                }
+                reply.push_str("0\r\n\r\n");
+                if sock.read(&mut buf).is_ok() && sock.write_all(reply.as_bytes()).is_ok() {
+                    sock.flush().ok();
+                }
+            }
+        });
+        let err = Client::new()
+            .get(format!("http://{addr}/"))
+            .max_body(100)
+            .send_raw()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::ResponseTooLarge { limit: 100 }));
     }
 
     #[tokio::test]
