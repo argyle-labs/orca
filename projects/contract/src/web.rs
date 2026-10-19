@@ -189,15 +189,19 @@ pub fn is_csp_hash(s: &str) -> bool {
     let Some(inner) = s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')) else {
         return false;
     };
-    ["sha256-", "sha384-", "sha512-"].iter().any(|p| {
-        inner.strip_prefix(p).is_some_and(|b64| {
-            !b64.is_empty()
-                && b64.len() <= 128
-                && b64
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
-        })
-    })
+    let Some((alg, b64)) = inner.split_once('-') else {
+        return false;
+    };
+    let want = match alg {
+        "sha256" => 32,
+        "sha384" => 48,
+        "sha512" => 64,
+        _ => return false,
+    };
+    let body = b64.trim_end_matches('=');
+    b64.len() - body.len() <= 2
+        && !body.contains('=')
+        && utils::encoding::base64_decode(b64).is_ok_and(|d| d.len() == want)
 }
 
 /// `settings`-table key prefix for user-chosen web-route owners: the row
@@ -499,6 +503,33 @@ impl WebProvider for WebProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csp_hash_requires_exact_digest_length() {
+        let s256 = "'sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI='";
+        let s384 = "'sha384-xgelKlDcc+BYp0O+ZYzFesLnWCgGpEbXVVZWNQT6WyZYygN01tbEMygnjPXb5OPI'";
+        assert!(is_csp_hash(s256));
+        assert!(is_csp_hash(s384));
+        assert!(!is_csp_hash(
+            "'sha512-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI='"
+        ));
+        assert!(!is_csp_hash("'sha256-abc='"));
+        assert!(!is_csp_hash(
+            "'sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI'"
+        ));
+        assert!(!is_csp_hash(
+            "'sha256-bhHHL3z2vDgxU=t0W3dWQOrprscmda2Y5pLsLg4GF+pI'"
+        ));
+        assert!(!is_csp_hash(
+            "'sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI==='"
+        ));
+        assert!(!is_csp_hash(
+            "'md5-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI='"
+        ));
+        assert!(!is_csp_hash(
+            "sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI="
+        ));
+    }
 
     struct Fake {
         name: &'static str,

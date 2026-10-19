@@ -60,7 +60,7 @@ impl Relaxations {
     }
 
     pub fn load(conn: &db::Conn) -> Self {
-        let row = match db::config_store::get(conn, CONFIG_NOUN, CONFIG_NAME) {
+        let row = match db::config_store::get_local(conn, CONFIG_NOUN, CONFIG_NAME) {
             Ok(Some(row)) => row,
             Ok(None) => return Self::default(),
             Err(e) => {
@@ -230,7 +230,7 @@ mod tests {
                 "'wasm-unsafe-eval'",
                 "https://cdn.example",
                 "https://cdn.example:8443/a/b.js",
-                "'sha256-abc='",
+                "'sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI='",
             ] {
                 assert!(valid_source(d, good), "{d} {good}");
             }
@@ -259,7 +259,12 @@ mod tests {
         assert!(Relaxations::parse(r#"{"script-src":["a; frame-ancestors *"]}"#).is_err());
         assert!(Relaxations::parse(r#"{"frame-ancestors":["*"]}"#).is_err());
         assert!(Relaxations::parse("not json").is_err());
-        assert!(Relaxations::parse(r#"{"script-src":["'sha256-abc='"]}"#).is_ok());
+        assert!(
+            Relaxations::parse(
+                r#"{"script-src":["'sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI='"]}"#
+            )
+            .is_ok()
+        );
     }
 
     #[test]

@@ -1326,38 +1326,10 @@ where
 }
 
 async fn static_handler(req: axum::extract::Request) -> axum::response::Response {
-    let additions = contract::web::resolve(req.uri().path()).map(|p| {
-        let route = p.route();
-        middleware::CspAdditions(
-            route
-                .csp_script_hashes
-                .iter()
-                .map(|h| ("script-src", h.clone()))
-                .chain(
-                    route
-                        .csp_style_hashes
-                        .iter()
-                        .map(|h| ("style-src", h.clone())),
-                )
-                .collect(),
-        )
-    });
-    let mut resp = render_static(req).await;
-    if let Some(a) = additions {
-        resp.extensions_mut().insert(a);
-    }
-    resp
-}
-
-/// Fallback handler in prod: route the request to the matching registered
-/// [`contract::web::WebProvider`], applying SPA fallback and a short-TTL cache.
-async fn render_static(req: axum::extract::Request) -> axum::response::Response {
     use axum::body::Body;
-    use axum::http::{Response, header};
+    use axum::http::Response;
 
-    let uri_path = req.uri().path().to_string();
-
-    let Some(provider) = contract::web::resolve(&uri_path) else {
+    let Some(provider) = contract::web::resolve(req.uri().path()) else {
         return Response::builder()
             .status(404)
             .header("content-type", "text/plain")
@@ -1366,6 +1338,35 @@ async fn render_static(req: axum::extract::Request) -> axum::response::Response 
             ))
             .expect("hardcoded response is valid");
     };
+    let route = provider.route();
+    let additions = middleware::CspAdditions(
+        route
+            .csp_script_hashes
+            .iter()
+            .map(|h| ("script-src", h.clone()))
+            .chain(
+                route
+                    .csp_style_hashes
+                    .iter()
+                    .map(|h| ("style-src", h.clone())),
+            )
+            .collect(),
+    );
+    let mut resp = render_static(req, provider).await;
+    resp.extensions_mut().insert(additions);
+    resp
+}
+
+/// Fallback handler in prod: route the request to the matching registered
+/// [`contract::web::WebProvider`], applying SPA fallback and a short-TTL cache.
+async fn render_static(
+    req: axum::extract::Request,
+    provider: std::sync::Arc<dyn contract::web::WebProvider>,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{Response, header};
+
+    let uri_path = req.uri().path().to_string();
 
     // The `ui.enabled` gate applies only to the root (`/`) owner — the SPA.
     // Non-root asset/viewer providers are not toggled by it.

@@ -481,9 +481,11 @@ mod tests {
         let def = web_backend("peacock", "/")
             .spa_fallback()
             .dev_upstream("http://127.0.0.1:12004")
-            .csp_script_hash("'sha256-abc='")
+            .csp_script_hash("'sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI='")
             .csp_script_hash("'unsafe-inline'")
-            .csp_style_hash("'sha384-def='")
+            .csp_style_hash(
+                "'sha384-xgelKlDcc+BYp0O+ZYzFesLnWCgGpEbXVVZWNQT6WyZYygN01tbEMygnjPXb5OPI'",
+            )
             .invoke_prefix("pk")
             .build();
         let json = serde_json::to_string(&vec![def]).unwrap();
@@ -497,8 +499,13 @@ mod tests {
                 prefix: "/".to_string(),
                 spa_fallback: true,
                 dev_upstream: Some("http://127.0.0.1:12004".to_string()),
-                csp_script_hashes: vec!["'sha256-abc='".to_string()],
-                csp_style_hashes: vec!["'sha384-def='".to_string()],
+                csp_script_hashes: vec![
+                    "'sha256-bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI='".to_string()
+                ],
+                csp_style_hashes: vec![
+                    "'sha384-xgelKlDcc+BYp0O+ZYzFesLnWCgGpEbXVVZWNQT6WyZYygN01tbEMygnjPXb5OPI'"
+                        .to_string()
+                ],
             }
         );
 

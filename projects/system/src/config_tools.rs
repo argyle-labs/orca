@@ -202,9 +202,8 @@ async fn config_set(
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ConfigSetOutput> {
     if is_csp_row(&args.noun, &args.name) {
-        let admin = ctx
-            .caller()
-            .is_some_and(|c| dispatch::tool_roles::satisfies(&c.role, "admin"));
+        let caller = ctx.verified_caller().cloned().or_else(|| ctx.caller());
+        let admin = caller.is_some_and(|c| dispatch::tool_roles::satisfies(&c.role, "admin"));
         anyhow::ensure!(admin, "config server/csp requires role 'admin'");
         crate::csp::Relaxations::parse(&args.json)
             .map_err(|e| anyhow::anyhow!("invalid server/csp: {e:#}"))?;
@@ -212,6 +211,10 @@ async fn config_set(
     let conn = db::open_default()?;
     let local = native_support::local_system(&conn);
     let owner = args.host.unwrap_or_else(|| local.clone());
+    anyhow::ensure!(
+        !is_csp_row(&args.noun, &args.name) || owner == local,
+        "config server/csp can only be set on the local host"
+    );
     let created = db::config_store::set(
         &conn, &local, &owner, &args.noun, &args.name, &args.json, "cli",
     )?;
@@ -284,6 +287,17 @@ mod tests {
             assert_eq!(out.csp_restart_pending, None);
             assert_eq!(detail("service", "plex", &ctx).effective_csp, None);
 
+            let conn = db::open_default().unwrap();
+            conn.execute(
+                "INSERT INTO config_rows (id, host_owner, noun, name, json, is_replica)
+                 VALUES ('r1', 'other', 'server', 'csp', ?1, 1)",
+                [r#"{"img-src":["https://replica.example"]}"#],
+            )
+            .unwrap();
+            let local = crate::csp::Relaxations::load(&conn);
+            assert!(local.img_src.is_empty(), "replica row must not apply");
+            drop(conn);
+
             crate::csp::set_enforced(&strict);
             let conn = db::open_default().unwrap();
             db::config_store::set(
@@ -336,6 +350,22 @@ mod tests {
             assert!(upsert(r#"{"script-src":["*"]}"#, &admin).is_err());
             assert!(upsert(r#"{"frame-ancestors":["*"]}"#, &admin).is_err());
             assert!(upsert(ok, &admin).is_ok());
+            let mut verified_user = test_ctx(dir.path()).with_auth(caller("admin"));
+            verified_user.set_verified_caller(Some(caller("user")));
+            assert!(upsert(ok, &verified_user).is_err());
+            let mut verified_admin = test_ctx(dir.path()).with_auth(caller("user"));
+            verified_admin.set_verified_caller(Some(caller("admin")));
+            assert!(upsert(ok, &verified_admin).is_ok());
+            let remote = run(config_set(
+                ConfigSetArgs {
+                    noun: "server".into(),
+                    name: "csp".into(),
+                    json: ok.into(),
+                    host: Some("other-host".into()),
+                },
+                &admin,
+            ));
+            assert!(remote.is_err());
         });
     }
 }
