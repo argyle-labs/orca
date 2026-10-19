@@ -152,6 +152,8 @@ pub struct ApiOp {
     pub body: Option<OpBody>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<OpOutput>,
+    #[serde(default, skip_serializing_if = "ResponseKind::is_json")]
+    pub response: ResponseKind,
     pub policy: Policy,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub internal: bool,
@@ -209,6 +211,23 @@ fn default_content_type() -> String {
 #[serde(deny_unknown_fields)]
 pub struct OpOutput {
     pub schema: Value,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ResponseKind {
+    #[default]
+    Json,
+    Text,
+    Binary {
+        content_type: String,
+    },
+}
+
+impl ResponseKind {
+    pub fn is_json(&self) -> bool {
+        *self == ResponseKind::Json
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -488,11 +507,21 @@ impl ApiSurface {
     }
 
     pub fn decode_response(&self, op: &ApiOp, body: &[u8]) -> Result<Value> {
-        let parsed: Value = if body.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(body)
-                .map_err(|e| anyhow!("{}: response is not JSON: {e}", op.tool))?
+        let parsed: Value = match &op.response {
+            ResponseKind::Binary { content_type } => {
+                return Ok(serde_json::json!({
+                    "content_type": content_type,
+                    "base64": utils::encoding::base64_encode(body),
+                }));
+            }
+            ResponseKind::Text => {
+                return Ok(Value::String(String::from_utf8_lossy(body).into_owned()));
+            }
+            ResponseKind::Json if body.is_empty() => Value::Null,
+            ResponseKind::Json => match serde_json::from_slice(body) {
+                Ok(v) => v,
+                Err(_) => return Ok(Value::String(String::from_utf8_lossy(body).into_owned())),
+            },
         };
         let mut out = peel_envelope(&self.response, parsed);
         if let Some(schema) = op.output.as_ref().map(|o| &o.schema) {
@@ -1070,6 +1099,58 @@ mod tests {
             out,
             json!({"template": false, "running": true, "cpu": 0.25, "maxmem": 1024, "name": "100"})
         );
+    }
+
+    fn with_response(kind: ResponseKind) -> (ApiSurface, ApiOp) {
+        let s = proxmox();
+        let mut op = s.ops[0].clone();
+        op.output = None;
+        op.response = kind;
+        (s, op)
+    }
+
+    #[test]
+    fn decode_text_response_as_string() {
+        let (s, op) = with_response(ResponseKind::Text);
+        assert_eq!(
+            s.decode_response(&op, b"plain diff").unwrap(),
+            json!("plain diff")
+        );
+    }
+
+    #[test]
+    fn decode_binary_response_as_base64() {
+        let (s, op) = with_response(ResponseKind::Binary {
+            content_type: "application/zip".into(),
+        });
+        assert_eq!(
+            s.decode_response(&op, &[0xff, 0x00, 0x01]).unwrap(),
+            json!({"content_type": "application/zip", "base64": "/wAB"})
+        );
+    }
+
+    #[test]
+    fn decode_mislabeled_json_falls_back_to_text() {
+        let (s, op) = with_response(ResponseKind::Json);
+        assert_eq!(
+            s.decode_response(&op, b"not json {").unwrap(),
+            json!("not json {")
+        );
+    }
+
+    #[test]
+    fn response_kind_round_trips_and_json_is_omitted() {
+        let (_, mut op) = with_response(ResponseKind::Json);
+        assert!(!serde_json::to_string(&op).unwrap().contains("\"response\""));
+        op.response = ResponseKind::Binary {
+            content_type: "image/png".into(),
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(
+            v["response"],
+            json!({"kind": "binary", "content_type": "image/png"})
+        );
+        assert_eq!(serde_json::from_value::<ApiOp>(v).unwrap(), op);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use ::openapi::surface::{
     ApiOp, ApiSurface, Auth, Base, EndpointBinding, FORMAT, OpBody, OpOutput, Param, ParamIn,
-    Policy, ResponseRules, SurfaceKind,
+    Policy, ResponseKind, ResponseRules, SurfaceKind,
 };
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
@@ -87,7 +87,7 @@ pub fn build(
             .with_context(|| format!("lower 3.1 -> 3.0 for {surface}"))?
             .emit_cargo_warnings(surface);
     }
-    let non_json = non_json_responses(&value)?;
+    let kinds = response_kinds(&value)?;
     let lowered = value.clone();
     let lowered_components = lowered.get("components").unwrap_or(&Value::Null);
     let mut typed: openapiv3::OpenAPI =
@@ -99,7 +99,6 @@ pub fn build(
     let mut warnings = Vec::new();
     let mut seen = BTreeSet::new();
     let mut ops: Vec<(ApiOp, Markers)> = Vec::new();
-    let mut raw_responses = 0usize;
     let mut unsupported_bodies = 0usize;
     let empty = Map::new();
     let paths = spec
@@ -113,10 +112,6 @@ pub fn build(
             };
             let http = method.to_ascii_uppercase();
             seen.insert((http.clone(), path.clone()));
-            if non_json.contains(&(http.clone(), path.clone())) {
-                raw_responses += 1;
-                continue;
-            }
             let output = output_schema(op, &components)?;
             let op_id = op
                 .get("operationId")
@@ -148,6 +143,10 @@ pub fn build(
                     params,
                     body,
                     output: output.map(|schema| OpOutput { schema }),
+                    response: kinds
+                        .get(&(http.clone(), path.clone()))
+                        .cloned()
+                        .unwrap_or_default(),
                     policy: {
                         let (role, data_mutation) = tool_policy(is_write(&http), mk);
                         super::derived_policy(&tail, is_write(&http), role, data_mutation)
@@ -162,11 +161,6 @@ pub fn build(
     if unsupported_bodies > 0 {
         warnings.push(format!(
             "{unsupported_bodies} op(s) with a multipart/binary request body omitted"
-        ));
-    }
-    if raw_responses > 0 {
-        warnings.push(format!(
-            "{raw_responses} op(s) with a non-JSON response omitted"
         ));
     }
     if let Some(lists) = lists {
@@ -415,9 +409,9 @@ fn json_media(content: &Map<String, Value>) -> Option<&Value> {
         .map(|(_, media)| media)
 }
 
-fn non_json_responses(spec: &Value) -> Result<BTreeSet<(String, String)>> {
+fn response_kinds(spec: &Value) -> Result<BTreeMap<(String, String), ResponseKind>> {
     let components = spec.get("components").unwrap_or(&Value::Null);
-    let mut out = BTreeSet::new();
+    let mut out = BTreeMap::new();
     for (path, item) in spec
         .get("paths")
         .and_then(Value::as_object)
@@ -428,12 +422,36 @@ fn non_json_responses(spec: &Value) -> Result<BTreeSet<(String, String)>> {
             let Some(op) = item.get(*method) else {
                 continue;
             };
-            if success_content(op, components)?.is_some_and(|c| json_media(c).is_none()) {
-                out.insert((method.to_ascii_uppercase(), path.clone()));
+            let Some(content) = success_content(op, components)? else {
+                continue;
+            };
+            if json_media(content).is_some() {
+                continue;
             }
+            let kind = match content.keys().find(|ct| !is_text(ct)) {
+                Some(ct) => ResponseKind::Binary {
+                    content_type: ct.clone(),
+                },
+                None => ResponseKind::Text,
+            };
+            out.insert((method.to_ascii_uppercase(), path.clone()), kind);
         }
     }
     Ok(out)
+}
+
+fn is_text(content_type: &str) -> bool {
+    let ct = content_type.split(';').next().unwrap_or_default().trim();
+    ct.starts_with("text/")
+        || ct.ends_with("+json")
+        || ct.ends_with("+xml")
+        || matches!(
+            ct,
+            "application/xml"
+                | "application/yaml"
+                | "application/x-yaml"
+                | "application/javascript"
+        )
 }
 
 fn output_schema(op: &Value, components: &Value) -> Result<Option<Value>> {
@@ -534,8 +552,21 @@ mod tests {
         let names: Vec<_> = t.ops.iter().map(|o| o.tool.as_str()).collect();
         assert_eq!(
             names,
-            ["pve.create_vm", "pve.get", "pve.list_v_ms", "pve.secrets"]
+            [
+                "pve.create_vm",
+                "pve.download",
+                "pve.get",
+                "pve.list_v_ms",
+                "pve.secrets"
+            ]
         );
+        assert_eq!(
+            t.find("pve.download").unwrap().response,
+            ResponseKind::Binary {
+                content_type: "application/octet-stream".into()
+            }
+        );
+        assert_eq!(t.find("pve.get").unwrap().response, ResponseKind::Json);
         let list = t.find("pve.list_v_ms").unwrap();
         let p: Vec<_> = list
             .params
@@ -676,6 +707,16 @@ mod tests {
         ))
         .unwrap();
         assert!(t.ops.is_empty());
+    }
+
+    #[test]
+    fn text_responses_are_kept_as_text() {
+        let t = one_path(json!({"get": {
+            "operationId": "x",
+            "responses": {"200": {"description": "ok", "content": {"text/plain": {"schema": {"type": "string"}}}}}
+        }}))
+        .unwrap();
+        assert_eq!(t.find("s.x").unwrap().response, ResponseKind::Text);
     }
 
     #[test]

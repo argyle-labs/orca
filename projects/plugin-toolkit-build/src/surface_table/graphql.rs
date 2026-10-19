@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ::openapi::surface::{
-    ApiOp, ApiSurface, Auth, Base, EndpointBinding, FORMAT, Param, ParamIn, ResponseRules,
-    SurfaceKind,
+    ApiOp, ApiSurface, Auth, Base, EndpointBinding, FORMAT, Param, ParamIn, ResponseKind,
+    ResponseRules, SurfaceKind,
 };
 use anyhow::{Context, Result, bail};
 use graphql_parser::query::{Definition, Document, OperationDefinition, Type, VariableDefinition};
@@ -129,6 +129,7 @@ pub fn build(
                 params,
                 body: None,
                 output: None,
+                response: ResponseKind::Json,
                 internal,
             });
         }
