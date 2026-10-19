@@ -260,10 +260,16 @@ fn serve_session<S: Read + Write + 'static>(
     write_frame(&mut *stream.borrow_mut(), &hello)?;
 
     match read_frame(&mut *stream.borrow_mut())? {
-        Some(Frame::Welcome { protocol, .. }) => {
+        Some(Frame::Welcome {
+            protocol,
+            capabilities,
+        }) => {
             if !protocol_compatible(&protocol, PROTOCOL_VERSION) {
                 bail!("daemon protocol {protocol} incompatible with plugin {PROTOCOL_VERSION}");
             }
+            crate::capsink::set_core_body_b64(
+                capabilities.iter().any(|c| c == crate::abi::HTTP_BODY_B64),
+            );
         }
         Some(other) => bail!("expected Welcome, got {other:?}"),
         None => bail!("daemon closed before Welcome"),

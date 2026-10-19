@@ -283,6 +283,7 @@ pub fn execute(
         timeout_ms: None,
         insecure: target.insecure,
         max_body_bytes: None,
+        body_b64: true,
     };
     let resp = crate::capsink::http_request(&req)?;
 

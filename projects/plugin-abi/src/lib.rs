@@ -429,7 +429,7 @@ pub struct HttpRequest {
     #[serde(default)]
     pub headers: Vec<(String, String)>,
     /// Raw request body. Empty = no body.
-    #[serde(default)]
+    #[serde(default, with = "b64_or_bytes")]
     pub body: Vec<u8>,
     /// Per-request timeout in milliseconds. `None` = core's default.
     #[serde(default)]
@@ -439,6 +439,68 @@ pub struct HttpRequest {
     pub insecure: bool,
     #[serde(default)]
     pub max_body_bytes: Option<u64>,
+    /// The plugin accepts a base64 `HttpResponse.body`; core replies with a
+    /// number array otherwise.
+    #[serde(default)]
+    pub body_b64: bool,
+}
+
+/// Capability name core advertises in `Welcome` when it accepts a base64
+/// `HttpRequest.body`.
+pub const HTTP_BODY_B64: &str = "http.body_b64";
+
+/// Borrowed wire form of an [`HttpRequest`] whose body is a number array, for
+/// a core that does not advertise [`HTTP_BODY_B64`].
+#[derive(serde::Serialize)]
+pub struct LegacyHttpRequest<'a> {
+    pub method: &'a str,
+    pub url: &'a str,
+    pub headers: &'a [(String, String)],
+    #[serde(serialize_with = "bytes_as_seq")]
+    pub body: &'a [u8],
+    pub timeout_ms: Option<u64>,
+    pub insecure: bool,
+    pub max_body_bytes: Option<u64>,
+    pub body_b64: bool,
+}
+
+impl HttpRequest {
+    pub fn legacy(&self) -> LegacyHttpRequest<'_> {
+        LegacyHttpRequest {
+            method: &self.method,
+            url: &self.url,
+            headers: &self.headers,
+            body: &self.body,
+            timeout_ms: self.timeout_ms,
+            insecure: self.insecure,
+            max_body_bytes: self.max_body_bytes,
+            body_b64: self.body_b64,
+        }
+    }
+}
+
+/// Borrowed wire form of an [`HttpResponse`] whose body is a number array, for
+/// a plugin that did not set [`HttpRequest::body_b64`].
+#[derive(serde::Serialize)]
+pub struct LegacyHttpResponse<'a> {
+    pub status: u16,
+    pub headers: &'a [(String, String)],
+    #[serde(serialize_with = "bytes_as_seq")]
+    pub body: &'a [u8],
+}
+
+impl HttpResponse {
+    pub fn legacy(&self) -> LegacyHttpResponse<'_> {
+        LegacyHttpResponse {
+            status: self.status,
+            headers: &self.headers,
+            body: &self.body,
+        }
+    }
+}
+
+fn bytes_as_seq<S: serde::Serializer>(bytes: &&[u8], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(bytes.iter())
 }
 
 /// The reply to an [`HttpRequest`]. Carries the response for **any** status —
@@ -449,7 +511,7 @@ pub struct HttpResponse {
     pub status: u16,
     #[serde(default)]
     pub headers: Vec<(String, String)>,
-    #[serde(default)]
+    #[serde(default, with = "b64_or_bytes")]
     pub body: Vec<u8>,
 }
 
@@ -617,6 +679,16 @@ pub struct WsClose {
 mod b64 {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+    const DECODE: [u8; 256] = {
+        let mut t = [0xFF; 256];
+        let mut i = 0;
+        while i < 64 {
+            t[ALPHABET[i] as usize] = i as u8;
+            i += 1;
+        }
+        t
+    };
+
     pub fn serialize<S: serde::Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
         let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
         for chunk in bytes.chunks(3) {
@@ -640,7 +712,7 @@ mod b64 {
         decode(&text).ok_or_else(|| serde::de::Error::custom("invalid base64"))
     }
 
-    fn decode(text: &str) -> Option<Vec<u8>> {
+    pub(super) fn decode(text: &str) -> Option<Vec<u8>> {
         let raw = text.as_bytes();
         if !raw.len().is_multiple_of(4) {
             return None;
@@ -656,7 +728,10 @@ mod b64 {
                 let v = if i >= 4 - pad {
                     0
                 } else {
-                    ALPHABET.iter().position(|&a| a == c)? as u32
+                    match DECODE[c as usize] {
+                        0xFF => return None,
+                        v => u32::from(v),
+                    }
                 };
                 n |= v << (18 - 6 * i);
             }
@@ -666,10 +741,147 @@ mod b64 {
     }
 }
 
+/// Serializes as [`b64`]; deserializes either base64 or a legacy number array.
+mod b64_or_bytes {
+    pub use super::b64::serialize;
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        d.deserialize_any(Visitor)
+    }
+
+    struct Visitor;
+
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a base64 string or an array of bytes")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Vec<u8>, E> {
+            super::b64::decode(v).ok_or_else(|| E::custom("invalid base64"))
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(b) = seq.next_element::<u8>()? {
+                out.push(b);
+            }
+            Ok(out)
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Vec<u8>, E> {
+            Ok(Vec::new())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn http_response_body_serializes_base64() {
+        let resp = HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: b"hello".to_vec(),
+        };
+        assert_eq!(
+            serde_json::to_value(&resp).unwrap()["body"],
+            json!("aGVsbG8=")
+        );
+    }
+
+    #[test]
+    fn http_response_body_accepts_base64_and_legacy_array() {
+        let b64: HttpResponse =
+            serde_json::from_value(json!({"status": 200, "body": "aGVsbG8="})).unwrap();
+        let legacy: HttpResponse =
+            serde_json::from_value(json!({"status": 200, "body": [104, 101, 108, 108, 111]}))
+                .unwrap();
+        let absent: HttpResponse = serde_json::from_value(json!({"status": 204})).unwrap();
+        assert_eq!(b64.body, b"hello");
+        assert_eq!(legacy.body, b"hello");
+        assert!(absent.body.is_empty());
+    }
+
+    #[test]
+    fn http_response_body_rejects_bad_input() {
+        assert!(
+            serde_json::from_value::<HttpResponse>(json!({"status": 200, "body": "a"})).is_err()
+        );
+        assert!(
+            serde_json::from_value::<HttpResponse>(json!({"status": 200, "body": [256]})).is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_forms_match_typed_shape_with_array_body() {
+        let req = HttpRequest {
+            method: "POST".into(),
+            url: "http://x/".into(),
+            headers: vec![("a".into(), "b".into())],
+            body: vec![1, 2, 255],
+            timeout_ms: Some(5),
+            insecure: true,
+            max_body_bytes: Some(9),
+            body_b64: true,
+        };
+        let mut typed = serde_json::to_value(&req).unwrap();
+        typed["body"] = json!([1, 2, 255]);
+        assert_eq!(serde_json::to_value(req.legacy()).unwrap(), typed);
+        let resp = HttpResponse {
+            status: 201,
+            headers: vec![("c".into(), "d".into())],
+            body: vec![0, 7],
+        };
+        let mut typed = serde_json::to_value(&resp).unwrap();
+        typed["body"] = json!([0, 7]);
+        assert_eq!(serde_json::to_value(resp.legacy()).unwrap(), typed);
+    }
+
+    #[test]
+    fn base64_decoder_rejects_malformed_and_round_trips_all_bytes() {
+        for bad in ["a", "ab=c", "a===", "ab!d", "=abc", "\u{e9}ab"] {
+            assert!(
+                serde_json::from_value::<HttpResponse>(json!({"status": 200, "body": bad}))
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        let all: Vec<u8> = (0..=255).collect();
+        for n in 0..4 {
+            let resp = HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: all[n..].to_vec(),
+            };
+            let back: HttpResponse =
+                serde_json::from_value(serde_json::to_value(&resp).unwrap()).unwrap();
+            assert_eq!(back.body, resp.body);
+        }
+    }
+
+    #[test]
+    fn http_request_body_and_flag_round_trip() {
+        let legacy: HttpRequest = serde_json::from_value(
+            json!({"method": "POST", "url": "http://x/", "body": [1, 2, 255]}),
+        )
+        .unwrap();
+        assert_eq!(legacy.body, vec![1, 2, 255]);
+        assert!(!legacy.body_b64);
+        let wire = serde_json::to_value(HttpRequest {
+            body_b64: true,
+            ..legacy
+        })
+        .unwrap();
+        assert_eq!(wire["body"], json!("AQL/"));
+        let back: HttpRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.body, vec![1, 2, 255]);
+        assert!(back.body_b64);
+    }
 
     #[test]
     fn ws_open_defaults_optional_fields() {
