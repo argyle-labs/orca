@@ -18,6 +18,7 @@
 //!                      derived from raw code), verifies, signs CSRs, returns
 //!                      the certs.
 
+use super::refusal::{PeerRefusal, peer_facing_error, refuse_unless};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -230,7 +231,12 @@ async fn dispatch(request: Request, peer: std::net::SocketAddr) -> (Response, Op
                 return (
                     Response::err(
                         id,
-                        ErrorObject::internal(&format!("parse signed envelope: {e}")),
+                        peer_facing_error(
+                            method,
+                            &anyhow::Error::new(PeerRefusal(format!(
+                                "{method} refused: malformed signed envelope: {e}"
+                            ))),
+                        ),
                     ),
                     None,
                 );
@@ -250,31 +256,19 @@ async fn dispatch(request: Request, peer: std::net::SocketAddr) -> (Response, Op
     match method {
         MESH_OFFER_METHOD => match handle_offer(&env, peer) {
             Ok((ack, auto_accept_code)) => (value_response(id, &ack), auto_accept_code),
-            Err(e) => (
-                Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
-                None,
-            ),
+            Err(e) => (Response::err(id, peer_facing_error(method, &e)), None),
         },
         MESH_JOIN_CONFIRM_METHOD => match handle_join_confirm(&env) {
             Ok(r) => (value_response(id, &r), None),
-            Err(e) => (
-                Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
-                None,
-            ),
+            Err(e) => (Response::err(id, peer_facing_error(method, &e)), None),
         },
         MESH_REQUEST_OFFER_METHOD => match handle_request_offer(&env, peer) {
             Ok(r) => (value_response(id, &r), None),
-            Err(e) => (
-                Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
-                None,
-            ),
+            Err(e) => (Response::err(id, peer_facing_error(method, &e)), None),
         },
         MESH_REFRESH_CERT_BOOTSTRAP_METHOD => match handle_refresh_cert_bootstrap(&env) {
             Ok(r) => (value_response(id, &r), None),
-            Err(e) => (
-                Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
-                None,
-            ),
+            Err(e) => (Response::err(id, peer_facing_error(method, &e)), None),
         },
         other => (
             Response::err(
@@ -457,12 +451,12 @@ fn refuse_taken_joiner_id(
     signer_fp: &str,
     own_id: &str,
 ) -> Result<()> {
-    anyhow::ensure!(
+    refuse_unless!(
         joiner_id != own_id,
         "join refused: {joiner_id} is this system's own id"
     );
     if let Some(fp) = pdb::peer_pubkey_fp_raw(conn, joiner_id)? {
-        anyhow::ensure!(
+        refuse_unless!(
             fp.as_deref() == Some(signer_fp),
             "join refused: {joiner_id} already belongs to another mesh member; if that \
              member is gone, run `orca system mesh delete --action forget --id \
@@ -513,11 +507,13 @@ fn handle_refresh_cert_bootstrap(env: &SignedEnvelope) -> Result<RefreshCertBoot
         .iter()
         .find(|p| p.departed_at.is_none() && p.pubkey_fp.as_deref() == Some(signer_fp.as_str()))
         .with_context(|| {
-            format!("bootstrap refresh refused: signer fp {signer_fp} is not a known active peer")
+            PeerRefusal(format!(
+                "refresh refused: signer fp {signer_fp} is not a known active peer"
+            ))
         })?;
-    anyhow::ensure!(
+    refuse_unless!(
         peer.peer_id == body.joiner_hostname,
-        "bootstrap refresh refused: peer_id ({}) does not match joiner_hostname ({})",
+        "refresh refused: peer_id ({}) does not match joiner_hostname ({})",
         peer.peer_id,
         body.joiner_hostname
     );
@@ -657,7 +653,7 @@ fn handle_request_offer(
 fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
     match serde_json::to_value(v) {
         Ok(val) => Response::ok(id, val),
-        Err(e) => Response::err(id, ErrorObject::internal(&format!("{e:#}"))),
+        Err(e) => Response::err(id, peer_facing_error("response", &e.into())),
     }
 }
 
@@ -899,7 +895,7 @@ mod tests {
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, -32603);
         assert!(
-            err.message.contains("parse signed envelope"),
+            err.message.contains("refused: malformed signed envelope"),
             "got: {}",
             err.message
         );
@@ -1133,7 +1129,7 @@ mod tests {
         assert!(auto.is_none());
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
-        assert!(err.message.contains("parse signed envelope"));
+        assert!(err.message.contains("malformed signed envelope"));
     }
 
     #[tokio::test]
@@ -1169,6 +1165,19 @@ mod tests {
         serde_json::to_value(&env).unwrap()
     }
 
+    #[test]
+    fn bootstrap_refusal_reaches_the_peer_and_local_detail_does_not() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let e = refuse_taken_joiner_id(&conn, "self-id", "fp", "self-id").unwrap_err();
+        assert_eq!(
+            peer_facing_error(MESH_OFFER_METHOD, &e).message,
+            "internal error: join refused: self-id is this system's own id"
+        );
+        let local = anyhow::anyhow!("open /var/lib/orca/pki/mesh-ca.key.pem").context("load CA");
+        let msg = peer_facing_error(MESH_OFFER_METHOD, &local).message;
+        assert!(!msg.contains("/var"), "got: {msg}");
+    }
+
     #[tokio::test]
     async fn dispatch_join_confirm_bad_envelope_is_internal_error() {
         let req = Request::new(
@@ -1180,6 +1189,10 @@ mod tests {
         assert!(auto.is_none());
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
+        assert_eq!(
+            err.message,
+            format!("internal error: {} failed", MESH_JOIN_CONFIRM_METHOD)
+        );
     }
 
     #[tokio::test]
@@ -1193,6 +1206,10 @@ mod tests {
         assert!(auto.is_none());
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
+        assert_eq!(
+            err.message,
+            format!("internal error: {} failed", MESH_REQUEST_OFFER_METHOD)
+        );
     }
 
     #[tokio::test]
@@ -1209,6 +1226,13 @@ mod tests {
         assert!(auto.is_none());
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
+        assert_eq!(
+            err.message,
+            format!(
+                "internal error: {} failed",
+                MESH_REFRESH_CERT_BOOTSTRAP_METHOD
+            )
+        );
     }
 
     // ── handle_request_offer: fp-mismatch guard fires before any DB access ─────

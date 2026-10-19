@@ -1038,7 +1038,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     // bare-name case to fall back to and no way to build a leading-dot name.
     let tool_name = format!("{}.{}", domain.value(), verb.value());
     let remote_ok_lit = attr.remote_ok;
-    let read_shaped = is_read_shaped(verb.value().as_str());
+    let read_shaped = verb_shape::is_read_shaped(verb.value().as_str());
     // Opt-in only: `can_mutate` lets a non-admin reach a data mutation, so a
     // hand-written write (plugin install, guest exec, mesh join) must never
     // become one by default. External-system writes declare it explicitly.
@@ -1399,54 +1399,6 @@ fn snake_to_pascal(s: &str) -> String {
     out
 }
 
-/// Does this verb only READ?
-///
-/// One predicate drives three things that must agree: `REQUIRED_ROLE`,
-/// `DATA_MUTATION`, and the dry-run gate, so a mutating verb cannot be left
-/// ungated by omission (#636).
-///
-/// The list is explicit rather than a heuristic, and deliberately conservative:
-/// a verb wrongly treated as a WRITE merely becomes admin-only and offers a
-/// `dryRun`, which is visible the first time anyone calls it. A verb wrongly
-/// treated as a READ applies changes with no audit, which is not. So anything not
-/// named here gates.
-///
-/// A noun-shaped verb is not evidence of a read: `profile` is absent because
-/// `system.profile` sets a plugin's heap-instrumentation flag (`MALLOC_CONF`
-/// injected on its next spawn), which is a write.
-fn is_read_shaped(verb: &str) -> bool {
-    // A dotted verb is classified by its LAST segment: `remediation.get` is a
-    // `get`, `update.status` is a `status`. Matching the whole string made both
-    // read as write-shaped, so #658 turned two pure reads into admin-only,
-    // execute-gated data mutations — reading the remediation policy started
-    // demanding `--execute`.
-    let verb = verb.rsplit('.').next().unwrap_or(verb);
-    matches!(
-        verb,
-        "list"
-            | "detail"
-            | "search"
-            | "info"
-            | "health"
-            | "status"
-            | "tree"
-            | "topology"
-            | "stat"
-            | "read"
-            | "logs"
-            | "history"
-            | "audit"
-            | "backends_check"
-            | "exports"
-            | "entities"
-            | "server_info"
-            | "diff"
-            | "serve_asset"
-            | "serve_release"
-            | "render"
-            | "get"
-    )
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1869,12 +1821,12 @@ mod tests {
     fn a_dotted_verb_is_classified_by_its_last_segment() {
         // `remediation.get` is a get and `update.status` is a status. Matching
         // the whole string made both write-shaped, which gated two pure reads.
-        assert!(is_read_shaped("remediation.get"));
-        assert!(is_read_shaped("update.status"));
+        assert!(verb_shape::is_read_shaped("remediation.get"));
+        assert!(verb_shape::is_read_shaped("update.status"));
         // The write-shaped ones stay write-shaped.
-        assert!(!is_read_shaped("remediation.set"));
-        assert!(!is_read_shaped("share.repair-permissions"));
-        assert!(!is_read_shaped("mount.create"));
+        assert!(!verb_shape::is_read_shaped("remediation.set"));
+        assert!(!verb_shape::is_read_shaped("share.repair-permissions"));
+        assert!(!verb_shape::is_read_shaped("mount.create"));
     }
 
     #[test]
@@ -1902,7 +1854,7 @@ mod tests {
     /// noun-shaped name.
     #[test]
     fn a_noun_shaped_write_verb_is_not_read_shaped() {
-        assert!(!is_read_shaped("profile"));
+        assert!(!verb_shape::is_read_shaped("profile"));
         let attr = parse_attr(quote!(domain = "system", verb = "profile")).unwrap();
         let out = expand(attr, ok_fn()).unwrap().to_string();
         assert!(out.contains("DATA_MUTATION : bool = false"), "got: {out}");
@@ -1917,9 +1869,9 @@ mod tests {
     /// derives no mutation and no gate.
     #[test]
     fn audit_is_read_shaped() {
-        assert!(is_read_shaped("audit"));
-        assert!(is_read_shaped("privilege.audit"));
-        assert!(is_read_shaped("backends_check"));
+        assert!(verb_shape::is_read_shaped("audit"));
+        assert!(verb_shape::is_read_shaped("privilege.audit"));
+        assert!(verb_shape::is_read_shaped("backends_check"));
     }
 
     #[test]

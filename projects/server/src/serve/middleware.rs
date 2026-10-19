@@ -1936,6 +1936,7 @@ mod tests {
         dispatch::tool_roles::install_plugin_tools([(
             tool.to_string(),
             dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                tool,
                 Some("admin"),
                 Some(true),
                 Some(false),

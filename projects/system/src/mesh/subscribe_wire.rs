@@ -18,6 +18,7 @@
 //!
 //! Heartbeat + adaptive cadence are slice D.
 
+use super::refusal::{PeerRefusal, peer_facing_message, refuse};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -138,7 +139,10 @@ where
     let topic_peer_id = match validate_subscribe(&request, own_peer_id) {
         Ok(p) => p,
         Err(e) => {
-            let resp = Response::err(id, ErrorObject::invalid_params(&e.to_string()));
+            let resp = Response::err(
+                id,
+                ErrorObject::invalid_params(&peer_facing_message(METHOD, &e)),
+            );
             let bytes = serde_json::to_vec(&resp).context("serialize error response")?;
             _ = write_frame(&mut stream, &bytes).await;
             return Err(e);
@@ -209,6 +213,11 @@ pub fn is_heartbeat_frame(bytes: &[u8]) -> bool {
 /// Validate a subscribe Request and return the topic's peer_id.
 /// Pure helper, no I/O — easy to test branch-by-branch.
 fn validate_subscribe(request: &Request, own_peer_id: &str) -> Result<String> {
+    check_subscribe(request, own_peer_id)
+        .map_err(|e| anyhow::Error::new(PeerRefusal(format!("{e:#}"))))
+}
+
+fn check_subscribe(request: &Request, own_peer_id: &str) -> Result<String> {
     anyhow::ensure!(
         request.method == METHOD,
         "unexpected method '{}' (expected '{METHOD}')",
@@ -216,7 +225,7 @@ fn validate_subscribe(request: &Request, own_peer_id: &str) -> Result<String> {
     );
     let params: SubscribeParams = match &request.params {
         Some(v) => serde_json::from_value(v.clone()).context("parse SubscribeParams")?,
-        None => anyhow::bail!("subscribe requires params"),
+        None => refuse!("mesh/subscribe requires params"),
     };
     let peer_id = parse_host_status_topic(&params.topic)?.to_string();
     // Peer ids are canonical uuidv7s, so the topic id must match ours exactly.

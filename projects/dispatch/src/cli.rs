@@ -2643,6 +2643,7 @@ mod tests {
 
     #[test]
     fn fetch_unit_ops_falls_back_to_in_process_catalog_when_unreachable() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         // Unreachable daemon → the in-process unit catalog is returned, so this
         // provider's op must appear without any daemon round-trip.
         contract::unit::register_provider(std::sync::Arc::new(CatalogProbe));

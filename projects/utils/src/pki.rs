@@ -160,6 +160,58 @@ pub fn has_mesh_ca_previous(pki_dir: &Path) -> bool {
     mesh_ca_previous_cert_path(pki_dir).exists()
 }
 
+/// Fingerprints of CAs that have left this host's current slot, newest last.
+pub fn mesh_ca_retired_path(pki_dir: &Path) -> PathBuf {
+    mesh_dir(pki_dir).join("ca.retired")
+}
+
+const MAX_RETIRED_MESH_CAS: usize = 64;
+
+/// Fingerprints of every CA this host has retired, bounded to the most recent
+/// [`MAX_RETIRED_MESH_CAS`]. Only a missing history reads as empty; any other
+/// read failure is an error, so an unreadable history never passes as clean.
+pub fn retired_mesh_ca_fingerprints(pki_dir: &Path) -> Result<Vec<String>> {
+    match read_pki_file(mesh_ca_retired_path(pki_dir)) {
+        Ok(s) => Ok(s
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e).context("read retired mesh CA history"),
+    }
+}
+
+pub fn ensure_mesh_ca_not_retired(pki_dir: &Path, cert_pem: &str) -> Result<()> {
+    let fp = cert_fingerprint(cert_pem).context("mesh CA cert is unreadable")?;
+    anyhow::ensure!(
+        !retired_mesh_ca_fingerprints(pki_dir)?.contains(&fp),
+        "mesh CA was previously retired by this host (downgrade)"
+    );
+    Ok(())
+}
+
+pub fn install_joined_mesh_ca(pki_dir: &Path, cert_pem: &str) -> Result<()> {
+    ensure_mesh_ca_not_retired(pki_dir, cert_pem)?;
+    atomic_write_pem(&mesh_ca_cert_path(pki_dir), cert_pem)
+}
+
+fn record_retired_mesh_ca(pki_dir: &Path, cert_pem: &str) -> Result<()> {
+    let fp = cert_fingerprint(cert_pem)?;
+    let mut fps = retired_mesh_ca_fingerprints(pki_dir)?;
+    fps.retain(|f| f != &fp);
+    fps.push(fp);
+    let skip = fps.len().saturating_sub(MAX_RETIRED_MESH_CAS);
+    let mut body = fps[skip..].join("\n");
+    body.push('\n');
+    atomic_write(
+        &mesh_ca_retired_path(pki_dir),
+        &mesh_dir(pki_dir).join("ca.retired.tmp"),
+        body.as_bytes(),
+    )
+}
+
 /// SNI the paired-peer mTLS surface answers on, and the DNS name a mesh
 /// server cert is issued for.
 pub const MESH_SERVER_SAN: &str = "mesh.orca.local";
@@ -352,11 +404,11 @@ fn issue_mesh_client_cert(
 /// Load this host's mesh server bundle (cert + key + mesh CA cert).
 pub fn load_mesh_server(pki_dir: &Path) -> Result<NodeBundle> {
     Ok(NodeBundle {
-        cert_pem: std::fs::read_to_string(mesh_server_cert_path(pki_dir))
+        cert_pem: read_pki_file(mesh_server_cert_path(pki_dir))
             .context("mesh server cert not found — run `orca mesh init`")?,
-        key_pem: std::fs::read_to_string(mesh_server_key_path(pki_dir))
+        key_pem: read_pki_file(mesh_server_key_path(pki_dir))
             .context("mesh server key not found — run `orca mesh init`")?,
-        ca_cert_pem: std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
+        ca_cert_pem: read_pki_file(mesh_ca_cert_path(pki_dir))
             .context("mesh CA cert not found — run `orca mesh init`")?,
     })
 }
@@ -364,11 +416,11 @@ pub fn load_mesh_server(pki_dir: &Path) -> Result<NodeBundle> {
 /// Load this host's mesh client bundle (used to dial peers).
 pub fn load_mesh_client(pki_dir: &Path) -> Result<NodeBundle> {
     Ok(NodeBundle {
-        cert_pem: std::fs::read_to_string(mesh_client_cert_path(pki_dir))
+        cert_pem: read_pki_file(mesh_client_cert_path(pki_dir))
             .context("mesh client cert not found — run `orca mesh init`")?,
-        key_pem: std::fs::read_to_string(mesh_client_key_path(pki_dir))
+        key_pem: read_pki_file(mesh_client_key_path(pki_dir))
             .context("mesh client key not found — run `orca mesh init`")?,
-        ca_cert_pem: std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
+        ca_cert_pem: read_pki_file(mesh_ca_cert_path(pki_dir))
             .context("mesh CA cert not found — run `orca mesh init`")?,
     })
 }
@@ -445,10 +497,8 @@ pub fn sign_peer_csr(
         "this host does not have the mesh CA private key — cannot sign peer CSRs"
     );
 
-    let ca_cert_pem =
-        std::fs::read_to_string(mesh_ca_cert_path(pki_dir)).context("read mesh CA cert")?;
-    let ca_key_pem =
-        std::fs::read_to_string(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
+    let ca_cert_pem = read_pki_file(mesh_ca_cert_path(pki_dir)).context("read mesh CA cert")?;
+    let ca_key_pem = read_pki_file(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
 
@@ -508,28 +558,113 @@ pub fn sign_peer_csr(
 /// just become mutually trusted. Caller is responsible for moving these over
 /// an already-authenticated mTLS channel and never persisting them in transit.
 pub fn export_mesh_ca_keypair(pki_dir: &Path) -> Result<(String, String)> {
-    let cert =
-        std::fs::read_to_string(mesh_ca_cert_path(pki_dir)).context("export: read mesh CA cert")?;
-    let key = std::fs::read_to_string(mesh_ca_key_path(pki_dir))
+    let cert = read_pki_file(mesh_ca_cert_path(pki_dir)).context("export: read mesh CA cert")?;
+    let key = read_pki_file(mesh_ca_key_path(pki_dir))
         .context("export: read mesh CA key — this host is not founder-equivalent")?;
     Ok((cert, key))
 }
 
 /// Import a mesh CA keypair received from a trusted peer. Verifies the cert
 /// PEM matches what we already have on disk (so a malicious peer can't
-/// substitute a different CA), then writes the key. Idempotent if the key
-/// already exists with matching content.
+/// substitute a different CA), then creates the key file exclusively: an
+/// existing key is never replaced, and two concurrent imports cannot both win.
 pub fn import_mesh_ca_keypair(pki_dir: &Path, cert_pem: &str, key_pem: &str) -> Result<()> {
-    let existing_cert = std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
+    let existing_cert = read_pki_file(mesh_ca_cert_path(pki_dir))
         .context("import: read local mesh CA cert (run `orca mesh join` first)")?;
     anyhow::ensure!(
         existing_cert.trim() == cert_pem.trim(),
         "imported CA cert does not match local mesh CA — refusing to install foreign key"
     );
-    // Sanity: verify the imported key actually signs against this cert.
-    let key = KeyPair::from_pem(key_pem).context("imported CA key is not valid PEM")?;
-    Issuer::from_ca_cert_pem(cert_pem, key).context("imported key does not match CA cert")?;
-    write_pem(mesh_ca_key_path(pki_dir), key_pem)?;
+    ensure_key_matches_cert(cert_pem, key_pem).context("imported key does not match CA cert")?;
+    ensure_mesh_ca_not_retired(pki_dir, cert_pem)?;
+    create_new_key_pem(&mesh_ca_key_path(pki_dir), key_pem)
+}
+
+fn create_new_key_pem(path: &Path, pem: &str) -> Result<()> {
+    use std::io::Write;
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            anyhow::bail!("the mesh CA key path is a symlink; refusing to write through it")
+        }
+        Ok(_) => anyhow::bail!("this host already holds a mesh CA key; a peer cannot replace it"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
+    }
+    let mut f = match key_file_options().open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            anyhow::bail!("this host already holds a mesh CA key; a peer cannot replace it")
+        }
+        Err(e) => return Err(e).with_context(|| format!("create {}", path.display())),
+    };
+    if let Err(e) = f.write_all(pem.as_bytes()).and_then(|()| f.sync_all()) {
+        drop(f);
+        if let Err(rm) = std::fs::remove_file(path) {
+            return Err(e).with_context(|| {
+                format!(
+                    "write {}; removing the partial key also failed: {rm}",
+                    path.display()
+                )
+            });
+        }
+        return Err(e).with_context(|| format!("write {}", path.display()));
+    }
+    sync_parent_dir(path)
+}
+
+fn key_file_options() -> std::fs::OpenOptions {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    opts
+}
+
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::File::open(parent)
+            .and_then(|d| d.sync_all())
+            .with_context(|| format!("fsync {}", parent.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Fails unless `key_pem` is the private half of the public key in `cert_pem`.
+pub fn ensure_key_matches_cert(cert_pem: &str, key_pem: &str) -> Result<()> {
+    use rustls_pemfile::certs;
+    let key = KeyPair::from_pem(key_pem).context("key is not valid PEM")?;
+    let der = certs(&mut cert_pem.as_bytes())
+        .next()
+        .context("no certificate in PEM")?
+        .context("parse cert DER")?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(der.as_ref()).context("parse cert")?;
+    anyhow::ensure!(
+        parsed.public_key().subject_public_key.data.as_ref() == key.public_key_raw(),
+        "key does not match the certificate's public key"
+    );
+    Ok(())
+}
+
+/// Fails unless `cert_pem` is a CA (`basicConstraints CA:TRUE`) valid at `now`.
+pub fn ensure_valid_ca_cert(cert_pem: &str, now: i64) -> Result<()> {
+    use rustls_pemfile::certs;
+    let der = certs(&mut cert_pem.as_bytes())
+        .next()
+        .context("no certificate in PEM")?
+        .context("parse cert DER")?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(der.as_ref()).context("parse cert")?;
+    anyhow::ensure!(parsed.is_ca(), "certificate is not a CA");
+    let validity = parsed.validity();
+    anyhow::ensure!(
+        validity.not_before.timestamp() <= now && now <= validity.not_after.timestamp(),
+        "certificate is outside its validity period"
+    );
     Ok(())
 }
 
@@ -632,7 +767,7 @@ pub struct MeshCertStatus {
 /// daemon, so only a crate that knows the daemon's version may supply it.
 pub fn mesh_cert_status(pki_dir: &Path, version: &str) -> MeshCertStatus {
     let parse = |path: PathBuf| -> Option<CertInfo> {
-        let pem = std::fs::read_to_string(&path).ok()?;
+        let pem = read_pki_file(&path).ok()?;
         let days = cert_days_remaining(&pem).ok()?;
         Some(CertInfo {
             days_remaining: days,
@@ -652,31 +787,33 @@ pub fn mesh_cert_status(pki_dir: &Path, version: &str) -> MeshCertStatus {
     }
 }
 
-/// Atomic file write: writes to `<path>.tmp`, fsyncs, renames over `<path>`.
-/// Readers of `path` see either the old content or the new content; rename
-/// is atomic at the namespace-entry level on POSIX. Restricts key files to
-/// 0o600 to match `write_pem`.
+/// Atomic file write via `<path>.tmp`: readers of `path` see either the old
+/// or the new content, never a partial file, and the rename survives a crash.
 pub fn atomic_write_pem(path: &Path, contents: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
+    atomic_write(path, &path.with_extension("pem.tmp"), contents.as_bytes())
+}
+
+fn atomic_write(path: &Path, tmp: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create parent {}", parent.display()))?;
     }
-    let tmp = path.with_extension("pem.tmp");
-    {
-        use std::io::Write;
-        let mut f =
-            std::fs::File::create(&tmp).with_context(|| format!("open tmp {}", tmp.display()))?;
-        f.write_all(contents.as_bytes())?;
-        f.sync_all()?;
+    match std::fs::remove_file(tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("remove stale {}", tmp.display())),
     }
-    #[cfg(unix)]
-    if path.to_string_lossy().contains(".key.") {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    }
-    std::fs::rename(&tmp, path)
+    let mut f = key_file_options()
+        .open(tmp)
+        .with_context(|| format!("open tmp {}", tmp.display()))?;
+    f.write_all(contents)
+        .and_then(|()| f.sync_all())
+        .with_context(|| format!("write {}", tmp.display()))?;
+    drop(f);
+    std::fs::rename(tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
+    sync_parent_dir(path)
 }
 
 /// Re-issue this host's mesh server cert against the local mesh CA. Requires
@@ -687,8 +824,8 @@ pub fn reissue_mesh_server_cert(pki_dir: &Path, host_cn: &str) -> Result<()> {
         has_mesh_ca_key(pki_dir),
         "reissue: this host does not have the mesh CA private key"
     );
-    let ca_cert_pem = std::fs::read_to_string(mesh_ca_cert_path(pki_dir))?;
-    let ca_key_pem = std::fs::read_to_string(mesh_ca_key_path(pki_dir))?;
+    let ca_cert_pem = read_pki_file(mesh_ca_cert_path(pki_dir))?;
+    let ca_key_pem = read_pki_file(mesh_ca_key_path(pki_dir))?;
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
 
@@ -717,8 +854,8 @@ pub fn reissue_mesh_client_cert(pki_dir: &Path, host_cn: &str) -> Result<()> {
         has_mesh_ca_key(pki_dir),
         "reissue: this host does not have the mesh CA private key"
     );
-    let ca_cert_pem = std::fs::read_to_string(mesh_ca_cert_path(pki_dir))?;
-    let ca_key_pem = std::fs::read_to_string(mesh_ca_key_path(pki_dir))?;
+    let ca_cert_pem = read_pki_file(mesh_ca_cert_path(pki_dir))?;
+    let ca_key_pem = read_pki_file(mesh_ca_key_path(pki_dir))?;
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
 
@@ -761,8 +898,9 @@ pub fn rotate_mesh_ca(pki_dir: &Path) -> Result<()> {
     let prev_key = mesh_ca_previous_key_path(pki_dir);
 
     // Slide current → previous (overwrites any older previous slot).
-    let cur_cert_pem = std::fs::read_to_string(&cur_cert).context("read current CA cert")?;
-    let cur_key_pem = std::fs::read_to_string(&cur_key).context("read current CA key")?;
+    let cur_cert_pem = read_pki_file(&cur_cert).context("read current CA cert")?;
+    let cur_key_pem = read_pki_file(&cur_key).context("read current CA key")?;
+    record_retired_mesh_ca(pki_dir, &cur_cert_pem)?;
     atomic_write_pem(&prev_cert, &cur_cert_pem)?;
     atomic_write_pem(&prev_key, &cur_key_pem)?;
 
@@ -808,18 +946,23 @@ pub fn import_mesh_ca_state(
     previous_cert_pem: Option<&str>,
     previous_key_pem: Option<&str>,
 ) -> Result<()> {
-    // Verify current.
-    let cur_key =
-        KeyPair::from_pem(current_key_pem).context("imported current CA key is not valid PEM")?;
-    Issuer::from_ca_cert_pem(current_cert_pem, cur_key)
+    ensure_key_matches_cert(current_cert_pem, current_key_pem)
         .context("imported current key does not match current cert")?;
-    // Verify previous if present.
     if let (Some(c), Some(k)) = (previous_cert_pem, previous_key_pem) {
-        let prev_key = KeyPair::from_pem(k).context("imported previous CA key is not valid PEM")?;
-        Issuer::from_ca_cert_pem(c, prev_key)
+        ensure_key_matches_cert(c, k)
             .context("imported previous key does not match previous cert")?;
     }
 
+    for old in [
+        mesh_ca_previous_cert_path(pki_dir),
+        mesh_ca_cert_path(pki_dir),
+    ] {
+        if let Ok(pem) = read_pki_file(&old)
+            && pem.trim() != current_cert_pem.trim()
+        {
+            record_retired_mesh_ca(pki_dir, &pem)?;
+        }
+    }
     atomic_write_pem(&mesh_ca_cert_path(pki_dir), current_cert_pem)?;
     atomic_write_pem(&mesh_ca_key_path(pki_dir), current_key_pem)?;
     if let (Some(c), Some(k)) = (previous_cert_pem, previous_key_pem) {
@@ -899,9 +1042,8 @@ pub fn verify_refreshed_peer_certs(
     use rustls::pki_types::{ServerName, UnixTime};
     use std::sync::Arc;
 
-    let mut ca_pems =
-        vec![std::fs::read_to_string(mesh_ca_cert_path(pki_dir)).context("read mesh CA cert")?];
-    if let Ok(prev) = std::fs::read_to_string(mesh_ca_previous_cert_path(pki_dir)) {
+    let mut ca_pems = vec![read_pki_file(mesh_ca_cert_path(pki_dir)).context("read mesh CA cert")?];
+    if let Ok(prev) = read_pki_file(mesh_ca_previous_cert_path(pki_dir)) {
         ca_pems.push(prev);
     }
     let roots = Arc::new(ca_root_store_multi(ca_pems.iter().map(String::as_str))?);
@@ -951,7 +1093,7 @@ pub fn verify_refreshed_peer_certs(
     .or_else(|e| {
         const REMEDY: &str = "upgrade a CA-key holder, or run \
              `orca system mesh update --action unpin --id <this host>` on each peer";
-        let current = std::fs::read_to_string(mesh_server_cert_path(pki_dir))
+        let current = read_pki_file(mesh_server_cert_path(pki_dir))
             .context("read current server cert")
             .and_then(|p| first_cert_der(&p))
             .and_then(|d| mesh_server_identity(&d));
@@ -1115,9 +1257,9 @@ pub fn rest_server_cert_is_browser_compatible(cert_pem: &str) -> bool {
 /// lacks the `localhost` SAN (pre-upgrade cert) so the new SANs take effect
 /// without requiring a full re-init.
 pub fn refresh_rest_server_cert(pki_dir: &Path) -> Result<()> {
-    let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir))
+    let ca_cert_pem = read_pki_file(ca_cert_path(pki_dir))
         .context("CA cert not found; run `orca install` to initialize PKI")?;
-    let ca_key_pem = std::fs::read_to_string(ca_key_path(pki_dir))
+    let ca_key_pem = read_pki_file(ca_key_path(pki_dir))
         .context("CA key not found; run `orca install` to initialize PKI")?;
     let ca_key = KeyPair::from_pem(&ca_key_pem).context("parse CA key")?;
     let issuer =
@@ -1192,9 +1334,9 @@ pub fn init(pki_dir: &Path) -> Result<()> {
 /// Issue a cert for `plugin_id` signed by the CA. Errors if the CA does not
 /// exist — caller must run `init` first.
 pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<NodeBundle> {
-    let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir))
+    let ca_cert_pem = read_pki_file(ca_cert_path(pki_dir))
         .context("CA cert not found — run `orca pki ca-init` first")?;
-    let ca_key_pem = std::fs::read_to_string(ca_key_path(pki_dir))
+    let ca_key_pem = read_pki_file(ca_key_path(pki_dir))
         .context("CA key not found — run `orca pki ca-init` first")?;
 
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
@@ -1241,18 +1383,18 @@ pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<
 /// over mTLS. NOT used for mesh federation — that uses `mesh/client/*` under
 /// the mesh CA.
 pub fn issue_cli_client_cert(pki_dir: &Path, host_cn: &str) -> Result<NodeBundle> {
-    let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir))
+    let ca_cert_pem = read_pki_file(ca_cert_path(pki_dir))
         .context("CA cert not found — run `orca install` (which runs utils::pki::init) first")?;
 
     if cli_client_cert_path(pki_dir).exists() && cli_client_key_path(pki_dir).exists() {
         return Ok(NodeBundle {
-            cert_pem: std::fs::read_to_string(cli_client_cert_path(pki_dir))?,
-            key_pem: std::fs::read_to_string(cli_client_key_path(pki_dir))?,
+            cert_pem: read_pki_file(cli_client_cert_path(pki_dir))?,
+            key_pem: read_pki_file(cli_client_key_path(pki_dir))?,
             ca_cert_pem,
         });
     }
 
-    let ca_key_pem = std::fs::read_to_string(ca_key_path(pki_dir))
+    let ca_key_pem = read_pki_file(ca_key_path(pki_dir))
         .context("CA key not found — this host cannot sign new CLI client certs")?;
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
@@ -1286,9 +1428,9 @@ pub fn issue_cli_client_cert(pki_dir: &Path, host_cn: &str) -> Result<NodeBundle
 /// `client.cert.pem` or `client.key.pem` is missing — caller decides whether
 /// to attempt issuance or fall back to bearer-token auth.
 pub fn load_cli_client(pki_dir: &Path) -> Option<NodeBundle> {
-    let cert_pem = std::fs::read_to_string(cli_client_cert_path(pki_dir)).ok()?;
-    let key_pem = std::fs::read_to_string(cli_client_key_path(pki_dir)).ok()?;
-    let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir)).ok()?;
+    let cert_pem = read_pki_file(cli_client_cert_path(pki_dir)).ok()?;
+    let key_pem = read_pki_file(cli_client_key_path(pki_dir)).ok()?;
+    let ca_cert_pem = read_pki_file(ca_cert_path(pki_dir)).ok()?;
     Some(NodeBundle {
         cert_pem,
         key_pem,
@@ -1301,11 +1443,11 @@ pub fn load_cli_client(pki_dir: &Path) -> Option<NodeBundle> {
 /// Load the server's TLS material (cert chain + key + CA cert) from disk.
 pub fn load_server(pki_dir: &Path) -> Result<NodeBundle> {
     Ok(NodeBundle {
-        cert_pem: std::fs::read_to_string(server_cert_path(pki_dir))
+        cert_pem: read_pki_file(server_cert_path(pki_dir))
             .context("server cert not found — run `orca pki ca-init`")?,
-        key_pem: std::fs::read_to_string(server_key_path(pki_dir))
+        key_pem: read_pki_file(server_key_path(pki_dir))
             .context("server key not found — run `orca pki ca-init`")?,
-        ca_cert_pem: std::fs::read_to_string(ca_cert_path(pki_dir))
+        ca_cert_pem: read_pki_file(ca_cert_path(pki_dir))
             .context("CA cert not found — run `orca pki ca-init`")?,
     })
 }
@@ -1313,16 +1455,12 @@ pub fn load_server(pki_dir: &Path) -> Result<NodeBundle> {
 /// Load a plugin's TLS material from disk.
 pub fn load_plugin(pki_dir: &Path, plugin_id: &str) -> Result<NodeBundle> {
     Ok(NodeBundle {
-        cert_pem: std::fs::read_to_string(plugin_cert_path(pki_dir, plugin_id)).with_context(
-            || {
-                format!(
-                    "plugin cert not found for '{plugin_id}' — run `orca pki issue {plugin_id}`"
-                )
-            },
-        )?,
-        key_pem: std::fs::read_to_string(plugin_key_path(pki_dir, plugin_id))
+        cert_pem: read_pki_file(plugin_cert_path(pki_dir, plugin_id)).with_context(|| {
+            format!("plugin cert not found for '{plugin_id}' — run `orca pki issue {plugin_id}`")
+        })?,
+        key_pem: read_pki_file(plugin_key_path(pki_dir, plugin_id))
             .with_context(|| format!("plugin key not found for '{plugin_id}'"))?,
-        ca_cert_pem: std::fs::read_to_string(ca_cert_path(pki_dir))
+        ca_cert_pem: read_pki_file(ca_cert_path(pki_dir))
             .context("CA cert not found — run `orca pki ca-init`")?,
     })
 }
@@ -1427,7 +1565,7 @@ pub fn load_or_init_bootstrap_key(pki_dir: &Path) -> Result<ed25519_dalek::Signi
 
     let key_path = bootstrap_key_path(pki_dir);
     if key_path.exists() {
-        let pem = std::fs::read_to_string(&key_path).context("read bootstrap key")?;
+        let pem = read_pki_file(&key_path).context("read bootstrap key")?;
         let signing = SigningKey::from_pkcs8_pem(&pem).context("parse bootstrap key PEM")?;
         return Ok(signing);
     }
@@ -1492,10 +1630,10 @@ pub fn load_or_init_bootstrap_cert(pki_dir: &Path) -> Result<(String, String)> {
 
     // Ensure the key exists; the cert without the key would be useless.
     load_or_init_bootstrap_key(pki_dir)?;
-    let key_pem = std::fs::read_to_string(&key_path).context("read bootstrap key")?;
+    let key_pem = read_pki_file(&key_path).context("read bootstrap key")?;
 
     if cert_path.exists() {
-        let cert_pem = std::fs::read_to_string(&cert_path).context("read bootstrap cert")?;
+        let cert_pem = read_pki_file(&cert_path).context("read bootstrap cert")?;
         return Ok((cert_pem, key_pem));
     }
 
@@ -1849,22 +1987,90 @@ pub fn parse_peer_addr(s: &str, default_port: u16) -> Result<(String, u16)> {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn write_pem(path: PathBuf, pem: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, pem.as_bytes()).with_context(|| format!("write {}", path.display()))?;
-    // Restrict key files to owner-only read/write.
+    atomic_write_pem(&path, pem)
+}
+
+/// Reads a PKI file, refusing to follow a symlink at `path`.
+pub fn read_pki_file(path: impl AsRef<Path>) -> std::io::Result<String> {
+    use std::io::Read;
+    let path = path.as_ref();
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
     #[cfg(unix)]
-    if path.to_string_lossy().contains(".key.") {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
     }
-    Ok(())
+    let mut s = String::new();
+    let mut f = opts.open(path).map_err(|e| {
+        #[cfg(unix)]
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            return std::io::Error::new(
+                e.kind(),
+                format!("{}: symlinked PKI files are refused", path.display()),
+            );
+        }
+        e
+    })?;
+    f.read_to_string(&mut s)?;
+    Ok(s)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn write_pem_creates_owner_only_files_on_first_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["ca.cert.pem", "ca.key.pem"] {
+            let path = dir.path().join(name);
+            write_pem(path.clone(), "x").unwrap();
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_pki_file_refuses_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.pem");
+        std::fs::write(&real, "pem").unwrap();
+        let link = dir.path().join("link.pem");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(read_pki_file(&real).unwrap(), "pem");
+        let err = read_pki_file(&link).unwrap_err().to_string();
+        assert!(err.contains("link.pem"), "got: {err}");
+        assert!(
+            err.contains("symlinked PKI files are refused"),
+            "got: {err}"
+        );
+        init_mesh_ca(dir.path(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+        let ca = mesh_ca_cert_path(dir.path());
+        let moved = dir.path().join("moved.pem");
+        std::fs::rename(&ca, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &ca).unwrap();
+        assert!(export_mesh_ca_keypair(dir.path()).is_err());
+    }
+
+    #[test]
+    fn ensure_valid_ca_cert_accepts_a_ca_and_refuses_a_leaf_or_out_of_validity() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+        let (ca, _) = export_mesh_ca_keypair(dir.path()).unwrap();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        ensure_valid_ca_cert(&ca, now).unwrap();
+        let err = ensure_valid_ca_cert(&ca, i64::from(i32::MAX) * 4).unwrap_err();
+        assert!(err.to_string().contains("validity"), "got: {err}");
+        let err = ensure_valid_ca_cert(&ca, 0).unwrap_err();
+        assert!(err.to_string().contains("validity"), "got: {err}");
+        let (leaf, _) = load_or_init_bootstrap_cert(dir.path()).unwrap();
+        let err = ensure_valid_ca_cert(&leaf, now).unwrap_err();
+        assert!(err.to_string().contains("not a CA"), "got: {err}");
+    }
 
     #[test]
     fn init_and_issue_roundtrip() {
@@ -2300,6 +2506,51 @@ mod tests {
     }
 
     #[test]
+    fn import_mesh_ca_keypair_refuses_when_a_key_already_exists() {
+        let src = tempfile::tempdir().unwrap();
+        init_mesh_ca(src.path(), "founder").unwrap();
+        let (cert_pem, key_pem) = export_mesh_ca_keypair(src.path()).unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(mesh_dir(dst.path())).unwrap();
+        std::fs::write(mesh_ca_cert_path(dst.path()), &cert_pem).unwrap();
+        import_mesh_ca_keypair(dst.path(), &cert_pem, &key_pem).unwrap();
+        let err = import_mesh_ca_keypair(dst.path(), &cert_pem, &key_pem).unwrap_err();
+        assert!(format!("{err:#}").contains("already holds"), "got: {err:#}");
+    }
+
+    #[test]
+    fn rotation_and_state_import_record_retired_cas() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        let (first, _) = export_mesh_ca_keypair(dir.path()).unwrap();
+        rotate_mesh_ca(dir.path()).unwrap();
+        let (second, second_key) = export_mesh_ca_keypair(dir.path()).unwrap();
+        assert_eq!(
+            retired_mesh_ca_fingerprints(dir.path()).unwrap(),
+            vec![cert_fingerprint(&first).unwrap()]
+        );
+
+        let other = tempfile::tempdir().unwrap();
+        init_mesh_ca(other.path(), "founder").unwrap();
+        let (third, third_key) = export_mesh_ca_keypair(other.path()).unwrap();
+        import_mesh_ca_state(
+            dir.path(),
+            &third,
+            &third_key,
+            Some(&second),
+            Some(&second_key),
+        )
+        .unwrap();
+        assert_eq!(
+            retired_mesh_ca_fingerprints(dir.path()).unwrap(),
+            vec![
+                cert_fingerprint(&first).unwrap(),
+                cert_fingerprint(&second).unwrap()
+            ]
+        );
+    }
+
+    #[test]
     fn import_mesh_ca_rejects_mismatched_cert() {
         let src = tempfile::tempdir().unwrap();
         init_mesh_ca(src.path(), "founder").unwrap();
@@ -2319,6 +2570,30 @@ mod tests {
             .err()
             .unwrap();
         assert!(format!("{err}").contains("does not match"));
+    }
+
+    #[test]
+    fn import_mesh_ca_rejects_a_key_that_is_not_the_cert_key() {
+        let src = tempfile::tempdir().unwrap();
+        init_mesh_ca(src.path(), "founder").unwrap();
+        let (cert_pem, _) = export_mesh_ca_keypair(src.path()).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        init_mesh_ca(other.path(), "founder").unwrap();
+        let (_, other_key) = export_mesh_ca_keypair(other.path()).unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(mesh_dir(dst.path())).unwrap();
+        std::fs::write(mesh_ca_cert_path(dst.path()), &cert_pem).unwrap();
+        let err = import_mesh_ca_keypair(dst.path(), &cert_pem, &other_key).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("does not match"),
+            "got: {err:#}"
+        );
+        assert!(!has_mesh_ca_key(dst.path()));
+        assert!(
+            import_mesh_ca_state(dst.path(), &cert_pem, &other_key, None, None).is_err(),
+            "state import must refuse a mismatched pair"
+        );
     }
 
     #[test]
@@ -2801,6 +3076,123 @@ mod tests {
         assert_eq!(
             oid, "1.2.840.10045.2.1",
             "expected ecPublicKey OID, got {oid}"
+        );
+    }
+
+    #[test]
+    fn retired_history_skips_blank_lines_and_missing_reads_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(retired_mesh_ca_fingerprints(dir.path()).unwrap().is_empty());
+        std::fs::create_dir_all(mesh_dir(dir.path())).unwrap();
+        std::fs::write(mesh_ca_retired_path(dir.path()), "\naa\n  \nbb\n\n").unwrap();
+        assert_eq!(
+            retired_mesh_ca_fingerprints(dir.path()).unwrap(),
+            vec!["aa".to_string(), "bb".to_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_retired_history_refuses_rotation_and_keeps_the_history() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        let retired = mesh_ca_retired_path(dir.path());
+        std::fs::write(&retired, "aa\n").unwrap();
+        std::fs::set_permissions(&retired, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_to_string(&retired).is_ok() {
+            return;
+        }
+        let (cert, key) = export_mesh_ca_keypair(dir.path()).unwrap();
+        assert!(retired_mesh_ca_fingerprints(dir.path()).is_err());
+        assert!(ensure_mesh_ca_not_retired(dir.path(), &cert).is_err());
+        assert!(rotate_mesh_ca(dir.path()).is_err());
+        let other = tempfile::tempdir().unwrap();
+        init_mesh_ca(other.path(), "founder").unwrap();
+        let (third, third_key) = export_mesh_ca_keypair(other.path()).unwrap();
+        assert!(
+            import_mesh_ca_state(dir.path(), &third, &third_key, Some(&cert), Some(&key)).is_err()
+        );
+        std::fs::set_permissions(&retired, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read_to_string(&retired).unwrap(), "aa\n");
+        assert_eq!(
+            std::fs::read_to_string(mesh_ca_cert_path(dir.path())).unwrap(),
+            cert
+        );
+    }
+
+    #[test]
+    fn retired_history_uses_its_own_tmp_name() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        std::fs::write(mesh_dir(dir.path()).join("ca.pem.tmp"), "keep").unwrap();
+        rotate_mesh_ca(dir.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(mesh_dir(dir.path()).join("ca.pem.tmp")).unwrap(),
+            "keep"
+        );
+        assert!(!mesh_dir(dir.path()).join("ca.retired.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_creates_0600_and_never_follows_a_stale_tmp_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("x.cert.pem");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join("x.cert.pem.tmp")).unwrap();
+        atomic_write_pem(&target, "pem").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "pem");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!dir.path().join("x.cert.pem.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_mesh_ca_keypair_refuses_a_symlinked_key_path() {
+        let src = tempfile::tempdir().unwrap();
+        init_mesh_ca(src.path(), "founder").unwrap();
+        let (cert_pem, key_pem) = export_mesh_ca_keypair(src.path()).unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(mesh_dir(dst.path())).unwrap();
+        std::fs::write(mesh_ca_cert_path(dst.path()), &cert_pem).unwrap();
+        std::os::unix::fs::symlink(dst.path().join("elsewhere"), mesh_ca_key_path(dst.path()))
+            .unwrap();
+        let err = import_mesh_ca_keypair(dst.path(), &cert_pem, &key_pem).unwrap_err();
+        assert!(format!("{err:#}").contains("symlink"), "got: {err:#}");
+        assert!(!dst.path().join("elsewhere").exists());
+    }
+
+    #[test]
+    fn retired_ca_is_refused_on_join_and_key_import() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        let (first, first_key) = export_mesh_ca_keypair(dir.path()).unwrap();
+        rotate_mesh_ca(dir.path()).unwrap();
+        let (current, _) = export_mesh_ca_keypair(dir.path()).unwrap();
+
+        let err = install_joined_mesh_ca(dir.path(), &first).unwrap_err();
+        assert!(format!("{err:#}").contains("retired"), "got: {err:#}");
+        assert_eq!(
+            std::fs::read_to_string(mesh_ca_cert_path(dir.path())).unwrap(),
+            current
+        );
+
+        std::fs::write(mesh_ca_cert_path(dir.path()), &first).unwrap();
+        std::fs::remove_file(mesh_ca_key_path(dir.path())).unwrap();
+        let err = import_mesh_ca_keypair(dir.path(), &first, &first_key).unwrap_err();
+        assert!(format!("{err:#}").contains("retired"), "got: {err:#}");
+        assert!(!has_mesh_ca_key(dir.path()));
+
+        let fresh = tempfile::tempdir().unwrap();
+        install_joined_mesh_ca(fresh.path(), &current).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(mesh_ca_cert_path(fresh.path())).unwrap(),
+            current
         );
     }
 }

@@ -38,6 +38,13 @@
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serializes every test that mutates or enumerates the process-global
+/// `contract::unit` provider registry; a concurrent register/deregister makes
+/// catalog reads (`mcp_definitions`, `unit_ops`) see transient providers.
+/// Sync tests take it with `blocking_lock`, async tests with `.lock().await`.
+#[cfg(test)]
+pub(crate) static UNIT_REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub mod cli;
 pub mod diagnostics_surface;
 mod erased;

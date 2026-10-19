@@ -123,7 +123,7 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
         .mesh_ca_cert_pem
         .as_deref()
         .context("offer has no mesh CA cert")?;
-    std::fs::write(utils::pki::mesh_ca_cert_path(&pki_d), ca_pem.as_bytes())?;
+    utils::pki::install_joined_mesh_ca(&pki_d, ca_pem)?;
 
     // Cert CN = stable machine_id (not the display hostname, which on macOS
     // mutates on mDNS conflicts and would force a re-issue on every flap).

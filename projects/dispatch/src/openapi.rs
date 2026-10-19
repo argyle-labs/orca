@@ -820,6 +820,7 @@ mod tests {
 
     #[test]
     fn inject_unit_paths_emits_typed_paths_for_live_providers() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
         use contract::BoxFuture;
         use contract::unit::{
             self, ActionDecl, KindDeclaration, UnitDescriptor, UnitProvider, VerbArgs, VerbDecl,
