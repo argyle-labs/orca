@@ -74,13 +74,7 @@ pub fn validate_segment(kind: &str, s: &str) -> Result<()> {
 }
 
 pub fn validate_principal(s: &str) -> Result<()> {
-    let ok = s.len() <= 64
-        && s.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
-        && s.bytes()
-            .all(|b| b == b'-' || b.is_ascii_lowercase() || b.is_ascii_digit())
-        && !s.ends_with('-')
-        && !s.contains("--");
-    if !ok {
+    if !contract::plugin::is_valid_plugin_id(s) {
         bail!(
             "invalid principal `{s}`: must match [a-z][a-z0-9-]* without trailing or doubled `-` (max 64)"
         );
