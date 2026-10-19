@@ -667,3 +667,102 @@ pub async fn dispatch_op(
         )))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_kind_strings_are_stable() {
+        assert_eq!(RuntimeKind::Docker.as_str(), "docker");
+        assert_eq!(RuntimeKind::Lxc.as_str(), "lxc");
+        assert_eq!(RuntimeKind::Podman.as_str(), "podman");
+        assert_eq!(RuntimeKind::Nspawn.as_str(), "nspawn");
+    }
+
+    #[test]
+    fn restart_policy_desire_matches_2_1_rules() {
+        assert!(RestartPolicy::UnlessStopped.desires_running());
+        assert!(RestartPolicy::Always.desires_running());
+        assert!(!RestartPolicy::No.desires_running());
+        assert!(!RestartPolicy::OnFailure.desires_running());
+    }
+
+    #[test]
+    fn startup_ordering_is_empty_when_all_fields_none() {
+        assert!(StartupOrdering::default().is_empty());
+        let so = StartupOrdering {
+            order: Some(3),
+            ..Default::default()
+        };
+        assert!(!so.is_empty());
+    }
+
+    #[test]
+    fn runtime_kind_from_str_round_trips_every_variant() {
+        for k in [
+            RuntimeKind::Docker,
+            RuntimeKind::Lxc,
+            RuntimeKind::Podman,
+            RuntimeKind::Nspawn,
+        ] {
+            assert_eq!(RuntimeKind::from_str(k.as_str()), Some(k));
+        }
+        assert_eq!(RuntimeKind::from_str("qemu"), None);
+        assert_eq!(RuntimeKind::from_str(""), None);
+    }
+
+    #[test]
+    fn liveness_as_str_and_default() {
+        assert_eq!(Liveness::NotApplicable.as_str(), "not_applicable");
+        assert_eq!(Liveness::Live.as_str(), "live");
+        assert_eq!(Liveness::Wedged.as_str(), "wedged");
+        assert_eq!(Liveness::Unknown.as_str(), "unknown");
+        assert_eq!(Liveness::default(), Liveness::NotApplicable);
+    }
+
+    #[test]
+    fn log_tail_default_is_200() {
+        assert_eq!(LogTail::default().0, 200);
+    }
+
+    #[test]
+    fn exec_output_default_is_empty() {
+        let out = ContainerExecOutput::default();
+        assert_eq!(out.exit_code, None);
+        assert!(out.stdout.is_empty());
+        assert!(out.stderr.is_empty());
+    }
+
+    #[test]
+    fn adapter_error_display_messages() {
+        assert_eq!(
+            AdapterError::NotFound("101".into()).to_string(),
+            "container `101` not found"
+        );
+        assert_eq!(
+            AdapterError::Unavailable("socket down".into()).to_string(),
+            "runtime unavailable: socket down"
+        );
+        assert_eq!(
+            AdapterError::Malformed("bad json".into()).to_string(),
+            "runtime returned malformed data: bad json"
+        );
+        assert_eq!(
+            AdapterError::Transport("io".into()).to_string(),
+            "transport error: io"
+        );
+        assert_eq!(
+            AdapterError::Refused("locked".into()).to_string(),
+            "operation refused: locked"
+        );
+    }
+
+    #[test]
+    fn local_hostname_is_nonempty_and_trimmed() {
+        let h = local_hostname();
+        assert!(!h.is_empty());
+        assert!(!h.ends_with('.'));
+        assert!(!h.ends_with('\n'));
+    }
+}

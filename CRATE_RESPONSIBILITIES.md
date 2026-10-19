@@ -159,6 +159,13 @@ deploy-target adapters (docker, proxmox, … register as providers). A deploymen
 *produces* a `hosts` entry; `deployments` owns lifecycle, `hosts` owns "is it
 reachable/healthy."
 
+### `container-runtime`  🔌 seam SDK
+The plugin-facing contract for a container runtime backend: the container model,
+`RuntimeAdapter` / `WedgeRecoverer`, wire args and `dispatch_op`. Plugins reach
+it as `plugin_toolkit::containers`. The reconciler, registry and host-side proxy
+stay in core `containers`. Dependencies: contract, derive and serde only, with no
+db, notifications or TLS.
+
 ### `models`  🔌 seam  *(rename ⟵ `model`)*
 LLM engine + backend abstraction (Claude / LMStudio / Ollama) + registry.
 **Seam:** engine/backend providers.
