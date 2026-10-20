@@ -375,7 +375,7 @@ pub fn surface_get_on<S: Read + Write>(stream: &mut S, id: u64, name: &str) -> R
 fn resolve_principal(expected_id: &str, declared: &str) -> Result<String> {
     if !crate::is_valid_plugin_id(expected_id) {
         bail!(
-            "refusing to load plugin as '{expected_id}': id must match ^[a-z][a-z0-9_-]{{0,63}}$"
+            "refusing to load plugin as '{expected_id}': id must match ^[a-z][a-z0-9-]{{0,63}}$ without trailing or doubled `-`"
         );
     }
     if crate::is_reserved_plugin_id(expected_id) {
@@ -1614,7 +1614,7 @@ mod tests {
 
     #[test]
     fn resolve_principal_refuses_reserved_ids() {
-        for id in ["orca", "github_token", "secrets", "mesh"] {
+        for id in ["orca", "secrets", "mesh"] {
             let err = resolve_principal(id, id).unwrap_err().to_string();
             assert!(err.contains("reserved"), "{id}: {err}");
         }

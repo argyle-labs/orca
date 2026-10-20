@@ -27,3 +27,17 @@ pub const RESERVED_PLUGIN_IDS: &[&str] = &[
 pub fn is_reserved_plugin_id(id: &str) -> bool {
     RESERVED_PLUGIN_IDS.contains(&id)
 }
+
+/// Whether `id` matches `^[a-z][a-z0-9-]{0,63}$` with no trailing or doubled
+/// `-`. No `.` (a dotted id would own a core secret's `<id>.…` names), no `/`
+/// (the id becomes the install filename), and no `_` (`-` maps to `_` in db
+/// namespaces, so `_` would let two ids collide).
+pub fn is_valid_plugin_id(id: &str) -> bool {
+    id.len() <= 64
+        && id.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+        && id
+            .bytes()
+            .all(|b| b == b'-' || b.is_ascii_lowercase() || b.is_ascii_digit())
+        && !id.ends_with('-')
+        && !id.contains("--")
+}

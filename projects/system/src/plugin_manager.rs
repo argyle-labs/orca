@@ -1024,7 +1024,9 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
 /// overwrite an installed plugin without `replace`.
 fn check_sideload_name(name: &str, replace: bool) -> Result<()> {
     if !plugin_loader::is_valid_plugin_id(name) {
-        bail!("plugin name '{name}' must match ^[a-z][a-z0-9_-]{{0,63}}$");
+        bail!(
+            "plugin name '{name}' must match ^[a-z][a-z0-9-]{{0,63}}$ without trailing or doubled `-`"
+        );
     }
     if plugin_loader::is_reserved_plugin_id(name) {
         bail!("plugin name '{name}' is reserved for orca core; choose another name");
@@ -2261,7 +2263,7 @@ mod tests {
         std::fs::write(&bin, b"").unwrap();
         let args = PluginInstallArgs {
             file: Some(bin.display().to_string()),
-            name: Some("github_token".to_string()),
+            name: Some("secrets".to_string()),
             ..Default::default()
         };
         let err = plugin_install(args, &ctx).await.unwrap_err();
