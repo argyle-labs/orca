@@ -242,7 +242,7 @@ namespace = { path = "projects/namespace", version = "=0.2.1-rc.21", registry = 
 notifications = { path = "projects/notifications", version = "=0.2.1-rc.21", registry = "gitea", package = "orca-notifications", default-features = false }
 openapi = { path = "projects/openapi", version = "=0.2.1-rc.21", registry = "gitea", package = "orca-openapi" }
 orca-inventory = { path = "projects/orca-inventory", version = "=0.2.1-rc.21", registry = "gitea", package = "orca-inventory" }
-plugin-abi = { path = "projects/plugin-abi", version = "=0.1.0", registry = "gitea", package = "orca-plugin-abi" }
+plugin-abi = { path = "projects/plugin-abi", version = "=0.2.1-rc.21", registry = "gitea", package = "orca-plugin-abi" }
 plugin-loader = { path = "projects/plugin-loader", version = "=0.2.1-rc.21", registry = "gitea", package = "orca-plugin-loader" }
 plugin-proto = { path = "projects/plugin-proto", version = "=0.2.1-rc.21", registry = "gitea", package = "orca-plugin-proto" }
 plugin-toolkit = { path = "projects/plugin-toolkit", version = "=0.2.1-rc.21", registry = "gitea", package = "orca-plugin-toolkit", default-features = false }
