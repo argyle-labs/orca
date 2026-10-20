@@ -288,7 +288,11 @@ pub fn deregister_collector(name: &str) -> bool {
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<crate::invocation_scope::BackendCall>,
+        ) -> std::result::Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync
         + 'static,
@@ -358,15 +362,17 @@ impl TopologyCollector for TopologyCollectorProxy {
     async fn collect_claims(&self) -> Result<Vec<TopologyClaim>> {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(COLLECT_OP, serde_json::json!({})))
-            .await
-            .map_err(|e| anyhow::anyhow!("topology '{name}' invoke task panicked: {e}"))?
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "topology '{name}' invoke failed: {}",
-                    crate::render_invoke_error(&e)
-                )
-            })?;
+        let call = crate::invocation_scope::capture("topology", &name);
+        let out =
+            tokio::task::spawn_blocking(move || invoke(COLLECT_OP, serde_json::json!({}), call))
+                .await
+                .map_err(|e| anyhow::anyhow!("topology '{name}' invoke task panicked: {e}"))?
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "topology '{name}' invoke failed: {}",
+                        crate::render_invoke_error(&e)
+                    )
+                })?;
         let claims: Vec<TopologyClaim> = serde_json::from_value(out)
             .map_err(|e| anyhow::anyhow!("topology '{name}' returned invalid JSON: {e}"))?;
         Ok(claims)

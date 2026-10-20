@@ -221,7 +221,8 @@ impl ReplicationStatusProvider for ReplicationStatusProxy {
         let args_json = serde_json::to_string(&args)
             .map_err(|e| StorageError::Other(format!("encode `{STATUS_OP}` args: {e}")))?;
         let invoke = self.invoke.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(STATUS_OP, args_json))
+        let call = utils::invocation_scope::capture("replication", &self.name);
+        let out = tokio::task::spawn_blocking(move || invoke(STATUS_OP, args_json, call))
             .await
             .map_err(|e| {
                 StorageError::Transport(format!("`{STATUS_OP}` proxy task failed: {e}"))
@@ -269,7 +270,7 @@ mod proxy_tests {
     /// would), resolved through the public `resolve` seam the gate uses.
     #[tokio::test]
     async fn register_from_def_proxy_round_trips() {
-        let thunk: crate::InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+        let thunk: crate::InvokeThunk = Arc::new(move |op: &str, args_json: String, _call| {
             assert_eq!(op, STATUS_OP);
             let args: StatusArgs =
                 serde_json::from_str(&args_json).map_err(|e| StorageError::Other(e.to_string()))?;

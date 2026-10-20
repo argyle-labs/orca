@@ -142,21 +142,40 @@ impl Invocation {
         self
     }
 
-    pub fn from_core_verb(verb: &contract::invocation_scope::CoreVerb) -> Self {
-        let mut caller = verb.caller.clone();
-        if dispatch::tool_roles::role_rank(verb.role)
-            < dispatch::tool_roles::role_rank(&caller.role)
-        {
-            caller.role = verb.role.to_string();
-        }
-        Self {
-            second_factor: verb.second_factor && caller.role == "super-admin",
-            caller,
+    pub fn for_backend(
+        verb: &contract::invocation_scope::CoreVerb,
+        targeted: bool,
+        reaches: &[String],
+    ) -> Self {
+        let rank = dispatch::tool_roles::role_rank;
+        let floor = if rank(verb.role) < rank("read") {
+            "read"
+        } else {
+            verb.role
+        };
+        let role = if rank(floor) < rank(&verb.caller.role) {
+            floor.to_string()
+        } else {
+            verb.caller.role.clone()
+        };
+        let inv = Self {
+            second_factor: verb.second_factor && role == "super-admin",
+            caller: CallerIdentity {
+                user_id: verb.caller.user_id.clone(),
+                username: verb.caller.username.clone(),
+                role,
+                can_mutate: verb.caller.can_mutate,
+            },
             dry_run: verb.dry_run,
             local: verb.local,
             execute_confirmed: verb.execute_gated && !verb.dry_run,
             reaches: Vec::new(),
             system: false,
+        };
+        if targeted {
+            inv.with_reaches(reaches)
+        } else {
+            inv.unconfirmed()
         }
     }
 

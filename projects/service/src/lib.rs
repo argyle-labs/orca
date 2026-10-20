@@ -464,8 +464,16 @@ pub fn providers() -> Vec<ServiceProvider> {
 /// Host-side (in-process) only: drives a *loaded plugin* over the subprocess wire
 /// via `spawn_blocking` — a daemon/host concern, gated out on thin.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> Result<String, ServiceError> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(
+            &str,
+            String,
+            Option<contract::invocation_scope::BackendCall>,
+        ) -> Result<String, ServiceError>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Register a backend from a plugin's `BackendDef`, wiring its ops back through
 /// `invoke`. `default_port` is the `kind` string, `runtimes` the `runtime` CSV,
@@ -525,7 +533,8 @@ impl ServiceProxy {
         let args_json = serde_json::to_string(&args)
             .map_err(|e| ServiceError::Other(format!("encode `{op}` args: {e}")))?;
         let invoke = self.invoke.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(op, args_json))
+        let call = utils::invocation_scope::capture("service", &self.name);
+        let out = tokio::task::spawn_blocking(move || invoke(op, args_json, call))
             .await
             .map_err(|e| ServiceError::Transport(format!("`{op}` proxy task failed: {e}")))??;
         serde_json::from_str(&out)
@@ -2033,7 +2042,7 @@ mod tests {
     #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn register_from_def_wires_proxy_ops_and_deregisters() {
-        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String| match op {
+        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String, _call| match op {
             "status" => {
                 let _a: ReachArgs = serde_json::from_str(&args_json).unwrap();
                 let st = ServiceStatus {
@@ -2085,7 +2094,7 @@ mod tests {
     #[cfg(feature = "in-process")]
     #[test]
     fn register_from_def_rejects_bad_port_runtime_and_capability() {
-        let thunk: InvokeThunk = Arc::new(|_, _| Ok("null".into()));
+        let thunk: InvokeThunk = Arc::new(|_, _, _call| Ok("null".into()));
         // Bad port.
         assert!(
             register_from_def(
@@ -2127,7 +2136,7 @@ mod tests {
     #[cfg(feature = "in-process")]
     #[test]
     fn register_from_def_ignores_empty_runtime_csv_entries() {
-        let thunk: InvokeThunk = Arc::new(|_, _| Ok("null".into()));
+        let thunk: InvokeThunk = Arc::new(|_, _, _call| Ok("null".into()));
         register_from_def(
             "empty-csv".into(),
             "80",
@@ -2319,7 +2328,7 @@ mod tests {
     #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn proxy_workload_spec_backup_and_restore_round_trip() {
-        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String| match op {
+        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String, _call| match op {
             "workload_spec" => {
                 let a: RuntimeArgs = serde_json::from_str(&args_json).unwrap();
                 // Echo the runtime + instance name back through the WorkloadSpec.
@@ -2390,7 +2399,7 @@ mod tests {
     #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn proxy_reports_decode_error_on_bad_thunk_output() {
-        let thunk: InvokeThunk = Arc::new(|_, _| Ok("not json".to_string()));
+        let thunk: InvokeThunk = Arc::new(|_, _, _call| Ok("not json".to_string()));
         register_from_def(
             "proxy-baddec".into(),
             "80",
@@ -2415,7 +2424,7 @@ mod tests {
     #[tokio::test]
     async fn proxy_propagates_thunk_error() {
         let thunk: InvokeThunk =
-            Arc::new(|_, _| Err(ServiceError::Transport("upstream boom".into())));
+            Arc::new(|_, _, _call| Err(ServiceError::Transport("upstream boom".into())));
         register_from_def(
             "proxy-err".into(),
             "80",

@@ -22,7 +22,7 @@ path = "src/lib.rs"
 [features]
 default = ["full"]
 full = ["in-process"]
-in-process = ["dep:tokio"]
+in-process = ["dep:tokio", "utils/reactor"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -31,6 +31,7 @@ async-trait = { workspace = true }
 # crate re-uses it directly as its domain type so the wire and domain shapes
 # never diverge. plugin-abi carries only serde + schemars, so there is no cycle.
 plugin-abi  = { workspace = true }
+utils       = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }

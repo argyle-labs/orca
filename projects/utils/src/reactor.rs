@@ -21,6 +21,14 @@ pub fn block_on<F: Future>(fut: F) -> F::Output {
 
 pub fn off_async_worker<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     use tokio::runtime::{Handle, RuntimeFlavor};
+    let daemon = crate::invocation_scope::in_daemon_task();
+    let f = move || {
+        if daemon {
+            crate::invocation_scope::sync_daemon_task(f)
+        } else {
+            f()
+        }
+    };
     match Handle::try_current().map(|h| h.runtime_flavor()) {
         Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
         Ok(_) => std::thread::scope(|s| {
@@ -36,12 +44,41 @@ pub fn spawn_detached<F>(fut: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    drop(shared_runtime().spawn(fut));
+    let daemon = crate::invocation_scope::in_daemon_task();
+    drop(shared_runtime().spawn(async move {
+        if daemon {
+            crate::invocation_scope::daemon_task(fut).await
+        } else {
+            fut.await
+        }
+    }));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn daemon_mark_survives_spawn_helpers() {
+        use crate::invocation_scope::{daemon_task, in_daemon_task};
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let worker = daemon_task(async move {
+            spawn_detached(async move {
+                tx.send(in_daemon_task()).ok();
+            });
+            off_async_worker(in_daemon_task)
+        })
+        .await;
+        assert!(worker);
+        assert_eq!(rx.await.ok(), Some(true));
+        assert!(!off_async_worker(in_daemon_task));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn daemon_mark_survives_block_in_place() {
+        use crate::invocation_scope::{daemon_task, in_daemon_task};
+        assert!(daemon_task(async { off_async_worker(in_daemon_task) }).await);
+    }
 
     #[test]
     fn block_on_outside_a_runtime() {

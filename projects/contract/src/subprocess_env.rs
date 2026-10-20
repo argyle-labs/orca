@@ -97,7 +97,11 @@ pub fn collect() -> Vec<(String, String)> {
 /// across the FFI / socket boundary (same shape the loader uses for every
 /// domain backend): `(op, args) -> Result<result, error>`, all `serde_json::Value`.
 type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<crate::invocation_scope::BackendCall>,
+        ) -> std::result::Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync,
 >;
@@ -143,7 +147,12 @@ impl EnvProvider for EnvProviderProxy {
         &self.name
     }
     fn env(&self) -> Result<Vec<EnvVar>> {
-        let out = (self.invoke)(ENV_OP, serde_json::json!({})).map_err(|e| {
+        let out = (self.invoke)(
+            ENV_OP,
+            serde_json::json!({}),
+            crate::invocation_scope::capture("subprocess_env", &self.name),
+        )
+        .map_err(|e| {
             anyhow::anyhow!(
                 "subprocess_env '{}' invoke failed: {}",
                 self.name,

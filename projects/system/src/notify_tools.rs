@@ -992,7 +992,7 @@ mod tests {
         use std::sync::Arc;
         notifications::register_from_def(
             "test-sink".into(),
-            Arc::new(|_op: &str, _args: String| {
+            Arc::new(|_op: &str, _args: String, _call| {
                 Ok("{\"backend\":\"test-sink\",\"id\":\"m1\"}".to_string())
             }),
         )

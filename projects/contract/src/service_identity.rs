@@ -146,7 +146,11 @@ pub async fn collect_registrations() -> Vec<ServiceRegistration> {
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<crate::invocation_scope::BackendCall>,
+        ) -> std::result::Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync
         + 'static,
@@ -191,17 +195,19 @@ impl ServiceIdentityProvider for ServiceIdentityProxy {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(LIST_OP, serde_json::json!({})))
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("service_identity '{name}' invoke task panicked: {e}")
-                })?
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "service_identity '{name}' invoke failed: {}",
-                        crate::render_invoke_error(&e)
-                    )
-                })?;
+            let call = crate::invocation_scope::capture("service_identity", &name);
+            let out =
+                tokio::task::spawn_blocking(move || invoke(LIST_OP, serde_json::json!({}), call))
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("service_identity '{name}' invoke task panicked: {e}")
+                    })?
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "service_identity '{name}' invoke failed: {}",
+                            crate::render_invoke_error(&e)
+                        )
+                    })?;
             serde_json::from_value(out).map_err(|e| {
                 anyhow::anyhow!("service_identity '{name}' returned invalid JSON: {e}")
             })

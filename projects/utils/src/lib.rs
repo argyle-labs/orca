@@ -78,6 +78,7 @@ pub mod git;
 /// HTTP client + TLS. Gated by the `http` feature (reqwest + rustls stack).
 #[cfg(feature = "http")]
 pub mod http;
+pub mod invocation_scope;
 /// X.509 + key generation. Gated by the `pki` feature.
 #[cfg(feature = "pki")]
 pub mod pki;

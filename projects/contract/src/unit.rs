@@ -928,6 +928,16 @@ async fn route_targeted(id: &UnitId, args: VerbArgs) -> Result<VerbOutcome> {
             id.manager
         )
     })?;
+    invoke_targeted(&*provider, args).await
+}
+
+#[cfg(feature = "in-process")]
+async fn invoke_targeted(provider: &dyn UnitProvider, args: VerbArgs) -> Result<VerbOutcome> {
+    crate::invocation_scope::targeting("unit", provider.name(), provider.invoke(args)).await
+}
+
+#[cfg(not(feature = "in-process"))]
+async fn invoke_targeted(provider: &dyn UnitProvider, args: VerbArgs) -> Result<VerbOutcome> {
     provider.invoke(args).await
 }
 
@@ -939,7 +949,7 @@ pub async fn dispatch_to(provider: &str, args: VerbArgs) -> Result<VerbOutcome> 
         .into_iter()
         .find(|p| p.name() == provider)
         .ok_or_else(|| anyhow::anyhow!("no unit provider named '{provider}'"))?;
-    p.invoke(args).await
+    invoke_targeted(&*p, args).await
 }
 
 // ── Update-with-backup guard (MINIMAL-BACKUP.md §4.3) ──────────────────────────
@@ -1035,7 +1045,11 @@ pub async fn dispatch_guarded(args: VerbArgs, back_up: bool) -> Result<VerbOutco
 // Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<crate::invocation_scope::BackendCall>,
+        ) -> std::result::Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync
         + 'static,
@@ -1054,7 +1068,7 @@ pub struct InvokeCall {
 // Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
-    let declarations = match invoke(DECLARATIONS_OP, serde_json::json!({})) {
+    let declarations = match invoke(DECLARATIONS_OP, serde_json::json!({}), None) {
         Ok(value) => serde_json::from_value(value).unwrap_or_default(),
         Err(_) => Vec::new(),
     };
@@ -1088,15 +1102,17 @@ impl UnitProvider for FfiUnitProvider {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(UNITS_OP, serde_json::json!({})))
-                .await
-                .map_err(|e| anyhow::anyhow!("unit '{name}' units task panicked: {e}"))?
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "unit '{name}' units failed: {}",
-                        crate::render_invoke_error(&e)
-                    )
-                })?;
+            let call = crate::invocation_scope::capture("unit", &name);
+            let out =
+                tokio::task::spawn_blocking(move || invoke(UNITS_OP, serde_json::json!({}), call))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("unit '{name}' units task panicked: {e}"))?
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "unit '{name}' units failed: {}",
+                            crate::render_invoke_error(&e)
+                        )
+                    })?;
             serde_json::from_value(out)
                 .map_err(|e| anyhow::anyhow!("unit '{name}' returned invalid units JSON: {e}"))
         })
@@ -1109,7 +1125,8 @@ impl UnitProvider for FfiUnitProvider {
         Box::pin(async move {
             let args = serde_json::to_value(&call)
                 .map_err(|e| anyhow::anyhow!("unit '{name}' encode invoke args: {e}"))?;
-            let out = tokio::task::spawn_blocking(move || invoke(INVOKE_OP, args))
+            let call = crate::invocation_scope::capture("unit", &name);
+            let out = tokio::task::spawn_blocking(move || invoke(INVOKE_OP, args, call))
                 .await
                 .map_err(|e| anyhow::anyhow!("unit '{name}' invoke task panicked: {e}"))?
                 .map_err(|e| {
@@ -1255,7 +1272,7 @@ mod tests {
 
     #[cfg(feature = "in-process")]
     fn fake_thunk() -> InvokeThunk {
-        Arc::new(|op: &str, args: serde_json::Value| match op {
+        Arc::new(|op: &str, args: serde_json::Value, _call| match op {
             DECLARATIONS_OP => Ok(serde_json::to_value(vec![KindDeclaration {
                 kind: "vm".into(),
                 backup_spec: None,
@@ -1350,6 +1367,46 @@ mod tests {
         }
 
         assert!(deregister_provider("prov-unit-test-v2"));
+    }
+
+    #[tokio::test]
+    async fn routed_verbs_target_only_their_provider() {
+        use crate::invocation_scope::{CoreVerb, VerbCaller, core_verb};
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let thunk: InvokeThunk = Arc::new(move |op: &str, _args, call| {
+            if op == INVOKE_OP {
+                record.lock().unwrap().push(call.map(|c| c.targeted()));
+            }
+            Err(serde_json::json!("refused"))
+        });
+        register_from_def("prov-unit-target".into(), thunk).unwrap();
+        let verb = CoreVerb {
+            caller: VerbCaller {
+                user_id: "u".into(),
+                username: "u".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            },
+            role: "admin",
+            execute_gated: true,
+            dry_run: false,
+            local: false,
+            second_factor: false,
+        };
+        let create = || VerbArgs::List(ListArgs::default());
+        core_verb(verb, async {
+            assert!(dispatch_to("prov-unit-target", create()).await.is_err());
+            let prov = providers()
+                .into_iter()
+                .find(|p| p.name() == "prov-unit-target")
+                .unwrap();
+            assert!(prov.invoke(create()).await.is_err());
+        })
+        .await;
+        assert!(dispatch_to("prov-unit-target", create()).await.is_err());
+        assert_eq!(*seen.lock().unwrap(), vec![Some(true), Some(false), None]);
+        assert!(deregister_provider("prov-unit-target"));
     }
 
     // ── Native mock provider for host-side routing tests ────────────────────────
@@ -2707,7 +2764,7 @@ mod tests {
     async fn ffi_provider_surfaces_declaration_and_units_and_outcome_errors() {
         // declarations op errors → provider registers with empty declarations;
         // units op errors → surfaced; invoke returns a non-outcome → decode error.
-        let thunk: InvokeThunk = Arc::new(|op: &str, _args| match op {
+        let thunk: InvokeThunk = Arc::new(|op: &str, _args, _call| match op {
             DECLARATIONS_OP => Err(serde_json::Value::String("no decls".into())),
             UNITS_OP => Err(serde_json::Value::String("units exploded".into())),
             INVOKE_OP => Ok(serde_json::Value::String("not an outcome".into())),
@@ -2738,7 +2795,7 @@ mod tests {
     #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn ffi_provider_surfaces_bad_units_json_and_invoke_error() {
-        let thunk: InvokeThunk = Arc::new(|op: &str, _args| match op {
+        let thunk: InvokeThunk = Arc::new(|op: &str, _args, _call| match op {
             DECLARATIONS_OP => Ok(serde_json::to_value(Vec::<KindDeclaration>::new()).unwrap()),
             UNITS_OP => Ok(serde_json::Value::String("not units".into())),
             INVOKE_OP => Err(serde_json::Value::String("invoke exploded".into())),

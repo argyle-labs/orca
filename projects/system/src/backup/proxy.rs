@@ -91,7 +91,7 @@ fn refuse_taken(domain: &str, kind: &str, taken: bool) -> Result<()> {
 /// registration-time value (not a per-call wire round-trip) so the sync
 /// `title(&self) -> &str` trait method can return a borrow.
 fn fetch_title(invoke: &BackendInvoke, kind: &str) -> String {
-    invoke(OP_TITLE, serde_json::json!({}))
+    invoke(OP_TITLE, serde_json::json!({}), None)
         .ok()
         .and_then(|s| serde_json::from_value::<String>(s).ok())
         .unwrap_or_else(|| kind.to_string())
@@ -154,7 +154,8 @@ impl BackupKindProxy {
         op: &str,
         args: serde_json::Value,
     ) -> Result<T> {
-        let out = (self.invoke)(op, args)
+        let call = utils::invocation_scope::capture("backup_kind", &self.kind);
+        let out = (self.invoke)(op, args, call)
             .map_err(|e| anyhow!("backup kind '{}' {op} failed: {e}", self.kind))?;
         serde_json::from_value(out).map_err(|e| {
             anyhow!(
@@ -173,7 +174,8 @@ impl BackupKindProxy {
         let invoke = self.invoke.clone();
         let kind = self.kind.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(op, args))
+            let call = utils::invocation_scope::capture("backup_kind", &kind);
+            let out = tokio::task::spawn_blocking(move || invoke(op, args, call))
                 .await
                 .map_err(|e| anyhow!("backup kind '{kind}' {op} task panicked: {e}"))?
                 .map_err(|e| anyhow!("backup kind '{kind}' {op} failed: {e}"))?;
@@ -192,7 +194,8 @@ impl BackupKindProxy {
         let invoke = self.invoke.clone();
         let kind = self.kind.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || invoke(op, args))
+            let call = utils::invocation_scope::capture("backup_kind", &kind);
+            tokio::task::spawn_blocking(move || invoke(op, args, call))
                 .await
                 .map_err(|e| anyhow!("backup kind '{kind}' {op} task panicked: {e}"))?
                 .map_err(|e| anyhow!("backup kind '{kind}' {op} failed: {e}"))?;
@@ -317,7 +320,8 @@ impl BackupTargetProxy {
         op: &str,
         args: serde_json::Value,
     ) -> Result<T> {
-        let out = (self.invoke)(op, args)
+        let call = utils::invocation_scope::capture("backup_target", &self.kind);
+        let out = (self.invoke)(op, args, call)
             .map_err(|e| anyhow!("backup target '{}' {op} failed: {e}", self.kind))?;
         serde_json::from_value(out).map_err(|e| {
             anyhow!(
@@ -335,7 +339,8 @@ impl BackupTargetProxy {
         let invoke = self.invoke.clone();
         let kind = self.kind.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(op, args))
+            let call = utils::invocation_scope::capture("backup_target", &kind);
+            let out = tokio::task::spawn_blocking(move || invoke(op, args, call))
                 .await
                 .map_err(|e| anyhow!("backup target '{kind}' {op} task panicked: {e}"))?
                 .map_err(|e| anyhow!("backup target '{kind}' {op} failed: {e}"))?;
@@ -353,7 +358,8 @@ impl BackupTargetProxy {
         let invoke = self.invoke.clone();
         let kind = self.kind.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || invoke(op, args))
+            let call = utils::invocation_scope::capture("backup_target", &kind);
+            tokio::task::spawn_blocking(move || invoke(op, args, call))
                 .await
                 .map_err(|e| anyhow!("backup target '{kind}' {op} task panicked: {e}"))?
                 .map_err(|e| anyhow!("backup target '{kind}' {op} failed: {e}"))?;
@@ -482,7 +488,7 @@ mod tests {
         responses: std::collections::HashMap<&'static str, serde_json::Value>,
         seen: Arc<Mutex<Vec<String>>>,
     ) -> BackendInvoke {
-        Arc::new(move |op: &str, args: serde_json::Value| {
+        Arc::new(move |op: &str, args: serde_json::Value, _call| {
             seen.lock().unwrap().push(format!("{op}:{args}"));
             responses
                 .get(op)

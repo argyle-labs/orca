@@ -99,7 +99,11 @@ pub fn deregister_backend(name: &str) -> bool {
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<crate::invocation_scope::BackendCall>,
+        ) -> std::result::Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync
         + 'static,
@@ -144,15 +148,17 @@ impl ClusterRoster for ClusterRosterProxy {
     async fn list_clusters(&self) -> Result<Vec<ClusterEntry>> {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(ROSTER_OP, serde_json::json!({})))
-            .await
-            .map_err(|e| anyhow::anyhow!("cluster_roster '{name}' invoke task panicked: {e}"))?
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "cluster_roster '{name}' invoke failed: {}",
-                    crate::render_invoke_error(&e)
-                )
-            })?;
+        let call = crate::invocation_scope::capture("cluster_roster", &name);
+        let out =
+            tokio::task::spawn_blocking(move || invoke(ROSTER_OP, serde_json::json!({}), call))
+                .await
+                .map_err(|e| anyhow::anyhow!("cluster_roster '{name}' invoke task panicked: {e}"))?
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "cluster_roster '{name}' invoke failed: {}",
+                        crate::render_invoke_error(&e)
+                    )
+                })?;
         let entries: Vec<ClusterEntry> = serde_json::from_value(out)
             .map_err(|e| anyhow::anyhow!("cluster_roster '{name}' returned invalid JSON: {e}"))?;
         Ok(entries)

@@ -167,7 +167,11 @@ pub fn deregister_provider(name: &str) -> bool {
 
 #[cfg(feature = "in-process")]
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<crate::invocation_scope::BackendCall>,
+        ) -> std::result::Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync
         + 'static,
@@ -276,7 +280,8 @@ impl TemplateKindProxy {
         Box::pin(async move {
             let args =
                 args.map_err(|e| anyhow::anyhow!("template_kind '{name}' {op} encode args: {e}"))?;
-            let out = tokio::task::spawn_blocking(move || invoke(op, args))
+            let call = crate::invocation_scope::capture("template_kind", &name);
+            let out = tokio::task::spawn_blocking(move || invoke(op, args, call))
                 .await
                 .map_err(|e| anyhow::anyhow!("template_kind '{name}' {op} task panicked: {e}"))?
                 .map_err(|e| {
@@ -669,7 +674,8 @@ mod tests {
     #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn template_kind_proxy_rejects_unknown_layer() {
-        let invoke: InvokeThunk = Arc::new(|_, _| panic!("unknown layer must not reach the wire"));
+        let invoke: InvokeThunk =
+            Arc::new(|_, _, _call| panic!("unknown layer must not reach the wire"));
         let proxy = TemplateKindProxy {
             name: "template-kind-proxy-layer".into(),
             invoke,
@@ -710,7 +716,7 @@ mod tests {
         let calls: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let rec = calls.clone();
-        let invoke: InvokeThunk = Arc::new(move |op, args| {
+        let invoke: InvokeThunk = Arc::new(move |op, args, _call| {
             rec.lock().unwrap().push((op.to_string(), args));
             Ok(match op {
                 DECL_OP => serde_json::json!({"kind": "compose"}),

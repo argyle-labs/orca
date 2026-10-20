@@ -589,6 +589,10 @@ pub fn target(id: &TargetId) -> Option<Arc<dyn DeployTarget>> {
         .cloned()
 }
 
+pub fn target_key(id: &TargetId) -> String {
+    format!("{}/{:?}/{:?}", id.host, id.runtime, id.kind)
+}
+
 /// Descriptor rows for every registered target — the `deploy.list` view.
 pub fn descriptors() -> Vec<Target> {
     targets().iter().map(|t| t.target()).collect()
@@ -632,8 +636,16 @@ pub fn deregister_host(host: &str) -> usize {
 /// path and no tokio, so the whole proxy surface is gated out on thin,
 /// consistent with `http`/`db` being capabilities rather than always-linked.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> Result<String, DeployError> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(
+            &str,
+            String,
+            Option<utils::invocation_scope::BackendCall>,
+        ) -> Result<String, DeployError>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Build and register a [`DeployTarget`] from a plugin's backend descriptor plus
 /// an [`InvokeThunk`]. The loader calls this from its domain dispatch table; it
@@ -745,6 +757,10 @@ struct DeployProxy {
 
 #[cfg(feature = "in-process")]
 impl DeployProxy {
+    fn target_key(&self) -> String {
+        target_key(&DeployTarget::id(self))
+    }
+
     /// Run one proxied op on the blocking pool and deserialize its JSON result.
     /// `op` is the bare operation name (the loader's thunk prepends the plugin's
     /// invoke prefix); `args` is the op's typed args object.
@@ -756,7 +772,8 @@ impl DeployProxy {
         let args_json = serde_json::to_string(&args)
             .map_err(|e| DeployError::Other(format!("encode `{op}` args: {e}")))?;
         let invoke = self.invoke.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(op, args_json))
+        let call = utils::invocation_scope::capture("deploy_target", &self.target_key());
+        let out = tokio::task::spawn_blocking(move || invoke(op, args_json, call))
             .await
             .map_err(|e| DeployError::Transport(format!("`{op}` proxy task failed: {e}")))??;
         serde_json::from_str(&out)

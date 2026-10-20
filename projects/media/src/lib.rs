@@ -907,8 +907,12 @@ pub async fn notify_path_invalidated(
 /// bridging to the subprocess wire. A thin subprocess plugin links no loader path
 /// and no tokio, so the whole proxy surface is gated out on thin builds.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> Result<String, MediaError> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(&str, String, Option<utils::invocation_scope::BackendCall>) -> Result<String, MediaError>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Build and register a [`MediaBackend`] from a plugin's backend descriptor plus
 /// an [`InvokeThunk`]. The loader calls this from its domain dispatch table; it
@@ -999,7 +1003,8 @@ impl MediaProxy {
         let args_json = serde_json::to_string(&args)
             .map_err(|e| MediaError::Other(format!("encode `{op}` args: {e}")))?;
         let invoke = self.invoke.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(op, args_json))
+        let call = utils::invocation_scope::capture("media", &self.name);
+        let out = tokio::task::spawn_blocking(move || invoke(op, args_json, call))
             .await
             .map_err(|e| MediaError::Transport(format!("`{op}` proxy task failed: {e}")))??;
         serde_json::from_str(&out)

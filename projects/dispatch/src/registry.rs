@@ -512,18 +512,23 @@ fn core_verb(
     args: &Value,
     ctx: &ToolCtx,
 ) -> Option<contract::invocation_scope::CoreVerb> {
-    let caller = ctx.verified_caller()?.clone();
+    let caller = ctx.verified_caller()?;
     let execute_gated = find(name).is_some_and(|t| t.execute_gated())
         || crate::tool_roles::plugin_execute_gated(name);
     let dry_run = ctx.dry_run() || crate::erased::dry_run_requested(args).unwrap_or(true);
-    Some(contract::invocation_scope::CoreVerb::new(
-        caller,
-        crate::tool_roles::required_role(name),
+    Some(contract::invocation_scope::CoreVerb {
+        caller: contract::invocation_scope::VerbCaller {
+            user_id: caller.user_id.clone(),
+            username: caller.username.clone(),
+            role: caller.role.clone(),
+            can_mutate: caller.can_mutate,
+        },
+        role: crate::tool_roles::required_role(name),
         execute_gated,
         dry_run,
-        ctx.local_transport(),
-        ctx.second_factor(),
-    ))
+        local: ctx.local_transport(),
+        second_factor: ctx.second_factor(),
+    })
 }
 
 async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Value> {

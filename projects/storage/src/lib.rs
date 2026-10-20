@@ -786,7 +786,8 @@ impl GuestApplierProxy {
         let args_json = serde_json::to_string(&args)
             .map_err(|e| StorageError::Other(format!("encode `{op}` args: {e}")))?;
         let invoke = self.invoke.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(op, args_json))
+        let call = utils::invocation_scope::capture("storage", &self.name);
+        let out = tokio::task::spawn_blocking(move || invoke(op, args_json, call))
             .await
             .map_err(|e| StorageError::Transport(format!("`{op}` proxy task failed: {e}")))??;
         // Appliers return no payload; a non-empty body is tolerated (ignored).
@@ -847,8 +848,16 @@ pub fn register_guest_applier_from_def(name: String, invoke: InvokeThunk) {
 /// path and no tokio, so the whole proxy surface is gated out on thin,
 /// consistent with `http`/`db` being capabilities rather than always-linked.
 #[cfg(feature = "in-process")]
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> Result<String, StorageError> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(
+            &str,
+            String,
+            Option<utils::invocation_scope::BackendCall>,
+        ) -> Result<String, StorageError>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Build and register a [`StorageBackend`] from a plugin's backend descriptor
 /// plus an [`InvokeThunk`]. The loader calls this from its domain dispatch
@@ -983,7 +992,8 @@ impl StorageProxy {
         let args_json = serde_json::to_string(&args)
             .map_err(|e| StorageError::Other(format!("encode `{op}` args: {e}")))?;
         let invoke = self.invoke.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(op, args_json))
+        let call = utils::invocation_scope::capture("storage", &self.name);
+        let out = tokio::task::spawn_blocking(move || invoke(op, args_json, call))
             .await
             .map_err(|e| StorageError::Transport(format!("`{op}` proxy task failed: {e}")))??;
         serde_json::from_str(&out)
@@ -1458,7 +1468,7 @@ mod tests {
         // Thunk standing in for the FFI invoke boundary: it answers the two ops
         // the proxy calls, (de)serializing through the same typed domain structs
         // the real boundary uses — no opaque `Value`.
-        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String| match op {
+        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String, _call| match op {
             "list_shares" => {
                 let shares = vec![Share {
                     id: "pool".into(),
@@ -1510,7 +1520,7 @@ mod tests {
 
     #[test]
     fn register_from_def_rejects_unknown_kind_and_capability() {
-        let thunk: InvokeThunk = Arc::new(|_, _| Ok("null".into()));
+        let thunk: InvokeThunk = Arc::new(|_, _, _call| Ok("null".into()));
         assert!(register_from_def("x".into(), "nope", "e".into(), &[], thunk.clone()).is_err());
         assert!(
             register_from_def("x".into(), "object", "e".into(), &["fly".into()], thunk).is_err()
@@ -1699,7 +1709,7 @@ mod tests {
 
     #[test]
     fn register_from_def_styled_rejects_unknown_mount_style() {
-        let thunk: InvokeThunk = Arc::new(|_, _| Ok("null".into()));
+        let thunk: InvokeThunk = Arc::new(|_, _, _call| Ok("null".into()));
         assert!(
             register_from_def_styled(
                 "m".into(),
@@ -1719,7 +1729,7 @@ mod tests {
     fn source_port_for_fstype_resolves_from_the_owning_backend() {
         // A proxy backend that owns `nfs4`/`nfs` and declares port 2049 — the
         // fstype→port grammar lives on the backend, not in core.
-        let thunk: InvokeThunk = Arc::new(|_, _| Ok("null".into()));
+        let thunk: InvokeThunk = Arc::new(|_, _, _call| Ok("null".into()));
         register_from_def_styled(
             "port-nfs".into(),
             "network_share",

@@ -19,7 +19,7 @@ path = "src/lib.rs"
 [features]
 default = ["full"]
 full = ["in-process"]
-in-process = ["dep:tokio"]
+in-process = ["dep:tokio", "utils/reactor"]
 
 [dependencies]
 utils = { workspace = true }

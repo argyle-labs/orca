@@ -667,7 +667,13 @@ async fn run_here(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<BackupRu
         let retention = target_retention(&r).await;
         let mut sub = match store.lock_async().await {
             Ok(_lock) => {
-                run_backups(&store, &bound, args.instance.as_deref(), &retention, ctx).await
+                let run = run_backups(&store, &bound, args.instance.as_deref(), &retention, ctx);
+                match args.kind.as_deref() {
+                    Some(kind) => {
+                        utils::invocation_scope::targeting("backup_kind", kind, run).await
+                    }
+                    None => run.await,
+                }
             }
             Err(e) => {
                 tracing::warn!("[backup] target {label}: {e:#}");
@@ -696,7 +702,9 @@ async fn run_here(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<BackupRu
         // Reconcile the remote backing (git push / s3 upload) after committing.
         if wrote_something
             && let Some(tp) = target::target(&r.kind)
-            && let Err(e) = tp.sync(&r.name, ctx).await
+            && let Err(e) =
+                utils::invocation_scope::targeting("backup_target", &r.kind, tp.sync(&r.name, ctx))
+                    .await
         {
             tracing::warn!("[backup] target {label} sync failed: {e:#}");
             out.errors.push(BackupError {
@@ -1090,7 +1098,9 @@ async fn backup_sync(args: BackupSyncArgs, ctx: &ToolCtx) -> anyhow::Result<Back
             continue;
         }
         if let Some(tp) = target::target(&r.kind)
-            && let Err(e) = tp.sync(&r.name, ctx).await
+            && let Err(e) =
+                utils::invocation_scope::targeting("backup_target", &r.kind, tp.sync(&r.name, ctx))
+                    .await
         {
             out.errors
                 .push(format!("target {}/{}: sync failed: {e:#}", r.kind, r.name));
@@ -1426,54 +1436,57 @@ async fn restore_one(
     approve_all: bool,
     ctx: &ToolCtx,
 ) -> anyhow::Result<BackupRestoreOutput> {
-    let p = provider::provider(kind)
-        .ok_or_else(|| anyhow::anyhow!("no backup provider for kind `{kind}`"))?;
-    let stores = open_targets(&configured_target_refs(), ctx, true).await;
+    utils::invocation_scope::targeting("backup_kind", kind, async move {
+        let p = provider::provider(kind)
+            .ok_or_else(|| anyhow::anyhow!("no backup provider for kind `{kind}`"))?;
+        let stores = open_targets(&configured_target_refs(), ctx, true).await;
 
-    let selector = match (id, approve_all) {
-        (Some(i), _) => BackupSelector::parse(i),
-        (None, true) => BackupSelector::Latest,
-        (None, false) => {
-            // Refuse: list the choices (across targets) instead of restoring blind.
-            let mut available = Vec::new();
-            for (_r, store) in &stores {
-                if let Ok(mut recs) = store.list(Some(kind), Some(instance)) {
-                    available.append(&mut recs);
+        let selector = match (id, approve_all) {
+            (Some(i), _) => BackupSelector::parse(i),
+            (None, true) => BackupSelector::Latest,
+            (None, false) => {
+                // Refuse: list the choices (across targets) instead of restoring blind.
+                let mut available = Vec::new();
+                for (_r, store) in &stores {
+                    if let Ok(mut recs) = store.list(Some(kind), Some(instance)) {
+                        available.append(&mut recs);
+                    }
+                }
+                available.sort_by(|a, b| b.id.cmp(&a.id));
+                return Ok(BackupRestoreOutput::AwaitingSelection {
+                    message: format!(
+                        "restore of {kind}/{instance} needs a selection: pass --id <id> \
+                         (from the list) or --approve-all to restore the latest"
+                    ),
+                    available,
+                });
+            }
+        };
+
+        // Pick the store+record that satisfies the selector. For `Latest`, that is
+        // the newest record across all targets; for an explicit id, the first target
+        // that holds it.
+        let mut best: Option<(&BackupStore, BackupRecord)> = None;
+        for (_r, store) in &stores {
+            if let Ok(rec) = store.resolve(kind, instance, &selector) {
+                let take = match &best {
+                    Some((_, b)) => rec.id > b.id,
+                    None => true,
+                };
+                if take {
+                    best = Some((store, rec));
+                }
+                if matches!(selector, BackupSelector::Id(_)) {
+                    break; // an explicit id is unique; first hit wins
                 }
             }
-            available.sort_by(|a, b| b.id.cmp(&a.id));
-            return Ok(BackupRestoreOutput::AwaitingSelection {
-                message: format!(
-                    "restore of {kind}/{instance} needs a selection: pass --id <id> \
-                     (from the list) or --approve-all to restore the latest"
-                ),
-                available,
-            });
         }
-    };
-
-    // Pick the store+record that satisfies the selector. For `Latest`, that is
-    // the newest record across all targets; for an explicit id, the first target
-    // that holds it.
-    let mut best: Option<(&BackupStore, BackupRecord)> = None;
-    for (_r, store) in &stores {
-        if let Ok(rec) = store.resolve(kind, instance, &selector) {
-            let take = match &best {
-                Some((_, b)) => rec.id > b.id,
-                None => true,
-            };
-            if take {
-                best = Some((store, rec));
-            }
-            if matches!(selector, BackupSelector::Id(_)) {
-                break; // an explicit id is unique; first hit wins
-            }
-        }
-    }
-    let (store, record) =
-        best.ok_or_else(|| anyhow::anyhow!("no matching backup for {kind}/{instance}"))?;
-    let record = restore_from(&p, store, instance, &record.id, ctx).await?;
-    Ok(BackupRestoreOutput::Restored { record })
+        let (store, record) =
+            best.ok_or_else(|| anyhow::anyhow!("no matching backup for {kind}/{instance}"))?;
+        let record = restore_from(&p, store, instance, &record.id, ctx).await?;
+        Ok(BackupRestoreOutput::Restored { record })
+    })
+    .await
 }
 
 /// Restore `instance` from backup `id` in `store`, holding the stage lock so a
@@ -1564,10 +1577,19 @@ async fn open_targets_reporting(
             ));
             continue;
         };
-        if refresh && let Err(e) = tp.refresh(&r.name, ctx).await {
+        if refresh
+            && let Err(e) = utils::invocation_scope::targeting(
+                "backup_target",
+                &r.kind,
+                tp.refresh(&r.name, ctx),
+            )
+            .await
+        {
             errors.push(format!("target {label}: refresh failed: {e:#}"));
         }
-        match tp.open(&r.name, ctx).await {
+        match utils::invocation_scope::targeting("backup_target", &r.kind, tp.open(&r.name, ctx))
+            .await
+        {
             Ok(store) => out.push((r.clone(), store.shared(r.shared))),
             Err(e) => errors.push(format!("target {label}: open failed: {e:#}")),
         }

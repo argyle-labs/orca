@@ -278,7 +278,11 @@ pub async fn dispatch_op(
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<crate::invocation_scope::BackendCall>,
+        ) -> std::result::Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync
         + 'static,
@@ -313,7 +317,8 @@ impl PermissionsProxy {
         let name = self.name.clone();
         let args = serde_json::Value::String(path.to_string());
         Box::pin(async move {
-            let result = tokio::task::spawn_blocking(move || invoke(op, args)).await;
+            let call = crate::invocation_scope::capture("permissions", &name);
+            let result = tokio::task::spawn_blocking(move || invoke(op, args, call)).await;
             match result {
                 Ok(Ok(out)) => serde_json::from_value(out).unwrap_or_default(),
                 Ok(Err(e)) => {

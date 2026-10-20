@@ -35,7 +35,11 @@ use crate::register_entry;
 /// through unwrapped: `(op, args) -> Result<result, error>`, all
 /// `serde_json::Value`.
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<contract::invocation_scope::BackendCall>,
+        ) -> Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync
         + 'static,
@@ -66,7 +70,9 @@ impl ContainerRuntimeProxy {
         let args = serde_json::to_value(&args)
             .map_err(|e| AdapterError::Malformed(format!("encode {op} args: {e}")))?;
         let invoke = self.invoke.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(op, args))
+        let call =
+            utils::invocation_scope::capture("container_runtime", &format!("{:?}", self.kind));
+        let out = tokio::task::spawn_blocking(move || invoke(op, args, call))
             .await
             .map_err(|e| AdapterError::Transport(format!("{op} join: {e}")))?
             .map_err(|e| {
