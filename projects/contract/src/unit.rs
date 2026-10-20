@@ -1381,19 +1381,19 @@ mod tests {
             Err(serde_json::json!("refused"))
         });
         register_from_def("prov-unit-target".into(), thunk).unwrap();
-        let verb = CoreVerb {
-            caller: VerbCaller {
+        let verb = CoreVerb::new(
+            VerbCaller {
                 user_id: "u".into(),
                 username: "u".into(),
                 role: "admin".into(),
                 can_mutate: true,
             },
-            role: "admin",
-            execute_gated: true,
-            dry_run: false,
-            local: false,
-            second_factor: false,
-        };
+            "admin",
+            true,
+            false,
+            false,
+            false,
+        );
         let create = || VerbArgs::List(ListArgs::default());
         core_verb(verb, async {
             assert!(dispatch_to("prov-unit-target", create()).await.is_err());
