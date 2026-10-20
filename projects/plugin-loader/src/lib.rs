@@ -795,13 +795,15 @@ fn backend_invocation(
     call: Option<&contract::invocation_scope::BackendCall>,
     reaches: &[String],
 ) -> Option<spec::surfaces::Invocation> {
-    use contract::invocation_scope::BackendCall;
-    match call? {
-        BackendCall::Verb { verb, targeted } => Some(spec::surfaces::Invocation::for_backend(
-            verb, *targeted, reaches,
-        )),
-        BackendCall::Daemon => Some(spec::surfaces::Invocation::system()),
+    let call = call?;
+    if call.is_daemon() {
+        return Some(spec::surfaces::Invocation::system());
     }
+    Some(spec::surfaces::Invocation::for_backend(
+        call.verb()?,
+        call.targeted(),
+        reaches,
+    ))
 }
 
 /// Register every backend a plugin declares into its domain registry, routing
@@ -1750,9 +1752,8 @@ mod surface_tests {
     #[cfg(unix)]
     #[test]
     fn backend_api_call_runs_under_the_core_verb_invocation() {
-        use contract::invocation_scope::{
-            CoreVerb, VerbCaller, capture, sync_core_verb, sync_targeting,
-        };
+        use contract::invocation_scope::testing::{sync_core_verb, sync_targeting};
+        use contract::invocation_scope::{CoreVerb, VerbCaller, capture};
         let surface = openapi::surface::ApiSurface::parse(
             &sj::json!({
                 "format": openapi::surface::FORMAT,
@@ -1786,18 +1787,20 @@ mod surface_tests {
         )
         .unwrap();
         spec::surfaces::register("bkv", surface).unwrap();
-        let verb = |gated: bool, role: &'static str| CoreVerb {
-            caller: VerbCaller {
-                user_id: "u-ann".into(),
-                username: "ann".into(),
-                role: "admin".into(),
-                can_mutate: true,
-            },
-            role,
-            execute_gated: gated,
-            dry_run: false,
-            local: false,
-            second_factor: false,
+        let verb = |gated: bool, role: &'static str| {
+            CoreVerb::new(
+                VerbCaller {
+                    user_id: "u-ann".into(),
+                    username: "ann".into(),
+                    role: "admin".into(),
+                    can_mutate: true,
+                },
+                role,
+                gated,
+                false,
+                false,
+                false,
+            )
         };
         let reaches = vec!["bkv.make".to_string()];
         let api = |op: &str,
@@ -1852,7 +1855,7 @@ mod surface_tests {
         assert!(forbidden(&api("bkv.admin_peek", any_verb(), &reaches)));
 
         assert!(backend_invocation(None, &reaches).is_none());
-        let daemon = contract::invocation_scope::sync_daemon_task(|| capture("unit", "a"));
+        let daemon = contract::invocation_scope::testing::sync_daemon_task(|| capture("unit", "a"));
         assert!(
             backend_invocation(daemon.as_ref(), &reaches)
                 .unwrap()
@@ -2186,6 +2189,31 @@ mod loader_tests {
                 err.contains("owner-a") && err.contains(domain) && err.contains("owner-b"),
                 "{domain}: {err}"
             );
+        }
+    }
+
+    #[test]
+    fn no_two_plugins_share_a_domain_name_pair() {
+        for domain in BUILTIN_DOMAINS {
+            let mut names = vec!["dup-a".to_string()];
+            if name_scope(domain) == NameScope::Agent {
+                names.push("acme/dup-a".to_string());
+            }
+            for name in names {
+                let mut d = def(domain, &name);
+                d.endpoint = "/plugins/dup-a/x".into();
+                claim_backend("dup-a", domain, &name);
+                check_backend_owner("dup-a", &d)
+                    .unwrap_or_else(|e| panic!("{domain}/{name}: {e:#}"));
+                let err = check_backend_owner("dup-b", &d)
+                    .expect_err("second plugin refused")
+                    .to_string();
+                assert!(
+                    err.contains("dup-b") && err.contains(domain),
+                    "{domain}/{name}: {err}"
+                );
+                release_backend_claim("dup-a", domain, &name);
+            }
         }
     }
 
