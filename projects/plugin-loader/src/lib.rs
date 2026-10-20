@@ -771,12 +771,13 @@ fn release_backend_claim(software: &str, domain: &str, name: &str) {
 /// subprocess socket the plugin's tools use.
 fn make_backend_invoke(
     backing: Backing,
+    backend: String,
     invoke_prefix: String,
     reaches: Vec<String>,
 ) -> BackendInvoke {
     Arc::new(move |op: &str, args: sj::Value| {
         let tool = format!("{invoke_prefix}.{op}");
-        let inv = backend_invocation(&reaches);
+        let inv = backend_invocation(&backend, &reaches);
         // Domain registries call this thunk directly, often from async code, so
         // this layer keeps it off the async worker itself.
         utils::reactor::off_async_worker(|| backing.invoke(&tool, args, inv))
@@ -784,29 +785,16 @@ fn make_backend_invoke(
     })
 }
 
-tokio::task_local! {
-    static CORE_VERB: spec::surfaces::Invocation;
-}
-
-fn backend_invocation(reaches: &[String]) -> Option<spec::surfaces::Invocation> {
-    Some(
-        CORE_VERB
-            .try_with(|inv| inv.clone().with_reaches(reaches))
-            .unwrap_or_else(|_| spec::surfaces::Invocation::system()),
-    )
-}
-
-fn core_verb_invocation(
-    ctx: &ToolCtx,
-    name: &str,
-    args: &sj::Value,
-) -> Option<spec::surfaces::Invocation> {
-    let gated = dispatch::execute_gated_names().contains(&name);
-    Some(
-        spec::surfaces::Invocation::from_ctx(ctx)
-            .ok()?
-            .for_core_verb(gated, dispatch::tool_roles::required_role(name), args),
-    )
+fn backend_invocation(backend: &str, reaches: &[String]) -> Option<spec::surfaces::Invocation> {
+    let Some(verb) = contract::invocation_scope::current_core_verb() else {
+        return Some(spec::surfaces::Invocation::system());
+    };
+    let inv = spec::surfaces::Invocation::from_core_verb(&verb);
+    Some(if verb.targets(backend) {
+        inv.with_reaches(reaches)
+    } else {
+        inv.unconfirmed()
+    })
 }
 
 /// Register every backend a plugin declares into its domain registry, routing
@@ -825,6 +813,7 @@ fn register_backends(
     register_backends_with(software, defs, |def| {
         make_backend_invoke(
             backing.clone(),
+            format!("{software}/{}/{}", def.domain, def.name),
             def.invoke_prefix.clone(),
             def.reaches.clone(),
         )
@@ -1574,14 +1563,7 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
             .with_context(|| format!("plugin invoke task for '{name}' panicked"))?;
         return plan_with_reaches(parse_invoke_result(result, name, &software), name, dry_run);
     }
-    match core_verb_invocation(ctx, name, &args) {
-        Some(inv) => {
-            CORE_VERB
-                .scope(inv, dispatch::dispatch(name, args, ctx))
-                .await
-        }
-        None => dispatch::dispatch(name, args, ctx).await,
-    }
+    dispatch::dispatch(name, args, ctx).await
 }
 
 /// Synchronous tool dispatch into the plugin registry. Returns `None` when no
@@ -1786,35 +1768,58 @@ mod surface_tests {
             role: "admin".into(),
             can_mutate: true,
         }));
-        let verb = |gated: bool| {
-            spec::surfaces::Invocation::from_ctx(&ctx)
-                .unwrap()
-                .for_core_verb(gated, "admin", &sj::json!({}))
+        let caller = ctx.verified_caller().unwrap().clone();
+        let verb = |gated: bool, role: &'static str| {
+            contract::invocation_scope::CoreVerb::new(
+                caller.clone(),
+                role,
+                gated,
+                false,
+                false,
+                false,
+            )
         };
         let call = || sj::json!({"op": "bkv.make", "endpoint": "main", "args": {"unexpected": 1}});
         let reaches = vec!["bkv.make".to_string()];
-        let run = |gated: bool, reaches: &[String]| {
-            CORE_VERB.sync_scope(verb(gated), || {
-                capability::handle_api_call(call(), "bkv", backend_invocation(reaches).as_ref())
-                    .unwrap_err()
+        let target = "bkv/unit/a";
+        let run = |v: contract::invocation_scope::CoreVerb, backend: &str, reaches: &[String]| {
+            contract::invocation_scope::sync_core_verb(v, || {
+                capability::handle_api_call(
+                    call(),
+                    "bkv",
+                    backend_invocation(backend, reaches).as_ref(),
+                )
+                .unwrap_err()
             })
         };
         let forbidden = |e: &anyhow::Error| e.downcast_ref::<spec::surfaces::Forbidden>().is_some();
 
-        let allowed = run(true, &reaches);
+        let allowed = run(verb(true, "admin"), target, &reaches);
         assert!(!forbidden(&allowed), "{allowed:#}");
         assert!(
             format!("{allowed:#}").contains("invalid arguments"),
             "{allowed:#}"
         );
 
-        let undeclared = run(true, &[]);
+        let undeclared = run(verb(true, "admin"), target, &[]);
         assert!(forbidden(&undeclared), "{undeclared:#}");
 
-        let unconfirmed = run(false, &reaches);
+        let unconfirmed = run(verb(false, "admin"), target, &reaches);
         assert!(forbidden(&unconfirmed), "{unconfirmed:#}");
 
-        assert!(backend_invocation(&reaches).unwrap().is_system());
+        let low_floor = run(verb(true, "user"), target, &reaches);
+        assert!(forbidden(&low_floor), "{low_floor:#}");
+
+        let fan_out = verb(true, "admin");
+        let other = contract::invocation_scope::sync_core_verb(fan_out, || {
+            let first = backend_invocation(target, &reaches);
+            let second = backend_invocation("bkv/unit/b", &reaches);
+            assert!(first.is_some());
+            capability::handle_api_call(call(), "bkv", second.as_ref()).unwrap_err()
+        });
+        assert!(forbidden(&other), "{other:#}");
+
+        assert!(backend_invocation(target, &reaches).unwrap().is_system());
         spec::surfaces::deregister("bkv");
     }
 
