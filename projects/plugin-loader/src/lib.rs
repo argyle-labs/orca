@@ -2190,6 +2190,31 @@ mod loader_tests {
     }
 
     #[test]
+    fn no_two_plugins_share_a_domain_name_pair() {
+        for domain in BUILTIN_DOMAINS {
+            let mut names = vec!["dup-a".to_string()];
+            if name_scope(domain) == NameScope::Agent {
+                names.push("acme/dup-a".to_string());
+            }
+            for name in names {
+                let mut d = def(domain, &name);
+                d.endpoint = "/plugins/dup-a/x".into();
+                claim_backend("dup-a", domain, &name);
+                check_backend_owner("dup-a", &d)
+                    .unwrap_or_else(|e| panic!("{domain}/{name}: {e:#}"));
+                let err = check_backend_owner("dup-b", &d)
+                    .expect_err("second plugin refused")
+                    .to_string();
+                assert!(
+                    err.contains("dup-b") && err.contains(domain),
+                    "{domain}/{name}: {err}"
+                );
+                release_backend_claim("dup-a", domain, &name);
+            }
+        }
+    }
+
+    #[test]
     fn reserved_names_are_refused_in_every_domain() {
         for domain in BUILTIN_DOMAINS {
             let err = register_backends_with("orca", &[def(domain, "orca")], |_| noop_invoke())
