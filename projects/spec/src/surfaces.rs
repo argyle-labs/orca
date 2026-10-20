@@ -117,10 +117,25 @@ impl Invocation {
         self
     }
 
-    pub fn for_core_verb(mut self, execute_gated: bool, role: &str, args: &Value) -> Self {
-        self.dry_run |= args.get(contract::plan::DRY_RUN_FIELD) == Some(&Value::Bool(true));
-        self.execute_confirmed = execute_gated && !self.dry_run;
-        self.second_factor &= role == "super-admin";
+    pub fn from_core_verb(verb: &contract::invocation_scope::CoreVerb) -> Self {
+        let mut caller = verb.caller.clone();
+        if dispatch::tool_roles::role_rank(verb.role)
+            < dispatch::tool_roles::role_rank(&caller.role)
+        {
+            caller.role = verb.role.to_string();
+        }
+        Self {
+            second_factor: verb.second_factor && caller.role == "super-admin",
+            caller,
+            dry_run: verb.dry_run,
+            local: verb.local,
+            execute_confirmed: verb.execute_gated && !verb.dry_run,
+            reaches: Vec::new(),
+        }
+    }
+
+    pub fn unconfirmed(mut self) -> Self {
+        self.execute_confirmed = false;
         self.reaches = Vec::new();
         self
     }
@@ -366,7 +381,18 @@ async fn run(
         }
         let base = utils::route::resolve_reachable(&route_key, &routes, |_| async { true }).await?;
         let secret = secret_name.as_ref().map(|_| REDACTED);
-        let req = surface.build_request_with(op, &base, &args, secret, &columns)?;
+        let shown = columns
+            .iter()
+            .map(|(k, v)| {
+                let v = if surface.is_public_column(k) {
+                    v.as_str()
+                } else {
+                    REDACTED
+                };
+                (k.clone(), v.to_string())
+            })
+            .collect();
+        let req = surface.build_request_with(op, &base, &args, secret, &shown)?;
         return Ok(Outcome::Plan(plan(req, endpoint, &base)));
     }
 
@@ -432,7 +458,7 @@ fn endpoint_row(plugin: &str, binding: &EndpointBinding, endpoint: &str) -> Resu
 
 fn auth_columns(surface: &ApiSurface, row: &DbRow) -> Result<BTreeMap<String, String>> {
     surface
-        .auth_columns()
+        .auth_columns()?
         .into_iter()
         .map(|col| {
             let value = match row.get(col) {
@@ -817,11 +843,16 @@ mod tests {
     }
 
     fn column_auth(plugin: &str, scheme: &str) -> ApiSurface {
+        column_auth_with(plugin, scheme, json!([]))
+    }
+
+    fn column_auth_with(plugin: &str, scheme: &str, public: Value) -> ApiSurface {
         let mut s = surface(plugin, &format!("{plugin}.{{endpoint}}.token"));
         let mut value = serde_json::to_value(&s).unwrap();
         value["auth"]["scheme"] = json!(scheme);
         value["auth"]["template"] = json!("Tok={endpoint.provider}={secret}");
         value["endpoint"]["columns"] = json!(["provider"]);
+        value["endpoint"]["public_columns"] = public;
         s = ApiSurface::parse(&value.to_string()).unwrap();
         s
     }
@@ -853,29 +884,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn dry_run_plan_shows_column_but_redacts_secret() {
-        let server = MockServer::start().await;
-        register("colq", column_auth("colq", "query")).unwrap();
-        let out = in_temp_db(async {
-            seed("colq", &server, "s3cr3t");
-            execute(
-                "colq",
-                "colq.item",
-                json!({"endpoint": "main", "id": 5}),
-                &inv(&caller("read", false), true),
-            )
+    async fn dry_run_plan_redacts_secret_and_private_columns() {
+        for (plugin, public, shown) in [
+            ("colq", json!([]), false),
+            ("colp2", json!(["provider"]), true),
+        ] {
+            let server = MockServer::start().await;
+            register(plugin, column_auth_with(plugin, "query", public)).unwrap();
+            let out = in_temp_db(async {
+                seed(plugin, &server, "s3cr3t");
+                execute(
+                    plugin,
+                    &format!("{plugin}.item"),
+                    json!({"endpoint": "main", "id": 5}),
+                    &inv(&caller("read", false), true),
+                )
+                .await
+            })
             .await
-        })
-        .await
-        .unwrap();
-        let Outcome::Plan(plan) = out else {
-            panic!("expected plan")
-        };
-        let text = serde_json::to_string(&plan).unwrap();
-        assert!(!text.contains("s3cr3t"), "{text}");
-        assert!(text.contains("colq"), "{text}");
-        assert!(server.received_requests().await.unwrap().is_empty());
-        deregister("colq");
+            .unwrap();
+            let Outcome::Plan(plan) = out else {
+                panic!("expected plan")
+            };
+            let text = serde_json::to_string(&plan).unwrap();
+            assert!(!text.contains("s3cr3t"), "{text}");
+            assert_eq!(text.contains(plugin), shown, "{text}");
+            assert!(server.received_requests().await.unwrap().is_empty());
+            deregister(plugin);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

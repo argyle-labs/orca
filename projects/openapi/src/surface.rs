@@ -57,6 +57,8 @@ pub struct EndpointBinding {
     pub fields: EndpointFields,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_columns: Vec<String>,
 }
 
 impl Default for EndpointBinding {
@@ -66,6 +68,7 @@ impl Default for EndpointBinding {
             key: default_endpoint_key(),
             fields: EndpointFields::default(),
             columns: Vec::new(),
+            public_columns: Vec::new(),
         }
     }
 }
@@ -286,16 +289,14 @@ impl ApiSurface {
                 surface.format
             );
         }
-        if let Some(auth) = &surface.auth {
-            for piece in template_pieces(&auth.template)? {
-                if let TemplatePiece::Column(col) = piece
-                    && !surface.endpoint.columns.iter().any(|c| c == col)
-                {
-                    bail!(
-                        "api-surface: auth template references undeclared endpoint column `{col}`"
-                    );
-                }
-            }
+        surface.auth_columns()?;
+        if let Some(col) = surface
+            .endpoint
+            .public_columns
+            .iter()
+            .find(|c| !surface.endpoint.columns.contains(c))
+        {
+            bail!("api-surface: public endpoint column `{col}` is not declared");
         }
         for op in &surface.ops {
             surface.check_wires(op)?;
@@ -303,18 +304,26 @@ impl ApiSurface {
         Ok(surface)
     }
 
-    pub fn auth_columns(&self) -> Vec<&str> {
+    pub fn auth_columns(&self) -> Result<Vec<&str>> {
         let Some(auth) = &self.auth else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        template_pieces(&auth.template)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|p| match p {
-                TemplatePiece::Column(c) => Some(c),
-                _ => None,
-            })
-            .collect()
+        let mut out = Vec::new();
+        for piece in template_pieces(&auth.template)? {
+            if let TemplatePiece::Column(col) = piece {
+                if !self.endpoint.columns.iter().any(|c| c == col) {
+                    bail!(
+                        "api-surface: auth template references undeclared endpoint column `{col}`"
+                    );
+                }
+                out.push(col);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn is_public_column(&self, col: &str) -> bool {
+        self.endpoint.public_columns.iter().any(|c| c == col)
     }
 
     fn check_wires(&self, op: &ApiOp) -> Result<()> {
@@ -487,6 +496,10 @@ impl ApiSurface {
         if let Some(auth) = &self.auth {
             let secret = secret
                 .ok_or_else(|| anyhow!("{}: surface requires secret `{}`", op.tool, auth.secret))?;
+            if secret.chars().any(char::is_control) {
+                bail!("{}: secret contains a control character", op.tool);
+            }
+            self.auth_columns()?;
             let mut value = String::new();
             for piece in template_pieces(&auth.template)? {
                 match piece {
@@ -496,8 +509,11 @@ impl ApiSurface {
                         let v = columns.get(col).ok_or_else(|| {
                             anyhow!("{}: endpoint column `{col}` is not set", op.tool)
                         })?;
-                        if v.contains(['\r', '\n']) {
-                            bail!("{}: endpoint column `{col}` contains a line break", op.tool);
+                        if v.chars().any(char::is_control) {
+                            bail!(
+                                "{}: endpoint column `{col}` contains a control character",
+                                op.tool
+                            );
                         }
                         value.push_str(v);
                     }
@@ -887,7 +903,7 @@ mod tests {
             json!(["token_id"]),
         )
         .unwrap();
-        assert_eq!(s.auth_columns(), vec!["token_id"]);
+        assert_eq!(s.auth_columns().unwrap(), vec!["token_id"]);
         let op = s.find("s.get").unwrap();
         let cols = BTreeMap::from([("token_id".to_string(), "root@pam!t".to_string())]);
         let req = s
@@ -910,11 +926,47 @@ mod tests {
             s.build_request_with(op, "https://h", &Map::new(), Some("k"), &BTreeMap::new())
                 .is_err()
         );
-        let crlf = BTreeMap::from([("token_id".to_string(), "a\r\nX-Evil: 1".to_string())]);
+        for bad in ["a\r\nX-Evil: 1", "a\tb", "a\u{0}b", "a\u{7f}b"] {
+            let cols = BTreeMap::from([("token_id".to_string(), bad.to_string())]);
+            assert!(
+                s.build_request_with(op, "https://h", &Map::new(), Some("k"), &cols)
+                    .is_err(),
+                "{bad:?}"
+            );
+            assert!(
+                s.build_request_with(op, "https://h", &Map::new(), Some(bad), &cols_ok())
+                    .is_err(),
+                "{bad:?}"
+            );
+        }
+        let mut bypass = s.clone();
+        bypass.endpoint.columns.clear();
+        assert!(bypass.auth_columns().is_err());
         assert!(
-            s.build_request_with(op, "https://h", &Map::new(), Some("k"), &crlf)
+            bypass
+                .build_request_with(op, "https://h", &Map::new(), Some("k"), &cols_ok())
                 .is_err()
         );
+    }
+
+    fn cols_ok() -> BTreeMap<String, String> {
+        BTreeMap::from([("token_id".to_string(), "t".to_string())])
+    }
+
+    #[test]
+    fn public_columns_must_be_declared() {
+        let parse = |endpoint: Value| {
+            ApiSurface::parse(
+                &json!({
+                    "format": FORMAT, "surface": "s", "kind": "openapi",
+                    "endpoint": endpoint, "ops": []
+                })
+                .to_string(),
+            )
+        };
+        let s = parse(json!({"columns": ["a", "b"], "public_columns": ["a"]})).unwrap();
+        assert!(s.is_public_column("a") && !s.is_public_column("b"));
+        assert!(parse(json!({"columns": ["a"], "public_columns": ["z"]})).is_err());
     }
 
     #[test]
