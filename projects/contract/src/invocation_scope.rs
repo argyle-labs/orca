@@ -41,6 +41,7 @@ impl CoreVerb {
 
 tokio::task_local! {
     static CORE_VERB: CoreVerb;
+    static DAEMON_TASK: ();
 }
 
 pub async fn core_verb<F: Future>(verb: CoreVerb, f: F) -> F::Output {
@@ -49,6 +50,18 @@ pub async fn core_verb<F: Future>(verb: CoreVerb, f: F) -> F::Output {
 
 pub fn current_core_verb() -> Option<CoreVerb> {
     CORE_VERB.try_with(Clone::clone).ok()
+}
+
+pub async fn daemon_task<F: Future>(f: F) -> F::Output {
+    DAEMON_TASK.scope((), f).await
+}
+
+pub fn in_daemon_task() -> bool {
+    DAEMON_TASK.try_with(|_| ()).is_ok()
+}
+
+pub fn sync_daemon_task<R>(f: impl FnOnce() -> R) -> R {
+    DAEMON_TASK.sync_scope((), f)
 }
 
 pub fn sync_core_verb<R>(verb: CoreVerb, f: impl FnOnce() -> R) -> R {
@@ -80,7 +93,8 @@ mod tests {
 
     #[test]
     fn scopes_are_only_visible_inside() {
-        assert!(current_core_verb().is_none());
+        assert!(current_core_verb().is_none() && !in_daemon_task());
         assert!(sync_core_verb(verb(), || current_core_verb().is_some()));
+        assert!(sync_daemon_task(in_daemon_task));
     }
 }

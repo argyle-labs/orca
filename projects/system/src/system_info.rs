@@ -145,7 +145,7 @@ pub fn spawn_refresher() {
     if SPAWNED.set(()).is_err() {
         return;
     }
-    tokio::spawn(async move {
+    tokio::spawn(contract::invocation_scope::daemon_task(async move {
         let mut sys = System::new_with_specifics(
             RefreshKind::new()
                 .with_memory(sysinfo::MemoryRefreshKind::everything())
@@ -199,7 +199,7 @@ pub fn spawn_refresher() {
                 *g = Some(Arc::new(snap));
             }
         }
-    });
+    }));
 }
 
 /// Synchronously collect a fresh snapshot (no prior `System` state — CPU

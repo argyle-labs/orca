@@ -787,7 +787,8 @@ fn make_backend_invoke(
 
 fn backend_invocation(backend: &str, reaches: &[String]) -> Option<spec::surfaces::Invocation> {
     let Some(verb) = contract::invocation_scope::current_core_verb() else {
-        return Some(spec::surfaces::Invocation::system());
+        return contract::invocation_scope::in_daemon_task()
+            .then(spec::surfaces::Invocation::system);
     };
     let inv = spec::surfaces::Invocation::from_core_verb(&verb);
     Some(if verb.targets(backend) {
@@ -1819,7 +1820,10 @@ mod surface_tests {
         });
         assert!(forbidden(&other), "{other:#}");
 
-        assert!(backend_invocation(target, &reaches).unwrap().is_system());
+        assert!(backend_invocation(target, &reaches).is_none());
+        let daemon =
+            contract::invocation_scope::sync_daemon_task(|| backend_invocation(target, &reaches));
+        assert!(daemon.unwrap().is_system());
         spec::surfaces::deregister("bkv");
     }
 
