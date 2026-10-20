@@ -147,8 +147,6 @@ pub struct BackendDef {
     /// serialized `BackendDef` missing it deserializes as `None`.
     #[serde(default)]
     pub provisioning: Option<ProvisioningConfig>,
-    /// Api-surface ops (or privileged caps) this backend's handlers may reach
-    /// via `api.call` when core dispatches it on behalf of a user verb.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reaches: Vec<String>,
 }
