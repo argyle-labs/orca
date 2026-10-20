@@ -95,6 +95,7 @@ fn service_surface_is_collapsed() {
         "service.detail",
         "service.create",
         "service.update",
+        "deploy.list",
     ] {
         assert!(names.contains(&present), "missing `{present}`: {names:?}");
     }
