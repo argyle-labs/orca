@@ -18,9 +18,14 @@
 //! {
 //!   "job":  "host.backup.run",
 //!   "cron": "0 * * * *",
-//!   "args": { ... }            // optional, passed as tool input
+//!   "args": { ... },           // optional, passed as tool input
+//!   "run_as": { "user_id": "…", "role": "admin", "can_mutate": false }
 //! }
 //! ```
+//!
+//! `run_as` is stamped by `config.upsert` from the writing caller. Each job
+//! dispatches as that user at the lower of the stamped role and the user's
+//! current role; a row with no owner, or whose owner is gone, is refused.
 //!
 //! ## Missed-while-down replay
 //!
@@ -38,7 +43,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use contract::ToolCtx;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{info, warn};
 use utils::schedule::Schedule;
@@ -62,6 +67,69 @@ struct ScheduleRow {
     /// Optional input to the tool. If omitted, dispatches with `{}`.
     #[serde(default)]
     args: Option<Value>,
+    #[serde(default)]
+    run_as: Option<RunAs>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RunAs {
+    user_id: String,
+    role: String,
+    #[serde(default)]
+    can_mutate: bool,
+}
+
+const RUN_AS_FIELD: &str = "run_as";
+
+pub fn stamp_run_as(json: &str, caller: &contract::CallerIdentity) -> Result<String> {
+    let mut row: Value = serde_json::from_str(json).context("schedule row is not valid JSON")?;
+    let obj = row
+        .as_object_mut()
+        .context("schedule row must be a JSON object")?;
+    let run_as = RunAs {
+        user_id: caller.user_id.clone(),
+        role: caller.role.clone(),
+        can_mutate: caller.can_mutate,
+    };
+    obj.insert(RUN_AS_FIELD.into(), serde_json::to_value(run_as)?);
+    Ok(serde_json::to_string(&row)?)
+}
+
+fn job_caller(run_as: Option<&RunAs>) -> Result<contract::CallerIdentity> {
+    let run_as = run_as.context("schedule has no owner; re-save it to run as yourself")?;
+    let conn = db::open_default()?;
+    let user = identities::users::find_by_id(&conn, &run_as.user_id)?
+        .with_context(|| format!("schedule owner '{}' no longer exists", run_as.user_id))?;
+    let rank = dispatch::tool_roles::role_rank;
+    let role = if rank(&user.role) < rank(&run_as.role) {
+        user.role
+    } else {
+        run_as.role.clone()
+    };
+    anyhow::ensure!(
+        rank(&role) > 0,
+        "schedule owner '{}' holds no role",
+        user.username
+    );
+    Ok(contract::CallerIdentity {
+        user_id: user.id,
+        username: user.username,
+        role,
+        can_mutate: run_as.can_mutate,
+    })
+}
+
+async fn dispatch_as_owner(
+    job: &str,
+    args: Value,
+    run_as: Option<&RunAs>,
+    ctx: &ToolCtx,
+) -> Result<Value> {
+    let caller = job_caller(run_as)?;
+    let mut job_ctx = ctx.clone();
+    job_ctx.set_caller(Some(caller.clone()));
+    job_ctx.set_verified_caller(Some(caller));
+    dispatch::dispatch(job, args, &job_ctx).await
 }
 
 /// Spawn the scheduler. Returns the periodic-loop handle; daemon should
@@ -123,7 +191,7 @@ async fn tick(ctx: &ToolCtx, daemon_start: Timestamp) -> Result<()> {
         let job_name = parsed.job.clone();
         let started_at = time::now();
         let t0 = std::time::Instant::now();
-        let outcome = dispatch::dispatch(&job_name, args, ctx).await;
+        let outcome = dispatch_as_owner(&job_name, args, parsed.run_as.as_ref(), ctx).await;
         let finished_at = time::now();
         let ok = outcome.is_ok();
         let error = outcome.as_ref().err().map(|e| format!("{e:#}"));
@@ -199,5 +267,54 @@ mod tests {
         let schedule = Schedule::parse("@hourly").unwrap();
         let now = time::now();
         assert!(!schedule.is_due(now, now));
+    }
+
+    fn run_as(user_id: &str, role: &str) -> RunAs {
+        RunAs {
+            user_id: user_id.into(),
+            role: role.into(),
+            can_mutate: false,
+        }
+    }
+
+    #[test]
+    fn jobs_run_as_their_owner_never_above_the_owners_current_role() {
+        let dir = tempfile::tempdir().unwrap();
+        db::with_thread_db_path(&dir.path().join("sched.db"), || {
+            let conn = db::open_default().unwrap();
+            identities::users::insert(&conn, "u-ann", "ann", "x", "member", "2026-01-01T00:00:00Z")
+                .unwrap();
+            drop(conn);
+
+            assert!(job_caller(None).is_err());
+            assert!(job_caller(Some(&run_as("u-gone", "admin"))).is_err());
+
+            let demoted = job_caller(Some(&run_as("u-ann", "admin"))).unwrap();
+            assert_eq!(
+                (demoted.user_id.as_str(), demoted.role.as_str()),
+                ("u-ann", "member")
+            );
+            let narrowed = job_caller(Some(&run_as("u-ann", "read"))).unwrap();
+            assert_eq!(narrowed.role, "read");
+            assert!(job_caller(Some(&run_as("u-ann", "bogus"))).is_err());
+        });
+    }
+
+    #[test]
+    fn stamp_run_as_overwrites_a_supplied_owner() {
+        let caller = contract::CallerIdentity {
+            user_id: "u-ann".into(),
+            username: "ann".into(),
+            role: "user".into(),
+            can_mutate: false,
+        };
+        let stamped = stamp_run_as(
+            r#"{"job":"x.y","cron":"@hourly","run_as":{"user_id":"root","role":"super-admin"}}"#,
+            &caller,
+        )
+        .unwrap();
+        let row: ScheduleRow = serde_json::from_str(&stamped).unwrap();
+        assert_eq!(row.run_as, Some(run_as("u-ann", "user")));
+        assert!(stamp_run_as("[]", &caller).is_err());
     }
 }
