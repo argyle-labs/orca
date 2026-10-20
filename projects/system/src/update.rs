@@ -465,6 +465,8 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     apply_binary(&binary, &info.version)
 }
 
+pub const CODESIGN_IDENTIFIER: &str = "com.argyle-labs.orca";
+
 /// Swap the running binary with `bytes` and schedule a supervisor restart.
 ///
 /// Caller is responsible for any pre-swap integrity check on `bytes`
@@ -525,17 +527,31 @@ pub fn apply_binary(bytes: &[u8], version: &str) -> Result<()> {
         _ = std::fs::remove_file(&backup);
     }
 
-    // macOS: ad-hoc sign so Gatekeeper accepts the new binary on next launch.
-    // Without this the launchd daemon gets SIGKILLed on respawn (exit -9).
+    // macOS: keep a valid release signature (re-signing would discard a
+    // Developer ID); ad-hoc sign only when unsigned, else launchd SIGKILLs the
+    // daemon on respawn (exit -9).
     #[cfg(target_os = "macos")]
     {
-        let codesign_status = std::process::Command::new("codesign")
-            .args(["--force", "--sign", "-"])
+        let signed = std::process::Command::new("codesign")
+            .args(["--verify", "--strict"])
             .arg(&current)
             .status()
-            .context("invoking codesign")?;
-        if !codesign_status.success() {
-            anyhow::bail!("codesign failed with status {codesign_status}");
+            .is_ok_and(|s| s.success());
+        if !signed {
+            let codesign_status = std::process::Command::new("codesign")
+                .args([
+                    "--force",
+                    "--sign",
+                    "-",
+                    "--identifier",
+                    CODESIGN_IDENTIFIER,
+                ])
+                .arg(&current)
+                .status()
+                .context("invoking codesign")?;
+            if !codesign_status.success() {
+                anyhow::bail!("codesign failed with status {codesign_status}");
+            }
         }
     }
 

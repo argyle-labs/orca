@@ -499,7 +499,13 @@ fn build_pkg(
     // Sign binary: real identity → hardened runtime; ad-hoc for local use.
     let sign = codesign_identity.unwrap_or("-");
     let mut codesign_cmd = Command::new("codesign");
-    codesign_cmd.args(["--force", "--sign", sign]);
+    codesign_cmd.args([
+        "--force",
+        "--sign",
+        sign,
+        "--identifier",
+        crate::update::CODESIGN_IDENTIFIER,
+    ]);
     if sign != "-" {
         codesign_cmd.args(["--options", "runtime"]);
     }
