@@ -148,27 +148,27 @@ impl Invocation {
         reaches: &[String],
     ) -> Self {
         let rank = dispatch::tool_roles::role_rank;
-        let floor = if rank(verb.role) < rank("read") {
+        let floor = if rank(verb.role()) < rank("read") {
             "read"
         } else {
-            verb.role
+            verb.role()
         };
-        let role = if rank(floor) < rank(&verb.caller.role) {
+        let role = if rank(floor) < rank(&verb.caller().role) {
             floor.to_string()
         } else {
-            verb.caller.role.clone()
+            verb.caller().role.clone()
         };
         let inv = Self {
-            second_factor: verb.second_factor && role == "super-admin",
+            second_factor: verb.second_factor() && role == "super-admin",
             caller: CallerIdentity {
-                user_id: verb.caller.user_id.clone(),
-                username: verb.caller.username.clone(),
+                user_id: verb.caller().user_id.clone(),
+                username: verb.caller().username.clone(),
                 role,
-                can_mutate: verb.caller.can_mutate,
+                can_mutate: verb.caller().can_mutate,
             },
-            dry_run: verb.dry_run,
-            local: verb.local,
-            execute_confirmed: verb.execute_gated && !verb.dry_run,
+            dry_run: verb.dry_run(),
+            local: verb.local(),
+            execute_confirmed: verb.execute_gated() && !verb.dry_run(),
             reaches: Vec::new(),
             system: false,
         };
