@@ -179,7 +179,7 @@ impl From<anyhow::Error> for OrcaError {
         // anyhow::Error has no kind info — default to Internal. Tools that
         // want classification should return OrcaError directly with a
         // specific kind instead of bailing through anyhow.
-        Self::new(ErrorKind::Internal, e.to_string())
+        Self::new(ErrorKind::Internal, format!("{e:#}"))
     }
 }
 
@@ -241,6 +241,15 @@ mod tests {
         let e: OrcaError = anyhow::anyhow!("boom").into();
         assert_eq!(e.kind, ErrorKind::Internal);
         assert_eq!(e.message, "boom");
+    }
+
+    #[test]
+    fn anyhow_conversion_keeps_the_full_context_chain() {
+        let io = std::io::Error::new(std::io::ErrorKind::HostUnreachable, "No route to host");
+        let e: OrcaError = anyhow::Error::new(io)
+            .context("connect 10.0.0.5:7443")
+            .into();
+        assert_eq!(e.message, "connect 10.0.0.5:7443: No route to host");
     }
 
     #[test]
