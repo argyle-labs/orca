@@ -208,13 +208,12 @@ async fn config_set(
         crate::csp::Relaxations::parse(&args.json)
             .map_err(|e| anyhow::anyhow!("invalid server/csp: {e:#}"))?;
     }
-    let json = if args.noun == "schedule" {
-        let caller = ctx.verified_caller().cloned().or_else(|| ctx.caller());
-        let caller = caller.ok_or_else(|| anyhow::anyhow!("config schedule requires a caller"))?;
-        crate::scheduler::stamp_run_as(&args.json, &caller)?
-    } else {
-        args.json
-    };
+    let verified = ctx.verified_caller();
+    anyhow::ensure!(
+        args.noun != "schedule" || verified.is_some(),
+        "config schedule requires a verified caller"
+    );
+    let updated_by = verified.map_or("cli", |c| c.user_id.as_str());
     let conn = db::open_default()?;
     let local = native_support::local_system(&conn);
     let owner = args.host.unwrap_or_else(|| local.clone());
@@ -222,8 +221,14 @@ async fn config_set(
         !is_csp_row(&args.noun, &args.name) || owner == local,
         "config server/csp can only be set on the local host"
     );
-    let created =
-        db::config_store::set(&conn, &local, &owner, &args.noun, &args.name, &json, "cli")?;
+    let created = db::config_store::set(
+        &conn, &local, &owner, &args.noun, &args.name, &args.json, updated_by,
+    )?;
+    if args.noun == "schedule"
+        && let Some(caller) = verified
+    {
+        crate::scheduler::record_owner(&conn, &owner, &args.name, &args.json, caller)?;
+    }
     let row = db::config_store::get(&conn, &args.noun, &args.name)?
         .ok_or_else(|| anyhow::anyhow!("row vanished after write"))?
         .into();
@@ -234,12 +239,17 @@ async fn config_set(
 #[orca_tool(domain = "config", verb = "delete")]
 async fn config_delete(
     args: ConfigDeleteArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ConfigDeleteOutput> {
     let conn = db::open_default()?;
     let local = native_support::local_system(&conn);
     let owner = args.host.unwrap_or_else(|| local.clone());
-    let removed = db::config_store::delete(&conn, &local, &owner, &args.noun, &args.name, "cli")?;
+    let deleted_by = ctx.verified_caller().map_or("cli", |c| c.user_id.as_str());
+    let removed =
+        db::config_store::delete(&conn, &local, &owner, &args.noun, &args.name, deleted_by)?;
+    if removed && args.noun == "schedule" {
+        db::schedule_owners::delete(&conn, &args.name)?;
+    }
     Ok(ConfigDeleteOutput { removed })
 }
 
@@ -376,43 +386,30 @@ mod tests {
     }
 
     #[test]
-    fn upsert_schedule_stamps_the_writing_caller_as_owner() {
+    fn upsert_schedule_records_only_a_verified_caller_as_owner() {
         let dir = tempfile::tempdir().unwrap();
         crate::host_identity::init(dir.path()).ok();
         db::with_thread_db_path(&dir.path().join("cfg.db"), || {
-            let spoofed = r#"{"job":"x.y","cron":"@hourly","run_as":{"user_id":"root","role":"super-admin"}}"#;
             let write = |ctx: &contract::ToolCtx| {
                 run(config_set(
                     ConfigSetArgs {
                         noun: "schedule".into(),
                         name: "nightly".into(),
-                        json: spoofed.into(),
+                        json: r#"{"job":"x.y","cron":"@hourly"}"#.into(),
                         host: None,
                     },
                     ctx,
                 ))
             };
             assert!(write(&test_ctx(dir.path())).is_err());
+            assert!(write(&test_ctx(dir.path()).with_auth(caller("super-admin"))).is_err());
             let mut ctx = test_ctx(dir.path()).with_auth(caller("super-admin"));
             ctx.set_verified_caller(Some(caller("user")));
             let row = write(&ctx).unwrap().row;
-            #[derive(serde::Deserialize)]
-            struct Owner {
-                user_id: String,
-                role: String,
-            }
-            #[derive(serde::Deserialize)]
-            struct Stamped {
-                run_as: Owner,
-            }
-            let stamped: Stamped = serde_json::from_str(&row.json).unwrap();
-            assert_eq!(
-                (
-                    stamped.run_as.user_id.as_str(),
-                    stamped.run_as.role.as_str()
-                ),
-                ("u", "user")
-            );
+            assert_eq!(row.updated_by, "u");
+            let conn = db::open_default().unwrap();
+            let owner = db::schedule_owners::get(&conn, "nightly").unwrap().unwrap();
+            assert_eq!((owner.user_id.as_str(), owner.role.as_str()), ("u", "user"));
         });
     }
 }

@@ -98,6 +98,22 @@ pub struct ScheduleStatusOutput {
     pub jobs: Vec<JobStatus>,
 }
 
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+pub struct ScheduleOwnerListArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnerlessSchedule {
+    pub name: String,
+    pub job: String,
+    pub reason: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ScheduleOwnerListOutput {
+    pub ownerless: Vec<OwnerlessSchedule>,
+}
+
 /// The `schedule.create` action. Only `run` today; the discriminant keeps the
 /// surface six-verb-uniform.
 #[derive(
@@ -229,6 +245,33 @@ async fn schedule_status(
     Ok(ScheduleStatusOutput { jobs })
 }
 
+/// List this host's schedules that the scheduler refuses to run for want of a
+/// valid local owner. Re-save each one to take ownership; nothing is assigned.
+#[orca_tool(domain = "schedule.owner", verb = "list", role = "admin")]
+async fn schedule_owner_list(
+    _args: ScheduleOwnerListArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<ScheduleOwnerListOutput> {
+    let conn = db::open_default()?;
+    let rows = db::config_store::list(&conn, Some("schedule"), None)?;
+    drop(conn);
+    let ownerless = rows
+        .into_iter()
+        .filter(|row| !row.is_replica)
+        .filter_map(|row| {
+            let reason = crate::scheduler::ownerless_reason(&row)?;
+            let job = serde_json::from_str::<native_support::ScheduleRow>(&row.json)
+                .map_or_else(|_| String::new(), |p| p.job);
+            Some(OwnerlessSchedule {
+                name: row.name,
+                job,
+                reason,
+            })
+        })
+        .collect();
+    Ok(ScheduleOwnerListOutput { ownerless })
+}
+
 /// [MUTATES STATE] Invoke a scheduled job immediately, out-of-band from the loop.
 /// Useful for testing schedule wiring without waiting for the next firing.
 /// `action=run` (the default and only action) runs the row's job now.
@@ -277,5 +320,6 @@ mod tests {
         assert!(names.contains(&"schedule.list"), "got: {names:?}");
         assert!(names.contains(&"schedule.detail"), "got: {names:?}");
         assert!(names.contains(&"schedule.create"), "got: {names:?}");
+        assert!(names.contains(&"schedule.owner.list"), "got: {names:?}");
     }
 }
