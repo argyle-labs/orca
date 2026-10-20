@@ -516,19 +516,19 @@ fn core_verb(
     let execute_gated = find(name).is_some_and(|t| t.execute_gated())
         || crate::tool_roles::plugin_execute_gated(name);
     let dry_run = ctx.dry_run() || crate::erased::dry_run_requested(args).unwrap_or(true);
-    Some(contract::invocation_scope::CoreVerb {
-        caller: contract::invocation_scope::VerbCaller {
+    Some(contract::invocation_scope::CoreVerb::new(
+        contract::invocation_scope::VerbCaller {
             user_id: caller.user_id.clone(),
             username: caller.username.clone(),
             role: caller.role.clone(),
             can_mutate: caller.can_mutate,
         },
-        role: crate::tool_roles::required_role(name),
+        crate::tool_roles::required_role(name),
         execute_gated,
         dry_run,
-        local: ctx.local_transport(),
-        second_factor: ctx.second_factor(),
-    })
+        ctx.local_transport(),
+        ctx.second_factor(),
+    ))
 }
 
 async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Value> {
@@ -2268,9 +2268,9 @@ mod tests {
         assert!(core_verb("anything", &json!({}), &ctx).is_none());
         ctx.set_verified_caller(Some(identity("ann")));
         let verb = core_verb("anything", &json!({"dryRun": true}), &ctx).unwrap();
-        assert_eq!(verb.caller.username, "ann");
-        assert!(verb.dry_run && !verb.execute_gated);
-        assert_eq!(verb.role, crate::tool_roles::required_role("anything"));
+        assert_eq!(verb.caller().username, "ann");
+        assert!(verb.dry_run() && !verb.execute_gated());
+        assert_eq!(verb.role(), crate::tool_roles::required_role("anything"));
     }
 
     fn identity(name: &str) -> contract::CallerIdentity {
