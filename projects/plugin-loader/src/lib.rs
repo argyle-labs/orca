@@ -28,6 +28,7 @@
 
 pub mod capability;
 #[cfg(unix)]
+pub mod privileged;
 pub mod supervisor;
 mod ws;
 
@@ -1073,7 +1074,9 @@ fn check_reaches(
 ) -> Result<()> {
     for def in tools.values() {
         for op in &def.reaches {
-            if !surfaces.iter().any(|s| s.ops.iter().any(|o| &o.tool == op)) {
+            if !privileged::is_privileged_cap(op)
+                && !surfaces.iter().any(|s| s.ops.iter().any(|o| &o.tool == op))
+            {
                 bail!(
                     "plugin '{software}' tool '{}' reaches '{op}', which is not an op in its api surfaces",
                     def.name

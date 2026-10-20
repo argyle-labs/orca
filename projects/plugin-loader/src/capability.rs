@@ -42,6 +42,9 @@ pub const CAPABILITIES: &[&str] = &[
     API_CALL,
     plugin_toolkit::abi::HTTP_BODY_B64,
     plugin_toolkit::abi::HTTP_NO_FOLLOW,
+    plugin_toolkit::abi::LXC_EXEC,
+    plugin_toolkit::abi::LXC_PUSH,
+    plugin_toolkit::abi::PRIVILEGED_APPLY,
 ];
 
 pub const API_CALL: &str = "api.call";

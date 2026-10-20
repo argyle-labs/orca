@@ -237,6 +237,26 @@ fn gate(
     Ok(())
 }
 
+pub fn authorize_capability(cap: &str, inv: &Invocation) -> Result<()> {
+    let deny = |reason: &str| -> Result<()> {
+        Err(Forbidden {
+            tool: cap.to_string(),
+            reason: reason.to_string(),
+        }
+        .into())
+    };
+    if !dispatch::tool_roles::satisfies(&inv.caller.role, "admin") {
+        return deny("requires role `admin`");
+    }
+    if !inv.reaches.iter().any(|r| r == cap) {
+        return deny("not declared in the invoking tool's reaches");
+    }
+    if inv.dry_run {
+        return deny("refused under dry run");
+    }
+    Ok(())
+}
+
 pub async fn execute(plugin: &str, tool: &str, args: Value, inv: &Invocation) -> Result<Outcome> {
     let (surface, index) = lookup(plugin, tool)?;
     if surface.ops[index].internal {

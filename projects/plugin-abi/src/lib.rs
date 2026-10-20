@@ -455,6 +455,21 @@ pub const HTTP_BODY_B64: &str = "http.body_b64";
 
 pub const HTTP_NO_FOLLOW: &str = "http.no_follow";
 
+pub const LXC_EXEC: &str = "lxc.exec";
+
+pub const LXC_PUSH: &str = "lxc.push";
+
+pub const PRIVILEGED_APPLY: &str = "privileged.apply";
+
+/// Raw outcome of a root helper the daemon ran for a privileged capability.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct HelperOutput {
+    pub success: bool,
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// Borrowed wire form of an [`HttpRequest`] whose body is a number array, for
 /// a core that does not advertise [`HTTP_BODY_B64`].
 #[derive(serde::Serialize)]
