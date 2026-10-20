@@ -119,7 +119,11 @@ pub async fn collect() -> HostFacts {
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<crate::invocation_scope::BackendCall>,
+        ) -> std::result::Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync
         + 'static,
@@ -184,15 +188,17 @@ impl HostFactsProvider for HostFactsProxy {
     async fn get_facts(&self) -> Result<HostFacts> {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
-        let out = tokio::task::spawn_blocking(move || invoke(FACTS_OP, serde_json::json!({})))
-            .await
-            .map_err(|e| anyhow::anyhow!("host_facts '{name}' invoke task panicked: {e}"))?
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "host_facts '{name}' invoke failed: {}",
-                    crate::render_invoke_error(&e)
-                )
-            })?;
+        let call = crate::invocation_scope::capture("host_facts", &name);
+        let out =
+            tokio::task::spawn_blocking(move || invoke(FACTS_OP, serde_json::json!({}), call))
+                .await
+                .map_err(|e| anyhow::anyhow!("host_facts '{name}' invoke task panicked: {e}"))?
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "host_facts '{name}' invoke failed: {}",
+                        crate::render_invoke_error(&e)
+                    )
+                })?;
         let facts: HostFacts = serde_json::from_value(out)
             .map_err(|e| anyhow::anyhow!("host_facts '{name}' returned invalid JSON: {e}"))?;
         Ok(facts)

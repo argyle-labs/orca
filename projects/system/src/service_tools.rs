@@ -236,46 +236,54 @@ async fn service_create(
     let action = args.action.ok_or_else(|| {
         anyhow::anyhow!("`action` is required for service.create (deploy|backup)")
     })?;
-    let backend = backend_for(&args.endpoint.service)?;
-    match action {
-        ServiceCreateAction::Deploy => {
-            let ep = &args.endpoint;
-            let runtime_str = ep
-                .runtime
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("--runtime is required for action=deploy"))?;
-            let runtime = parse_runtime(&runtime_str)?;
-            let spec = backend
-                .workload_spec(runtime, &ep.instance, &ep.reach()?)
-                .await?;
+    let target = args.endpoint.service.clone();
+    utils::invocation_scope::targeting("service", &target, async move {
+        let backend = backend_for(&args.endpoint.service)?;
+        match action {
+            ServiceCreateAction::Deploy => {
+                let ep = &args.endpoint;
+                let runtime_str = ep
+                    .runtime
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("--runtime is required for action=deploy"))?;
+                let runtime = parse_runtime(&runtime_str)?;
+                let spec = backend
+                    .workload_spec(runtime, &ep.instance, &ep.reach()?)
+                    .await?;
 
-            // Resolve a deploy target on this host + runtime that can launch.
-            let target = deploy_target::targets()
-                .into_iter()
-                .find(|t| {
-                    t.host() == ep.host
-                        && t.runtime() == runtime
-                        && t.supports(DeployCapability::Launch)
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no deploy target on host `{}` with runtime `{}` that can launch",
-                        ep.host,
-                        runtime_str
+                // Resolve a deploy target on this host + runtime that can launch.
+                let target = deploy_target::targets()
+                    .into_iter()
+                    .find(|t| {
+                        t.host() == ep.host
+                            && t.runtime() == runtime
+                            && t.supports(DeployCapability::Launch)
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no deploy target on host `{}` with runtime `{}` that can launch",
+                            ep.host,
+                            runtime_str
+                        )
+                    })?;
+                let key = deploy_target::target_key(&target.id());
+                let launched =
+                    utils::invocation_scope::targeting("deploy_target", &key, target.launch(&spec))
+                        .await?;
+                Ok(ServiceCreateOutput::Deploy(launched))
+            }
+            ServiceCreateAction::Backup => Ok(ServiceCreateOutput::Backup(BackupOutput {
+                artifact: backend
+                    .backup(
+                        &args.endpoint.instance,
+                        args.endpoint.runtime(),
+                        args.endpoint.method.as_deref(),
                     )
-                })?;
-            Ok(ServiceCreateOutput::Deploy(target.launch(&spec).await?))
+                    .await?,
+            })),
         }
-        ServiceCreateAction::Backup => Ok(ServiceCreateOutput::Backup(BackupOutput {
-            artifact: backend
-                .backup(
-                    &args.endpoint.instance,
-                    args.endpoint.runtime(),
-                    args.endpoint.method.as_deref(),
-                )
-                .await?,
-        })),
-    }
+    })
+    .await
 }
 
 // ── update{action=configure|restore} ─────────────────────────────────
@@ -327,40 +335,44 @@ async fn service_update(
     let action = args.action.ok_or_else(|| {
         anyhow::anyhow!("`action` is required for service.update (configure|restore)")
     })?;
-    let backend = backend_for(&args.endpoint.service)?;
-    match action {
-        ServiceUpdateAction::Configure => {
-            backend
-                .configure(
-                    &args.endpoint.instance,
-                    &args.endpoint.reach()?,
-                    &args.config,
-                )
-                .await?;
+    let target = args.endpoint.service.clone();
+    utils::invocation_scope::targeting("service", &target, async move {
+        let backend = backend_for(&args.endpoint.service)?;
+        match action {
+            ServiceUpdateAction::Configure => {
+                backend
+                    .configure(
+                        &args.endpoint.instance,
+                        &args.endpoint.reach()?,
+                        &args.config,
+                    )
+                    .await?;
+            }
+            ServiceUpdateAction::Restore => {
+                let from = args
+                    .from
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("`from` is required for action=restore"))?;
+                let artifact = BackupArtifact {
+                    service: args.endpoint.service.clone(),
+                    instance: args.endpoint.instance.clone(),
+                    path: from.to_string(),
+                    ..Default::default()
+                };
+                backend
+                    .restore(
+                        &args.endpoint.instance,
+                        args.endpoint.runtime(),
+                        args.endpoint.method.as_deref(),
+                        &artifact,
+                    )
+                    .await?;
+            }
         }
-        ServiceUpdateAction::Restore => {
-            let from = args
-                .from
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("`from` is required for action=restore"))?;
-            let artifact = BackupArtifact {
-                service: args.endpoint.service.clone(),
-                instance: args.endpoint.instance.clone(),
-                path: from.to_string(),
-                ..Default::default()
-            };
-            backend
-                .restore(
-                    &args.endpoint.instance,
-                    args.endpoint.runtime(),
-                    args.endpoint.method.as_deref(),
-                    &artifact,
-                )
-                .await?;
-        }
-    }
-    Ok(OkOutput { ok: true })
+        Ok(OkOutput { ok: true })
+    })
+    .await
 }
 
 // ── detail{view=status} ──────────────────────────────────────────────
@@ -394,10 +406,14 @@ async fn service_detail(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ServiceStatus> {
     let ServiceDetailView::Status = args.view;
-    let backend = backend_for(&args.endpoint.service)?;
-    Ok(backend
-        .status(&args.endpoint.instance, &args.endpoint.reach()?)
-        .await?)
+    let target = args.endpoint.service.clone();
+    utils::invocation_scope::targeting("service", &target, async move {
+        let backend = backend_for(&args.endpoint.service)?;
+        Ok(backend
+            .status(&args.endpoint.instance, &args.endpoint.reach()?)
+            .await?)
+    })
+    .await
 }
 
 // ── health (fleet-wide aggregate) ────────────────────────────────────

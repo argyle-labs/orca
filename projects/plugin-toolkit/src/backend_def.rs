@@ -885,7 +885,7 @@ mod tests {
         // The deploy-target host thunk keeps a `String`/`DeployError` shape, so
         // bridge it to the `Value`-based plugin-side `dispatch_op` (same as the
         // loader does) — no wire change.
-        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String| {
+        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String, _call| {
             let args =
                 sj::from_str(&args_json).map_err(|e| DeployError::Transport(format!("{e}")))?;
             match futures_block(dispatch_op(&MockDeploy, op, args)) {
@@ -1026,7 +1026,7 @@ mod tests {
             "proxmox.__deploy.host-e",
         );
 
-        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String| {
+        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String, _call| {
             let target = MockProxmox {
                 provisioning: sample_proxmox_provisioning(),
             };

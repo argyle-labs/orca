@@ -425,7 +425,11 @@ pub fn resolve(path: &str) -> Option<Arc<dyn WebProvider>> {
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<crate::invocation_scope::BackendCall>,
+        ) -> std::result::Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync
         + 'static,
@@ -485,7 +489,8 @@ impl WebProvider for WebProxy {
         let name = self.name.clone();
         let args = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(RENDER_OP, args))
+            let call = crate::invocation_scope::capture("web", &name);
+            let out = tokio::task::spawn_blocking(move || invoke(RENDER_OP, args, call))
                 .await
                 .map_err(|e| anyhow::anyhow!("web '{name}' render task panicked: {e}"))?
                 .map_err(|e| {
@@ -852,7 +857,7 @@ mod tests {
     #[tokio::test]
     async fn web_proxy_render_success_deserializes_response() {
         let _g = guard();
-        let invoke: InvokeThunk = Arc::new(|op: &str, args: serde_json::Value| {
+        let invoke: InvokeThunk = Arc::new(|op: &str, args: serde_json::Value, _call| {
             assert_eq!(op, RENDER_OP);
             // The request path threads through as JSON.
             assert_eq!(args["path"], "/hello");
@@ -887,7 +892,7 @@ mod tests {
     async fn web_proxy_render_propagates_invoke_error() {
         let _g = guard();
         let invoke: InvokeThunk =
-            Arc::new(|_op, _args| Err(serde_json::json!({"message": "boom"})));
+            Arc::new(|_op, _args, _call| Err(serde_json::json!({"message": "boom"})));
         register_from_def("peacock".to_string(), route("/", true), invoke).unwrap();
 
         let provider = resolve("/").unwrap();
@@ -903,7 +908,7 @@ mod tests {
         let _g = guard();
         // `status` is a required u16 — a string cannot deserialize into WebResponse.
         let invoke: InvokeThunk =
-            Arc::new(|_op, _args| Ok(serde_json::json!({"status": "not-a-number"})));
+            Arc::new(|_op, _args, _call| Ok(serde_json::json!({"status": "not-a-number"})));
         register_from_def("peacock".to_string(), route("/", true), invoke).unwrap();
 
         let provider = resolve("/").unwrap();

@@ -1588,7 +1588,13 @@ pub async fn recover_backends_only<'a>(
             Some(b) => b,
             None => continue,
         };
-        match b.recover_stale(&targets, timeout).await {
+        match utils::invocation_scope::targeting(
+            "storage",
+            &backend_name,
+            b.recover_stale(&targets, timeout),
+        )
+        .await
+        {
             Ok(out) => {
                 merged.recovered.extend(out.recovered);
                 merged.still_stale.extend(out.still_stale);
@@ -1715,7 +1721,7 @@ async fn mount_unmount(provider: &str, target: &str) -> anyhow::Result<MountOutc
     if !b.supports(StorageCapability::Unmount) {
         anyhow::bail!("backend `{provider}` does not support unmount");
     }
-    Ok(b.unmount(target).await?)
+    Ok(utils::invocation_scope::targeting("storage", provider, b.unmount(target)).await?)
 }
 
 // ── mount.update (dispatcher) ────────────────────────────────────────

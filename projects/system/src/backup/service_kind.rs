@@ -77,10 +77,13 @@ impl BackupProvider for ServiceKindProvider {
             let backend = service::backend(instance)
                 .ok_or_else(|| anyhow!("no service backend `{instance}`"))?;
             let (runtime, method) = backup_inputs(instance);
-            let artifact = backend
-                .backup(instance, runtime, method.as_deref())
-                .await
-                .map_err(|e| anyhow!("service backup `{instance}`: {e}"))?;
+            let artifact = utils::invocation_scope::targeting(
+                "service",
+                instance,
+                backend.backup(instance, runtime, method.as_deref()),
+            )
+            .await
+            .map_err(|e| anyhow!("service backup `{instance}`: {e}"))?;
 
             let checksum = (!artifact.checksum.is_empty()).then(|| artifact.checksum.clone());
             let note = Some(format!("service `{instance}` artifact {}", artifact.path));
@@ -104,10 +107,13 @@ impl BackupProvider for ServiceKindProvider {
                 .ok_or_else(|| anyhow!("no service backend `{instance}`"))?;
             let artifact = load_artifact(payload_dir)?;
             let (runtime, method) = backup_inputs(instance);
-            backend
-                .restore(instance, runtime, method.as_deref(), &artifact)
-                .await
-                .map_err(|e| anyhow!("service restore `{instance}`: {e}"))?;
+            utils::invocation_scope::targeting(
+                "service",
+                instance,
+                backend.restore(instance, runtime, method.as_deref(), &artifact),
+            )
+            .await
+            .map_err(|e| anyhow!("service restore `{instance}`: {e}"))?;
             Ok(())
         })
     }

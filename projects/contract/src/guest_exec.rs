@@ -313,7 +313,11 @@ pub struct WriteFileArgs {
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<crate::invocation_scope::BackendCall>,
+        ) -> std::result::Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync
         + 'static,
@@ -394,7 +398,8 @@ impl GuestExecProxy {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(op, args))
+            let call = crate::invocation_scope::capture("guest_exec", &name);
+            let out = tokio::task::spawn_blocking(move || invoke(op, args, call))
                 .await
                 .map_err(|e| anyhow::anyhow!("guest_exec '{name}' {op} task panicked: {e}"))?
                 .map_err(|e| {

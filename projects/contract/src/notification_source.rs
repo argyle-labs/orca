@@ -158,7 +158,11 @@ pub fn deregister_source(name: &str) -> bool {
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<crate::invocation_scope::BackendCall>,
+        ) -> std::result::Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync
         + 'static,
@@ -201,17 +205,19 @@ impl NotificationSource for SourceProxy {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
-            let out = tokio::task::spawn_blocking(move || invoke(POLL_OP, serde_json::json!({})))
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("notification_source '{name}' poll task panicked: {e}")
-                })?
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "notification_source '{name}' poll failed: {}",
-                        crate::render_invoke_error(&e)
-                    )
-                })?;
+            let call = crate::invocation_scope::capture("notification_source", &name);
+            let out =
+                tokio::task::spawn_blocking(move || invoke(POLL_OP, serde_json::json!({}), call))
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("notification_source '{name}' poll task panicked: {e}")
+                    })?
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "notification_source '{name}' poll failed: {}",
+                            crate::render_invoke_error(&e)
+                        )
+                    })?;
             serde_json::from_value(out).map_err(|e| {
                 anyhow::anyhow!("notification_source '{name}' poll returned invalid JSON: {e}")
             })
@@ -223,7 +229,8 @@ impl NotificationSource for SourceProxy {
         let name = self.name.clone();
         let args = serde_json::json!({ "sourceRef": source_ref });
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || invoke(DISMISS_OP, args))
+            let call = crate::invocation_scope::capture("notification_source", &name);
+            tokio::task::spawn_blocking(move || invoke(DISMISS_OP, args, call))
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!("notification_source '{name}' dismiss task panicked: {e}")

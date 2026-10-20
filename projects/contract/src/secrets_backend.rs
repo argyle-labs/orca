@@ -91,7 +91,11 @@ pub async fn resolve(backend_kind: &str, ref_path: &str) -> Result<String> {
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> std::result::Result<serde_json::Value, serde_json::Value>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<crate::invocation_scope::BackendCall>,
+        ) -> std::result::Result<serde_json::Value, serde_json::Value>
         + Send
         + Sync
         + 'static,
@@ -162,7 +166,8 @@ impl SecretsBackend for SecretsBackendProxy {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         let args = serde_json::json!({ "ref_path": ref_path });
-        let out = tokio::task::spawn_blocking(move || invoke(RESOLVE_OP, args))
+        let call = crate::invocation_scope::capture("secrets_backend", &name);
+        let out = tokio::task::spawn_blocking(move || invoke(RESOLVE_OP, args, call))
             .await
             .map_err(|e| anyhow::anyhow!("secrets_backend '{name}' invoke task panicked: {e}"))?
             .map_err(|e| {

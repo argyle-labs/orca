@@ -608,8 +608,16 @@ pub fn deregister_backend(name: &str) -> bool {
 /// so this crate stays free of any dependency on the ABI/loader crates (no
 /// cycle): the loader owns the FFI types, this crate owns the domain shape.
 /// Mirrors `storage::InvokeThunk`.
-pub type InvokeThunk =
-    Arc<dyn Fn(&str, String) -> Result<String, BackendError> + Send + Sync + 'static>;
+pub type InvokeThunk = Arc<
+    dyn Fn(
+            &str,
+            String,
+            Option<utils::invocation_scope::BackendCall>,
+        ) -> Result<String, BackendError>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Build and register a [`Backend`] from a plugin's backend descriptor plus an
 /// [`InvokeThunk`]. The loader calls this from its domain dispatch table for
@@ -641,7 +649,8 @@ impl Backend for NotifyProxy {
         let args_json = serde_json::to_string(event)
             .map_err(|e| BackendError::Transport(format!("encode `emit` args: {e}")))?;
         let invoke = self.invoke.clone();
-        let out = tokio::task::spawn_blocking(move || invoke("emit", args_json))
+        let call = utils::invocation_scope::capture("notifications", &self.name);
+        let out = tokio::task::spawn_blocking(move || invoke("emit", args_json, call))
             .await
             .map_err(|e| BackendError::Transport(format!("`emit` proxy task failed: {e}")))??;
         serde_json::from_str(&out)

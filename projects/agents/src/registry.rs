@@ -178,7 +178,13 @@ pub fn deregister_provider(name: &str) -> bool {
 /// loader's `BackendInvoke` and the `cluster_roster`/`topology` thunks, so it
 /// passes through unwrapped.
 pub type InvokeThunk = Arc<
-    dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, serde_json::Value> + Send + Sync,
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<contract::invocation_scope::BackendCall>,
+        ) -> Result<serde_json::Value, serde_json::Value>
+        + Send
+        + Sync,
 >;
 
 /// An [`AgentProvider`] backed by a plugin across the FFI boundary. Each
@@ -193,7 +199,7 @@ struct FfiAgentProvider {
 
 impl FfiAgentProvider {
     fn fetch<T: for<'de> Deserialize<'de> + Originated>(&self, op: &str) -> Vec<T> {
-        match (self.invoke)(op, serde_json::json!({})) {
+        match (self.invoke)(op, serde_json::json!({}), None) {
             Ok(value) => stamp_origin(
                 serde_json::from_value(value).unwrap_or_default(),
                 &self.name,
@@ -456,7 +462,7 @@ mod tests {
 
     #[test]
     fn ffi_provider_parses_invoke_json_and_composes() {
-        let invoke: InvokeThunk = Arc::new(|op: &str, _args: serde_json::Value| match op {
+        let invoke: InvokeThunk = Arc::new(|op: &str, _args: serde_json::Value, _call| match op {
             "agents" => Ok(serde_json::json!([{
                 "name": "ffi-owl-xyz",
                 "body": "---\nname: ffi-owl-xyz\n---\nb",
@@ -476,7 +482,7 @@ mod tests {
     #[test]
     fn ffi_provider_transport_error_composes_to_nothing() {
         let invoke: InvokeThunk =
-            Arc::new(|_op: &str, _args: serde_json::Value| Err(serde_json::json!("boom")));
+            Arc::new(|_op: &str, _args: serde_json::Value, _call| Err(serde_json::json!("boom")));
         register_from_def("broken-xyz".to_string(), invoke);
         assert!(compose_agents().iter().all(|a| a.origin != "broken-xyz"));
         deregister_provider("broken-xyz");
@@ -627,7 +633,7 @@ mod tests {
 
     #[test]
     fn ffi_provider_fetches_every_op_kind() {
-        let invoke: InvokeThunk = Arc::new(|op: &str, _args: serde_json::Value| match op {
+        let invoke: InvokeThunk = Arc::new(|op: &str, _args: serde_json::Value, _call| match op {
             "agents" => Ok(serde_json::json!([{"name":"fa","body":"b","origin":"fo"}])),
             "hooks" => Ok(serde_json::json!([{
                 "event":"Stop","command":"c","origin":"fo"
@@ -662,7 +668,7 @@ mod tests {
     #[test]
     fn ffi_provider_undecodable_payload_yields_empty() {
         // A well-formed transport reply that isn't the expected array shape.
-        let invoke: InvokeThunk = Arc::new(|_op: &str, _args: serde_json::Value| {
+        let invoke: InvokeThunk = Arc::new(|_op: &str, _args: serde_json::Value, _call| {
             Ok(serde_json::json!({"not":"an array"}))
         });
         register_from_def("ffi-baddecode-xyz".to_string(), invoke);

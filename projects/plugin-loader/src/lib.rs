@@ -138,8 +138,15 @@ pub type DomainDeregister = fn(&str);
 /// already produces a parsed value, so args and results pass as `Value` with no
 /// String hop. `Send + Sync + 'static` so domain proxies can offload it onto a
 /// blocking pool.
-pub type BackendInvoke =
-    Arc<dyn Fn(&str, sj::Value) -> std::result::Result<sj::Value, sj::Value> + Send + Sync>;
+pub type BackendInvoke = Arc<
+    dyn Fn(
+            &str,
+            sj::Value,
+            Option<contract::invocation_scope::BackendCall>,
+        ) -> std::result::Result<sj::Value, sj::Value>
+        + Send
+        + Sync,
+>;
 
 /// Domains contributed at runtime by crates downstream of the loader (which the
 /// hardcoded [`domain_register`] match cannot name without a cycle). The backup
@@ -227,10 +234,10 @@ fn register_subprocess_env_backend(def: &BackendDef, invoke: BackendInvoke) -> R
 /// as the storage/service domains (no wire change; the wire still carries `Value`).
 fn register_replication_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     use plugin_toolkit::storage::{self, StorageError, replication_status};
-    let thunk: storage::InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+    let thunk: storage::InvokeThunk = Arc::new(move |op: &str, args_json: String, call| {
         let args = sj::from_str(&args_json)
             .map_err(|e| StorageError::Transport(format!("encode args for '{op}': {e}")))?;
-        match invoke(op, args) {
+        match invoke(op, args, call) {
             Ok(v) => sj::to_string(&v)
                 .map_err(|e| StorageError::Transport(format!("decode result for '{op}': {e}"))),
             Err(v) => Err(StorageError::Transport(contract::render_invoke_error(&v))),
@@ -395,10 +402,10 @@ fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
     // This domain keeps a `String`-payload thunk with a typed `StorageError`, so
     // bridge it to the loader's `Value` [`BackendInvoke`]: parse args in, render
     // result/error out. (No wire change — the wire still carries `Value`.)
-    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String, call| {
         let args = sj::from_str(&args_json)
             .map_err(|e| StorageError::Transport(format!("encode args for '{op}': {e}")))?;
-        match invoke(op, args) {
+        match invoke(op, args, call) {
             Ok(v) => sj::to_string(&v)
                 .map_err(|e| StorageError::Transport(format!("decode result for '{op}': {e}"))),
             Err(v) => Err(StorageError::Transport(contract::render_invoke_error(&v))),
@@ -424,10 +431,10 @@ fn register_storage_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
 /// same shape as the storage/replication domains — no wire change.
 fn register_media_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     use plugin_toolkit::media::{self, InvokeThunk, MediaError};
-    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String, call| {
         let args = sj::from_str(&args_json)
             .map_err(|e| MediaError::Transport(format!("encode args for '{op}': {e}")))?;
-        match invoke(op, args) {
+        match invoke(op, args, call) {
             Ok(v) => sj::to_string(&v)
                 .map_err(|e| MediaError::Transport(format!("decode result for '{op}': {e}"))),
             Err(v) => Err(MediaError::Transport(contract::render_invoke_error(&v))),
@@ -450,10 +457,10 @@ fn register_media_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()>
 /// [`InvokeThunk`], same as [`register_storage_backend`].
 fn register_guest_mount_applier(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     use plugin_toolkit::storage::{self, InvokeThunk, StorageError};
-    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String, call| {
         let args = sj::from_str(&args_json)
             .map_err(|e| StorageError::Transport(format!("encode args for '{op}': {e}")))?;
-        match invoke(op, args) {
+        match invoke(op, args, call) {
             Ok(v) => sj::to_string(&v)
                 .map_err(|e| StorageError::Transport(format!("decode result for '{op}': {e}"))),
             Err(v) => Err(StorageError::Transport(contract::render_invoke_error(&v))),
@@ -473,10 +480,10 @@ fn register_service_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
     use plugin_toolkit::service::{self, InvokeThunk, ServiceError};
     // Bridge the domain's `String`/`ServiceError` thunk to the loader's `Value`
     // [`BackendInvoke`] (no wire change — the wire still carries `Value`).
-    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String, call| {
         let args = sj::from_str(&args_json)
             .map_err(|e| ServiceError::Transport(format!("encode args for '{op}': {e}")))?;
-        match invoke(op, args) {
+        match invoke(op, args, call) {
             Ok(v) => sj::to_string(&v)
                 .map_err(|e| ServiceError::Transport(format!("decode result for '{op}': {e}"))),
             Err(v) => Err(ServiceError::Transport(contract::render_invoke_error(&v))),
@@ -508,10 +515,10 @@ fn register_deploy_target_backend(def: &BackendDef, invoke: BackendInvoke) -> Re
     use plugin_toolkit::deploy_target::{self, DeployError, InvokeThunk};
     // Bridge the domain's `String`/`DeployError` thunk to the loader's `Value`
     // [`BackendInvoke`] (no wire change — the wire still carries `Value`).
-    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String, call| {
         let args = sj::from_str(&args_json)
             .map_err(|e| DeployError::Transport(format!("encode args for '{op}': {e}")))?;
-        match invoke(op, args) {
+        match invoke(op, args, call) {
             Ok(v) => sj::to_string(&v)
                 .map_err(|e| DeployError::Transport(format!("decode result for '{op}': {e}"))),
             Err(v) => Err(DeployError::Transport(contract::render_invoke_error(&v))),
@@ -539,10 +546,10 @@ fn register_notify_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()
     use plugin_toolkit::notify::{self, BackendError, InvokeThunk};
     // Bridge the domain's `String`/`BackendError` thunk to the loader's `Value`
     // [`BackendInvoke`] (no wire change — the wire still carries `Value`).
-    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String| {
+    let thunk: InvokeThunk = Arc::new(move |op: &str, args_json: String, call| {
         let args = sj::from_str(&args_json)
             .map_err(|e| BackendError::Transport(format!("encode args for '{op}': {e}")))?;
-        match invoke(op, args) {
+        match invoke(op, args, call) {
             Ok(v) => sj::to_string(&v)
                 .map_err(|e| BackendError::Transport(format!("decode result for '{op}': {e}"))),
             Err(v) => Err(BackendError::Transport(contract::render_invoke_error(&v))),
@@ -771,13 +778,12 @@ fn release_backend_claim(software: &str, domain: &str, name: &str) {
 /// subprocess socket the plugin's tools use.
 fn make_backend_invoke(
     backing: Backing,
-    backend: String,
     invoke_prefix: String,
     reaches: Vec<String>,
 ) -> BackendInvoke {
-    Arc::new(move |op: &str, args: sj::Value| {
+    Arc::new(move |op: &str, args: sj::Value, call| {
         let tool = format!("{invoke_prefix}.{op}");
-        let inv = backend_invocation(&backend, &reaches);
+        let inv = backend_invocation(call.as_ref(), &reaches);
         // Domain registries call this thunk directly, often from async code, so
         // this layer keeps it off the async worker itself.
         utils::reactor::off_async_worker(|| backing.invoke(&tool, args, inv))
@@ -785,17 +791,17 @@ fn make_backend_invoke(
     })
 }
 
-fn backend_invocation(backend: &str, reaches: &[String]) -> Option<spec::surfaces::Invocation> {
-    let Some(verb) = contract::invocation_scope::current_core_verb() else {
-        return contract::invocation_scope::in_daemon_task()
-            .then(spec::surfaces::Invocation::system);
-    };
-    let inv = spec::surfaces::Invocation::from_core_verb(&verb);
-    Some(if verb.targets(backend) {
-        inv.with_reaches(reaches)
-    } else {
-        inv.unconfirmed()
-    })
+fn backend_invocation(
+    call: Option<&contract::invocation_scope::BackendCall>,
+    reaches: &[String],
+) -> Option<spec::surfaces::Invocation> {
+    use contract::invocation_scope::BackendCall;
+    match call? {
+        BackendCall::Verb { verb, targeted } => Some(spec::surfaces::Invocation::for_backend(
+            verb, *targeted, reaches,
+        )),
+        BackendCall::Daemon => Some(spec::surfaces::Invocation::system()),
+    }
 }
 
 /// Register every backend a plugin declares into its domain registry, routing
@@ -814,7 +820,6 @@ fn register_backends(
     register_backends_with(software, defs, |def| {
         make_backend_invoke(
             backing.clone(),
-            format!("{software}/{}/{}", def.domain, def.name),
             def.invoke_prefix.clone(),
             def.reaches.clone(),
         )
@@ -1745,85 +1750,114 @@ mod surface_tests {
     #[cfg(unix)]
     #[test]
     fn backend_api_call_runs_under_the_core_verb_invocation() {
+        use contract::invocation_scope::{
+            CoreVerb, VerbCaller, capture, sync_core_verb, sync_targeting,
+        };
         let surface = openapi::surface::ApiSurface::parse(
             &sj::json!({
                 "format": openapi::surface::FORMAT,
                 "surface": "main",
                 "kind": "openapi",
-                "ops": [{
-                    "tool": "bkv.make",
-                    "method": "POST",
-                    "path": "/x",
-                    "policy": {"role": "admin"},
-                    "internal": true
-                }]
+                "ops": [
+                    {
+                        "tool": "bkv.make",
+                        "method": "POST",
+                        "path": "/x",
+                        "policy": {"role": "admin"},
+                        "internal": true
+                    },
+                    {
+                        "tool": "bkv.peek",
+                        "method": "GET",
+                        "path": "/x",
+                        "policy": {"role": "read"},
+                        "internal": true
+                    },
+                    {
+                        "tool": "bkv.admin_peek",
+                        "method": "GET",
+                        "path": "/y",
+                        "policy": {"role": "admin"},
+                        "internal": true
+                    }
+                ]
             })
             .to_string(),
         )
         .unwrap();
         spec::surfaces::register("bkv", surface).unwrap();
-        let mut ctx = ToolCtx::new(Arc::new(contract::config::Config::load().unwrap()));
-        ctx.set_verified_caller(Some(contract::CallerIdentity {
-            user_id: "u-ann".into(),
-            username: "ann".into(),
-            role: "admin".into(),
-            can_mutate: true,
-        }));
-        let caller = ctx.verified_caller().unwrap().clone();
-        let verb = |gated: bool, role: &'static str| {
-            contract::invocation_scope::CoreVerb::new(
-                caller.clone(),
-                role,
-                gated,
-                false,
-                false,
-                false,
-            )
+        let verb = |gated: bool, role: &'static str| CoreVerb {
+            caller: VerbCaller {
+                user_id: "u-ann".into(),
+                username: "ann".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            },
+            role,
+            execute_gated: gated,
+            dry_run: false,
+            local: false,
+            second_factor: false,
         };
-        let call = || sj::json!({"op": "bkv.make", "endpoint": "main", "args": {"unexpected": 1}});
         let reaches = vec!["bkv.make".to_string()];
-        let target = "bkv/unit/a";
-        let run = |v: contract::invocation_scope::CoreVerb, backend: &str, reaches: &[String]| {
-            contract::invocation_scope::sync_core_verb(v, || {
-                capability::handle_api_call(
-                    call(),
-                    "bkv",
-                    backend_invocation(backend, reaches).as_ref(),
-                )
-                .unwrap_err()
-            })
+        let api = |op: &str,
+                   call: Option<contract::invocation_scope::BackendCall>,
+                   reaches: &[String]| {
+            let payload = sj::json!({"op": op, "endpoint": "main", "args": {"unexpected": 1}});
+            capability::handle_api_call(
+                payload,
+                "bkv",
+                backend_invocation(call.as_ref(), reaches).as_ref(),
+            )
+            .unwrap_err()
+        };
+        let targeted = |v: CoreVerb| {
+            sync_core_verb(v, || sync_targeting("unit", "b", || capture("unit", "b")))
         };
         let forbidden = |e: &anyhow::Error| e.downcast_ref::<spec::surfaces::Forbidden>().is_some();
+        let passed =
+            |e: &anyhow::Error| !forbidden(e) && format!("{e:#}").contains("invalid arguments");
 
-        let allowed = run(verb(true, "admin"), target, &reaches);
-        assert!(!forbidden(&allowed), "{allowed:#}");
-        assert!(
-            format!("{allowed:#}").contains("invalid arguments"),
-            "{allowed:#}"
-        );
+        let allowed = api("bkv.make", targeted(verb(true, "admin")), &reaches);
+        assert!(passed(&allowed), "{allowed:#}");
+        assert!(forbidden(&api(
+            "bkv.make",
+            targeted(verb(true, "admin")),
+            &[]
+        )));
+        assert!(forbidden(&api(
+            "bkv.make",
+            targeted(verb(false, "admin")),
+            &reaches
+        )));
+        assert!(forbidden(&api(
+            "bkv.make",
+            targeted(verb(true, "user")),
+            &reaches
+        )));
 
-        let undeclared = run(verb(true, "admin"), target, &[]);
-        assert!(forbidden(&undeclared), "{undeclared:#}");
-
-        let unconfirmed = run(verb(false, "admin"), target, &reaches);
-        assert!(forbidden(&unconfirmed), "{unconfirmed:#}");
-
-        let low_floor = run(verb(true, "user"), target, &reaches);
-        assert!(forbidden(&low_floor), "{low_floor:#}");
-
-        let fan_out = verb(true, "admin");
-        let other = contract::invocation_scope::sync_core_verb(fan_out, || {
-            let first = backend_invocation(target, &reaches);
-            let second = backend_invocation("bkv/unit/b", &reaches);
-            assert!(first.is_some());
-            capability::handle_api_call(call(), "bkv", second.as_ref()).unwrap_err()
+        let (read_a, write_b) = sync_core_verb(verb(true, "admin"), || {
+            sync_targeting("unit", "b", || (capture("unit", "a"), capture("unit", "b")))
         });
-        assert!(forbidden(&other), "{other:#}");
+        assert!(!read_a.as_ref().unwrap().targeted());
+        assert!(passed(&api("bkv.peek", read_a.clone(), &reaches)));
+        assert!(forbidden(&api("bkv.make", read_a, &reaches)));
+        assert!(passed(&api("bkv.make", write_b, &reaches)));
 
-        assert!(backend_invocation(target, &reaches).is_none());
-        let daemon =
-            contract::invocation_scope::sync_daemon_task(|| backend_invocation(target, &reaches));
-        assert!(daemon.unwrap().is_system());
+        let fan_out = sync_core_verb(verb(true, "admin"), || capture("unit", "c"));
+        assert!(forbidden(&api("bkv.make", fan_out, &reaches)));
+
+        let any_verb = || sync_core_verb(verb(false, "any"), || capture("unit", "a"));
+        assert!(passed(&api("bkv.peek", any_verb(), &reaches)));
+        assert!(forbidden(&api("bkv.admin_peek", any_verb(), &reaches)));
+
+        assert!(backend_invocation(None, &reaches).is_none());
+        let daemon = contract::invocation_scope::sync_daemon_task(|| capture("unit", "a"));
+        assert!(
+            backend_invocation(daemon.as_ref(), &reaches)
+                .unwrap()
+                .is_system()
+        );
         spec::surfaces::deregister("bkv");
     }
 
@@ -1927,7 +1961,8 @@ mod extra_domain_tests {
 
         // domain_register now resolves the injected constructor.
         let ctor = domain_register(domain).expect("injected domain resolves");
-        let invoke: BackendInvoke = Arc::new(|_op: &str, _args: sj::Value| Ok(sj::json!({})));
+        let invoke: BackendInvoke =
+            Arc::new(|_op: &str, _args: sj::Value, _call| Ok(sj::json!({})));
         let def = BackendDef {
             domain: domain.to_string(),
             ..Default::default()
@@ -1949,7 +1984,7 @@ mod loader_tests {
     /// to drive backend registration (which only *constructs* the thunk — it runs
     /// lazily on invoke).
     fn noop_invoke() -> BackendInvoke {
-        Arc::new(|_op: &str, _args: sj::Value| Ok(sj::json!({})))
+        Arc::new(|_op: &str, _args: sj::Value, _call| Ok(sj::json!({})))
     }
 
     const BUILTIN_DOMAINS: &[&str] = BUILTIN_BACKEND_DOMAINS;
@@ -2373,7 +2408,7 @@ mod loader_tests {
         let name = "loader-notify-ok";
         let invoke: BackendInvoke = {
             let n = name.to_string();
-            Arc::new(move |op: &str, _args: sj::Value| {
+            Arc::new(move |op: &str, _args: sj::Value, _call| {
                 assert_eq!(op, "emit", "notify backend proxies the emit op");
                 Ok(sj::json!({ "backend": n, "id": "msg-42" }))
             })
@@ -2405,8 +2440,9 @@ mod loader_tests {
     async fn notify_backend_thunk_surfaces_error() {
         use plugin_toolkit::notify::{self, Event, EventClass, Severity};
         let name = "loader-notify-err";
-        let invoke: BackendInvoke =
-            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("emit-exploded".into())));
+        let invoke: BackendInvoke = Arc::new(|_op: &str, _args: sj::Value, _call| {
+            Err(sj::Value::String("emit-exploded".into()))
+        });
         let def = BackendDef {
             domain: "notifications".to_string(),
             name: name.to_string(),
@@ -2434,7 +2470,7 @@ mod loader_tests {
     async fn storage_backend_thunk_routes_success() {
         use plugin_toolkit::storage;
         let name = "loader-storage-ok";
-        let invoke: BackendInvoke = Arc::new(|op: &str, _args: sj::Value| {
+        let invoke: BackendInvoke = Arc::new(|op: &str, _args: sj::Value, _call| {
             assert_eq!(op, "list_shares");
             // list_shares decodes into Vec<Share>; an empty list is valid.
             Ok(sj::json!([]))
@@ -2465,8 +2501,9 @@ mod loader_tests {
     async fn storage_backend_thunk_surfaces_error() {
         use plugin_toolkit::storage;
         let name = "loader-storage-err";
-        let invoke: BackendInvoke =
-            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("disk-gone".into())));
+        let invoke: BackendInvoke = Arc::new(|_op: &str, _args: sj::Value, _call| {
+            Err(sj::Value::String("disk-gone".into()))
+        });
         let def = BackendDef {
             domain: "storage".to_string(),
             name: name.to_string(),
@@ -2494,7 +2531,7 @@ mod loader_tests {
     #[tokio::test]
     async fn secrets_backend_resolves_through_loader_entry() {
         let kind = "loader-secrets-ok";
-        let invoke: BackendInvoke = Arc::new(|op: &str, args: sj::Value| {
+        let invoke: BackendInvoke = Arc::new(|op: &str, args: sj::Value, _call| {
             assert_eq!(op, "resolve");
             assert_eq!(args["ref_path"], sj::json!("op://vault/item"));
             Ok(sj::json!("resolved-secret"))
@@ -2523,8 +2560,9 @@ mod loader_tests {
     #[tokio::test]
     async fn secrets_backend_surfaces_invoke_error() {
         let kind = "loader-secrets-err";
-        let invoke: BackendInvoke =
-            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("vault-locked".into())));
+        let invoke: BackendInvoke = Arc::new(|_op: &str, _args: sj::Value, _call| {
+            Err(sj::Value::String("vault-locked".into()))
+        });
         let def = BackendDef {
             domain: "secrets_backend".to_string(),
             name: kind.to_string(),
@@ -2553,7 +2591,7 @@ mod loader_tests {
         use plugin_toolkit::service::Routes;
         use plugin_toolkit::service::{self};
         let name = "loader-service-ok";
-        let invoke: BackendInvoke = Arc::new(|op: &str, _args: sj::Value| {
+        let invoke: BackendInvoke = Arc::new(|op: &str, _args: sj::Value, _call| {
             assert_eq!(op, "status");
             Ok(sj::json!({ "healthy": true, "detail": "all-green" }))
         });
@@ -2591,8 +2629,9 @@ mod loader_tests {
         use plugin_toolkit::service::Routes;
         use plugin_toolkit::service::{self};
         let name = "loader-service-err";
-        let invoke: BackendInvoke =
-            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("svc-down".into())));
+        let invoke: BackendInvoke = Arc::new(|_op: &str, _args: sj::Value, _call| {
+            Err(sj::Value::String("svc-down".into()))
+        });
         let def = BackendDef {
             domain: "service".to_string(),
             name: name.to_string(),
@@ -2644,7 +2683,7 @@ mod loader_tests {
     async fn deploy_target_backend_thunk_routes_success() {
         use plugin_toolkit::deploy_target::{self, Runtime, TargetId, TargetKind};
         let host = "loader-deploy-ok";
-        let invoke: BackendInvoke = Arc::new(|op: &str, args: sj::Value| {
+        let invoke: BackendInvoke = Arc::new(|op: &str, args: sj::Value, _call| {
             assert_eq!(op, "stop");
             assert_eq!(args["workload"], sj::json!("ct-100"));
             Ok(sj::json!({ "workload": "ct-100", "state": "stopped" }))
@@ -2685,8 +2724,9 @@ mod loader_tests {
     async fn deploy_target_backend_thunk_surfaces_error() {
         use plugin_toolkit::deploy_target::{self, Runtime, TargetId, TargetKind};
         let host = "loader-deploy-err";
-        let invoke: BackendInvoke =
-            Arc::new(|_op: &str, _args: sj::Value| Err(sj::Value::String("node-offline".into())));
+        let invoke: BackendInvoke = Arc::new(|_op: &str, _args: sj::Value, _call| {
+            Err(sj::Value::String("node-offline".into()))
+        });
         let def = BackendDef {
             domain: "deploy_target".to_string(),
             name: host.to_string(),
