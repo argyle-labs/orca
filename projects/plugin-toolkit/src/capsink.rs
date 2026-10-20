@@ -58,13 +58,17 @@ pub(crate) fn set_core_privileged(caps: &[String]) {
     });
 }
 
+pub fn core_advertises(cap: &str) -> bool {
+    CORE_PRIVILEGED.with(|c| c.borrow().iter().any(|c| c == cap))
+}
+
 /// Run a privileged capability through core when core advertises `cap` and a
 /// sink is installed; `None` means the caller must take its direct path.
 pub(crate) fn privileged_route(
     cap: &str,
     op_json: &str,
 ) -> Option<Result<crate::abi::HelperOutput>> {
-    if !CORE_PRIVILEGED.with(|c| c.borrow().iter().any(|c| c == cap)) {
+    if !core_advertises(cap) {
         return None;
     }
     cap_route(cap, op_json).map(|reply| Ok(serde_json::from_str(&reply?)?))
@@ -313,6 +317,16 @@ mod tests {
         let out = with_cap_sink(sink(), || privileged_route(crate::abi::LXC_EXEC, "{}"));
         set_core_privileged(&[]);
         assert_eq!(out.unwrap().unwrap().code, Some(0));
+    }
+
+    #[test]
+    fn core_advertises_reflects_welcome_caps() {
+        set_core_privileged(&[]);
+        assert!(!core_advertises(crate::abi::LXC_PUSH));
+        set_core_privileged(&[crate::abi::LXC_PUSH.to_string()]);
+        assert!(core_advertises(crate::abi::LXC_PUSH));
+        assert!(!core_advertises(crate::abi::LXC_EXEC));
+        set_core_privileged(&[]);
     }
 
     #[test]
