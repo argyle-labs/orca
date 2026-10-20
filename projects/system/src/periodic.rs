@@ -41,7 +41,7 @@ pub struct PeriodicSpec {
 /// exits. Callers should drop the handle to "leak it" — that's the
 /// daemon-task convention.
 pub fn spawn(spec: PeriodicSpec, tick: TickFn) -> JoinHandle<()> {
-    tokio::spawn(async move {
+    tokio::spawn(contract::invocation_scope::daemon_task(async move {
         let shutdown = shutdown_token();
         if !spec.initial_delay.is_zero() {
             tokio::select! {
@@ -56,7 +56,7 @@ pub fn spawn(spec: PeriodicSpec, tick: TickFn) -> JoinHandle<()> {
                 _ = shutdown.cancelled() => return,
             }
         }
-    })
+    }))
 }
 
 async fn run_one(name: &'static str, tick: &TickFn) {
@@ -119,4 +119,31 @@ where
     Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
 {
     Box::new(move || Box::pin(f()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ticks_run_as_daemon_tasks() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn(
+            PeriodicSpec {
+                name: "daemon-scope-test",
+                initial_delay: Duration::ZERO,
+                interval: Duration::from_secs(3600),
+            },
+            boxed(move || {
+                let tx = tx.clone();
+                async move {
+                    tx.send(contract::invocation_scope::in_daemon_task()).ok();
+                    Ok(())
+                }
+            }),
+        );
+        assert_eq!(rx.recv().await, Some(true));
+        assert!(!contract::invocation_scope::in_daemon_task());
+        handle.abort();
+    }
 }
