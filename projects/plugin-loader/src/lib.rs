@@ -785,8 +785,6 @@ fn make_backend_invoke(
 }
 
 tokio::task_local! {
-    // The invocation of the core verb currently being dispatched; a backend op
-    // run outside such a dispatch (or off its task) carries no caller.
     static CORE_VERB: spec::surfaces::Invocation;
 }
 
