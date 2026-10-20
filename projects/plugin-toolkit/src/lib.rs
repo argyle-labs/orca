@@ -78,6 +78,7 @@ pub mod io;
 pub mod lifecycle;
 pub mod logging;
 pub mod lxc_exec;
+pub mod lxc_push;
 /// Unified multi-facet plugin entrypoint — the [`plugin::Plugin`] builder. One
 /// binary advertises any mix of domain backends (service + media, storage +
 /// topology, …), replacing the one-domain-per-macro constraint of the
