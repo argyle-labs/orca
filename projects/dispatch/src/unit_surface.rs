@@ -1119,6 +1119,7 @@ mod tests {
     #[tokio::test]
     async fn unit_update_and_create_carry_the_verified_caller_never_the_host_operator() {
         let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        crate::init().unwrap();
         let (name, kind) = setup("caller");
         let who = |n: &str| contract::CallerIdentity {
             user_id: format!("u_{n}"),
@@ -1700,6 +1701,7 @@ mod tests {
     #[tokio::test]
     async fn the_gate_checks_the_verified_caller_over_the_ambient_operator() {
         let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        crate::init().unwrap();
         let kind = "own_gate";
         owner("unraid-g", "tower", kind, &[("abc", "plex")]);
         let who = |n: &str, role: &str| contract::CallerIdentity {

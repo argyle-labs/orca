@@ -79,6 +79,9 @@ pub mod git;
 #[cfg(feature = "http")]
 pub mod http;
 pub mod invocation_scope;
+
+#[cfg(all(feature = "test-scope", not(debug_assertions)))]
+compile_error!("orca-utils `test-scope` is test-only and must not reach an optimized build");
 /// X.509 + key generation. Gated by the `pki` feature.
 #[cfg(feature = "pki")]
 pub mod pki;

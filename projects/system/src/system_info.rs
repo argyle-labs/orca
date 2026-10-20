@@ -141,11 +141,14 @@ pub fn current_or_collect() -> Arc<SystemInfoReport> {
 /// Keeps a single `sysinfo::System` alive between ticks so CPU usage is
 /// measured as a delta between refreshes rather than always returning 0 %.
 pub fn spawn_refresher() {
+    let Some(key) = crate::periodic::daemon_key() else {
+        return;
+    };
     static SPAWNED: OnceLock<()> = OnceLock::new();
     if SPAWNED.set(()).is_err() {
         return;
     }
-    tokio::spawn(crate::periodic::daemon_key().scope(async move {
+    tokio::spawn(key.scope(async move {
         let mut sys = System::new_with_specifics(
             RefreshKind::new()
                 .with_memory(sysinfo::MemoryRefreshKind::everything())

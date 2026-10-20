@@ -121,6 +121,8 @@ gate() {
   local selection="$1" scope=() crates=()
   echo "==> rustfmt"
   cargo fmt --all -- --check
+  echo "==> test-scope guard"
+  ./scripts/check-no-test-scope.sh
 
   case "$(printf '%s\n' "$selection" | head -1)" in
     workspace*)

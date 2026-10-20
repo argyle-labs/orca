@@ -37,20 +37,35 @@ pub struct PeriodicSpec {
     pub interval: Duration,
 }
 
-pub(crate) fn daemon_key() -> &'static contract::invocation_scope::DaemonKey {
-    static KEY: std::sync::LazyLock<contract::invocation_scope::DaemonKey> =
-        std::sync::LazyLock::new(|| {
-            contract::invocation_scope::DaemonKey::claim()
-                .expect("daemon key is claimed only by orca-system")
-        });
-    &KEY
+static DAEMON_KEY: std::sync::OnceLock<contract::invocation_scope::DaemonKey> =
+    std::sync::OnceLock::new();
+
+pub fn init() -> Result<(), contract::invocation_scope::KeyStolen> {
+    if DAEMON_KEY.get().is_some() {
+        return Ok(());
+    }
+    let key = contract::invocation_scope::DaemonKey::claim()
+        .ok_or(contract::invocation_scope::KeyStolen("daemon"))?;
+    drop(DAEMON_KEY.set(key));
+    Ok(())
+}
+
+pub(crate) fn daemon_key() -> Option<&'static contract::invocation_scope::DaemonKey> {
+    let key = DAEMON_KEY.get();
+    if key.is_none() {
+        tracing::error!("daemon key not initialized; refusing to start daemon task");
+    }
+    key
 }
 
 /// Spawn the loop. Returns immediately; the task runs until the process
 /// exits. Callers should drop the handle to "leak it" — that's the
 /// daemon-task convention.
 pub fn spawn(spec: PeriodicSpec, tick: TickFn) -> JoinHandle<()> {
-    tokio::spawn(crate::periodic::daemon_key().scope(async move {
+    let Some(key) = daemon_key() else {
+        return tokio::spawn(async {});
+    };
+    tokio::spawn(key.scope(async move {
         let shutdown = shutdown_token();
         if !spec.initial_delay.is_zero() {
             tokio::select! {
@@ -136,6 +151,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn ticks_run_as_daemon_tasks() {
+        init().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let handle = spawn(
             PeriodicSpec {
