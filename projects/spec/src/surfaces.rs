@@ -116,6 +116,19 @@ impl Invocation {
         self.second_factor &= outer_role == "super-admin";
         self
     }
+
+    pub fn for_core_verb(mut self, execute_gated: bool, role: &str, args: &Value) -> Self {
+        self.dry_run |= args.get(contract::plan::DRY_RUN_FIELD) == Some(&Value::Bool(true));
+        self.execute_confirmed = execute_gated && !self.dry_run;
+        self.second_factor &= role == "super-admin";
+        self.reaches = Vec::new();
+        self
+    }
+
+    pub fn with_reaches(mut self, reaches: &[String]) -> Self {
+        self.reaches = reaches.to_vec();
+        self
+    }
 }
 
 pub fn register(plugin: &str, surface: ApiSurface) -> Result<()> {

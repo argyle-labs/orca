@@ -769,15 +769,44 @@ fn release_backend_claim(software: &str, domain: &str, name: &str) {
 /// (cheap to clone — an `Arc` process handle) and its `invoke_prefix`, so each
 /// proxied `op` becomes a `"{prefix}.{op}"` call routed through the same
 /// subprocess socket the plugin's tools use.
-fn make_backend_invoke(backing: Backing, invoke_prefix: String) -> BackendInvoke {
+fn make_backend_invoke(
+    backing: Backing,
+    invoke_prefix: String,
+    reaches: Vec<String>,
+) -> BackendInvoke {
     Arc::new(move |op: &str, args: sj::Value| {
         let tool = format!("{invoke_prefix}.{op}");
-        // Domain ops are daemon-originated; no request identity rides them.
+        let inv = backend_invocation(&reaches);
         // Domain registries call this thunk directly, often from async code, so
         // this layer keeps it off the async worker itself.
-        utils::reactor::off_async_worker(|| backing.invoke(&tool, args, None))
+        utils::reactor::off_async_worker(|| backing.invoke(&tool, args, inv))
             .map_err(|e| sj::Value::String(format!("{e:#}")))
     })
+}
+
+tokio::task_local! {
+    // The invocation of the core verb currently being dispatched; a backend op
+    // run outside such a dispatch (or off its task) carries no caller.
+    static CORE_VERB: spec::surfaces::Invocation;
+}
+
+fn backend_invocation(reaches: &[String]) -> Option<spec::surfaces::Invocation> {
+    CORE_VERB
+        .try_with(|inv| inv.clone().with_reaches(reaches))
+        .ok()
+}
+
+fn core_verb_invocation(
+    ctx: &ToolCtx,
+    name: &str,
+    args: &sj::Value,
+) -> Option<spec::surfaces::Invocation> {
+    let gated = dispatch::execute_gated_names().contains(&name);
+    Some(
+        spec::surfaces::Invocation::from_ctx(ctx)
+            .ok()?
+            .for_core_verb(gated, dispatch::tool_roles::required_role(name), args),
+    )
 }
 
 /// Register every backend a plugin declares into its domain registry, routing
@@ -794,7 +823,11 @@ fn register_backends(
     defs: &[BackendDef],
 ) -> Result<Vec<(String, String)>> {
     register_backends_with(software, defs, |def| {
-        make_backend_invoke(backing.clone(), def.invoke_prefix.clone())
+        make_backend_invoke(
+            backing.clone(),
+            def.invoke_prefix.clone(),
+            def.reaches.clone(),
+        )
     })
 }
 
@@ -903,11 +936,6 @@ pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
         tools.insert(abi_def.name.clone(), abi_def);
     }
     let surfaces = load_surfaces(&software, &proc.api_surfaces, |n| proc.fetch_surface(n))?;
-    check_reaches(&software, &tools, &surfaces)?;
-    let surface_policies = surface_tools(&software, &surfaces, &mut tools)?;
-    let mut tool_names: Vec<String> = tools.keys().cloned().collect();
-    tool_names.sort();
-
     // Backend defs arrive as verbatim JSON so the daemon's richer shape survives
     // the wire; parse each into `abi::BackendDef` here.
     let backend_defs: Vec<BackendDef> = proc
@@ -916,6 +944,11 @@ pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
         .map(|v| sj::from_value(v.clone()))
         .collect::<std::result::Result<_, _>>()
         .with_context(|| format!("plugin '{software}' returned an invalid backends list"))?;
+    check_reaches(&software, &tools, &surfaces)?;
+    check_backend_reaches(&software, &backend_defs, &surfaces)?;
+    let surface_policies = surface_tools(&software, &surfaces, &mut tools)?;
+    let mut tool_names: Vec<String> = tools.keys().cloned().collect();
+    tool_names.sort();
 
     let declared_schema: SchemaDecl = if proc.schema.is_null() {
         SchemaDecl::default()
@@ -1073,15 +1106,37 @@ fn check_reaches(
     surfaces: &[openapi::surface::ApiSurface],
 ) -> Result<()> {
     for def in tools.values() {
-        for op in &def.reaches {
-            if !privileged::is_privileged_cap(op)
-                && !surfaces.iter().any(|s| s.ops.iter().any(|o| &o.tool == op))
-            {
-                bail!(
-                    "plugin '{software}' tool '{}' reaches '{op}', which is not an op in its api surfaces",
-                    def.name
-                );
-            }
+        check_reach_list(software, "tool", &def.name, &def.reaches, surfaces)?;
+    }
+    Ok(())
+}
+
+fn check_backend_reaches(
+    software: &str,
+    defs: &[BackendDef],
+    surfaces: &[openapi::surface::ApiSurface],
+) -> Result<()> {
+    for def in defs {
+        let who = format!("{}/{}", def.domain, def.name);
+        check_reach_list(software, "backend", &who, &def.reaches, surfaces)?;
+    }
+    Ok(())
+}
+
+fn check_reach_list(
+    software: &str,
+    kind: &str,
+    who: &str,
+    reaches: &[String],
+    surfaces: &[openapi::surface::ApiSurface],
+) -> Result<()> {
+    for op in reaches {
+        if !privileged::is_privileged_cap(op)
+            && !surfaces.iter().any(|s| s.ops.iter().any(|o| &o.tool == op))
+        {
+            bail!(
+                "plugin '{software}' {kind} '{who}' reaches '{op}', which is not an op in its api surfaces"
+            );
         }
     }
     Ok(())
@@ -1519,7 +1574,14 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
             .with_context(|| format!("plugin invoke task for '{name}' panicked"))?;
         return plan_with_reaches(parse_invoke_result(result, name, &software), name, dry_run);
     }
-    dispatch::dispatch(name, args, ctx).await
+    match core_verb_invocation(ctx, name, &args) {
+        Some(inv) => {
+            CORE_VERB
+                .scope(inv, dispatch::dispatch(name, args, ctx))
+                .await
+        }
+        None => dispatch::dispatch(name, args, ctx).await,
+    }
 }
 
 /// Synchronous tool dispatch into the plugin registry. Returns `None` when no
@@ -1672,6 +1734,88 @@ mod surface_tests {
         );
         assert!(check_reaches("reachp", &tool(&["get"]), surfaces).is_err());
         assert!(check_reaches("reachp", &tool(&["reachp.get"]), &[]).is_err());
+    }
+
+    #[test]
+    fn backend_reaches_must_name_an_op_in_the_plugins_own_surfaces() {
+        let surface = openapi::surface::ApiSurface::parse(&surface_json("main", "breach")).unwrap();
+        let def = |reaches: &[&str]| BackendDef {
+            domain: "unit".into(),
+            name: "breach".into(),
+            reaches: reaches.iter().map(|r| r.to_string()).collect(),
+            ..Default::default()
+        };
+        let surfaces = std::slice::from_ref(&surface);
+        check_backend_reaches("breach", &[def(&["breach.make"])], surfaces).unwrap();
+        let err = check_backend_reaches("breach", &[def(&["breach.nope"])], surfaces)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unit/breach") && err.contains("breach.nope"),
+            "{err}"
+        );
+        assert!(check_backend_reaches("breach", &[def(&["breach.make"])], &[]).is_err());
+        let wire: BackendDef = sj::from_value(sj::json!({"domain": "unit"})).unwrap();
+        assert!(wire.reaches.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backend_api_call_runs_under_the_core_verb_invocation() {
+        let surface = openapi::surface::ApiSurface::parse(
+            &sj::json!({
+                "format": openapi::surface::FORMAT,
+                "surface": "main",
+                "kind": "openapi",
+                "ops": [{
+                    "tool": "bkv.make",
+                    "method": "POST",
+                    "path": "/x",
+                    "policy": {"role": "admin"},
+                    "internal": true
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        spec::surfaces::register("bkv", surface).unwrap();
+        let mut ctx = ToolCtx::new(Arc::new(contract::config::Config::load().unwrap()));
+        ctx.set_verified_caller(Some(contract::CallerIdentity {
+            user_id: "u-ann".into(),
+            username: "ann".into(),
+            role: "admin".into(),
+            can_mutate: true,
+        }));
+        let verb = |gated: bool| {
+            spec::surfaces::Invocation::from_ctx(&ctx)
+                .unwrap()
+                .for_core_verb(gated, "admin", &sj::json!({}))
+        };
+        let call = || sj::json!({"op": "bkv.make", "endpoint": "main", "args": {"unexpected": 1}});
+        let reaches = vec!["bkv.make".to_string()];
+        let run = |gated: bool, reaches: &[String]| {
+            CORE_VERB.sync_scope(verb(gated), || {
+                capability::handle_api_call(call(), "bkv", backend_invocation(reaches).as_ref())
+                    .unwrap_err()
+            })
+        };
+        let forbidden = |e: &anyhow::Error| e.downcast_ref::<spec::surfaces::Forbidden>().is_some();
+
+        let allowed = run(true, &reaches);
+        assert!(!forbidden(&allowed), "{allowed:#}");
+        assert!(
+            format!("{allowed:#}").contains("invalid arguments"),
+            "{allowed:#}"
+        );
+
+        let undeclared = run(true, &[]);
+        assert!(forbidden(&undeclared), "{undeclared:#}");
+
+        let unconfirmed = run(false, &reaches);
+        assert!(forbidden(&unconfirmed), "{unconfirmed:#}");
+
+        assert!(backend_invocation(&reaches).is_none());
+        spec::surfaces::deregister("bkv");
     }
 
     #[test]
