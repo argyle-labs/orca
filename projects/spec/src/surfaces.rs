@@ -349,6 +349,8 @@ async fn run(
     let insecure = row.get(&fields.insecure).is_some_and(truthy);
     let routes = routes_of(&row, &fields.routes)
         .with_context(|| format!("{tool}: endpoint `{endpoint}`"))?;
+    let columns =
+        auth_columns(surface, &row).with_context(|| format!("{tool}: endpoint `{endpoint}`"))?;
     let route_key = format!("{plugin}.{endpoint}");
     let secret_name = surface
         .auth
@@ -364,7 +366,7 @@ async fn run(
         }
         let base = utils::route::resolve_reachable(&route_key, &routes, |_| async { true }).await?;
         let secret = secret_name.as_ref().map(|_| REDACTED);
-        let req = surface.build_request(op, &base, &args, secret)?;
+        let req = surface.build_request_with(op, &base, &args, secret, &columns)?;
         return Ok(Outcome::Plan(plan(req, endpoint, &base)));
     }
 
@@ -380,7 +382,7 @@ async fn run(
         utils::route::probe_http(&url, insecure).await
     })
     .await?;
-    let req = surface.build_request(op, &base, &args, secret.as_deref())?;
+    let req = surface.build_request_with(op, &base, &args, secret.as_deref(), &columns)?;
     let builder = utils::http::shared()
         .raw_request(utils::http::RawRequest {
             method: req.method,
@@ -426,6 +428,21 @@ fn endpoint_row(plugin: &str, binding: &EndpointBinding, endpoint: &str) -> Resu
     .into_iter()
     .next()
     .ok_or_else(|| anyhow!("plugin `{plugin}` has no endpoint `{endpoint}`"))
+}
+
+fn auth_columns(surface: &ApiSurface, row: &DbRow) -> Result<BTreeMap<String, String>> {
+    surface
+        .auth_columns()
+        .into_iter()
+        .map(|col| {
+            let value = match row.get(col) {
+                Some(DbValue::Text(t)) => t.clone(),
+                Some(DbValue::Int(i)) => i.to_string(),
+                _ => bail!("no `{col}` column"),
+            };
+            Ok((col.to_string(), value))
+        })
+        .collect()
 }
 
 fn truthy(v: &DbValue) -> bool {
@@ -797,6 +814,68 @@ mod tests {
         .unwrap();
         assert_eq!(out, Outcome::Response(json!({"id": 5})));
         deregister("e2e");
+    }
+
+    fn column_auth(plugin: &str, scheme: &str) -> ApiSurface {
+        let mut s = surface(plugin, &format!("{plugin}.{{endpoint}}.token"));
+        let mut value = serde_json::to_value(&s).unwrap();
+        value["auth"]["scheme"] = json!(scheme);
+        value["auth"]["template"] = json!("Tok={endpoint.provider}={secret}");
+        value["endpoint"]["columns"] = json!(["provider"]);
+        s = ApiSurface::parse(&value.to_string()).unwrap();
+        s
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auth_template_uses_endpoint_row_column() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/items/5"))
+            .and(header("Authorization", "Tok=colp=s3cr3t"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"id": 5}})))
+            .mount(&server)
+            .await;
+        register("colp", column_auth("colp", "header")).unwrap();
+        let out = in_temp_db(async {
+            seed("colp", &server, "s3cr3t");
+            execute(
+                "colp",
+                "colp.item",
+                json!({"endpoint": "main", "id": 5}),
+                &inv(&caller("read", false), false),
+            )
+            .await
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, Outcome::Response(json!({"id": 5})));
+        deregister("colp");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dry_run_plan_shows_column_but_redacts_secret() {
+        let server = MockServer::start().await;
+        register("colq", column_auth("colq", "query")).unwrap();
+        let out = in_temp_db(async {
+            seed("colq", &server, "s3cr3t");
+            execute(
+                "colq",
+                "colq.item",
+                json!({"endpoint": "main", "id": 5}),
+                &inv(&caller("read", false), true),
+            )
+            .await
+        })
+        .await
+        .unwrap();
+        let Outcome::Plan(plan) = out else {
+            panic!("expected plan")
+        };
+        let text = serde_json::to_string(&plan).unwrap();
+        assert!(!text.contains("s3cr3t"), "{text}");
+        assert!(text.contains("colq"), "{text}");
+        assert!(server.received_requests().await.unwrap().is_empty());
+        deregister("colq");
     }
 
     #[tokio::test(flavor = "multi_thread")]
