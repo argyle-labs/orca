@@ -498,7 +498,35 @@ pub fn tool_manifest_json() -> String {
 
 /// Dispatch a `tools/call` by name, returning a structured JSON value.
 /// Returns `Err` for unknown tool names.
-pub async fn dispatch(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Value> {
+pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
+    #[cfg(feature = "in-process")]
+    if let Some(verb) = core_verb(name, &args, ctx) {
+        return contract::invocation_scope::core_verb(verb, dispatch_verb(name, args, ctx)).await;
+    }
+    dispatch_verb(name, args, ctx).await
+}
+
+#[cfg(feature = "in-process")]
+fn core_verb(
+    name: &str,
+    args: &Value,
+    ctx: &ToolCtx,
+) -> Option<contract::invocation_scope::CoreVerb> {
+    let caller = ctx.verified_caller()?.clone();
+    let execute_gated = find(name).is_some_and(|t| t.execute_gated())
+        || crate::tool_roles::plugin_execute_gated(name);
+    let dry_run = ctx.dry_run() || crate::erased::dry_run_requested(args).unwrap_or(true);
+    Some(contract::invocation_scope::CoreVerb::new(
+        caller,
+        crate::tool_roles::required_role(name),
+        execute_gated,
+        dry_run,
+        ctx.local_transport(),
+        ctx.second_factor(),
+    ))
+}
+
+async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Value> {
     if let Some(system) = take_system_target(name, &mut args, ctx).await? {
         // Same rule as an ambient-peer forward: nothing proves the target
         // honours `dryRun`, so only an execute-gated tool may dry-run remotely.
@@ -2227,6 +2255,17 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[test]
+    fn core_verb_scope_needs_a_verified_caller() {
+        let mut ctx = make_ctx();
+        assert!(core_verb("anything", &json!({}), &ctx).is_none());
+        ctx.set_verified_caller(Some(identity("ann")));
+        let verb = core_verb("anything", &json!({"dryRun": true}), &ctx).unwrap();
+        assert_eq!(verb.caller.username, "ann");
+        assert!(verb.dry_run && !verb.execute_gated);
+        assert_eq!(verb.role, crate::tool_roles::required_role("anything"));
     }
 
     fn identity(name: &str) -> contract::CallerIdentity {

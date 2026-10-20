@@ -142,10 +142,26 @@ impl Invocation {
         self
     }
 
-    pub fn for_core_verb(mut self, execute_gated: bool, role: &str, args: &Value) -> Self {
-        self.dry_run |= args.get(contract::plan::DRY_RUN_FIELD) == Some(&Value::Bool(true));
-        self.execute_confirmed = execute_gated && !self.dry_run;
-        self.second_factor &= role == "super-admin";
+    pub fn from_core_verb(verb: &contract::invocation_scope::CoreVerb) -> Self {
+        let mut caller = verb.caller.clone();
+        if dispatch::tool_roles::role_rank(verb.role)
+            < dispatch::tool_roles::role_rank(&caller.role)
+        {
+            caller.role = verb.role.to_string();
+        }
+        Self {
+            second_factor: verb.second_factor && caller.role == "super-admin",
+            caller,
+            dry_run: verb.dry_run,
+            local: verb.local,
+            execute_confirmed: verb.execute_gated && !verb.dry_run,
+            reaches: Vec::new(),
+            system: false,
+        }
+    }
+
+    pub fn unconfirmed(mut self) -> Self {
+        self.execute_confirmed = false;
         self.reaches = Vec::new();
         self
     }

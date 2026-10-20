@@ -61,6 +61,8 @@ mod ctx;
 /// only: it spawns, and a thin plugin links no tokio.
 #[cfg(feature = "in-process")]
 pub mod fanout;
+#[cfg(feature = "in-process")]
+pub mod invocation_scope;
 pub mod owner;
 mod remote;
 mod tool;
