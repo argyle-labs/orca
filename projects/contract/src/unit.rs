@@ -1371,7 +1371,8 @@ mod tests {
 
     #[tokio::test]
     async fn routed_verbs_target_only_their_provider() {
-        use crate::invocation_scope::{CoreVerb, VerbCaller, core_verb};
+        use crate::invocation_scope::VerbCaller;
+        use crate::invocation_scope::testing::{core_verb, verb as core_verb_of};
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let record = seen.clone();
         let thunk: InvokeThunk = Arc::new(move |op: &str, _args, call| {
@@ -1381,7 +1382,7 @@ mod tests {
             Err(serde_json::json!("refused"))
         });
         register_from_def("prov-unit-target".into(), thunk).unwrap();
-        let verb = CoreVerb::new(
+        let verb = core_verb_of(
             VerbCaller {
                 user_id: "u".into(),
                 username: "u".into(),

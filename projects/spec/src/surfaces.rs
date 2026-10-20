@@ -1275,7 +1275,7 @@ mod tests {
 
     #[test]
     fn untargeted_backend_under_an_admin_verb_only_reads() {
-        let verb = contract::invocation_scope::CoreVerb::new(
+        let verb = contract::invocation_scope::testing::verb(
             contract::invocation_scope::VerbCaller {
                 user_id: "u".into(),
                 username: "u".into(),

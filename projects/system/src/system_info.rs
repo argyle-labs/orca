@@ -145,7 +145,7 @@ pub fn spawn_refresher() {
     if SPAWNED.set(()).is_err() {
         return;
     }
-    tokio::spawn(contract::invocation_scope::daemon_task(async move {
+    tokio::spawn(crate::periodic::daemon_key().scope(async move {
         let mut sys = System::new_with_specifics(
             RefreshKind::new()
                 .with_memory(sysinfo::MemoryRefreshKind::everything())

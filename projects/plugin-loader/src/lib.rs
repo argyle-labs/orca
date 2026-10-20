@@ -1788,7 +1788,7 @@ mod surface_tests {
         .unwrap();
         spec::surfaces::register("bkv", surface).unwrap();
         let verb = |gated: bool, role: &'static str| {
-            CoreVerb::new(
+            contract::invocation_scope::testing::verb(
                 VerbCaller {
                     user_id: "u-ann".into(),
                     username: "ann".into(),
