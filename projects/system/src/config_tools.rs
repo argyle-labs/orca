@@ -208,6 +208,13 @@ async fn config_set(
         crate::csp::Relaxations::parse(&args.json)
             .map_err(|e| anyhow::anyhow!("invalid server/csp: {e:#}"))?;
     }
+    let json = if args.noun == "schedule" {
+        let caller = ctx.verified_caller().cloned().or_else(|| ctx.caller());
+        let caller = caller.ok_or_else(|| anyhow::anyhow!("config schedule requires a caller"))?;
+        crate::scheduler::stamp_run_as(&args.json, &caller)?
+    } else {
+        args.json
+    };
     let conn = db::open_default()?;
     let local = native_support::local_system(&conn);
     let owner = args.host.unwrap_or_else(|| local.clone());
@@ -215,9 +222,8 @@ async fn config_set(
         !is_csp_row(&args.noun, &args.name) || owner == local,
         "config server/csp can only be set on the local host"
     );
-    let created = db::config_store::set(
-        &conn, &local, &owner, &args.noun, &args.name, &args.json, "cli",
-    )?;
+    let created =
+        db::config_store::set(&conn, &local, &owner, &args.noun, &args.name, &json, "cli")?;
     let row = db::config_store::get(&conn, &args.noun, &args.name)?
         .ok_or_else(|| anyhow::anyhow!("row vanished after write"))?
         .into();
@@ -366,6 +372,47 @@ mod tests {
                 &admin,
             ));
             assert!(remote.is_err());
+        });
+    }
+
+    #[test]
+    fn upsert_schedule_stamps_the_writing_caller_as_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::host_identity::init(dir.path()).ok();
+        db::with_thread_db_path(&dir.path().join("cfg.db"), || {
+            let spoofed = r#"{"job":"x.y","cron":"@hourly","run_as":{"user_id":"root","role":"super-admin"}}"#;
+            let write = |ctx: &contract::ToolCtx| {
+                run(config_set(
+                    ConfigSetArgs {
+                        noun: "schedule".into(),
+                        name: "nightly".into(),
+                        json: spoofed.into(),
+                        host: None,
+                    },
+                    ctx,
+                ))
+            };
+            assert!(write(&test_ctx(dir.path())).is_err());
+            let mut ctx = test_ctx(dir.path()).with_auth(caller("super-admin"));
+            ctx.set_verified_caller(Some(caller("user")));
+            let row = write(&ctx).unwrap().row;
+            #[derive(serde::Deserialize)]
+            struct Owner {
+                user_id: String,
+                role: String,
+            }
+            #[derive(serde::Deserialize)]
+            struct Stamped {
+                run_as: Owner,
+            }
+            let stamped: Stamped = serde_json::from_str(&row.json).unwrap();
+            assert_eq!(
+                (
+                    stamped.run_as.user_id.as_str(),
+                    stamped.run_as.role.as_str()
+                ),
+                ("u", "user")
+            );
         });
     }
 }
