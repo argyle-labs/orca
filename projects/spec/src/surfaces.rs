@@ -148,7 +148,7 @@ impl Invocation {
         reaches: &[String],
     ) -> Self {
         let rank = dispatch::tool_roles::role_rank;
-        let floor = if rank(verb.role) < rank("read") {
+        let floor = if !targeted || rank(verb.role) < rank("read") {
             "read"
         } else {
             verb.role
@@ -1271,6 +1271,33 @@ mod tests {
         .unwrap_err();
         assert!(ungated.downcast_ref::<Forbidden>().is_none(), "{ungated}");
         deregister("gatep");
+    }
+
+    #[test]
+    fn untargeted_backend_under_an_admin_verb_only_reads() {
+        let verb = contract::invocation_scope::CoreVerb {
+            caller: contract::invocation_scope::VerbCaller {
+                user_id: "u".into(),
+                username: "u".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            },
+            role: "admin",
+            execute_gated: false,
+            dry_run: false,
+            local: true,
+            second_factor: false,
+        };
+        let s = surface("untg", "untg.{endpoint}.token");
+        let untargeted = Invocation::for_backend(&verb, false, &[]);
+        assert_eq!(untargeted.caller.role, "read");
+        let err = gate(&s, &op("GET", "admin", false), &untargeted, false, false).unwrap_err();
+        assert!(err.downcast_ref::<Forbidden>().is_some(), "{err}");
+        gate(&s, &op("GET", "read", false), &untargeted, false, false).unwrap();
+
+        let targeted = Invocation::for_backend(&verb, true, &[]);
+        assert_eq!(targeted.caller.role, "admin");
+        gate(&s, &op("GET", "admin", false), &targeted, false, false).unwrap();
     }
 
     #[test]
