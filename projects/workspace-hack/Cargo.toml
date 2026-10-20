@@ -82,7 +82,7 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 unic-langid-impl = { version = "0.9", default-features = false, features = ["serde"] }
 url = { version = "2", features = ["serde"] }
-uuid = { version = "1", features = ["serde", "v4", "v7"] }
+uuid = { version = "1", features = ["serde", "v4", "v5", "v7"] }
 winnow = { version = "1" }
 yoke = { version = "0.8", features = ["derive"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
@@ -168,7 +168,7 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 unic-langid-impl = { version = "0.9", default-features = false, features = ["serde"] }
 url = { version = "2", features = ["serde"] }
-uuid = { version = "1", features = ["serde", "v4", "v7"] }
+uuid = { version = "1", features = ["serde", "v4", "v5", "v7"] }
 winnow = { version = "1" }
 yoke = { version = "0.8", features = ["derive"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }

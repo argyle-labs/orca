@@ -111,6 +111,11 @@ fn service_surface_is_collapsed() {
 }
 
 #[test]
+fn deploy_list_requires_read_role() {
+    assert_eq!(dispatch::required_role("deploy.list"), Some("read"));
+}
+
+#[test]
 fn mesh_tools_present_in_inventory_slice() {
     let names: Vec<&'static str> = inventory::iter::<ToolRegistration>
         .into_iter()

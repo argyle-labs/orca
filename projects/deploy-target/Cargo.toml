@@ -35,8 +35,8 @@ utils       = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
-uuid        = { workspace = true }
-schemars    = { workspace = true }
+uuid        = { workspace = true, features = ["serde", "v5"] }
+schemars    = { workspace = true, features = ["uuid1"] }
 # `spawn_blocking` for the loaded-plugin JSON proxy: the `invoke` thunk is
 # synchronous, so the async DeployProxy offloads it to the blocking pool,
 # bounded by the caller's timeout. In-process only — a thin subprocess plugin

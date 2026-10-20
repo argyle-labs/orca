@@ -545,8 +545,13 @@ pub trait DeployTarget: Send + Sync {
 const TARGET_NAMESPACE: Uuid = Uuid::from_u128(0x5d1c_7a3e_4b2f_4e8a_9c61_0f3d_8e2a_b7c4);
 
 impl TargetId {
+    pub fn canonical_key(&self) -> String {
+        let host = self.host.trim().trim_end_matches('.').to_ascii_lowercase();
+        format!("{host}/{}/{}", self.runtime.as_str(), self.kind.as_str())
+    }
+
     pub fn uuid(&self) -> Uuid {
-        Uuid::new_v5(&TARGET_NAMESPACE, target_key(self).as_bytes())
+        Uuid::new_v5(&TARGET_NAMESPACE, self.canonical_key().as_bytes())
     }
 
     /// A human-readable rendering of the triple for logs/errors ONLY. This is a
@@ -562,8 +567,9 @@ impl TargetId {
 
 // ── Process-global registry ─────────────────────────────────────────────────
 
-static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn DeployTarget>>>> =
-    LazyLock::new(|| RwLock::new(Vec::new()));
+type Entry = (Uuid, Arc<dyn DeployTarget>);
+
+static GLOBAL: LazyLock<RwLock<Vec<Entry>>> = LazyLock::new(|| RwLock::new(Vec::new()));
 
 /// Register a deploy target with the process-global registry. Each adapter
 /// (proxmox, docker, dockge, …) calls this from its bootstrap once per
@@ -572,17 +578,26 @@ static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn DeployTarget>>>> =
 /// targets.
 pub fn register_target(target: Arc<dyn DeployTarget>) {
     let mut g = GLOBAL.write().expect("deploy-target registry poisoned");
-    let id = target.id();
-    if let Some(slot) = g.iter_mut().find(|t| t.id() == id) {
-        *slot = target;
+    let uuid = target.id().uuid();
+    if let Some(slot) = g.iter_mut().find(|(u, _)| *u == uuid) {
+        slot.1 = target;
     } else {
-        g.push(target);
+        g.push((uuid, target));
     }
 }
 
 /// Snapshot of every registered target. Consumers iterate this rather than
 /// naming specific runtime kinds.
 pub fn targets() -> Vec<Arc<dyn DeployTarget>> {
+    GLOBAL
+        .read()
+        .expect("deploy-target registry poisoned")
+        .iter()
+        .map(|(_, t)| t.clone())
+        .collect()
+}
+
+pub fn entries() -> Vec<(Uuid, Arc<dyn DeployTarget>)> {
     GLOBAL
         .read()
         .expect("deploy-target registry poisoned")
@@ -594,8 +609,8 @@ pub fn target(uuid: &Uuid) -> Option<Arc<dyn DeployTarget>> {
         .read()
         .expect("deploy-target registry poisoned")
         .iter()
-        .find(|t| &t.id().uuid() == uuid)
-        .cloned()
+        .find(|(u, _)| u == uuid)
+        .map(|(_, t)| t.clone())
 }
 
 /// Look up a single target by its composite identity.
@@ -604,8 +619,8 @@ pub fn target_by_triple(id: &TargetId) -> Option<Arc<dyn DeployTarget>> {
         .read()
         .expect("deploy-target registry poisoned")
         .iter()
-        .find(|t| &t.id() == id)
-        .cloned()
+        .find(|(_, t)| &t.id() == id)
+        .map(|(_, t)| t.clone())
 }
 
 pub fn target_key(id: &TargetId) -> String {
@@ -614,7 +629,10 @@ pub fn target_key(id: &TargetId) -> String {
 
 /// Descriptor rows for every registered target — the `deploy.list` view.
 pub fn descriptors() -> Vec<Target> {
-    targets().iter().map(|t| t.target()).collect()
+    entries()
+        .into_iter()
+        .map(|(uuid, t)| Target { uuid, ..t.target() })
+        .collect()
 }
 
 /// Deregister the target identified by `id`, if present. The removal path the
@@ -625,7 +643,7 @@ pub fn descriptors() -> Vec<Target> {
 pub fn deregister_target(id: &TargetId) -> bool {
     let mut g = GLOBAL.write().expect("deploy-target registry poisoned");
     let before = g.len();
-    g.retain(|t| &t.id() != id);
+    g.retain(|(_, t)| &t.id() != id);
     before != g.len()
 }
 
@@ -639,7 +657,7 @@ pub fn deregister_target(id: &TargetId) -> bool {
 pub fn deregister_host(host: &str) -> usize {
     let mut g = GLOBAL.write().expect("deploy-target registry poisoned");
     let before = g.len();
-    g.retain(|t| t.host() != host);
+    g.retain(|(_, t)| t.host() != host);
     before - g.len()
 }
 
@@ -1054,8 +1072,14 @@ mod tests {
         assert_eq!(id.uuid(), id.clone().uuid());
         assert_eq!(
             id.uuid(),
-            Uuid::new_v5(&TARGET_NAMESPACE, b"host-uuid/Lxc/Proxmox")
+            Uuid::parse_str("fa3fdf1c-fcf8-5d02-ad1b-b020e71620ac").unwrap()
         );
+        let shouty = TargetId {
+            host: "HOST-UUID.".into(),
+            ..pve_lxc_id()
+        };
+        assert_eq!(shouty.uuid(), id.uuid());
+        assert_eq!(id.canonical_key(), "host-uuid/lxc/proxmox");
         assert_eq!(id.uuid().get_version_num(), 5);
         let other = TargetId {
             host: "host-c".into(),
