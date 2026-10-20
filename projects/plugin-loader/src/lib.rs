@@ -785,15 +785,15 @@ fn make_backend_invoke(
 }
 
 tokio::task_local! {
-    // The invocation of the core verb currently being dispatched; a backend op
-    // run outside such a dispatch (or off its task) carries no caller.
     static CORE_VERB: spec::surfaces::Invocation;
 }
 
 fn backend_invocation(reaches: &[String]) -> Option<spec::surfaces::Invocation> {
-    CORE_VERB
-        .try_with(|inv| inv.clone().with_reaches(reaches))
-        .ok()
+    Some(
+        CORE_VERB
+            .try_with(|inv| inv.clone().with_reaches(reaches))
+            .unwrap_or_else(|_| spec::surfaces::Invocation::system()),
+    )
 }
 
 fn core_verb_invocation(
@@ -1814,7 +1814,7 @@ mod surface_tests {
         let unconfirmed = run(false, &reaches);
         assert!(forbidden(&unconfirmed), "{unconfirmed:#}");
 
-        assert!(backend_invocation(&reaches).is_none());
+        assert!(backend_invocation(&reaches).unwrap().is_system());
         spec::surfaces::deregister("bkv");
     }
 

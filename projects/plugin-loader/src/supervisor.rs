@@ -201,7 +201,9 @@ pub fn invoke_on<S: Read + Write>(
             id,
             tool: tool.to_string(),
             args,
-            caller: inv.map(|i| crate::wire_caller(i.caller())),
+            caller: inv
+                .filter(|i| !i.is_system())
+                .map(|i| crate::wire_caller(i.caller())),
         },
     )
     .with_context(|| format!("sending Invoke for '{tool}'"))?;
