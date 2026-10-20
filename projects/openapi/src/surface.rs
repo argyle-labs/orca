@@ -1,5 +1,7 @@
 #![allow(clippy::disallowed_types)]
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -53,6 +55,8 @@ pub struct EndpointBinding {
     pub key: String,
     #[serde(default)]
     pub fields: EndpointFields,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
 }
 
 impl Default for EndpointBinding {
@@ -61,6 +65,7 @@ impl Default for EndpointBinding {
             table: default_endpoint_table(),
             key: default_endpoint_key(),
             fields: EndpointFields::default(),
+            columns: Vec::new(),
         }
     }
 }
@@ -281,10 +286,35 @@ impl ApiSurface {
                 surface.format
             );
         }
+        if let Some(auth) = &surface.auth {
+            for piece in template_pieces(&auth.template)? {
+                if let TemplatePiece::Column(col) = piece
+                    && !surface.endpoint.columns.iter().any(|c| c == col)
+                {
+                    bail!(
+                        "api-surface: auth template references undeclared endpoint column `{col}`"
+                    );
+                }
+            }
+        }
         for op in &surface.ops {
             surface.check_wires(op)?;
         }
         Ok(surface)
+    }
+
+    pub fn auth_columns(&self) -> Vec<&str> {
+        let Some(auth) = &self.auth else {
+            return Vec::new();
+        };
+        template_pieces(&auth.template)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|p| match p {
+                TemplatePiece::Column(c) => Some(c),
+                _ => None,
+            })
+            .collect()
     }
 
     fn check_wires(&self, op: &ApiOp) -> Result<()> {
@@ -371,6 +401,17 @@ impl ApiSurface {
         args: &Map<String, Value>,
         secret: Option<&str>,
     ) -> Result<BuiltRequest> {
+        self.build_request_with(op, base_url, args, secret, &BTreeMap::new())
+    }
+
+    pub fn build_request_with(
+        &self,
+        op: &ApiOp,
+        base_url: &str,
+        args: &Map<String, Value>,
+        secret: Option<&str>,
+        columns: &BTreeMap<String, String>,
+    ) -> Result<BuiltRequest> {
         let root = if self.base.api_root.is_empty() {
             base_url.trim_end_matches('/').to_string()
         } else {
@@ -446,7 +487,22 @@ impl ApiSurface {
         if let Some(auth) = &self.auth {
             let secret = secret
                 .ok_or_else(|| anyhow!("{}: surface requires secret `{}`", op.tool, auth.secret))?;
-            let value = auth.template.replace("{secret}", secret);
+            let mut value = String::new();
+            for piece in template_pieces(&auth.template)? {
+                match piece {
+                    TemplatePiece::Literal(text) => value.push_str(text),
+                    TemplatePiece::Secret => value.push_str(secret),
+                    TemplatePiece::Column(col) => {
+                        let v = columns.get(col).ok_or_else(|| {
+                            anyhow!("{}: endpoint column `{col}` is not set", op.tool)
+                        })?;
+                        if v.contains(['\r', '\n']) {
+                            bail!("{}: endpoint column `{col}` contains a line break", op.tool);
+                        }
+                        value.push_str(v);
+                    }
+                }
+            }
             match auth.scheme {
                 AuthScheme::Header => headers.push((auth.header.clone(), value)),
                 AuthScheme::Query => query.push((auth.header.clone(), value)),
@@ -529,6 +585,37 @@ impl ApiSurface {
         }
         Ok(out)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemplatePiece<'a> {
+    Literal(&'a str),
+    Secret,
+    Column(&'a str),
+}
+
+fn template_pieces(template: &str) -> Result<Vec<TemplatePiece<'_>>> {
+    let mut pieces = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        if open > 0 {
+            pieces.push(TemplatePiece::Literal(&rest[..open]));
+        }
+        let Some(len) = rest[open..].find('}') else {
+            bail!("api-surface: auth template has an unclosed placeholder");
+        };
+        let name = &rest[open + 1..open + len];
+        pieces.push(match name.strip_prefix("endpoint.") {
+            _ if name == "secret" => TemplatePiece::Secret,
+            Some(col) if !col.is_empty() => TemplatePiece::Column(col),
+            _ => bail!("api-surface: auth template placeholder `{{{name}}}` is not supported"),
+        });
+        rest = &rest[open + len + 1..];
+    }
+    if !rest.is_empty() {
+        pieces.push(TemplatePiece::Literal(rest));
+    }
+    Ok(pieces)
 }
 
 pub fn peel_envelope(rules: &ResponseRules, value: Value) -> Value {
@@ -779,6 +866,65 @@ mod tests {
             vec![("Authorization".into(), "PVEAPIToken=root@pam!t=uuid".into())]
         );
         assert!(req.body.is_empty());
+    }
+
+    fn column_surface(template: &str, columns: Value) -> Result<ApiSurface> {
+        ApiSurface::parse(
+            &json!({
+                "format": FORMAT, "surface": "s", "kind": "openapi",
+                "auth": {"scheme": "header", "header": "Authorization", "template": template, "secret": "s.token"},
+                "endpoint": {"columns": columns},
+                "ops": [{"tool": "s.get", "method": "GET", "path": "/x", "policy": {"role": "read"}}]
+            })
+            .to_string(),
+        )
+    }
+
+    #[test]
+    fn auth_template_substitutes_declared_endpoint_columns() {
+        let s = column_surface(
+            "PVEAPIToken={endpoint.token_id}={secret}",
+            json!(["token_id"]),
+        )
+        .unwrap();
+        assert_eq!(s.auth_columns(), vec!["token_id"]);
+        let op = s.find("s.get").unwrap();
+        let cols = BTreeMap::from([("token_id".to_string(), "root@pam!t".to_string())]);
+        let req = s
+            .build_request_with(
+                op,
+                "https://h",
+                &Map::new(),
+                Some("{endpoint.token_id}"),
+                &cols,
+            )
+            .unwrap();
+        assert_eq!(
+            req.headers,
+            vec![(
+                "Authorization".into(),
+                "PVEAPIToken=root@pam!t={endpoint.token_id}".into()
+            )]
+        );
+        assert!(
+            s.build_request_with(op, "https://h", &Map::new(), Some("k"), &BTreeMap::new())
+                .is_err()
+        );
+        let crlf = BTreeMap::from([("token_id".to_string(), "a\r\nX-Evil: 1".to_string())]);
+        assert!(
+            s.build_request_with(op, "https://h", &Map::new(), Some("k"), &crlf)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn auth_template_rejects_undeclared_or_unknown_placeholders() {
+        assert!(column_surface("{endpoint.token_id}={secret}", json!([])).is_err());
+        assert!(column_surface("{endpoint.token_id}={secret}", json!(["other"])).is_err());
+        assert!(column_surface("{endpoint.}={secret}", json!([])).is_err());
+        assert!(column_surface("{env.HOME}={secret}", json!([])).is_err());
+        assert!(column_surface("{secret", json!([])).is_err());
+        assert!(column_surface("Bearer {secret}", json!([])).is_ok());
     }
 
     #[test]
