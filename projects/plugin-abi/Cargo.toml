@@ -8,7 +8,7 @@ name = "orca-plugin-abi"
 # `plugin-proto` major match, not by this crate's version — but keeping this
 # pinned documents that the type contract is a deliberate, hand-managed
 # flag-day, not something an orca release bumps.
-version = "0.1.0"
+version.workspace = true
 publish = ["gitea"]
 edition.workspace = true
 

@@ -29,6 +29,13 @@ fi
 
 meta="$(cargo metadata --format-version 1 --no-deps --locked)"
 
+offver="$(jq -r --arg v "$ws_version" '
+  .workspace_members as $m
+  | .packages[] | select(.id as $id | $m | index($id))
+  | select(.publish | index("gitea")) | select(.version != $v)
+  | "\(.name) \(.version)"' <<<"$meta")"
+[ -z "$offver" ] || { echo "publishable crates not on workspace version $ws_version:" >&2; echo "$offver" >&2; exit 1; }
+
 # name<TAB>version, publishable members only, dependencies before dependents.
 order="$(jq -r '
   .workspace_members as $m
