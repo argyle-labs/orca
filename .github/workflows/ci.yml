@@ -85,7 +85,9 @@ jobs:
           features: ""
           force: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
           drop-cargo-config: 'false'
-          scripts: ./scripts/check-no-real-ips.sh
+          scripts: |
+            ./scripts/check-no-real-ips.sh
+            ./scripts/check-no-test-scope.sh
           cargo-checks: |
             check -p orca-notifications --no-default-features
             check -p orca-plugin-toolkit --no-default-features --features tools,notify

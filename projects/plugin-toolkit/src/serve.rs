@@ -175,6 +175,8 @@ fn surface_reply(surfaces: &[(String, &'static [u8])], id: u64, name: &str) -> F
 /// `main()` calls this and returns its result.
 pub fn serve(spec: PluginSpec) -> Result<()> {
     check_shared_endpoint_providers(&spec.name)?;
+    #[cfg(feature = "in-process")]
+    crate::dispatch::init()?;
     // Off-orca introspection: dump the manifest and exit before touching a
     // socket. The CI gate (and local validation) drives this path.
     if std::env::var_os(DUMP_MANIFEST_ENV).is_some() {
@@ -201,6 +203,8 @@ pub fn serve(spec: PluginSpec) -> Result<()> {
 /// testable over an in-memory `UnixStream` pair.
 pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Result<()> {
     check_shared_endpoint_providers(&spec.name)?;
+    #[cfg(feature = "in-process")]
+    crate::dispatch::init()?;
     serve_session(stream, spec, None)
 }
 

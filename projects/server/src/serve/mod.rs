@@ -74,6 +74,8 @@ fn publish_http_port(port: u16) {
 
 pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()> {
     install_panic_hook();
+    dispatch::init()?;
+    system::init()?;
     // Prod guard for `--dev`: drops `Secure` cookie, serves plain HTTP, and
     // relaxes SameSite. Safe on a single-user laptop; unsafe the moment a
     // multi-user host adopts it. Refuse if more than one user exists.
@@ -205,6 +207,8 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
 
     install_panic_hook();
+    dispatch::init()?;
+    system::init()?;
 
     // If we restarted because of an in-progress update, verify the swap took
     // and clear the marker. `system.update` surfaces the marker on stale

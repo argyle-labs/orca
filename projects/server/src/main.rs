@@ -406,6 +406,8 @@ async fn main() -> Result<()> {
     // its own; the reqwest impl lives here, in the binary. This keeps plugins
     // (which link `dispatch` only for the tool surface) free of reqwest/rustls.
     orca::daemon_client::HttpDaemonClient::install();
+    dispatch::init()?;
+    system::init()?;
 
     // ntfy extracted to ~/code/ntfy (argyle-labs/ntfy) — its notification
     // backends now register through the plugin-loader's `notifications`-domain

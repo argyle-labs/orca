@@ -500,26 +500,35 @@ pub fn tool_manifest_json() -> String {
 /// Returns `Err` for unknown tool names.
 pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
     #[cfg(feature = "in-process")]
-    if let Some(verb) = core_verb(name, &args, ctx) {
-        return core_verb_key()
-            .scope(verb, dispatch_verb(name, args, ctx))
-            .await;
+    if ctx.verified_caller().is_some() {
+        let Some(key) = CORE_VERB_KEY.get() else {
+            tracing::error!(tool = name, "core-verb key not initialized; refusing verb");
+            anyhow::bail!("dispatch is not initialized; refusing '{name}'");
+        };
+        if let Some(verb) = core_verb(key, name, &args, ctx) {
+            return key.scope(verb, dispatch_verb(name, args, ctx)).await;
+        }
     }
     dispatch_verb(name, args, ctx).await
 }
 
 #[cfg(feature = "in-process")]
-fn core_verb_key() -> &'static contract::invocation_scope::CoreVerbKey {
-    static KEY: std::sync::LazyLock<contract::invocation_scope::CoreVerbKey> =
-        std::sync::LazyLock::new(|| {
-            contract::invocation_scope::CoreVerbKey::claim()
-                .expect("core-verb key is claimed only by dispatch")
-        });
-    &KEY
+static CORE_VERB_KEY: OnceLock<contract::invocation_scope::CoreVerbKey> = OnceLock::new();
+
+#[cfg(feature = "in-process")]
+pub fn init() -> std::result::Result<(), contract::invocation_scope::KeyStolen> {
+    if CORE_VERB_KEY.get().is_some() {
+        return Ok(());
+    }
+    let key = contract::invocation_scope::CoreVerbKey::claim()
+        .ok_or(contract::invocation_scope::KeyStolen("core-verb"))?;
+    drop(CORE_VERB_KEY.set(key));
+    Ok(())
 }
 
 #[cfg(feature = "in-process")]
 fn core_verb(
+    key: &contract::invocation_scope::CoreVerbKey,
     name: &str,
     args: &Value,
     ctx: &ToolCtx,
@@ -528,7 +537,7 @@ fn core_verb(
     let execute_gated = find(name).is_some_and(|t| t.execute_gated())
         || crate::tool_roles::plugin_execute_gated(name);
     let dry_run = ctx.dry_run() || crate::erased::dry_run_requested(args).unwrap_or(true);
-    Some(core_verb_key().verb(
+    Some(key.verb(
         contract::invocation_scope::VerbCaller {
             user_id: caller.user_id.clone(),
             username: caller.username.clone(),
@@ -2276,10 +2285,12 @@ mod tests {
 
     #[test]
     fn core_verb_scope_needs_a_verified_caller() {
+        init().unwrap();
+        let key = CORE_VERB_KEY.get().unwrap();
         let mut ctx = make_ctx();
-        assert!(core_verb("anything", &json!({}), &ctx).is_none());
+        assert!(core_verb(key, "anything", &json!({}), &ctx).is_none());
         ctx.set_verified_caller(Some(identity("ann")));
-        let verb = core_verb("anything", &json!({"dryRun": true}), &ctx).unwrap();
+        let verb = core_verb(key, "anything", &json!({"dryRun": true}), &ctx).unwrap();
         assert_eq!(verb.caller().username, "ann");
         assert!(verb.dry_run() && !verb.execute_gated());
         assert_eq!(verb.role(), crate::tool_roles::required_role("anything"));
@@ -2300,6 +2311,7 @@ mod tests {
     #[tokio::test]
     async fn plugin_invoke_carries_the_verified_caller_never_the_host_operator() {
         let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        crate::init().unwrap();
         let _serial = SEEN_TESTS.lock().await;
         install_fake_plugin();
         SEEN.lock().unwrap().clear();
@@ -2336,6 +2348,7 @@ mod tests {
     #[tokio::test]
     async fn rest_fallback_never_forwards_the_daemon_identity() {
         let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        crate::init().unwrap();
         use axum::body::Body;
         use axum::http::Request as AxumReq;
         use tower::ServiceExt;
