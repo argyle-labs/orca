@@ -248,7 +248,7 @@ write_cargo_version() {
     sed -i 's/^version = ".*"/version = "'"$new"'"/' "$workspace_toml"
   fi
   # Internal [workspace.dependencies] pin the exact workspace version so
-  # published orca-* crates move in lockstep; plugin-abi has its own version.
+  # every published orca-* crate moves in lockstep.
   # Only `path = "projects/…"` lines are touched, so third-party `=x.y.z` pins
   # that happen to share the old version stay put.
   local old_re
