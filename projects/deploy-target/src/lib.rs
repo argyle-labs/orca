@@ -18,6 +18,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock, RwLock};
 use thiserror::Error;
+use uuid::Uuid;
 
 /// Typed, per-runtime provisioning profile a deploy target carries — the
 /// placement + sizing "where/how", orthogonal to a [`WorkloadSpec`]'s "what".
@@ -204,6 +205,8 @@ pub struct TargetId {
 /// `deploy.list` surfaces and the topology aggregator turns into a node.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Target {
+    #[serde(default)]
+    pub uuid: Uuid,
     /// Composite identity — `(host, runtime, kind)`, the three independent axes.
     pub id: TargetId,
     /// Human-readable endpoint, e.g. `proxmox:pve/lxc`, `docker:unix:///…`,
@@ -458,6 +461,7 @@ pub trait DeployTarget: Send + Sync {
     /// Target descriptor for `deploy.list` / topology.
     fn target(&self) -> Target {
         Target {
+            uuid: self.id().uuid(),
             id: self.id(),
             endpoint: self.endpoint(),
             capabilities: self.capabilities(),
@@ -538,7 +542,13 @@ pub trait DeployTarget: Send + Sync {
     }
 }
 
+const TARGET_NAMESPACE: Uuid = Uuid::from_u128(0x5d1c_7a3e_4b2f_4e8a_9c61_0f3d_8e2a_b7c4);
+
 impl TargetId {
+    pub fn uuid(&self) -> Uuid {
+        Uuid::new_v5(&TARGET_NAMESPACE, target_key(self).as_bytes())
+    }
+
     /// A human-readable rendering of the triple for logs/errors ONLY. This is a
     /// display string, never an identifier — code matches on the discrete
     /// `host`/`runtime`/`kind` fields, never by parsing this back.
@@ -579,8 +589,17 @@ pub fn targets() -> Vec<Arc<dyn DeployTarget>> {
         .clone()
 }
 
+pub fn target(uuid: &Uuid) -> Option<Arc<dyn DeployTarget>> {
+    GLOBAL
+        .read()
+        .expect("deploy-target registry poisoned")
+        .iter()
+        .find(|t| &t.id().uuid() == uuid)
+        .cloned()
+}
+
 /// Look up a single target by its composite identity.
-pub fn target(id: &TargetId) -> Option<Arc<dyn DeployTarget>> {
+pub fn target_by_triple(id: &TargetId) -> Option<Arc<dyn DeployTarget>> {
     GLOBAL
         .read()
         .expect("deploy-target registry poisoned")
@@ -1003,7 +1022,7 @@ mod tests {
         register_target(Arc::new(FakeProxmox {
             host: "host-b".into(),
         }));
-        let found = target(&id).expect("registered target is retrievable");
+        let found = target_by_triple(&id).expect("registered target is retrievable");
         assert_eq!(found.runtime(), Runtime::Lxc);
         assert_eq!(found.kind(), TargetKind::Proxmox);
         assert!(found.supports(DeployCapability::Launch));
@@ -1023,7 +1042,37 @@ mod tests {
         assert_eq!(descriptors().iter().filter(|t| t.id == id).count(), 1);
 
         assert!(deregister_target(&id));
-        assert!(target(&id).is_none());
+        assert!(target_by_triple(&id).is_none());
+    }
+
+    #[test]
+    fn uuid_is_stable_and_resolves_the_target() {
+        let id = TargetId {
+            host: "host-uuid".into(),
+            ..pve_lxc_id()
+        };
+        assert_eq!(id.uuid(), id.clone().uuid());
+        assert_eq!(
+            id.uuid(),
+            Uuid::new_v5(&TARGET_NAMESPACE, b"host-uuid/Lxc/Proxmox")
+        );
+        assert_eq!(id.uuid().get_version_num(), 5);
+        let other = TargetId {
+            host: "host-c".into(),
+            ..pve_lxc_id()
+        };
+        assert_ne!(id.uuid(), other.uuid());
+
+        deregister_target(&id);
+        register_target(Arc::new(FakeProxmox {
+            host: "host-uuid".into(),
+        }));
+        let found = target(&id.uuid()).expect("lookup by uuid");
+        assert_eq!(found.id(), id);
+        let row = descriptors().into_iter().find(|t| t.id == id).unwrap();
+        assert_eq!(row.uuid, id.uuid());
+        deregister_target(&id);
+        assert!(target(&id.uuid()).is_none());
     }
 
     #[test]

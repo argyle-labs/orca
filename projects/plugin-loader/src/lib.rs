@@ -2731,7 +2731,7 @@ mod loader_tests {
             runtime: Runtime::Docker,
             kind: TargetKind::Cli,
         };
-        let target = deploy_target::target(&id).expect("target is registered");
+        let target = deploy_target::target_by_triple(&id).expect("target is registered");
         let outcome = target
             .stop("ct-100")
             .await
@@ -2741,7 +2741,7 @@ mod loader_tests {
 
         domain_deregister("deploy_target", host);
         assert!(
-            deploy_target::target(&id).is_none(),
+            deploy_target::target_by_triple(&id).is_none(),
             "deregister_host removed it"
         );
     }
@@ -2770,7 +2770,7 @@ mod loader_tests {
             runtime: Runtime::Docker,
             kind: TargetKind::Cli,
         };
-        let target = deploy_target::target(&id).expect("target is registered");
+        let target = deploy_target::target_by_triple(&id).expect("target is registered");
         let err = target
             .stop("ct-1")
             .await
