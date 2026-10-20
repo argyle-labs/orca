@@ -1,13 +1,5 @@
 [package]
 name = "orca-plugin-abi"
-# INDEPENDENT of the workspace version — deliberately NOT `version.workspace`.
-#
-# The capability contract in src/lib.rs is FROZEN across orca releases so a
-# plugin built against it stays loadable regardless of the daemon's own
-# (workspace) version. Wire compatibility is negotiated at spawn as a
-# `plugin-proto` major match, not by this crate's version — but keeping this
-# pinned documents that the type contract is a deliberate, hand-managed
-# flag-day, not something an orca release bumps.
 version.workspace = true
 publish = ["gitea"]
 edition.workspace = true
