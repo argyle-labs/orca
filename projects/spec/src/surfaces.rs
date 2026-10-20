@@ -79,7 +79,10 @@ pub struct Invocation {
     second_factor: bool,
     execute_confirmed: bool,
     reaches: Vec<String>,
+    system: bool,
 }
+
+const SYSTEM_ROLE: &str = "read";
 
 impl Invocation {
     pub fn from_ctx(ctx: &ToolCtx) -> Result<Self> {
@@ -94,7 +97,29 @@ impl Invocation {
             second_factor: ctx.second_factor(),
             execute_confirmed: false,
             reaches: Vec::new(),
+            system: false,
         })
+    }
+
+    pub fn system() -> Self {
+        Self {
+            caller: CallerIdentity {
+                user_id: String::new(),
+                username: "orca-system".into(),
+                role: SYSTEM_ROLE.into(),
+                can_mutate: false,
+            },
+            dry_run: false,
+            local: false,
+            second_factor: false,
+            execute_confirmed: false,
+            reaches: Vec::new(),
+            system: true,
+        }
+    }
+
+    pub fn is_system(&self) -> bool {
+        self.system
     }
 
     pub fn caller(&self) -> &CallerIdentity {
@@ -235,6 +260,9 @@ fn gate(
         }
         .into())
     };
+    if inv.system && (required != SYSTEM_ROLE || surface.execute_gated(op)) {
+        return deny("system callers may only read".into());
+    }
     if !dispatch::tool_roles::satisfies(&inv.caller.role, required) {
         return deny(format!("requires role `{required}`"));
     }
@@ -258,7 +286,7 @@ pub fn authorize_capability(cap: &str, inv: &Invocation) -> Result<()> {
         }
         .into())
     };
-    if !dispatch::tool_roles::satisfies(&inv.caller.role, "admin") {
+    if inv.system || !dispatch::tool_roles::satisfies(&inv.caller.role, "admin") {
         return deny("requires role `admin`");
     }
     if !inv.reaches.iter().any(|r| r == cap) {
@@ -702,6 +730,44 @@ mod tests {
         assert!(gate(&s, &sensitive, &verified, true, false).is_ok());
         let admin_2fa = Invocation::from_ctx(&ctx(&admin, true, true, true)).unwrap();
         assert!(gate(&s, &sensitive, &admin_2fa, true, false).is_err());
+    }
+
+    #[test]
+    fn system_caller_may_only_read() {
+        let s = surface("g", "g.{endpoint}.token");
+        let sys = Invocation::system();
+        assert!(sys.is_system());
+        assert!(gate(&s, &op("GET", "read", false), &sys, false, false).is_ok());
+        assert!(gate(&s, &op("GET", "user", false), &sys, false, false).is_err());
+        assert!(gate(&s, &op("GET", "admin", false), &sys, false, false).is_err());
+        assert!(gate(&s, &op("GET", "super-admin", false), &sys, false, false).is_err());
+        let mut gated_read = op("GET", "read", false);
+        gated_read.policy.execute_gated = true;
+        assert!(gate(&s, &gated_read, &sys, false, true).is_err());
+        assert!(gate(&s, &gated_read, &sys, true, false).is_err());
+        for method in ["POST", "PUT", "DELETE"] {
+            assert!(gate(&s, &op(method, "read", true), &sys, false, true).is_err());
+        }
+        let reached = Invocation::system().with_reaches(&["vm.exec".to_string()]);
+        assert!(authorize_capability("vm.exec", &reached).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn system_caller_api_call_refused_on_writes() {
+        register("sysc", surface("sysc", "sysc.{endpoint}.token")).unwrap();
+        let sys = Invocation::system().with_reaches(&["sysc.create".to_string()]);
+        let err = call(
+            "sysc",
+            None,
+            "sysc.create",
+            "main",
+            json!({"name": "n"}),
+            &sys,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.downcast_ref::<Forbidden>().is_some(), "{err}");
+        deregister("sysc");
     }
 
     #[test]
