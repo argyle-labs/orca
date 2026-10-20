@@ -31,6 +31,8 @@ state = ["rt"]
 rt = ["reactor", "dep:tokio-util"]
 # `utils::reactor` — the shared runtime and its sync→async `block_on` bridge.
 reactor = ["dep:tokio"]
+# `utils::invocation_scope::testing` — sync scope setters for other crates' tests.
+test-scope = ["reactor"]
 # `utils::search` — glob matching.
 search = ["dep:glob"]
 # `utils::config_format` — parse-check managed config files. Pulls the toml and

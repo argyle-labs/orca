@@ -148,27 +148,27 @@ impl Invocation {
         reaches: &[String],
     ) -> Self {
         let rank = dispatch::tool_roles::role_rank;
-        let floor = if rank(verb.role) < rank("read") {
+        let floor = if !targeted || rank(verb.role()) < rank("read") {
             "read"
         } else {
-            verb.role
+            verb.role()
         };
-        let role = if rank(floor) < rank(&verb.caller.role) {
+        let role = if rank(floor) < rank(&verb.caller().role) {
             floor.to_string()
         } else {
-            verb.caller.role.clone()
+            verb.caller().role.clone()
         };
         let inv = Self {
-            second_factor: verb.second_factor && role == "super-admin",
+            second_factor: verb.second_factor() && role == "super-admin",
             caller: CallerIdentity {
-                user_id: verb.caller.user_id.clone(),
-                username: verb.caller.username.clone(),
+                user_id: verb.caller().user_id.clone(),
+                username: verb.caller().username.clone(),
                 role,
-                can_mutate: verb.caller.can_mutate,
+                can_mutate: verb.caller().can_mutate,
             },
-            dry_run: verb.dry_run,
-            local: verb.local,
-            execute_confirmed: verb.execute_gated && !verb.dry_run,
+            dry_run: verb.dry_run(),
+            local: verb.local(),
+            execute_confirmed: verb.execute_gated() && !verb.dry_run(),
             reaches: Vec::new(),
             system: false,
         };
@@ -1271,6 +1271,33 @@ mod tests {
         .unwrap_err();
         assert!(ungated.downcast_ref::<Forbidden>().is_none(), "{ungated}");
         deregister("gatep");
+    }
+
+    #[test]
+    fn untargeted_backend_under_an_admin_verb_only_reads() {
+        let verb = contract::invocation_scope::CoreVerb::new(
+            contract::invocation_scope::VerbCaller {
+                user_id: "u".into(),
+                username: "u".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            },
+            "admin",
+            false,
+            false,
+            true,
+            false,
+        );
+        let s = surface("untg", "untg.{endpoint}.token");
+        let untargeted = Invocation::for_backend(&verb, false, &[]);
+        assert_eq!(untargeted.caller.role, "read");
+        let err = gate(&s, &op("GET", "admin", false), &untargeted, false, false).unwrap_err();
+        assert!(err.downcast_ref::<Forbidden>().is_some(), "{err}");
+        gate(&s, &op("GET", "read", false), &untargeted, false, false).unwrap();
+
+        let targeted = Invocation::for_backend(&verb, true, &[]);
+        assert_eq!(targeted.caller.role, "admin");
+        gate(&s, &op("GET", "admin", false), &targeted, false, false).unwrap();
     }
 
     #[test]

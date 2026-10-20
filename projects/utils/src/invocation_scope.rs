@@ -11,23 +11,81 @@ pub struct VerbCaller {
 
 #[derive(Debug, Clone)]
 pub struct CoreVerb {
-    pub caller: VerbCaller,
-    pub role: &'static str,
-    pub execute_gated: bool,
-    pub dry_run: bool,
-    pub local: bool,
-    pub second_factor: bool,
+    caller: VerbCaller,
+    role: &'static str,
+    execute_gated: bool,
+    dry_run: bool,
+    local: bool,
+    second_factor: bool,
+}
+
+impl CoreVerb {
+    pub fn new(
+        caller: VerbCaller,
+        role: &'static str,
+        execute_gated: bool,
+        dry_run: bool,
+        local: bool,
+        second_factor: bool,
+    ) -> Self {
+        Self {
+            caller,
+            role,
+            execute_gated,
+            dry_run,
+            local,
+            second_factor,
+        }
+    }
+
+    pub fn caller(&self) -> &VerbCaller {
+        &self.caller
+    }
+
+    pub fn role(&self) -> &'static str {
+        self.role
+    }
+
+    pub fn execute_gated(&self) -> bool {
+        self.execute_gated
+    }
+
+    pub fn dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    pub fn local(&self) -> bool {
+        self.local
+    }
+
+    pub fn second_factor(&self) -> bool {
+        self.second_factor
+    }
 }
 
 #[derive(Debug, Clone)]
-pub enum BackendCall {
+pub struct BackendCall(Call);
+
+#[derive(Debug, Clone)]
+enum Call {
     Verb { verb: CoreVerb, targeted: bool },
     Daemon,
 }
 
 impl BackendCall {
     pub fn targeted(&self) -> bool {
-        matches!(self, BackendCall::Verb { targeted: true, .. })
+        matches!(self.0, Call::Verb { targeted: true, .. })
+    }
+
+    pub fn verb(&self) -> Option<&CoreVerb> {
+        match &self.0 {
+            Call::Verb { verb, .. } => Some(verb),
+            Call::Daemon => None,
+        }
+    }
+
+    pub fn is_daemon(&self) -> bool {
+        matches!(self.0, Call::Daemon)
     }
 }
 
@@ -60,11 +118,11 @@ pub async fn targeting<F: Future>(domain: &str, name: &str, f: F) -> F::Output {
 #[cfg(feature = "reactor")]
 pub fn capture(domain: &str, name: &str) -> Option<BackendCall> {
     let Some(verb) = current_core_verb() else {
-        return in_daemon_task().then_some(BackendCall::Daemon);
+        return in_daemon_task().then_some(BackendCall(Call::Daemon));
     };
     let key = backend_key(domain, name);
     let targeted = TARGET.try_with(|t| *t == key).unwrap_or(false);
-    Some(BackendCall::Verb { verb, targeted })
+    Some(BackendCall(Call::Verb { verb, targeted }))
 }
 
 #[cfg(feature = "reactor")]
@@ -78,7 +136,7 @@ pub fn in_daemon_task() -> bool {
 }
 
 #[cfg(feature = "reactor")]
-pub fn sync_daemon_task<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn sync_daemon_task<R>(f: impl FnOnce() -> R) -> R {
     DAEMON_TASK.sync_scope((), f)
 }
 
@@ -87,34 +145,42 @@ pub fn capture(_domain: &str, _name: &str) -> Option<BackendCall> {
     None
 }
 
-#[cfg(feature = "reactor")]
-pub fn sync_core_verb<R>(verb: CoreVerb, f: impl FnOnce() -> R) -> R {
-    CORE_VERB.sync_scope(verb, f)
-}
+#[cfg(all(feature = "reactor", any(test, feature = "test-scope")))]
+pub mod testing {
+    use super::{CORE_VERB, CoreVerb, TARGET, backend_key};
 
-#[cfg(feature = "reactor")]
-pub fn sync_targeting<R>(domain: &str, name: &str, f: impl FnOnce() -> R) -> R {
-    TARGET.sync_scope(backend_key(domain, name), f)
+    pub fn sync_core_verb<R>(verb: CoreVerb, f: impl FnOnce() -> R) -> R {
+        CORE_VERB.sync_scope(verb, f)
+    }
+
+    pub fn sync_targeting<R>(domain: &str, name: &str, f: impl FnOnce() -> R) -> R {
+        TARGET.sync_scope(backend_key(domain, name), f)
+    }
+
+    pub fn sync_daemon_task<R>(f: impl FnOnce() -> R) -> R {
+        super::sync_daemon_task(f)
+    }
 }
 
 #[cfg(all(test, feature = "reactor"))]
 mod tests {
+    use super::testing::{sync_core_verb, sync_targeting};
     use super::*;
 
     fn verb() -> CoreVerb {
-        CoreVerb {
-            caller: VerbCaller {
+        CoreVerb::new(
+            VerbCaller {
                 user_id: "u".into(),
                 username: "u".into(),
                 role: "admin".into(),
                 can_mutate: true,
             },
-            role: "admin",
-            execute_gated: true,
-            dry_run: false,
-            local: false,
-            second_factor: false,
-        }
+            "admin",
+            true,
+            false,
+            false,
+            false,
+        )
     }
 
     #[test]
@@ -129,6 +195,6 @@ mod tests {
             });
         });
         let daemon = sync_daemon_task(|| capture("unit", "a"));
-        assert!(matches!(daemon, Some(BackendCall::Daemon)));
+        assert!(daemon.unwrap().is_daemon());
     }
 }
