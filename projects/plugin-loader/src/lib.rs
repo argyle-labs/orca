@@ -1263,17 +1263,7 @@ pub fn loaded_plugins() -> Vec<LoadedPluginInfo> {
         .collect()
 }
 
-pub use contract::plugin::{RESERVED_PLUGIN_IDS, is_reserved_plugin_id};
-
-/// Whether `id` matches `^[a-z][a-z0-9_-]{0,63}$`. No `.` (a dotted id would
-/// own a core secret's `<id>.…` names past the reserved list) and no `/`
-/// (the id becomes the install filename).
-pub fn is_valid_plugin_id(id: &str) -> bool {
-    let mut bytes = id.bytes();
-    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
-        && id.len() <= 64
-        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-}
+pub use contract::plugin::{RESERVED_PLUGIN_IDS, is_reserved_plugin_id, is_valid_plugin_id};
 
 /// Declared id + semver of a plugin binary, read via a capability-less
 /// handshake ([`supervisor::probe`]). Registers nothing.
@@ -2901,13 +2891,7 @@ mod loader_tests {
 
     #[test]
     fn plugin_id_shape_is_enforced() {
-        for id in [
-            "jellyfin",
-            "calibre-web",
-            "github_token",
-            "a",
-            &"a".repeat(64),
-        ] {
+        for id in ["jellyfin", "calibre-web", "a", &"a".repeat(64)] {
             assert!(is_valid_plugin_id(id), "{id} must be valid");
         }
         for id in [
@@ -2919,6 +2903,10 @@ mod loader_tests {
             "Jellyfin",
             "1plugin",
             "-x",
+            "github_token",
+            "calibre_web",
+            "a-",
+            "a--b",
             &"a".repeat(65),
         ] {
             assert!(!is_valid_plugin_id(id), "{id} must be refused");
