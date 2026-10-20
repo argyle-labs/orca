@@ -137,7 +137,7 @@ mod tests {
             boxed(move || {
                 let tx = tx.clone();
                 async move {
-                    let _ = tx.send(contract::invocation_scope::in_daemon_task());
+                    tx.send(contract::invocation_scope::in_daemon_task()).ok();
                     Ok(())
                 }
             }),
