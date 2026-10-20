@@ -66,6 +66,7 @@ extern crate self as db;
 pub mod ports;
 // `proxmox` endpoint registry now lives in the proxmox plugin via
 // `plugin_toolkit::endpoint_resource!`.
+pub mod schedule_owners;
 pub mod scheduler_runs;
 /// Foreign-schema introspection and the `schema.*` view (parses TOML config). Gated by the default-on `config` feature so a thin plugin —
 /// which reaches `db` via `notifications` but never reads a config file —
