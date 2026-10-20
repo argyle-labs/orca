@@ -58,6 +58,8 @@ pub mod ups_surface;
 
 pub use erased::{ErasedTool, ToolWrapper, value_to_text};
 pub use inventory_slice::ToolRegistration;
+#[cfg(feature = "in-process")]
+pub use registry::init;
 pub use registry::{
     AMBIENT_PEER_KEY, CliArgs, SYSTEM_ID_KEY, clap_command, cli_dispatch, data_mutation_names,
     dispatch, dispatch_text, dispatchable, dry_run_aware_names, dry_run_neutralized_names,

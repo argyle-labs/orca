@@ -20,6 +20,21 @@ pub struct CoreVerb {
     second_factor: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyStolen(pub &'static str);
+
+impl std::fmt::Display for KeyStolen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the {} invocation key was already claimed by another component; refusing to start",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for KeyStolen {}
+
 #[derive(Debug)]
 pub struct CoreVerbKey(());
 
