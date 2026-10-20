@@ -37,6 +37,7 @@ orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
 wiremock = { workspace = true }
+utils    = { workspace = true, features = ["test-scope"] }
 
 [lints]
 workspace = true

@@ -501,9 +501,21 @@ pub fn tool_manifest_json() -> String {
 pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
     #[cfg(feature = "in-process")]
     if let Some(verb) = core_verb(name, &args, ctx) {
-        return contract::invocation_scope::core_verb(verb, dispatch_verb(name, args, ctx)).await;
+        return core_verb_key()
+            .scope(verb, dispatch_verb(name, args, ctx))
+            .await;
     }
     dispatch_verb(name, args, ctx).await
+}
+
+#[cfg(feature = "in-process")]
+fn core_verb_key() -> &'static contract::invocation_scope::CoreVerbKey {
+    static KEY: std::sync::LazyLock<contract::invocation_scope::CoreVerbKey> =
+        std::sync::LazyLock::new(|| {
+            contract::invocation_scope::CoreVerbKey::claim()
+                .expect("core-verb key is claimed only by dispatch")
+        });
+    &KEY
 }
 
 #[cfg(feature = "in-process")]
@@ -516,7 +528,7 @@ fn core_verb(
     let execute_gated = find(name).is_some_and(|t| t.execute_gated())
         || crate::tool_roles::plugin_execute_gated(name);
     let dry_run = ctx.dry_run() || crate::erased::dry_run_requested(args).unwrap_or(true);
-    Some(contract::invocation_scope::CoreVerb::new(
+    Some(core_verb_key().verb(
         contract::invocation_scope::VerbCaller {
             user_id: caller.user_id.clone(),
             username: caller.username.clone(),

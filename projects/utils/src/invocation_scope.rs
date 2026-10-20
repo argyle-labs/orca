@@ -1,5 +1,6 @@
 #[cfg(feature = "reactor")]
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerbCaller {
@@ -19,8 +20,51 @@ pub struct CoreVerb {
     second_factor: bool,
 }
 
+#[derive(Debug)]
+pub struct CoreVerbKey(());
+
+#[derive(Debug)]
+pub struct DaemonKey(());
+
+static CORE_VERB_KEY_CLAIMED: AtomicBool = AtomicBool::new(false);
+static DAEMON_KEY_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+impl CoreVerbKey {
+    pub fn claim() -> Option<Self> {
+        (!CORE_VERB_KEY_CLAIMED.swap(true, Ordering::SeqCst)).then_some(Self(()))
+    }
+
+    pub fn verb(
+        &self,
+        caller: VerbCaller,
+        role: &'static str,
+        execute_gated: bool,
+        dry_run: bool,
+        local: bool,
+        second_factor: bool,
+    ) -> CoreVerb {
+        CoreVerb::new(caller, role, execute_gated, dry_run, local, second_factor)
+    }
+
+    #[cfg(feature = "reactor")]
+    pub async fn scope<F: Future>(&self, verb: CoreVerb, f: F) -> F::Output {
+        CORE_VERB.scope(verb, f).await
+    }
+}
+
+impl DaemonKey {
+    pub fn claim() -> Option<Self> {
+        (!DAEMON_KEY_CLAIMED.swap(true, Ordering::SeqCst)).then_some(Self(()))
+    }
+
+    #[cfg(feature = "reactor")]
+    pub async fn scope<F: Future>(&self, f: F) -> F::Output {
+        daemon_task(f).await
+    }
+}
+
 impl CoreVerb {
-    pub fn new(
+    fn new(
         caller: VerbCaller,
         role: &'static str,
         execute_gated: bool,
@@ -101,11 +145,6 @@ tokio::task_local! {
 }
 
 #[cfg(feature = "reactor")]
-pub async fn core_verb<F: Future>(verb: CoreVerb, f: F) -> F::Output {
-    CORE_VERB.scope(verb, f).await
-}
-
-#[cfg(feature = "reactor")]
 pub fn current_core_verb() -> Option<CoreVerb> {
     CORE_VERB.try_with(Clone::clone).ok()
 }
@@ -126,7 +165,7 @@ pub fn capture(domain: &str, name: &str) -> Option<BackendCall> {
 }
 
 #[cfg(feature = "reactor")]
-pub async fn daemon_task<F: Future>(f: F) -> F::Output {
+pub(crate) async fn daemon_task<F: Future>(f: F) -> F::Output {
     DAEMON_TASK.scope((), f).await
 }
 
@@ -147,7 +186,23 @@ pub fn capture(_domain: &str, _name: &str) -> Option<BackendCall> {
 
 #[cfg(all(feature = "reactor", any(test, feature = "test-scope")))]
 pub mod testing {
-    use super::{CORE_VERB, CoreVerb, TARGET, backend_key};
+    use super::{CORE_VERB, CoreVerb, TARGET, VerbCaller, backend_key};
+    use std::future::Future;
+
+    pub fn verb(
+        caller: VerbCaller,
+        role: &'static str,
+        execute_gated: bool,
+        dry_run: bool,
+        local: bool,
+        second_factor: bool,
+    ) -> CoreVerb {
+        CoreVerb::new(caller, role, execute_gated, dry_run, local, second_factor)
+    }
+
+    pub async fn core_verb<F: Future>(verb: CoreVerb, f: F) -> F::Output {
+        CORE_VERB.scope(verb, f).await
+    }
 
     pub fn sync_core_verb<R>(verb: CoreVerb, f: impl FnOnce() -> R) -> R {
         CORE_VERB.sync_scope(verb, f)
@@ -196,5 +251,29 @@ mod tests {
         });
         let daemon = sync_daemon_task(|| capture("unit", "a"));
         assert!(daemon.unwrap().is_daemon());
+    }
+
+    #[test]
+    fn keys_are_claimable_exactly_once() {
+        assert!(CoreVerbKey::claim().is_some());
+        assert!(CoreVerbKey::claim().is_none());
+        assert!(DaemonKey::claim().is_some());
+        assert!(DaemonKey::claim().is_none());
+    }
+
+    #[tokio::test]
+    async fn keys_enter_their_scopes() {
+        let core = CoreVerbKey(());
+        let v = core.verb(verb().caller().clone(), "admin", true, false, false, false);
+        let call = core.scope(v, async { capture("unit", "a") }).await;
+        assert!(call.unwrap().verb().is_some());
+        let daemon = DaemonKey(());
+        assert!(
+            daemon
+                .scope(async { capture("unit", "a") })
+                .await
+                .unwrap()
+                .is_daemon()
+        );
     }
 }

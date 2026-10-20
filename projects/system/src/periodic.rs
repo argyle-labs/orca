@@ -37,11 +37,20 @@ pub struct PeriodicSpec {
     pub interval: Duration,
 }
 
+pub(crate) fn daemon_key() -> &'static contract::invocation_scope::DaemonKey {
+    static KEY: std::sync::LazyLock<contract::invocation_scope::DaemonKey> =
+        std::sync::LazyLock::new(|| {
+            contract::invocation_scope::DaemonKey::claim()
+                .expect("daemon key is claimed only by orca-system")
+        });
+    &KEY
+}
+
 /// Spawn the loop. Returns immediately; the task runs until the process
 /// exits. Callers should drop the handle to "leak it" — that's the
 /// daemon-task convention.
 pub fn spawn(spec: PeriodicSpec, tick: TickFn) -> JoinHandle<()> {
-    tokio::spawn(contract::invocation_scope::daemon_task(async move {
+    tokio::spawn(crate::periodic::daemon_key().scope(async move {
         let shutdown = shutdown_token();
         if !spec.initial_delay.is_zero() {
             tokio::select! {
