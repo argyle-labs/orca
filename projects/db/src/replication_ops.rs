@@ -41,9 +41,6 @@ use serde_json::Value;
 /// before rows land.
 pub const ENTITY: &str = "replication_ops";
 
-/// A `delete` op survives at least this long so any peer that was briefly
-/// offline still replays it. 30 days: a host down longer than that re-bootstraps
-/// from a full snapshot, which already reflects the deletion.
 const LEGACY_ENTITIES: &[(&str, &str)] = &[
     ("pod_peers", "mesh_peers"),
     ("pod_peer_addresses", "mesh_peer_addresses"),
@@ -53,6 +50,18 @@ const LEGACY_ENTITIES: &[(&str, &str)] = &[
     ("pod_pending_offers", "mesh_pending_offers"),
 ];
 
+const LEGACY_KEY_COLS: &[(&str, &str, &str)] = &[
+    ("mesh_self", "pod_id", "mesh_id"),
+    ("mesh_pending_offers", "pod_id", "mesh_id"),
+];
+
+fn canonical_key_col<'a>(entity: &str, key_col: &'a str) -> &'a str {
+    LEGACY_KEY_COLS
+        .iter()
+        .find(|(e, old, _)| *e == entity && *old == key_col)
+        .map_or(key_col, |(_, _, new)| new)
+}
+
 fn canonical_entity(entity: &str) -> &str {
     LEGACY_ENTITIES
         .iter()
@@ -60,6 +69,9 @@ fn canonical_entity(entity: &str) -> &str {
         .map_or(entity, |(_, new)| new)
 }
 
+/// A `delete` op survives at least this long so any peer that was briefly
+/// offline still replays it. 30 days: a host down longer than that re-bootstraps
+/// from a full snapshot, which already reflects the deletion.
 pub const DEFAULT_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 /// True iff `ident` is a bare SQL identifier (`[A-Za-z_][A-Za-z0-9_]*`). The
@@ -350,7 +362,7 @@ fn replicate_merge(conn: &Connection, rows: Value) -> Result<usize> {
         };
         let op_id = s("op_id");
         let entity = canonical_entity(&s("entity")).to_string();
-        let key_col = s("key_col");
+        let key_col = canonical_key_col(&entity, &s("key_col")).to_string();
         let key_val = s("key_val");
         let op = s("op");
         let origin = s("origin");
@@ -483,6 +495,75 @@ mod tests {
             "{rows:?}"
         );
         assert!(rows.iter().all(|r| r.0 != "pod_peers"), "{rows:?}");
+    }
+
+    #[test]
+    fn legacy_pod_id_key_col_maps_to_mesh_id() {
+        assert_eq!(canonical_key_col("mesh_self", "pod_id"), "mesh_id");
+        assert_eq!(
+            canonical_key_col("mesh_pending_offers", "pod_id"),
+            "mesh_id"
+        );
+        assert_eq!(canonical_key_col("mesh_peers", "pod_id"), "pod_id");
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms, local_origin)
+             VALUES ('k', 'pod_self', 'pod_id', 'm1', 'delete', 'o', 100, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(include_str!(
+            "../migrations/20261020000000__replication_ops_mesh_entities.up.sql"
+        ))
+        .unwrap();
+        conn.execute_batch(include_str!(
+            "../migrations/20261021000000__replication_ops_mesh_key_col.up.sql"
+        ))
+        .unwrap();
+        let migrated: (String, String) = conn
+            .query_row(
+                "SELECT entity, key_col FROM replication_ops WHERE key_val = 'm1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(migrated, ("mesh_self".into(), "mesh_id".into()));
+    }
+
+    #[test]
+    fn legacy_bundle_delete_removes_the_mesh_peers_row() {
+        let conn = test_conn();
+        insert_op(&conn, "old", "pod_peers", "p7", "upsert", 100);
+        conn.execute_batch(include_str!(
+            "../migrations/20261020000000__replication_ops_mesh_entities.up.sql"
+        ))
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mesh_peers (peer_id, peer_hostname, ca_cert_pem, first_seen_at, last_seen_at)
+             VALUES ('p7', 'h7', 'pem', 1, 1)",
+            [],
+        )
+        .unwrap();
+        macro_runtime::replicate_table::with_merge_peer("p7", || {
+            replicate_merge(
+                &conn,
+                serde_json::json!([{
+                    "op_id": "z", "entity": "pod_peers", "key_col": "peer_id",
+                    "key_val": "p7", "op": "delete", "origin": "o",
+                    "stamp_ms": utils::time::now().unix_millis(),
+                }]),
+            )
+        })
+        .unwrap();
+        apply_pending_deletes(&conn).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM mesh_peers WHERE peer_id = 'p7'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[test]
