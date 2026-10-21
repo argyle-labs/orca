@@ -392,6 +392,14 @@ pub fn delete_outbound_offers_by_addr(conn: &Connection, addr: &str) -> Result<u
     Ok(n as u32)
 }
 
+pub fn delete_outbound_offers_by_fp(conn: &Connection, peer_pubkey_fp: &str) -> Result<u32> {
+    let n = conn.execute(
+        "DELETE FROM mesh_pending_offers WHERE direction = 'out' AND peer_pubkey_fp = ?",
+        params![peer_pubkey_fp],
+    )?;
+    Ok(n as u32)
+}
+
 /// True if we already have an open outbound offer to this peer fp. Used by
 /// the auto-offer scheduler to avoid spamming a target.
 pub fn has_open_outbound_offer(conn: &Connection, peer_pubkey_fp: &str) -> Result<bool> {
@@ -2244,6 +2252,35 @@ mod tests {
         // The other addr is untouched; a second call removes nothing.
         assert_eq!(delete_outbound_offers_by_addr(&c, "10.0.0.1").unwrap(), 0);
         assert_eq!(list_pending_offers(&c, "out").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delete_outbound_offers_by_fp_spares_other_fps_at_the_same_addr() {
+        let (_d, c) = test_conn();
+        for (id, fp) in [("o1", "fp1"), ("o2", "fp2")] {
+            insert_pending_offer(
+                &c,
+                id,
+                "out",
+                fp,
+                "h1",
+                "10.0.0.1",
+                12002,
+                &hash_code(id),
+                None,
+                None,
+                None,
+                300,
+                None,
+                &[],
+            )
+            .unwrap();
+        }
+        assert_eq!(delete_outbound_offers_by_fp(&c, "fp1").unwrap(), 1);
+        assert_eq!(delete_outbound_offers_by_fp(&c, "fp1").unwrap(), 0);
+        let left = list_pending_offers(&c, "out").unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].peer_pubkey_fp, "fp2");
     }
 
     #[test]

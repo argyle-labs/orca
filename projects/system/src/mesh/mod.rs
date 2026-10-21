@@ -392,7 +392,7 @@ const DISCOVERY_TTL_SECS: i64 = 900;
 fn find_discovered<'a>(
     rows: &'a [::db::mesh::DiscoveryRow],
     id: &str,
-    pinned_fp: impl Fn(&str) -> Option<String>,
+    pinned_fp: impl Fn(&str) -> anyhow::Result<Option<String>>,
 ) -> anyhow::Result<&'a ::db::mesh::DiscoveryRow> {
     if let Some(row) = rows.iter().find(|r| candidate_id(&r.pubkey_fp) == id) {
         return Ok(row);
@@ -409,7 +409,7 @@ fn find_discovered<'a>(
             many.len()
         ),
     };
-    if let Some(fp) = pinned_fp(id)
+    if let Some(fp) = pinned_fp(id)?
         && fp != row.pubkey_fp
     {
         anyhow::bail!("discovered candidate {id} does not present its trusted pubkey");
@@ -430,7 +430,7 @@ fn resolve_target(
     port: Option<u16>,
     rows: &[::db::mesh::DiscoveryRow],
     now_secs: i64,
-    pinned_fp: impl Fn(&str) -> Option<String>,
+    pinned_fp: impl Fn(&str) -> anyhow::Result<Option<String>>,
 ) -> anyhow::Result<CandidateTarget> {
     let Some(id) = id else {
         let addr = addr.ok_or_else(|| {
@@ -470,7 +470,7 @@ fn candidate_target(
     port: Option<u16>,
 ) -> anyhow::Result<CandidateTarget> {
     let Some(id) = id else {
-        return resolve_target(action, addr, None, port, &[], 0, |_| None);
+        return resolve_target(action, addr, None, port, &[], 0, |_| Ok(None));
     };
     ::db::pool::with_pooled_or_open(|conn| {
         let rows = ::db::mesh::list_discovery(conn)?;
@@ -481,11 +481,7 @@ fn candidate_target(
             port,
             &rows,
             utils::time::now_secs_since_epoch(),
-            |peer_id| {
-                ::db::mesh::peerdb::pinned_pubkey_fp(conn, peer_id)
-                    .ok()
-                    .flatten()
-            },
+            |peer_id| ::db::mesh::peerdb::pinned_pubkey_fp(conn, peer_id),
         )
     })
 }
@@ -1687,7 +1683,9 @@ async fn mesh_create(
     match args.action {
         MeshCreateAction::Join => {
             let t = candidate_target("join", args.addr, args.id, args.port)?;
-            Ok(MeshCreateOutput::Accept(exec::join(&t.addr, t.port).await?))
+            Ok(MeshCreateOutput::Accept(
+                exec::join(&t.addr, t.port, t.pubkey_fp.as_deref()).await?,
+            ))
         }
         MeshCreateAction::Offer => {
             let t = candidate_target("offer", args.addr, args.id, args.port)?;
@@ -3408,7 +3406,7 @@ mod mesh_snapshot_tests {
             port,
             rows,
             0,
-            |_| None,
+            |_| Ok(None),
         )
     }
 
@@ -3428,7 +3426,7 @@ mod mesh_snapshot_tests {
             disc_row("fp2", Some(""), "10.0.0.3"),
             disc_row("fp3", Some("sys-3"), "10.0.0.4"),
         ];
-        let none = |_: &str| None;
+        let none = |_: &str| Ok(None);
         assert_eq!(
             find_discovered(&rows, &candidate_id("fp"), none)
                 .unwrap()
@@ -3452,12 +3450,19 @@ mod mesh_snapshot_tests {
     #[test]
     fn a_known_member_with_a_different_pinned_fp_is_refused() {
         let rows = vec![disc_row("fp3", Some("sys-3"), "10.0.0.4")];
-        let err = find_discovered(&rows, "sys-3", |_| Some("other".into())).unwrap_err();
+        let err = find_discovered(&rows, "sys-3", |_| Ok(Some("other".into()))).unwrap_err();
         assert_eq!(
             err.to_string(),
             "discovered candidate sys-3 does not present its trusted pubkey"
         );
-        assert!(find_discovered(&rows, "sys-3", |_| Some("fp3".into())).is_ok());
+        assert!(find_discovered(&rows, "sys-3", |_| Ok(Some("fp3".into()))).is_ok());
+    }
+
+    #[test]
+    fn a_pinned_fp_lookup_error_refuses_the_candidate() {
+        let rows = vec![disc_row("fp3", Some("sys-3"), "10.0.0.4")];
+        let err = find_discovered(&rows, "sys-3", |_| anyhow::bail!("db down")).unwrap_err();
+        assert_eq!(err.to_string(), "db down");
     }
 
     #[test]
@@ -3536,7 +3541,7 @@ mod mesh_snapshot_tests {
             None,
             &rows,
             DISCOVERY_TTL_SECS + 1,
-            |_| None,
+            |_| Ok(None),
         )
         .err()
         .unwrap();
@@ -3555,7 +3560,7 @@ mod mesh_snapshot_tests {
                 None,
                 &rows,
                 DISCOVERY_TTL_SECS,
-                |_| None
+                |_| Ok(None)
             )
             .is_ok()
         );
