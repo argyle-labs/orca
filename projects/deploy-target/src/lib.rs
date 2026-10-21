@@ -1119,6 +1119,14 @@ mod tests {
             ..pve_lxc_id()
         };
         assert!(target_by_triple(&variant).is_some());
+        assert!(!deregister_target(&TargetId {
+            host: "other-host".into(),
+            ..pve_lxc_id()
+        }));
+        assert!(deregister_target(&variant));
+        register_target(Arc::new(FakeProxmox {
+            host: "spell-host".into(),
+        }));
         assert_eq!(deregister_host("SPELL-HOST."), 1);
         assert!(target(&id.uuid()).is_none());
     }

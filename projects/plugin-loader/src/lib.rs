@@ -720,7 +720,11 @@ static BACKEND_CLAIMS: std::sync::LazyLock<RwLock<HashMap<(String, String), Stri
 /// Refuse a backend whose name `software` may not register under.
 fn check_backend_owner(software: &str, def: &BackendDef) -> Result<()> {
     let (domain, name) = (def.domain.as_str(), def.name.as_str());
-    if is_reserved_plugin_id(name) {
+    let canonical = claim_key(domain, name).1;
+    if canonical.is_empty() {
+        bail!("plugin '{software}' may not register {domain} backend '{name}': the name is empty");
+    }
+    if is_reserved_plugin_id(&canonical) {
         bail!(
             "plugin '{software}' may not register {domain} backend '{name}': the name is reserved"
         );
@@ -2275,6 +2279,18 @@ mod loader_tests {
             assert!(err.contains("variant-a"), "{name}: {err}");
             check_backend_owner("variant-a", &d)
                 .unwrap_or_else(|e| panic!("{name}: owner re-register refused: {e:#}"));
+        }
+        for name in ["ORCA", "orca.", " orca "] {
+            let err = check_backend_owner("variant-a", &def(domain, name))
+                .expect_err("reserved spelling refused")
+                .to_string();
+            assert!(err.contains("reserved"), "{name}: {err}");
+        }
+        for name in ["", ".", "   ", "..."] {
+            let err = check_backend_owner("variant-a", &def(domain, name))
+                .expect_err("empty host refused")
+                .to_string();
+            assert!(err.contains("empty"), "{name:?}: {err}");
         }
         release_backend_claim("variant-a", domain, "VARIANT-HOST.");
         let d = def(domain, "variant-host");
