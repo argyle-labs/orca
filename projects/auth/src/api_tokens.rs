@@ -83,7 +83,9 @@ pub fn list(conn: &Connection) -> Result<Vec<ApiToken>> {
 pub fn find_by_hash(conn: &Connection, token_hash: &str) -> Result<Option<ApiTokenLookup>> {
     let r = conn
         .query_row(
-            "SELECT id, name, role, expires_at, user_id, can_mutate FROM api_tokens WHERE token_hash = ?1",
+            "SELECT id, name, role, expires_at, user_id, can_mutate FROM api_tokens
+             WHERE token_hash = ?1
+               AND (user_id IS NULL OR EXISTS (SELECT 1 FROM users u WHERE u.id = api_tokens.user_id))",
             params![token_hash],
             |r| {
                 Ok(ApiTokenLookup {
@@ -140,9 +142,19 @@ mod tests {
     use super::*;
     use db::testing::test_conn;
 
+    fn insert_user(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO users (id, username, username_lower, password_hash, role, created_at, password_updated_at, updated_at)
+             VALUES (?1, ?1, ?1, 'h', 'admin', 't', 't', 't')",
+            params![id],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn insert_lookup_revoke_roundtrip() {
         let conn = test_conn();
+        insert_user(&conn, "u_alice");
         let row = insert(
             &conn,
             "01J000000000000000000000AA",
@@ -184,5 +196,29 @@ mod tests {
         insert(&conn, "id1", "n", "h1", "admin", "t", None, None, false).unwrap();
         assert!(insert(&conn, "id2", "n", "h2", "admin", "t", None, None, false).is_err());
         assert!(insert(&conn, "id3", "n3", "h1", "admin", "t", None, None, false).is_err());
+    }
+
+    #[test]
+    fn token_of_a_deleted_user_no_longer_resolves() {
+        let conn = test_conn();
+        insert_user(&conn, "u_bob");
+        insert(
+            &conn,
+            "t1",
+            "n",
+            "h1",
+            "admin",
+            "t",
+            None,
+            Some("u_bob"),
+            true,
+        )
+        .unwrap();
+        insert(&conn, "t2", "legacy", "h2", "admin", "t", None, None, false).unwrap();
+        assert!(find_by_hash(&conn, "h1").unwrap().is_some());
+        conn.execute("DELETE FROM users WHERE id = 'u_bob'", [])
+            .unwrap();
+        assert!(find_by_hash(&conn, "h1").unwrap().is_none());
+        assert!(find_by_hash(&conn, "h2").unwrap().is_some());
     }
 }

@@ -1907,6 +1907,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn require_auth_rejects_token_and_session_of_a_deleted_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let _db_guard = override_default_db(&dir);
+        let conn = db::open_unencrypted(&_db_guard).unwrap();
+        let uid = insert_user(&conn, "admin");
+        let token = "token_of_a_deleted_user";
+        insert_token_for_user(&conn, "admin", &sha256_hex(token.as_bytes()), Some(&uid));
+        let expires = utils::time::now()
+            .plus(std::time::Duration::from_secs(3600))
+            .to_rfc3339();
+        let sid = insert_session(&conn, &uid, &expires);
+        assert!(identities::users::delete_by_id(&conn, &uid).unwrap());
+
+        for (name, value) in [
+            ("authorization", format!("Bearer {token}")),
+            ("cookie", format!("{SESSION_COOKIE}={sid}")),
+        ] {
+            let mut req = AxumReq::builder()
+                .uri("/api/agents")
+                .header(name, value)
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo::<SocketAddr>("10.0.0.1:12345".parse().unwrap()));
+            let resp = auth_router().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
     async fn require_auth_with_loopback_peer_and_zero_tokens_bootstrap_passes() {
         let dir = tempfile::tempdir().unwrap();
         let _db_guard = override_default_db(&dir);
