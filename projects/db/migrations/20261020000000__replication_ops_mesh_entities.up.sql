@@ -30,3 +30,8 @@ UPDATE replication_ops
  WHERE entity IN (SELECT old FROM replication_ops_entity_map);
 
 DROP TABLE replication_ops_entity_map;
+
+UPDATE replication_ops
+   SET key_col = 'mesh_id'
+ WHERE entity IN ('mesh_self', 'mesh_pending_offers')
+   AND key_col = 'pod_id';
