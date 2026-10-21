@@ -970,7 +970,7 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
         //    touching the install dir. A failed handshake (including a declared
         //    name other than `name`) returns the loader's clean error and
         //    installs nothing.
-        let report = plugin_loader::spawn_plugin(src, name)
+        let report = plugin_loader::spawn_plugin_for_install(src, name)
             .with_context(|| format!("refusing to install {file}: plugin handshake failed"))?;
         apply_plugin_schema(&report);
 
@@ -1001,6 +1001,7 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
         }
         make_executable(&dest)
             .with_context(|| format!("failed to mark {} executable", dest.display()))?;
+        plugin_loader::write_tool_call_pins(&dest, &report.tool_calls)?;
 
         tracing::info!(
             plugin = %report.software,
@@ -1148,7 +1149,7 @@ pub(crate) async fn install_from_catalog(
         // rejected file so the next startup scan doesn't trip on it, then put the
         // incumbent back — a rejected upgrade must be a no-op, not an uninstall.
         // The catalog target_software is the authoritative id (== dest filename).
-        let report = match plugin_loader::spawn_plugin(&dest, &entry.target_software) {
+        let report = match plugin_loader::spawn_plugin_for_install(&dest, &entry.target_software) {
             Ok(r) => r,
             Err(e) => {
                 if let Err(rm) = std::fs::remove_file(&dest) {
@@ -1167,6 +1168,7 @@ pub(crate) async fn install_from_catalog(
         // The signature must sit beside the binary it signs, so it is written
         // only once the candidate is live; root's `plugin-trust` reads it.
         save_signature(&dir, &entry.target_software, fetched.minisig.as_deref())?;
+        plugin_loader::write_tool_call_pins(&dest, &report.tool_calls)?;
         if fetched.minisig.is_some()
             && let Err(e) = request_trust(&entry.target_software).await
         {
@@ -3472,6 +3474,7 @@ mod tests {
             semver: "0.1.0".to_string(),
             tools: Vec::new(),
             declared_schema: schema,
+            tool_calls: Default::default(),
         }
     }
 

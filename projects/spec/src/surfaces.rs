@@ -80,6 +80,10 @@ pub struct Invocation {
     execute_confirmed: bool,
     reaches: Vec<String>,
     system: bool,
+    execute_gated: bool,
+    call_chain: Vec<String>,
+    tool_calls: Vec<String>,
+    call_budget: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 const SYSTEM_ROLE: &str = "read";
@@ -98,6 +102,10 @@ impl Invocation {
             execute_confirmed: false,
             reaches: Vec::new(),
             system: false,
+            execute_gated: false,
+            call_chain: ctx.call_chain().to_vec(),
+            tool_calls: Vec::new(),
+            call_budget: ctx.call_budget().cloned().unwrap_or_default(),
         })
     }
 
@@ -115,6 +123,10 @@ impl Invocation {
             execute_confirmed: false,
             reaches: Vec::new(),
             system: true,
+            execute_gated: false,
+            call_chain: Vec::new(),
+            tool_calls: Vec::new(),
+            call_budget: Default::default(),
         }
     }
 
@@ -126,6 +138,27 @@ impl Invocation {
         &self.caller
     }
 
+    pub fn child_may_execute(&self) -> bool {
+        self.execute_gated && self.execute_confirmed && !self.dry_run
+    }
+
+    pub fn call_chain(&self) -> &[String] {
+        &self.call_chain
+    }
+
+    pub fn call_budget(&self) -> &std::sync::Arc<std::sync::atomic::AtomicUsize> {
+        &self.call_budget
+    }
+
+    pub fn tool_calls(&self) -> &[String] {
+        &self.tool_calls
+    }
+
+    pub fn with_tool_calls(mut self, tool_calls: &[String]) -> Self {
+        self.tool_calls = tool_calls.to_vec();
+        self
+    }
+
     pub fn for_plugin_invoke(
         mut self,
         outer_execute_gated: bool,
@@ -134,6 +167,7 @@ impl Invocation {
         args: &Value,
     ) -> Self {
         self.reaches = outer_reaches.to_vec();
+        self.execute_gated = outer_execute_gated;
         let flag = |k: &str| args.get(k) == Some(&Value::Bool(true));
         self.dry_run |= flag(contract::plan::DRY_RUN_FIELD);
         self.execute_confirmed =
@@ -171,6 +205,10 @@ impl Invocation {
             execute_confirmed: verb.execute_gated() && !verb.dry_run(),
             reaches: Vec::new(),
             system: false,
+            execute_gated: verb.execute_gated(),
+            call_chain: Vec::new(),
+            tool_calls: Vec::new(),
+            call_budget: Default::default(),
         };
         if targeted {
             inv.with_reaches(reaches)

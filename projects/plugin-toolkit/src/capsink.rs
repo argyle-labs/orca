@@ -48,6 +48,7 @@ pub(crate) fn set_core_privileged(caps: &[String]) {
         crate::abi::LXC_EXEC,
         crate::abi::LXC_PUSH,
         crate::abi::PRIVILEGED_APPLY,
+        crate::abi::TOOL_CALL,
     ];
     CORE_PRIVILEGED.with(|c| {
         *c.borrow_mut() = caps

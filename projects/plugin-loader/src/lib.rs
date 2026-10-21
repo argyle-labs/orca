@@ -30,6 +30,7 @@ pub mod capability;
 #[cfg(unix)]
 pub mod privileged;
 pub mod supervisor;
+pub mod tool_call;
 mod ws;
 
 use std::collections::HashMap;
@@ -906,6 +907,61 @@ pub struct LoadReport {
     /// real db connection — the loader does not own db lifecycle. Empty
     /// `namespace`/`tables` for a plugin that declares none.
     pub declared_schema: SchemaDecl,
+    pub tool_calls: ToolCallPins,
+}
+
+pub type ToolCallPins = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
+
+pub fn tool_call_pins_path(exe: &Path) -> std::path::PathBuf {
+    let name = exe
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    exe.with_file_name(format!("{name}.tool_calls.json"))
+}
+
+pub fn read_tool_call_pins(exe: &Path) -> Result<ToolCallPins> {
+    let path = tool_call_pins_path(exe);
+    match std::fs::read(&path) {
+        Ok(bytes) => sj::from_slice(&bytes)
+            .with_context(|| format!("reading tool_calls pins {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ToolCallPins::new()),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("reading {}", path.display()))),
+    }
+}
+
+pub fn write_tool_call_pins(exe: &Path, pins: &ToolCallPins) -> Result<()> {
+    let path = tool_call_pins_path(exe);
+    let tmp = path.with_extension("json.incoming");
+    std::fs::write(&tmp, sj::to_vec_pretty(pins)?)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("installing {}", path.display()))
+}
+
+fn declared_tool_calls(tools: &HashMap<String, ToolDef>) -> ToolCallPins {
+    tools
+        .values()
+        .filter(|d| !d.tool_calls.is_empty())
+        .map(|d| (d.name.clone(), d.tool_calls.iter().cloned().collect()))
+        .collect()
+}
+
+fn check_tool_call_pins(
+    software: &str,
+    declared: &ToolCallPins,
+    pinned: &ToolCallPins,
+) -> Result<()> {
+    for (tool, entries) in declared {
+        let allowed = pinned.get(tool);
+        for entry in entries {
+            if !allowed.is_some_and(|a| a.contains(entry)) {
+                bail!(
+                    "plugin '{software}' quarantined: tool '{tool}' declares tool_calls '{entry}', which was not pinned when it was installed; widening tool_calls requires a plugin update"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Spawn an out-of-process plugin executable, complete the wire-protocol
@@ -929,6 +985,21 @@ pub struct LoadReport {
 /// namespace. Reserved core ids ([`is_reserved_plugin_id`]) are refused.
 #[cfg(unix)]
 pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
+    let pins = read_tool_call_pins(exe)?;
+    spawn_plugin_with(exe, expected_id, Some(&pins))
+}
+
+#[cfg(unix)]
+pub fn spawn_plugin_for_install(exe: &Path, expected_id: &str) -> Result<LoadReport> {
+    spawn_plugin_with(exe, expected_id, None)
+}
+
+#[cfg(unix)]
+fn spawn_plugin_with(
+    exe: &Path,
+    expected_id: &str,
+    pins: Option<&ToolCallPins>,
+) -> Result<LoadReport> {
     let proc = supervisor::PluginProcess::spawn(exe, expected_id)?;
     let software = proc.software.clone();
     let semver = proc.semver.clone();
@@ -955,6 +1026,11 @@ pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
         .collect::<std::result::Result<_, _>>()
         .with_context(|| format!("plugin '{software}' returned an invalid backends list"))?;
     check_reaches(&software, &tools, &surfaces)?;
+    check_tool_calls(&software, &tools)?;
+    let tool_calls = declared_tool_calls(&tools);
+    if let Some(pins) = pins {
+        check_tool_call_pins(&software, &tool_calls, pins)?;
+    }
     check_backend_reaches(&software, &backend_defs, &surfaces)?;
     let surface_policies = surface_tools(&software, &surfaces, &mut tools)?;
     let mut tool_names: Vec<String> = tools.keys().cloned().collect();
@@ -1027,6 +1103,7 @@ pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
         semver,
         tools: tool_names,
         declared_schema,
+        tool_calls,
     })
 }
 
@@ -1121,6 +1198,21 @@ fn check_reaches(
     Ok(())
 }
 
+fn check_tool_calls(software: &str, tools: &HashMap<String, ToolDef>) -> Result<()> {
+    for def in tools.values() {
+        for entry in &def.tool_calls {
+            let stem = entry.strip_suffix(".*").unwrap_or(entry);
+            if stem.trim().is_empty() || stem.contains('*') {
+                anyhow::bail!(
+                    "plugin '{software}' tool '{}' declares tool_calls entry '{entry}'; use a tool name or a `prefix.*` glob",
+                    def.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_backend_reaches(
     software: &str,
     defs: &[BackendDef],
@@ -1205,6 +1297,7 @@ fn surface_tools(
                     data_mutation: false,
                     local_only: op.policy.local_only,
                     read_unconfirmed: false,
+                    tool_callable: false,
                 },
             ));
         }
@@ -1269,7 +1362,8 @@ fn install_tool_policies(software: &str, tools: &HashMap<String, ToolDef>) {
                 d.execute_gated,
                 d.data_mutation,
             )
-            .local_only(d.local_only),
+            .local_only(d.local_only)
+            .tool_callable(d.tool_callable),
         )
     }));
 }
@@ -1484,6 +1578,25 @@ fn tool_reaches(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn tool_tool_calls(name: &str) -> Vec<String> {
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
+    reg.by_tool
+        .get(name)
+        .and_then(|idx| reg.plugins[*idx].tools.get(name))
+        .map(|d| d.tool_calls.clone())
+        .unwrap_or_default()
+}
+
+pub(crate) fn refuse_reentry(ctx: &ToolCtx, software: &str, name: &str) -> Result<()> {
+    if ctx.call_chain().iter().any(|p| p == software) {
+        return Err(contract::OrcaError::forbidden(format!(
+            "{name} refused: plugin '{software}' is already in the tool.call chain"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 fn plan_with_reaches(result: Result<sj::Value>, name: &str, dry_run: bool) -> Result<sj::Value> {
     let mut value = result?;
     let reaches = tool_reaches(name);
@@ -1513,7 +1626,8 @@ fn invocation_for(
                 dispatch::tool_roles::required_role(name),
                 &tool_reaches(name),
                 args,
-            ),
+            )
+            .with_tool_calls(&tool_tool_calls(name)),
     )
 }
 
@@ -1576,6 +1690,7 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
         return execute_surface(&software, name, args, ctx).await;
     }
     if let Some((backing, software)) = backing_for(name) {
+        refuse_reentry(ctx, &software, name)?;
         let owned = name.to_string();
         let inv = invocation_for(ctx, name, &args);
         let dry_run = dry_run_args(&args);
@@ -1605,6 +1720,9 @@ pub fn invoke_plugin(name: &str, args: &sj::Value, ctx: &ToolCtx) -> Option<Resu
         )));
     }
     let (backing, software) = backing_for(name)?;
+    if let Err(e) = refuse_reentry(ctx, &software, name) {
+        return Some(Err(e));
+    }
     let result = backing.invoke(name, args.clone(), invocation_for(ctx, name, args));
     Some(plan_with_reaches(
         parse_invoke_result(result, name, &software),
@@ -2445,12 +2563,60 @@ mod loader_tests {
     }
 
     #[test]
+    fn tool_call_pins_refuse_widening() {
+        let pins = |entries: &[(&str, &[&str])]| -> ToolCallPins {
+            entries
+                .iter()
+                .map(|(t, e)| (t.to_string(), e.iter().map(|s| s.to_string()).collect()))
+                .collect()
+        };
+        let pinned = pins(&[("p.deploy", &["service.create", "deploy.list"])]);
+        check_tool_call_pins("p", &pins(&[("p.deploy", &["service.create"])]), &pinned).unwrap();
+        check_tool_call_pins("p", &ToolCallPins::new(), &pinned).unwrap();
+        let err = check_tool_call_pins("p", &pins(&[("p.deploy", &["service.update"])]), &pinned)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("quarantined") && err.contains("service.update"),
+            "{err}"
+        );
+        let err = check_tool_call_pins("p", &pins(&[("p.other", &["deploy.list"])]), &pinned)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("p.other"), "{err}");
+        let err = check_tool_call_pins(
+            "p",
+            &pins(&[("p.deploy", &["deploy.list"])]),
+            &ToolCallPins::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("quarantined"), "{err}");
+    }
+
+    #[test]
+    fn tool_call_pins_round_trip_beside_the_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("orca-plugin-p");
+        assert!(read_tool_call_pins(&exe).unwrap().is_empty());
+        let mut pins = ToolCallPins::new();
+        pins.insert("p.deploy".into(), ["service.create".to_string()].into());
+        write_tool_call_pins(&exe, &pins).unwrap();
+        assert_eq!(read_tool_call_pins(&exe).unwrap(), pins);
+        assert_eq!(
+            tool_call_pins_path(&exe),
+            dir.path().join("orca-plugin-p.tool_calls.json")
+        );
+    }
+
+    #[test]
     fn load_report_is_debug_and_clone() {
         let report = LoadReport {
             software: "jellyfin".to_string(),
             semver: "0.1.0".to_string(),
             tools: vec!["a".to_string(), "b".to_string()],
             declared_schema: SchemaDecl::default(),
+            tool_calls: ToolCallPins::new(),
         };
         let cloned = report.clone();
         assert_eq!(cloned.software, "jellyfin");
@@ -2878,6 +3044,8 @@ mod loader_tests {
                     data_mutation: Some(true),
                     local_only: Some(true),
                     reaches: Vec::new(),
+                    tool_calls: Vec::new(),
+                    tool_callable: None,
                 },
                 plugin_proto::ToolDef {
                     name: "loaderfakeplugin.fetch".into(),
@@ -2889,6 +3057,8 @@ mod loader_tests {
                     data_mutation: None,
                     local_only: None,
                     reaches: Vec::new(),
+                    tool_calls: Vec::new(),
+                    tool_callable: None,
                 },
             ],
             backends: vec![

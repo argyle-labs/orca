@@ -122,6 +122,7 @@ pub mod stream;
 /// available (runs on the shared reactor); the wall-clock `Timestamp`/`now`
 /// re-exports are gated on `tools`.
 pub mod time;
+pub mod tool_call;
 /// Thin-profile tool-surface helpers (manifest filtering + `minimal_ctx`) that
 /// both the in-process `export` glue and the out-of-process [`serve`] loop need.
 /// Reactor-free, so gated on `tools` alone rather than `in-process`.
