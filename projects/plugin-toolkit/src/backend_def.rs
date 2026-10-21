@@ -443,6 +443,7 @@ pub fn deploy_backend_def(
         endpoint: target.endpoint(),
         capabilities,
         provisioning: target.provisioning(),
+        data_roots: target.data_roots(),
         invoke_prefix: invoke_prefix.to_string(),
         ..Default::default()
     }
