@@ -532,6 +532,7 @@ fn register_deploy_target_backend(def: &BackendDef, invoke: BackendInvoke) -> Re
         def.endpoint.clone(),
         &def.capabilities,
         def.provisioning.clone(),
+        def.data_roots.clone(),
         thunk,
     )
     .map_err(|e| anyhow!("register deploy-target backend '{}': {e}", def.name))
