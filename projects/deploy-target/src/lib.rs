@@ -526,7 +526,25 @@ fn numeric_oddity(host: &str) -> bool {
         && host.parse::<std::net::Ipv4Addr>().is_err()
 }
 
-fn nas_host_error(host: &str, on_host: bool) -> Option<String> {
+type Resolver = dyn Fn(&str) -> std::io::Result<Vec<std::net::IpAddr>>;
+
+fn absolute_name(name: &str) -> String {
+    if name.ends_with('.') {
+        name.to_string()
+    } else {
+        format!("{name}.")
+    }
+}
+
+fn system_resolve(name: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+    use std::net::ToSocketAddrs;
+    Ok((absolute_name(name).as_str(), 0)
+        .to_socket_addrs()?
+        .map(|a| a.ip())
+        .collect())
+}
+
+fn nas_host_error(host: &str, resolve: Option<&Resolver>) -> Option<String> {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     let lower = bare.to_ascii_lowercase();
     if LOOPBACK_HOSTS.contains(&lower.as_str()) {
@@ -546,23 +564,19 @@ fn nas_host_error(host: &str, on_host: bool) -> Option<String> {
             "NAS export host `{host}` is this host; bind the path directly"
         ));
     }
-    if !on_host {
-        return None;
-    }
-    use std::net::ToSocketAddrs;
-    let addrs: Vec<_> = match (bare, 0).to_socket_addrs() {
-        Ok(a) => a.collect(),
-        Err(e) => return Some(format!("NAS export host `{host}` does not resolve: {e}")),
+    let resolve = resolve?;
+    let addrs = match lower.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![ip],
+        Err(_) => match resolve(bare) {
+            Ok(a) if !a.is_empty() => a,
+            Ok(_) => return Some(format!("NAS export host `{host}` does not resolve")),
+            Err(e) => return Some(format!("NAS export host `{host}` does not resolve: {e}")),
+        },
     };
     addrs
         .iter()
-        .find(|a| self_ip(a.ip()) || std::net::UdpSocket::bind((a.ip(), 0)).is_ok())
-        .map(|a| {
-            format!(
-                "NAS export host `{host}` resolves to this host ({})",
-                a.ip()
-            )
-        })
+        .find(|ip| self_ip(**ip) || std::net::UdpSocket::bind((**ip, 0)).is_ok())
+        .map(|ip| format!("NAS export host `{host}` resolves to this host ({ip})"))
 }
 
 fn sensitive_segments() -> Vec<Vec<String>> {
@@ -612,15 +626,16 @@ fn under_data_root(candidate: &Path, data_roots: &[PathBuf]) -> bool {
 
 pub fn bind_source_error(source: &str) -> Option<String> {
     let denied = denied_roots(utils::home::orca_home().as_deref());
-    bind_source_check(source, None, &denied, false).err()
+    bind_source_check(source, None, &denied, None).err()
 }
 
 fn bind_source_check(
     source: &str,
     data_roots: Option<&[PathBuf]>,
     denied: &[PathBuf],
-    on_host: bool,
+    resolve: Option<&Resolver>,
 ) -> Result<Option<PathBuf>, String> {
+    let on_host = resolve.is_some();
     let source = source.trim();
     if source.split(['/', '\\']).any(|seg| seg == "..") {
         return Err("`..` is not allowed".into());
@@ -635,7 +650,7 @@ fn bind_source_check(
         if let Some(why) = protected_reason(&export, &roots) {
             return Err(why);
         }
-        return match nas_host_error(host, on_host) {
+        return match nas_host_error(host, resolve) {
             Some(why) => Err(why),
             None => Ok(None),
         };
@@ -785,7 +800,7 @@ impl WorkloadSpec {
     }
 
     pub fn validate_for_target(&self, data_roots: &[String]) -> Result<(), DeployError> {
-        self.check_binds(data_roots, utils::home::orca_home().as_deref(), false)
+        self.check_binds(data_roots, utils::home::orca_home().as_deref(), None)
             .map(|_| ())
     }
 
@@ -794,15 +809,16 @@ impl WorkloadSpec {
         data_roots: &[String],
         orca_home: Option<&Path>,
     ) -> Result<WorkloadSpec, DeployError> {
-        self.check_binds(data_roots, orca_home, true)
+        self.check_binds(data_roots, orca_home, Some(&system_resolve))
     }
 
     fn check_binds(
         &self,
         data_roots: &[String],
         orca_home: Option<&Path>,
-        on_host: bool,
+        resolve: Option<&Resolver>,
     ) -> Result<WorkloadSpec, DeployError> {
+        let on_host = resolve.is_some();
         self.validate()?;
         let denied = denied_roots(orca_home);
         let refuse =
@@ -815,7 +831,7 @@ impl WorkloadSpec {
             .iter_mut()
             .filter(|m| m.kind == MountKind::Bind)
         {
-            match bind_source_check(&m.source, Some(&roots), &denied, on_host) {
+            match bind_source_check(&m.source, Some(&roots), &denied, resolve) {
                 Ok(Some(resolved)) => m.source = resolved.display().to_string(),
                 Ok(None) => {}
                 Err(why) => errs.push(format!(
@@ -2159,15 +2175,43 @@ mod tests {
 
     #[test]
     fn the_host_check_applies_orca_home_and_resolution_to_nas_exports() {
+        use std::net::IpAddr;
         let srv = vec!["/srv/x".to_string()];
-        let err = host_err(
-            &binds(&["nas.invalid:/data/orca/db"]),
-            &srv,
-            Some(Path::new("/data/orca")),
-        );
+        let check = |source: &str,
+                     home: Option<&Path>,
+                     resolve: &Resolver|
+         -> Result<WorkloadSpec, DeployError> {
+            binds(&[source]).check_binds(&srv, home, Some(resolve))
+        };
+        let unresolvable = |_: &str| -> std::io::Result<Vec<IpAddr>> {
+            Err(std::io::Error::other("no such host"))
+        };
+        let empty = |_: &str| -> std::io::Result<Vec<IpAddr>> { Ok(Vec::new()) };
+        let loopback =
+            |_: &str| -> std::io::Result<Vec<IpAddr>> { Ok(vec!["127.0.0.1".parse().unwrap()]) };
+        let remote =
+            |_: &str| -> std::io::Result<Vec<IpAddr>> { Ok(vec!["192.0.2.10".parse().unwrap()]) };
+
+        let err = check("nas:/data/orca/db", Some(Path::new("/data/orca")), &remote)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("protected host path"), "{err}");
-        let err = host_err(&binds(&["nas.invalid:/export"]), &srv, None);
-        assert!(err.contains("does not resolve"), "{err}");
+        for resolve in [&unresolvable as &Resolver, &empty] {
+            let err = check("nas:/export", None, resolve).unwrap_err().to_string();
+            assert!(err.contains("does not resolve"), "{err}");
+        }
+        let err = check("nas:/export", None, &loopback)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("resolves to this host"), "{err}");
+        check("nas:/export", None, &remote).unwrap();
+    }
+
+    #[test]
+    fn nas_names_resolve_as_absolute_names() {
+        assert_eq!(absolute_name("nas"), "nas.");
+        assert_eq!(absolute_name("nas.lan"), "nas.lan.");
+        assert_eq!(absolute_name("nas.lan."), "nas.lan.");
     }
 
     #[test]
