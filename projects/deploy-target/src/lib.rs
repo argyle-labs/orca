@@ -16,6 +16,7 @@
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, RwLock};
 use thiserror::Error;
 use uuid::Uuid;
@@ -219,6 +220,10 @@ pub struct Target {
     /// [`WorkloadSpec`] at launch: the spec is the *what*, this is the *where/how*.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisioning: Option<ProvisioningConfig>,
+    /// Host directories bind mounts on this target must live under. Empty
+    /// means no host path may be bound.
+    #[serde(default)]
+    pub data_roots: Vec<String>,
 }
 
 /// A workload as orca asks a target to place it. Runtime-agnostic on purpose:
@@ -259,9 +264,11 @@ pub struct EnvVar {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MountKind {
-    /// Bind a host path, named volume, or NAS export into the workload.
+    /// Bind a host path or NAS export (`host:/path`) into the workload.
     #[default]
     Bind,
+    /// Attach a runtime-managed named volume. `source` is the volume name.
+    Volume,
     /// Mount a fresh in-memory filesystem. No source.
     ///
     /// Some software requires one and degrades *silently* without it rather
@@ -300,6 +307,16 @@ impl Mount {
         Self {
             kind: MountKind::Bind,
             source: source.into(),
+            target: target.into(),
+            read_only: false,
+            size: None,
+        }
+    }
+
+    pub fn volume(name: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            kind: MountKind::Volume,
+            source: name.into(),
             target: target.into(),
             read_only: false,
             size: None,
@@ -351,6 +368,20 @@ impl Mount {
                     )
                 })
             }
+            MountKind::Volume => {
+                if self.size.is_some() {
+                    return Some(format!(
+                        "volume at {} sets `size`, which applies only to tmpfs",
+                        self.target
+                    ));
+                }
+                (!is_volume_name(&self.source)).then(|| {
+                    format!(
+                        "volume at {}: `{}` is not a volume name ([A-Za-z0-9][A-Za-z0-9_.-]*)",
+                        self.target, self.source
+                    )
+                })
+            }
             MountKind::Tmpfs => {
                 if !self.source.trim().is_empty() {
                     return Some(format!(
@@ -373,27 +404,66 @@ const DENIED_BIND_ROOTS: &[&str] = &[
     "/boot",
     "/run",
     "/var/run",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/opt/orca",
+    "/var/spool",
     "/var/lib/docker",
+    "/var/lib/containerd",
+    "/var/lib/containers",
+    "/var/lib/lxc",
+    "/var/lib/libvirt",
+    "/var/lib/orca",
+    "/private/etc",
+    "/private/var/root",
+    "/private/var/db",
+    "/Library/Keychains",
 ];
 
-fn denied_bind_roots() -> Vec<std::path::PathBuf> {
-    let mut roots: Vec<std::path::PathBuf> = DENIED_BIND_ROOTS
-        .iter()
-        .map(std::path::PathBuf::from)
-        .collect();
-    roots.extend(utils::home::orca_home());
+const SENSITIVE_ENTRIES: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".orca",
+    "Library/Keychains",
+    ".aws",
+    ".docker",
+    ".kube",
+    ".config/gcloud",
+    ".netrc",
+    ".password-store",
+    ".local/share/keyrings",
+];
+
+const HOME_PARENTS: &[&str] = &["home", "users"];
+
+const LOOPBACK_HOSTS: &[&str] = &[
+    "localhost",
+    "localhost.localdomain",
+    "ip6-localhost",
+    "ip6-loopback",
+];
+
+fn denied_roots(orca_home: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = DENIED_BIND_ROOTS.iter().map(PathBuf::from).collect();
+    roots.extend(orca_home.map(Path::to_path_buf));
     let resolved: Vec<_> = roots.iter().filter_map(|r| r.canonicalize().ok()).collect();
     roots.extend(resolved);
     roots
 }
 
-fn normalize_bind_path(source: &str) -> Result<std::path::PathBuf, String> {
+fn normalize_absolute(source: &str) -> Result<PathBuf, String> {
     use std::path::Component;
-    let path = std::path::Path::new(source);
+    let path = Path::new(source);
     if !path.is_absolute() {
-        return Err("a host path must be absolute".into());
+        return Err(
+            "a bind source must be an absolute host path; use a volume mount for a named volume"
+                .into(),
+        );
     }
-    let mut out = std::path::PathBuf::from("/");
+    let mut out = PathBuf::from("/");
     for c in path.components() {
         match c {
             Component::RootDir | Component::CurDir => {}
@@ -406,49 +476,313 @@ fn normalize_bind_path(source: &str) -> Result<std::path::PathBuf, String> {
     Ok(out)
 }
 
-fn is_named_volume(source: &str) -> bool {
-    !source.is_empty()
+fn lowered(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(p) => Some(p.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn starts_with_ci(path: &Path, prefix: &Path) -> bool {
+    let (p, q) = (lowered(path), lowered(prefix));
+    p.len() >= q.len() && p[..q.len()] == q[..]
+}
+
+fn is_volume_name(source: &str) -> bool {
+    source
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
         && source
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
-        && source
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
 }
 
-fn is_nas_export(source: &str) -> bool {
-    source
-        .split_once(":/")
-        .is_some_and(|(host, _)| !host.is_empty() && !host.contains('/'))
+fn nas_export(source: &str) -> Option<(&str, &str)> {
+    let idx = if source.starts_with('[') {
+        source.find("]:/")? + 1
+    } else {
+        source.find(":/")?
+    };
+    let (host, rest) = source.split_at(idx);
+    (!host.is_empty() && !host.contains('/')).then_some((host, &rest[1..]))
+}
+
+fn self_ip(ip: std::net::IpAddr) -> bool {
+    let ip = match ip {
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(ip),
+        v4 => v4,
+    };
+    ip.is_loopback() || ip.is_unspecified()
+}
+
+fn numeric_oddity(host: &str) -> bool {
+    host.chars().next().is_some_and(|c| c.is_ascii_digit())
+        && host
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || matches!(c, '.' | 'x' | 'X'))
+        && host.parse::<std::net::Ipv4Addr>().is_err()
+}
+
+type Resolver = dyn Fn(&str) -> std::io::Result<Vec<std::net::IpAddr>>;
+
+fn absolute_name(name: &str) -> String {
+    if name.ends_with('.') {
+        name.to_string()
+    } else {
+        format!("{name}.")
+    }
+}
+
+fn system_resolve(name: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+    use std::net::ToSocketAddrs;
+    Ok((absolute_name(name).as_str(), 0)
+        .to_socket_addrs()?
+        .map(|a| a.ip())
+        .collect())
+}
+
+fn nas_host_error(host: &str, resolve: Option<&Resolver>) -> Option<String> {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    let lower = bare.to_ascii_lowercase();
+    if LOOPBACK_HOSTS.contains(&lower.as_str()) {
+        return Some(format!(
+            "NAS export host `{host}` is this host; bind the path directly"
+        ));
+    }
+    if numeric_oddity(&lower) {
+        return Some(format!(
+            "NAS export host `{host}` is not a canonical address"
+        ));
+    }
+    if let Ok(ip) = lower.parse::<std::net::IpAddr>()
+        && self_ip(ip)
+    {
+        return Some(format!(
+            "NAS export host `{host}` is this host; bind the path directly"
+        ));
+    }
+    let resolve = resolve?;
+    let addrs = match lower.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![ip],
+        Err(_) => match resolve(bare) {
+            Ok(a) if !a.is_empty() => a,
+            Ok(_) => return Some(format!("NAS export host `{host}` does not resolve")),
+            Err(e) => return Some(format!("NAS export host `{host}` does not resolve: {e}")),
+        },
+    };
+    addrs
+        .iter()
+        .find(|ip| self_ip(**ip) || std::net::UdpSocket::bind((**ip, 0)).is_ok())
+        .map(|ip| format!("NAS export host `{host}` resolves to this host ({ip})"))
+}
+
+fn sensitive_segments() -> Vec<Vec<String>> {
+    SENSITIVE_ENTRIES
+        .iter()
+        .map(|e| e.split('/').map(str::to_ascii_lowercase).collect())
+        .collect()
+}
+
+fn protected_reason(candidate: &Path, roots: &[PathBuf]) -> Option<String> {
+    protected_within(candidate, roots, true)
+}
+
+fn protected_within(candidate: &Path, roots: &[PathBuf], ancestors: bool) -> Option<String> {
+    let segs = lowered(candidate);
+    if segs.is_empty() {
+        return Some("binding the host root is not allowed".into());
+    }
+    if let Some(root) = roots
+        .iter()
+        .find(|r| starts_with_ci(candidate, r) || (ancestors && starts_with_ci(r, candidate)))
+    {
+        return Some(format!("overlaps protected host path {}", root.display()));
+    }
+    if let Some(pat) = sensitive_segments()
+        .into_iter()
+        .find(|pat| segs.windows(pat.len()).any(|w| w == &pat[..]))
+    {
+        return Some(format!("contains protected segment {}", pat.join("/")));
+    }
+    if ancestors && segs.len() == 2 && HOME_PARENTS.contains(&segs[0].as_str()) {
+        return Some("binding a home directory root is not allowed; bind a subdirectory".into());
+    }
+    None
+}
+
+fn sensitive_child(dir: &Path) -> Option<String> {
+    SENSITIVE_ENTRIES
+        .iter()
+        .find(|e| dir.join(e).symlink_metadata().is_ok())
+        .map(|e| format!("contains {e}"))
+}
+
+fn under_data_root(candidate: &Path, data_roots: &[PathBuf]) -> bool {
+    data_roots.iter().any(|r| candidate.starts_with(r))
 }
 
 pub fn bind_source_error(source: &str) -> Option<String> {
+    let denied = denied_roots(utils::home::orca_home().as_deref());
+    bind_source_check(source, None, &denied, None).err()
+}
+
+fn bind_source_check(
+    source: &str,
+    data_roots: Option<&[PathBuf]>,
+    denied: &[PathBuf],
+    resolve: Option<&Resolver>,
+) -> Result<Option<PathBuf>, String> {
+    let on_host = resolve.is_some();
     let source = source.trim();
     if source.split(['/', '\\']).any(|seg| seg == "..") {
-        return Some("`..` is not allowed".into());
+        return Err("`..` is not allowed".into());
     }
-    if is_named_volume(source) || is_nas_export(source) {
-        return None;
-    }
-    let lexical = match normalize_bind_path(source) {
-        Ok(p) => p,
-        Err(why) => return Some(why),
-    };
-    let resolved = lexical.canonicalize().ok();
-    let roots = denied_bind_roots();
-    for candidate in std::iter::once(&lexical).chain(resolved.as_ref()) {
-        if candidate == std::path::Path::new("/") {
-            return Some("binding the host root is not allowed".into());
+    if let Some((host, path)) = nas_export(source) {
+        let export = normalize_absolute(path)?;
+        let roots: Vec<PathBuf> = if on_host {
+            denied.to_vec()
+        } else {
+            DENIED_BIND_ROOTS.iter().map(PathBuf::from).collect()
+        };
+        if let Some(why) = protected_reason(&export, &roots) {
+            return Err(why);
         }
-        if let Some(root) = roots
-            .iter()
-            .find(|r| candidate.starts_with(r) || r.starts_with(candidate))
+        return match nas_host_error(host, resolve) {
+            Some(why) => Err(why),
+            None => Ok(None),
+        };
+    }
+    let lexical = normalize_absolute(source)?;
+    if let Some(why) = protected_reason(&lexical, denied) {
+        return Err(why);
+    }
+    let checked = if on_host {
+        let meta = lexical.symlink_metadata().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "does not exist on this host; create it under a data root first".to_string()
+            } else {
+                format!("cannot inspect: {e}")
+            }
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err("is a symlink; bind its target directly".into());
+        }
+        let resolved = lexical
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve: {e}"))?;
+        if let Some(why) = protected_reason(&resolved, denied) {
+            return Err(why);
+        }
+        if meta.is_dir()
+            && let Some(why) = sensitive_child(&resolved)
         {
-            return Some(format!("overlaps protected host path {}", root.display()));
+            return Err(why);
+        }
+        resolved
+    } else {
+        lexical
+    };
+    if let Some(roots) = data_roots {
+        if roots.is_empty() {
+            return Err(
+                "the deploy target declares no data_roots, so no host path may be bound".into(),
+            );
+        }
+        if !under_data_root(&checked, roots) {
+            return Err(format!(
+                "not under a data root of this target ({})",
+                roots
+                    .iter()
+                    .map(|r| r.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
     }
-    None
+    Ok(on_host.then_some(checked))
+}
+
+fn prepare_data_roots(
+    data_roots: &[String],
+    denied: &[PathBuf],
+    on_host: bool,
+) -> Result<Vec<PathBuf>, String> {
+    data_roots
+        .iter()
+        .map(|r| {
+            let p = normalize_absolute(r.trim()).map_err(|why| format!("data root {r}: {why}"))?;
+            if lowered(&p).len() < 2 {
+                return Err(format!(
+                    "data root {r}: a top-level directory cannot be a data root; use a subdirectory"
+                ));
+            }
+            let p = if on_host {
+                p.canonicalize().unwrap_or(p)
+            } else {
+                p
+            };
+            match protected_within(&p, denied, false) {
+                Some(why) => Err(format!("data root {r}: {why}")),
+                None => Ok(p),
+            }
+        })
+        .collect()
+}
+
+pub fn ensure_bind_dir(
+    data_roots: &[String],
+    path: &str,
+    orca_home: Option<&Path>,
+) -> Result<PathBuf, DeployError> {
+    let refuse = |why: String| DeployError::Other(format!("refusing bind directory {path}: {why}"));
+    let denied = denied_roots(orca_home);
+    let lexical = normalize_absolute(path).map_err(refuse)?;
+    if let Some(why) = protected_reason(&lexical, &denied) {
+        return Err(refuse(why));
+    }
+    let root = data_roots
+        .iter()
+        .filter_map(|r| normalize_absolute(r.trim()).ok())
+        .find(|r| lexical.starts_with(r))
+        .ok_or_else(|| refuse("not under a data root of this target".into()))?;
+    prepare_data_roots(&[root.display().to_string()], &denied, true).map_err(refuse)?;
+    let mut current = root
+        .canonicalize()
+        .map_err(|e| refuse(format!("data root {}: {e}", root.display())))?;
+    let rest = lexical.strip_prefix(&root).unwrap_or(Path::new(""));
+    for component in rest.components() {
+        current.push(component);
+        let meta = match current.symlink_metadata() {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(refuse(format!("create {}: {e}", current.display()))),
+                }
+                current
+                    .symlink_metadata()
+                    .map_err(|e| refuse(format!("inspect {}: {e}", current.display())))?
+            }
+            Err(e) => return Err(refuse(format!("inspect {}: {e}", current.display()))),
+        };
+        if meta.file_type().is_symlink() {
+            return Err(refuse(format!("{} is a symlink", current.display())));
+        }
+        if !meta.is_dir() {
+            return Err(refuse(format!("{} is not a directory", current.display())));
+        }
+    }
+    let resolved = current
+        .canonicalize()
+        .map_err(|e| refuse(format!("resolve {}: {e}", current.display())))?;
+    if let Some(why) = protected_reason(&resolved, &denied) {
+        return Err(refuse(why));
+    }
+    Ok(resolved)
 }
 
 impl WorkloadSpec {
@@ -462,6 +796,54 @@ impl WorkloadSpec {
                 self.name,
                 errs.join("; ")
             )))
+        }
+    }
+
+    pub fn validate_for_target(&self, data_roots: &[String]) -> Result<(), DeployError> {
+        self.check_binds(data_roots, utils::home::orca_home().as_deref(), None)
+            .map(|_| ())
+    }
+
+    pub fn validate_on_host(
+        &self,
+        data_roots: &[String],
+        orca_home: Option<&Path>,
+    ) -> Result<WorkloadSpec, DeployError> {
+        self.check_binds(data_roots, orca_home, Some(&system_resolve))
+    }
+
+    fn check_binds(
+        &self,
+        data_roots: &[String],
+        orca_home: Option<&Path>,
+        resolve: Option<&Resolver>,
+    ) -> Result<WorkloadSpec, DeployError> {
+        let on_host = resolve.is_some();
+        self.validate()?;
+        let denied = denied_roots(orca_home);
+        let refuse =
+            |why: String| DeployError::Other(format!("refusing workload {}: {why}", self.name));
+        let roots = prepare_data_roots(data_roots, &denied, on_host).map_err(refuse)?;
+        let mut canonical = self.clone();
+        let mut errs = Vec::new();
+        for m in canonical
+            .mounts
+            .iter_mut()
+            .filter(|m| m.kind == MountKind::Bind)
+        {
+            match bind_source_check(&m.source, Some(&roots), &denied, resolve) {
+                Ok(Some(resolved)) => m.source = resolved.display().to_string(),
+                Ok(None) => {}
+                Err(why) => errs.push(format!(
+                    "bind mount at {}: source {}: {why}",
+                    m.target, m.source
+                )),
+            }
+        }
+        if errs.is_empty() {
+            Ok(canonical)
+        } else {
+            Err(refuse(errs.join("; ")))
         }
     }
 
@@ -571,6 +953,7 @@ pub trait DeployTarget: Send + Sync {
             endpoint: self.endpoint(),
             capabilities: self.capabilities(),
             provisioning: self.provisioning(),
+            data_roots: self.data_roots(),
         }
     }
 
@@ -583,6 +966,10 @@ pub trait DeployTarget: Send + Sync {
     /// A container target that needs no sizing leaves this `None` (the default).
     fn provisioning(&self) -> Option<ProvisioningConfig> {
         None
+    }
+
+    fn data_roots(&self) -> Vec<String> {
+        Vec::new()
     }
 
     fn supports(&self, cap: DeployCapability) -> bool {
@@ -806,6 +1193,7 @@ pub type InvokeThunk = Arc<
 /// any existing target with the same triple (idempotent reload), matching
 /// [`register_target`]'s semantics.
 #[cfg(feature = "in-process")]
+#[allow(clippy::too_many_arguments)]
 pub fn register_from_def(
     host: String,
     runtime: &str,
@@ -813,6 +1201,7 @@ pub fn register_from_def(
     endpoint: String,
     capabilities: &[String],
     provisioning: Option<ProvisioningConfig>,
+    data_roots: Vec<String>,
     invoke: InvokeThunk,
 ) -> Result<(), DeployError> {
     let runtime = parse_runtime(runtime)?;
@@ -828,6 +1217,7 @@ pub fn register_from_def(
         endpoint,
         capabilities,
         provisioning,
+        data_roots,
         invoke,
     }));
     Ok(())
@@ -900,6 +1290,7 @@ struct DeployProxy {
     endpoint: String,
     capabilities: Vec<DeployCapability>,
     provisioning: Option<ProvisioningConfig>,
+    data_roots: Vec<String>,
     invoke: InvokeThunk,
 }
 
@@ -951,8 +1342,12 @@ impl DeployTarget for DeployProxy {
         self.provisioning.clone()
     }
 
+    fn data_roots(&self) -> Vec<String> {
+        self.data_roots.clone()
+    }
+
     async fn launch(&self, spec: &WorkloadSpec) -> Result<DeployOutcome, DeployError> {
-        spec.validate()?;
+        spec.validate_for_target(&self.data_roots)?;
         self.call(OP_LAUNCH, LaunchArgs { spec: spec.clone() })
             .await
     }
@@ -978,6 +1373,7 @@ impl DeployTarget for DeployProxy {
     }
 
     async fn provision(&self, spec: &WorkloadSpec) -> Result<DeployOutcome, DeployError> {
+        spec.validate_for_target(&self.data_roots)?;
         self.call(OP_PROVISION, ProvisionArgs { spec: spec.clone() })
             .await
     }
@@ -1070,7 +1466,11 @@ pub async fn dispatch_op(
     match op {
         OP_LAUNCH => {
             let a: LaunchArgs = dec(op, args)?;
-            enc(&target.launch(&a.spec).await.map_err(err)?)
+            let spec = a
+                .spec
+                .validate_on_host(&target.data_roots(), utils::home::orca_home().as_deref())
+                .map_err(err)?;
+            enc(&target.launch(&spec).await.map_err(err)?)
         }
         OP_STOP => {
             let a: WorkloadArg = dec(op, args)?;
@@ -1082,7 +1482,11 @@ pub async fn dispatch_op(
         }
         OP_PROVISION => {
             let a: ProvisionArgs = dec(op, args)?;
-            enc(&target.provision(&a.spec).await.map_err(err)?)
+            let spec = a
+                .spec
+                .validate_on_host(&target.data_roots(), utils::home::orca_home().as_deref())
+                .map_err(err)?;
+            enc(&target.provision(&spec).await.map_err(err)?)
         }
         OP_DESTROY => {
             let a: WorkloadArg = dec(op, args)?;
@@ -1623,6 +2027,24 @@ mod tests {
         assert!(errs[1].contains("/bad-two"));
     }
 
+    fn binds(sources: &[&str]) -> WorkloadSpec {
+        WorkloadSpec {
+            name: "w".into(),
+            mounts: sources.iter().map(|s| Mount::bind(*s, "/data")).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn roots(paths: &[&Path]) -> Vec<String> {
+        paths.iter().map(|p| p.display().to_string()).collect()
+    }
+
+    fn host_err(spec: &WorkloadSpec, data_roots: &[String], home: Option<&Path>) -> String {
+        spec.validate_on_host(data_roots, home)
+            .expect_err("refused")
+            .to_string()
+    }
+
     #[test]
     fn protected_bind_sources_are_refused() {
         for source in [
@@ -1630,6 +2052,7 @@ mod tests {
             "//",
             "/etc",
             "/etc/shadow",
+            "/ETC/passwd",
             "/root",
             "/proc/1",
             "/sys",
@@ -1638,17 +2061,53 @@ mod tests {
             "/var/run/docker.sock",
             "/run/docker.sock",
             "/run",
+            "/usr/bin",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib64",
+            "/opt/orca/bin",
+            "/var/spool/cron",
             "/var/lib/docker/volumes",
+            "/var/lib/containerd",
+            "/var/lib/containers",
+            "/var/lib/lxc",
+            "/var/lib/libvirt",
+            "/var/lib/orca",
+            "/private/etc/hosts",
+            "/private/var/root",
+            "/private/var/db/x",
+            "/Library/Keychains",
             "/var",
             "/var/lib",
+            "/home/u/.ssh",
+            "/home/u/.SSH",
+            "/home/u/.gnupg/keys",
+            "/srv/x/.orca",
+            "/Users/u/Library/Keychains",
+            "/Users/u/LIBRARY/keychains",
+            "/home/u/.aws",
+            "/home/u/.docker/config.json",
+            "/home/u/.kube",
+            "/home/u/.config/gcloud",
+            "/home/u/.netrc",
+            "/home/u/.password-store",
+            "/home/u/.local/share/keyrings",
+            "/home/alice",
+            "/Users/alice",
+            "/HOME/alice",
             "/./etc",
             "/srv/../etc",
             "../srv",
             "srv/data",
             "./data",
+            "jellyfin-config",
         ] {
             let m = Mount::bind(source, "/data");
             assert!(m.validation_error().is_some(), "{source} should be refused");
+        }
+        for source in ["/home/alice/media", "/opt/stacks/app", "/srv/pbs"] {
+            assert_eq!(bind_source_error(source), None, "{source}");
         }
     }
 
@@ -1665,26 +2124,255 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
-    fn a_symlink_into_a_protected_path_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let link = dir.path().join("sneaky");
-        std::os::unix::fs::symlink("/etc", &link).unwrap();
-        let err = bind_source_error(&link.display().to_string()).unwrap();
-        assert!(err.contains("/etc"), "{err}");
+    fn volumes_are_typed_and_named() {
+        assert_eq!(
+            Mount::volume("jellyfin-config", "/config").validation_error(),
+            None
+        );
+        for bad in ["/etc", "../x", "", "-x", ".x"] {
+            assert!(
+                Mount::volume(bad, "/x").validation_error().is_some(),
+                "{bad}"
+            );
+        }
+        assert!(
+            Mount::volume("v", "/x")
+                .with_size("1g")
+                .validation_error()
+                .is_some()
+        );
+        let spec = WorkloadSpec {
+            name: "w".into(),
+            mounts: vec![Mount::volume("cfg", "/config")],
+            ..Default::default()
+        };
+        spec.validate_for_target(&[]).unwrap();
     }
 
     #[test]
-    fn data_paths_volumes_and_exports_are_allowed() {
+    fn nas_exports_refuse_self_hosts_and_protected_paths() {
+        assert_eq!(bind_source_error("nas:/export/media"), None);
+        assert_eq!(bind_source_error("[fd00::5]:/export"), None);
         for source in [
-            "/srv/pbs",
-            "/mnt/media/tv",
-            "/opt/app/data",
-            "jellyfin-config",
-            "nas:/export/media",
+            "localhost:/srv",
+            "LOCALHOST:/srv",
+            "127.0.0.1:/srv",
+            "[::1]:/srv",
+            "[::ffff:127.0.0.1]:/srv",
+            "0.0.0.0:/srv",
+            "0:/srv",
+            "2130706433:/srv",
+            "127.1:/srv",
+            "0x7f.1:/srv",
+            "nas:/etc",
+            "nas:/srv/../etc",
+            "nas:/home/u/.ssh",
         ] {
-            assert_eq!(bind_source_error(source), None, "{source}");
+            assert!(bind_source_error(source).is_some(), "{source}");
+        }
+    }
+
+    #[test]
+    fn the_host_check_applies_orca_home_and_resolution_to_nas_exports() {
+        use std::net::IpAddr;
+        let srv = vec!["/srv/x".to_string()];
+        let check = |source: &str,
+                     home: Option<&Path>,
+                     resolve: &Resolver|
+         -> Result<WorkloadSpec, DeployError> {
+            binds(&[source]).check_binds(&srv, home, Some(resolve))
+        };
+        let unresolvable = |_: &str| -> std::io::Result<Vec<IpAddr>> {
+            Err(std::io::Error::other("no such host"))
+        };
+        let empty = |_: &str| -> std::io::Result<Vec<IpAddr>> { Ok(Vec::new()) };
+        let loopback =
+            |_: &str| -> std::io::Result<Vec<IpAddr>> { Ok(vec!["127.0.0.1".parse().unwrap()]) };
+        let remote =
+            |_: &str| -> std::io::Result<Vec<IpAddr>> { Ok(vec!["192.0.2.10".parse().unwrap()]) };
+
+        let err = check("nas:/data/orca/db", Some(Path::new("/data/orca")), &remote)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("protected host path"), "{err}");
+        for resolve in [&unresolvable as &Resolver, &empty] {
+            let err = check("nas:/export", None, resolve).unwrap_err().to_string();
+            assert!(err.contains("does not resolve"), "{err}");
+        }
+        let err = check("nas:/export", None, &loopback)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("resolves to this host"), "{err}");
+        check("nas:/export", None, &remote).unwrap();
+    }
+
+    #[test]
+    fn nas_names_resolve_as_absolute_names() {
+        assert_eq!(absolute_name("nas"), "nas.");
+        assert_eq!(absolute_name("nas.lan"), "nas.lan.");
+        assert_eq!(absolute_name("nas.lan."), "nas.lan.");
+    }
+
+    #[test]
+    fn binds_must_sit_under_a_declared_data_root() {
+        let err = binds(&["/srv/pbs"])
+            .validate_for_target(&[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("declares no data_roots"), "{err}");
+        let srv = vec!["/srv/pbs".to_string()];
+        binds(&["/srv/pbs/data", "nas:/export"])
+            .validate_for_target(&srv)
+            .unwrap();
+        binds(&["/opt/stacks/jellyfin/config"])
+            .validate_for_target(&["/opt/stacks".into()])
+            .unwrap();
+        for (source, why) in [
+            ("/mnt/media/x", "not under a data root"),
+            ("/srv/pbsx/a", "not under a data root"),
+        ] {
+            let err = binds(&[source])
+                .validate_for_target(&srv)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(why), "{source}: {err}");
+        }
+        let err = binds(&["/srv/x/y"])
+            .validate_for_target(&["/etc/x".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("data root /etc/x"), "{err}");
+    }
+
+    #[test]
+    fn top_level_directories_are_not_data_roots() {
+        for root in ["/var", "/home", "/Users", "/private", "/mnt", "/srv", "/"] {
+            let err = binds(&["/srv/a/b"])
+                .validate_for_target(&[root.into()])
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("top-level") || err.contains("protected"),
+                "{root}: {err}"
+            );
+        }
+        for root in ["/mnt/media", "/srv/a"] {
+            binds(&[&format!("{root}/x")])
+                .validate_for_target(&[root.into()])
+                .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_host_check_resolves_symlinks_and_returns_canonical_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outside.path().join("sub")).unwrap();
+        std::fs::create_dir(root.path().join("real")).unwrap();
+        std::os::unix::fs::symlink("/etc", root.path().join("etclink")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("real"), root.path().join("final")).unwrap();
+        let data_roots = roots(&[root.path()]);
+        let src = |name: &str| root.path().join(name).display().to_string();
+
+        binds(&[&src("etclink/hosts")])
+            .validate_for_target(&data_roots)
+            .unwrap();
+        let err = host_err(&binds(&[&src("etclink/hosts")]), &data_roots, None);
+        assert!(err.contains("protected"), "{err}");
+        let err = host_err(&binds(&[&src("escape/sub")]), &data_roots, None);
+        assert!(err.contains("not under a data root"), "{err}");
+        let err = host_err(&binds(&[&src("final")]), &data_roots, None);
+        assert!(err.contains("is a symlink"), "{err}");
+        let err = host_err(&binds(&[&src("missing")]), &data_roots, None);
+        assert!(err.contains("does not exist"), "{err}");
+
+        let canonical = binds(&[&src("real")])
+            .validate_on_host(&data_roots, None)
+            .unwrap();
+        assert_eq!(
+            canonical.mounts[0].source,
+            root.path()
+                .canonicalize()
+                .unwrap()
+                .join("real")
+                .display()
+                .to_string()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_host_check_refuses_a_dir_holding_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let data_roots = roots(&[root.path()]);
+        for entry in [".ssh", ".aws", "Library/Keychains", ".config/gcloud"] {
+            let dir = root.path().join(format!("d-{}", entry.replace('/', "-")));
+            std::fs::create_dir_all(dir.join(entry)).unwrap();
+            let err = host_err(&binds(&[&dir.display().to_string()]), &data_roots, None);
+            assert!(err.contains(&format!("contains {entry}")), "{entry}: {err}");
+        }
+        let netrc = root.path().join("n");
+        std::fs::create_dir(&netrc).unwrap();
+        std::fs::write(netrc.join(".netrc"), b"x").unwrap();
+        let err = host_err(&binds(&[&netrc.display().to_string()]), &data_roots, None);
+        assert!(err.contains("contains .netrc"), "{err}");
+    }
+
+    #[test]
+    fn the_host_check_refuses_its_orca_home() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("orca");
+        std::fs::create_dir_all(home.join("db")).unwrap();
+        std::fs::create_dir(root.path().join("x")).unwrap();
+        let data_roots = roots(&[root.path()]);
+        let err = host_err(
+            &binds(&[&home.join("db").display().to_string()]),
+            &data_roots,
+            Some(&home),
+        );
+        assert!(err.contains("protected host path"), "{err}");
+        binds(&[&root.path().join("x").display().to_string()])
+            .validate_on_host(&data_roots, Some(&home))
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_bind_dir_creates_only_real_dirs_under_a_data_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let data_roots = roots(&[root.path()]);
+        let made = ensure_bind_dir(
+            &data_roots,
+            &root.path().join("app/config").display().to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(made.is_dir());
+        assert_eq!(made, root.path().canonicalize().unwrap().join("app/config"));
+        binds(&[&made.display().to_string()])
+            .validate_on_host(&data_roots, None)
+            .unwrap();
+
+        std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
+        let err = ensure_bind_dir(
+            &data_roots,
+            &root.path().join("link/x").display().to_string(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("is a symlink"), "{err}");
+        assert!(!outside.path().join("x").exists());
+
+        for bad in [outside.path().join("y"), root.path().join("u/.ssh")] {
+            let err = ensure_bind_dir(&data_roots, &bad.display().to_string(), None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("refusing bind directory"), "{err}");
         }
     }
 
