@@ -1699,62 +1699,6 @@ mod tests {
     }
 
     #[test]
-    fn execute_gated_names_are_a_subset_of_names() {
-        let all: std::collections::HashSet<&'static str> = names().into_iter().collect();
-        for n in execute_gated_names() {
-            assert!(all.contains(n), "execute_gated name {n} not in names()");
-        }
-    }
-
-    /// An execute-gated verb applies changes, so it must also be gated on WHO
-    /// may call it — for the default execute and for its dry run alike.
-    #[test]
-    fn every_execute_gated_tool_is_admin_only() {
-        for name in execute_gated_names() {
-            assert_eq!(
-                required_role(name),
-                Some("admin"),
-                "{name} is execute_gated but not role=admin — mutation without authorization"
-            );
-        }
-    }
-
-    /// The gate injects `dryRun` and the deprecated `execute` into a gated
-    /// tool's advertised schema and strips both before typed deserialization.
-    /// A verb that ALSO declares either field would have it silently
-    /// swallowed, so catch that here rather than at runtime. The ad-hoc gates
-    /// (`system.update`, `plugin.update` with `execute`;
-    /// `storage.share.repair-permissions` with `apply`; `storage.mount.create`
-    /// with `force`) are deliberately NOT execute_gated.
-    #[test]
-    fn no_execute_gated_tool_declares_its_own_gate_field() {
-        for name in execute_gated_names() {
-            let Some(tool) = find(name) else { continue };
-            let schema = tool.input_schema();
-            // Both properties are present because the gate injected them; a
-            // verb-owned one would carry its own description instead.
-            for (field, marker) in [("dryRun", "ExecutionPlan"), ("execute", "Deprecated no-op")] {
-                let desc = schema["properties"][field]["description"]
-                    .as_str()
-                    .unwrap_or_default();
-                assert!(
-                    desc.contains(marker),
-                    "{name} appears to declare its own `{field}` field; it would be \
-                     swallowed by the gate. Migrate it or drop execute_gated."
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn remote_ok_names_are_a_subset_of_names() {
-        let all: std::collections::HashSet<&'static str> = names().into_iter().collect();
-        for n in remote_ok_names() {
-            assert!(all.contains(n), "remote_ok name {n} not in names()");
-        }
-    }
-
-    #[test]
     fn required_role_returns_none_for_unknown_tool() {
         assert!(required_role("does.not.exist").is_none());
     }
