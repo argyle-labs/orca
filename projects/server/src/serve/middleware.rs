@@ -633,9 +633,14 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
         if let Some(ident) = try_token_auth(token) {
             let mut req = req;
             // Resolve the issuing user so REST→mesh dispatch mints a token
-            // bound to them. A legacy (NULL user) or orphaned token is marked
-            // unbound so it never inherits the ambient admin host operator.
-            match identity_user_id(&ident).and_then(|uid| caller_from_user_id(&uid)) {
+            // bound to them. A legacy (NULL user) token is marked unbound so it
+            // never inherits the ambient admin host operator.
+            let bound_user = identity_user_id(&ident);
+            let caller = bound_user.as_deref().and_then(caller_from_user_id);
+            if bound_user.is_some() && caller.is_none() {
+                return (StatusCode::UNAUTHORIZED, "auth required").into_response();
+            }
+            match caller {
                 Some(mut c) => {
                     // Dispatch re-checks the role against this identity, so
                     // it carries the token's scope, not the issuing user's.
@@ -1919,6 +1924,38 @@ mod tests {
             .to_rfc3339();
         let sid = insert_session(&conn, &uid, &expires);
         assert!(identities::users::delete_by_id(&conn, &uid).unwrap());
+
+        for (name, value) in [
+            ("authorization", format!("Bearer {token}")),
+            ("cookie", format!("{SESSION_COOKIE}={sid}")),
+        ] {
+            let mut req = AxumReq::builder()
+                .uri("/api/agents")
+                .header(name, value)
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo::<SocketAddr>("10.0.0.1:12345".parse().unwrap()));
+            let resp = auth_router().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn token_of_a_deleted_user_stays_dead_when_the_id_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let _db_guard = override_default_db(&dir);
+        let conn = db::open_unencrypted(&_db_guard).unwrap();
+        let uid = insert_user(&conn, "admin");
+        let token = "token_of_a_recreated_user";
+        insert_token_for_user(&conn, "admin", &sha256_hex(token.as_bytes()), Some(&uid));
+        let expires = utils::time::now()
+            .plus(std::time::Duration::from_secs(3600))
+            .to_rfc3339();
+        let sid = insert_session(&conn, &uid, &expires);
+        assert!(identities::users::delete_by_id(&conn, &uid).unwrap());
+        identities::users::insert(&conn, &uid, "reborn", "h", "admin", "2026-01-01T00:00:00Z")
+            .unwrap();
 
         for (name, value) in [
             ("authorization", format!("Bearer {token}")),
