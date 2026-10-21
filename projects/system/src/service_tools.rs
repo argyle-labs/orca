@@ -296,7 +296,7 @@ pub enum ServiceCreateOutput {
 /// backend describes *what* to run; the deploy target runs it (composition, not
 /// duplication). `action=backup` snapshots a service instance's config/data,
 /// delegating to the backend's own backup engine (no duplicate logic here).
-#[orca_tool(domain = "service", verb = "create")]
+#[orca_tool(domain = "service", verb = "create", tool_callable = true)]
 async fn service_create(
     args: ServiceCreateArgs,
     _ctx: &contract::ToolCtx,
@@ -369,7 +369,7 @@ pub struct DeployListOutput {
 }
 
 /// Every registered deploy target, addressed by its stable UUID.
-#[orca_tool(domain = "deploy", verb = "list", role = "read")]
+#[orca_tool(domain = "deploy", verb = "list", role = "read", tool_callable = true)]
 async fn deploy_list(
     _args: DeployListArgs,
     _ctx: &contract::ToolCtx,
@@ -503,7 +503,7 @@ pub struct ServiceDetailArgs {
 }
 
 /// Detail for a service instance. `view=status` returns health/diagnostics.
-#[orca_tool(domain = "service", verb = "detail")]
+#[orca_tool(domain = "service", verb = "detail", tool_callable = true)]
 async fn service_detail(
     args: ServiceDetailArgs,
     _ctx: &contract::ToolCtx,
@@ -627,7 +627,7 @@ async fn probe(
 /// provider using the endpoint given on the call. This is an explicit on-demand
 /// aggregate — not a cached poll, and never wired into
 /// `service.list`/`containers.list`/`system.list` hot reads.
-#[orca_tool(domain = "service", verb = "health")]
+#[orca_tool(domain = "service", verb = "health", tool_callable = true)]
 async fn service_health(
     args: ServiceHealthArgs,
     _ctx: &contract::ToolCtx,

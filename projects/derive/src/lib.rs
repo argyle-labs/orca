@@ -276,6 +276,7 @@ struct ToolAttr {
     /// body may drive through `api.call`. Non-empty, unique names.
     reaches: Vec<LitStr>,
     tool_calls: Vec<LitStr>,
+    tool_callable: bool,
     /// Minimum role required to invoke this tool via authenticated surfaces.
     /// `"any"` (default) means any authenticated identity passes; `"admin"`
     /// requires `AuthIdentity::role == "admin"`. Set via
@@ -309,6 +310,7 @@ impl Parse for ToolAttr {
         let mut dry_run_neutralize: Option<syn::Path> = None;
         let mut reaches: Vec<LitStr> = Vec::new();
         let mut tool_calls: Vec<LitStr> = Vec::new();
+        let mut tool_callable = false;
         let mut role: Option<LitStr> = None;
         let mut title: Option<LitStr> = None;
         let mut crate_path: Option<syn::Path> = None;
@@ -451,6 +453,19 @@ impl Parse for ToolAttr {
                         reaches.push(s);
                     }
                 }
+                "tool_callable" => {
+                    tool_callable = match &nv.value {
+                        Expr::Lit(ExprLit {
+                            lit: Lit::Bool(b), ..
+                        }) => b.value,
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                "tool_callable expects a bool literal",
+                            ));
+                        }
+                    };
+                }
                 "tool_calls" => {
                     let Expr::Array(arr) = &nv.value else {
                         return Err(syn::Error::new_spanned(
@@ -534,6 +549,7 @@ impl Parse for ToolAttr {
             dry_run_neutralize,
             reaches,
             tool_calls,
+            tool_callable,
             role,
             title,
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
@@ -1110,6 +1126,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let dry_run_aware_lit = attr.dry_run_aware;
     let reaches = &attr.reaches;
     let tool_calls = &attr.tool_calls;
+    let tool_callable_lit = attr.tool_callable;
     // REQUIRED_ROLE: explicit `role = "..."` wins; otherwise default-deny
     // derives from the verb — read-shaped verbs (`list`/`detail`/`search`) get
     // "any", anything else gets "admin". This closes C2 (default-deny on
@@ -1360,6 +1377,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             const DRY_RUN_AWARE: bool = #dry_run_aware_lit;
             const REACHES: &'static [&'static str] = &[#(#reaches),*];
             const TOOL_CALLS: &'static [&'static str] = &[#(#tool_calls),*];
+            const TOOL_CALLABLE: bool = #tool_callable_lit;
             #role_const
             type Args = #args_ty;
             type Output = #output_ty;
@@ -1924,6 +1942,25 @@ mod tests {
             ),
             "got: {out}"
         );
+    }
+
+    #[test]
+    fn tool_callable_defaults_off_and_is_emitted_when_set() {
+        let off = expand(
+            parse_attr(quote!(domain = "h", verb = "list")).unwrap(),
+            ok_fn(),
+        )
+        .unwrap()
+        .to_string();
+        assert!(off.contains("TOOL_CALLABLE : bool = false"), "got: {off}");
+        let on = expand(
+            parse_attr(quote!(domain = "h", verb = "list", tool_callable = true)).unwrap(),
+            ok_fn(),
+        )
+        .unwrap()
+        .to_string();
+        assert!(on.contains("TOOL_CALLABLE : bool = true"), "got: {on}");
+        assert!(parse_attr(quote!(domain = "h", verb = "list", tool_callable = "yes")).is_err());
     }
 
     #[test]

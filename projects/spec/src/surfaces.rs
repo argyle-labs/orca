@@ -83,6 +83,7 @@ pub struct Invocation {
     execute_gated: bool,
     call_chain: Vec<String>,
     tool_calls: Vec<String>,
+    call_budget: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 const SYSTEM_ROLE: &str = "read";
@@ -104,6 +105,7 @@ impl Invocation {
             execute_gated: false,
             call_chain: ctx.call_chain().to_vec(),
             tool_calls: Vec::new(),
+            call_budget: ctx.call_budget().cloned().unwrap_or_default(),
         })
     }
 
@@ -124,6 +126,7 @@ impl Invocation {
             execute_gated: false,
             call_chain: Vec::new(),
             tool_calls: Vec::new(),
+            call_budget: Default::default(),
         }
     }
 
@@ -141,6 +144,10 @@ impl Invocation {
 
     pub fn call_chain(&self) -> &[String] {
         &self.call_chain
+    }
+
+    pub fn call_budget(&self) -> &std::sync::Arc<std::sync::atomic::AtomicUsize> {
+        &self.call_budget
     }
 
     pub fn tool_calls(&self) -> &[String] {
@@ -201,6 +208,7 @@ impl Invocation {
             execute_gated: verb.execute_gated(),
             call_chain: Vec::new(),
             tool_calls: Vec::new(),
+            call_budget: Default::default(),
         };
         if targeted {
             inv.with_reaches(reaches)

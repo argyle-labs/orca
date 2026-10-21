@@ -1,18 +1,21 @@
 #![allow(clippy::disallowed_types)]
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use contract::ToolCtx;
 use plugin_proto::ToolCall;
 use plugin_toolkit::serde_json::{self, Value};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub const MAX_DEPTH: usize = 4;
-pub const MAX_PER_INVOKE: usize = 64;
-pub const PER_PLUGIN_CONCURRENCY: usize = 4;
-const SECRET_BEARING: &[&str] = &["secrets.", "auth.", "pki."];
+pub const MAX_PER_REQUEST: usize = 64;
+pub const PER_USER_CONCURRENCY: usize = 2;
+pub const PER_PLUGIN_CONCURRENCY: usize = 8;
+const ACQUIRE_WAIT: Duration = Duration::from_secs(2);
 
 pub type CtxFactory = dyn Fn() -> Result<ToolCtx> + Send + Sync;
 
@@ -24,36 +27,63 @@ pub fn set_ctx_factory(factory: Box<CtxFactory>) {
     }
 }
 
-fn plugin_share(principal: &str) -> Arc<Semaphore> {
-    static SHARES: OnceLock<Mutex<HashMap<String, Arc<Semaphore>>>> = OnceLock::new();
-    SHARES
+fn semaphore(principal: &str, user: Option<&str>) -> Arc<Semaphore> {
+    type Key = (String, Option<String>);
+    static SEMAPHORES: OnceLock<Mutex<HashMap<Key, Arc<Semaphore>>>> = OnceLock::new();
+    let permits = if user.is_some() {
+        PER_USER_CONCURRENCY
+    } else {
+        PER_PLUGIN_CONCURRENCY
+    };
+    SEMAPHORES
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .entry(principal.to_string())
-        .or_insert_with(|| Arc::new(Semaphore::new(PER_PLUGIN_CONCURRENCY)))
+        .entry((principal.to_string(), user.map(str::to_string)))
+        .or_insert_with(|| Arc::new(Semaphore::new(permits)))
         .clone()
+}
+
+fn acquire(
+    principal: &str,
+    user: &str,
+    wait: Duration,
+) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
+    let per_user = semaphore(principal, Some(user));
+    let per_plugin = semaphore(principal, None);
+    let busy = format!(
+        "tool.call refused: plugin '{principal}' is at its tool.call concurrency limit; retry shortly"
+    );
+    crate::capability::run_on_cap_runtime(async move {
+        let user_permit = tokio::time::timeout(wait, per_user.acquire_owned())
+            .await
+            .map_err(|_| anyhow!("{busy}"))??;
+        let plugin_permit = tokio::time::timeout(wait, per_plugin.acquire_owned())
+            .await
+            .map_err(|_| anyhow!("{busy}"))??;
+        Ok((user_permit, plugin_permit))
+    })?
+}
+
+fn consume_budget(inv: &spec::surfaces::Invocation) -> Result<()> {
+    if inv.call_budget().fetch_add(1, Ordering::SeqCst) >= MAX_PER_REQUEST {
+        bail!("tool.call refused: more than {MAX_PER_REQUEST} tool.calls in one request");
+    }
+    Ok(())
 }
 
 pub fn handle(
     args: Value,
     principal: &str,
     inv: Option<&spec::surfaces::Invocation>,
-    calls: &mut usize,
 ) -> Result<Value> {
-    *calls += 1;
-    if *calls > MAX_PER_INVOKE {
-        bail!("tool.call refused: more than {MAX_PER_INVOKE} tool.calls in one invocation");
-    }
-    let _permit = plugin_share(principal).try_acquire_owned().map_err(|_| {
-        anyhow!(
-            "tool.call refused: plugin '{principal}' already has {PER_PLUGIN_CONCURRENCY} tool.calls in flight"
-        )
-    })?;
     let factory = CTX_FACTORY
         .get()
         .ok_or_else(|| anyhow!("tool.call unavailable: this host has no tool context"))?;
     let (tool, args, ctx) = prepare(args, principal, inv, factory()?)?;
+    let inv = inv.ok_or_else(|| anyhow!("tool.call: no invocation"))?;
+    consume_budget(inv)?;
+    let _permits = acquire(principal, &inv.caller().user_id, ACQUIRE_WAIT)?;
     let name = tool.clone();
     let result = crate::capability::run_on_cap_runtime(async move {
         dispatch::dispatch(&tool, args, &ctx).await
@@ -74,10 +104,6 @@ fn declared(tool: &str, tool_calls: &[String]) -> bool {
                 .is_some_and(|rest| rest.starts_with('.') && rest.len() > 1),
             None => entry == tool,
         })
-}
-
-fn secret_bearing(tool: &str) -> bool {
-    SECRET_BEARING.iter().any(|p| tool.starts_with(p))
 }
 
 fn forbidden(principal: &str, tool: &str, required: &str, why: &str) -> anyhow::Error {
@@ -108,13 +134,15 @@ pub(crate) fn prepare(
             call.tool
         );
     }
-    if secret_bearing(&call.tool) {
+    if !dispatch::tool_roles::is_tool_callable(&call.tool) {
         bail!(
-            "tool.call {} refused: secret-bearing tools are not reachable through tool.call",
+            "tool.call {} refused: the tool is not marked tool_callable",
             call.tool
         );
     }
-    let required = dispatch::tool_roles::required_role(&call.tool);
+    let Some(required) = dispatch::tool_roles::known_role(&call.tool) else {
+        bail!("tool.call {} refused: unknown tool", call.tool);
+    };
     if required == "super-admin" {
         bail!(
             "tool.call {} refused: super-admin tools are not reachable through tool.call",
@@ -122,9 +150,12 @@ pub(crate) fn prepare(
         );
     }
     let caller = inv.caller().clone();
-    if let Err(required) =
-        dispatch::tool_roles::may_invoke(&call.tool, Some(&caller.role), caller.can_mutate)
-    {
+    if !dispatch::tool_roles::authorize(
+        &caller.role,
+        caller.can_mutate,
+        required,
+        dispatch::tool_roles::is_data_mutation(&call.tool),
+    ) {
         return Err(forbidden(
             principal,
             &call.tool,
@@ -156,6 +187,7 @@ pub(crate) fn prepare(
     ctx.set_peer(None);
     ctx.set_correlation_id(correlation_id);
     ctx.set_call_chain(chain);
+    ctx.set_call_budget(Some(inv.call_budget().clone()));
     Ok((call.tool, args, ctx))
 }
 
@@ -214,13 +246,7 @@ mod tests {
     }
 
     fn inv(role: &str, chain: &[&str], gated: bool, args: &Value) -> spec::surfaces::Invocation {
-        inv_with(
-            role,
-            chain,
-            gated,
-            args,
-            &["tcall.*", "secrets.detail", "tcall2.root"],
-        )
+        inv_with(role, chain, gated, args, &["tcall.*", "tcall2.root"])
     }
 
     fn executing() -> spec::surfaces::Invocation {
@@ -238,11 +264,25 @@ mod tests {
     fn install_roles() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            dispatch::tool_roles::install([
-                ("tcall.detail", "read"),
-                ("tcall.update", "admin"),
-                ("tcall2.root", "super-admin"),
-                ("secrets.detail", "admin"),
+            dispatch::tool_roles::install([("tcall2.root", "super-admin")]);
+            let policy = |name: &str, role: &str, callable: bool| {
+                (
+                    name.to_string(),
+                    dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                        name,
+                        Some(role),
+                        Some(true),
+                        Some(true),
+                    )
+                    .tool_callable(Some(callable)),
+                )
+            };
+            dispatch::tool_roles::install_plugin_tools([
+                policy("tcall.detail", "read", true),
+                policy("tcall.update", "admin", true),
+                policy("tcall.plain", "admin", false),
+                policy("tcall2.root", "admin", true),
+                policy("secrets.detail", "admin", false),
             ]);
         });
     }
@@ -321,15 +361,32 @@ mod tests {
     }
 
     #[test]
-    fn secret_bearing_and_super_admin_tools_are_refused() {
+    fn tools_not_marked_tool_callable_are_refused_even_when_declared() {
         install_roles();
+        for tool in ["tcall.plain", "secrets.detail"] {
+            let parent = inv_with("admin", &[], true, &json!({ "execute": true }), &[tool]);
+            let err = refusal(prepare(call(tool, json!({})), "p", Some(&parent), ctx()));
+            assert!(err.contains("not marked tool_callable"), "{tool}: {err}");
+        }
+    }
+
+    #[test]
+    fn unknown_and_super_admin_tools_are_refused() {
+        install_roles();
+        let parent = inv_with(
+            "admin",
+            &[],
+            true,
+            &json!({ "execute": true }),
+            &["*.x", "nope.*"],
+        );
         let err = refusal(prepare(
-            call("secrets.detail", json!({})),
+            call("nope.tool", json!({})),
             "p",
-            Some(&executing()),
+            Some(&parent),
             ctx(),
         ));
-        assert!(err.contains("secret-bearing"), "{err}");
+        assert!(err.contains("not marked tool_callable"), "{err}");
         let err = refusal(prepare(
             call("tcall2.root", json!({})),
             "p",
@@ -458,29 +515,53 @@ mod tests {
     }
 
     #[test]
-    fn calls_per_invocation_are_capped() {
-        let mut calls = MAX_PER_INVOKE;
-        let err = handle(call("tcall.detail", json!({})), "capped", None, &mut calls)
-            .unwrap_err()
-            .to_string();
+    fn nested_fan_out_shares_one_budget() {
+        install_roles();
+        let root = executing();
+        for _ in 0..MAX_PER_REQUEST / 2 {
+            consume_budget(&root).unwrap();
+        }
+        let (_, _, child_ctx) = prepare(
+            call("tcall.detail", json!({})),
+            "mylar3",
+            Some(&root),
+            ctx(),
+        )
+        .unwrap();
+        let child = spec::surfaces::Invocation::from_ctx(&child_ctx).unwrap();
+        for _ in 0..MAX_PER_REQUEST / 2 {
+            consume_budget(&child).unwrap();
+        }
+        let err = consume_budget(&child).unwrap_err().to_string();
         assert!(err.contains("more than"), "{err}");
+        assert!(consume_budget(&root).is_err());
+        let fresh = executing();
+        assert!(consume_budget(&fresh).is_ok());
     }
 
     #[test]
-    fn concurrency_per_plugin_is_capped() {
-        let held = plugin_share("busy")
-            .try_acquire_many_owned(PER_PLUGIN_CONCURRENCY as u32)
-            .unwrap();
-        let mut calls = 0;
-        let err = handle(call("tcall.detail", json!({})), "busy", None, &mut calls)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("in flight"), "{err}");
+    fn one_user_cannot_starve_another() {
+        let wait = Duration::from_millis(50);
+        let held: Vec<_> = (0..PER_USER_CONCURRENCY)
+            .map(|_| acquire("shared", "u-a", wait).unwrap())
+            .collect();
+        let err = acquire("shared", "u-a", wait).unwrap_err().to_string();
+        assert!(err.contains("concurrency limit"), "{err}");
+        let other = acquire("shared", "u-b", wait).unwrap();
         drop(held);
-        let err = handle(call("tcall.detail", json!({})), "busy", None, &mut calls)
-            .unwrap_err()
-            .to_string();
-        assert!(!err.contains("in flight"), "{err}");
+        drop(other);
+        assert!(acquire("shared", "u-a", wait).is_ok());
+    }
+
+    #[test]
+    fn the_plugin_ceiling_bounds_all_users() {
+        let wait = Duration::from_millis(50);
+        let held: Vec<_> = (0..PER_PLUGIN_CONCURRENCY)
+            .map(|i| acquire("ceiling", &format!("u-{i}"), wait).unwrap())
+            .collect();
+        let err = acquire("ceiling", "u-new", wait).unwrap_err().to_string();
+        assert!(err.contains("concurrency limit"), "{err}");
+        drop(held);
     }
 
     #[test]

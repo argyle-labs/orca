@@ -490,6 +490,7 @@ pub fn tool_manifest_json() -> String {
                 "local_only": !t.remote_ok(),
                 "reaches": t.reaches(),
                 "tool_calls": t.tool_calls(),
+                "tool_callable": t.tool_callable(),
             })
         })
         .collect();
@@ -960,6 +961,10 @@ pub fn role_table() -> Vec<(&'static str, &'static str)> {
 /// Required role for a single tool, or `None` if no such tool is registered.
 pub fn required_role(name: &str) -> Option<&'static str> {
     find(name).map(|t| t.required_role())
+}
+
+pub(crate) fn tool_callable(name: &str) -> bool {
+    find(name).is_some_and(|t| t.tool_callable())
 }
 
 /// Names of every registered tool that is a data mutation (write against an
