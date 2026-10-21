@@ -590,8 +590,14 @@ fn vet_nas_host(
         |ip: &std::net::IpAddr| self_ip(*ip) || std::net::UdpSocket::bind((*ip, 0)).is_ok();
     let (local, remote): (Vec<std::net::IpAddr>, Vec<std::net::IpAddr>) =
         addrs.into_iter().partition(is_local);
+    let routable = remote.iter().find(|ip| match ip {
+        std::net::IpAddr::V6(v6) => !v6.is_unicast_link_local(),
+        std::net::IpAddr::V4(_) => true,
+    });
     match (local.first(), remote.first()) {
-        (None, Some(ip)) => Ok(Some(*ip)),
+        (None, Some(_)) => routable.map(|ip| Some(*ip)).ok_or_else(|| {
+            format!("NAS export host `{host}` resolves only to unscoped link-local addresses")
+        }),
         (Some(_), Some(_)) => Err(format!(
             "NAS export host `{host}` resolves to a mix of local and remote addresses"
         )),
@@ -741,20 +747,37 @@ fn prepare_data_roots(
         .iter()
         .map(|r| {
             let p = normalize_absolute(r.trim()).map_err(|why| format!("data root {r}: {why}"))?;
-            let segs = lowered(&p);
-            if segs.len() < 2 {
-                return Err(format!(
-                    "data root {r}: a top-level directory cannot be a data root; use a subdirectory"
-                ));
-            }
-            if segs.len() == 2 && (HOME_PARENTS.contains(&segs[0].as_str()) || segs == ["var", "lib"]) {
-                return Err(format!(
-                    "data root {r}: a home directory or /var/lib cannot be a data root; use a subdirectory"
-                ));
-            }
+            let segment_rule = |p: &Path| {
+                let segs = lowered(p);
+                if segs.len() < 2 {
+                    return Err(format!(
+                        "data root {r}: a top-level directory cannot be a data root; use a subdirectory"
+                    ));
+                }
+                if segs.len() == 2
+                    && (HOME_PARENTS.contains(&segs[0].as_str()) || segs == ["var", "lib"])
+                {
+                    return Err(format!(
+                        "data root {r}: a home directory or /var/lib cannot be a data root; use a subdirectory"
+                    ));
+                }
+                Ok(())
+            };
+            segment_rule(&p)?;
             let p = if on_host {
-                p.canonicalize()
-                    .map_err(|e| format!("data root {r}: does not exist on this host: {e}"))?
+                let meta = p
+                    .symlink_metadata()
+                    .map_err(|e| format!("data root {r}: does not exist on this host: {e}"))?;
+                if meta.file_type().is_symlink() {
+                    return Err(format!(
+                        "data root {r}: is a symlink; declare its target directly"
+                    ));
+                }
+                let canonical = p
+                    .canonicalize()
+                    .map_err(|e| format!("data root {r}: does not exist on this host: {e}"))?;
+                segment_rule(&canonical)?;
+                canonical
             } else {
                 p
             };
@@ -2206,6 +2229,12 @@ mod tests {
         assert_eq!(v6.mounts[0].source, "[2001:db8::5]:/export");
         let literal = check("192.0.2.20:/export", None, &unresolvable).unwrap();
         assert_eq!(literal.mounts[0].source, "192.0.2.20:/export");
+        let routable = check("nas:/export", None, &fixed(&["fe80::1", "2001:db8::6"])).unwrap();
+        assert_eq!(routable.mounts[0].source, "[2001:db8::6]:/export");
+        let err = check("nas:/export", None, &fixed(&["fe80::1"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unscoped link-local"), "{err}");
     }
 
     #[test]
@@ -2313,6 +2342,33 @@ mod tests {
             None,
         );
         assert!(err.contains("does not exist on this host"), "{err}");
+    }
+
+    #[test]
+    fn the_host_check_refuses_a_symlinked_data_root() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        std::os::unix::fs::symlink("/var/lib", &state).unwrap();
+        let err = host_err(
+            &binds(&[&state.join("x").display().to_string()]),
+            &roots(&[&state]),
+            None,
+        );
+        assert!(err.contains("is a symlink"), "{err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_host_check_applies_the_segment_rule_to_the_canonical_root() {
+        let root = tempfile::tempdir().unwrap();
+        let var = root.path().join("v");
+        std::os::unix::fs::symlink("/var", &var).unwrap();
+        let err = host_err(
+            &binds(&[&var.join("lib/x").display().to_string()]),
+            &roots(&[&var.join("lib")]),
+            None,
+        );
+        assert!(err.contains("cannot be a data root"), "{err}");
     }
 
     #[test]
