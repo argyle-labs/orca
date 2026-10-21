@@ -344,7 +344,12 @@ impl Mount {
                         self.target
                     ));
                 }
-                None
+                bind_source_error(&self.source).map(|why| {
+                    format!(
+                        "bind mount at {}: source {}: {why}",
+                        self.target, self.source
+                    )
+                })
             }
             MountKind::Tmpfs => {
                 if !self.source.trim().is_empty() {
@@ -359,7 +364,107 @@ impl Mount {
     }
 }
 
+const DENIED_BIND_ROOTS: &[&str] = &[
+    "/etc",
+    "/root",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/boot",
+    "/run",
+    "/var/run",
+    "/var/lib/docker",
+];
+
+fn denied_bind_roots() -> Vec<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = DENIED_BIND_ROOTS
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    roots.extend(utils::home::orca_home());
+    let resolved: Vec<_> = roots.iter().filter_map(|r| r.canonicalize().ok()).collect();
+    roots.extend(resolved);
+    roots
+}
+
+fn normalize_bind_path(source: &str) -> Result<std::path::PathBuf, String> {
+    use std::path::Component;
+    let path = std::path::Path::new(source);
+    if !path.is_absolute() {
+        return Err("a host path must be absolute".into());
+    }
+    let mut out = std::path::PathBuf::from("/");
+    for c in path.components() {
+        match c {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(p) => out.push(p),
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err("`..` is not allowed".into());
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn is_named_volume(source: &str) -> bool {
+    !source.is_empty()
+        && source
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        && source
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+}
+
+fn is_nas_export(source: &str) -> bool {
+    source
+        .split_once(":/")
+        .is_some_and(|(host, _)| !host.is_empty() && !host.contains('/'))
+}
+
+pub fn bind_source_error(source: &str) -> Option<String> {
+    let source = source.trim();
+    if source.split(['/', '\\']).any(|seg| seg == "..") {
+        return Some("`..` is not allowed".into());
+    }
+    if is_named_volume(source) || is_nas_export(source) {
+        return None;
+    }
+    let lexical = match normalize_bind_path(source) {
+        Ok(p) => p,
+        Err(why) => return Some(why),
+    };
+    let resolved = lexical.canonicalize().ok();
+    let roots = denied_bind_roots();
+    for candidate in std::iter::once(&lexical).chain(resolved.as_ref()) {
+        if candidate == std::path::Path::new("/") {
+            return Some("binding the host root is not allowed".into());
+        }
+        if let Some(root) = roots
+            .iter()
+            .find(|r| candidate.starts_with(r) || r.starts_with(candidate))
+        {
+            return Some(format!("overlaps protected host path {}", root.display()));
+        }
+    }
+    None
+}
+
 impl WorkloadSpec {
+    pub fn validate(&self) -> Result<(), DeployError> {
+        let errs = self.mount_errors();
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(DeployError::Other(format!(
+                "refusing workload {}: {}",
+                self.name,
+                errs.join("; ")
+            )))
+        }
+    }
+
     /// Every problem with this spec's mounts, in declaration order. Empty when
     /// the spec is applyable.
     pub fn mount_errors(&self) -> Vec<String> {
@@ -847,6 +952,7 @@ impl DeployTarget for DeployProxy {
     }
 
     async fn launch(&self, spec: &WorkloadSpec) -> Result<DeployOutcome, DeployError> {
+        spec.validate()?;
         self.call(OP_LAUNCH, LaunchArgs { spec: spec.clone() })
             .await
     }
@@ -1515,6 +1621,82 @@ mod tests {
         assert_eq!(errs.len(), 2, "{errs:?}");
         assert!(errs[0].contains("/bad-one"));
         assert!(errs[1].contains("/bad-two"));
+    }
+
+    #[test]
+    fn protected_bind_sources_are_refused() {
+        for source in [
+            "/",
+            "//",
+            "/etc",
+            "/etc/shadow",
+            "/root",
+            "/proc/1",
+            "/sys",
+            "/dev/sda",
+            "/boot",
+            "/var/run/docker.sock",
+            "/run/docker.sock",
+            "/run",
+            "/var/lib/docker/volumes",
+            "/var",
+            "/var/lib",
+            "/./etc",
+            "/srv/../etc",
+            "../srv",
+            "srv/data",
+            "./data",
+        ] {
+            let m = Mount::bind(source, "/data");
+            assert!(m.validation_error().is_some(), "{source} should be refused");
+        }
+    }
+
+    #[test]
+    fn orca_home_and_its_ancestors_are_refused() {
+        let home = utils::home::orca_home().unwrap();
+        for p in [
+            home.clone(),
+            home.join("secrets"),
+            home.parent().unwrap().to_path_buf(),
+        ] {
+            let source = p.display().to_string();
+            assert!(bind_source_error(&source).is_some(), "{source}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_into_a_protected_path_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("sneaky");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        let err = bind_source_error(&link.display().to_string()).unwrap();
+        assert!(err.contains("/etc"), "{err}");
+    }
+
+    #[test]
+    fn data_paths_volumes_and_exports_are_allowed() {
+        for source in [
+            "/srv/pbs",
+            "/mnt/media/tv",
+            "/opt/app/data",
+            "jellyfin-config",
+            "nas:/export/media",
+        ] {
+            assert_eq!(bind_source_error(source), None, "{source}");
+        }
+    }
+
+    #[test]
+    fn validate_reports_the_refusal() {
+        let spec = WorkloadSpec {
+            name: "evil".into(),
+            mounts: vec![Mount::bind("/var/run/docker.sock", "/var/run/docker.sock")],
+            ..Default::default()
+        };
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(err.contains("refusing workload evil"), "{err}");
     }
 
     #[test]

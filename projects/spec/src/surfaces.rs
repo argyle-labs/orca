@@ -105,7 +105,13 @@ impl Invocation {
             execute_gated: false,
             call_chain: ctx.call_chain().to_vec(),
             tool_calls: Vec::new(),
-            call_budget: ctx.call_budget().cloned().unwrap_or_default(),
+            call_budget: match ctx.call_budget() {
+                Some(budget) => budget.clone(),
+                None if !ctx.call_chain().is_empty() => {
+                    std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX / 2))
+                }
+                None => Default::default(),
+            },
         })
     }
 
@@ -1459,6 +1465,25 @@ mod tests {
         assert_eq!(
             scrub_body(&vec![b'a'; 5000], None).chars().count(),
             MAX_ERROR_BODY + 1
+        );
+    }
+
+    #[test]
+    fn a_chained_ctx_without_a_budget_is_exhausted() {
+        let admin = CallerIdentity {
+            user_id: "u".into(),
+            username: "u".into(),
+            role: "admin".into(),
+            can_mutate: false,
+        };
+        let mut chained = ctx(&admin, false, true, false);
+        chained.set_call_chain(vec!["p".into()]);
+        let inv = Invocation::from_ctx(&chained).unwrap();
+        assert!(inv.call_budget().load(std::sync::atomic::Ordering::SeqCst) >= 64);
+        let root = Invocation::from_ctx(&ctx(&admin, false, true, false)).unwrap();
+        assert_eq!(
+            root.call_budget().load(std::sync::atomic::Ordering::SeqCst),
+            0
         );
     }
 }
