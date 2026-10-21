@@ -38,7 +38,7 @@ pub struct UserAuth {
 /// derive maps fields ↔ columns 1:1), so `username_lower` is carried even
 /// though it is just `lower(username)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, derive::Replicated)]
-#[replicate(crate = ::macro_runtime, table = "users", lww = "updated_at", unique = "username_lower")]
+#[replicate(crate = ::macro_runtime, table = "users", lww = "updated_at", unique = "username_lower", peer_delete = peer_may_delete)]
 pub struct ReplicaUser {
     pub id: String,
     pub username: String,
@@ -179,6 +179,19 @@ pub fn count_admins(conn: &Connection) -> Result<i64> {
         r.get(0)
     })?;
     Ok(n)
+}
+
+fn peer_may_delete(conn: &Connection, username_lower: &str) -> bool {
+    conn.query_row(
+        "SELECT role = 'admin' AND (SELECT COUNT(*) FROM users WHERE role = 'admin') <= 1
+         FROM users WHERE username_lower = ?1",
+        params![username_lower],
+        |r| r.get::<_, bool>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some_and(|last_admin| !last_admin)
 }
 
 pub fn delete_by_id(conn: &Connection, id: &str) -> Result<bool> {
@@ -490,5 +503,30 @@ mod tests {
         assert!(set_password_hash(&conn, "u1", "h2", "t1").unwrap());
         let u = find_by_id(&conn, "u1").unwrap().unwrap();
         assert_eq!(u.password_updated_at, "t1");
+    }
+
+    #[test]
+    fn replicated_delete_removes_the_user_on_a_second_store() {
+        let (src, dst) = two_hosts();
+        insert(&dst, "a1", "root", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        assert!(delete_by_id(&src, "u1").unwrap());
+        macro_runtime::replicate_table::with_merge_peer("peer-a", || {
+            db::replicate::merge_bundle(&dst, db::replicate::export_all(&src).unwrap()).unwrap()
+        });
+        assert!(find_auth_by_username(&dst, "scott").unwrap().is_none());
+    }
+
+    #[test]
+    fn replicated_delete_never_removes_the_last_admin() {
+        let src = test_conn();
+        let dst = test_conn();
+        for c in [&src, &dst] {
+            insert(c, "a1", "root", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        }
+        assert!(delete_by_id(&src, "a1").unwrap());
+        macro_runtime::replicate_table::with_merge_peer("peer-a", || {
+            db::replicate::merge_bundle(&dst, db::replicate::export_all(&src).unwrap()).unwrap()
+        });
+        assert!(find_auth_by_username(&dst, "root").unwrap().is_some());
     }
 }
