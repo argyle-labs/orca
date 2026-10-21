@@ -542,11 +542,15 @@ pub trait DeployTarget: Send + Sync {
     }
 }
 
+pub fn normalize_host(host: &str) -> String {
+    host.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
 const TARGET_NAMESPACE: Uuid = Uuid::from_u128(0x5d1c_7a3e_4b2f_4e8a_9c61_0f3d_8e2a_b7c4);
 
 impl TargetId {
     pub fn canonical_key(&self) -> String {
-        let host = self.host.trim().trim_end_matches('.').to_ascii_lowercase();
+        let host = normalize_host(&self.host);
         format!("{host}/{}/{}", self.runtime.as_str(), self.kind.as_str())
     }
 
@@ -619,7 +623,7 @@ pub fn target_by_triple(id: &TargetId) -> Option<Arc<dyn DeployTarget>> {
         .read()
         .expect("deploy-target registry poisoned")
         .iter()
-        .find(|(_, t)| &t.id() == id)
+        .find(|(u, _)| *u == id.uuid())
         .map(|(_, t)| t.clone())
 }
 
@@ -643,7 +647,8 @@ pub fn descriptors() -> Vec<Target> {
 pub fn deregister_target(id: &TargetId) -> bool {
     let mut g = GLOBAL.write().expect("deploy-target registry poisoned");
     let before = g.len();
-    g.retain(|(_, t)| &t.id() != id);
+    let uuid = id.uuid();
+    g.retain(|(u, _)| *u != uuid);
     before != g.len()
 }
 
@@ -657,7 +662,8 @@ pub fn deregister_target(id: &TargetId) -> bool {
 pub fn deregister_host(host: &str) -> usize {
     let mut g = GLOBAL.write().expect("deploy-target registry poisoned");
     let before = g.len();
-    g.retain(|(_, t)| t.host() != host);
+    let host = normalize_host(host);
+    g.retain(|(_, t)| normalize_host(t.host()) != host);
     before - g.len()
 }
 
@@ -1096,6 +1102,24 @@ mod tests {
         let row = descriptors().into_iter().find(|t| t.id == id).unwrap();
         assert_eq!(row.uuid, id.uuid());
         deregister_target(&id);
+        assert!(target(&id.uuid()).is_none());
+    }
+
+    #[test]
+    fn host_spelling_variants_resolve_and_deregister_one_target() {
+        let id = TargetId {
+            host: "spell-host".into(),
+            ..pve_lxc_id()
+        };
+        register_target(Arc::new(FakeProxmox {
+            host: "spell-host".into(),
+        }));
+        let variant = TargetId {
+            host: "Spell-Host.".into(),
+            ..pve_lxc_id()
+        };
+        assert!(target_by_triple(&variant).is_some());
+        assert_eq!(deregister_host("SPELL-HOST."), 1);
         assert!(target(&id.uuid()).is_none());
     }
 

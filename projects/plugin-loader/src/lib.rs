@@ -734,7 +734,7 @@ fn check_backend_owner(software: &str, def: &BackendDef) -> Result<()> {
         ),
         NameScope::Claimed => {
             let claims = BACKEND_CLAIMS.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(owner) = claims.get(&(domain.to_string(), name.to_string()))
+            if let Some(owner) = claims.get(&claim_key(domain, name))
                 && owner != software
             {
                 bail!(
@@ -760,13 +760,22 @@ fn claim_backend(software: &str, domain: &str, name: &str) {
         BACKEND_CLAIMS
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .insert((domain.to_string(), name.to_string()), software.to_string());
+            .insert(claim_key(domain, name), software.to_string());
     }
+}
+
+fn claim_key(domain: &str, name: &str) -> (String, String) {
+    let name = if domain == "deploy_target" {
+        plugin_toolkit::deploy_target::normalize_host(name)
+    } else {
+        name.to_string()
+    };
+    (domain.to_string(), name)
 }
 
 fn release_backend_claim(software: &str, domain: &str, name: &str) {
     let mut claims = BACKEND_CLAIMS.write().unwrap_or_else(|e| e.into_inner());
-    let key = (domain.to_string(), name.to_string());
+    let key = claim_key(domain, name);
     if claims.get(&key).is_some_and(|owner| owner == software) {
         claims.remove(&key);
     }
@@ -2251,6 +2260,25 @@ mod loader_tests {
         assert!(names.iter().any(|n| n == "owner-own-b"));
         assert!(!names.iter().any(|n| n == "owner-own-a"));
         rollback_domain_backends("owner-own-b", &b);
+    }
+
+    #[test]
+    fn deploy_host_spelling_variants_share_one_claim() {
+        let domain = "deploy_target";
+        claim_backend("variant-a", domain, "variant-host");
+        for name in ["Variant-Host", "variant-host.", " VARIANT-HOST. "] {
+            let mut d = def(domain, name);
+            d.endpoint = "/plugins/variant-b/x".into();
+            let err = check_backend_owner("variant-b", &d)
+                .expect_err("variant spelling refused")
+                .to_string();
+            assert!(err.contains("variant-a"), "{name}: {err}");
+            check_backend_owner("variant-a", &d)
+                .unwrap_or_else(|e| panic!("{name}: owner re-register refused: {e:#}"));
+        }
+        release_backend_claim("variant-a", domain, "VARIANT-HOST.");
+        let d = def(domain, "variant-host");
+        check_backend_owner("variant-b", &d).expect("claim released under any spelling");
     }
 
     #[test]

@@ -217,8 +217,7 @@ pub struct ServiceCreateArgs {
 }
 
 fn same_host(a: &str, b: &str) -> bool {
-    let norm = |h: &str| h.trim().trim_end_matches('.').to_ascii_lowercase();
-    norm(a) == norm(b)
+    deploy_target::normalize_host(a) == deploy_target::normalize_host(b)
 }
 
 fn select_deploy_target(
