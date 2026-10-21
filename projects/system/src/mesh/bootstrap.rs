@@ -40,7 +40,8 @@ const MESH_REFRESH_CERT_BOOTSTRAP_METHOD: &str = "mesh/refresh-cert-bootstrap";
 /// Joiner → inviter, sent over an unauthenticated bootstrap TLS session (the
 /// joiner doesn't know the inviter's fp yet — TOFU). The inviter responds
 /// with a `RequestOfferResult` carrying the full signed `mesh/offer` payload
-/// the joiner would normally have received via the inviter's auto-offer push.
+/// the joiner would otherwise receive via an inviter-pushed offer. Refused
+/// unless `join_token` is a live, unused, admin-issued join token.
 ///
 /// `joiner_pubkey_fp` lets the inviter pin the joiner's bootstrap pubkey for
 /// the matching `mesh/join-confirm` step that follows, without having to
@@ -66,6 +67,8 @@ struct RequestOfferBody {
     /// inviter then falls back to the canonical mesh port rather than the socket.
     #[serde(default)]
     joiner_mesh_port: Option<u16>,
+    #[serde(default)]
+    join_token: Option<String>,
 }
 
 /// The joiner's dialable mesh port.
@@ -107,8 +110,8 @@ struct RequestOfferResult {
     inviter_display_name: Option<String>,
     #[serde(default)]
     code_hint: Option<String>,
-    /// Plaintext pairing code — included when both sides are mDNS-verified LAN
-    /// peers so the joiner can auto-accept without out-of-band code entry.
+    /// Plaintext pairing code, returned only after the joiner presented a valid
+    /// admin-issued join token.
     #[serde(default)]
     code_plain: Option<String>,
     /// The inviter's own reachable addresses; the joiner tries each (pinned to
@@ -139,8 +142,8 @@ struct OfferBody {
     /// rc.25 daemon can parse an rc.24 OfferBody that omits the field.
     #[serde(default)]
     inviter_display_name: Option<String>,
-    /// Plaintext pairing code — included by rc.12+ inviters on mDNS-verified
-    /// LAN peers so the joiner can auto-accept without out-of-band code entry.
+    /// Accepted for wire compat and ignored: an inviter push never admits the
+    /// joiner; its operator must `orca mesh accept <code>`.
     #[serde(default)]
     code_plain: Option<String>,
     /// The inviter's own reachable addresses. The joiner tries each (pinned to
@@ -200,27 +203,16 @@ pub async fn handle_mesh_bootstrap_connection(
         }
     };
 
-    let (response, auto_accept_code) = dispatch(request, peer).await;
+    let response = dispatch(request, peer).await;
     let envelope = serde_json::to_vec(&response).context("serialize bootstrap response")?;
     write_frame(&mut tls, &envelope)
         .await
         .context("write bootstrap response")?;
 
-    // Ack is on the wire — now safe to dial back for auto-accept.
-    if let Some(code) = auto_accept_code {
-        tokio::spawn(async move {
-            if let Err(e) = crate::mesh::cli::cmd_mesh_accept(&code).await {
-                warn!("[mesh-bootstrap] auto-accept failed: {e:#}");
-            } else {
-                info!("[mesh-bootstrap] auto-accept succeeded");
-            }
-        });
-    }
-
     Ok(())
 }
 
-async fn dispatch(request: Request, peer: std::net::SocketAddr) -> (Response, Option<String>) {
+async fn dispatch(request: Request, peer: std::net::SocketAddr) -> Response {
     let id = request.id.clone();
     let method = request.method.as_str();
 
@@ -228,62 +220,50 @@ async fn dispatch(request: Request, peer: std::net::SocketAddr) -> (Response, Op
         Some(v) => match serde_json::from_value(v) {
             Ok(e) => e,
             Err(e) => {
-                return (
-                    Response::err(
-                        id,
-                        peer_facing_error(
-                            method,
-                            &anyhow::Error::new(PeerRefusal(format!(
-                                "{method} refused: malformed signed envelope: {e}"
-                            ))),
-                        ),
+                return Response::err(
+                    id,
+                    peer_facing_error(
+                        method,
+                        &anyhow::Error::new(PeerRefusal(format!(
+                            "{method} refused: malformed signed envelope: {e}"
+                        ))),
                     ),
-                    None,
                 );
             }
         },
         None => {
-            return (
-                Response::err(
-                    id,
-                    ErrorObject::internal("bootstrap requires signed params"),
-                ),
-                None,
+            return Response::err(
+                id,
+                ErrorObject::internal("bootstrap requires signed params"),
             );
         }
     };
 
     match method {
         MESH_OFFER_METHOD => match handle_offer(&env, peer) {
-            Ok((ack, auto_accept_code)) => (value_response(id, &ack), auto_accept_code),
-            Err(e) => (Response::err(id, peer_facing_error(method, &e)), None),
+            Ok(ack) => value_response(id, &ack),
+            Err(e) => Response::err(id, peer_facing_error(method, &e)),
         },
         MESH_JOIN_CONFIRM_METHOD => match handle_join_confirm(&env) {
-            Ok(r) => (value_response(id, &r), None),
-            Err(e) => (Response::err(id, peer_facing_error(method, &e)), None),
+            Ok(r) => value_response(id, &r),
+            Err(e) => Response::err(id, peer_facing_error(method, &e)),
         },
         MESH_REQUEST_OFFER_METHOD => match handle_request_offer(&env, peer) {
-            Ok(r) => (value_response(id, &r), None),
-            Err(e) => (Response::err(id, peer_facing_error(method, &e)), None),
+            Ok(r) => value_response(id, &r),
+            Err(e) => Response::err(id, peer_facing_error(method, &e)),
         },
         MESH_REFRESH_CERT_BOOTSTRAP_METHOD => match handle_refresh_cert_bootstrap(&env) {
-            Ok(r) => (value_response(id, &r), None),
-            Err(e) => (Response::err(id, peer_facing_error(method, &e)), None),
+            Ok(r) => value_response(id, &r),
+            Err(e) => Response::err(id, peer_facing_error(method, &e)),
         },
-        other => (
-            Response::err(
-                id,
-                ErrorObject::method_not_found(&format!("bootstrap method '{other}' not supported")),
-            ),
-            None,
+        other => Response::err(
+            id,
+            ErrorObject::method_not_found(&format!("bootstrap method '{other}' not supported")),
         ),
     }
 }
 
-fn handle_offer(
-    env: &SignedEnvelope,
-    peer: std::net::SocketAddr,
-) -> Result<(OfferAck, Option<String>)> {
+fn handle_offer(env: &SignedEnvelope, peer: std::net::SocketAddr) -> Result<OfferAck> {
     let (body, signer_vk) = utils::pki::verify_envelope::<OfferBody>(env)?;
     let signer_fp = utils::pki::bootstrap_pubkey_fingerprint(&signer_vk);
 
@@ -335,22 +315,14 @@ fn handle_offer(
         Some(&body.inviter_peer_id),
         Some(&body.mesh_id),
         ttl,
-        body.code_plain.as_deref(),
+        None,
         &candidate_addrs,
     )?;
-    let auto_accept_code = body.code_plain.clone();
-    if auto_accept_code.is_some() {
-        info!(
-            "[mesh-bootstrap] received auto-pair offer from {} ({}@{}:{}) — accepting",
-            body.inviter_hostname, body.inviter_peer_id, inviter_addr, body.inviter_port
-        );
-    } else {
-        info!(
-            "[mesh-bootstrap] received offer from {} ({}, {}@{}:{}); run `orca mesh pending` to view",
-            body.inviter_hostname, body.inviter_peer_id, signer_fp, inviter_addr, body.inviter_port
-        );
-    }
-    Ok((OfferAck { code_hint: None }, auto_accept_code))
+    info!(
+        "[mesh-bootstrap] received offer from {} ({}, {}@{}:{}); run `orca mesh pending` to view",
+        body.inviter_hostname, body.inviter_peer_id, signer_fp, inviter_addr, body.inviter_port
+    );
+    Ok(OfferAck { code_hint: None })
 }
 
 fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
@@ -564,6 +536,11 @@ fn handle_request_offer(
     let pki_d = pki_dir();
     let mesh_ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
         .context("this host has no mesh CA; run `orca mesh init` first")?;
+    let token = body.join_token.as_deref().unwrap_or_default();
+    refuse_unless!(
+        !token.is_empty() && pdb::consume_join_token(&conn, token)?,
+        "mesh/request-offer refused: a valid admin-issued join token is required"
+    );
     let mesh_id = pdb::get_mesh_id(&conn)?.unwrap_or_else(|| "default".to_string());
 
     // Record the joiner in discovery (idempotent — same fp = same row).
@@ -615,8 +592,6 @@ fn handle_request_offer(
         &[], // outbound offer: the joiner dials us, not the reverse
     )?;
 
-    // Print code on the inviter side so a watching operator can read it.
-    // Matches the auto-offer scheduler's behavior.
     info!(
         "[mesh-bootstrap] joiner-initiated request from {} ({}, fp {}) — pairing code: {code}",
         joiner_label, body.joiner_peer_id, body.joiner_pubkey_fp
@@ -874,8 +849,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_missing_params_is_internal_error() {
         let req = Request::new(1, MESH_OFFER_METHOD, None);
-        let (resp, auto) = dispatch(req, test_peer()).await;
-        assert!(auto.is_none());
+        let resp = dispatch(req, test_peer()).await;
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, -32603);
         assert!(
@@ -890,8 +864,7 @@ mod tests {
     async fn dispatch_unparseable_params_is_internal_error() {
         // A bare number is not a SignedEnvelope object.
         let req = Request::new(7, MESH_OFFER_METHOD, Some(Value::from(42)));
-        let (resp, auto) = dispatch(req, test_peer()).await;
-        assert!(auto.is_none());
+        let resp = dispatch(req, test_peer()).await;
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, -32603);
         assert!(
@@ -904,8 +877,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_unknown_method_is_method_not_found() {
         let req = Request::new("abc", "mesh/does-not-exist", Some(dummy_envelope_value()));
-        let (resp, auto) = dispatch(req, test_peer()).await;
-        assert!(auto.is_none());
+        let resp = dispatch(req, test_peer()).await;
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, -32601);
         assert!(
@@ -1113,8 +1085,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_rejects_missing_params() {
         let req = Request::new(1u64, MESH_OFFER_METHOD, None);
-        let (resp, auto) = dispatch(req, test_peer()).await;
-        assert!(auto.is_none());
+        let resp = dispatch(req, test_peer()).await;
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
         assert!(err.message.contains("requires signed params"));
@@ -1125,8 +1096,7 @@ mod tests {
         // An empty object is not a valid SignedEnvelope (missing fields).
         let params = serde_json::to_value(serde_json::Map::new()).unwrap();
         let req = Request::new(1u64, MESH_OFFER_METHOD, Some(params));
-        let (resp, auto) = dispatch(req, test_peer()).await;
-        assert!(auto.is_none());
+        let resp = dispatch(req, test_peer()).await;
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
         assert!(err.message.contains("malformed signed envelope"));
@@ -1143,8 +1113,7 @@ mod tests {
         };
         let params = serde_json::to_value(&env).unwrap();
         let req = Request::new(1u64, "mesh/does-not-exist", Some(params));
-        let (resp, auto) = dispatch(req, test_peer()).await;
-        assert!(auto.is_none());
+        let resp = dispatch(req, test_peer()).await;
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32601);
         assert!(err.message.contains("not supported"));
@@ -1185,8 +1154,7 @@ mod tests {
             MESH_JOIN_CONFIRM_METHOD,
             Some(unverifiable_envelope_params()),
         );
-        let (resp, auto) = dispatch(req, test_peer()).await;
-        assert!(auto.is_none());
+        let resp = dispatch(req, test_peer()).await;
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
         assert_eq!(
@@ -1202,8 +1170,7 @@ mod tests {
             MESH_REQUEST_OFFER_METHOD,
             Some(unverifiable_envelope_params()),
         );
-        let (resp, auto) = dispatch(req, test_peer()).await;
-        assert!(auto.is_none());
+        let resp = dispatch(req, test_peer()).await;
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
         assert_eq!(
@@ -1222,8 +1189,7 @@ mod tests {
             MESH_REFRESH_CERT_BOOTSTRAP_METHOD,
             Some(unverifiable_envelope_params()),
         );
-        let (resp, auto) = dispatch(req, test_peer()).await;
-        assert!(auto.is_none());
+        let resp = dispatch(req, test_peer()).await;
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
         assert_eq!(
@@ -1248,6 +1214,7 @@ mod tests {
             joiner_pubkey_fp: "fp-does-not-match".into(),
             joiner_display_name: None,
             joiner_mesh_port: None,
+            join_token: None,
         };
         let env = utils::pki::sign_envelope(&key, &body).unwrap();
         let res = handle_request_offer(&env, test_peer());
@@ -1288,6 +1255,7 @@ mod tests {
             joiner_pubkey_fp: "fp".into(),
             joiner_display_name: None,
             joiner_mesh_port: None,
+            join_token: None,
         };
         let env = utils::pki::sign_envelope(&key, &body).unwrap();
         let (back, _vk): (RequestOfferBody, _) = utils::pki::verify_envelope(&env).unwrap();
@@ -1336,6 +1304,7 @@ mod tests {
             joiner_pubkey_fp: "fp".into(),
             joiner_display_name: None,
             joiner_mesh_port: None,
+            join_token: None,
         };
         let s = serde_json::to_string(&body).unwrap();
         assert!(s.contains(r#""joiner_pubkey_fp":"fp""#));
@@ -1431,7 +1400,7 @@ mod tests {
     // ── handle_offer: signed-envelope happy paths against an ephemeral DB ──────
     //
     // These reach the full offer-ingest body (ttl guard, source-IP fallback,
-    // candidate-addr dedup, pending-offer insert, auto-accept selection) without
+    // candidate-addr dedup, pending-offer insert) without
     // touching real mesh PKI: the signer key lives in a tempdir and the CA is
     // never consulted by `handle_offer` (only `verify_envelope` runs, keyed by
     // the in-test bootstrap key).
@@ -1464,9 +1433,8 @@ mod tests {
             // the dedup loop must collapse to two entries, order preserved.
             body.inviter_addrs = vec!["10.0.0.2".into(), "10.0.0.2".into()];
             let env = utils::pki::sign_envelope(&key, &body).unwrap();
-            let (ack, auto) = handle_offer(&env, test_peer()).unwrap();
+            let ack = handle_offer(&env, test_peer()).unwrap();
             assert!(ack.code_hint.is_none());
-            assert!(auto.is_none(), "no code_plain → no auto-accept");
 
             let conn = db::open_default().unwrap();
             let offers = pdb::list_pending_offers(&conn, "in").unwrap();
@@ -1485,7 +1453,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_offer_returns_auto_accept_when_code_plain_present() {
+    async fn handle_offer_with_code_plain_never_auto_accepts() {
         let dir = tempfile::tempdir().unwrap();
         let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1493,8 +1461,12 @@ mod tests {
             let mut body = mk_offer_body(utils::time::now_secs_since_epoch() + 3600);
             body.code_plain = Some("SECRET-CODE".into());
             let env = utils::pki::sign_envelope(&key, &body).unwrap();
-            let (_ack, auto) = handle_offer(&env, test_peer()).unwrap();
-            assert_eq!(auto.as_deref(), Some("SECRET-CODE"));
+            handle_offer(&env, test_peer()).unwrap();
+            let conn = db::open_default().unwrap();
+            let offers = pdb::list_pending_offers(&conn, "in").unwrap();
+            assert_eq!(offers.len(), 1);
+            assert!(offers[0].code_plain.is_none());
+            assert!(pdb::list_peers(&conn).unwrap().is_empty());
         })
         .await;
     }
@@ -1541,7 +1513,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_offer_valid_envelope_returns_ack_and_auto_accept() {
+    async fn dispatch_offer_valid_envelope_returns_ack_without_joining() {
         let dir = tempfile::tempdir().unwrap();
         let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1551,11 +1523,11 @@ mod tests {
             let env = utils::pki::sign_envelope(&key, &body).unwrap();
             let params = serde_json::to_value(&env).unwrap();
             let req = Request::new(1u64, MESH_OFFER_METHOD, Some(params));
-            let (resp, auto) = dispatch(req, test_peer()).await;
+            let resp = dispatch(req, test_peer()).await;
             assert!(!resp.is_error(), "valid offer must succeed");
-            assert_eq!(auto.as_deref(), Some("AUTO-1"));
             let conn = db::open_default().unwrap();
             assert_eq!(pdb::list_pending_offers(&conn, "in").unwrap().len(), 1);
+            assert!(pdb::list_peers(&conn).unwrap().is_empty());
         })
         .await;
     }
@@ -1627,17 +1599,18 @@ mod tests {
                 joiner_pubkey_fp: fp.clone(),
                 joiner_display_name: Some("Joiner Box".into()),
                 joiner_mesh_port: None,
+                join_token: Some("tok-ok".into()),
             };
             let env = utils::pki::sign_envelope(&key, &body).unwrap();
             let db_file = tempfile::NamedTempFile::new().unwrap();
             rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                pdb::insert_join_token(&db::open_default().unwrap(), "tok-ok", 300).unwrap();
                 let res = handle_request_offer(&env, test_peer()).unwrap();
                 // Inviter echoes a non-empty bootstrap fp and mesh CA; its own
                 // addr is blank (the joiner already dialed it).
                 assert!(!res.inviter_pubkey_fp.is_empty());
                 assert!(res.inviter_addr.is_empty());
                 assert!(!res.mesh_ca_cert_pem.is_empty());
-                // Auto-pair fields: plaintext code shipped, 2-char hint derived.
                 assert!(res.code_plain.is_some());
                 assert_eq!(res.code_hint.as_deref().map(str::len), Some(2));
                 assert_eq!(
@@ -1662,26 +1635,98 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
             let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
-            let body = RequestOfferBody {
-                joiner_peer_id: "join-peer".into(),
-                joiner_hostname: "joinhost".into(),
-                joiner_pubkey_fp: fp,
-                joiner_display_name: None,
-                joiner_mesh_port: None,
+            let mk = |token: &str| {
+                let body = RequestOfferBody {
+                    joiner_peer_id: "join-peer".into(),
+                    joiner_hostname: "joinhost".into(),
+                    joiner_pubkey_fp: fp.clone(),
+                    joiner_display_name: None,
+                    joiner_mesh_port: None,
+                    join_token: Some(token.into()),
+                };
+                utils::pki::sign_envelope(&key, &body).unwrap()
             };
-            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let (env1, env2) = (mk("tok-1"), mk("tok-2"));
             let db_file = tempfile::NamedTempFile::new().unwrap();
             rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
-                handle_request_offer(&env, test_peer()).unwrap();
+                let conn = db::open_default().unwrap();
+                pdb::insert_join_token(&conn, "tok-1", 300).unwrap();
+                pdb::insert_join_token(&conn, "tok-2", 300).unwrap();
+                handle_request_offer(&env1, test_peer()).unwrap();
                 // Second request for the same joiner fp must be rejected while
                 // the first offer is still open.
-                let err = handle_request_offer(&env, test_peer()).unwrap_err();
+                let err = handle_request_offer(&env2, test_peer()).unwrap_err();
                 assert!(
                     format!("{err:#}").contains("already pending"),
                     "got: {err:#}"
                 );
             }));
         });
+    }
+
+    fn request_offer_refusal(token: Option<&str>, seed: Option<(&str, i64)>, replay: bool) {
+        run_with_home(true, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let body = RequestOfferBody {
+                joiner_peer_id: "join-peer".into(),
+                joiner_hostname: "joinhost".into(),
+                joiner_pubkey_fp: fp.clone(),
+                joiner_display_name: None,
+                joiner_mesh_port: None,
+                join_token: token.map(Into::into),
+            };
+            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                let conn = db::open_default().unwrap();
+                if let Some((raw, ttl)) = seed {
+                    pdb::insert_join_token(&conn, raw, ttl).unwrap();
+                }
+                if replay {
+                    handle_request_offer(&env, test_peer()).unwrap();
+                    pdb::delete_outbound_offers_by_addr(&conn, "127.0.0.1").unwrap();
+                }
+                let err = handle_request_offer(&env, test_peer()).unwrap_err();
+                assert!(
+                    format!("{err:#}").contains("join token is required"),
+                    "got: {err:#}"
+                );
+                assert!(!pdb::has_open_outbound_offer(&conn, &fp).unwrap());
+                if !replay {
+                    assert!(pdb::list_discovery(&conn).unwrap().is_empty());
+                }
+            }));
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn handle_request_offer_without_token_is_refused() {
+        let _env = crate::test_env::snapshot();
+        request_offer_refusal(None, None, false);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn handle_request_offer_with_forged_token_is_refused() {
+        let _env = crate::test_env::snapshot();
+        request_offer_refusal(Some("forged"), Some(("real", 300)), false);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn handle_request_offer_with_expired_token_is_refused() {
+        let _env = crate::test_env::snapshot();
+        request_offer_refusal(Some("stale"), Some(("stale", -1)), false);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn handle_request_offer_with_used_token_is_refused() {
+        let _env = crate::test_env::snapshot();
+        request_offer_refusal(Some("once"), Some(("once", 300)), true);
     }
 
     #[test]
@@ -1698,6 +1743,7 @@ mod tests {
                 joiner_pubkey_fp: fp,
                 joiner_display_name: None,
                 joiner_mesh_port: None,
+                join_token: None,
             };
             let env = utils::pki::sign_envelope(&key, &body).unwrap();
             let db_file = tempfile::NamedTempFile::new().unwrap();

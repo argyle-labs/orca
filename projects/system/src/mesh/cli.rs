@@ -248,7 +248,7 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
     drop(conn);
 
     // Notify the inviter so THEIR peer_secure for us flips to true. Without
-    // this the inviter sees mutual=false forever after auto-accept — the
+    // this the inviter sees mutual=false forever after accept — the
     // initial DB write is local-only and roster-sync only carries identity,
     // not trust state.
     if let Err(e) = call_peer(
@@ -284,14 +284,15 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
 /// validates the inviter's pubkey echo against the captured TLS fp, and lands
 /// the resulting offer as an inbound pending row so `orca mesh accept <code>` can
 /// finish the handshake.
-pub async fn cmd_mesh_connect(addr: &str) -> Result<()> {
-    cmd_mesh_join(addr).await
+pub async fn cmd_mesh_connect(addr: &str, token: &str) -> Result<()> {
+    cmd_mesh_join(addr, token).await
 }
 
 /// Thin CLI wrapper over [`mesh_join_core`]: joiner-initiated pairing that dials
-/// the inviter directly (no mDNS) and auto-accepts. Prints a human summary.
-pub async fn cmd_mesh_join(addr: &str) -> Result<()> {
-    let out = mesh_join_core(addr, None).await?;
+/// the inviter directly (no mDNS) with an admin-issued join token and accepts.
+/// Prints a human summary.
+pub async fn cmd_mesh_join(addr: &str, token: &str) -> Result<()> {
+    let out = mesh_join_core(addr, None, token).await?;
     println!(
         "✓ joined mesh {} via {} ({}, {}:{})",
         out.mesh_id, out.inviter_hostname, out.inviter_peer_id, out.inviter_addr, out.inviter_port
@@ -302,14 +303,20 @@ pub async fn cmd_mesh_join(addr: &str) -> Result<()> {
 /// Core joiner-initiated pairing. Dials the inviter's bootstrap SNI with a TOFU
 /// verifier, sends a signed `mesh/request-offer`, validates the inviter's pubkey
 /// echo against the captured TLS fp, lands the resulting offer as an inbound
-/// pending row, and auto-accepts via the offer-embedded code — returning the
+/// pending row, and accepts via the offer-embedded code — returning the
 /// established membership. Shared by the CLI wrapper and the `system.join` tool so
 /// every surface pairs the same way. `port_override` wins over any port parsed
 /// from `addr` and the mesh-port default.
 pub async fn mesh_join_core(
     addr: &str,
     port_override: Option<u16>,
+    token: &str,
 ) -> Result<crate::mesh::MeshAcceptOutput> {
+    if token.trim().is_empty() {
+        bail!(
+            "joining requires a join token — run `orca mesh token` on an admin host of the mesh, then pass `--token <token>`"
+        );
+    }
     let (host, parsed_port) = utils::pki::parse_peer_addr(addr, mesh_port())?;
     let port = port_override.unwrap_or(parsed_port);
 
@@ -330,6 +337,7 @@ pub async fn mesh_join_core(
         /// our ephemeral TCP source port — so reporting it is what makes us
         /// dialable afterwards.
         joiner_mesh_port: u16,
+        join_token: &'a str,
     }
     let body = RequestBody {
         joiner_peer_id: &joiner_peer_id,
@@ -337,6 +345,7 @@ pub async fn mesh_join_core(
         joiner_pubkey_fp: &joiner_fp,
         joiner_display_name: &joiner_display_name,
         joiner_mesh_port: db::ports::mesh_port(),
+        join_token: token.trim(),
     };
     let env = utils::pki::sign_envelope(&signing, &body)?;
 
@@ -458,13 +467,9 @@ pub async fn mesh_join_core(
         r.inviter_peer_id, r.inviter_pubkey_fp
     );
 
-    // S1 auto-accept: the inviter embeds `code_plain` in the request-offer
-    // response on joiner-initiated handshakes. Security unchanged — the
-    // TOFU pubkey pin + signed envelope already authenticated this exchange,
-    // and the code's only purpose was operator transcription. Skip straight
-    // to `orca mesh accept <code>` so one command finishes the join.
+    // The inviter only embeds `code_plain` after consuming our join token.
     if let Some(code) = r.code_plain.as_deref() {
-        println!("  auto-accepting via offer-embedded code…");
+        println!("  accepting via offer-embedded code…");
         return crate::mesh::exec::accept(code).await;
     }
 
@@ -1073,7 +1078,7 @@ async fn dial_mesh_mtls(
 }
 
 /// Dial a peer over the bootstrap SNI with a pinned pubkey. Used by `mesh
-/// accept` (join-confirm) and by the auto-offer scheduler (offer push).
+/// accept` (join-confirm) and by the operator offer push.
 async fn dial_bootstrap(
     host: &str,
     port: u16,
@@ -2046,9 +2051,21 @@ mod tests {
 
     #[tokio::test]
     async fn mesh_join_core_rejects_empty_addr() {
-        let err = mesh_join_core("", None).await.err().unwrap();
+        let err = mesh_join_core("", None, "tok").await.err().unwrap();
         assert!(
             format!("{err:#}").contains("empty peer address"),
+            "got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mesh_join_core_refuses_without_token() {
+        let err = mesh_join_core("127.0.0.1", Some(1), " ")
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            format!("{err:#}").contains("requires a join token"),
             "got: {err:#}"
         );
     }
@@ -2057,7 +2074,10 @@ mod tests {
     async fn mesh_join_core_rejects_invalid_port() {
         // `host:99999` overflows u16 → the `invalid port` parse error fires
         // before any key material is generated.
-        let err = mesh_join_core("host-x:99999", None).await.err().unwrap();
+        let err = mesh_join_core("host-x:99999", None, "tok")
+            .await
+            .err()
+            .unwrap();
         assert!(format!("{err:#}").contains("invalid port"), "got: {err:#}");
     }
 
@@ -2076,7 +2096,10 @@ mod tests {
         let _home = set_home(home.path());
         // machine_id() (called before the dial) requires a one-time global init.
         drop(crate::host_identity::init(home.path()));
-        let err = mesh_join_core("127.0.0.1", Some(1)).await.err().unwrap();
+        let err = mesh_join_core("127.0.0.1", Some(1), "tok")
+            .await
+            .err()
+            .unwrap();
         assert!(
             format!("{err:#}").contains("connect 127.0.0.1:1"),
             "got: {err:#}"
@@ -2091,7 +2114,7 @@ mod tests {
         let _home = set_home(home.path());
         drop(crate::host_identity::init(home.path()));
         // Delegates through cmd_mesh_join → mesh_join_core; port 1 parsed from addr.
-        let err = cmd_mesh_connect("127.0.0.1:1").await.unwrap_err();
+        let err = cmd_mesh_connect("127.0.0.1:1", "tok").await.unwrap_err();
         assert!(
             format!("{err:#}").contains("connect 127.0.0.1:1"),
             "got: {err:#}"
@@ -2105,7 +2128,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         drop(crate::host_identity::init(home.path()));
-        let err = cmd_mesh_join("127.0.0.1:1").await.unwrap_err();
+        let err = cmd_mesh_join("127.0.0.1:1", "tok").await.unwrap_err();
         assert!(
             format!("{err:#}").contains("connect 127.0.0.1:1"),
             "got: {err:#}"

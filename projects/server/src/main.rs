@@ -217,11 +217,22 @@ enum MeshAction {
     Accept { code: String },
     /// Manual fallback when mDNS doesn't see the inviter — point at a
     /// specific addr `host[:port]`. Alias for `orca mesh join`.
-    Connect { addr: String },
+    Connect {
+        addr: String,
+        #[arg(long)]
+        token: String,
+    },
     /// Joiner-initiated handshake. Dials the inviter over the bootstrap
     /// channel (TOFU first contact, then signed-echo fp check) and lands a
-    /// pending inbound offer ready for `orca mesh accept`.
-    Join { addr: String },
+    /// pending inbound offer ready for `orca mesh accept`. Requires a join
+    /// token from `orca mesh token` on the inviter.
+    Join {
+        addr: String,
+        #[arg(long)]
+        token: String,
+    },
+    /// Issue a single-use, short-lived join token for one joiner.
+    Token,
     /// Manually push an offer to a known address (inviter side, when
     /// mDNS doesn't see the joiner).
     Offer { addr: String },
@@ -582,17 +593,30 @@ async fn main() -> Result<()> {
                 );
                 println!("  self_secure: true (secrets storage enabled)");
                 println!(
-                    "  next: start the daemon. Auto-offers will flow to any \
-                     unclaimed orca on the LAN; user accepts on the joiner with \
-                     `orca mesh accept <code>` (the code is printed in the daemon log here)."
+                    "  next: start the daemon, then admit a host with `orca mesh token` here + \
+                     `orca mesh join <this-host> --token <token>` on the joiner, or \
+                     `orca mesh offer <addr>` here + `orca mesh accept <code>` there."
                 );
                 Ok(())
             }
             MeshAction::Discover => system::mesh::cli::cmd_mesh_discover(),
             MeshAction::Pending => system::mesh::cli::cmd_mesh_pending(),
             MeshAction::Accept { code } => system::mesh::cli::cmd_mesh_accept(&code).await,
-            MeshAction::Connect { addr } => system::mesh::cli::cmd_mesh_connect(&addr).await,
-            MeshAction::Join { addr } => system::mesh::cli::cmd_mesh_join(&addr).await,
+            MeshAction::Connect { addr, token } => {
+                system::mesh::cli::cmd_mesh_connect(&addr, &token).await
+            }
+            MeshAction::Join { addr, token } => {
+                system::mesh::cli::cmd_mesh_join(&addr, &token).await
+            }
+            MeshAction::Token => {
+                let out = system::mesh::exec::issue_join_token()?;
+                println!("{}", out.token);
+                eprintln!(
+                    "  single-use; expires at {} — on the joiner run `orca mesh join <this-host> --token <token>`",
+                    out.expires_at
+                );
+                Ok(())
+            }
             MeshAction::Offer { addr } => system::mesh::cli::cmd_mesh_offer(&addr).await,
             MeshAction::Pair { addr } => system::mesh::cli::cmd_mesh_pair(&addr).await,
             MeshAction::List => system::mesh::cli::cmd_mesh_list(),

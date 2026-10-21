@@ -1,18 +1,11 @@
 // Wire envelopes are opaque JSON; mirrors the allow in jsonrpc.rs.
 #![allow(clippy::disallowed_types)]
 
-//! Auto-offer scheduler.
+//! Mesh scheduler.
 //!
-//! Periodically (every 15s by default) scans `mesh_discovery` for peers in
-//! state=unclaimed and pushes a mesh/offer to each — provided:
-//!
-//!   * This host has the mesh CA private key (`can_invite`).
-//!   * This host's `self_secure` is true.
-//!   * There isn't already an open outbound offer to that peer fp.
-//!
-//! The dial is over SNI=mesh-bootstrap.orca.local with the joiner's
-//! mDNS-advertised pubkey pinned. If the dial fails (peer offline, blocked,
-//! restarted with a new key), the row stays unclaimed and we retry next tick.
+//! Periodically GCs the in-memory peer caches. Discovery never produces an
+//! offer: pairing requires an operator-pushed offer (`orca mesh offer`) or a
+//! joiner presenting an admin-issued join token (`orca mesh join --token`).
 
 use anyhow::{Context, Result};
 use db::ports::mesh_port;
@@ -23,7 +16,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use tracing::{info, warn};
 use utils::framing::{read_frame, write_frame};
 use utils::jsonrpc::{Message, Request, Response};
 
@@ -49,12 +41,8 @@ pub fn spawn() -> tokio::task::JoinHandle<()> {
 }
 
 async fn tick() -> Result<()> {
-    // GC the in-memory peer caches on EVERY host, BEFORE the CA/secure gates
-    // below. Any peer whose row has been removed (by any path, not just
-    // forget_peer) gets its cached RuntimeFields evicted here; cardinality is
-    // bounded by live peers. This must not sit behind the offer-extension gate
-    // — non-CA hosts never pass that gate, so they would otherwise never GC and
-    // would leak peer-cache entries for the whole process lifetime.
+    // Evicts cached RuntimeFields for any peer whose row was removed by any
+    // path, so the cache stays bounded by live peers.
     let active_ids: std::collections::HashSet<String> = db::pool::with_pooled_or_open(|conn| {
         Ok(pdb::list_peers(conn)?
             .into_iter()
@@ -62,71 +50,6 @@ async fn tick() -> Result<()> {
             .collect())
     })?;
     crate::mesh::peer_info::retain_only(&active_ids);
-
-    // Gate: only secure hosts with the CA key extend offers.
-    let pki_d = pki_dir();
-    if !utils::pki::has_mesh_ca_key(&pki_d) {
-        return Ok(());
-    }
-    let Some((mesh_id, unclaimed)) = db::pool::with_pooled_or_open(|conn| {
-        if !db::mesh::get_self_secure(conn)? {
-            return Ok(None);
-        }
-        let mesh_id = pdb::get_mesh_id(conn)?.unwrap_or_else(|| "default".to_string());
-        let unclaimed = pdb::list_unclaimed_discovery(conn)?;
-        Ok(Some((mesh_id, unclaimed)))
-    })?
-    else {
-        return Ok(());
-    };
-
-    for d in unclaimed {
-        let code = db::pool::with_pooled_or_open(|conn| {
-            if pdb::has_open_outbound_offer(conn, &d.pubkey_fp)? {
-                return Ok(None);
-            }
-            let code = mint_pairing_code();
-            let code_hash = pdb::hash_code(&code);
-            let offer_id = utils::id::new();
-            let inviter_peer_id = crate::host_identity::machine_id().to_string();
-            pdb::insert_pending_offer(
-                conn,
-                &offer_id,
-                "out",
-                &d.pubkey_fp,
-                &d.hostname,
-                &d.addr,
-                d.port,
-                &code_hash,
-                None,
-                Some(&inviter_peer_id),
-                None,
-                OFFER_TTL_SECS,
-                None,
-                &[], // outbound offer: we don't dial ourselves
-            )?;
-            Ok(Some(code))
-        })?;
-        let Some(code) = code else {
-            continue;
-        };
-
-        let mesh_id = mesh_id.clone();
-        let code_for_log = code.clone();
-        let hostname = d.hostname.clone();
-        let addr = d.addr.clone();
-        let port = d.port;
-        let fp = d.pubkey_fp.clone();
-        tokio::spawn(async move {
-            if let Err(e) = push_offer(&hostname, &addr, port, &fp, &code, &mesh_id).await {
-                warn!("[mesh-scheduler] push offer to {hostname} failed: {e:#}");
-            } else {
-                info!(
-                    "[mesh-scheduler] offered mesh-membership to {hostname} ({addr}:{port}) — pairing code: {code_for_log}"
-                );
-            }
-        });
-    }
     Ok(())
 }
 
@@ -197,10 +120,6 @@ pub async fn push_offer(
         code_hash: String,
         expires_at: i64,
         inviter_display_name: &'a str,
-        /// Plaintext code — included so the joiner can auto-accept without
-        /// out-of-band code entry. Safe over the bootstrap TLS channel where
-        /// both sides verified each other's pubkey fingerprint via mDNS.
-        code_plain: &'a str,
         /// The inviter's own reachable addresses (LAN v4/v6, tailscale). The
         /// joiner tries each — pinned to our bootstrap fp — for join-confirm,
         /// so re-pair works even when the offer-push TLS source IP is a tunnel
@@ -217,7 +136,6 @@ pub async fn push_offer(
         code_hash: pdb::hash_code(code),
         expires_at: now_secs() + OFFER_TTL_SECS,
         inviter_display_name: &inviter_hostname,
-        code_plain: code,
         inviter_addrs: self_advertised_addrs(),
     };
     let env = utils::pki::sign_envelope(&signing, &body)?;
@@ -457,7 +375,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn tick_inserts_outbound_offer_for_unclaimed_peer() {
+    fn tick_never_offers_to_discovered_peer() {
         let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
@@ -481,66 +399,15 @@ mod tests {
 
             tick().await.unwrap();
 
-            // The synchronous DB write in tick() mints an outbound offer row
-            // keyed by the joiner fp before spawning the (doomed) dial.
-            let has = db::pool::with_pooled_or_open(|conn| {
-                pdb::has_open_outbound_offer(conn, "fp-claim-me")
+            let (has, peers) = db::pool::with_pooled_or_open(|conn| {
+                Ok((
+                    pdb::has_open_outbound_offer(conn, "fp-claim-me")?,
+                    pdb::list_peers(conn)?.len(),
+                ))
             })
             .unwrap();
-            assert!(
-                has,
-                "secure CA host must extend an offer to an unclaimed peer"
-            );
-        });
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn tick_skips_peer_with_existing_open_offer() {
-        let _env = crate::test_env::snapshot();
-        let dir = tempfile::tempdir().unwrap();
-        with_home_db(dir.path(), async {
-            crate::host_identity::init(dir.path()).unwrap();
-            let pki = pki_dir();
-            utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
-            db::pool::with_pooled_or_open(|conn| {
-                pdb::set_self_secure(conn, true)?;
-                pdb::upsert_discovery(
-                    conn,
-                    "fp-dup",
-                    None,
-                    "joiner-d",
-                    "127.0.0.1",
-                    1,
-                    "unclaimed",
-                    false,
-                )
-            })
-            .unwrap();
-
-            // First tick mints the offer.
-            tick().await.unwrap();
-            let count_after_first = db::pool::with_pooled_or_open(|conn| {
-                Ok(conn.query_row(
-                    "SELECT COUNT(*) FROM mesh_pending_offers WHERE peer_pubkey_fp = ?",
-                    [&"fp-dup"],
-                    |r| r.get::<_, i64>(0),
-                )?)
-            })
-            .unwrap();
-            assert_eq!(count_after_first, 1);
-
-            // Second tick sees an open outbound offer and must not add another.
-            tick().await.unwrap();
-            let count_after_second = db::pool::with_pooled_or_open(|conn| {
-                Ok(conn.query_row(
-                    "SELECT COUNT(*) FROM mesh_pending_offers WHERE peer_pubkey_fp = ?",
-                    [&"fp-dup"],
-                    |r| r.get::<_, i64>(0),
-                )?)
-            })
-            .unwrap();
-            assert_eq!(count_after_second, 1, "duplicate offer must not be minted");
+            assert!(!has);
+            assert_eq!(peers, 0);
         });
     }
 }
