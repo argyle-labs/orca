@@ -667,7 +667,8 @@ pub struct MeshInstance {
     pub health: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Wall-clock millis when this row was assembled.
+    /// Unix seconds when this row was assembled, the unit every other
+    /// `system.list` timestamp uses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_checked: Option<i64>,
 
@@ -700,7 +701,7 @@ pub struct MeshInstancesOutput {
 
 /// Pure helper. Project a `MeshPeerDto` (or the synthetic local row) into the
 /// frontend-shaped `MeshInstance`. Unit-tested.
-fn build_instance(p: &MeshPeerDto, is_local: bool, now_ms: i64) -> MeshInstance {
+fn build_instance(p: &MeshPeerDto, is_local: bool, now_secs: i64) -> MeshInstance {
     let role = if is_local { "local" } else { "system" };
     // Hard rule: ids are bare UUIDv7, never prefixed. Locality is carried
     // on the separate `role` field, so `id` and `peer_id` are simply the
@@ -764,7 +765,7 @@ fn build_instance(p: &MeshPeerDto, is_local: bool, now_ms: i64) -> MeshInstance 
         update_checked_secs: p.update_checked_secs,
         health,
         error: None,
-        last_checked: Some(now_ms),
+        last_checked: Some(now_secs),
         secure,
         status: if is_local {
             None
@@ -1475,7 +1476,6 @@ pub async fn collect_mesh_instances() -> anyhow::Result<MeshInstancesOutput> {
     let members_raw = assemble_members().await?;
 
     let now_secs = utils::time::now().unix_seconds();
-    let now_ms = now_secs * 1000;
     let (members_classified, candidates, stale, inbound_offers) =
         classify_snapshot(members_raw, now_secs);
 
@@ -1487,7 +1487,7 @@ pub async fn collect_mesh_instances() -> anyhow::Result<MeshInstancesOutput> {
         if let MeshMember::Joined(p) = m
             && p.local
         {
-            instances.push(build_instance(p, true, now_ms));
+            instances.push(build_instance(p, true, now_secs));
             local_seen = true;
             break;
         }
@@ -1522,14 +1522,14 @@ pub async fn collect_mesh_instances() -> anyhow::Result<MeshInstancesOutput> {
             system: None,
             pubkey_fp: None,
         };
-        instances.push(build_instance(&synthetic, true, now_ms));
+        instances.push(build_instance(&synthetic, true, now_secs));
     }
     for m in &members_classified {
         if let MeshMember::Joined(p) = m
             && !p.local
             && p.status == "active"
         {
-            instances.push(build_instance(p, false, now_ms));
+            instances.push(build_instance(p, false, now_secs));
         }
     }
 
@@ -3664,6 +3664,31 @@ mod added_coverage {
     }
 
     // ── build_instance — down health + update flags ──────────────────────────
+
+    #[test]
+    fn instance_last_checked_shares_the_last_seen_unit() {
+        let now = utils::time::now().unix_seconds();
+        let mut p = peer("p", "h", "active", false);
+        p.last_seen_at = now;
+        let inst = build_instance(&p, false, now);
+        let checked = inst.last_checked.unwrap();
+        assert!(
+            (checked - p.last_seen_at).abs() < 60,
+            "{checked} vs {}",
+            p.last_seen_at
+        );
+        let (_m, _c, stale, _o) = classify_snapshot(
+            vec![MeshMember::Joined(Box::new(peer(
+                "q", "h2", "departed", false,
+            )))],
+            now,
+        );
+        assert!(
+            stale
+                .iter()
+                .all(|s| s.last_seen_at.is_none_or(|t| t <= now))
+        );
+    }
 
     #[test]
     fn build_instance_down_health_for_inactive_remote() {
