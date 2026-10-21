@@ -649,6 +649,7 @@ struct ReplicateAttr {
     /// the ids fleet-wide.
     unique: Option<String>,
     protected: Vec<String>,
+    peer_delete: Option<syn::Path>,
     /// Crate path the macro emits against. Defaults to `::plugin_toolkit`;
     /// domain crates pass `crate = ::macro_runtime` to anchor against the
     /// lower-level macro-runtime crate (breaks the Cargo cycle that would
@@ -675,6 +676,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
     let mut unique = None;
     let mut protected = Vec::new();
     let mut crate_path: Option<syn::Path> = None;
+    let mut peer_delete = None;
     for nv in items {
         let key = nv
             .path
@@ -683,6 +685,10 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
             .unwrap_or_default();
         if key == "crate" {
             crate_path = Some(parse_path(&nv.value)?);
+            continue;
+        }
+        if key == "peer_delete" {
+            peer_delete = Some(parse_path(&nv.value)?);
             continue;
         }
         let val = match &nv.value {
@@ -724,6 +730,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
         pk: pk.unwrap_or_else(|| "id".to_string()),
         unique,
         protected,
+        peer_delete,
         crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
     })
 }
@@ -889,7 +896,9 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
     let key_lits: Vec<&String> = ::std::iter::once(&cfg.pk)
         .chain(cfg.unique.as_ref())
         .collect();
-    let peer_delete = if cfg.protected.is_empty() {
+    let peer_delete = if let Some(pred) = &cfg.peer_delete {
+        quote! { ::std::option::Option::Some(#pred) }
+    } else if cfg.protected.is_empty() {
         quote! { ::std::option::Option::Some(#crate_path::allow_peer_delete) }
     } else {
         quote! { ::std::option::Option::None }
