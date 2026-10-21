@@ -329,6 +329,8 @@ pub enum MeshListResult {
 pub struct MeshCandidate {
     pub pubkey_fp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_id: Option<String>,
     pub hostname: String,
     pub addr: String,
@@ -339,6 +341,7 @@ pub struct MeshCandidate {
 #[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MeshStaleRow {
+    pub id: String,
     pub peer_id: String,
     pub hostname: String,
     pub addr: String,
@@ -419,6 +422,7 @@ fn classify_snapshot(
             MeshMember::Joined(p) => {
                 if !p.local && p.status != "active" {
                     stale.push(MeshStaleRow {
+                        id: p.peer_id.clone(),
                         peer_id: p.peer_id.clone(),
                         hostname: if p.hostname.is_empty() {
                             p.peer_id.clone()
@@ -458,6 +462,7 @@ fn classify_snapshot(
                 if unclaimed && !is_self_echo {
                     candidates.push(MeshCandidate {
                         pubkey_fp: d.pubkey_fp.clone(),
+                        id: d.peer_id.clone(),
                         peer_id: d.peer_id.clone(),
                         hostname: d.hostname.clone(),
                         addr: d.addr.clone(),
@@ -466,6 +471,7 @@ fn classify_snapshot(
                     });
                 } else if let Some(pid) = &d.peer_id {
                     stale.push(MeshStaleRow {
+                        id: pid.clone(),
                         peer_id: pid.clone(),
                         hostname: d.hostname.clone(),
                         addr: d.addr.clone(),
@@ -3887,6 +3893,7 @@ mod added_coverage {
     fn mesh_candidate_omits_none_peer_id() {
         let c = MeshCandidate {
             pubkey_fp: "fp".into(),
+            id: None,
             peer_id: None,
             hostname: "h".into(),
             addr: "1.2.3.4".into(),
@@ -3898,8 +3905,38 @@ mod added_coverage {
     }
 
     #[test]
+    fn candidate_and_stale_rows_carry_the_system_id_as_id() {
+        let id = "0b8c7f2e-1111-4222-8333-444455556666";
+        let c = serde_json::to_value(MeshCandidate {
+            pubkey_fp: "fp".into(),
+            id: Some(id.into()),
+            peer_id: Some(id.into()),
+            hostname: "h".into(),
+            addr: "10.0.0.5".into(),
+            port: 1,
+            can_invite: true,
+        })
+        .unwrap();
+        assert_eq!(c["id"], id);
+        assert_eq!(c["peer_id"], id);
+        let s = serde_json::to_value(MeshStaleRow {
+            id: id.into(),
+            peer_id: id.into(),
+            hostname: "h".into(),
+            addr: "10.0.0.5".into(),
+            port: 1,
+            reason: "orphan".into(),
+            last_seen_at: None,
+        })
+        .unwrap();
+        assert_eq!(s["id"], id);
+        assert_eq!(s["peer_id"], id);
+    }
+
+    #[test]
     fn mesh_stale_row_omits_none_last_seen() {
         let s = serde_json::to_string(&MeshStaleRow {
+            id: "p".into(),
             peer_id: "p".into(),
             hostname: "h".into(),
             addr: "1.2.3.4".into(),
