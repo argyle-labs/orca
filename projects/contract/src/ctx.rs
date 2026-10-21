@@ -44,6 +44,7 @@ pub struct ToolCtx {
     unbound_role: Option<String>,
     local_transport: bool,
     second_factor: bool,
+    call_chain: Vec<String>,
     services: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
@@ -59,6 +60,7 @@ impl ToolCtx {
             unbound_role: None,
             local_transport: false,
             second_factor: false,
+            call_chain: Vec::new(),
             services: HashMap::new(),
         }
     }
@@ -159,6 +161,14 @@ impl ToolCtx {
     /// Whether the caller asked for a dry run. Defaults to `false`: execute.
     pub fn dry_run(&self) -> bool {
         self.dry_run
+    }
+
+    pub fn set_call_chain(&mut self, chain: Vec<String>) {
+        self.call_chain = chain;
+    }
+
+    pub fn call_chain(&self) -> &[String] {
+        &self.call_chain
     }
 
     /// Insert a service handle. `T` is typically `Arc<dyn FooService>` —

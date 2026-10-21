@@ -30,6 +30,7 @@ pub mod capability;
 #[cfg(unix)]
 pub mod privileged;
 pub mod supervisor;
+pub mod tool_call;
 mod ws;
 
 use std::collections::HashMap;

@@ -107,6 +107,13 @@ pub struct ApiCall {
     pub args: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolCall {
+    pub tool: String,
+    #[serde(default = "empty_args")]
+    pub args: Value,
+}
+
 fn empty_args() -> Value {
     Value::Object(serde_json::Map::new())
 }

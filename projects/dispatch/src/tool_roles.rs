@@ -223,6 +223,26 @@ pub fn authorize(
         && caller_role != "any"
 }
 
+pub fn may_invoke(
+    tool: &str,
+    caller_role: Option<&str>,
+    can_mutate: bool,
+) -> Result<(), &'static str> {
+    let required = required_role(tool);
+    if required == "any"
+        || authorize(
+            caller_role.unwrap_or(""),
+            can_mutate,
+            required,
+            is_data_mutation(tool),
+        )
+    {
+        Ok(())
+    } else {
+        Err(required)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

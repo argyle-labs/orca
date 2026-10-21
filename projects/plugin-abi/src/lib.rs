@@ -463,6 +463,8 @@ pub const LXC_PUSH: &str = "lxc.push";
 
 pub const PRIVILEGED_APPLY: &str = "privileged.apply";
 
+pub const TOOL_CALL: &str = "tool.call";
+
 /// Raw outcome of a root helper the daemon ran for a privileged capability.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct HelperOutput {
