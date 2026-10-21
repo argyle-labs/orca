@@ -16,6 +16,7 @@ pub const MAX_PER_REQUEST: usize = 64;
 pub const PER_USER_CONCURRENCY: usize = 2;
 pub const PER_PLUGIN_CONCURRENCY: usize = 8;
 const ACQUIRE_WAIT: Duration = Duration::from_secs(2);
+const ACTION_LIMITS: &[(&str, &[&str])] = &[("service.create", &["deploy"])];
 
 pub type CtxFactory = dyn Fn() -> Result<ToolCtx> + Send + Sync;
 
@@ -27,20 +28,27 @@ pub fn set_ctx_factory(factory: Box<CtxFactory>) {
     }
 }
 
+type SemaphoreKey = (String, Option<String>);
+
+fn semaphores() -> &'static Mutex<HashMap<SemaphoreKey, Arc<Semaphore>>> {
+    static SEMAPHORES: OnceLock<Mutex<HashMap<SemaphoreKey, Arc<Semaphore>>>> = OnceLock::new();
+    SEMAPHORES.get_or_init(Default::default)
+}
+
 fn semaphore(principal: &str, user: Option<&str>) -> Arc<Semaphore> {
-    type Key = (String, Option<String>);
-    static SEMAPHORES: OnceLock<Mutex<HashMap<Key, Arc<Semaphore>>>> = OnceLock::new();
-    let permits = if user.is_some() {
-        PER_USER_CONCURRENCY
-    } else {
-        PER_PLUGIN_CONCURRENCY
+    let permits = |key: &SemaphoreKey| {
+        if key.1.is_some() {
+            PER_USER_CONCURRENCY
+        } else {
+            PER_PLUGIN_CONCURRENCY
+        }
     };
-    SEMAPHORES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry((principal.to_string(), user.map(str::to_string)))
-        .or_insert_with(|| Arc::new(Semaphore::new(permits)))
+    let mut map = semaphores().lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|key, sem| Arc::strong_count(sem) > 1 || sem.available_permits() < permits(key));
+    let key = (principal.to_string(), user.map(str::to_string));
+    let full = permits(&key);
+    map.entry(key)
+        .or_insert_with(|| Arc::new(Semaphore::new(full)))
         .clone()
 }
 
@@ -49,20 +57,23 @@ fn acquire(
     user: &str,
     wait: Duration,
 ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
+    let busy = || {
+        anyhow!(
+            "tool.call refused: plugin '{principal}' is at its tool.call concurrency limit; retry shortly"
+        )
+    };
+    let plugin_permit = semaphore(principal, None)
+        .try_acquire_owned()
+        .map_err(|_| busy())?;
     let per_user = semaphore(principal, Some(user));
-    let per_plugin = semaphore(principal, None);
-    let busy = format!(
-        "tool.call refused: plugin '{principal}' is at its tool.call concurrency limit; retry shortly"
-    );
-    crate::capability::run_on_cap_runtime(async move {
-        let user_permit = tokio::time::timeout(wait, per_user.acquire_owned())
-            .await
-            .map_err(|_| anyhow!("{busy}"))??;
-        let plugin_permit = tokio::time::timeout(wait, per_plugin.acquire_owned())
-            .await
-            .map_err(|_| anyhow!("{busy}"))??;
-        Ok((user_permit, plugin_permit))
-    })?
+    let user_permit = match per_user.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => crate::capability::run_on_cap_runtime(async move {
+            tokio::time::timeout(wait, per_user.acquire_owned()).await
+        })?
+        .map_err(|_| busy())??,
+    };
+    Ok((user_permit, plugin_permit))
 }
 
 fn consume_budget(inv: &spec::surfaces::Invocation) -> Result<()> {
@@ -163,6 +174,7 @@ pub(crate) fn prepare(
             &format!("caller '{}' has role '{}'", caller.username, caller.role),
         ));
     }
+    refuse_action(&call.tool, &call.args)?;
     let (mut args, peer, correlation_id) = dispatch::take_ambient(call.args)?;
     if peer.is_some() || args.get(dispatch::SYSTEM_ID_KEY).is_some() {
         bail!(
@@ -189,6 +201,23 @@ pub(crate) fn prepare(
     ctx.set_call_chain(chain);
     ctx.set_call_budget(Some(inv.call_budget().clone()));
     Ok((call.tool, args, ctx))
+}
+
+fn refuse_action(tool: &str, args: &Value) -> Result<()> {
+    let Some((_, allowed)) = ACTION_LIMITS.iter().find(|(t, _)| *t == tool) else {
+        return Ok(());
+    };
+    let action = args
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !allowed.contains(&action) {
+        bail!(
+            "tool.call {tool} refused: action '{action}' is not available through tool.call (allowed: {})",
+            allowed.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn refuse_loop(tool: &str, chain: &[String], owner: Option<&str>) -> Result<()> {
@@ -551,6 +580,40 @@ mod tests {
         drop(held);
         drop(other);
         assert!(acquire("shared", "u-a", wait).is_ok());
+    }
+
+    #[test]
+    fn a_saturated_user_waits_once_and_idle_entries_are_evicted() {
+        let wait = Duration::from_millis(100);
+        let held: Vec<_> = (0..PER_USER_CONCURRENCY)
+            .map(|_| acquire("deadline", "u-a", wait).unwrap())
+            .collect();
+        let started = std::time::Instant::now();
+        assert!(acquire("deadline", "u-a", wait).is_err());
+        assert!(started.elapsed() < wait * 2, "{:?}", started.elapsed());
+        drop(held);
+        drop(acquire("idle", "u-z", wait).unwrap());
+        let _ = semaphore("other", None);
+        let map = semaphores().lock().unwrap();
+        assert!(!map.contains_key(&("idle".to_string(), Some("u-z".to_string()))));
+        assert!(!map.contains_key(&("deadline".to_string(), Some("u-a".to_string()))));
+    }
+
+    #[test]
+    fn service_create_is_limited_to_deploy() {
+        assert!(refuse_action("service.create", &json!({ "action": "deploy" })).is_ok());
+        for args in [
+            json!({ "action": "backup" }),
+            json!({ "action": "restore" }),
+            json!({ "action": "configure" }),
+            json!({}),
+        ] {
+            let err = refuse_action("service.create", &args)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("not available through tool.call"), "{err}");
+        }
+        assert!(refuse_action("deploy.list", &json!({ "action": "anything" })).is_ok());
     }
 
     #[test]

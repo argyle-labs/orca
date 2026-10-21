@@ -325,6 +325,7 @@ async fn service_create(
                     &ep.host,
                     runtime,
                 )?;
+                spec.validate()?;
                 let key = deploy_target::target_key(&target.id());
                 let launched =
                     utils::invocation_scope::targeting("deploy_target", &key, target.launch(&spec))

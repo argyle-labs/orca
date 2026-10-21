@@ -228,6 +228,37 @@ fn restore_incumbent(backup: Option<&Path>, dest: &Path, software: &str) -> Stri
     }
 }
 
+fn commit_install_records(
+    dir: &Path,
+    dest: &Path,
+    software: &str,
+    minisig: Option<&str>,
+    tool_calls: &plugin_loader::ToolCallPins,
+) -> Result<()> {
+    plugin_loader::stage_tool_call_pins(dest, tool_calls)?;
+    save_signature(dir, software, minisig)
+        .and_then(|()| plugin_loader::promote_tool_call_pins(dest))
+        .inspect_err(|_| plugin_loader::discard_staged_tool_call_pins(dest))
+}
+
+fn rollback_install(incumbent: Option<&Path>, dest: &Path, software: &str) -> String {
+    plugin_loader::discard_staged_tool_call_pins(dest);
+    if incumbent.is_some() {
+        return restore_incumbent(incumbent, dest, software);
+    }
+    plugin_loader::unload_plugin(software);
+    match std::fs::remove_file(dest) {
+        Ok(()) => format!("{software} removed; it was not installed before"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            format!("{software} was not installed before; nothing to restore")
+        }
+        Err(e) => {
+            tracing::error!(plugin = %software, path = %dest.display(), error = %e, "could not remove the rolled-back plugin binary");
+            format!("WARNING: could not remove {}", dest.display())
+        }
+    }
+}
+
 /// Set the owner-executable bit on a freshly-written plugin file so the startup
 /// scan (and `spawn_plugin`) can exec it. No-op on non-unix.
 #[cfg(unix)]
@@ -1001,7 +1032,13 @@ async fn plugin_install(args: PluginInstallArgs, _ctx: &ToolCtx) -> Result<Plugi
         }
         make_executable(&dest)
             .with_context(|| format!("failed to mark {} executable", dest.display()))?;
-        plugin_loader::write_tool_call_pins(&dest, &report.tool_calls)?;
+        if let Err(e) = plugin_loader::write_tool_call_pins(&dest, &report.tool_calls) {
+            let restored = rollback_install(None, &dest, &report.software);
+            return Err(e.context(format!(
+                "sideloaded {} but could not pin its tool_calls; rolled back ({restored})",
+                report.software
+            )));
+        }
 
         tracing::info!(
             plugin = %report.software,
@@ -1167,8 +1204,19 @@ pub(crate) async fn install_from_catalog(
         };
         // The signature must sit beside the binary it signs, so it is written
         // only once the candidate is live; root's `plugin-trust` reads it.
-        save_signature(&dir, &entry.target_software, fetched.minisig.as_deref())?;
-        plugin_loader::write_tool_call_pins(&dest, &report.tool_calls)?;
+        if let Err(e) = commit_install_records(
+            &dir,
+            &dest,
+            &entry.target_software,
+            fetched.minisig.as_deref(),
+            &report.tool_calls,
+        ) {
+            let restored = rollback_install(incumbent.as_deref(), &dest, &entry.target_software);
+            return Err(e.context(format!(
+                "installed {} but could not record its signature and tool_calls pins; rolled back ({restored})",
+                fetched.asset
+            )));
+        }
         if fetched.minisig.is_some()
             && let Err(e) = request_trust(&entry.target_software).await
         {
@@ -1861,6 +1909,64 @@ mod tests {
         save_signature(dir.path(), "demo", None).unwrap();
         assert!(!dir.path().join("demo.minisig").exists());
         save_signature(dir.path(), "demo", None).unwrap();
+    }
+
+    #[test]
+    fn a_failed_signature_write_keeps_the_previous_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("pinp");
+        std::fs::write(&dest, b"new").unwrap();
+        let mut old = plugin_loader::ToolCallPins::new();
+        old.insert("pinp.a".into(), ["deploy.list".to_string()].into());
+        plugin_loader::write_tool_call_pins(&dest, &old).unwrap();
+        std::fs::create_dir(dir.path().join(signature_filename("pinp"))).unwrap();
+        let mut new = old.clone();
+        new.insert("pinp.b".into(), ["service.create".to_string()].into());
+        assert!(commit_install_records(dir.path(), &dest, "pinp", Some("sig"), &new).is_err());
+        assert_eq!(plugin_loader::read_tool_call_pins(&dest).unwrap(), old);
+        assert!(!plugin_loader::staged_tool_call_pins_path(&dest).exists());
+    }
+
+    #[test]
+    fn commit_install_records_promotes_pins_with_the_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("pinq");
+        std::fs::write(&dest, b"new").unwrap();
+        let mut pins = plugin_loader::ToolCallPins::new();
+        pins.insert("pinq.a".into(), ["service.create".to_string()].into());
+        commit_install_records(dir.path(), &dest, "pinq", Some("sig"), &pins).unwrap();
+        assert_eq!(plugin_loader::read_tool_call_pins(&dest).unwrap(), pins);
+        assert!(dir.path().join(signature_filename("pinq")).exists());
+    }
+
+    #[test]
+    fn rollback_restores_the_incumbent_and_its_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("pinr");
+        let backup = dir.path().join(".pinr.previous");
+        std::fs::write(&backup, b"old").unwrap();
+        std::fs::write(&dest, b"new").unwrap();
+        let mut old = plugin_loader::ToolCallPins::new();
+        old.insert("pinr.a".into(), ["deploy.list".to_string()].into());
+        plugin_loader::write_tool_call_pins(&dest, &old).unwrap();
+        let mut new = old.clone();
+        new.insert("pinr.b".into(), ["service.create".to_string()].into());
+        plugin_loader::stage_tool_call_pins(&dest, &new).unwrap();
+        rollback_install(Some(&backup), &dest, "pinr");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old");
+        assert_eq!(plugin_loader::read_tool_call_pins(&dest).unwrap(), old);
+        assert!(!plugin_loader::staged_tool_call_pins_path(&dest).exists());
+    }
+
+    #[test]
+    fn rollback_without_an_incumbent_removes_the_new_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("pins");
+        std::fs::write(&dest, b"new").unwrap();
+        plugin_loader::stage_tool_call_pins(&dest, &Default::default()).unwrap();
+        rollback_install(None, &dest, "pins");
+        assert!(!dest.exists());
+        assert!(!plugin_loader::staged_tool_call_pins_path(&dest).exists());
     }
 
     #[test]

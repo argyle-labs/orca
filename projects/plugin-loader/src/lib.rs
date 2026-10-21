@@ -930,12 +930,34 @@ pub fn read_tool_call_pins(exe: &Path) -> Result<ToolCallPins> {
     }
 }
 
-pub fn write_tool_call_pins(exe: &Path, pins: &ToolCallPins) -> Result<()> {
-    let path = tool_call_pins_path(exe);
-    let tmp = path.with_extension("json.incoming");
+pub fn staged_tool_call_pins_path(exe: &Path) -> std::path::PathBuf {
+    tool_call_pins_path(exe).with_extension("json.incoming")
+}
+
+pub fn stage_tool_call_pins(exe: &Path, pins: &ToolCallPins) -> Result<()> {
+    let tmp = staged_tool_call_pins_path(exe);
     std::fs::write(&tmp, sj::to_vec_pretty(pins)?)
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("installing {}", path.display()))
+        .with_context(|| format!("writing {}", tmp.display()))
+}
+
+pub fn promote_tool_call_pins(exe: &Path) -> Result<()> {
+    let path = tool_call_pins_path(exe);
+    std::fs::rename(staged_tool_call_pins_path(exe), &path)
+        .with_context(|| format!("installing {}", path.display()))
+}
+
+pub fn discard_staged_tool_call_pins(exe: &Path) {
+    let tmp = staged_tool_call_pins_path(exe);
+    if let Err(e) = std::fs::remove_file(&tmp)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %tmp.display(), error = %e, "could not remove staged tool_calls pins");
+    }
+}
+
+pub fn write_tool_call_pins(exe: &Path, pins: &ToolCallPins) -> Result<()> {
+    stage_tool_call_pins(exe, pins)?;
+    promote_tool_call_pins(exe).inspect_err(|_| discard_staged_tool_call_pins(exe))
 }
 
 fn declared_tool_calls(tools: &HashMap<String, ToolDef>) -> ToolCallPins {

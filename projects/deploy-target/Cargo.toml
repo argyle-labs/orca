@@ -43,5 +43,8 @@ schemars    = { workspace = true, features = ["uuid1"] }
 # links no tokio. Mirrors the `storage` domain crate.
 tokio       = { workspace = true, optional = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true
