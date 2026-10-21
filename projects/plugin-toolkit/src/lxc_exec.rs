@@ -32,12 +32,41 @@ pub struct LxcExecResult {
     pub success: bool,
     /// Process exit code; `None` if it never ran or was killed by signal/timeout.
     pub exit_code: Option<i32>,
-    /// Captured stdout (trimmed).
+    /// Captured stdout, lossily decoded; exact bytes via [`LxcExecResult::stdout_bytes`].
     pub stdout: String,
-    /// Captured stderr (trimmed).
+    /// Captured stderr, lossily decoded; exact bytes via [`LxcExecResult::stderr_bytes`].
     pub stderr: String,
     /// Set when the op was refused or could not run; empty on a clean run.
     pub error: String,
+    #[serde(default)]
+    pub stdout_b64: String,
+    #[serde(default)]
+    pub stderr_b64: String,
+    #[serde(default)]
+    pub stdout_len: usize,
+    #[serde(default)]
+    pub stderr_len: usize,
+    #[serde(default)]
+    pub stdout_truncated: bool,
+    #[serde(default)]
+    pub stderr_truncated: bool,
+}
+
+impl LxcExecResult {
+    pub fn stdout_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        exact(&self.stdout_b64, &self.stdout)
+    }
+
+    pub fn stderr_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        exact(&self.stderr_b64, &self.stderr)
+    }
+}
+
+fn exact(b64: &str, lossy: &str) -> anyhow::Result<Vec<u8>> {
+    if b64.is_empty() {
+        return Ok(lossy.as_bytes().to_vec());
+    }
+    utils::encoding::base64_decode(b64)
 }
 
 /// Run `argv` inside LXC `vmid` through the privileged seam. `Ok` means the
@@ -130,15 +159,36 @@ async fn via_direct_pct(vmid: u32, argv: &[&str]) -> anyhow::Result<LxcExecResul
     Ok(LxcExecResult {
         success: out.status.success(),
         exit_code: out.status.code(),
-        stdout: String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         error: String::new(),
+        stdout_b64: utils::encoding::base64_encode(&out.stdout),
+        stderr_b64: utils::encoding::base64_encode(&out.stderr),
+        stdout_len: out.stdout.len(),
+        stderr_len: out.stderr.len(),
+        stdout_truncated: false,
+        stderr_truncated: false,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_bytes_come_from_b64_and_fall_back_for_older_orca() {
+        let r: LxcExecResult = crate::serde_json::from_str(
+            r#"{"success":true,"exit_code":0,"stdout":"a\ufffd","stderr":"","error":"","stdout_b64":"Yf8K","stdout_len":3}"#,
+        )
+        .unwrap();
+        assert_eq!(r.stdout_bytes().unwrap(), b"a\xff\n");
+        let old: LxcExecResult = crate::serde_json::from_str(
+            r#"{"success":true,"exit_code":0,"stdout":"hi","stderr":"","error":""}"#,
+        )
+        .unwrap();
+        assert_eq!(old.stdout_bytes().unwrap(), b"hi");
+        assert!(!old.stdout_truncated);
+    }
 
     #[test]
     fn an_advertised_core_runs_lxc_exec_over_the_cap() {
