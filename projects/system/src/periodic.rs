@@ -1,6 +1,6 @@
 //! Reusable periodic-loop primitive.
 //!
-//! Three production tickers (mesh auto-offer, cert rotation, host-identity
+//! Three production tickers (mesh cache GC, cert rotation, host-identity
 //! refresh) historically each hand-rolled the same `loop { tick().await;
 //! sleep(interval).await }` shape. This module is the shared scaffold and
 //! adds free observability — every tick is recorded to `scheduler_runs`

@@ -1180,6 +1180,12 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_mesh_pending_offers_fp
             ON mesh_pending_offers (peer_pubkey_fp, direction);
 
+        CREATE TABLE IF NOT EXISTS mesh_join_tokens (
+            token_hash TEXT PRIMARY KEY,
+            expires_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+
         -- mesh_peers: paired members of the mesh. `peer_port` is the peer's mesh
         -- listen port (one port, many addresses); departed_at marks a peer that
         -- ran `orca mesh leave` and is no longer trusted until re-paired.

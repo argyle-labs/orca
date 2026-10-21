@@ -413,6 +413,29 @@ pub fn has_open_outbound_offer(conn: &Connection, peer_pubkey_fp: &str) -> Resul
     Ok(count > 0)
 }
 
+pub fn insert_join_token(conn: &Connection, raw: &str, ttl_secs: i64) -> Result<i64> {
+    let now = now_secs();
+    let expires_at = now + ttl_secs;
+    conn.execute(
+        "INSERT INTO mesh_join_tokens (token_hash, expires_at, created_at) VALUES (?, ?, ?)",
+        params![hash_code(raw), expires_at, now],
+    )?;
+    Ok(expires_at)
+}
+
+pub fn consume_join_token(conn: &Connection, raw: &str) -> Result<bool> {
+    let now = now_secs();
+    conn.execute(
+        "DELETE FROM mesh_join_tokens WHERE expires_at < ?",
+        params![now],
+    )?;
+    let n = conn.execute(
+        "DELETE FROM mesh_join_tokens WHERE token_hash = ? AND expires_at >= ?",
+        params![hash_code(raw), now],
+    )?;
+    Ok(n == 1)
+}
+
 // ── mesh_peers ────────────────────────────────────────────────────────────────
 
 /// Correlated subquery yielding one `(peer_id, value)` row per peer: the
@@ -2121,6 +2144,29 @@ mod tests {
         );
         // Inbound-only lookups never see the 'out' row.
         assert!(find_pending_offer_by_code(&c, "OUT").unwrap().is_none());
+    }
+
+    #[test]
+    fn join_token_is_single_use() {
+        let (_d, c) = test_conn();
+        insert_join_token(&c, "tok-1", 300).unwrap();
+        assert!(consume_join_token(&c, "tok-1").unwrap());
+        assert!(!consume_join_token(&c, "tok-1").unwrap());
+    }
+
+    #[test]
+    fn join_token_expired_is_refused() {
+        let (_d, c) = test_conn();
+        insert_join_token(&c, "tok-old", -1).unwrap();
+        assert!(!consume_join_token(&c, "tok-old").unwrap());
+    }
+
+    #[test]
+    fn join_token_forged_is_refused() {
+        let (_d, c) = test_conn();
+        insert_join_token(&c, "tok-real", 300).unwrap();
+        assert!(!consume_join_token(&c, "tok-forged").unwrap());
+        assert!(consume_join_token(&c, "tok-real").unwrap());
     }
 
     #[test]

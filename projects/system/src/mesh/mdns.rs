@@ -12,10 +12,8 @@
 //!   pubkey_fp     — first-16-byte SHA-256 hex of our bootstrap ed25519 pubkey
 //!   port          — TCP port for the mesh surface (default 12002)
 //!
-//! Discovery loop upserts mesh_discovery rows; the auto-offer scheduler
-//! (crate::mesh::scheduler) reads from that table — it does NOT consume mDNS events
-//! directly. This decoupling keeps the auto-offer logic testable against a
-//! seeded DB instead of a live LAN.
+//! Discovery loop upserts mesh_discovery rows. Discovery never admits a peer:
+//! the rows only resolve targets for an operator-pushed `orca mesh offer`.
 
 use anyhow::{Context, Result};
 use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -282,7 +280,7 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
     ))
 }
 
-/// Rank addresses so the auto-offer scheduler dials a routable one.
+/// Rank addresses so an offer push dials a routable one.
 /// Lower score = better. Prefer routable IPv4, then routable IPv6, then
 /// link-local IPv4, then link-local IPv6 (last resort — won't route between
 /// hosts without scope id).
