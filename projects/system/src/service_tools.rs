@@ -325,7 +325,7 @@ async fn service_create(
                     &ep.host,
                     runtime,
                 )?;
-                spec.validate()?;
+                spec.validate_for_target(&target.data_roots())?;
                 let key = deploy_target::target_key(&target.id());
                 let launched =
                     utils::invocation_scope::targeting("deploy_target", &key, target.launch(&spec))
@@ -361,6 +361,7 @@ pub struct DeployTargetRow {
     pub kind: TargetKind,
     pub endpoint: String,
     pub capabilities: Vec<DeployCapability>,
+    pub data_roots: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -384,6 +385,7 @@ async fn deploy_list(
             kind: t.id.kind,
             endpoint: utils::http::redact_url(&t.endpoint),
             capabilities: t.capabilities,
+            data_roots: t.data_roots,
         })
         .collect();
     targets.sort_by(|a, b| a.host.cmp(&b.host).then(a.id.cmp(&b.id)));

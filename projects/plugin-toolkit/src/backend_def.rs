@@ -443,6 +443,7 @@ pub fn deploy_backend_def(
         endpoint: target.endpoint(),
         capabilities,
         provisioning: target.provisioning(),
+        data_roots: target.data_roots(),
         invoke_prefix: invoke_prefix.to_string(),
         ..Default::default()
     }
@@ -905,6 +906,7 @@ mod tests {
             def.endpoint.clone(),
             &def.capabilities,
             def.provisioning.clone(),
+            def.data_roots.clone(),
             thunk,
         )
         .expect("register deploy target from def");
@@ -1049,6 +1051,7 @@ mod tests {
             def.endpoint.clone(),
             &def.capabilities,
             def.provisioning.clone(),
+            def.data_roots.clone(),
             thunk,
         )
         .expect("register proxmox deploy target from def");
