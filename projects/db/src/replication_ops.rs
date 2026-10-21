@@ -516,6 +516,10 @@ mod tests {
             "../migrations/20261020000000__replication_ops_mesh_entities.up.sql"
         ))
         .unwrap();
+        conn.execute_batch(include_str!(
+            "../migrations/20261021000000__replication_ops_mesh_key_col.up.sql"
+        ))
+        .unwrap();
         let migrated: (String, String) = conn
             .query_row(
                 "SELECT entity, key_col FROM replication_ops WHERE key_val = 'm1'",
