@@ -387,6 +387,33 @@ pub struct MeshSnapshotOutput {
     pub cluster_membership: std::collections::BTreeMap<String, String>,
 }
 
+fn find_discovered<'a>(
+    rows: &'a [::db::mesh::DiscoveryRow],
+    id: &str,
+) -> Option<&'a ::db::mesh::DiscoveryRow> {
+    rows.iter().find(|r| {
+        r.peer_id.as_deref().filter(|p| !p.is_empty()) == Some(id)
+            || candidate_id(&r.pubkey_fp) == id
+    })
+}
+
+fn candidate_target(
+    action: &str,
+    addr: Option<String>,
+    id: Option<crate::system_id::SystemId>,
+    port: Option<u16>,
+) -> anyhow::Result<(String, Option<u16>)> {
+    if let Some(addr) = addr {
+        return Ok((addr, port));
+    }
+    let id =
+        id.ok_or_else(|| anyhow::anyhow!("system.join action={action} requires `addr` or `id`"))?;
+    let rows = ::db::pool::with_pooled_or_open(::db::mesh::list_discovery)?;
+    let row = find_discovered(&rows, id.as_str())
+        .ok_or_else(|| anyhow::anyhow!("no discovered candidate with id {id}"))?;
+    Ok((row.addr.clone(), port.or(Some(row.port))))
+}
+
 fn candidate_id(pubkey_fp: &str) -> String {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(pubkey_fp.as_bytes());
@@ -886,6 +913,9 @@ pub struct MeshCreateArgs {
     /// (accept) 6-char pairing code printed on the inviter's CLI.
     #[arg(long)]
     pub code: Option<String>,
+    /// (join/offer) Discovered candidate id from `system.list --snapshot`, used in place of `addr`.
+    #[arg(long)]
+    pub id: Option<crate::system_id::SystemId>,
 }
 
 /// Tagged result of `system.join`: `join`/`accept` return the membership
@@ -1580,20 +1610,12 @@ async fn mesh_create(
 ) -> anyhow::Result<MeshCreateOutput> {
     match args.action {
         MeshCreateAction::Join => {
-            let addr = args
-                .addr
-                .ok_or_else(|| anyhow::anyhow!("system.join action=join requires `addr`"))?;
-            Ok(MeshCreateOutput::Accept(
-                exec::join(&addr, args.port).await?,
-            ))
+            let (addr, port) = candidate_target("join", args.addr, args.id, args.port)?;
+            Ok(MeshCreateOutput::Accept(exec::join(&addr, port).await?))
         }
         MeshCreateAction::Offer => {
-            let addr = args
-                .addr
-                .ok_or_else(|| anyhow::anyhow!("system.join action=offer requires `addr`"))?;
-            Ok(MeshCreateOutput::Offer(
-                exec::offer(&addr, args.port).await?,
-            ))
+            let (addr, port) = candidate_target("offer", args.addr, args.id, args.port)?;
+            Ok(MeshCreateOutput::Offer(exec::offer(&addr, port).await?))
         }
         MeshCreateAction::Accept => {
             let code = args
@@ -3279,6 +3301,42 @@ mod mesh_snapshot_tests {
         assert!(candidates[0].peer_id.is_none());
         assert_eq!(candidates[1].id, candidate_id("fp2"));
         assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn a_discovered_candidate_resolves_by_its_derived_or_announced_id() {
+        let row = |fp: &str, peer_id: Option<&str>, addr: &str| ::db::mesh::DiscoveryRow {
+            pubkey_fp: fp.into(),
+            peer_id: peer_id.map(Into::into),
+            hostname: "h".into(),
+            addr: addr.into(),
+            port: 7777,
+            state: "unclaimed".into(),
+            can_invite: true,
+            first_seen_at: 0,
+            last_seen_at: 0,
+        };
+        let rows = vec![
+            row("fp", None, "10.0.0.2"),
+            row("fp2", Some(""), "10.0.0.3"),
+            row("fp3", Some("sys-3"), "10.0.0.4"),
+        ];
+        assert_eq!(
+            find_discovered(&rows, &candidate_id("fp")).unwrap().addr,
+            "10.0.0.2"
+        );
+        assert_eq!(
+            find_discovered(&rows, &candidate_id("fp2")).unwrap().addr,
+            "10.0.0.3"
+        );
+        assert_eq!(find_discovered(&rows, "sys-3").unwrap().addr, "10.0.0.4");
+        assert!(find_discovered(&rows, "").is_none());
+        assert!(find_discovered(&rows, "nope").is_none());
+        assert!(
+            candidate_id("fp")
+                .parse::<crate::system_id::SystemId>()
+                .is_ok()
+        );
     }
 
     fn handshaking(offer_id: &str, expires_at: i64) -> MeshMember {
