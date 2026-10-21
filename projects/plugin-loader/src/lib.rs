@@ -720,7 +720,11 @@ static BACKEND_CLAIMS: std::sync::LazyLock<RwLock<HashMap<(String, String), Stri
 /// Refuse a backend whose name `software` may not register under.
 fn check_backend_owner(software: &str, def: &BackendDef) -> Result<()> {
     let (domain, name) = (def.domain.as_str(), def.name.as_str());
-    if is_reserved_plugin_id(name) {
+    let canonical = claim_key(domain, name).1;
+    if canonical.is_empty() {
+        bail!("plugin '{software}' may not register {domain} backend '{name}': the name is empty");
+    }
+    if is_reserved_plugin_id(&canonical) {
         bail!(
             "plugin '{software}' may not register {domain} backend '{name}': the name is reserved"
         );
@@ -734,7 +738,7 @@ fn check_backend_owner(software: &str, def: &BackendDef) -> Result<()> {
         ),
         NameScope::Claimed => {
             let claims = BACKEND_CLAIMS.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(owner) = claims.get(&(domain.to_string(), name.to_string()))
+            if let Some(owner) = claims.get(&claim_key(domain, name))
                 && owner != software
             {
                 bail!(
@@ -760,13 +764,22 @@ fn claim_backend(software: &str, domain: &str, name: &str) {
         BACKEND_CLAIMS
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .insert((domain.to_string(), name.to_string()), software.to_string());
+            .insert(claim_key(domain, name), software.to_string());
     }
+}
+
+fn claim_key(domain: &str, name: &str) -> (String, String) {
+    let name = if domain == "deploy_target" {
+        plugin_toolkit::deploy_target::normalize_host(name)
+    } else {
+        name.to_string()
+    };
+    (domain.to_string(), name)
 }
 
 fn release_backend_claim(software: &str, domain: &str, name: &str) {
     let mut claims = BACKEND_CLAIMS.write().unwrap_or_else(|e| e.into_inner());
-    let key = (domain.to_string(), name.to_string());
+    let key = claim_key(domain, name);
     if claims.get(&key).is_some_and(|owner| owner == software) {
         claims.remove(&key);
     }
@@ -2254,6 +2267,37 @@ mod loader_tests {
     }
 
     #[test]
+    fn deploy_host_spelling_variants_share_one_claim() {
+        let domain = "deploy_target";
+        claim_backend("variant-a", domain, "variant-host");
+        for name in ["Variant-Host", "variant-host.", " VARIANT-HOST. "] {
+            let mut d = def(domain, name);
+            d.endpoint = "/plugins/variant-b/x".into();
+            let err = check_backend_owner("variant-b", &d)
+                .expect_err("variant spelling refused")
+                .to_string();
+            assert!(err.contains("variant-a"), "{name}: {err}");
+            check_backend_owner("variant-a", &d)
+                .unwrap_or_else(|e| panic!("{name}: owner re-register refused: {e:#}"));
+        }
+        for name in ["ORCA", "orca.", " orca "] {
+            let err = check_backend_owner("variant-a", &def(domain, name))
+                .expect_err("reserved spelling refused")
+                .to_string();
+            assert!(err.contains("reserved"), "{name}: {err}");
+        }
+        for name in ["", ".", "   ", "..."] {
+            let err = check_backend_owner("variant-a", &def(domain, name))
+                .expect_err("empty host refused")
+                .to_string();
+            assert!(err.contains("empty"), "{name:?}: {err}");
+        }
+        release_backend_claim("variant-a", domain, "VARIANT-HOST.");
+        let d = def(domain, "variant-host");
+        check_backend_owner("variant-b", &d).expect("claim released under any spelling");
+    }
+
+    #[test]
     fn claimed_names_belong_to_the_first_registrant() {
         let domain = "notifications";
         let b = register_backends_with("claim-b", &[def(domain, "claim-endpoint")], |_| {
@@ -2731,7 +2775,7 @@ mod loader_tests {
             runtime: Runtime::Docker,
             kind: TargetKind::Cli,
         };
-        let target = deploy_target::target(&id).expect("target is registered");
+        let target = deploy_target::target_by_triple(&id).expect("target is registered");
         let outcome = target
             .stop("ct-100")
             .await
@@ -2741,7 +2785,7 @@ mod loader_tests {
 
         domain_deregister("deploy_target", host);
         assert!(
-            deploy_target::target(&id).is_none(),
+            deploy_target::target_by_triple(&id).is_none(),
             "deregister_host removed it"
         );
     }
@@ -2770,7 +2814,7 @@ mod loader_tests {
             runtime: Runtime::Docker,
             kind: TargetKind::Cli,
         };
-        let target = deploy_target::target(&id).expect("target is registered");
+        let target = deploy_target::target_by_triple(&id).expect("target is registered");
         let err = target
             .stop("ct-1")
             .await

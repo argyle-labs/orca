@@ -95,6 +95,7 @@ fn service_surface_is_collapsed() {
         "service.detail",
         "service.create",
         "service.update",
+        "deploy.list",
     ] {
         assert!(names.contains(&present), "missing `{present}`: {names:?}");
     }
@@ -107,6 +108,11 @@ fn service_surface_is_collapsed() {
     ] {
         assert!(!names.contains(&gone), "`{gone}` should be gone: {names:?}");
     }
+}
+
+#[test]
+fn deploy_list_requires_read_role() {
+    assert_eq!(dispatch::required_role("deploy.list"), Some("read"));
 }
 
 #[test]

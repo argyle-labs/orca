@@ -876,7 +876,8 @@ mod tests {
     #[test]
     fn deploy_backend_def_registers_and_answers_through_dispatch() {
         use crate::deploy_target::{
-            self, InvokeThunk, TargetId, dispatch_op, register_from_def, target as lookup_target,
+            self, InvokeThunk, TargetId, dispatch_op, register_from_def,
+            target_by_triple as lookup_target,
         };
         use std::sync::Arc;
 
@@ -1015,7 +1016,7 @@ mod tests {
     fn provisioning_survives_registration_and_reaches_launch() {
         use crate::deploy_target::{
             self, InvokeThunk, ProvisioningConfig, TargetId, dispatch_op, register_from_def,
-            target as lookup_target,
+            target_by_triple as lookup_target,
         };
         use std::sync::Arc;
 

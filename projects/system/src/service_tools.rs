@@ -21,12 +21,15 @@
 //! one path ([[feedback-cli-api-mcp-one-path]]).
 
 use derive::orca_tool;
-use plugin_toolkit::deploy_target::{self, DeployCapability, DeployOutcome};
+use plugin_toolkit::deploy_target::{
+    self, DeployCapability, DeployOutcome, DeployTarget, Runtime, TargetKind,
+};
 use plugin_toolkit::service::{
     self, BackupArtifact, Route, Routes, ServiceProvider, ServiceStatus, parse_runtime,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 // ── list ─────────────────────────────────────────────────────────────
 
@@ -207,6 +210,71 @@ pub struct ServiceCreateArgs {
     pub action: Option<ServiceCreateAction>,
     #[command(flatten)]
     pub endpoint: EndpointArgs,
+    /// `deploy`: UUID of the deploy target to launch on (see `deploy.list`).
+    /// Absent = the single target matching `--host` + `--runtime`.
+    #[arg(long)]
+    pub target_id: Option<utils::id::Id>,
+}
+
+fn same_host(a: &str, b: &str) -> bool {
+    deploy_target::normalize_host(a) == deploy_target::normalize_host(b)
+}
+
+fn select_deploy_target(
+    candidates: Vec<(uuid::Uuid, Arc<dyn DeployTarget>)>,
+    target_id: Option<&str>,
+    host: &str,
+    runtime: Runtime,
+) -> anyhow::Result<Arc<dyn DeployTarget>> {
+    if let Some(raw) = target_id {
+        if raw.trim().is_empty() {
+            anyhow::bail!("`targetId` must not be blank");
+        }
+        let uuid = uuid::Uuid::parse_str(raw.trim())
+            .map_err(|e| anyhow::anyhow!("`targetId` `{raw}` is not a UUID: {e}"))?;
+        let target = candidates
+            .into_iter()
+            .find(|(u, _)| *u == uuid)
+            .map(|(_, t)| t)
+            .ok_or_else(|| anyhow::anyhow!("no deploy target with id `{uuid}`"))?;
+        if !host.trim().is_empty() && !same_host(host, target.host()) {
+            anyhow::bail!(
+                "deploy target `{uuid}` is on host `{}`, not `{host}`",
+                target.host()
+            );
+        }
+        if target.runtime() != runtime || !target.supports(DeployCapability::Launch) {
+            anyhow::bail!(
+                "deploy target `{uuid}` ({}) cannot launch runtime `{}`",
+                target.id().describe(),
+                runtime.as_str()
+            );
+        }
+        return Ok(target);
+    }
+    let mut matches: Vec<_> = candidates
+        .into_iter()
+        .filter(|(_, t)| {
+            same_host(t.host(), host)
+                && t.runtime() == runtime
+                && t.supports(DeployCapability::Launch)
+        })
+        .collect();
+    match matches.len() {
+        0 => anyhow::bail!(
+            "no deploy target on host `{host}` with runtime `{}` that can launch",
+            runtime.as_str()
+        ),
+        1 => Ok(matches.remove(0).1),
+        _ => {
+            let ids: Vec<String> = matches.iter().map(|(u, _)| u.to_string()).collect();
+            anyhow::bail!(
+                "several deploy targets on host `{host}` with runtime `{}` can launch; pass `targetId`, one of: {}",
+                runtime.as_str(),
+                ids.join(", ")
+            )
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -251,21 +319,12 @@ async fn service_create(
                     .workload_spec(runtime, &ep.instance, &ep.reach()?)
                     .await?;
 
-                // Resolve a deploy target on this host + runtime that can launch.
-                let target = deploy_target::targets()
-                    .into_iter()
-                    .find(|t| {
-                        t.host() == ep.host
-                            && t.runtime() == runtime
-                            && t.supports(DeployCapability::Launch)
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "no deploy target on host `{}` with runtime `{}` that can launch",
-                            ep.host,
-                            runtime_str
-                        )
-                    })?;
+                let target = select_deploy_target(
+                    deploy_target::entries(),
+                    args.target_id.as_ref().map(utils::id::Id::as_str),
+                    &ep.host,
+                    runtime,
+                )?;
                 let key = deploy_target::target_key(&target.id());
                 let launched =
                     utils::invocation_scope::targeting("deploy_target", &key, target.launch(&spec))
@@ -284,6 +343,50 @@ async fn service_create(
         }
     })
     .await
+}
+
+// ── deploy.list ──────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DeployListArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployTargetRow {
+    pub id: uuid::Uuid,
+    pub host: String,
+    pub runtime: Runtime,
+    pub kind: TargetKind,
+    pub endpoint: String,
+    pub capabilities: Vec<DeployCapability>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployListOutput {
+    pub targets: Vec<DeployTargetRow>,
+}
+
+/// Every registered deploy target, addressed by its stable UUID.
+#[orca_tool(domain = "deploy", verb = "list", role = "read")]
+async fn deploy_list(
+    _args: DeployListArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<DeployListOutput> {
+    let mut targets: Vec<DeployTargetRow> = deploy_target::descriptors()
+        .into_iter()
+        .map(|t| DeployTargetRow {
+            id: t.uuid,
+            host: t.id.host,
+            runtime: t.id.runtime,
+            kind: t.id.kind,
+            endpoint: utils::http::redact_url(&t.endpoint),
+            capabilities: t.capabilities,
+        })
+        .collect();
+    targets.sort_by(|a, b| a.host.cmp(&b.host).then(a.id.cmp(&b.id)));
+    Ok(DeployListOutput { targets })
 }
 
 // ── update{action=configure|restore} ─────────────────────────────────
@@ -639,7 +742,167 @@ async fn service_health(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plugin_toolkit::deploy_target::Runtime;
+
+    struct FakeTarget {
+        host: &'static str,
+        runtime: Runtime,
+        kind: TargetKind,
+        caps: Vec<DeployCapability>,
+        endpoint: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl DeployTarget for FakeTarget {
+        fn host(&self) -> &str {
+            self.host
+        }
+        fn runtime(&self) -> Runtime {
+            self.runtime
+        }
+        fn kind(&self) -> TargetKind {
+            self.kind
+        }
+        fn capabilities(&self) -> Vec<DeployCapability> {
+            self.caps.clone()
+        }
+        fn endpoint(&self) -> String {
+            self.endpoint.to_string()
+        }
+    }
+
+    fn fake(
+        host: &'static str,
+        kind: TargetKind,
+        caps: &[DeployCapability],
+    ) -> Arc<dyn DeployTarget> {
+        Arc::new(FakeTarget {
+            host,
+            runtime: Runtime::Docker,
+            kind,
+            caps: caps.to_vec(),
+            endpoint: "",
+        })
+    }
+
+    #[test]
+    fn deploy_list_scrubs_endpoint_credentials() {
+        let t: Arc<dyn DeployTarget> = Arc::new(FakeTarget {
+            host: "scrub-host",
+            runtime: Runtime::Docker,
+            kind: TargetKind::Cli,
+            caps: vec![DeployCapability::Launch],
+            endpoint: "https://admin:hunter2@scrub-host:2376/api?token=abc",
+        });
+        let uuid = t.id().uuid();
+        deploy_target::register_target(t);
+        let out = rt()
+            .block_on(deploy_list(DeployListArgs {}, &test_ctx()))
+            .unwrap();
+        deploy_target::deregister_target(&deploy_target::target(&uuid).unwrap().id());
+        let row = out.targets.iter().find(|r| r.id == uuid).expect("listed");
+        assert_eq!(row.endpoint, "https://scrub-host:2376/api");
+        assert_eq!(row.host, "scrub-host");
+    }
+
+    fn two_docker_targets() -> Vec<(uuid::Uuid, Arc<dyn DeployTarget>)> {
+        let all: Vec<Arc<dyn DeployTarget>> = vec![
+            fake("node-a", TargetKind::Cli, &[DeployCapability::Launch]),
+            fake("node-a", TargetKind::Dockge, &[DeployCapability::Launch]),
+            fake("node-b", TargetKind::Cli, &[DeployCapability::Stop]),
+        ];
+        all.into_iter().map(|t| (t.id().uuid(), t)).collect()
+    }
+
+    #[test]
+    fn explicit_target_id_selects_exactly_that_target() {
+        let all = two_docker_targets();
+        let want = all[1].0.to_string();
+        let got = select_deploy_target(all.clone(), Some(&want), "", Runtime::Docker).unwrap();
+        assert_eq!(got.kind(), TargetKind::Dockge);
+        let got =
+            select_deploy_target(all.clone(), Some(&want), "NODE-A.", Runtime::Docker).unwrap();
+        assert_eq!(got.kind(), TargetKind::Dockge);
+        let err = select_deploy_target(all, Some(&want), "node-b", Runtime::Docker)
+            .err()
+            .expect("host mismatch")
+            .to_string();
+        assert!(err.contains("node-a"), "{err}");
+    }
+
+    #[test]
+    fn explicit_target_without_launch_or_runtime_is_rejected() {
+        let all = two_docker_targets();
+        let no_launch = all[2].0.to_string();
+        assert!(
+            select_deploy_target(all.clone(), Some(&no_launch), "node-b", Runtime::Docker).is_err()
+        );
+        let ok = all[0].0.to_string();
+        assert!(select_deploy_target(all, Some(&ok), "node-a", Runtime::Lxc).is_err());
+    }
+
+    #[test]
+    fn unknown_or_malformed_target_id_is_rejected() {
+        let unknown = "0b6f2c1e-3d4a-4f5b-8c9d-0e1f2a3b4c5d".to_string();
+        assert!(
+            select_deploy_target(
+                two_docker_targets(),
+                Some(&unknown),
+                "node-a",
+                Runtime::Docker
+            )
+            .is_err()
+        );
+        assert!(
+            select_deploy_target(
+                two_docker_targets(),
+                Some("nope"),
+                "node-a",
+                Runtime::Docker
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn blank_target_id_fails_to_parse() {
+        let parsed: Result<ServiceCreateArgs, _> =
+            serde_json::from_value(serde_json::json!({ "targetId": "" }));
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn blank_target_id_is_invalid() {
+        for blank in ["", "  "] {
+            let err =
+                select_deploy_target(two_docker_targets(), Some(blank), "node-a", Runtime::Docker)
+                    .err()
+                    .expect("blank rejected")
+                    .to_string();
+            assert!(err.contains("blank"), "{err}");
+        }
+    }
+
+    #[test]
+    fn omitted_target_id_defaults_only_when_unambiguous() {
+        let all = two_docker_targets();
+        let ids: Vec<String> = all[..2].iter().map(|(u, _)| u.to_string()).collect();
+        let err = select_deploy_target(all, None, "node-a", Runtime::Docker)
+            .err()
+            .expect("ambiguous")
+            .to_string();
+        for id in &ids {
+            assert!(err.contains(id), "{err}");
+        }
+
+        let t = fake("node-a", TargetKind::Cli, &[DeployCapability::Launch]);
+        let single = vec![(t.id().uuid(), t)];
+        let got = select_deploy_target(single, None, "node-a", Runtime::Docker).unwrap();
+        assert_eq!(got.kind(), TargetKind::Cli);
+
+        assert!(
+            select_deploy_target(two_docker_targets(), None, "node-b", Runtime::Docker).is_err()
+        );
+    }
 
     fn sample_args() -> EndpointArgs {
         EndpointArgs {
@@ -950,6 +1213,7 @@ mod tests {
         let args = ServiceCreateArgs {
             action: None,
             endpoint: sample_args(),
+            target_id: None,
         };
         // ServiceCreateOutput is not Debug, so unwrap the error via a match.
         let err = match rt().block_on(service_create(args, &test_ctx())) {
@@ -969,6 +1233,7 @@ mod tests {
         let args = ServiceCreateArgs {
             action: Some(ServiceCreateAction::Backup),
             endpoint: sample_args(),
+            target_id: None,
         };
         let err = match rt().block_on(service_create(args, &test_ctx())) {
             Ok(_) => panic!("expected an error for an unregistered backend"),
@@ -1194,6 +1459,7 @@ mod tests {
         let args = ServiceCreateArgs {
             action: Some(ServiceCreateAction::Backup),
             endpoint: args_for("lc-backup"),
+            target_id: None,
         };
         let out = rt().block_on(service_create(args, &test_ctx())).unwrap();
         match out {
@@ -1215,6 +1481,7 @@ mod tests {
         let args = ServiceCreateArgs {
             action: Some(ServiceCreateAction::Deploy),
             endpoint: ep,
+            target_id: None,
         };
         let err = match rt().block_on(service_create(args, &test_ctx())) {
             Ok(_) => panic!("expected error when runtime is absent for deploy"),
@@ -1235,6 +1502,7 @@ mod tests {
         let args = ServiceCreateArgs {
             action: Some(ServiceCreateAction::Deploy),
             endpoint: args_for("lc-notarget"),
+            target_id: None,
         };
         let err = match rt().block_on(service_create(args, &test_ctx())) {
             Ok(_) => panic!("expected error when no deploy target exists"),
