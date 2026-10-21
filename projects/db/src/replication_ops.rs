@@ -44,6 +44,22 @@ pub const ENTITY: &str = "replication_ops";
 /// A `delete` op survives at least this long so any peer that was briefly
 /// offline still replays it. 30 days: a host down longer than that re-bootstraps
 /// from a full snapshot, which already reflects the deletion.
+const LEGACY_ENTITIES: &[(&str, &str)] = &[
+    ("pod_peers", "mesh_peers"),
+    ("pod_peer_addresses", "mesh_peer_addresses"),
+    ("pod_trust", "mesh_trust"),
+    ("pod_self", "mesh_self"),
+    ("pod_discovery", "mesh_discovery"),
+    ("pod_pending_offers", "mesh_pending_offers"),
+];
+
+fn canonical_entity(entity: &str) -> &str {
+    LEGACY_ENTITIES
+        .iter()
+        .find(|(old, _)| *old == entity)
+        .map_or(entity, |(_, new)| new)
+}
+
 pub const DEFAULT_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 /// True iff `ident` is a bare SQL identifier (`[A-Za-z_][A-Za-z0-9_]*`). The
@@ -333,7 +349,7 @@ fn replicate_merge(conn: &Connection, rows: Value) -> Result<usize> {
                 .to_string()
         };
         let op_id = s("op_id");
-        let entity = s("entity");
+        let entity = canonical_entity(&s("entity")).to_string();
         let key_col = s("key_col");
         let key_val = s("key_val");
         let op = s("op");
@@ -383,6 +399,91 @@ inventory::submit! {
 mod tests {
     use super::*;
     use crate::testing::test_conn;
+
+    fn insert_op(
+        conn: &Connection,
+        op_id: &str,
+        entity: &str,
+        key_val: &str,
+        op: &str,
+        stamp_ms: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms, local_origin)
+             VALUES (?1, ?2, 'peer_id', ?3, ?4, 'o', ?5, 0)",
+            params![op_id, entity, key_val, op, stamp_ms],
+        )
+        .unwrap();
+    }
+
+    fn ops(conn: &Connection) -> Vec<(String, String, String, i64)> {
+        let mut stmt = conn
+            .prepare("SELECT entity, key_val, op, stamp_ms FROM replication_ops ORDER BY entity, key_val")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn migration_renames_pod_entities_keeping_the_newest_op() {
+        let conn = test_conn();
+        insert_op(&conn, "a", "pod_peers", "p1", "delete", 100);
+        insert_op(&conn, "b", "pod_peers", "p2", "delete", 300);
+        insert_op(&conn, "c", "mesh_peers", "p2", "upsert", 200);
+        insert_op(&conn, "d", "pod_peer_addresses", "p3", "delete", 100);
+        insert_op(&conn, "e", "mesh_peers", "p4", "upsert", 500);
+        insert_op(&conn, "f", "pod_peers", "p4", "delete", 400);
+        insert_op(&conn, "g", "config_rows", "k", "delete", 100);
+        conn.execute_batch(include_str!(
+            "../migrations/20261020000000__replication_ops_mesh_entities.up.sql"
+        ))
+        .unwrap();
+        assert_eq!(
+            ops(&conn),
+            vec![
+                ("config_rows".into(), "k".into(), "delete".into(), 100),
+                (
+                    "mesh_peer_addresses".into(),
+                    "p3".into(),
+                    "delete".into(),
+                    100
+                ),
+                ("mesh_peers".into(), "p1".into(), "delete".into(), 100),
+                ("mesh_peers".into(), "p2".into(), "delete".into(), 300),
+                ("mesh_peers".into(), "p4".into(), "upsert".into(), 500),
+            ]
+        );
+    }
+
+    #[test]
+    fn ops_from_older_peers_land_under_the_mesh_entity() {
+        assert_eq!(canonical_entity("pod_peers"), "mesh_peers");
+        assert_eq!(canonical_entity("pod_discovery"), "mesh_discovery");
+        assert_eq!(canonical_entity("mesh_peers"), "mesh_peers");
+        assert_eq!(canonical_entity("pod_unknown"), "pod_unknown");
+        let conn = test_conn();
+        let n = macro_runtime::replicate_table::with_merge_peer("p9", || {
+            replicate_merge(
+                &conn,
+                serde_json::json!([{
+                    "op_id": "z", "entity": "pod_peers", "key_col": "peer_id",
+                    "key_val": "p9", "op": "delete", "origin": "o",
+                    "stamp_ms": utils::time::now().unix_millis(),
+                }]),
+            )
+        })
+        .unwrap();
+        let rows = ops(&conn);
+        assert_eq!(n, 1, "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|r| r.0 == "mesh_peers" && r.1 == "p9" && r.2 == "delete"),
+            "{rows:?}"
+        );
+        assert!(rows.iter().all(|r| r.0 != "pod_peers"), "{rows:?}");
+    }
 
     #[test]
     fn note_delete_then_apply_removes_row() {
