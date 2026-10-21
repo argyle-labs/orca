@@ -969,6 +969,11 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
                 .collect()
         }),
     );
+    plugin_loader::tool_call::set_ctx_factory(Box::new(|| {
+        Ok(crate::mcp::build_tool_ctx(Arc::new(
+            contract::config::Config::load()?,
+        )))
+    }));
     system::system_info::spawn_refresher();
     // Only this host's OWN status is captured on a timer, kept local, and
     // retention-capped (host_status_sweep). Peer telemetry is NOT synced or
