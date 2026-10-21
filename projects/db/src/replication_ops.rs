@@ -109,6 +109,8 @@ fn op_target(
     }
 }
 
+const ROW_DELETE_REFUSED: &str = "delete not permitted for this row";
+
 fn peer_delete_allowed(
     conn: &Connection,
     entity: &str,
@@ -120,7 +122,7 @@ fn peer_delete_allowed(
     };
     match reg.peer_delete {
         Some(allowed) if allowed(conn, key_val) => Ok(()),
-        Some(_) => Err("delete not permitted for this row"),
+        Some(_) => Err(ROW_DELETE_REFUSED),
         None => Err("entity is not peer-deletable"),
     }
 }
@@ -278,6 +280,13 @@ pub fn apply_pending_deletes(conn: &Connection) -> Result<usize> {
         };
         if let Err(reason) = check {
             tracing::debug!("[replication_ops] not applying delete {entity}.{key_col}: {reason}");
+            if reason == ROW_DELETE_REFUSED {
+                conn.execute(
+                    "UPDATE replication_ops SET op = 'refused'
+                      WHERE entity = ?1 AND key_val = ?2 AND op = 'delete' AND local_origin = 0",
+                    params![entity, key_val],
+                )?;
+            }
             continue;
         }
         // Defensive: entity/key_col originate from registration code, but they
@@ -331,7 +340,7 @@ pub fn reap(conn: &Connection, now_ms: i64, ttl_ms: i64) -> Result<usize> {
 fn replicate_export(conn: &Connection) -> Result<Value> {
     let mut stmt = conn.prepare(
         "SELECT op_id, entity, key_col, key_val, op, origin, stamp_ms
-           FROM replication_ops ORDER BY op_id",
+           FROM replication_ops WHERE op != 'refused' ORDER BY op_id",
     )?;
     let rows: Vec<Value> = stmt
         .query_map([], |r| {
@@ -364,10 +373,13 @@ fn replicate_merge(conn: &Connection, rows: Value) -> Result<usize> {
         let entity = canonical_entity(&s("entity")).to_string();
         let key_col = canonical_key_col(&entity, &s("key_col")).to_string();
         let key_val = s("key_val");
-        let op = s("op");
+        let mut op = s("op");
         let origin = s("origin");
         let stamp_ms = row.get("stamp_ms").and_then(|v| v.as_i64()).unwrap_or(0);
         if op_id.is_empty() || entity.is_empty() || key_val.is_empty() || op.is_empty() {
+            continue;
+        }
+        if op == "refused" {
             continue;
         }
         if let Err(reason) = macro_runtime::replicate_table::check_incoming_millis(stamp_ms)
@@ -375,7 +387,10 @@ fn replicate_merge(conn: &Connection, rows: Value) -> Result<usize> {
             .and_then(|()| peer_op_allowed(conn, &entity, &key_col, &key_val, &op))
         {
             macro_runtime::replicate_table::audit_reject(ENTITY, &(&entity, &key_col), reason);
-            continue;
+            if reason != ROW_DELETE_REFUSED || op != "delete" {
+                continue;
+            }
+            op = "refused".to_string();
         }
         let n = conn.execute(
             "INSERT INTO replication_ops (op_id, entity, key_col, key_val, op, origin, stamp_ms, local_origin)
@@ -392,7 +407,9 @@ fn replicate_merge(conn: &Connection, rows: Value) -> Result<usize> {
                     AND excluded.op_id > replication_ops.op_id)",
             params![op_id, entity, key_col, key_val, op, origin, stamp_ms],
         )?;
-        merged += n;
+        if op != "refused" {
+            merged += n;
+        }
     }
     Ok(merged)
 }

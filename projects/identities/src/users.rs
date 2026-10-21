@@ -31,14 +31,14 @@ pub struct UserAuth {
 
 /// Full replicable user row. `users` is ONE shared pool replicated across every
 /// paired host (last-write-wins on `updated_at`), so any admin can sign in on
-/// any machine/UI. No column is peer-writable: a peer can never introduce a row
-/// or change one, so accounts are set only by local writes.
+/// any machine/UI. Only `email` is peer-writable: a peer can never introduce a
+/// row or change its identity, role, or credentials.
 ///
 /// Field order mirrors the `users` table columns exactly (the `Replicated`
 /// derive maps fields ↔ columns 1:1), so `username_lower` is carried even
 /// though it is just `lower(username)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, derive::Replicated)]
-#[replicate(crate = ::macro_runtime, table = "users", lww = "updated_at", unique = "username_lower", peer_delete = peer_may_delete)]
+#[replicate(crate = ::macro_runtime, table = "users", lww = "updated_at", unique = "username_lower", peer_writable = "email", peer_delete = peer_may_delete)]
 pub struct ReplicaUser {
     pub id: String,
     pub username: String,
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_cannot_change_any_user_column() {
+    fn peer_cannot_change_role_or_password_hash() {
         let (src, dst) = two_hosts();
         set_email(&src, "u1", Some("a@example.test"), "2026-02-01T00:00:00Z").unwrap();
         let bundle = peer_bundle(&src, |r| {
@@ -329,7 +329,41 @@ mod tests {
         let got = find_auth_by_username(&dst, "scott").unwrap().unwrap();
         assert_eq!(got.role, "member");
         assert_eq!(got.password_hash, "hash-v1");
-        assert_eq!(find_by_id(&dst, "u1").unwrap().unwrap().email, None);
+    }
+
+    #[test]
+    fn local_email_change_replicates_out() {
+        let (src, dst) = two_hosts();
+        set_email(&src, "u1", Some("a@example.test"), "2026-02-01T00:00:00Z").unwrap();
+        db::replicate::merge_bundle(&dst, db::replicate::export_all(&src).unwrap()).unwrap();
+        assert_eq!(
+            find_by_id(&dst, "u1").unwrap().unwrap().email.as_deref(),
+            Some("a@example.test")
+        );
+    }
+
+    #[test]
+    fn refused_last_admin_delete_never_fires_later() {
+        let src = test_conn();
+        let dst = test_conn();
+        for c in [&src, &dst] {
+            insert(c, "root", "root", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        }
+        assert!(delete_by_id(&src, "root").unwrap());
+        let bundle = || db::replicate::export_all(&src).unwrap();
+        db::replicate::merge_bundle(&dst, bundle()).unwrap();
+        assert!(find_by_id(&dst, "root").unwrap().is_some());
+        insert(
+            &dst,
+            "second",
+            "second",
+            "h",
+            "admin",
+            "2026-01-02T00:00:00Z",
+        )
+        .unwrap();
+        db::replicate::merge_bundle(&dst, bundle()).unwrap();
+        assert!(find_by_id(&dst, "root").unwrap().is_some());
     }
 
     #[test]
