@@ -409,7 +409,7 @@ const DENIED_BIND_ROOTS: &[&str] = &[
     "/sbin",
     "/lib",
     "/lib64",
-    "/opt",
+    "/opt/orca",
     "/var/spool",
     "/var/lib/docker",
     "/var/lib/containerd",
@@ -1891,7 +1891,7 @@ mod tests {
             "/sbin",
             "/lib",
             "/lib64",
-            "/opt/app",
+            "/opt/orca/bin",
             "/var/spool/cron",
             "/var/lib/docker/volumes",
             "/var/lib/containerd",
@@ -1978,6 +1978,9 @@ mod tests {
         let srv = vec!["/srv".to_string()];
         binds(&["/srv/pbs", "nas:/export"])
             .validate_for_target(&srv)
+            .unwrap();
+        binds(&["/opt/stacks/jellyfin/config"])
+            .validate_for_target(&["/opt/stacks".into()])
             .unwrap();
         let err = binds(&["/mnt/media"])
             .validate_for_target(&srv)
