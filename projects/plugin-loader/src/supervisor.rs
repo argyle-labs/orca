@@ -208,6 +208,7 @@ pub fn invoke_on<S: Read + Write>(
     )
     .with_context(|| format!("sending Invoke for '{tool}'"))?;
 
+    let mut tool_calls = 0;
     loop {
         let frame = read_frame(stream)
             .with_context(|| format!("awaiting Result for '{tool}'"))?
@@ -288,7 +289,7 @@ pub fn invoke_on<S: Read + Write>(
                 let result = if cap == capability::API_CALL {
                     capability::handle_api_call(args, principal, inv)
                 } else if cap == plugin_toolkit::abi::TOOL_CALL {
-                    crate::tool_call::handle(args, principal, inv)
+                    crate::tool_call::handle(args, principal, inv, &mut tool_calls)
                 } else if crate::privileged::is_privileged_cap(&cap) {
                     crate::privileged::handle_privileged(&cap, args, principal, inv)
                 } else {

@@ -195,6 +195,7 @@ pub trait ErasedTool: Send + Sync {
     fn dry_run_neutralizes(&self) -> bool;
     /// Mirrors `OrcaToolDef::REACHES`.
     fn reaches(&self) -> &'static [&'static str];
+    fn tool_calls(&self) -> &'static [&'static str];
     /// JSON Schema for this tool's Args — used for MCP tools/list, CLI flag generation,
     /// OpenAPI request body, and TS `.d.ts` emission.
     fn input_schema(&self) -> Value;
@@ -243,6 +244,10 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
 
     fn reaches(&self) -> &'static [&'static str] {
         T::REACHES
+    }
+
+    fn tool_calls(&self) -> &'static [&'static str] {
+        T::TOOL_CALLS
     }
 
     fn dry_run_neutralizes(&self) -> bool {

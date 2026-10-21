@@ -75,6 +75,8 @@ pub struct ToolDef {
     pub local_only: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reaches: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -375,6 +377,7 @@ mod tests {
                 data_mutation: Some(true),
                 local_only: Some(true),
                 reaches: vec!["proxmox.vm_stop".into()],
+                tool_calls: Vec::new(),
             }],
             backends: vec![json!({
                 "domain": "host_facts",

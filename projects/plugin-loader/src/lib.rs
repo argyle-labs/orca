@@ -956,6 +956,7 @@ pub fn spawn_plugin(exe: &Path, expected_id: &str) -> Result<LoadReport> {
         .collect::<std::result::Result<_, _>>()
         .with_context(|| format!("plugin '{software}' returned an invalid backends list"))?;
     check_reaches(&software, &tools, &surfaces)?;
+    check_tool_calls(&software, &tools)?;
     check_backend_reaches(&software, &backend_defs, &surfaces)?;
     let surface_policies = surface_tools(&software, &surfaces, &mut tools)?;
     let mut tool_names: Vec<String> = tools.keys().cloned().collect();
@@ -1118,6 +1119,21 @@ fn check_reaches(
 ) -> Result<()> {
     for def in tools.values() {
         check_reach_list(software, "tool", &def.name, &def.reaches, surfaces)?;
+    }
+    Ok(())
+}
+
+fn check_tool_calls(software: &str, tools: &HashMap<String, ToolDef>) -> Result<()> {
+    for def in tools.values() {
+        for entry in &def.tool_calls {
+            let stem = entry.strip_suffix(".*").unwrap_or(entry);
+            if stem.trim().is_empty() || stem.contains('*') {
+                anyhow::bail!(
+                    "plugin '{software}' tool '{}' declares tool_calls entry '{entry}'; use a tool name or a `prefix.*` glob",
+                    def.name
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1485,6 +1501,25 @@ fn tool_reaches(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn tool_tool_calls(name: &str) -> Vec<String> {
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
+    reg.by_tool
+        .get(name)
+        .and_then(|idx| reg.plugins[*idx].tools.get(name))
+        .map(|d| d.tool_calls.clone())
+        .unwrap_or_default()
+}
+
+pub(crate) fn refuse_reentry(ctx: &ToolCtx, software: &str, name: &str) -> Result<()> {
+    if ctx.call_chain().iter().any(|p| p == software) {
+        return Err(contract::OrcaError::forbidden(format!(
+            "{name} refused: plugin '{software}' is already in the tool.call chain"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 fn plan_with_reaches(result: Result<sj::Value>, name: &str, dry_run: bool) -> Result<sj::Value> {
     let mut value = result?;
     let reaches = tool_reaches(name);
@@ -1514,7 +1549,8 @@ fn invocation_for(
                 dispatch::tool_roles::required_role(name),
                 &tool_reaches(name),
                 args,
-            ),
+            )
+            .with_tool_calls(&tool_tool_calls(name)),
     )
 }
 
@@ -1577,6 +1613,7 @@ pub async fn dispatch(name: &str, args: sj::Value, ctx: &ToolCtx) -> Result<sj::
         return execute_surface(&software, name, args, ctx).await;
     }
     if let Some((backing, software)) = backing_for(name) {
+        refuse_reentry(ctx, &software, name)?;
         let owned = name.to_string();
         let inv = invocation_for(ctx, name, &args);
         let dry_run = dry_run_args(&args);
@@ -1606,6 +1643,9 @@ pub fn invoke_plugin(name: &str, args: &sj::Value, ctx: &ToolCtx) -> Option<Resu
         )));
     }
     let (backing, software) = backing_for(name)?;
+    if let Err(e) = refuse_reentry(ctx, &software, name) {
+        return Some(Err(e));
+    }
     let result = backing.invoke(name, args.clone(), invocation_for(ctx, name, args));
     Some(plan_with_reaches(
         parse_invoke_result(result, name, &software),
@@ -2879,6 +2919,7 @@ mod loader_tests {
                     data_mutation: Some(true),
                     local_only: Some(true),
                     reaches: Vec::new(),
+                    tool_calls: Vec::new(),
                 },
                 plugin_proto::ToolDef {
                     name: "loaderfakeplugin.fetch".into(),
@@ -2890,6 +2931,7 @@ mod loader_tests {
                     data_mutation: None,
                     local_only: None,
                     reaches: Vec::new(),
+                    tool_calls: Vec::new(),
                 },
             ],
             backends: vec![

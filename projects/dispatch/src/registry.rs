@@ -489,6 +489,7 @@ pub fn tool_manifest_json() -> String {
                 "data_mutation": t.data_mutation(),
                 "local_only": !t.remote_ok(),
                 "reaches": t.reaches(),
+                "tool_calls": t.tool_calls(),
             })
         })
         .collect();

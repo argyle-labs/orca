@@ -82,6 +82,7 @@ pub struct Invocation {
     system: bool,
     execute_gated: bool,
     call_chain: Vec<String>,
+    tool_calls: Vec<String>,
 }
 
 const SYSTEM_ROLE: &str = "read";
@@ -102,6 +103,7 @@ impl Invocation {
             system: false,
             execute_gated: false,
             call_chain: ctx.call_chain().to_vec(),
+            tool_calls: Vec::new(),
         })
     }
 
@@ -121,6 +123,7 @@ impl Invocation {
             system: true,
             execute_gated: false,
             call_chain: Vec::new(),
+            tool_calls: Vec::new(),
         }
     }
 
@@ -132,12 +135,21 @@ impl Invocation {
         &self.caller
     }
 
-    pub fn plans(&self) -> bool {
-        self.dry_run || (self.execute_gated && !self.execute_confirmed)
+    pub fn child_may_execute(&self) -> bool {
+        self.execute_gated && self.execute_confirmed && !self.dry_run
     }
 
     pub fn call_chain(&self) -> &[String] {
         &self.call_chain
+    }
+
+    pub fn tool_calls(&self) -> &[String] {
+        &self.tool_calls
+    }
+
+    pub fn with_tool_calls(mut self, tool_calls: &[String]) -> Self {
+        self.tool_calls = tool_calls.to_vec();
+        self
     }
 
     pub fn for_plugin_invoke(
@@ -188,6 +200,7 @@ impl Invocation {
             system: false,
             execute_gated: verb.execute_gated(),
             call_chain: Vec::new(),
+            tool_calls: Vec::new(),
         };
         if targeted {
             inv.with_reaches(reaches)
