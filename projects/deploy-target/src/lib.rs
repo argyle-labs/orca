@@ -701,7 +701,7 @@ fn bind_source_check(
             }
         })?;
         if meta.file_type().is_symlink() {
-            return Err("is a symlink; bind its target directly".into());
+            return Err("the final path component is a symlink; bind its target directly".into());
         }
         let resolved = lexical
             .canonicalize()
@@ -738,6 +738,15 @@ fn bind_source_check(
     Ok(on_host.then(|| checked.display().to_string()))
 }
 
+fn without_private_prefix(p: &Path) -> PathBuf {
+    if cfg!(target_os = "macos")
+        && let Ok(rest) = p.strip_prefix("/private")
+    {
+        return Path::new("/").join(rest);
+    }
+    p.to_path_buf()
+}
+
 fn prepare_data_roots(
     data_roots: &[String],
     denied: &[PathBuf],
@@ -770,13 +779,13 @@ fn prepare_data_roots(
                     .map_err(|e| format!("data root {r}: does not exist on this host: {e}"))?;
                 if meta.file_type().is_symlink() {
                     return Err(format!(
-                        "data root {r}: is a symlink; declare its target directly"
+                        "data root {r}: the final path component is a symlink; declare its target directly"
                     ));
                 }
                 let canonical = p
                     .canonicalize()
                     .map_err(|e| format!("data root {r}: does not exist on this host: {e}"))?;
-                segment_rule(&canonical)?;
+                segment_rule(&without_private_prefix(&canonical))?;
                 canonical
             } else {
                 p
@@ -2357,7 +2366,6 @@ mod tests {
         assert!(err.contains("is a symlink"), "{err}");
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn the_host_check_applies_the_segment_rule_to_the_canonical_root() {
         let root = tempfile::tempdir().unwrap();
@@ -2369,6 +2377,23 @@ mod tests {
             None,
         );
         assert!(err.contains("cannot be a data root"), "{err}");
+
+        let slash = root.path().join("s");
+        let parent = if cfg!(target_os = "macos") {
+            "/private"
+        } else {
+            "/"
+        };
+        std::os::unix::fs::symlink(parent, &slash).unwrap();
+        let err = host_err(
+            &binds(&[&slash.join("etc/x").display().to_string()]),
+            &roots(&[&slash.join("etc")]),
+            None,
+        );
+        assert!(
+            err.contains("top-level") || err.contains("protected"),
+            "{err}"
+        );
     }
 
     #[test]
