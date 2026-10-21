@@ -152,6 +152,8 @@ pub struct BackendDef {
     #[serde(default)]
     pub provisioning: Option<ProvisioningConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reaches: Vec<String>,
 }
 

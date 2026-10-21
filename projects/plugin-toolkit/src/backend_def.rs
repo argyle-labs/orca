@@ -905,6 +905,7 @@ mod tests {
             def.endpoint.clone(),
             &def.capabilities,
             def.provisioning.clone(),
+            def.data_roots.clone(),
             thunk,
         )
         .expect("register deploy target from def");
@@ -1049,6 +1050,7 @@ mod tests {
             def.endpoint.clone(),
             &def.capabilities,
             def.provisioning.clone(),
+            def.data_roots.clone(),
             thunk,
         )
         .expect("register proxmox deploy target from def");
