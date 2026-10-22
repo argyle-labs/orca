@@ -34,7 +34,31 @@ check keychain "--force --sign Argyle Labs orca Code Signing --identifier wtf.ar
 
 cat > "$stub_dir/security" <<STUB
 #!/usr/bin/env bash
-python3 -c 'import shlex, sys; sys.stdout.write("\n".join(shlex.split(sys.stdin.read())) + "\n")' > "$log"
+IFS= read -r line
+out=() tok="" have=0 inq=0 i=0
+while [ "\$i" -lt "\${#line}" ]; do
+  c="\${line:\$i:1}"
+  if [ "\$inq" -eq 1 ]; then
+    if [ "\$c" = "\\\\" ]; then
+      i=\$((i + 1))
+      tok+="\${line:\$i:1}"
+    elif [ "\$c" = '"' ]; then
+      inq=0
+    else
+      tok+="\$c"
+    fi
+  elif [ "\$c" = '"' ]; then
+    inq=1 have=1
+  elif [ "\$c" = " " ]; then
+    [ "\$have" -eq 1 ] && out+=("\$tok")
+    tok="" have=0
+  else
+    tok+="\$c" have=1
+  fi
+  i=\$((i + 1))
+done
+[ "\$have" -eq 1 ] && out+=("\$tok")
+printf '%s\\n' "\${out[@]}" > "$log"
 STUB
 chmod +x "$stub_dir/security"
 
@@ -55,3 +79,17 @@ if secq $'a\nb' 2>/dev/null; then
   exit 1
 fi
 echo "ok secq rejects newline"
+
+if [ "$(uname -s)" = "Darwin" ]; then
+  missing="$stub_dir/no such \"dir\"/k.keychain-db"
+  if err="$(printf 'show-keychain-info %s\n' "$(secq "$missing")" | /usr/bin/security -i 2>&1)"; then
+    echo "FAIL real security accepted nonexistent keychain" >&2
+    exit 1
+  fi
+  case "$err" in
+    *"$missing"*) echo "ok real security parses quoted path" ;;
+    *) echo "FAIL real security error lacks '$missing': $err" >&2; exit 1 ;;
+  esac
+else
+  echo "skip real security (non-Darwin)"
+fi

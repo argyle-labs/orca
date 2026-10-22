@@ -33,8 +33,6 @@ if [ ! -f "$kc" ]; then
     || { echo "error: failed to create $kc" >&2; exit 1; }
 fi
 sec "unlock-keychain -p $q_kc_pw $q_kc"
-security show-keychain-info "$kc" >/dev/null 2>&1 \
-  || { echo "error: failed to unlock $kc" >&2; exit 1; }
 security set-keychain-settings -lut 3600 "$kc"
 sec "import $q_p12 -k $q_kc -f pkcs12 -P $q_p12_pw -T /usr/bin/codesign"
 security find-identity -v -p codesigning "$kc" | grep -qF "\"$identity\"" \
