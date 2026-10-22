@@ -291,7 +291,7 @@ pub async fn cmd_mesh_connect(addr: &str) -> Result<()> {
 /// Thin CLI wrapper over [`mesh_join_core`]: joiner-initiated pairing that dials
 /// the inviter directly (no mDNS) and auto-accepts. Prints a human summary.
 pub async fn cmd_mesh_join(addr: &str) -> Result<()> {
-    let out = mesh_join_core(addr, None).await?;
+    let out = mesh_join_core(addr, None, None).await?;
     println!(
         "✓ joined mesh {} via {} ({}, {}:{})",
         out.mesh_id, out.inviter_hostname, out.inviter_peer_id, out.inviter_addr, out.inviter_port
@@ -309,6 +309,7 @@ pub async fn cmd_mesh_join(addr: &str) -> Result<()> {
 pub async fn mesh_join_core(
     addr: &str,
     port_override: Option<u16>,
+    expected_fp: Option<&str>,
 ) -> Result<crate::mesh::MeshAcceptOutput> {
     let (host, parsed_port) = utils::pki::parse_peer_addr(addr, mesh_port())?;
     let port = port_override.unwrap_or(parsed_port);
@@ -358,6 +359,16 @@ pub async fn mesh_join_core(
         .connect(sni, tcp)
         .await
         .context("bootstrap TLS handshake (is the inviter's daemon running?)")?;
+    if let Some(expected) = expected_fp {
+        let presented = captured
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .context("TLS verifier did not capture a server cert fp")?;
+        if presented != expected {
+            bail!("inviter at {target} presented fp {presented}, expected {expected}");
+        }
+    }
 
     write_frame(
         &mut tls,
@@ -2046,7 +2057,7 @@ mod tests {
 
     #[tokio::test]
     async fn mesh_join_core_rejects_empty_addr() {
-        let err = mesh_join_core("", None).await.err().unwrap();
+        let err = mesh_join_core("", None, None).await.err().unwrap();
         assert!(
             format!("{err:#}").contains("empty peer address"),
             "got: {err:#}"
@@ -2057,7 +2068,10 @@ mod tests {
     async fn mesh_join_core_rejects_invalid_port() {
         // `host:99999` overflows u16 → the `invalid port` parse error fires
         // before any key material is generated.
-        let err = mesh_join_core("host-x:99999", None).await.err().unwrap();
+        let err = mesh_join_core("host-x:99999", None, None)
+            .await
+            .err()
+            .unwrap();
         assert!(format!("{err:#}").contains("invalid port"), "got: {err:#}");
     }
 
@@ -2076,7 +2090,10 @@ mod tests {
         let _home = set_home(home.path());
         // machine_id() (called before the dial) requires a one-time global init.
         drop(crate::host_identity::init(home.path()));
-        let err = mesh_join_core("127.0.0.1", Some(1)).await.err().unwrap();
+        let err = mesh_join_core("127.0.0.1", Some(1), None)
+            .await
+            .err()
+            .unwrap();
         assert!(
             format!("{err:#}").contains("connect 127.0.0.1:1"),
             "got: {err:#}"
@@ -2150,6 +2167,81 @@ mod tests {
                 "got: {err:#}"
             );
             server.abort();
+        })
+        .await;
+    }
+
+    #[serial_test::serial(env)]
+    #[tokio::test]
+    async fn mesh_join_core_refuses_an_inviter_with_another_fp_before_sending() {
+        drop(rustls::crypto::ring::default_provider().install_default());
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        crate::host_identity::init(home.path()).unwrap();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pki = pki_dir();
+            let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let mut frames = 0;
+                if let Ok(Ok((tcp, _))) =
+                    tokio::time::timeout(Duration::from_secs(2), listener.accept()).await
+                    && let Ok(mut tls) = acceptor.accept(tcp).await
+                {
+                    while read_frame(&mut tls).await.is_ok() {
+                        frames += 1;
+                    }
+                }
+                frames
+            });
+            let err = mesh_join_core("127.0.0.1", Some(port), Some("fp-other"))
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                format!("{err:#}").contains("expected fp-other"),
+                "got: {err:#}"
+            );
+            assert_eq!(server.await.unwrap(), 0);
+        })
+        .await;
+    }
+
+    #[serial_test::serial(env)]
+    #[tokio::test]
+    async fn mesh_join_core_dials_through_when_the_inviter_fp_matches() {
+        drop(rustls::crypto::ring::default_provider().install_default());
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        crate::host_identity::init(home.path()).unwrap();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pki = pki_dir();
+            let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(&pki).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                if let Ok(Ok((tcp, _))) =
+                    tokio::time::timeout(Duration::from_secs(2), listener.accept()).await
+                    && let Ok(mut tls) = acceptor.accept(tcp).await
+                    && read_frame(&mut tls).await.is_ok()
+                {
+                    return 1;
+                }
+                0
+            });
+            let err = mesh_join_core("127.0.0.1", Some(port), Some(&fp))
+                .await
+                .err()
+                .unwrap();
+            assert!(!format!("{err:#}").contains("presented fp"), "got: {err:#}");
+            assert!(server.await.unwrap() >= 1);
         })
         .await;
     }
