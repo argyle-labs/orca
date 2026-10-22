@@ -505,6 +505,109 @@ pub fn codesign_attempts(
     }
 }
 
+pub fn env_flag(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        let v = v.trim();
+        ["1", "true", "yes"]
+            .iter()
+            .any(|t| v.eq_ignore_ascii_case(t))
+    })
+}
+
+pub fn install_binary(
+    current: &std::path::Path,
+    bytes: &[u8],
+    version: &str,
+    identity: Option<&str>,
+    require_identity: Option<&str>,
+    sign: impl FnOnce(&std::path::Path, &[Vec<String>]) -> Result<()>,
+) -> Result<()> {
+    let attempts = codesign_attempts(identity, env_flag(require_identity))?;
+    let tmp = current.with_extension("tmp");
+    let backup = current.with_extension("prev");
+
+    let staged = (|| -> Result<Vec<u8>> {
+        std::fs::write(&tmp, bytes).context("failed to write temp binary")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&tmp)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&tmp, perms)?;
+        }
+        sign(&tmp, &attempts)
+            .context("signing staged binary failed; installed binary unchanged")?;
+        std::fs::read(&tmp).context("failed to read back staged binary")
+    })();
+    let installed = match staged {
+        Ok(b) => b,
+        Err(e) => {
+            _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+
+    let backed_up = std::fs::copy(current, &backup).is_ok();
+    if let Err(e) = std::fs::rename(&tmp, current) {
+        _ = std::fs::remove_file(&tmp);
+        if backed_up {
+            _ = std::fs::remove_file(&backup);
+        }
+        return Err(anyhow::Error::new(e).context("failed to replace binary"));
+    }
+
+    if let Err(e) = verify_on_disk(current, &installed, version) {
+        if backed_up && let Err(rollback) = std::fs::rename(&backup, current) {
+            return Err(e.context(format!(
+                "post-swap binary verification failed AND rollback failed \
+                     ({rollback}); the binary at {} is corrupt — restore manually \
+                     from {}",
+                current.display(),
+                backup.display()
+            )));
+        }
+        return Err(e.context("post-swap binary verification failed; rolled back"));
+    }
+    if backed_up {
+        _ = std::fs::remove_file(&backup);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn sign_staged(path: &std::path::Path, attempts: &[Vec<String>]) -> Result<()> {
+    let signed = std::process::Command::new("codesign")
+        .args(["--verify", "--strict"])
+        .arg(path)
+        .status()
+        .is_ok_and(|s| s.success());
+    if signed {
+        return Ok(());
+    }
+    let mut last_status = None;
+    for args in attempts {
+        let status = std::process::Command::new("codesign")
+            .args(args)
+            .arg(path)
+            .status()
+            .context("invoking codesign")?;
+        if status.success() {
+            return Ok(());
+        }
+        tracing::warn!(%status, sign = %args[2], "codesign failed");
+        last_status = Some(status);
+    }
+    match last_status {
+        Some(status) => anyhow::bail!("codesign failed with status {status}"),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sign_staged(_path: &std::path::Path, _attempts: &[Vec<String>]) -> Result<()> {
+    Ok(())
+}
+
 /// Swap the running binary with `bytes` and schedule a supervisor restart.
 ///
 /// Caller is responsible for any pre-swap integrity check on `bytes`
@@ -518,86 +621,17 @@ pub fn codesign_attempts(
 /// delegate-fetched-from-peer path can share the swap codepath without
 /// going through GitHub. See [[project-github-token-auto-provision]].
 pub fn apply_binary(bytes: &[u8], version: &str) -> Result<()> {
-    // Write to a temp file beside the current binary, then atomic rename.
-    // Stash the current binary first so we can roll back on post-swap
-    // verification failure — silent zero-byte writes (e.g. FUSE shfs
-    // truncating on /mnt/user/appdata) used to leave the host with no
-    // working binary and a falsely-successful `applied` response.
     let current = current_binary_path()?;
-    let tmp = current.with_extension("tmp");
-    let backup = current.with_extension("prev");
-    let backed_up = std::fs::copy(&current, &backup).is_ok();
-
-    std::fs::write(&tmp, bytes).context("failed to write temp binary")?;
-
-    // Set executable bit on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&tmp)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&tmp, perms)?;
-    }
-
-    std::fs::rename(&tmp, &current).context("failed to replace binary")?;
-
-    // Verify what actually hit disk — not just what we held in memory. The
-    // pre-rename sha check covers download integrity; this covers
-    // filesystem-level corruption (truncation, partial writes on FUSE).
-    if let Err(e) = verify_on_disk(&current, bytes, version) {
-        if backed_up {
-            // The swapped-in binary is corrupt; restore the backup. If that
-            // ALSO fails, the live binary is left broken — say so plainly
-            // rather than claiming a rollback that did not happen.
-            if let Err(rollback) = std::fs::rename(&backup, &current) {
-                return Err(e.context(format!(
-                    "post-swap binary verification failed AND rollback failed \
-                     ({rollback}); the binary at {} is corrupt — restore manually \
-                     from {}",
-                    current.display(),
-                    backup.display()
-                )));
-            }
-        }
-        return Err(e.context("post-swap binary verification failed; rolled back"));
-    }
-    if backed_up {
-        _ = std::fs::remove_file(&backup);
-    }
-
-    // macOS: keep a valid release signature (re-signing would discard a
-    // Developer ID); ad-hoc sign only when unsigned, else launchd SIGKILLs the
-    // daemon on respawn (exit -9).
-    #[cfg(target_os = "macos")]
-    {
-        let signed = std::process::Command::new("codesign")
-            .args(["--verify", "--strict"])
-            .arg(&current)
-            .status()
-            .is_ok_and(|s| s.success());
-        if !signed {
-            let identity = std::env::var("ORCA_CODESIGN_IDENTITY").ok();
-            let require_identity =
-                std::env::var("ORCA_CODESIGN_REQUIRE_IDENTITY").is_ok_and(|v| !v.is_empty());
-            let mut last_status = None;
-            for args in codesign_attempts(identity.as_deref(), require_identity)? {
-                let status = std::process::Command::new("codesign")
-                    .args(&args)
-                    .arg(&current)
-                    .status()
-                    .context("invoking codesign")?;
-                if status.success() {
-                    last_status = None;
-                    break;
-                }
-                tracing::warn!(%status, sign = %args[2], "codesign failed");
-                last_status = Some(status);
-            }
-            if let Some(status) = last_status {
-                anyhow::bail!("codesign failed with status {status}");
-            }
-        }
-    }
+    install_binary(
+        &current,
+        bytes,
+        version,
+        std::env::var("ORCA_CODESIGN_IDENTITY").ok().as_deref(),
+        std::env::var("ORCA_CODESIGN_REQUIRE_IDENTITY")
+            .ok()
+            .as_deref(),
+        sign_staged,
+    )?;
 
     // Unraid: mirror the new binary to appdata so it survives the RAM-rootfs
     // wipe on reboot. /mnt/user/appdata/orca/bin/ is a real ext4/xfs path owned
@@ -2077,6 +2111,93 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).expect("chmod");
         path
+    }
+
+    #[test]
+    fn env_flag_parses_bool_values() {
+        for v in ["1", "true", "TRUE", "Yes", "yes"] {
+            assert!(env_flag(Some(v)), "{v}");
+        }
+        for v in ["0", "false", "No", "", "maybe"] {
+            assert!(!env_flag(Some(v)), "{v}");
+        }
+        assert!(!env_flag(None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_binary_config_error_changes_nothing() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let old = b"#!/bin/sh\necho 'orca 0.0.1'\n";
+        let current = write_exec(tmp.path(), "orca", old);
+        let err = install_binary(
+            &current,
+            b"#!/bin/sh\necho 'orca 0.0.2'\n",
+            "0.0.2",
+            None,
+            Some("1"),
+            |_, _| panic!("sign must not run"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("REQUIRE_IDENTITY"), "{err}");
+        let entries: Vec<_> = std::fs::read_dir(tmp.path()).expect("read_dir").collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(std::fs::read(&current).expect("read"), old);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_binary_sign_failure_keeps_old_binary() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let old = b"#!/bin/sh\necho 'orca 0.0.1'\n";
+        let current = write_exec(tmp.path(), "orca", old);
+        let err = install_binary(
+            &current,
+            b"#!/bin/sh\necho 'orca 0.0.2'\n",
+            "0.0.2",
+            Some("Argyle Labs orca Code Signing"),
+            Some("true"),
+            |_, attempts| {
+                assert_eq!(attempts.len(), 1);
+                anyhow::bail!("codesign failed")
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("installed binary unchanged"),
+            "{err}"
+        );
+        let entries: Vec<_> = std::fs::read_dir(tmp.path()).expect("read_dir").collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(std::fs::read(&current).expect("read"), old);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_binary_swaps_signed_bytes() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let current = write_exec(tmp.path(), "orca", b"#!/bin/sh\necho 'orca 0.0.1'\n");
+        install_binary(
+            &current,
+            b"#!/bin/sh\necho 'orca 0.0.2'\n",
+            "0.0.2",
+            None,
+            None,
+            |p, _| {
+                let mut b = std::fs::read(p)?;
+                b.extend_from_slice(b"# signed\n");
+                std::fs::write(p, b)?;
+                Ok(())
+            },
+        )
+        .expect("install");
+        let entries: Vec<_> = std::fs::read_dir(tmp.path()).expect("read_dir").collect();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            std::fs::read(&current)
+                .expect("read")
+                .ends_with(b"# signed\n")
+        );
     }
 
     #[cfg(unix)]
