@@ -1618,7 +1618,7 @@ pub async fn collect_mesh_instances() -> anyhow::Result<MeshInstancesOutput> {
 ///     operator.
 ///   - `accept` — complete an out-of-band offer by its 6-char code (needs
 ///     `code`).
-#[orca_tool(domain = "system", verb = "join")]
+#[orca_tool(domain = "system", verb = "join", role = "admin")]
 async fn mesh_create(
     args: MeshCreateArgs,
     _ctx: &contract::ToolCtx,
@@ -1750,6 +1750,48 @@ async fn mesh_delete(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn system_join_refuses_a_non_admin_caller() {
+        use contract::OrcaToolDef;
+        use contract::config::{Config, Model};
+        use dispatch::ErasedTool;
+        assert_eq!(<super::MeshCreate as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = contract::ToolCtx::new(std::sync::Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: dir.path().to_path_buf(),
+            memory_root: dir.path().to_path_buf(),
+            db_path: dir.path().join("join-test.db"),
+            ports: Default::default(),
+        }));
+        let tool = dispatch::ToolWrapper::<super::MeshCreate>(std::marker::PhantomData);
+        for (role, can_mutate) in [("user", false), ("user", true), ("read", true)] {
+            ctx.set_caller(Some(contract::CallerIdentity {
+                user_id: "u-test".into(),
+                username: "tester".into(),
+                role: role.into(),
+                can_mutate,
+            }));
+            let err = tool
+                .run_json(
+                    serde_json::json!({ "action": "join", "addr": "127.0.0.1:1", "token": "t" }),
+                    &ctx,
+                )
+                .await
+                .expect_err("a non-admin caller must not join");
+            assert!(
+                err.to_string().contains("requires role 'admin'"),
+                "{role}: {err}"
+            );
+        }
+    }
+
     #[test]
     fn the_local_peer_ref_carries_this_systems_id() {
         use crate::mesh::fleet_update::Target;

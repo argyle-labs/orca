@@ -219,8 +219,9 @@ enum MeshAction {
     /// specific addr `host[:port]`. Alias for `orca mesh join`.
     Connect {
         addr: String,
+        /// Join token; `-` reads it from stdin. Falls back to `ORCA_JOIN_TOKEN`.
         #[arg(long)]
-        token: String,
+        token: Option<String>,
     },
     /// Joiner-initiated handshake. Dials the inviter over the bootstrap
     /// channel (TOFU first contact, then signed-echo fp check) and lands a
@@ -228,8 +229,9 @@ enum MeshAction {
     /// token from `orca mesh token` on the inviter.
     Join {
         addr: String,
+        /// Join token; `-` reads it from stdin. Falls back to `ORCA_JOIN_TOKEN`.
         #[arg(long)]
-        token: String,
+        token: Option<String>,
     },
     /// Issue a single-use, short-lived join token for one joiner.
     Token,
@@ -603,16 +605,18 @@ async fn main() -> Result<()> {
             MeshAction::Pending => system::mesh::cli::cmd_mesh_pending(),
             MeshAction::Accept { code } => system::mesh::cli::cmd_mesh_accept(&code).await,
             MeshAction::Connect { addr, token } => {
+                let token = system::mesh::cli::resolve_join_token(token.as_deref())?;
                 system::mesh::cli::cmd_mesh_connect(&addr, &token).await
             }
             MeshAction::Join { addr, token } => {
+                let token = system::mesh::cli::resolve_join_token(token.as_deref())?;
                 system::mesh::cli::cmd_mesh_join(&addr, &token).await
             }
             MeshAction::Token => {
                 let out = system::mesh::exec::issue_join_token()?;
                 println!("{}", out.token);
                 eprintln!(
-                    "  single-use; expires at {} — on the joiner run `orca mesh join <this-host> --token <token>`",
+                    "  single-use; expires at {} — on the joiner run `orca mesh join <this-host> --token -` and paste it",
                     out.expires_at
                 );
                 Ok(())
