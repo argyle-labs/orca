@@ -114,7 +114,7 @@ host_target() {
 die() { echo "error: $*" >&2; exit 1; }
 log() { echo "→ $*"; }
 
-ORCA_CODESIGN_IDENTIFIER="com.argyle-labs.orca"
+ORCA_CODESIGN_IDENTIFIER="wtf.argyle.orca"
 
 # Sign with ORCA_CODESIGN_IDENTITY when set, else ad-hoc. The fixed identifier
 # and identity keep the TCC designated requirement stable across updates.

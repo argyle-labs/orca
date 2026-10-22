@@ -465,7 +465,7 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     apply_binary(&binary, &info.version)
 }
 
-pub const CODESIGN_IDENTIFIER: &str = "com.argyle-labs.orca";
+pub const CODESIGN_IDENTIFIER: &str = "wtf.argyle.orca";
 
 pub fn codesign_args(identity: Option<&str>) -> Vec<String> {
     let sign = identity.filter(|i| !i.is_empty()).unwrap_or("-");
@@ -1169,7 +1169,7 @@ mod tests {
                 "--sign",
                 "-",
                 "--identifier",
-                "com.argyle-labs.orca",
+                "wtf.argyle.orca",
                 "--timestamp=none"
             ]
         );
@@ -1192,7 +1192,7 @@ mod tests {
                 "--sign",
                 "Argyle Labs orca Code Signing",
                 "--identifier",
-                "com.argyle-labs.orca",
+                "wtf.argyle.orca",
                 "--timestamp=none",
                 "--options",
                 "runtime"
