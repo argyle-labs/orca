@@ -443,6 +443,7 @@ pub fn deploy_backend_def(
         endpoint: target.endpoint(),
         capabilities,
         provisioning: target.provisioning(),
+        data_roots: target.data_roots(),
         invoke_prefix: invoke_prefix.to_string(),
         ..Default::default()
     }
@@ -876,7 +877,8 @@ mod tests {
     #[test]
     fn deploy_backend_def_registers_and_answers_through_dispatch() {
         use crate::deploy_target::{
-            self, InvokeThunk, TargetId, dispatch_op, register_from_def, target as lookup_target,
+            self, InvokeThunk, TargetId, dispatch_op, register_from_def,
+            target_by_triple as lookup_target,
         };
         use std::sync::Arc;
 
@@ -904,6 +906,7 @@ mod tests {
             def.endpoint.clone(),
             &def.capabilities,
             def.provisioning.clone(),
+            def.data_roots.clone(),
             thunk,
         )
         .expect("register deploy target from def");
@@ -1015,7 +1018,7 @@ mod tests {
     fn provisioning_survives_registration_and_reaches_launch() {
         use crate::deploy_target::{
             self, InvokeThunk, ProvisioningConfig, TargetId, dispatch_op, register_from_def,
-            target as lookup_target,
+            target_by_triple as lookup_target,
         };
         use std::sync::Arc;
 
@@ -1048,6 +1051,7 @@ mod tests {
             def.endpoint.clone(),
             &def.capabilities,
             def.provisioning.clone(),
+            def.data_roots.clone(),
             thunk,
         )
         .expect("register proxmox deploy target from def");

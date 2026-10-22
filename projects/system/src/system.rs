@@ -336,7 +336,8 @@ pub struct SystemHealthArgs {
 pub struct MeshHealthRow {
     /// Display hostname of the system.
     pub host: String,
-    /// The system's id; empty for the local system, which has no roster row.
+    /// The system's id (the local row carries this host's machine id). Empty
+    /// only on the row reporting a roster read failure, which names no system.
     pub id: String,
     /// The system's own health report. `None` when it could not be reached.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -823,6 +824,25 @@ mod tests {
             db_path: dir.join("system-test.db"),
             ports: Default::default(),
         }))
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn the_local_health_row_carries_the_machine_id() {
+        let _env = crate::test_env::snapshot();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = crate::mesh::pin_home(tmp.path());
+        let ctx = empty_ctx();
+        let id = "0b8c7f2e-1111-4222-8333-444455556666";
+        std::fs::write(ctx.config.app_dir.join("machine_id"), id).unwrap();
+        let SystemHealthResult::Mesh(m) = system_health(SystemHealthArgs::default(), &ctx)
+            .await
+            .unwrap()
+        else {
+            panic!("a bare sweep reports the mesh");
+        };
+        assert!(!m.systems[0].id.is_empty());
+        assert_eq!(m.systems[0].id, id);
     }
 
     #[test]

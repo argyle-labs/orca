@@ -24,6 +24,7 @@ pub struct PluginToolPolicy {
     /// An `any` tool that explicitly opted out of the execute gate without
     /// also declaring `data_mutation: false`; mesh refuses it without a caller.
     pub read_unconfirmed: bool,
+    pub tool_callable: bool,
 }
 
 impl PluginToolPolicy {
@@ -51,6 +52,7 @@ impl PluginToolPolicy {
             read_unconfirmed: role == "any"
                 && execute_gated == Some(false)
                 && data_mutation != Some(false),
+            tool_callable: false,
         }
     }
 
@@ -58,6 +60,11 @@ impl PluginToolPolicy {
     /// the flag crossed the wire, which stays remote-callable.
     pub fn local_only(mut self, local_only: Option<bool>) -> Self {
         self.local_only = local_only.unwrap_or(false);
+        self
+    }
+
+    pub fn tool_callable(mut self, tool_callable: Option<bool>) -> Self {
+        self.tool_callable = tool_callable.unwrap_or(false);
         self
     }
 }
@@ -96,6 +103,10 @@ fn plugin_policy(tool: &str) -> Option<PluginToolPolicy> {
 /// plans on `dryRun` instead of applying.
 pub fn plugin_execute_gated(tool: &str) -> bool {
     plugin_policy(tool).is_some_and(|p| p.execute_gated)
+}
+
+pub fn is_tool_callable(tool: &str) -> bool {
+    crate::registry::tool_callable(tool) || plugin_policy(tool).is_some_and(|p| p.tool_callable)
 }
 
 /// Whether a loaded plugin's `any` tool lacks an explicit read declaration.
