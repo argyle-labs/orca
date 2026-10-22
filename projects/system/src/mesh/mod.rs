@@ -959,7 +959,7 @@ fn reachable_addrs(
 )]
 #[serde(rename_all = "snake_case")]
 pub enum MeshCreateAction {
-    /// Dial the inviter directly and auto-accept (needs `addr`).
+    /// Dial the inviter directly with an admin-issued join token (needs `addr` + `token`).
     #[default]
     Join,
     /// Push an offer to an mDNS-discovered joiner (needs `addr`).
@@ -985,6 +985,9 @@ pub struct MeshCreateArgs {
     /// (accept) 6-char pairing code printed on the inviter's CLI.
     #[arg(long)]
     pub code: Option<String>,
+    /// (join) Single-use join token issued by `system.mesh.update --action join_token` on the inviter.
+    #[arg(long)]
+    pub token: Option<String>,
     /// (join/offer) Candidate id from `system.list --snapshot`. With `addr`, the two must name the same candidate.
     #[arg(long)]
     pub id: Option<crate::system_id::SystemId>,
@@ -1118,6 +1121,15 @@ pub struct MeshOfferOutput {
     pub joiner_port: u16,
     pub joiner_pubkey_fp: String,
     pub offer_id: String,
+    pub expires_at: i64,
+}
+
+#[derive::snake_aliases]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshJoinTokenOutput {
+    /// Single-use token a joiner passes to `system.join --action join --token`.
+    pub token: String,
     pub expires_at: i64,
 }
 
@@ -1270,6 +1282,8 @@ pub enum MeshUpdateAction {
     CancelOffer,
     /// Drop this host's identity pin for a peer (needs `id`).
     Unpin,
+    /// Issue a single-use, short-lived join token for one joiner.
+    JoinToken,
 }
 
 /// Union of args across the mesh-update operations; required fields are
@@ -1277,8 +1291,8 @@ pub enum MeshUpdateAction {
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MeshUpdateArgs {
-    /// `settings` (default), `trust`, `sync`, `recover`, `cancel_offer`, or
-    /// `unpin`.
+    /// `settings` (default), `trust`, `sync`, `recover`, `cancel_offer`,
+    /// `unpin`, or `join_token`.
     #[arg(long, default_value = "settings")]
     pub action: MeshUpdateAction,
     /// (settings) Toggle Tier-2 secrets-storage permission. `None` leaves the
@@ -1321,6 +1335,7 @@ pub enum MeshUpdateOutput {
     Recover(MeshRecoverOutput),
     CancelOffer(MeshCancelOfferOutput),
     Unpin(MeshUnpinOutput),
+    JoinToken(MeshJoinTokenOutput),
 }
 
 // ── DTO conversions + wire-dispatch types ───────────────────────────────────
@@ -1669,13 +1684,13 @@ pub async fn collect_mesh_instances() -> anyhow::Result<MeshInstancesOutput> {
 
 /// [MUTATES STATE] Establish mesh membership. `action` selects the pairing path:
 ///   - `join`   — dial the inviter DIRECTLY over the bootstrap channel (no mDNS
-///     required) and auto-accept in one call (needs `addr`, optional `port`).
+///     required) and accept in one call (needs `addr` + `token`, optional `port`).
 ///   - `offer`  — push a membership offer to a joiner discovered via mDNS
 ///     (needs `addr`, optional `port`); returns a pairing code to show the
 ///     operator.
 ///   - `accept` — complete an out-of-band offer by its 6-char code (needs
 ///     `code`).
-#[orca_tool(domain = "system", verb = "join")]
+#[orca_tool(domain = "system", verb = "join", role = "admin")]
 async fn mesh_create(
     args: MeshCreateArgs,
     _ctx: &contract::ToolCtx,
@@ -1683,8 +1698,11 @@ async fn mesh_create(
     match args.action {
         MeshCreateAction::Join => {
             let t = candidate_target("join", args.addr, args.id, args.port)?;
+            let token = args
+                .token
+                .ok_or_else(|| anyhow::anyhow!("system.join action=join requires `token`"))?;
             Ok(MeshCreateOutput::Accept(
-                exec::join(&t.addr, t.port, t.pubkey_fp.as_deref()).await?,
+                exec::join(&t.addr, t.port, t.pubkey_fp.as_deref(), &token).await?,
             ))
         }
         MeshCreateAction::Offer => {
@@ -1714,6 +1732,7 @@ async fn mesh_create(
 ///   - `cancel_offer` — clear stuck outbound pairing offer(s) for `addr` or `id`.
 ///   - `unpin`        — drop this host's identity pin for `peer_id`, so it
 ///     is accepted again with a cert that carries no identity name.
+///   - `join_token`   — issue a single-use, short-lived join token.
 #[orca_tool(domain = "system.mesh", verb = "update", role = "admin")]
 async fn mesh_update(
     args: MeshUpdateArgs,
@@ -1791,6 +1810,7 @@ async fn mesh_update(
                 .ok_or_else(|| anyhow::anyhow!("system.mesh.update action=unpin requires `id`"))?;
             Ok(MeshUpdateOutput::Unpin(exec::unpin(&peer_id)?))
         }
+        MeshUpdateAction::JoinToken => Ok(MeshUpdateOutput::JoinToken(exec::issue_join_token()?)),
     }
 }
 
@@ -1826,6 +1846,48 @@ async fn mesh_delete(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn system_join_refuses_a_non_admin_caller() {
+        use contract::OrcaToolDef;
+        use contract::config::{Config, Model};
+        use dispatch::ErasedTool;
+        assert_eq!(<super::MeshCreate as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = contract::ToolCtx::new(std::sync::Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: dir.path().to_path_buf(),
+            memory_root: dir.path().to_path_buf(),
+            db_path: dir.path().join("join-test.db"),
+            ports: Default::default(),
+        }));
+        let tool = dispatch::ToolWrapper::<super::MeshCreate>(std::marker::PhantomData);
+        for (role, can_mutate) in [("user", false), ("user", true), ("read", true)] {
+            ctx.set_caller(Some(contract::CallerIdentity {
+                user_id: "u-test".into(),
+                username: "tester".into(),
+                role: role.into(),
+                can_mutate,
+            }));
+            let err = tool
+                .run_json(
+                    serde_json::json!({ "action": "join", "addr": "127.0.0.1:1", "token": "t" }),
+                    &ctx,
+                )
+                .await
+                .expect_err("a non-admin caller must not join");
+            assert!(
+                err.to_string().contains("requires role 'admin'"),
+                "{role}: {err}"
+            );
+        }
+    }
+
     #[test]
     fn the_local_peer_ref_carries_this_systems_id() {
         use crate::mesh::fleet_update::Target;
@@ -2407,7 +2469,7 @@ pub fn reconcile_mesh_leaf_identity(
              a reinstall displaced pki/mesh/ into .orca-trash). The CA key is \
              gone, so a trusted leaf cannot be re-minted here; resetting stale \
              membership so the daemon comes up unpaired and can re-pair via \
-             `orca mesh join <inviter>` or an mDNS auto-offer. This should never \
+             `orca mesh join <inviter> --token <t>` or an operator offer. This should never \
              happen while pki/mesh/ is intact."
         );
         db::mesh::wipe_mesh_membership(conn)?;
@@ -2422,7 +2484,7 @@ pub fn reconcile_mesh_leaf_identity(
         "[mesh] mesh leaf drifted from expected format but the mesh CA key is \
          ABSENT on this host — cannot migrate in place. Resetting mesh cert \
          material and mesh membership; daemon will come up unpaired and must \
-         re-pair via `orca mesh join <inviter>` or an mDNS auto-offer. This is \
+         re-pair via `orca mesh join <inviter> --token <t>` or an operator offer. This is \
          a last-resort path and indicates the CA was not present when it \
          should have been."
     );

@@ -248,7 +248,7 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
     drop(conn);
 
     // Notify the inviter so THEIR peer_secure for us flips to true. Without
-    // this the inviter sees mutual=false forever after auto-accept — the
+    // this the inviter sees mutual=false forever after accept — the
     // initial DB write is local-only and roster-sync only carries identity,
     // not trust state.
     if let Err(e) = call_peer(
@@ -284,14 +284,15 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
 /// validates the inviter's pubkey echo against the captured TLS fp, and lands
 /// the resulting offer as an inbound pending row so `orca mesh accept <code>` can
 /// finish the handshake.
-pub async fn cmd_mesh_connect(addr: &str) -> Result<()> {
-    cmd_mesh_join(addr).await
+pub async fn cmd_mesh_connect(addr: &str, token: &str) -> Result<()> {
+    cmd_mesh_join(addr, token).await
 }
 
 /// Thin CLI wrapper over [`mesh_join_core`]: joiner-initiated pairing that dials
-/// the inviter directly (no mDNS) and auto-accepts. Prints a human summary.
-pub async fn cmd_mesh_join(addr: &str) -> Result<()> {
-    let out = mesh_join_core(addr, None, None).await?;
+/// the inviter directly (no mDNS) with an admin-issued join token and accepts.
+/// Prints a human summary.
+pub async fn cmd_mesh_join(addr: &str, token: &str) -> Result<()> {
+    let out = mesh_join_core(addr, None, None, token).await?;
     println!(
         "✓ joined mesh {} via {} ({}, {}:{})",
         out.mesh_id, out.inviter_hostname, out.inviter_peer_id, out.inviter_addr, out.inviter_port
@@ -299,10 +300,11 @@ pub async fn cmd_mesh_join(addr: &str) -> Result<()> {
     Ok(())
 }
 
-/// Core joiner-initiated pairing. Dials the inviter's bootstrap SNI with a TOFU
-/// verifier, sends a signed `mesh/request-offer`, validates the inviter's pubkey
-/// echo against the captured TLS fp, lands the resulting offer as an inbound
-/// pending row, and auto-accepts via the offer-embedded code — returning the
+/// Core joiner-initiated pairing. Dials the inviter's bootstrap SNI requiring the
+/// mesh CA pinned by the join token, verifies the CA's attestation of the
+/// inviter's bootstrap key, then sends a signed `mesh/request-offer` carrying the
+/// token secret over a dial pinned to that key, lands the resulting offer as an inbound
+/// pending row, and accepts via the offer-embedded code — returning the
 /// established membership. Shared by the CLI wrapper and the `system.join` tool so
 /// every surface pairs the same way. `port_override` wins over any port parsed
 /// from `addr` and the mesh-port default.
@@ -310,7 +312,9 @@ pub async fn mesh_join_core(
     addr: &str,
     port_override: Option<u16>,
     expected_fp: Option<&str>,
+    token: &str,
 ) -> Result<crate::mesh::MeshAcceptOutput> {
+    let (secret, ca_pin) = split_join_token(token)?;
     let (host, parsed_port) = utils::pki::parse_peer_addr(addr, mesh_port())?;
     let port = port_override.unwrap_or(parsed_port);
 
@@ -321,16 +325,25 @@ pub async fn mesh_join_core(
     let joiner_hostname = crate::host_identity::machine_id().to_string();
     let joiner_display_name = crate::host_identity::display_hostname().to_string();
 
+    let attest_env = utils::pki::sign_envelope(&signing, &serde_json::json!({}))?;
+    let inviter_fp = attested_inviter_fp(&host, port, attest_env, ca_pin).await?;
+    if let Some(expected) = expected_fp
+        && inviter_fp != expected
+    {
+        bail!("inviter at {host}:{port} presented fp {inviter_fp}, expected {expected}");
+    }
+
     #[derive(serde::Serialize)]
     struct RequestBody<'a> {
         joiner_peer_id: &'a str,
         joiner_hostname: &'a str,
         joiner_pubkey_fp: &'a str,
         joiner_display_name: &'a str,
-        /// Our mesh LISTEN port. The inviter cannot infer this — all it sees is
-        /// our ephemeral TCP source port — so reporting it is what makes us
-        /// dialable afterwards.
+        /// The joiner's mesh LISTEN port. The inviter can't learn it from the
+        /// socket — `peer.port()` there is our ephemeral TCP source port — so
+        /// reporting it is what makes us dialable afterwards.
         joiner_mesh_port: u16,
+        join_token: &'a str,
     }
     let body = RequestBody {
         joiner_peer_id: &joiner_peer_id,
@@ -338,51 +351,19 @@ pub async fn mesh_join_core(
         joiner_pubkey_fp: &joiner_fp,
         joiner_display_name: &joiner_display_name,
         joiner_mesh_port: db::ports::mesh_port(),
+        join_token: secret,
     };
     let env = utils::pki::sign_envelope(&signing, &body)?;
 
-    // TOFU dial — capture the inviter's bootstrap fp; we'll cross-check it
-    // against the signed echo below before persisting anything.
-    let captured: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
-    let verifier = utils::pki::capturing_bootstrap_verifier(captured.clone());
-    let client_config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
-    let connector = TlsConnector::from(Arc::new(client_config));
-    let target = format!("{host}:{port}");
-    let tcp = TcpStream::connect(&target)
-        .await
-        .with_context(|| format!("connect {target}"))?;
-    let sni = ServerName::try_from(utils::pki::MESH_BOOTSTRAP_SAN)?.to_owned();
-    let mut tls = connector
-        .connect(sni, tcp)
-        .await
-        .context("bootstrap TLS handshake (is the inviter's daemon running?)")?;
-    if let Some(expected) = expected_fp {
-        let presented = captured
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
-            .context("TLS verifier did not capture a server cert fp")?;
-        if presented != expected {
-            bail!("inviter at {target} presented fp {presented}, expected {expected}");
-        }
-    }
-
-    write_frame(
-        &mut tls,
-        &serde_json::to_vec(&Request::new(
-            1,
-            "mesh/request-offer",
-            Some(serde_json::to_value(&env)?),
-        ))?,
+    let resp_value = dial_bootstrap(
+        &host,
+        port,
+        &inviter_fp,
+        "mesh/request-offer",
+        serde_json::to_value(&env)?,
     )
-    .await?;
-    let raw = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut tls))
-        .await
-        .context("mesh/request-offer timed out (inviter unreachable or wrong port?)")??;
-    let resp_value = parse_resp(&raw)?;
+    .await
+    .context("mesh/request-offer")?;
 
     #[derive(serde::Deserialize)]
     struct Resp {
@@ -405,19 +386,14 @@ pub async fn mesh_join_core(
     }
     let r: Resp = serde_json::from_value(resp_value)?;
 
-    // The signed response says "I'm fp X". The TOFU TLS layer captured "this
-    // cert has fp Y". X must equal Y, otherwise we're talking to a MITM that
-    // presented its own cert and forwarded the envelope along.
-    let observed_fp = captured
-        .lock()
-        .ok()
-        .and_then(|g| g.clone())
-        .context("TLS verifier did not capture a server cert fp")?;
-    if observed_fp != r.inviter_pubkey_fp {
+    if inviter_fp != r.inviter_pubkey_fp {
         bail!(
-            "TOFU fp mismatch: TLS cert fp {observed_fp} != signed response fp {} (possible MITM)",
+            "inviter fp mismatch: TLS cert fp {inviter_fp} != signed response fp {} (possible MITM)",
             r.inviter_pubkey_fp
         );
+    }
+    if utils::pki::mesh_ca_pin(&r.mesh_ca_cert_pem)? != ca_pin {
+        bail!("inviter offered a mesh CA that does not match the join token");
     }
 
     let label = r
@@ -469,13 +445,9 @@ pub async fn mesh_join_core(
         r.inviter_peer_id, r.inviter_pubkey_fp
     );
 
-    // S1 auto-accept: the inviter embeds `code_plain` in the request-offer
-    // response on joiner-initiated handshakes. Security unchanged — the
-    // TOFU pubkey pin + signed envelope already authenticated this exchange,
-    // and the code's only purpose was operator transcription. Skip straight
-    // to `orca mesh accept <code>` so one command finishes the join.
+    // The inviter only embeds `code_plain` after consuming our join token.
     if let Some(code) = r.code_plain.as_deref() {
-        println!("  auto-accepting via offer-embedded code…");
+        println!("  accepting via offer-embedded code…");
         return crate::mesh::exec::accept(code).await;
     }
 
@@ -1083,8 +1055,96 @@ async fn dial_mesh_mtls(
         .with_context(|| format!("mesh exchange with {target} timed out"))?
 }
 
+pub fn resolve_join_token(arg: Option<&str>) -> Result<String> {
+    resolve_join_token_from(
+        arg,
+        std::env::var("ORCA_JOIN_TOKEN").ok(),
+        std::io::stdin().lock(),
+    )
+}
+
+fn resolve_join_token_from(
+    arg: Option<&str>,
+    env: Option<String>,
+    mut stdin: impl std::io::BufRead,
+) -> Result<String> {
+    let token = match arg {
+        Some("-") => {
+            let mut line = String::new();
+            stdin
+                .read_line(&mut line)
+                .context("read join token from stdin")?;
+            line
+        }
+        Some(t) => t.to_string(),
+        None => env.unwrap_or_default(),
+    };
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        bail!(
+            "joining requires a join token — run `orca mesh token` on an admin host of the mesh, then pass `--token <token>`, `--token -` (stdin), or set ORCA_JOIN_TOKEN"
+        );
+    }
+    Ok(token)
+}
+
+fn split_join_token(token: &str) -> Result<(&str, &str)> {
+    let token = token.trim();
+    if token.is_empty() {
+        bail!(
+            "joining requires a join token — run `orca mesh token` on an admin host of the mesh, then pass `--token <token>`"
+        );
+    }
+    match token.rsplit_once('.') {
+        Some((secret, pin))
+            if !secret.is_empty()
+                && pin.len() == 64
+                && pin.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            Ok((secret, pin))
+        }
+        _ => bail!(
+            "malformed join token — expected `<secret>.<mesh CA sha256>` from `orca mesh token`"
+        ),
+    }
+}
+
+async fn attested_inviter_fp(
+    host: &str,
+    port: u16,
+    env: utils::pki::SignedEnvelope,
+    ca_pin: &str,
+) -> Result<String> {
+    let captured: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let verifier =
+        utils::pki::ca_pinned_capturing_bootstrap_verifier(captured.clone(), ca_pin.to_string());
+    let value = dial_bootstrap_with(
+        host,
+        port,
+        verifier,
+        crate::mesh::bootstrap::MESH_CA_ATTEST_METHOD,
+        serde_json::to_value(&env)?,
+    )
+    .await?;
+    let attest: crate::mesh::bootstrap::CaAttestResult = serde_json::from_value(value)?;
+    if utils::pki::mesh_ca_pin(&attest.mesh_ca_cert_pem)? != ca_pin {
+        bail!("inviter's mesh CA does not match the join token");
+    }
+    let fp = captured
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .context("TLS verifier did not capture a server cert fp")?;
+    utils::pki::verify_bootstrap_attestation(
+        &attest.mesh_ca_cert_pem,
+        &fp,
+        &attest.attestation_b64,
+    )?;
+    Ok(fp)
+}
+
 /// Dial a peer over the bootstrap SNI with a pinned pubkey. Used by `mesh
-/// accept` (join-confirm) and by the auto-offer scheduler (offer push).
+/// accept` (join-confirm) and by the operator offer push.
 async fn dial_bootstrap(
     host: &str,
     port: u16,
@@ -1093,6 +1153,16 @@ async fn dial_bootstrap(
     params: serde_json::Value,
 ) -> Result<serde_json::Value> {
     let verifier = utils::pki::pinned_bootstrap_verifier(pinned_fp.to_string());
+    dial_bootstrap_with(host, port, verifier, method, params).await
+}
+
+async fn dial_bootstrap_with(
+    host: &str,
+    port: u16,
+    verifier: Arc<dyn rustls::client::danger::ServerCertVerifier>,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value> {
     let client_config = ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
@@ -2057,7 +2127,15 @@ mod tests {
 
     #[tokio::test]
     async fn mesh_join_core_rejects_empty_addr() {
-        let err = mesh_join_core("", None, None).await.err().unwrap();
+        let err = mesh_join_core(
+            "",
+            None,
+            None,
+            "s.0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .await
+        .err()
+        .unwrap();
         assert!(
             format!("{err:#}").contains("empty peer address"),
             "got: {err:#}"
@@ -2065,13 +2143,171 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mesh_join_core_rejects_invalid_port() {
-        // `host:99999` overflows u16 → the `invalid port` parse error fires
-        // before any key material is generated.
-        let err = mesh_join_core("host-x:99999", None, None)
+    async fn mesh_join_core_refuses_without_token() {
+        let err = mesh_join_core("127.0.0.1", Some(1), None, " ")
             .await
             .err()
             .unwrap();
+        assert!(
+            format!("{err:#}").contains("requires a join token"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn join_token_resolves_from_argv_stdin_or_env() {
+        let none = std::io::empty();
+        assert_eq!(
+            resolve_join_token_from(Some("argv"), Some("env".into()), none).unwrap(),
+            "argv"
+        );
+        assert_eq!(
+            resolve_join_token_from(Some("-"), Some("env".into()), &b"piped\n"[..]).unwrap(),
+            "piped"
+        );
+        assert_eq!(
+            resolve_join_token_from(None, Some(" env \n".into()), std::io::empty()).unwrap(),
+            "env"
+        );
+        for err in [
+            resolve_join_token_from(None, None, std::io::empty()),
+            resolve_join_token_from(Some("-"), None, &b"\n"[..]),
+        ] {
+            assert!(format!("{:#}", err.unwrap_err()).contains("ORCA_JOIN_TOKEN"),);
+        }
+    }
+
+    #[tokio::test]
+    async fn mesh_join_core_refuses_a_token_without_a_ca_pin() {
+        for token in [
+            "secret",
+            "secret.abc",
+            ".0000000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            let err = mesh_join_core("127.0.0.1", Some(1), None, token)
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                format!("{err:#}").contains("malformed join token"),
+                "{token}: {err:#}"
+            );
+        }
+    }
+
+    async fn serve_fake_inviter(
+        pki: std::path::PathBuf,
+    ) -> (u16, Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>) {
+        let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = frames.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut tls) = acceptor.accept(tcp).await else {
+                    continue;
+                };
+                let Ok(raw) = read_frame(&mut tls).await else {
+                    continue;
+                };
+                let req: Request = serde_json::from_slice(&raw).unwrap();
+                let env: utils::pki::SignedEnvelope =
+                    serde_json::from_value(req.params.clone().unwrap()).unwrap();
+                let payload: serde_json::Value = serde_json::from_str(&env.payload).unwrap();
+                seen.lock().unwrap().push((req.method.clone(), payload));
+                let resp = if req.method == crate::mesh::bootstrap::MESH_CA_ATTEST_METHOD {
+                    let key = utils::pki::load_or_init_bootstrap_key(&pki).unwrap();
+                    let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+                    Response::ok(
+                        req.id,
+                        serde_json::json!({
+                            "mesh_ca_cert_pem": std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki)).unwrap(),
+                            "attestation_b64": utils::pki::attest_bootstrap_fp(&pki, &fp).unwrap(),
+                        }),
+                    )
+                } else {
+                    Response::err(
+                        req.id,
+                        utils::jsonrpc::ErrorObject::internal("stop after request-offer"),
+                    )
+                };
+                write_frame(&mut tls, &serde_json::to_vec(&resp).unwrap())
+                    .await
+                    .unwrap();
+            }
+        });
+        (port, frames)
+    }
+
+    #[serial_test::serial(env)]
+    #[tokio::test]
+    async fn mesh_join_core_refuses_a_mismatched_ca_before_any_frame() {
+        drop(rustls::crypto::ring::default_provider().install_default());
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        drop(crate::host_identity::init(home.path()));
+        let inviter = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(inviter.path(), "inviter-host").unwrap();
+        let (port, frames) = serve_fake_inviter(inviter.path().to_path_buf()).await;
+        let token = format!("secret-1.{}", "ab".repeat(32));
+        let err = mesh_join_core("127.0.0.1", Some(port), None, &token)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            format!("{err:#}").contains("does not match the join token"),
+            "got: {err:#}"
+        );
+        assert!(frames.lock().unwrap().is_empty());
+    }
+
+    #[serial_test::serial(env)]
+    #[tokio::test]
+    async fn mesh_join_core_with_the_pinned_ca_sends_only_the_secret() {
+        drop(rustls::crypto::ring::default_provider().install_default());
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        drop(crate::host_identity::init(home.path()));
+        let inviter = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(inviter.path(), "inviter-host").unwrap();
+        let ca_pem =
+            std::fs::read_to_string(utils::pki::mesh_ca_cert_path(inviter.path())).unwrap();
+        let (port, frames) = serve_fake_inviter(inviter.path().to_path_buf()).await;
+        let token = format!("secret-2.{}", utils::pki::mesh_ca_pin(&ca_pem).unwrap());
+        let err = mesh_join_core("127.0.0.1", Some(port), None, &token)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            format!("{err:#}").contains("stop after request-offer"),
+            "got: {err:#}"
+        );
+        let frames = frames.lock().unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].0, crate::mesh::bootstrap::MESH_CA_ATTEST_METHOD);
+        assert_eq!(frames[1].0, "mesh/request-offer");
+        assert_eq!(frames[1].1["join_token"], "secret-2");
+    }
+
+    #[tokio::test]
+    async fn mesh_join_core_rejects_invalid_port() {
+        // `host:99999` overflows u16 → the `invalid port` parse error fires
+        // before any key material is generated.
+        let err = mesh_join_core(
+            "host-x:99999",
+            None,
+            None,
+            "s.0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .await
+        .err()
+        .unwrap();
         assert!(format!("{err:#}").contains("invalid port"), "got: {err:#}");
     }
 
@@ -2090,10 +2326,15 @@ mod tests {
         let _home = set_home(home.path());
         // machine_id() (called before the dial) requires a one-time global init.
         drop(crate::host_identity::init(home.path()));
-        let err = mesh_join_core("127.0.0.1", Some(1), None)
-            .await
-            .err()
-            .unwrap();
+        let err = mesh_join_core(
+            "127.0.0.1",
+            Some(1),
+            None,
+            "s.0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .await
+        .err()
+        .unwrap();
         assert!(
             format!("{err:#}").contains("connect 127.0.0.1:1"),
             "got: {err:#}"
@@ -2108,7 +2349,12 @@ mod tests {
         let _home = set_home(home.path());
         drop(crate::host_identity::init(home.path()));
         // Delegates through cmd_mesh_join → mesh_join_core; port 1 parsed from addr.
-        let err = cmd_mesh_connect("127.0.0.1:1").await.unwrap_err();
+        let err = cmd_mesh_connect(
+            "127.0.0.1:1",
+            "s.0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("connect 127.0.0.1:1"),
             "got: {err:#}"
@@ -2122,7 +2368,12 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
         drop(crate::host_identity::init(home.path()));
-        let err = cmd_mesh_join("127.0.0.1:1").await.unwrap_err();
+        let err = cmd_mesh_join(
+            "127.0.0.1:1",
+            "s.0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("connect 127.0.0.1:1"),
             "got: {err:#}"
@@ -2178,36 +2429,24 @@ mod tests {
         let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
-        crate::host_identity::init(home.path()).unwrap();
-        let tmp = tmp_db();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let pki = pki_dir();
-            let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let server = tokio::spawn(async move {
-                let mut frames = 0;
-                if let Ok(Ok((tcp, _))) =
-                    tokio::time::timeout(Duration::from_secs(2), listener.accept()).await
-                    && let Ok(mut tls) = acceptor.accept(tcp).await
-                {
-                    while read_frame(&mut tls).await.is_ok() {
-                        frames += 1;
-                    }
-                }
-                frames
-            });
-            let err = mesh_join_core("127.0.0.1", Some(port), Some("fp-other"))
-                .await
-                .err()
-                .unwrap();
-            assert!(
-                format!("{err:#}").contains("expected fp-other"),
-                "got: {err:#}"
-            );
-            assert_eq!(server.await.unwrap(), 0);
-        })
-        .await;
+        drop(crate::host_identity::init(home.path()));
+        let inviter = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(inviter.path(), "inviter-host").unwrap();
+        let ca_pem =
+            std::fs::read_to_string(utils::pki::mesh_ca_cert_path(inviter.path())).unwrap();
+        let (port, frames) = serve_fake_inviter(inviter.path().to_path_buf()).await;
+        let token = format!("secret-3.{}", utils::pki::mesh_ca_pin(&ca_pem).unwrap());
+        let err = mesh_join_core("127.0.0.1", Some(port), Some("fp-other"), &token)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            format!("{err:#}").contains("expected fp-other"),
+            "got: {err:#}"
+        );
+        let frames = frames.lock().unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, crate::mesh::bootstrap::MESH_CA_ATTEST_METHOD);
     }
 
     #[serial_test::serial(env)]
@@ -2217,33 +2456,24 @@ mod tests {
         let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
-        crate::host_identity::init(home.path()).unwrap();
-        let tmp = tmp_db();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let pki = pki_dir();
-            let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
-            let key = utils::pki::load_or_init_bootstrap_key(&pki).unwrap();
-            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let server = tokio::spawn(async move {
-                if let Ok(Ok((tcp, _))) =
-                    tokio::time::timeout(Duration::from_secs(2), listener.accept()).await
-                    && let Ok(mut tls) = acceptor.accept(tcp).await
-                    && read_frame(&mut tls).await.is_ok()
-                {
-                    return 1;
-                }
-                0
-            });
-            let err = mesh_join_core("127.0.0.1", Some(port), Some(&fp))
-                .await
-                .err()
-                .unwrap();
-            assert!(!format!("{err:#}").contains("presented fp"), "got: {err:#}");
-            assert!(server.await.unwrap() >= 1);
-        })
-        .await;
+        drop(crate::host_identity::init(home.path()));
+        let inviter = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(inviter.path(), "inviter-host").unwrap();
+        let ca_pem =
+            std::fs::read_to_string(utils::pki::mesh_ca_cert_path(inviter.path())).unwrap();
+        let key = utils::pki::load_or_init_bootstrap_key(inviter.path()).unwrap();
+        let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+        let (port, frames) = serve_fake_inviter(inviter.path().to_path_buf()).await;
+        let token = format!("secret-3.{}", utils::pki::mesh_ca_pin(&ca_pem).unwrap());
+        let err = mesh_join_core("127.0.0.1", Some(port), Some(&fp), &token)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            format!("{err:#}").contains("stop after request-offer"),
+            "got: {err:#}"
+        );
+        assert_eq!(frames.lock().unwrap().len(), 2);
     }
 
     #[serial_test::serial(env)]

@@ -1081,7 +1081,7 @@ async fn spawn_mesh_runtime(pki_dir: &std::path::Path) {
     }
 
     std::mem::drop(system::mesh::scheduler::spawn());
-    info!("[mesh] auto-offer scheduler armed");
+    info!("[mesh] scheduler armed");
 
     // Background liveness refresher: keeps the mesh roster's reachability/version
     // warm off the read path so `system.list` never dials inline (the 3+s regression).

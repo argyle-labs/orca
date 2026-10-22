@@ -1,7 +1,7 @@
 use crate::mesh::{
-    MeshAcceptOutput, MeshCertStatusOutput, MeshDiscoveryRowDto, MeshExecDispatch, MeshLeaveOutput,
-    MeshOfferOutput, MeshPeerDto, MeshPendingOfferDto, MeshPingOutput, MeshTrustOutput, Route,
-    Routes,
+    MeshAcceptOutput, MeshCertStatusOutput, MeshDiscoveryRowDto, MeshExecDispatch,
+    MeshJoinTokenOutput, MeshLeaveOutput, MeshOfferOutput, MeshPeerDto, MeshPendingOfferDto,
+    MeshPingOutput, MeshTrustOutput, Route, Routes,
 };
 use crate::update_state::read_channel_marker;
 use anyhow::{Context, Result};
@@ -493,7 +493,7 @@ pub fn cancel_offer(addr: &str, pubkey_fp: Option<&str>) -> Result<u32> {
 }
 
 /// Joiner-initiated pairing: dial the inviter directly (no mDNS), request an
-/// offer, and auto-accept — returning the established membership. Delegates to
+/// offer with an admin-issued join token, and accept — returning the established membership. Delegates to
 /// [`crate::mesh::cli::mesh_join_core`], the single implementation shared with the CLI
 /// so every surface (CLI / MCP / REST) pairs identically. `port` overrides any
 /// port embedded in `inviter_addr`.
@@ -501,8 +501,29 @@ pub async fn join(
     inviter_addr: &str,
     port: Option<u16>,
     pubkey_fp: Option<&str>,
+    token: &str,
 ) -> Result<MeshAcceptOutput> {
-    crate::mesh::cli::mesh_join_core(inviter_addr, port, pubkey_fp).await
+    crate::mesh::cli::mesh_join_core(inviter_addr, port, pubkey_fp, token).await
+}
+
+pub fn issue_join_token() -> Result<MeshJoinTokenOutput> {
+    use rand::Rng;
+    if !utils::pki::has_mesh_ca_key(&pki_dir()) {
+        anyhow::bail!("this host holds no mesh CA key and cannot admit joiners");
+    }
+    let ca_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_dir()))
+        .context("read mesh CA cert")?;
+    let ca_pin = utils::pki::mesh_ca_pin(&ca_pem)?;
+    let mut buf = [0u8; 32];
+    rand::rng().fill_bytes(&mut buf);
+    let secret = utils::hash::hex_encode(&buf);
+    let expires_at = db::pool::with_pooled_or_open(|conn| {
+        pdb::insert_join_token(conn, &secret, OFFER_TTL_SECS)
+    })?;
+    Ok(MeshJoinTokenOutput {
+        token: format!("{secret}.{ca_pin}"),
+        expires_at,
+    })
 }
 
 /// Kick a peer: drop its rows locally and send a one-way "you've been removed"
