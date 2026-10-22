@@ -511,27 +511,29 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
 
     fn verify_tls12_signature(
         &self,
-        _: &[u8],
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &signature_algorithms())
     }
 
     fn verify_tls13_signature(
         &self,
-        _: &[u8],
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &signature_algorithms())
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::CryptoProvider::get_default()
-            .map(|p| p.signature_verification_algorithms.supported_schemes())
-            .unwrap_or_default()
+        signature_algorithms().supported_schemes()
     }
+}
+
+fn signature_algorithms() -> rustls::crypto::WebPkiSupportedAlgorithms {
+    rustls::crypto::ring::default_provider().signature_verification_algorithms
 }
 
 /// Own one socket: run commands, queue inbound data. Pings are answered by
@@ -626,10 +628,17 @@ mod tests {
     /// WebSocket server on loopback accepting any number of connections. The
     /// receiver yields the close code each client sent, if any.
     fn serve(peer: Peer, tls: bool) -> (String, std::sync::mpsc::Receiver<Option<u16>>) {
+        serve_with(peer, tls.then(|| tls_acceptor(false)))
+    }
+
+    fn serve_with(
+        peer: Peer,
+        acceptor: Option<tokio_rustls::TlsAcceptor>,
+    ) -> (String, std::sync::mpsc::Receiver<Option<u16>>) {
+        let tls = acceptor.is_some();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
-        let acceptor = tls.then(tls_acceptor);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -664,15 +673,35 @@ mod tests {
         serve(peer, false)
     }
 
-    fn tls_acceptor() -> tokio_rustls::TlsAcceptor {
+    #[derive(Debug)]
+    struct FixedCert(Arc<rustls::sign::CertifiedKey>);
+
+    impl rustls::server::ResolvesServerCert for FixedCert {
+        fn resolve(
+            &self,
+            _: rustls::server::ClientHello<'_>,
+        ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn tls_acceptor(impostor: bool) -> tokio_rustls::TlsAcceptor {
         utils::http::ensure_crypto_provider();
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let key =
-            rustls::pki_types::PrivateKeyDer::try_from(cert.signing_key.serialize_der()).unwrap();
+        let signing_key = if impostor {
+            rcgen::KeyPair::generate().unwrap()
+        } else {
+            cert.signing_key
+        };
+        let key = rustls::pki_types::PrivateKeyDer::try_from(signing_key.serialize_der()).unwrap();
+        let signer = rustls::crypto::ring::default_provider()
+            .key_provider
+            .load_private_key(key)
+            .unwrap();
+        let ck = rustls::sign::CertifiedKey::new(vec![cert.cert.der().clone()], signer);
         let config = rustls::ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(vec![cert.cert.der().clone()], key)
-            .unwrap();
+            .with_cert_resolver(Arc::new(FixedCert(Arc::new(ck))));
         tokio_rustls::TlsAcceptor::from(Arc::new(config))
     }
 
@@ -1105,6 +1134,19 @@ mod tests {
         if let Err(e) = reply {
             assert!(!e.to_string().contains("set by the host"), "got: {e}");
         }
+    }
+
+    #[test]
+    fn wss_insecure_refuses_a_server_without_the_cert_private_key() {
+        let (url, _closed) = serve_with(Peer::Echo, Some(tls_acceptor(true)));
+        let err = handle_cap(
+            "ws.open",
+            json!({"url": url, "insecure": true}),
+            "ws-tls-impostor",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("TLS handshake"), "got: {err}");
     }
 
     #[test]

@@ -399,15 +399,21 @@ pub fn pending() -> Result<Vec<MeshPendingOfferDto>> {
         .collect())
 }
 
-pub async fn offer(addr: &str, port: Option<u16>) -> Result<MeshOfferOutput> {
+pub async fn offer(
+    addr: &str,
+    port: Option<u16>,
+    pubkey_fp: Option<&str>,
+) -> Result<MeshOfferOutput> {
     let port = port.unwrap_or_else(mesh_port);
 
-    // Look up the joiner in the discovery table by addr.
     let (d, mesh_id, code, offer_id, now) = db::pool::with_pooled_or_open(|conn| {
         let discovery = pdb::list_discovery(conn)?;
         let d = discovery
             .into_iter()
-            .find(|r| r.addr == addr || format!("{}:{}", r.addr, r.port) == addr)
+            .find(|r| match pubkey_fp {
+                Some(fp) => r.pubkey_fp == fp,
+                None => r.addr == addr || format!("{}:{}", r.addr, r.port) == addr,
+            })
             .with_context(|| {
                 format!("{addr} not found in mesh_discovery — is the joiner visible via mDNS?")
             })?;
@@ -1641,7 +1647,7 @@ mod tests {
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             // Empty discovery table → the pre-dial lookup fails before any push.
-            let err = match offer("203.0.113.9", None).await {
+            let err = match offer("203.0.113.9", None, None).await {
                 Ok(_) => panic!("expected offer to fail on empty discovery table"),
                 Err(e) => e,
             };

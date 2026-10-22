@@ -387,13 +387,79 @@ pub struct MeshSnapshotOutput {
     pub cluster_membership: std::collections::BTreeMap<String, String>,
 }
 
+const DISCOVERY_TTL_SECS: i64 = 900;
+
 fn find_discovered<'a>(
     rows: &'a [::db::mesh::DiscoveryRow],
     id: &str,
-) -> Option<&'a ::db::mesh::DiscoveryRow> {
-    rows.iter().find(|r| {
-        r.peer_id.as_deref().filter(|p| !p.is_empty()) == Some(id)
-            || candidate_id(&r.pubkey_fp) == id
+    pinned_fp: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<&'a ::db::mesh::DiscoveryRow> {
+    if let Some(row) = rows.iter().find(|r| candidate_id(&r.pubkey_fp) == id) {
+        return Ok(row);
+    }
+    let claimants: Vec<&::db::mesh::DiscoveryRow> = rows
+        .iter()
+        .filter(|r| r.peer_id.as_deref().filter(|p| !p.is_empty()) == Some(id))
+        .collect();
+    let row = match claimants.as_slice() {
+        [] => anyhow::bail!("no discovered candidate with id {id}"),
+        [row] => *row,
+        many => anyhow::bail!(
+            "id {id} is claimed by {} discovered candidates; refusing to pick one",
+            many.len()
+        ),
+    };
+    if let Some(fp) = pinned_fp(id)
+        && fp != row.pubkey_fp
+    {
+        anyhow::bail!("discovered candidate {id} does not present its trusted pubkey");
+    }
+    Ok(row)
+}
+
+struct CandidateTarget {
+    addr: String,
+    port: Option<u16>,
+    pubkey_fp: Option<String>,
+}
+
+fn resolve_target(
+    action: &str,
+    addr: Option<String>,
+    id: Option<&str>,
+    port: Option<u16>,
+    rows: &[::db::mesh::DiscoveryRow],
+    now_secs: i64,
+    pinned_fp: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<CandidateTarget> {
+    let Some(id) = id else {
+        let addr = addr.ok_or_else(|| {
+            anyhow::anyhow!("system.join action={action} requires `addr` or `id`")
+        })?;
+        return Ok(CandidateTarget {
+            addr,
+            port,
+            pubkey_fp: None,
+        });
+    };
+    let row = find_discovered(rows, id, pinned_fp)?;
+    let age = now_secs - row.last_seen_at;
+    if age > DISCOVERY_TTL_SECS {
+        anyhow::bail!("discovered candidate {id} was last seen {age}s ago; rediscover it first");
+    }
+    if let Some(addr) = addr
+        && addr != row.addr
+        && addr != format!("{}:{}", row.addr, row.port)
+    {
+        anyhow::bail!(
+            "addr {addr} does not match discovered candidate {id} at {}",
+            row.addr
+        );
+    }
+    Ok(CandidateTarget {
+        addr: row.addr.clone(),
+        port: port.or(Some(row.port)),
+        pubkey_fp: Some(row.pubkey_fp.clone()),
     })
 }
 
@@ -402,16 +468,26 @@ fn candidate_target(
     addr: Option<String>,
     id: Option<crate::system_id::SystemId>,
     port: Option<u16>,
-) -> anyhow::Result<(String, Option<u16>)> {
-    if let Some(addr) = addr {
-        return Ok((addr, port));
-    }
-    let id =
-        id.ok_or_else(|| anyhow::anyhow!("system.join action={action} requires `addr` or `id`"))?;
-    let rows = ::db::pool::with_pooled_or_open(::db::mesh::list_discovery)?;
-    let row = find_discovered(&rows, id.as_str())
-        .ok_or_else(|| anyhow::anyhow!("no discovered candidate with id {id}"))?;
-    Ok((row.addr.clone(), port.or(Some(row.port))))
+) -> anyhow::Result<CandidateTarget> {
+    let Some(id) = id else {
+        return resolve_target(action, addr, None, port, &[], 0, |_| None);
+    };
+    ::db::pool::with_pooled_or_open(|conn| {
+        let rows = ::db::mesh::list_discovery(conn)?;
+        resolve_target(
+            action,
+            addr,
+            Some(id.as_str()),
+            port,
+            &rows,
+            utils::time::now_secs_since_epoch(),
+            |peer_id| {
+                ::db::mesh::peerdb::pinned_pubkey_fp(conn, peer_id)
+                    .ok()
+                    .flatten()
+            },
+        )
+    })
 }
 
 fn candidate_id(pubkey_fp: &str) -> String {
@@ -916,7 +992,7 @@ pub struct MeshCreateArgs {
     /// (join) Single-use join token issued by `system.mesh.update --action join_token` on the inviter.
     #[arg(long)]
     pub token: Option<String>,
-    /// (join/offer) Discovered candidate id from `system.list --snapshot`, used in place of `addr`.
+    /// (join/offer) Candidate id from `system.list --snapshot`. With `addr`, the two must name the same candidate.
     #[arg(long)]
     pub id: Option<crate::system_id::SystemId>,
 }
@@ -1625,17 +1701,19 @@ async fn mesh_create(
 ) -> anyhow::Result<MeshCreateOutput> {
     match args.action {
         MeshCreateAction::Join => {
-            let (addr, port) = candidate_target("join", args.addr, args.id, args.port)?;
+            let t = candidate_target("join", args.addr, args.id, args.port)?;
             let token = args
                 .token
                 .ok_or_else(|| anyhow::anyhow!("system.join action=join requires `token`"))?;
             Ok(MeshCreateOutput::Accept(
-                exec::join(&addr, port, &token).await?,
+                exec::join(&t.addr, t.port, &token).await?,
             ))
         }
         MeshCreateAction::Offer => {
-            let (addr, port) = candidate_target("offer", args.addr, args.id, args.port)?;
-            Ok(MeshCreateOutput::Offer(exec::offer(&addr, port).await?))
+            let t = candidate_target("offer", args.addr, args.id, args.port)?;
+            Ok(MeshCreateOutput::Offer(
+                exec::offer(&t.addr, t.port, t.pubkey_fp.as_deref()).await?,
+            ))
         }
         MeshCreateAction::Accept => {
             let code = args
@@ -3367,9 +3445,8 @@ mod mesh_snapshot_tests {
         assert!(stale.is_empty());
     }
 
-    #[test]
-    fn a_discovered_candidate_resolves_by_its_derived_or_announced_id() {
-        let row = |fp: &str, peer_id: Option<&str>, addr: &str| ::db::mesh::DiscoveryRow {
+    fn disc_row(fp: &str, peer_id: Option<&str>, addr: &str) -> ::db::mesh::DiscoveryRow {
+        ::db::mesh::DiscoveryRow {
             pubkey_fp: fp.into(),
             peer_id: peer_id.map(Into::into),
             hostname: "h".into(),
@@ -3379,27 +3456,172 @@ mod mesh_snapshot_tests {
             can_invite: true,
             first_seen_at: 0,
             last_seen_at: 0,
-        };
-        let rows = vec![
-            row("fp", None, "10.0.0.2"),
-            row("fp2", Some(""), "10.0.0.3"),
-            row("fp3", Some("sys-3"), "10.0.0.4"),
-        ];
-        assert_eq!(
-            find_discovered(&rows, &candidate_id("fp")).unwrap().addr,
-            "10.0.0.2"
-        );
-        assert_eq!(
-            find_discovered(&rows, &candidate_id("fp2")).unwrap().addr,
-            "10.0.0.3"
-        );
-        assert_eq!(find_discovered(&rows, "sys-3").unwrap().addr, "10.0.0.4");
-        assert!(find_discovered(&rows, "").is_none());
-        assert!(find_discovered(&rows, "nope").is_none());
+        }
+    }
+
+    fn resolve(
+        addr: Option<&str>,
+        id: &str,
+        port: Option<u16>,
+        rows: &[::db::mesh::DiscoveryRow],
+    ) -> anyhow::Result<CandidateTarget> {
+        resolve_target(
+            "join",
+            addr.map(Into::into),
+            Some(id),
+            port,
+            rows,
+            0,
+            |_| None,
+        )
+    }
+
+    #[test]
+    fn candidate_id_parses_as_a_system_id() {
         assert!(
             candidate_id("fp")
                 .parse::<crate::system_id::SystemId>()
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_discovered_candidate_resolves_by_its_derived_or_announced_id() {
+        let rows = vec![
+            disc_row("fp", None, "10.0.0.2"),
+            disc_row("fp2", Some(""), "10.0.0.3"),
+            disc_row("fp3", Some("sys-3"), "10.0.0.4"),
+        ];
+        let none = |_: &str| None;
+        assert_eq!(
+            find_discovered(&rows, &candidate_id("fp"), none)
+                .unwrap()
+                .addr,
+            "10.0.0.2"
+        );
+        assert_eq!(
+            find_discovered(&rows, &candidate_id("fp2"), none)
+                .unwrap()
+                .addr,
+            "10.0.0.3"
+        );
+        assert_eq!(
+            find_discovered(&rows, "sys-3", none).unwrap().addr,
+            "10.0.0.4"
+        );
+        assert!(find_discovered(&rows, "", none).is_err());
+        assert!(find_discovered(&rows, "nope", none).is_err());
+    }
+
+    #[test]
+    fn a_known_member_with_a_different_pinned_fp_is_refused() {
+        let rows = vec![disc_row("fp3", Some("sys-3"), "10.0.0.4")];
+        let err = find_discovered(&rows, "sys-3", |_| Some("other".into())).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "discovered candidate sys-3 does not present its trusted pubkey"
+        );
+        assert!(find_discovered(&rows, "sys-3", |_| Some("fp3".into())).is_ok());
+    }
+
+    #[test]
+    fn candidate_target_accepts_a_matching_explicit_addr() {
+        let rows = vec![disc_row("fp", None, "10.0.0.2")];
+        let id = candidate_id("fp");
+        let t = resolve(Some("10.0.0.2"), &id, None, &rows).unwrap();
+        assert_eq!(t.addr, "10.0.0.2");
+        assert_eq!(t.pubkey_fp.as_deref(), Some("fp"));
+        let t = resolve(Some("10.0.0.2:7777"), &id, None, &rows).unwrap();
+        assert_eq!(t.addr, "10.0.0.2");
+    }
+
+    #[test]
+    fn candidate_target_refuses_a_mismatched_addr() {
+        let rows = vec![disc_row("fp", None, "10.0.0.2")];
+        let id = candidate_id("fp");
+        let err = resolve(Some("10.0.0.9"), &id, None, &rows).err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            format!("addr 10.0.0.9 does not match discovered candidate {id} at 10.0.0.2")
+        );
+    }
+
+    #[test]
+    fn candidate_target_falls_back_to_the_discovered_port() {
+        let rows = vec![disc_row("fp", None, "10.0.0.2")];
+        let id = candidate_id("fp");
+        assert_eq!(resolve(None, &id, None, &rows).unwrap().port, Some(7777));
+        assert_eq!(
+            resolve(None, &id, Some(9000), &rows).unwrap().port,
+            Some(9000)
+        );
+    }
+
+    #[test]
+    fn candidate_target_refuses_an_unknown_id() {
+        let rows = vec![disc_row("fp", None, "10.0.0.2")];
+        let err = resolve(None, "nope", None, &rows).err().unwrap();
+        assert_eq!(err.to_string(), "no discovered candidate with id nope");
+    }
+
+    #[test]
+    fn candidate_target_refuses_a_duplicate_peer_id() {
+        let rows = vec![
+            disc_row("fp", Some("sys-1"), "10.0.0.2"),
+            disc_row("fp2", Some("sys-1"), "10.0.0.3"),
+        ];
+        let err = resolve(None, "sys-1", None, &rows).err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "id sys-1 is claimed by 2 discovered candidates; refusing to pick one"
+        );
+    }
+
+    #[test]
+    fn candidate_target_resolves_rows_sharing_an_addr_by_fp() {
+        let rows = vec![
+            disc_row("fp", None, "10.0.0.2"),
+            disc_row("fp2", None, "10.0.0.2"),
+        ];
+        let t = resolve(None, &candidate_id("fp2"), None, &rows).unwrap();
+        assert_eq!(t.pubkey_fp.as_deref(), Some("fp2"));
+        let t = resolve(None, &candidate_id("fp"), None, &rows).unwrap();
+        assert_eq!(t.pubkey_fp.as_deref(), Some("fp"));
+    }
+
+    #[test]
+    fn candidate_target_refuses_a_stale_row() {
+        let rows = vec![disc_row("fp", None, "10.0.0.2")];
+        let id = candidate_id("fp");
+        let err = resolve_target(
+            "join",
+            None,
+            Some(&id),
+            None,
+            &rows,
+            DISCOVERY_TTL_SECS + 1,
+            |_| None,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "discovered candidate {id} was last seen {}s ago; rediscover it first",
+                DISCOVERY_TTL_SECS + 1
+            )
+        );
+        assert!(
+            resolve_target(
+                "join",
+                None,
+                Some(&id),
+                None,
+                &rows,
+                DISCOVERY_TTL_SECS,
+                |_| None
+            )
+            .is_ok()
         );
     }
 
@@ -4674,7 +4896,7 @@ mod handler_dispatch_tests {
     // ── mesh_create: per-action required-argument guards (pre-I/O) ─────────────
 
     #[tokio::test]
-    async fn mesh_create_join_requires_addr() {
+    async fn mesh_create_join_requires_addr_or_id() {
         let ctx = empty_ctx();
         let err = expect_err(
             mesh_create(
@@ -4686,14 +4908,14 @@ mod handler_dispatch_tests {
             )
             .await,
         );
-        assert!(
-            format!("{err:#}").contains("action=join requires `addr`"),
-            "got: {err:#}"
+        assert_eq!(
+            format!("{err:#}"),
+            "system.join action=join requires `addr` or `id`"
         );
     }
 
     #[tokio::test]
-    async fn mesh_create_offer_requires_addr() {
+    async fn mesh_create_offer_requires_addr_or_id() {
         let ctx = empty_ctx();
         let err = expect_err(
             mesh_create(
@@ -4705,9 +4927,9 @@ mod handler_dispatch_tests {
             )
             .await,
         );
-        assert!(
-            format!("{err:#}").contains("action=offer requires `addr`"),
-            "got: {err:#}"
+        assert_eq!(
+            format!("{err:#}"),
+            "system.join action=offer requires `addr` or `id`"
         );
     }
 
