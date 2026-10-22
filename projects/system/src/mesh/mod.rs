@@ -2765,6 +2765,15 @@ pub async fn dev_disable(host: &str) -> Result<MeshDevDisableResult> {
     .await
 }
 
+const MESH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn connect_tcp(addr: &str, limit: Duration) -> Result<TcpStream> {
+    tokio::time::timeout(limit, TcpStream::connect(addr))
+        .await
+        .map_err(|_| anyhow::anyhow!("connect {addr} timed out after {}s", limit.as_secs()))?
+        .with_context(|| format!("connect {addr}"))
+}
+
 /// Open a fresh mTLS client connection to a peer's mesh channel. Used by
 /// both one-shot `call_typed` and long-lived streaming dials
 /// (`subscribe_client`). The caller owns the returned stream.
@@ -2789,9 +2798,7 @@ pub(crate) async fn connect_mesh_tls(
         let connector = connector.clone();
         let addr = addr.clone();
         async move {
-            let tcp = TcpStream::connect(&addr)
-                .await
-                .with_context(|| format!("connect {addr}"))?;
+            let tcp = connect_tcp(&addr, MESH_CONNECT_TIMEOUT).await?;
             let sni = ServerName::try_from(name)
                 .context("build SNI ServerName")?
                 .to_owned();
@@ -3008,6 +3015,39 @@ where
 #[cfg(test)]
 mod mesh_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn connect_tcp_reaches_a_listening_peer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        connect_tcp(&addr, Duration::from_secs(5)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_tcp_names_the_address_and_os_cause_on_refusal() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let err = connect_tcp(&addr, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.starts_with(&format!("connect {addr}: ")), "{msg}");
+        assert!(msg.contains("os error"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn connect_tcp_times_out_with_a_clear_error() {
+        let err = connect_tcp("192.0.2.1:7443", Duration::ZERO)
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg == "connect 192.0.2.1:7443 timed out after 0s"
+                || msg.starts_with("connect 192.0.2.1:7443: "),
+            "{msg}"
+        );
+    }
 
     fn server_leaf_der(host_cn: &str) -> Vec<u8> {
         let dir = tempfile::tempdir().unwrap();
