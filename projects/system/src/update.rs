@@ -467,6 +467,24 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
 
 pub const CODESIGN_IDENTIFIER: &str = "com.argyle-labs.orca";
 
+pub fn codesign_args(identity: Option<&str>) -> Vec<String> {
+    let sign = identity.filter(|i| !i.is_empty()).unwrap_or("-");
+    let mut args: Vec<String> = [
+        "--force",
+        "--sign",
+        sign,
+        "--identifier",
+        CODESIGN_IDENTIFIER,
+        "--timestamp=none",
+    ]
+    .map(String::from)
+    .into();
+    if sign != "-" {
+        args.extend(["--options", "runtime"].map(String::from));
+    }
+    args
+}
+
 /// Swap the running binary with `bytes` and schedule a supervisor restart.
 ///
 /// Caller is responsible for any pre-swap integrity check on `bytes`
@@ -539,13 +557,9 @@ pub fn apply_binary(bytes: &[u8], version: &str) -> Result<()> {
             .is_ok_and(|s| s.success());
         if !signed {
             let codesign_status = std::process::Command::new("codesign")
-                .args([
-                    "--force",
-                    "--sign",
-                    "-",
-                    "--identifier",
-                    CODESIGN_IDENTIFIER,
-                ])
+                .args(codesign_args(
+                    std::env::var("ORCA_CODESIGN_IDENTITY").ok().as_deref(),
+                ))
                 .arg(&current)
                 .status()
                 .context("invoking codesign")?;
@@ -1145,6 +1159,47 @@ pub fn write_cached_sha256(version: &str, body: &[u8]) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codesign_args_ad_hoc_when_identity_unset() {
+        let args = super::codesign_args(None);
+        assert_eq!(
+            args,
+            [
+                "--force",
+                "--sign",
+                "-",
+                "--identifier",
+                "com.argyle-labs.orca",
+                "--timestamp=none"
+            ]
+        );
+    }
+
+    #[test]
+    fn codesign_args_ad_hoc_when_identity_empty() {
+        let args = super::codesign_args(Some(""));
+        assert_eq!(args[2], "-");
+        assert!(!args.contains(&"runtime".to_string()));
+    }
+
+    #[test]
+    fn codesign_args_uses_identity_with_stable_identifier() {
+        let args = super::codesign_args(Some("Argyle Labs orca Code Signing"));
+        assert_eq!(
+            args,
+            [
+                "--force",
+                "--sign",
+                "Argyle Labs orca Code Signing",
+                "--identifier",
+                "com.argyle-labs.orca",
+                "--timestamp=none",
+                "--options",
+                "runtime"
+            ]
+        );
+    }
+
     use super::*;
 
     // Guards the MCP-drops-on-every-update regression: `launchctl kickstart -k`

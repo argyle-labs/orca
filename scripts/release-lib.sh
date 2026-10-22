@@ -116,12 +116,13 @@ log() { echo "→ $*"; }
 
 ORCA_CODESIGN_IDENTIFIER="com.argyle-labs.orca"
 
-# Sign with ORCA_CODESIGN_IDENTITY (a Developer ID) when set, else ad-hoc. The
-# fixed identifier keeps the signing identity stable across builds.
+# Sign with ORCA_CODESIGN_IDENTITY when set, else ad-hoc. The fixed identifier
+# and identity keep the TCC designated requirement stable across updates.
 codesign_orca() {
   local identity="${ORCA_CODESIGN_IDENTITY:--}"
-  local args=(--force --sign "$identity" --identifier "$ORCA_CODESIGN_IDENTIFIER")
-  [ "$identity" = "-" ] || args+=(--options runtime --timestamp)
+  local args=(--force --sign "$identity" --identifier "$ORCA_CODESIGN_IDENTIFIER" --timestamp=none)
+  [ "$identity" = "-" ] || args+=(--options runtime)
+  [ -z "${ORCA_CODESIGN_KEYCHAIN:-}" ] || args+=(--keychain "$ORCA_CODESIGN_KEYCHAIN")
   codesign "${args[@]}" "$1"
 }
 
