@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Bind the mesh listener and spawn its accept loop. Returns the spawned
 /// task's `JoinHandle` so the caller can park it for the daemon's lifetime
@@ -89,19 +89,24 @@ async fn serve(
             let tls = match acceptor.accept(tcp).await {
                 Ok(s) => s,
                 Err(e) => {
-                    // This was `"mesh TLS accept failed: {e}"` with no peer and
-                    // no id — unactionable, and it fired in bursts while the
-                    // fleet advertised dead ephemeral ports. The peer address is
-                    // the one field that makes it diagnosable, and it was in
-                    // scope the whole time.
-                    warn!(
-                        conn_id = %conn_id,
-                        peer_addr = %peer,
-                        peer_ip = %peer.ip(),
-                        peer_port = peer.port(),
-                        error = %format!("{e:#}"),
-                        "[mesh] TLS accept failed"
-                    );
+                    let error = format!("{e:#}");
+                    if is_loopback_peer(&peer) {
+                        debug!(
+                            conn_id = %conn_id,
+                            peer_addr = %peer,
+                            error = %error,
+                            "[mesh] TLS accept failed"
+                        );
+                    } else {
+                        warn!(
+                            conn_id = %conn_id,
+                            peer_addr = %peer,
+                            peer_ip = %peer.ip(),
+                            peer_port = peer.port(),
+                            error = %error,
+                            "[mesh] TLS accept failed"
+                        );
+                    }
                     return;
                 }
             };
@@ -140,6 +145,10 @@ async fn serve(
             warn!("[mesh] {peer} closed connection with unknown SNI: {sni:?}");
         });
     }
+}
+
+fn is_loopback_peer(peer: &std::net::SocketAddr) -> bool {
+    peer.ip().to_canonical().is_loopback()
 }
 
 fn extract_peer_cn(tls: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> Result<String> {
@@ -397,6 +406,16 @@ mod tests {
     use tokio::io::AsyncWriteExt;
     use tokio_util::sync::CancellationToken;
     use tokio_util::task::TaskTracker;
+
+    #[test]
+    fn loopback_peers_are_classified_loopback() {
+        for addr in ["127.0.0.1:1", "[::1]:1", "[::ffff:127.0.0.1]:1"] {
+            assert!(is_loopback_peer(&addr.parse().unwrap()), "{addr}");
+        }
+        for addr in ["10.0.0.5:1", "[fe80::1]:1", "[::ffff:10.0.0.5]:1"] {
+            assert!(!is_loopback_peer(&addr.parse().unwrap()), "{addr}");
+        }
+    }
 
     /// An accepted-but-not-yet-handshaked connection is registered on the
     /// tracker, so `drain` waits for it instead of letting it be aborted: the
