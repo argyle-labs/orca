@@ -408,22 +408,24 @@ pub async fn offer(
 
     let (d, mesh_id, code, offer_id, now) = db::pool::with_pooled_or_open(|conn| {
         let discovery = pdb::list_discovery(conn)?;
-        let d = discovery
+        let mut matches: Vec<_> = discovery
             .into_iter()
-            .find(|r| match pubkey_fp {
+            .filter(|r| match pubkey_fp {
                 Some(fp) => r.pubkey_fp == fp,
                 None => r.addr == addr || format!("{}:{}", r.addr, r.port) == addr,
             })
-            .with_context(|| {
-                format!("{addr} not found in mesh_discovery — is the joiner visible via mDNS?")
-            })?;
+            .collect();
+        if matches.len() > 1 {
+            anyhow::bail!(
+                "{addr} matches {} discovered candidates; pass --id to pick one",
+                matches.len()
+            );
+        }
+        let d = matches.pop().with_context(|| {
+            format!("{addr} not found in mesh_discovery — is the joiner visible via mDNS?")
+        })?;
 
-        // User-driven invites are idempotent: if an outbound offer to this
-        // address is already pending, drop it and mint a fresh one. The
-        // stale-offer guard belongs to the auto-offer scheduler
-        // ([[scheduler.rs:83]]), not to operator-triggered +Add clicks —
-        // the operator's intent is clear: send a NEW invite now.
-        let replaced = pdb::delete_outbound_offers_by_addr(conn, &d.addr)?;
+        let replaced = pdb::delete_outbound_offers_by_fp(conn, &d.pubkey_fp)?;
         if replaced > 0 {
             tracing::info!(addr = %d.addr, replaced, "replaced stale outbound offer(s)");
         }
@@ -465,13 +467,29 @@ pub async fn offer(
     })
 }
 
-/// Cancel every outbound pending offer pinned to `addr`. Used by the
+/// Cancel outbound pending offers to one joiner, by `pubkey_fp` when given,
+/// else by `addr` — refused when several joiners share `addr`. Used by the
 /// `mesh.cancel_offer` tool when an operator wants to clear a stuck
 /// pairing handshake without waiting for the TTL. Returns the number of
 /// rows removed (0 if none matched).
-pub fn cancel_offer(addr: &str) -> Result<u32> {
-    let n = db::pool::with_pooled_or_open(|conn| pdb::delete_outbound_offers_by_addr(conn, addr))?;
-    Ok(n)
+pub fn cancel_offer(addr: &str, pubkey_fp: Option<&str>) -> Result<u32> {
+    db::pool::with_pooled_or_open(|conn| {
+        if let Some(fp) = pubkey_fp {
+            return pdb::delete_outbound_offers_by_fp(conn, fp);
+        }
+        let fps: std::collections::BTreeSet<String> = pdb::list_pending_offers(conn, "out")?
+            .into_iter()
+            .filter(|o| o.peer_addr == addr)
+            .map(|o| o.peer_pubkey_fp)
+            .collect();
+        if fps.len() > 1 {
+            anyhow::bail!(
+                "{addr} matches {} pending offers; pass --id to pick one",
+                fps.len()
+            );
+        }
+        pdb::delete_outbound_offers_by_addr(conn, addr)
+    })
 }
 
 /// Joiner-initiated pairing: dial the inviter directly (no mDNS), request an
@@ -479,8 +497,12 @@ pub fn cancel_offer(addr: &str) -> Result<u32> {
 /// [`crate::mesh::cli::mesh_join_core`], the single implementation shared with the CLI
 /// so every surface (CLI / MCP / REST) pairs identically. `port` overrides any
 /// port embedded in `inviter_addr`.
-pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<MeshAcceptOutput> {
-    crate::mesh::cli::mesh_join_core(inviter_addr, port).await
+pub async fn join(
+    inviter_addr: &str,
+    port: Option<u16>,
+    pubkey_fp: Option<&str>,
+) -> Result<MeshAcceptOutput> {
+    crate::mesh::cli::mesh_join_core(inviter_addr, port, pubkey_fp).await
 }
 
 /// Kick a peer: drop its rows locally and send a one-way "you've been removed"
@@ -1619,8 +1641,8 @@ mod tests {
             .unwrap();
             drop(conn);
             // First cancel removes the row; the second is a no-op.
-            assert_eq!(cancel_offer("10.0.0.9").unwrap(), 1);
-            assert_eq!(cancel_offer("10.0.0.9").unwrap(), 0);
+            assert_eq!(cancel_offer("10.0.0.9", None).unwrap(), 1);
+            assert_eq!(cancel_offer("10.0.0.9", None).unwrap(), 0);
         })
         .await;
     }
@@ -1638,6 +1660,118 @@ mod tests {
                 err.to_string().contains("not found in mesh_discovery"),
                 "got: {err:#}"
             );
+        })
+        .await;
+    }
+
+    fn seed_shared_addr(conn: &rusqlite::Connection) {
+        for (fp, host) in [("fp-a", "host-a"), ("fp-b", "host-b")] {
+            pdb::upsert_discovery(
+                conn,
+                fp,
+                None,
+                host,
+                "127.0.0.1",
+                12002,
+                "discovered",
+                false,
+            )
+            .unwrap();
+            pdb::insert_pending_offer(
+                conn,
+                &format!("old-{fp}"),
+                "out",
+                fp,
+                host,
+                "127.0.0.1",
+                12002,
+                "hash",
+                None,
+                None,
+                None,
+                3600,
+                None,
+                &[],
+            )
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn offer_by_fp_picks_its_row_among_a_shared_addr() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            seed_shared_addr(&db::open_default().unwrap());
+            assert!(offer("127.0.0.1", Some(1), Some("fp-b")).await.is_err());
+            let conn = db::open_default().unwrap();
+            let mut out: Vec<_> = pdb::list_pending_offers(&conn, "out")
+                .unwrap()
+                .into_iter()
+                .map(|r| {
+                    (
+                        r.offer_id.starts_with("old-"),
+                        r.peer_pubkey_fp,
+                        r.peer_hostname,
+                    )
+                })
+                .collect();
+            out.sort();
+            assert_eq!(
+                out,
+                vec![
+                    (false, "fp-b".to_string(), "host-b".to_string()),
+                    (true, "fp-a".to_string(), "host-a".to_string()),
+                ]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cancel_offer_by_fp_spares_the_other_joiner_at_a_shared_addr() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            seed_shared_addr(&db::open_default().unwrap());
+            assert_eq!(cancel_offer("127.0.0.1", Some("fp-b")).unwrap(), 1);
+            let conn = db::open_default().unwrap();
+            let left = pdb::list_pending_offers(&conn, "out").unwrap();
+            assert_eq!(left.len(), 1);
+            assert_eq!(left[0].peer_pubkey_fp, "fp-a");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cancel_offer_by_ambiguous_addr_requires_an_id() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            seed_shared_addr(&db::open_default().unwrap());
+            let err = cancel_offer("127.0.0.1", None).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "127.0.0.1 matches 2 pending offers; pass --id to pick one"
+            );
+            let conn = db::open_default().unwrap();
+            assert_eq!(pdb::list_pending_offers(&conn, "out").unwrap().len(), 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn offer_by_ambiguous_addr_requires_an_id() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            seed_shared_addr(&db::open_default().unwrap());
+            let err = match offer("127.0.0.1", Some(1), None).await {
+                Ok(_) => panic!("expected an ambiguous addr to be refused"),
+                Err(e) => e,
+            };
+            assert_eq!(
+                err.to_string(),
+                "127.0.0.1 matches 2 discovered candidates; pass --id to pick one"
+            );
+            let conn = db::open_default().unwrap();
+            assert_eq!(pdb::list_pending_offers(&conn, "out").unwrap().len(), 2);
         })
         .await;
     }
@@ -2217,7 +2351,7 @@ mod tests {
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             // Nothing pinned to this addr → 0 rows removed, not an error.
-            assert_eq!(cancel_offer("198.51.100.1").unwrap(), 0);
+            assert_eq!(cancel_offer("198.51.100.1", None).unwrap(), 0);
         })
         .await;
     }
@@ -2248,7 +2382,7 @@ mod tests {
             .unwrap();
             drop(conn);
             assert_eq!(
-                cancel_offer("10.0.0.42").unwrap(),
+                cancel_offer("10.0.0.42", None).unwrap(),
                 0,
                 "inbound offers are not outbound and must survive cancel_offer"
             );
