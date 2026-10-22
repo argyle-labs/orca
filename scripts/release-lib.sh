@@ -116,8 +116,6 @@ log() { echo "→ $*"; }
 
 ORCA_CODESIGN_IDENTIFIER="wtf.argyle.orca"
 
-# Sign with ORCA_CODESIGN_IDENTITY when set, else ad-hoc. The fixed identifier
-# and identity keep the TCC designated requirement stable across updates.
 codesign_orca() {
   local identity="${ORCA_CODESIGN_IDENTITY:--}"
   local args=(--force --sign "$identity" --identifier "$ORCA_CODESIGN_IDENTIFIER" --timestamp=none)

@@ -485,6 +485,16 @@ pub fn codesign_args(identity: Option<&str>) -> Vec<String> {
     args
 }
 
+pub fn codesign_attempts(identity: Option<&str>) -> Vec<Vec<String>> {
+    let primary = codesign_args(identity);
+    let ad_hoc = codesign_args(None);
+    if primary == ad_hoc {
+        vec![ad_hoc]
+    } else {
+        vec![primary, ad_hoc]
+    }
+}
+
 /// Swap the running binary with `bytes` and schedule a supervisor restart.
 ///
 /// Caller is responsible for any pre-swap integrity check on `bytes`
@@ -556,15 +566,23 @@ pub fn apply_binary(bytes: &[u8], version: &str) -> Result<()> {
             .status()
             .is_ok_and(|s| s.success());
         if !signed {
-            let codesign_status = std::process::Command::new("codesign")
-                .args(codesign_args(
-                    std::env::var("ORCA_CODESIGN_IDENTITY").ok().as_deref(),
-                ))
-                .arg(&current)
-                .status()
-                .context("invoking codesign")?;
-            if !codesign_status.success() {
-                anyhow::bail!("codesign failed with status {codesign_status}");
+            let identity = std::env::var("ORCA_CODESIGN_IDENTITY").ok();
+            let mut last_status = None;
+            for args in codesign_attempts(identity.as_deref()) {
+                let status = std::process::Command::new("codesign")
+                    .args(&args)
+                    .arg(&current)
+                    .status()
+                    .context("invoking codesign")?;
+                if status.success() {
+                    last_status = None;
+                    break;
+                }
+                tracing::warn!(%status, sign = %args[2], "codesign failed");
+                last_status = Some(status);
+            }
+            if let Some(status) = last_status {
+                anyhow::bail!("codesign failed with status {status}");
             }
         }
     }
@@ -1159,6 +1177,8 @@ pub fn write_cached_sha256(version: &str, body: &[u8]) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn codesign_args_ad_hoc_when_identity_unset() {
         let args = super::codesign_args(None);
@@ -1200,7 +1220,20 @@ mod tests {
         );
     }
 
-    use super::*;
+    #[test]
+    fn codesign_attempts_falls_back_to_ad_hoc_keeping_identifier() {
+        let attempts = codesign_attempts(Some("Argyle Labs orca Code Signing"));
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0][2], "Argyle Labs orca Code Signing");
+        assert_eq!(attempts[1], codesign_args(None));
+        assert_eq!(attempts[1][4], CODESIGN_IDENTIFIER);
+    }
+
+    #[test]
+    fn codesign_attempts_single_ad_hoc_without_identity() {
+        assert_eq!(codesign_attempts(None), vec![codesign_args(None)]);
+        assert_eq!(codesign_attempts(Some("")), vec![codesign_args(None)]);
+    }
 
     // Guards the MCP-drops-on-every-update regression: `launchctl kickstart -k`
     // SIGKILLs sibling `orca` processes in the GUI session (the Claude-spawned
