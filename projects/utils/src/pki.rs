@@ -1714,15 +1714,27 @@ impl rustls::client::danger::ServerCertVerifier for CapturingFpVerifier {
     }
     fn verify_tls13_signature(
         &self,
-        _: &[u8],
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        verify_bootstrap_tls13_signature(message, cert, dss)
     }
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![rustls::SignatureScheme::ED25519]
+        bootstrap_signature_algorithms().supported_schemes()
     }
+}
+
+fn bootstrap_signature_algorithms() -> rustls::crypto::WebPkiSupportedAlgorithms {
+    rustls::crypto::ring::default_provider().signature_verification_algorithms
+}
+
+fn verify_bootstrap_tls13_signature(
+    message: &[u8],
+    cert: &rustls::pki_types::CertificateDer<'_>,
+    dss: &rustls::DigitallySignedStruct,
+) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+    rustls::crypto::verify_tls13_signature(message, cert, dss, &bootstrap_signature_algorithms())
 }
 
 #[derive(Debug)]
@@ -1757,27 +1769,20 @@ impl rustls::client::danger::ServerCertVerifier for PinnedFpVerifier {
         _: &rustls::pki_types::CertificateDer<'_>,
         _: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        // Bootstrap channel is TLS 1.3 only; this should never be called.
         Err(rustls::Error::PeerIncompatible(
             rustls::PeerIncompatible::Tls12NotOfferedOrEnabled,
         ))
     }
-
     fn verify_tls13_signature(
         &self,
-        _: &[u8],
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        // We've pinned the pubkey directly; rustls still calls into here to
-        // verify the handshake signature itself. Delegate to the default ring
-        // crypto provider's algorithms.
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        verify_bootstrap_tls13_signature(message, cert, dss)
     }
-
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        // Ed25519 only — matches what the server cert uses.
-        vec![rustls::SignatureScheme::ED25519]
+        bootstrap_signature_algorithms().supported_schemes()
     }
 }
 
@@ -3020,6 +3025,96 @@ mod tests {
             v.supported_verify_schemes()
                 .contains(&rustls::SignatureScheme::ED25519)
         );
+    }
+
+    #[derive(Debug)]
+    struct FixedCert(std::sync::Arc<rustls::sign::CertifiedKey>);
+
+    impl rustls::server::ResolvesServerCert for FixedCert {
+        fn resolve(
+            &self,
+            _: rustls::server::ClientHello<'_>,
+        ) -> Option<std::sync::Arc<rustls::sign::CertifiedKey>> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn bootstrap_handshake(
+        verifier: std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier>,
+        cert: rustls::pki_types::CertificateDer<'static>,
+        signing_key: &KeyPair,
+    ) -> std::result::Result<(), rustls::Error> {
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let key_der =
+            rustls::pki_types::PrivateKeyDer::try_from(signing_key.serialize_der()).unwrap();
+        let signer = provider.key_provider.load_private_key(key_der).unwrap();
+        let ck = rustls::sign::CertifiedKey::new(vec![cert], signer);
+        let server_cfg = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_cert_resolver(std::sync::Arc::new(FixedCert(std::sync::Arc::new(ck))));
+        let client_cfg = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth();
+        let sn = rustls::pki_types::ServerName::try_from("mesh-bootstrap.orca.local").unwrap();
+        let mut client =
+            rustls::ClientConnection::new(std::sync::Arc::new(client_cfg), sn).unwrap();
+        let mut server = rustls::ServerConnection::new(std::sync::Arc::new(server_cfg)).unwrap();
+        for _ in 0..16 {
+            if !client.is_handshaking() && !server.is_handshaking() {
+                return Ok(());
+            }
+            let mut buf = Vec::new();
+            client.write_tls(&mut buf).unwrap();
+            server.read_tls(&mut buf.as_slice()).unwrap();
+            server.process_new_packets()?;
+            let mut buf = Vec::new();
+            server.write_tls(&mut buf).unwrap();
+            client.read_tls(&mut buf.as_slice()).unwrap();
+            client.process_new_packets()?;
+        }
+        Err(rustls::Error::General("handshake did not complete".into()))
+    }
+
+    fn bootstrap_cert_and_key(dir: &Path) -> (rustls::pki_types::CertificateDer<'static>, KeyPair) {
+        let (cert_pem, key_pem) = load_or_init_bootstrap_cert(dir).unwrap();
+        let (chain, _) = parse_cert_and_key(&cert_pem, &key_pem).unwrap();
+        (chain[0].clone(), KeyPair::from_pem(&key_pem).unwrap())
+    }
+
+    #[test]
+    fn pinned_bootstrap_verifier_requires_proof_of_private_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cert, key) = bootstrap_cert_and_key(dir.path());
+        let fp = spki_fingerprint_der(cert.as_ref()).unwrap();
+        let impostor = KeyPair::generate_for(&PKCS_ED25519).unwrap();
+
+        assert!(
+            bootstrap_handshake(pinned_bootstrap_verifier(fp.clone()), cert.clone(), &key).is_ok()
+        );
+        assert!(bootstrap_handshake(pinned_bootstrap_verifier(fp), cert, &impostor).is_err());
+    }
+
+    #[test]
+    fn capturing_bootstrap_verifier_requires_proof_of_private_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cert, key) = bootstrap_cert_and_key(dir.path());
+        let impostor = KeyPair::generate_for(&PKCS_ED25519).unwrap();
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+
+        assert!(
+            bootstrap_handshake(
+                capturing_bootstrap_verifier(slot.clone()),
+                cert.clone(),
+                &key
+            )
+            .is_ok()
+        );
+        assert!(bootstrap_handshake(capturing_bootstrap_verifier(slot), cert, &impostor).is_err());
     }
 
     #[test]
