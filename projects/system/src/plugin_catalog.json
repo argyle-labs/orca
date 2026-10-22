@@ -24,7 +24,7 @@
     },
     {
       "name": "caddy",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "caddy",
       "repoUrl": "https://github.com/argyle-labs/caddy",
       "docsUrl": "https://github.com/argyle-labs/caddy#readme"

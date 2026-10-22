@@ -275,6 +275,8 @@ struct ToolAttr {
     /// `#[orca_tool(..., reaches = ["op", ...])]`: the api-surface ops the
     /// body may drive through `api.call`. Non-empty, unique names.
     reaches: Vec<LitStr>,
+    tool_calls: Vec<LitStr>,
+    tool_callable: bool,
     /// Minimum role required to invoke this tool via authenticated surfaces.
     /// `"any"` (default) means any authenticated identity passes; `"admin"`
     /// requires `AuthIdentity::role == "admin"`. Set via
@@ -307,6 +309,8 @@ impl Parse for ToolAttr {
         let mut dry_run_aware = false;
         let mut dry_run_neutralize: Option<syn::Path> = None;
         let mut reaches: Vec<LitStr> = Vec::new();
+        let mut tool_calls: Vec<LitStr> = Vec::new();
+        let mut tool_callable = false;
         let mut role: Option<LitStr> = None;
         let mut title: Option<LitStr> = None;
         let mut crate_path: Option<syn::Path> = None;
@@ -449,6 +453,45 @@ impl Parse for ToolAttr {
                         reaches.push(s);
                     }
                 }
+                "tool_callable" => {
+                    tool_callable = match &nv.value {
+                        Expr::Lit(ExprLit {
+                            lit: Lit::Bool(b), ..
+                        }) => b.value,
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                "tool_callable expects a bool literal",
+                            ));
+                        }
+                    };
+                }
+                "tool_calls" => {
+                    let Expr::Array(arr) = &nv.value else {
+                        return Err(syn::Error::new_spanned(
+                            &nv.value,
+                            "tool_calls expects an array of string literals",
+                        ));
+                    };
+                    for e in &arr.elems {
+                        let s = lit_str(e)?;
+                        let v = s.value();
+                        let stem = v.strip_suffix(".*").unwrap_or(&v);
+                        if stem.trim().is_empty() || stem.contains('*') {
+                            return Err(syn::Error::new_spanned(
+                                &s,
+                                "tool_calls entries are tool names or `prefix.*` globs",
+                            ));
+                        }
+                        if tool_calls.iter().any(|r| r.value() == v) {
+                            return Err(syn::Error::new_spanned(
+                                &s,
+                                format!("duplicate tool_calls entry {v:?}"),
+                            ));
+                        }
+                        tool_calls.push(s);
+                    }
+                }
                 "role" => {
                     let s = lit_str(&nv.value)?;
                     match s.value().as_str() {
@@ -505,6 +548,8 @@ impl Parse for ToolAttr {
             dry_run_aware,
             dry_run_neutralize,
             reaches,
+            tool_calls,
+            tool_callable,
             role,
             title,
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
@@ -604,6 +649,7 @@ struct ReplicateAttr {
     /// the ids fleet-wide.
     unique: Option<String>,
     protected: Vec<String>,
+    peer_delete: Option<syn::Path>,
     /// Crate path the macro emits against. Defaults to `::plugin_toolkit`;
     /// domain crates pass `crate = ::macro_runtime` to anchor against the
     /// lower-level macro-runtime crate (breaks the Cargo cycle that would
@@ -630,6 +676,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
     let mut unique = None;
     let mut protected = Vec::new();
     let mut crate_path: Option<syn::Path> = None;
+    let mut peer_delete = None;
     for nv in items {
         let key = nv
             .path
@@ -638,6 +685,10 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
             .unwrap_or_default();
         if key == "crate" {
             crate_path = Some(parse_path(&nv.value)?);
+            continue;
+        }
+        if key == "peer_delete" {
+            peer_delete = Some(parse_path(&nv.value)?);
             continue;
         }
         let val = match &nv.value {
@@ -679,6 +730,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
         pk: pk.unwrap_or_else(|| "id".to_string()),
         unique,
         protected,
+        peer_delete,
         crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
     })
 }
@@ -844,7 +896,9 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
     let key_lits: Vec<&String> = ::std::iter::once(&cfg.pk)
         .chain(cfg.unique.as_ref())
         .collect();
-    let peer_delete = if cfg.protected.is_empty() {
+    let peer_delete = if let Some(pred) = &cfg.peer_delete {
+        quote! { ::std::option::Option::Some(#pred) }
+    } else if cfg.protected.is_empty() {
         quote! { ::std::option::Option::Some(#crate_path::allow_peer_delete) }
     } else {
         quote! { ::std::option::Option::None }
@@ -1080,6 +1134,8 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let execute_gated_lit = attr.execute_gated.unwrap_or(!read_shaped);
     let dry_run_aware_lit = attr.dry_run_aware;
     let reaches = &attr.reaches;
+    let tool_calls = &attr.tool_calls;
+    let tool_callable_lit = attr.tool_callable;
     // REQUIRED_ROLE: explicit `role = "..."` wins; otherwise default-deny
     // derives from the verb — read-shaped verbs (`list`/`detail`/`search`) get
     // "any", anything else gets "admin". This closes C2 (default-deny on
@@ -1329,6 +1385,8 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             const EXECUTE_GATED: bool = #execute_gated_lit;
             const DRY_RUN_AWARE: bool = #dry_run_aware_lit;
             const REACHES: &'static [&'static str] = &[#(#reaches),*];
+            const TOOL_CALLS: &'static [&'static str] = &[#(#tool_calls),*];
+            const TOOL_CALLABLE: bool = #tool_callable_lit;
             #role_const
             type Args = #args_ty;
             type Output = #output_ty;
@@ -1873,6 +1931,56 @@ mod tests {
             quote!(domain = "h", verb = "list", reaches = ["a", "a"]),
             quote!(domain = "h", verb = "list", reaches = "a"),
             quote!(domain = "h", verb = "list", reaches = [1]),
+        ] {
+            assert!(parse_attr(ts).is_err());
+        }
+    }
+
+    #[test]
+    fn tool_calls_is_emitted_into_the_tool_def() {
+        let attr = parse_attr(quote!(
+            domain = "h",
+            verb = "list",
+            tool_calls = ["service.create", "docker.*"]
+        ))
+        .unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
+        assert!(
+            out.contains(
+                "TOOL_CALLS : & 'static [& 'static str] = & [\"service.create\" , \"docker.*\"]"
+            ),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn tool_callable_defaults_off_and_is_emitted_when_set() {
+        let off = expand(
+            parse_attr(quote!(domain = "h", verb = "list")).unwrap(),
+            ok_fn(),
+        )
+        .unwrap()
+        .to_string();
+        assert!(off.contains("TOOL_CALLABLE : bool = false"), "got: {off}");
+        let on = expand(
+            parse_attr(quote!(domain = "h", verb = "list", tool_callable = true)).unwrap(),
+            ok_fn(),
+        )
+        .unwrap()
+        .to_string();
+        assert!(on.contains("TOOL_CALLABLE : bool = true"), "got: {on}");
+        assert!(parse_attr(quote!(domain = "h", verb = "list", tool_callable = "yes")).is_err());
+    }
+
+    #[test]
+    fn tool_calls_rejects_bad_globs_duplicates_and_non_array() {
+        for ts in [
+            quote!(domain = "h", verb = "list", tool_calls = [""]),
+            quote!(domain = "h", verb = "list", tool_calls = ["*"]),
+            quote!(domain = "h", verb = "list", tool_calls = [".*"]),
+            quote!(domain = "h", verb = "list", tool_calls = ["a*.x"]),
+            quote!(domain = "h", verb = "list", tool_calls = ["a", "a"]),
+            quote!(domain = "h", verb = "list", tool_calls = "a"),
         ] {
             assert!(parse_attr(ts).is_err());
         }

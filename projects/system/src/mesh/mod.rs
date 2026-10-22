@@ -328,6 +328,8 @@ pub enum MeshListResult {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MeshCandidate {
     pub pubkey_fp: String,
+    /// The system id when announced; otherwise a UUID derived from `pubkey_fp`.
+    pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_id: Option<String>,
     pub hostname: String,
@@ -339,12 +341,14 @@ pub struct MeshCandidate {
 #[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MeshStaleRow {
+    pub id: String,
     pub peer_id: String,
     pub hostname: String,
     pub addr: String,
     pub port: u16,
     /// "departed" | "orphan" | "stale self identity".
     pub reason: String,
+    /// Unix seconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<i64>,
 }
@@ -357,7 +361,10 @@ pub struct MeshInboundOffer {
     pub peer_addr: String,
     pub peer_port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub inviter_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub inviter_peer_id: Option<String>,
+    /// Unix seconds.
     pub expires_at: i64,
     pub ttl_secs: i64,
 }
@@ -378,6 +385,43 @@ pub struct MeshSnapshotOutput {
     /// `peer_id` → cluster name for every joined peer matched to a cluster
     /// via IP-first then hostname. Only matches included.
     pub cluster_membership: std::collections::BTreeMap<String, String>,
+}
+
+fn find_discovered<'a>(
+    rows: &'a [::db::mesh::DiscoveryRow],
+    id: &str,
+) -> Option<&'a ::db::mesh::DiscoveryRow> {
+    rows.iter().find(|r| {
+        r.peer_id.as_deref().filter(|p| !p.is_empty()) == Some(id)
+            || candidate_id(&r.pubkey_fp) == id
+    })
+}
+
+fn candidate_target(
+    action: &str,
+    addr: Option<String>,
+    id: Option<crate::system_id::SystemId>,
+    port: Option<u16>,
+) -> anyhow::Result<(String, Option<u16>)> {
+    if let Some(addr) = addr {
+        return Ok((addr, port));
+    }
+    let id =
+        id.ok_or_else(|| anyhow::anyhow!("system.join action={action} requires `addr` or `id`"))?;
+    let rows = ::db::pool::with_pooled_or_open(::db::mesh::list_discovery)?;
+    let row = find_discovered(&rows, id.as_str())
+        .ok_or_else(|| anyhow::anyhow!("no discovered candidate with id {id}"))?;
+    Ok((row.addr.clone(), port.or(Some(row.port))))
+}
+
+fn candidate_id(pubkey_fp: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(pubkey_fp.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_custom_bytes(bytes)
+        .into_uuid()
+        .to_string()
 }
 
 /// Pure classification helper — split out so unit tests can exercise the
@@ -419,6 +463,7 @@ fn classify_snapshot(
             MeshMember::Joined(p) => {
                 if !p.local && p.status != "active" {
                     stale.push(MeshStaleRow {
+                        id: p.peer_id.clone(),
                         peer_id: p.peer_id.clone(),
                         hostname: if p.hostname.is_empty() {
                             p.peer_id.clone()
@@ -428,7 +473,7 @@ fn classify_snapshot(
                         addr: p.addr.clone(),
                         port: p.port,
                         reason: "departed".into(),
-                        last_seen_at: None,
+                        last_seen_at: Some(p.last_seen_at),
                     });
                 }
             }
@@ -439,6 +484,7 @@ fn classify_snapshot(
                         peer_hostname: o.peer_hostname.clone(),
                         peer_addr: o.peer_addr.clone(),
                         peer_port: o.peer_port,
+                        inviter_id: o.inviter_peer_id.clone(),
                         inviter_peer_id: o.inviter_peer_id.clone(),
                         expires_at: o.expires_at,
                         ttl_secs: o.ttl_secs,
@@ -447,7 +493,8 @@ fn classify_snapshot(
             }
             MeshMember::Discovered(d) => {
                 // Drop live echoes of peers we're already paired with.
-                if let Some(pid) = d.peer_id.as_deref()
+                let peer_id = d.peer_id.clone().filter(|p| !p.is_empty());
+                if let Some(pid) = peer_id.as_deref()
                     && active_peer_ids.contains(pid)
                 {
                     continue;
@@ -458,14 +505,18 @@ fn classify_snapshot(
                 if unclaimed && !is_self_echo {
                     candidates.push(MeshCandidate {
                         pubkey_fp: d.pubkey_fp.clone(),
-                        peer_id: d.peer_id.clone(),
+                        id: peer_id
+                            .clone()
+                            .unwrap_or_else(|| candidate_id(&d.pubkey_fp)),
+                        peer_id: peer_id.clone(),
                         hostname: d.hostname.clone(),
                         addr: d.addr.clone(),
                         port: d.port,
                         can_invite: d.can_invite,
                     });
-                } else if let Some(pid) = &d.peer_id {
+                } else if let Some(pid) = &peer_id {
                     stale.push(MeshStaleRow {
+                        id: pid.clone(),
                         peer_id: pid.clone(),
                         hostname: d.hostname.clone(),
                         addr: d.addr.clone(),
@@ -667,7 +718,8 @@ pub struct MeshInstance {
     pub health: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Wall-clock millis when this row was assembled.
+    /// Unix seconds when this row was assembled, the unit every other
+    /// `system.list` timestamp uses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_checked: Option<i64>,
 
@@ -700,7 +752,7 @@ pub struct MeshInstancesOutput {
 
 /// Pure helper. Project a `MeshPeerDto` (or the synthetic local row) into the
 /// frontend-shaped `MeshInstance`. Unit-tested.
-fn build_instance(p: &MeshPeerDto, is_local: bool, now_ms: i64) -> MeshInstance {
+fn build_instance(p: &MeshPeerDto, is_local: bool, now_secs: i64) -> MeshInstance {
     let role = if is_local { "local" } else { "system" };
     // Hard rule: ids are bare UUIDv7, never prefixed. Locality is carried
     // on the separate `role` field, so `id` and `peer_id` are simply the
@@ -764,7 +816,7 @@ fn build_instance(p: &MeshPeerDto, is_local: bool, now_ms: i64) -> MeshInstance 
         update_checked_secs: p.update_checked_secs,
         health,
         error: None,
-        last_checked: Some(now_ms),
+        last_checked: Some(now_secs),
         secure,
         status: if is_local {
             None
@@ -861,6 +913,9 @@ pub struct MeshCreateArgs {
     /// (accept) 6-char pairing code printed on the inviter's CLI.
     #[arg(long)]
     pub code: Option<String>,
+    /// (join/offer) Discovered candidate id from `system.list --snapshot`, used in place of `addr`.
+    #[arg(long)]
+    pub id: Option<crate::system_id::SystemId>,
 }
 
 /// Tagged result of `system.join`: `join`/`accept` return the membership
@@ -1475,7 +1530,6 @@ pub async fn collect_mesh_instances() -> anyhow::Result<MeshInstancesOutput> {
     let members_raw = assemble_members().await?;
 
     let now_secs = utils::time::now().unix_seconds();
-    let now_ms = now_secs * 1000;
     let (members_classified, candidates, stale, inbound_offers) =
         classify_snapshot(members_raw, now_secs);
 
@@ -1487,7 +1541,7 @@ pub async fn collect_mesh_instances() -> anyhow::Result<MeshInstancesOutput> {
         if let MeshMember::Joined(p) = m
             && p.local
         {
-            instances.push(build_instance(p, true, now_ms));
+            instances.push(build_instance(p, true, now_secs));
             local_seen = true;
             break;
         }
@@ -1522,14 +1576,14 @@ pub async fn collect_mesh_instances() -> anyhow::Result<MeshInstancesOutput> {
             system: None,
             pubkey_fp: None,
         };
-        instances.push(build_instance(&synthetic, true, now_ms));
+        instances.push(build_instance(&synthetic, true, now_secs));
     }
     for m in &members_classified {
         if let MeshMember::Joined(p) = m
             && !p.local
             && p.status == "active"
         {
-            instances.push(build_instance(p, false, now_ms));
+            instances.push(build_instance(p, false, now_secs));
         }
     }
 
@@ -1556,20 +1610,12 @@ async fn mesh_create(
 ) -> anyhow::Result<MeshCreateOutput> {
     match args.action {
         MeshCreateAction::Join => {
-            let addr = args
-                .addr
-                .ok_or_else(|| anyhow::anyhow!("system.join action=join requires `addr`"))?;
-            Ok(MeshCreateOutput::Accept(
-                exec::join(&addr, args.port).await?,
-            ))
+            let (addr, port) = candidate_target("join", args.addr, args.id, args.port)?;
+            Ok(MeshCreateOutput::Accept(exec::join(&addr, port).await?))
         }
         MeshCreateAction::Offer => {
-            let addr = args
-                .addr
-                .ok_or_else(|| anyhow::anyhow!("system.join action=offer requires `addr`"))?;
-            Ok(MeshCreateOutput::Offer(
-                exec::offer(&addr, args.port).await?,
-            ))
+            let (addr, port) = candidate_target("offer", args.addr, args.id, args.port)?;
+            Ok(MeshCreateOutput::Offer(exec::offer(&addr, port).await?))
         }
         MeshCreateAction::Accept => {
             let code = args
@@ -3277,6 +3323,62 @@ mod mesh_snapshot_tests {
         })
     }
 
+    #[test]
+    fn candidate_id_is_a_stable_uuid_and_empty_peer_id_is_refused() {
+        assert_eq!(candidate_id("fp"), candidate_id("fp"));
+        assert_ne!(candidate_id("fp"), candidate_id("fp2"));
+        assert!(candidate_id("fp").parse::<uuid::Uuid>().is_ok());
+        let (_m, candidates, stale, _o) = classify_snapshot(
+            vec![
+                discovered("fp", Some(""), "h", "unclaimed"),
+                discovered("fp2", None, "h2", "unclaimed"),
+                discovered("fp3", Some(""), "h3", "seen"),
+            ],
+            0,
+        );
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].id, candidate_id("fp"));
+        assert!(candidates[0].peer_id.is_none());
+        assert_eq!(candidates[1].id, candidate_id("fp2"));
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn a_discovered_candidate_resolves_by_its_derived_or_announced_id() {
+        let row = |fp: &str, peer_id: Option<&str>, addr: &str| ::db::mesh::DiscoveryRow {
+            pubkey_fp: fp.into(),
+            peer_id: peer_id.map(Into::into),
+            hostname: "h".into(),
+            addr: addr.into(),
+            port: 7777,
+            state: "unclaimed".into(),
+            can_invite: true,
+            first_seen_at: 0,
+            last_seen_at: 0,
+        };
+        let rows = vec![
+            row("fp", None, "10.0.0.2"),
+            row("fp2", Some(""), "10.0.0.3"),
+            row("fp3", Some("sys-3"), "10.0.0.4"),
+        ];
+        assert_eq!(
+            find_discovered(&rows, &candidate_id("fp")).unwrap().addr,
+            "10.0.0.2"
+        );
+        assert_eq!(
+            find_discovered(&rows, &candidate_id("fp2")).unwrap().addr,
+            "10.0.0.3"
+        );
+        assert_eq!(find_discovered(&rows, "sys-3").unwrap().addr, "10.0.0.4");
+        assert!(find_discovered(&rows, "").is_none());
+        assert!(find_discovered(&rows, "nope").is_none());
+        assert!(
+            candidate_id("fp")
+                .parse::<crate::system_id::SystemId>()
+                .is_ok()
+        );
+    }
+
     fn handshaking(offer_id: &str, expires_at: i64) -> MeshMember {
         MeshMember::Handshaking(MeshPendingOfferDto {
             offer_id: offer_id.into(),
@@ -3706,6 +3808,28 @@ mod added_coverage {
     // ── build_instance — down health + update flags ──────────────────────────
 
     #[test]
+    fn instance_last_checked_shares_the_last_seen_unit() {
+        let now = utils::time::now().unix_seconds();
+        let mut p = peer("p", "h", "active", false);
+        p.last_seen_at = now;
+        let inst = build_instance(&p, false, now);
+        let checked = inst.last_checked.unwrap();
+        assert!(
+            (checked - p.last_seen_at).abs() < 60,
+            "{checked} vs {}",
+            p.last_seen_at
+        );
+        let mut q = peer("q", "h2", "departed", false);
+        q.last_seen_at = now;
+        let (_m, _c, stale, _o) = classify_snapshot(vec![MeshMember::Joined(Box::new(q))], now);
+        assert!(!stale.is_empty());
+        for s in &stale {
+            let t = s.last_seen_at.expect("stale row carries last_seen_at");
+            assert!((t - now).abs() < 60, "{t} vs {now}");
+        }
+    }
+
+    #[test]
     fn build_instance_down_health_for_inactive_remote() {
         let inst = build_instance(&peer("p", "h", "departed", false), false, 5);
         assert_eq!(inst.health, "down");
@@ -3927,6 +4051,7 @@ mod added_coverage {
     fn mesh_candidate_omits_none_peer_id() {
         let c = MeshCandidate {
             pubkey_fp: "fp".into(),
+            id: candidate_id("fp"),
             peer_id: None,
             hostname: "h".into(),
             addr: "1.2.3.4".into(),
@@ -3938,8 +4063,38 @@ mod added_coverage {
     }
 
     #[test]
+    fn candidate_and_stale_rows_carry_the_system_id_as_id() {
+        let id = "0b8c7f2e-1111-4222-8333-444455556666";
+        let c = serde_json::to_value(MeshCandidate {
+            pubkey_fp: "fp".into(),
+            id: id.into(),
+            peer_id: Some(id.into()),
+            hostname: "h".into(),
+            addr: "10.0.0.5".into(),
+            port: 1,
+            can_invite: true,
+        })
+        .unwrap();
+        assert_eq!(c["id"], id);
+        assert_eq!(c["peer_id"], id);
+        let s = serde_json::to_value(MeshStaleRow {
+            id: id.into(),
+            peer_id: id.into(),
+            hostname: "h".into(),
+            addr: "10.0.0.5".into(),
+            port: 1,
+            reason: "orphan".into(),
+            last_seen_at: None,
+        })
+        .unwrap();
+        assert_eq!(s["id"], id);
+        assert_eq!(s["peer_id"], id);
+    }
+
+    #[test]
     fn mesh_stale_row_omits_none_last_seen() {
         let s = serde_json::to_string(&MeshStaleRow {
+            id: "p".into(),
             peer_id: "p".into(),
             hostname: "h".into(),
             addr: "1.2.3.4".into(),
@@ -3958,12 +4113,14 @@ mod added_coverage {
             peer_hostname: "h".into(),
             peer_addr: "1.2.3.4".into(),
             peer_port: 1,
+            inviter_id: None,
             inviter_peer_id: None,
             expires_at: 10,
             ttl_secs: 5,
         })
         .unwrap();
         assert!(!s.contains("inviterPeerId"), "got: {s}");
+        assert!(!s.contains("inviterId"), "got: {s}");
     }
 
     // ── serde: transparent newtype wrappers ──────────────────────────────────

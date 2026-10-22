@@ -45,6 +45,7 @@ pub const CAPABILITIES: &[&str] = &[
     plugin_toolkit::abi::LXC_EXEC,
     plugin_toolkit::abi::LXC_PUSH,
     plugin_toolkit::abi::PRIVILEGED_APPLY,
+    plugin_toolkit::abi::TOOL_CALL,
 ];
 
 pub const API_CALL: &str = "api.call";

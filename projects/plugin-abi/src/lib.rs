@@ -55,6 +55,10 @@ pub struct ToolDef {
     pub local_only: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reaches: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_callable: Option<bool>,
 }
 
 /// JSON shape of a single domain backend a plugin contributes, in the plugin's
@@ -147,6 +151,8 @@ pub struct BackendDef {
     /// serialized `BackendDef` missing it deserializes as `None`.
     #[serde(default)]
     pub provisioning: Option<ProvisioningConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reaches: Vec<String>,
 }
@@ -462,6 +468,8 @@ pub const LXC_EXEC: &str = "lxc.exec";
 pub const LXC_PUSH: &str = "lxc.push";
 
 pub const PRIVILEGED_APPLY: &str = "privileged.apply";
+
+pub const TOOL_CALL: &str = "tool.call";
 
 /// Raw outcome of a root helper the daemon ran for a privileged capability.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]

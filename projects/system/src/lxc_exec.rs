@@ -31,6 +31,10 @@ use tokio::process::Command;
 /// watchdog. Five minutes covers a package upgrade with margin.
 const LXC_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
 
+pub const LXC_EXEC_OUTPUT_CAP: usize = 1024 * 1024;
+
+const LXC_EXEC_HELPER_GRACE: Duration = Duration::from_secs(30);
+
 /// Commands the seam permits as `argv[0]`, bare or under `COMMAND_DIRS`. Scoped
 /// to the deployment-lifecycle verbs (package upgrade + service restart + a
 /// couple of read-only probes). Extend deliberately — every entry widens what a
@@ -73,12 +77,24 @@ pub struct LxcExecResult {
     /// Process exit code; `None` if it never ran (validation/spawn failure) or
     /// was killed by signal/timeout.
     pub exit_code: Option<i32>,
-    /// Captured stdout (trimmed).
+    /// Captured stdout, lossily decoded; exact bytes are in `stdout_b64`.
     pub stdout: String,
-    /// Captured stderr (trimmed).
+    /// Captured stderr, lossily decoded; exact bytes are in `stderr_b64`.
     pub stderr: String,
     /// Set when the op was refused or could not run; empty on a clean run.
     pub error: String,
+    #[serde(default)]
+    pub stdout_b64: String,
+    #[serde(default)]
+    pub stderr_b64: String,
+    #[serde(default)]
+    pub stdout_len: usize,
+    #[serde(default)]
+    pub stderr_len: usize,
+    #[serde(default)]
+    pub stdout_truncated: bool,
+    #[serde(default)]
+    pub stderr_truncated: bool,
 }
 
 impl LxcExecResult {
@@ -86,6 +102,83 @@ impl LxcExecResult {
         Self {
             error: msg.into(),
             ..Default::default()
+        }
+    }
+
+    fn from_run(status: std::process::ExitStatus, stdout: Captured, stderr: Captured) -> Self {
+        Self {
+            success: status.success(),
+            exit_code: status.code(),
+            stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
+            error: String::new(),
+            stdout_b64: utils::encoding::base64_encode(&stdout.bytes),
+            stderr_b64: utils::encoding::base64_encode(&stderr.bytes),
+            stdout_len: stdout.bytes.len(),
+            stderr_len: stderr.bytes.len(),
+            stdout_truncated: stdout.truncated,
+            stderr_truncated: stderr.truncated,
+        }
+    }
+}
+
+struct Captured {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+async fn read_capped<R>(reader: Option<R>, cap: usize) -> std::io::Result<Captured>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let Some(mut reader) = reader else {
+        return Ok(Captured {
+            bytes: Vec::new(),
+            truncated: false,
+        });
+    };
+    let mut bytes = Vec::new();
+    (&mut reader)
+        .take(cap as u64)
+        .read_to_end(&mut bytes)
+        .await?;
+    let extra = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await?;
+    Ok(Captured {
+        bytes,
+        truncated: extra > 0,
+    })
+}
+
+async fn run_capped(mut cmd: Command, what: &str, timeout: Duration, cap: usize) -> LxcExecResult {
+    let child = cmd
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return LxcExecResult::refused(format!("spawn {what}: {e}")),
+    };
+    let (out, err) = (child.stdout.take(), child.stderr.take());
+    let run = async {
+        let (out, err, status) =
+            tokio::join!(read_capped(out, cap), read_capped(err, cap), child.wait());
+        (out, err, status)
+    };
+    match tokio::time::timeout(timeout, run).await {
+        Ok((Ok(out), Ok(err), Ok(status))) => LxcExecResult::from_run(status, out, err),
+        Ok((Err(e), _, _)) | Ok((_, Err(e), _)) => {
+            LxcExecResult::refused(format!("read {what} output: {e}"))
+        }
+        Ok((_, _, Err(e))) => LxcExecResult::refused(format!("wait {what}: {e}")),
+        Err(_) => {
+            _ = child.start_kill();
+            LxcExecResult::refused(format!(
+                "{what} timed out after {}s — killed",
+                timeout.as_secs()
+            ))
         }
     }
 }
@@ -359,7 +452,18 @@ pub async fn run_privileged_lxc(op: &LxcExecOp) -> LxcExecResult {
         let _shut = stdin.shutdown().await;
     }
 
-    match child.wait_with_output().await {
+    let waited = tokio::time::timeout(
+        LXC_EXEC_TIMEOUT + LXC_EXEC_HELPER_GRACE,
+        child.wait_with_output(),
+    )
+    .await;
+    let Ok(waited) = waited else {
+        return LxcExecResult::refused(format!(
+            "lxc-exec helper did not finish within {}s",
+            (LXC_EXEC_TIMEOUT + LXC_EXEC_HELPER_GRACE).as_secs()
+        ));
+    };
+    match waited {
         Ok(out) if out.status.success() => {
             serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
                 LxcExecResult::refused(format!(
@@ -392,36 +496,9 @@ pub async fn execute_privileged_lxc(op: LxcExecOp) -> LxcExecResult {
     let mut pct_argv: Vec<String> = vec!["exec".to_string(), op.vmid.to_string(), "--".to_string()];
     pct_argv.extend(op.argv.iter().cloned());
 
-    let child = Command::new("pct")
-        .args(&pct_argv)
-        .kill_on_drop(true)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
-    let child = match child {
-        Ok(c) => c,
-        Err(e) => return LxcExecResult::refused(format!("spawn pct: {e}")),
-    };
-
-    let out = match tokio::time::timeout(LXC_EXEC_TIMEOUT, child.wait_with_output()).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => return LxcExecResult::refused(format!("wait pct: {e}")),
-        Err(_) => {
-            return LxcExecResult::refused(format!(
-                "pct exec timed out after {}s — killed",
-                LXC_EXEC_TIMEOUT.as_secs()
-            ));
-        }
-    };
-
-    LxcExecResult {
-        success: out.status.success(),
-        exit_code: out.status.code(),
-        stdout: String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        error: String::new(),
-    }
+    let mut cmd = Command::new("pct");
+    cmd.args(&pct_argv);
+    run_capped(cmd, "pct exec", LXC_EXEC_TIMEOUT, LXC_EXEC_OUTPUT_CAP).await
 }
 
 // ── File push (write_file) ────────────────────────────────────────────────────
@@ -767,6 +844,72 @@ pub async fn execute_privileged_lxc_push(op: LxcPushOp) -> LxcPushResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sh(script: &str) -> Command {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script]);
+        cmd
+    }
+
+    #[tokio::test]
+    async fn output_is_returned_byte_exact() {
+        let r = run_capped(
+            sh(r"printf '  a\377b\n\n'; printf 'e \n' >&2; exit 3"),
+            "sh",
+            Duration::from_secs(10),
+            LXC_EXEC_OUTPUT_CAP,
+        )
+        .await;
+        assert_eq!(r.exit_code, Some(3), "{r:?}");
+        let out = utils::encoding::base64_decode(&r.stdout_b64).unwrap();
+        assert_eq!(out, b"  a\xffb\n\n");
+        assert_eq!(r.stdout_len, out.len());
+        assert_eq!(
+            utils::encoding::base64_decode(&r.stderr_b64).unwrap(),
+            b"e \n"
+        );
+        assert!(!r.stdout_truncated && !r.stderr_truncated);
+        assert_eq!(r.stderr, "e \n");
+    }
+
+    #[tokio::test]
+    async fn output_is_capped_and_flagged() {
+        let r = run_capped(
+            sh("head -c 5000 /dev/zero; head -c 10 /dev/zero >&2"),
+            "sh",
+            Duration::from_secs(10),
+            1024,
+        )
+        .await;
+        assert!(r.success, "{r:?}");
+        assert_eq!(r.stdout_len, 1024);
+        assert!(r.stdout_truncated);
+        assert_eq!(r.stderr_len, 10);
+        assert!(!r.stderr_truncated);
+    }
+
+    #[tokio::test]
+    async fn a_timeout_kills_the_child() {
+        let started = std::time::Instant::now();
+        let r = run_capped(sh("sleep 30"), "sh", Duration::from_millis(200), 1024).await;
+        assert!(r.error.contains("timed out"), "{r:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn dropping_the_call_kills_the_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("done");
+        let script = format!("sleep 1; touch {}", marker.display());
+        let call = run_capped(sh(&script), "sh", Duration::from_secs(10), 1024);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), call)
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!marker.exists());
+    }
 
     #[test]
     fn allowlist_accepts_bare_and_absolute() {
