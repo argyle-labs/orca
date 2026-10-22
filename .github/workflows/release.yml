@@ -75,6 +75,7 @@ jobs:
   build-aarch64-apple-darwin:
     runs-on: macos
     steps:
+      - uses: actions/checkout@v4
       - name: Unlock codesign keychain
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.ORCA_CODESIGN_KEYCHAIN_PASSWORD }}
@@ -95,14 +96,7 @@ jobs:
                 ;;
             esac
           fi
-          secq() {
-            case "$1" in
-              *$'\n'*) echo "::error::security -i value contains a newline" >&2; return 1 ;;
-            esac
-            local s=${1//\\/\\\\}
-            s=${s//\"/\\\"}
-            printf '"%s"' "$s"
-          }
+          . scripts/release-lib.sh
           q_pw=$(secq "$KEYCHAIN_PASSWORD")
           q_kc=$(secq "$kc")
           printf 'unlock-keychain -p %s %s\n' "$q_pw" "$q_kc" | security -i
