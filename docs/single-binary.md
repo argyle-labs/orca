@@ -55,6 +55,27 @@ veto. Updates fan
 out across the mesh via mesh-relay — non-networked peers update via
 a connected relay.
 
+## macOS code signing
+
+Darwin binaries are signed with identifier `wtf.argyle.orca` and the
+`Argyle Labs orca Code Signing` identity so macOS TCC grants persist across
+updates. The release workflow unlocks
+`~/Library/Keychains/orca-codesign.keychain-db` on the macOS runner using the
+`ORCA_CODESIGN_KEYCHAIN_PASSWORD` secret. Without the secret, RC builds are
+ad-hoc signed with a warning and stable releases fail.
+
+Provision the runner once:
+
+```sh
+ORCA_CODESIGN_KEYCHAIN_PASSWORD=... ORCA_CODESIGN_P12_PASSWORD=... \
+  scripts/macos-codesign-setup.sh identity.p12
+```
+
+Self-update re-signs only unsigned binaries, using `ORCA_CODESIGN_IDENTITY`
+when set and falling back to ad-hoc signing with the same identifier. Set
+`ORCA_CODESIGN_REQUIRE_IDENTITY=1` to disable the ad-hoc fallback and fail
+the update instead.
+
 ## Why one binary
 
 Deployment is `cp orca ~/.local/bin/orca` (or the equivalent

@@ -78,16 +78,41 @@ jobs:
       - name: Unlock codesign keychain
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.ORCA_CODESIGN_KEYCHAIN_PASSWORD }}
+          IDENTITY: Argyle Labs orca Code Signing
         run: |
           set -euo pipefail
+          kc="$HOME/Library/Keychains/orca-codesign.keychain-db"
+          echo "CODESIGN_KEYCHAIN_PATH=$kc" >> "$GITHUB_ENV"
           if [ -z "$KEYCHAIN_PASSWORD" ]; then
-            echo "ORCA_CODESIGN_KEYCHAIN_PASSWORD unset; ad-hoc signing"
-            exit 0
+            case "$TAG" in
+              *-rc.*)
+                echo "::warning::ORCA_CODESIGN_KEYCHAIN_PASSWORD unset; darwin build is ad-hoc signed and macOS TCC grants will not persist across updates"
+                exit 0
+                ;;
+              *)
+                echo "::error::ORCA_CODESIGN_KEYCHAIN_PASSWORD unset; stable releases must be signed with the orca identity"
+                exit 1
+                ;;
+            esac
           fi
-          keychain="$HOME/Library/Keychains/orca-codesign.keychain-db"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
-          echo "ORCA_CODESIGN_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
-          echo "ORCA_CODESIGN_IDENTITY=Argyle Labs orca Code Signing" >> "$GITHUB_ENV"
+          secq() {
+            case "$1" in
+              *$'\n'*) echo "::error::security -i value contains a newline" >&2; return 1 ;;
+            esac
+            local s=${1//\\/\\\\}
+            s=${s//\"/\\\"}
+            printf '"%s"' "$s"
+          }
+          q_pw=$(secq "$KEYCHAIN_PASSWORD")
+          q_kc=$(secq "$kc")
+          printf 'unlock-keychain -p %s %s\n' "$q_pw" "$q_kc" | security -i
+          security set-keychain-settings -lut 3600 "$kc"
+          if ! security find-identity -v -p codesigning "$kc" | grep -qF "\"$IDENTITY\""; then
+            echo "::error::codesigning identity '$IDENTITY' not found in $kc; run scripts/macos-codesign-setup.sh on the runner"
+            exit 1
+          fi
+          echo "ORCA_CODESIGN_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+          echo "ORCA_CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
       - name: Build aarch64-apple-darwin
         uses: argyle-labs/.github/.github/actions/job-release-build-macos@main
         with:
@@ -96,8 +121,8 @@ jobs:
       - name: Lock codesign keychain
         if: always()
         run: |
-          keychain="$HOME/Library/Keychains/orca-codesign.keychain-db"
-          [ ! -f "$keychain" ] || security lock-keychain "$keychain" || true
+          kc="${CODESIGN_KEYCHAIN_PATH:-}"
+          [ -z "$kc" ] || [ ! -f "$kc" ] || security lock-keychain "$kc" || true
 
   package:
     needs: [build-x86_64-linux-gnu, build-x86_64-linux-musl, build-aarch64-apple-darwin]
