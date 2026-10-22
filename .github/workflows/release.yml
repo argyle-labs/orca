@@ -75,11 +75,29 @@ jobs:
   build-aarch64-apple-darwin:
     runs-on: macos
     steps:
+      - name: Unlock codesign keychain
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.ORCA_CODESIGN_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYCHAIN_PASSWORD" ]; then
+            echo "ORCA_CODESIGN_KEYCHAIN_PASSWORD unset; ad-hoc signing"
+            exit 0
+          fi
+          keychain="$HOME/Library/Keychains/orca-codesign.keychain-db"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          echo "ORCA_CODESIGN_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "ORCA_CODESIGN_IDENTITY=Argyle Labs orca Code Signing" >> "$GITHUB_ENV"
       - name: Build aarch64-apple-darwin
         uses: argyle-labs/.github/.github/actions/job-release-build-macos@main
         with:
           tag: ${{ env.TAG }}
           disable-lto-for-rc: 'true'
+      - name: Lock codesign keychain
+        if: always()
+        run: |
+          keychain="$HOME/Library/Keychains/orca-codesign.keychain-db"
+          [ ! -f "$keychain" ] || security lock-keychain "$keychain" || true
 
   package:
     needs: [build-x86_64-linux-gnu, build-x86_64-linux-musl, build-aarch64-apple-darwin]

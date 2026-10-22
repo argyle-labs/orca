@@ -380,7 +380,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
   # Keep a valid release signature; ad-hoc sign (stable identifier) only when
   # unsigned, else launchd SIGKILLs the daemon on first launch (exit -9).
   codesign --verify --strict "${INSTALL_DIR}/orca" 2>/dev/null \
-    || codesign --force --sign - --identifier com.argyle-labs.orca "${INSTALL_DIR}/orca" 2>/dev/null \
+    || codesign --force --sign - --identifier wtf.argyle.orca --timestamp=none "${INSTALL_DIR}/orca" 2>/dev/null \
     || true
 fi
 
