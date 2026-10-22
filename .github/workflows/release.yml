@@ -76,6 +76,8 @@ jobs:
     runs-on: macos
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Unlock codesign keychain
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.ORCA_CODESIGN_KEYCHAIN_PASSWORD }}

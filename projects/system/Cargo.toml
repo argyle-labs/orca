@@ -20,6 +20,7 @@ derive     = { workspace = true }
 schemars       = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
+tempfile       = { workspace = true }
 
 utils = { workspace = true, default-features = true }
 files = { workspace = true }
@@ -79,7 +80,6 @@ orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 libc = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 serial_test = { workspace = true }
 wiremock = { workspace = true }

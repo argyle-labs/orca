@@ -523,41 +523,39 @@ pub fn install_binary(
     sign: impl FnOnce(&std::path::Path, &[Vec<String>]) -> Result<()>,
 ) -> Result<()> {
     let attempts = codesign_attempts(identity, env_flag(require_identity))?;
-    let tmp = current.with_extension("tmp");
+    let dir = current
+        .parent()
+        .context("installed binary has no parent directory")?;
     let backup = current.with_extension("prev");
 
-    let staged = (|| -> Result<Vec<u8>> {
-        std::fs::write(&tmp, bytes).context("failed to write temp binary")?;
+    let tmp = tempfile::Builder::new()
+        .prefix(".orca-update-")
+        .tempfile_in(dir)
+        .context("failed to create temp binary")?;
+    let installed = (|| -> Result<Vec<u8>> {
+        std::fs::write(tmp.path(), bytes).context("failed to write temp binary")?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&tmp)?.permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&tmp, perms)?;
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755))?;
         }
-        sign(&tmp, &attempts)
+        sign(tmp.path(), &attempts)
             .context("signing staged binary failed; installed binary unchanged")?;
-        std::fs::read(&tmp).context("failed to read back staged binary")
-    })();
-    let installed = match staged {
-        Ok(b) => b,
-        Err(e) => {
-            _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-    };
+        std::fs::File::open(tmp.path())
+            .and_then(|f| f.sync_all())
+            .context("failed to sync staged binary")?;
+        std::fs::read(tmp.path()).context("failed to read back staged binary")
+    })()?;
 
-    let backed_up = std::fs::copy(current, &backup).is_ok();
-    if let Err(e) = std::fs::rename(&tmp, current) {
-        _ = std::fs::remove_file(&tmp);
-        if backed_up {
-            _ = std::fs::remove_file(&backup);
-        }
-        return Err(anyhow::Error::new(e).context("failed to replace binary"));
+    create_backup(current, &backup).context("failed to back up installed binary; not swapping")?;
+    if let Err(e) = tmp.persist(current) {
+        _ = std::fs::remove_file(&backup);
+        return Err(anyhow::Error::new(e.error).context("failed to replace binary"));
     }
+    sync_dir(dir);
 
     if let Err(e) = verify_on_disk(current, &installed, version) {
-        if backed_up && let Err(rollback) = std::fs::rename(&backup, current) {
+        if let Err(rollback) = std::fs::rename(&backup, current) {
             return Err(e.context(format!(
                 "post-swap binary verification failed AND rollback failed \
                      ({rollback}); the binary at {} is corrupt — restore manually \
@@ -566,12 +564,31 @@ pub fn install_binary(
                 backup.display()
             )));
         }
+        sync_dir(dir);
         return Err(e.context("post-swap binary verification failed; rolled back"));
     }
-    if backed_up {
-        _ = std::fs::remove_file(&backup);
-    }
+    _ = std::fs::remove_file(&backup);
     Ok(())
+}
+
+fn create_backup(current: &std::path::Path, backup: &std::path::Path) -> Result<()> {
+    match std::fs::remove_file(backup) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    if std::fs::hard_link(current, backup).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(current, backup)?;
+    std::fs::File::open(backup)?.sync_all()?;
+    Ok(())
+}
+
+fn sync_dir(dir: &std::path::Path) {
+    #[cfg(unix)]
+    if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+        tracing::warn!(dir = %dir.display(), error = %e, "fsync of install dir failed");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2198,6 +2215,61 @@ mod tests {
                 .expect("read")
                 .ends_with(b"# signed\n")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_binary_fails_before_swap_when_backup_cannot_be_created() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let old = b"#!/bin/sh\necho 'orca 0.0.1'\n";
+        let current = write_exec(tmp.path(), "orca", old);
+        std::fs::create_dir(current.with_extension("prev")).expect("block backup");
+        std::fs::write(current.with_extension("prev").join("x"), b"x").expect("fill");
+        let err = install_binary(
+            &current,
+            b"#!/bin/sh\necho 'orca 0.0.2'\n",
+            "0.0.2",
+            None,
+            None,
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not swapping"), "{err}");
+        assert_eq!(std::fs::read(&current).expect("read"), old);
+        let entries: Vec<_> = std::fs::read_dir(tmp.path()).expect("read_dir").collect();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_binary_rolls_back_from_backup_on_verify_failure() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let old = b"#!/bin/sh\necho 'orca 0.0.1'\n";
+        let current = write_exec(tmp.path(), "orca", old);
+        let err = install_binary(
+            &current,
+            b"#!/bin/sh\necho 'orca 0.0.2'\n",
+            "9.9.9",
+            None,
+            None,
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("rolled back"), "{err:#}");
+        assert_eq!(std::fs::read(&current).expect("read"), old);
+        let entries: Vec<_> = std::fs::read_dir(tmp.path()).expect("read_dir").collect();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_backup_replaces_stale_backup() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let current = write_exec(tmp.path(), "orca", b"new");
+        let backup = current.with_extension("prev");
+        std::fs::write(&backup, b"stale").expect("stale");
+        create_backup(&current, &backup).expect("backup");
+        assert_eq!(std::fs::read(&backup).expect("read"), b"new");
     }
 
     #[cfg(unix)]
