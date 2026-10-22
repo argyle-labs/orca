@@ -2212,6 +2212,42 @@ mod tests {
 
     #[serial_test::serial(env)]
     #[tokio::test]
+    async fn mesh_join_core_dials_through_when_the_inviter_fp_matches() {
+        drop(rustls::crypto::ring::default_provider().install_default());
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        crate::host_identity::init(home.path()).unwrap();
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pki = pki_dir();
+            let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(&pki).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                if let Ok(Ok((tcp, _))) =
+                    tokio::time::timeout(Duration::from_secs(2), listener.accept()).await
+                    && let Ok(mut tls) = acceptor.accept(tcp).await
+                    && read_frame(&mut tls).await.is_ok()
+                {
+                    return 1;
+                }
+                0
+            });
+            let err = mesh_join_core("127.0.0.1", Some(port), Some(&fp))
+                .await
+                .err()
+                .unwrap();
+            assert!(!format!("{err:#}").contains("presented fp"), "got: {err:#}");
+            assert!(server.await.unwrap() >= 1);
+        })
+        .await;
+    }
+
+    #[serial_test::serial(env)]
+    #[tokio::test]
     async fn replicate_ca_key_refuses_another_identity_before_sending_the_key() {
         drop(rustls::crypto::ring::default_provider().install_default());
         let _env = crate::test_env::snapshot();

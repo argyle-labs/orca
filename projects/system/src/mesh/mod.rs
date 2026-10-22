@@ -1285,7 +1285,7 @@ pub struct MeshUpdateArgs {
     /// current value unchanged.
     #[arg(long)]
     pub self_secure: Option<bool>,
-    /// (trust/recover/unpin) Target system.
+    /// (trust/recover/unpin/cancel_offer) Target system.
     // Aliases: pre-rename daemons send `peer_id` over the mesh.
     #[arg(long)]
     #[serde(alias = "peerId", alias = "peer_id")]
@@ -1299,7 +1299,7 @@ pub struct MeshUpdateArgs {
     /// (sync) Optional source-peer filter (hostname / peer_id / addr).
     #[arg(long)]
     pub peer: Option<String>,
-    /// (cancel_offer) Joiner address whose outbound offer(s) to clear.
+    /// (cancel_offer) Joiner address whose outbound offer(s) to clear; use `id` when several joiners share it.
     #[arg(long)]
     pub addr: Option<String>,
 }
@@ -1711,7 +1711,7 @@ async fn mesh_create(
 ///     source filter).
 ///   - `recover`      — clear a stale `departed_at` flag on THIS host (needs
 ///     `peer_id`). LOCAL-ONLY: rejected for remote callers by the mesh listener.
-///   - `cancel_offer` — clear stuck outbound pairing offer(s) for `addr`.
+///   - `cancel_offer` — clear stuck outbound pairing offer(s) for `addr` or `id`.
 ///   - `unpin`        — drop this host's identity pin for `peer_id`, so it
 ///     is accepted again with a cert that carries no identity name.
 #[orca_tool(domain = "system.mesh", verb = "update", role = "admin")]
@@ -1754,10 +1754,32 @@ async fn mesh_update(
             Ok(MeshUpdateOutput::Recover(exec::recover(&peer_id)?))
         }
         MeshUpdateAction::CancelOffer => {
-            let addr = args.addr.ok_or_else(|| {
-                anyhow::anyhow!("system.mesh.update action=cancel_offer requires `addr`")
-            })?;
-            let rows_removed = exec::cancel_offer(&addr)?;
+            let (addr, pubkey_fp) = match args.id {
+                Some(id) => {
+                    let (addr, fp) = ::db::pool::with_pooled_or_open(|conn| {
+                        let rows = ::db::mesh::list_discovery(conn)?;
+                        let row = find_discovered(&rows, id.as_str(), |_| Ok(None))?;
+                        Ok((row.addr.clone(), row.pubkey_fp.clone()))
+                    })?;
+                    if let Some(a) = args.addr.as_deref()
+                        && a != addr
+                    {
+                        anyhow::bail!(
+                            "addr {a} does not match discovered candidate {id} at {addr}"
+                        );
+                    }
+                    (addr, Some(fp))
+                }
+                None => (
+                    args.addr.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "system.mesh.update action=cancel_offer requires `addr` or `id`"
+                        )
+                    })?,
+                    None,
+                ),
+            };
+            let rows_removed = exec::cancel_offer(&addr, pubkey_fp.as_deref())?;
             Ok(MeshUpdateOutput::CancelOffer(MeshCancelOfferOutput {
                 addr,
                 rows_removed,
