@@ -138,9 +138,42 @@ impl ApiClientBuilder {
             .connect_timeout(timeout)
             .timeout(timeout)
             .cookie_store(cookie_store)
+            .retry(retry_policy())
             .build()
             .context("build reqwest client")
     }
+}
+
+struct AnyHost;
+
+impl PartialEq<&str> for AnyHost {
+    fn eq(&self, _: &&str) -> bool {
+        true
+    }
+}
+
+fn retry_policy() -> reqwest::retry::Builder {
+    reqwest::retry::for_host(AnyHost)
+        .max_retries_per_request(2)
+        .classify_fn(|rr| {
+            let idempotent = matches!(
+                *rr.method(),
+                reqwest::Method::GET
+                    | reqwest::Method::HEAD
+                    | reqwest::Method::PUT
+                    | reqwest::Method::DELETE
+                    | reqwest::Method::OPTIONS
+            );
+            let transient = match rr.status() {
+                Some(s) => matches!(s.as_u16(), 429 | 502 | 503 | 504),
+                None => rr.error().is_some(),
+            };
+            if idempotent && transient {
+                rr.retryable()
+            } else {
+                rr.success()
+            }
+        })
 }
 
 /// Install a process-default rustls `CryptoProvider` if none is set yet.
@@ -502,6 +535,38 @@ mod tests {
         assert_eq!(resp.status(), 500);
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body, serde_json::json!({"data": "ignored"}));
+    }
+
+    #[tokio::test]
+    async fn idempotent_request_retries_transient_status() {
+        install_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = ApiClientBuilder::new().build().unwrap();
+        let resp = client.get(server.uri()).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    #[tokio::test]
+    async fn post_is_not_retried() {
+        install_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = ApiClientBuilder::new().build().unwrap();
+        let resp = client.post(server.uri()).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 503);
     }
 
     #[tokio::test]

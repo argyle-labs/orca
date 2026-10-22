@@ -285,6 +285,8 @@ pub fn execute(
         max_body_bytes: None,
         body_b64: true,
         follow_redirects: None,
+        connect_timeout_ms: None,
+        retry: None,
     };
     let resp = crate::capsink::http_request(&req)?;
 

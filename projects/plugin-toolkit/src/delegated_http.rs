@@ -110,6 +110,8 @@ pub mod reqwest {
         pub(crate) insecure: bool,
         pub(crate) default_headers: HeaderMap,
         pub(crate) base_origin: std::sync::Arc<std::sync::OnceLock<String>>,
+        pub(crate) timeout: Option<::std::time::Duration>,
+        pub(crate) connect_timeout: Option<::std::time::Duration>,
     }
     impl Client {
         pub fn new() -> Self {
@@ -162,11 +164,13 @@ pub mod reqwest {
                     .map(|(k, v)| (k.clone(), v.0.clone()))
                     .collect(),
                 body: request.body,
-                timeout_ms: None,
+                timeout_ms: self.timeout.map(|d| d.as_millis() as u64),
                 insecure: self.insecure,
                 max_body_bytes: request.max_body_bytes,
                 body_b64: true,
                 follow_redirects: request.follow_redirects,
+                connect_timeout_ms: self.connect_timeout.map(|d| d.as_millis() as u64),
+                retry: None,
             };
             let resp = crate::capsink::http_request(&req).map_err(|e| Error(e.to_string()))?;
             let mut headers = HeaderMap::new();
@@ -186,6 +190,8 @@ pub mod reqwest {
     pub struct ClientBuilder {
         insecure: bool,
         default_headers: HeaderMap,
+        timeout: Option<::std::time::Duration>,
+        connect_timeout: Option<::std::time::Duration>,
     }
     impl ClientBuilder {
         pub fn new() -> Self {
@@ -195,20 +201,17 @@ pub mod reqwest {
             self.insecure = on;
             self
         }
-        /// Default headers sent on every request built from this client. The
-        /// timeout / cookie-store knobs the real reqwest builder exposes are
-        /// no-ops here — the transport is orca's single client, which owns them.
+        /// Default headers sent on every request built from this client.
         pub fn default_headers(mut self, headers: HeaderMap) -> Self {
             self.default_headers = headers;
             self
         }
-        /// Accepted for parity with the real reqwest builder (progenitor's
-        /// generated `Client::new` chains `.connect_timeout(..).timeout(..)`);
-        /// no-ops here — orca's single client owns transport timeouts.
-        pub fn connect_timeout(self, _dur: ::std::time::Duration) -> Self {
+        pub fn connect_timeout(mut self, dur: ::std::time::Duration) -> Self {
+            self.connect_timeout = Some(dur);
             self
         }
-        pub fn timeout(self, _dur: ::std::time::Duration) -> Self {
+        pub fn timeout(mut self, dur: ::std::time::Duration) -> Self {
+            self.timeout = Some(dur);
             self
         }
         pub fn build(self) -> Result<Client> {
@@ -216,6 +219,8 @@ pub mod reqwest {
                 insecure: self.insecure,
                 default_headers: self.default_headers,
                 base_origin: Default::default(),
+                timeout: self.timeout,
+                connect_timeout: self.connect_timeout,
             })
         }
     }
@@ -722,12 +727,13 @@ pub mod api_client {
     /// surface, but `build()` produces the cap-backed shim [`Client`] instead of
     /// a real reqwest client — so a plugin builds its typed API client exactly as
     /// before and every request rides orca's `http.request` capability. The
-    /// `timeout` / `cookie_store` knobs are accepted for API parity but are
-    /// no-ops (orca's single client owns transport policy).
+    /// `cookie_store` knob is accepted for API parity but is a no-op (orca's
+    /// single client owns the cookie jar).
     #[derive(Debug, Default)]
     pub struct ApiClientBuilder {
         headers: HeaderMap,
         insecure: bool,
+        timeout: Option<::std::time::Duration>,
     }
 
     impl ApiClientBuilder {
@@ -759,8 +765,8 @@ pub mod api_client {
             self
         }
 
-        /// Accepted for parity with the real builder; no-op (orca owns timeout).
-        pub fn timeout(self, _dur: ::std::time::Duration) -> Self {
+        pub fn timeout(mut self, dur: ::std::time::Duration) -> Self {
+            self.timeout = Some(dur);
             self
         }
 
@@ -772,10 +778,13 @@ pub mod api_client {
         /// Materialise the cap-backed [`Client`] with default headers + insecure
         /// pre-attached. No crypto-provider install needed — no local TLS stack.
         pub fn build(self) -> AnyResult<Client> {
-            super::reqwest::ClientBuilder::new()
+            let mut b = super::reqwest::ClientBuilder::new()
                 .default_headers(self.headers)
-                .danger_accept_invalid_certs(self.insecure)
-                .build()
+                .danger_accept_invalid_certs(self.insecure);
+            if let Some(t) = self.timeout {
+                b = b.connect_timeout(t).timeout(t);
+            }
+            b.build()
                 .map_err(|e| ::anyhow::anyhow!("build delegated client: {e}"))
         }
     }
@@ -865,6 +874,23 @@ mod tests {
             client.get("http://x/").build().unwrap().follow_redirects,
             None
         );
+    }
+
+    #[test]
+    fn client_builder_carries_timeouts() {
+        let t = ::std::time::Duration::from_secs(7);
+        let c = super::reqwest::ClientBuilder::new()
+            .connect_timeout(t / 7)
+            .timeout(t)
+            .build()
+            .unwrap();
+        assert_eq!(c.timeout, Some(t));
+        assert_eq!(c.connect_timeout, Some(t / 7));
+        let c = super::api_client::ApiClientBuilder::new()
+            .timeout(t)
+            .build()
+            .unwrap();
+        assert_eq!(c.timeout, Some(t));
     }
 
     fn authed_client() -> super::reqwest::Client {

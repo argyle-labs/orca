@@ -221,6 +221,8 @@ mod tests {
             max_body_bytes: None,
             body_b64: true,
             follow_redirects: None,
+            connect_timeout_ms: None,
+            retry: None,
         };
         let out = with_cap_sink(
             Box::new(|cap: &str, json: &str| {
@@ -244,6 +246,8 @@ mod tests {
             max_body_bytes: None,
             body_b64: true,
             follow_redirects: None,
+            connect_timeout_ms: None,
+            retry: None,
         }
     }
 
@@ -288,6 +292,8 @@ mod tests {
             max_body_bytes: None,
             body_b64: true,
             follow_redirects: None,
+            connect_timeout_ms: None,
+            retry: None,
         };
         let err = http_request(&req).unwrap_err().to_string();
         assert!(
@@ -334,6 +340,8 @@ mod tests {
     fn no_follow_requires_core_capability() {
         let req = HttpRequest {
             follow_redirects: Some(false),
+            connect_timeout_ms: None,
+            retry: None,
             ..post(b"")
         };
         let reply = || {
