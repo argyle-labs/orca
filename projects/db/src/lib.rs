@@ -102,8 +102,13 @@ use std::sync::Mutex;
 /// `mcp-serve`, where every tool dispatch opens a connection.
 static SCHEMA_INITIALIZED: Mutex<Option<HashSet<std::path::PathBuf>>> = Mutex::new(None);
 
+static SCHEMA_INIT_LOCK: Mutex<()> = Mutex::new(());
+
 fn ensure_schema_once(conn: &Connection, path: &Path) -> Result<()> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let _init = SCHEMA_INIT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     {
         let mut guard = SCHEMA_INITIALIZED.lock().unwrap();
         let set = guard.get_or_insert_with(HashSet::new);
@@ -1138,7 +1143,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         -- bootstrap pubkey fingerprint (stable across restarts and IP changes).
         -- state = 'unclaimed' (no mesh CA) or 'mesh:<mesh_id>' (member of a mesh).
         -- can_invite = 1 iff that peer advertises it has the mesh CA private key
-        -- AND has self_secure=true. Auto-offer scheduler only targets state=unclaimed.
+        -- AND has self_secure=true.
         CREATE TABLE IF NOT EXISTS mesh_discovery (
             pubkey_fp     TEXT PRIMARY KEY,
             peer_id       TEXT,

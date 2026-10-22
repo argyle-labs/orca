@@ -146,9 +146,8 @@ pub struct PendingOffer {
     pub mesh_id: Option<String>,
     pub expires_at: i64,
     pub created_at: i64,
-    /// Plaintext pairing code — present on inbound offers when the inviter
-    /// included it (mDNS-verified LAN peers). Allows auto-accept without
-    /// out-of-band code entry.
+    /// Plaintext pairing code — embedded on inbound offers only after the
+    /// joiner's admin-issued join token is consumed.
     pub code_plain: Option<String>,
     /// The inviter's self-advertised reachable addresses (LAN v4/v6,
     /// tailscale). The joiner tries each, pinned to `peer_pubkey_fp`, for

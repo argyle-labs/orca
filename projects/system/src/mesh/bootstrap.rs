@@ -565,17 +565,17 @@ fn handle_request_offer(
         .context("this host has no mesh CA; run `orca mesh init` first")?;
     let joiner_label =
         select_peer_label(&body.joiner_hostname, body.joiner_display_name.as_deref());
+    let token = body.join_token.as_deref().unwrap_or_default();
+    refuse_unless!(
+        !token.is_empty() && pdb::consume_join_token(&conn, token)?,
+        "mesh/request-offer refused: a valid admin-issued join token is required"
+    );
     if pdb::has_open_outbound_offer(&conn, &body.joiner_pubkey_fp)? {
         anyhow::bail!(
             "an outbound offer to {} is already pending — try `orca mesh accept` with the existing code",
             joiner_label
         );
     }
-    let token = body.join_token.as_deref().unwrap_or_default();
-    refuse_unless!(
-        !token.is_empty() && pdb::consume_join_token(&conn, token)?,
-        "mesh/request-offer refused: a valid admin-issued join token is required"
-    );
     let mesh_id = pdb::get_mesh_id(&conn)?.unwrap_or_else(|| "default".to_string());
 
     // Record the joiner in discovery (idempotent — same fp = same row).
@@ -1686,7 +1686,41 @@ mod tests {
                     format!("{err:#}").contains("already pending"),
                     "got: {err:#}"
                 );
-                assert!(pdb::consume_join_token(&conn, "tok-2").unwrap());
+                assert!(!pdb::consume_join_token(&conn, "tok-2").unwrap());
+            }));
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn handle_request_offer_tokenless_with_pending_offer_is_refused_by_token() {
+        let _env = crate::test_env::snapshot();
+        run_with_home(true, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let mk = |token: Option<&str>| {
+                let body = RequestOfferBody {
+                    joiner_peer_id: "join-peer".into(),
+                    joiner_hostname: "joinhost".into(),
+                    joiner_pubkey_fp: fp.clone(),
+                    joiner_display_name: None,
+                    joiner_mesh_port: None,
+                    join_token: token.map(Into::into),
+                };
+                utils::pki::sign_envelope(&key, &body).unwrap()
+            };
+            let (env1, env2) = (mk(Some("tok-1")), mk(None));
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                let conn = db::open_default().unwrap();
+                pdb::insert_join_token(&conn, "tok-1", 300).unwrap();
+                handle_request_offer(&env1, test_peer()).unwrap();
+                let err = handle_request_offer(&env2, test_peer()).unwrap_err();
+                assert!(
+                    format!("{err:#}").contains("join token is required"),
+                    "got: {err:#}"
+                );
             }));
         });
     }
