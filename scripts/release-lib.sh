@@ -114,6 +114,17 @@ host_target() {
 die() { echo "error: $*" >&2; exit 1; }
 log() { echo "→ $*"; }
 
+ORCA_CODESIGN_IDENTIFIER="com.argyle-labs.orca"
+
+# Sign with ORCA_CODESIGN_IDENTITY (a Developer ID) when set, else ad-hoc. The
+# fixed identifier keeps the signing identity stable across builds.
+codesign_orca() {
+  local identity="${ORCA_CODESIGN_IDENTITY:--}"
+  local args=(--force --sign "$identity" --identifier "$ORCA_CODESIGN_IDENTIFIER")
+  [ "$identity" = "-" ] || args+=(--options runtime --timestamp)
+  codesign "${args[@]}" "$1"
+}
+
 # ── parallelism knobs ───────────────────────────────────────────────────────
 
 # Total logical cores on the host. Portable across macOS/Linux.
@@ -432,7 +443,7 @@ stage_target_asset() {
   case "$target" in
     *-apple-darwin)
       if [ "$(uname -s)" = "Darwin" ]; then
-        codesign --force --sign - "${DIST_DIR}/${asset}" 2>/dev/null \
+        codesign_orca "${DIST_DIR}/${asset}" 2>/dev/null \
           || log "warn: codesign failed for ${asset} — install.sh will retry on target"
       fi
       ;;
@@ -494,7 +505,7 @@ install_orca_binary() {
   chmod +x "$dest"
 
   if [ "$(uname -s)" = "Darwin" ]; then
-    codesign --force --sign - "$dest" 2>/dev/null || true
+    codesign --verify --strict "$dest" 2>/dev/null || codesign_orca "$dest" 2>/dev/null || true
   fi
 
   log "installed → ${dest}"
