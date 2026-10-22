@@ -36,6 +36,7 @@ const MESH_OFFER_METHOD: &str = "mesh/offer";
 const MESH_JOIN_CONFIRM_METHOD: &str = "mesh/join-confirm";
 const MESH_REQUEST_OFFER_METHOD: &str = "mesh/request-offer";
 const MESH_REFRESH_CERT_BOOTSTRAP_METHOD: &str = "mesh/refresh-cert-bootstrap";
+pub(crate) const MESH_CA_ATTEST_METHOD: &str = "mesh/ca-attest";
 
 /// Joiner → inviter, sent over an unauthenticated bootstrap TLS session (the
 /// joiner doesn't know the inviter's fp yet — TOFU). The inviter responds
@@ -249,6 +250,10 @@ async fn dispatch(request: Request, peer: std::net::SocketAddr) -> Response {
             Err(e) => Response::err(id, peer_facing_error(method, &e)),
         },
         MESH_REQUEST_OFFER_METHOD => match handle_request_offer(&env, peer) {
+            Ok(r) => value_response(id, &r),
+            Err(e) => Response::err(id, peer_facing_error(method, &e)),
+        },
+        MESH_CA_ATTEST_METHOD => match handle_ca_attest() {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, peer_facing_error(method, &e)),
         },
@@ -509,6 +514,28 @@ fn handle_refresh_cert_bootstrap(env: &SignedEnvelope) -> Result<RefreshCertBoot
     })
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct CaAttestResult {
+    pub(crate) mesh_ca_cert_pem: String,
+    pub(crate) attestation_b64: String,
+}
+
+fn handle_ca_attest() -> Result<CaAttestResult> {
+    let pki_d = pki_dir();
+    refuse_unless!(
+        utils::pki::has_mesh_ca_key(&pki_d),
+        "mesh/ca-attest refused: this host cannot admit joiners"
+    );
+    let mesh_ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
+        .context("read mesh CA cert")?;
+    let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
+    let fp = utils::pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
+    Ok(CaAttestResult {
+        mesh_ca_cert_pem,
+        attestation_b64: utils::pki::attest_bootstrap_fp(&pki_d, &fp)?,
+    })
+}
+
 /// Joiner-initiated handshake (Slice JU-3). Joiner calls this over TOFU TLS
 /// asking "please offer me membership". We treat the request like an mDNS
 /// discovery hit: record the joiner in `mesh_discovery`, mint a pairing code,
@@ -536,6 +563,14 @@ fn handle_request_offer(
     let pki_d = pki_dir();
     let mesh_ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
         .context("this host has no mesh CA; run `orca mesh init` first")?;
+    let joiner_label =
+        select_peer_label(&body.joiner_hostname, body.joiner_display_name.as_deref());
+    if pdb::has_open_outbound_offer(&conn, &body.joiner_pubkey_fp)? {
+        anyhow::bail!(
+            "an outbound offer to {} is already pending — try `orca mesh accept` with the existing code",
+            joiner_label
+        );
+    }
     let token = body.join_token.as_deref().unwrap_or_default();
     refuse_unless!(
         !token.is_empty() && pdb::consume_join_token(&conn, token)?,
@@ -544,8 +579,6 @@ fn handle_request_offer(
     let mesh_id = pdb::get_mesh_id(&conn)?.unwrap_or_else(|| "default".to_string());
 
     // Record the joiner in discovery (idempotent — same fp = same row).
-    let joiner_label =
-        select_peer_label(&body.joiner_hostname, body.joiner_display_name.as_deref());
     // The port peers will DIAL. Never `peer.port()` — see `joiner_mesh_port`.
     let joiner_mesh_port = dialable_joiner_port(body.joiner_mesh_port);
     pdb::upsert_discovery(
@@ -558,13 +591,6 @@ fn handle_request_offer(
         "unclaimed",
         true,
     )?;
-
-    if pdb::has_open_outbound_offer(&conn, &body.joiner_pubkey_fp)? {
-        anyhow::bail!(
-            "an outbound offer to {} is already pending — try `orca mesh accept` with the existing code",
-            joiner_label
-        );
-    }
 
     let code = crate::mesh::scheduler::mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
@@ -593,7 +619,7 @@ fn handle_request_offer(
     )?;
 
     info!(
-        "[mesh-bootstrap] joiner-initiated request from {} ({}, fp {}) — pairing code: {code}",
+        "[mesh-bootstrap] joiner-initiated request from {} ({}, fp {}) — offer issued",
         joiner_label, body.joiner_peer_id, body.joiner_pubkey_fp
     );
 
@@ -1660,6 +1686,7 @@ mod tests {
                     format!("{err:#}").contains("already pending"),
                     "got: {err:#}"
                 );
+                assert!(pdb::consume_join_token(&conn, "tok-2").unwrap());
             }));
         });
     }

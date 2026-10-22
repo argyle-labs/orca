@@ -1678,23 +1678,97 @@ pub fn pinned_bootstrap_verifier(
 pub fn capturing_bootstrap_verifier(
     captured: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 ) -> std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier> {
-    std::sync::Arc::new(CapturingFpVerifier { captured })
+    std::sync::Arc::new(CapturingFpVerifier {
+        captured,
+        ca_pin: None,
+    })
+}
+
+pub fn ca_pinned_capturing_bootstrap_verifier(
+    captured: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    ca_pin: String,
+) -> std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier> {
+    std::sync::Arc::new(CapturingFpVerifier {
+        captured,
+        ca_pin: Some(ca_pin),
+    })
+}
+
+pub fn mesh_ca_pin_der(cert_der: &[u8]) -> String {
+    crate::hash::sha256_hex(cert_der)
+}
+
+pub fn mesh_ca_pin(cert_pem: &str) -> Result<String> {
+    Ok(mesh_ca_pin_der(first_cert_der(cert_pem)?.as_ref()))
+}
+
+fn bootstrap_attestation_message(bootstrap_fp: &str) -> Vec<u8> {
+    format!("orca-mesh-bootstrap-attest:{bootstrap_fp}").into_bytes()
+}
+
+pub fn attest_bootstrap_fp(pki_dir: &Path, bootstrap_fp: &str) -> Result<String> {
+    use ed25519_dalek::Signer;
+    use ed25519_dalek::pkcs8::DecodePrivateKey;
+    let key_pem = read_pki_file(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
+    let signing =
+        ed25519_dalek::SigningKey::from_pkcs8_pem(&key_pem).context("parse mesh CA key PEM")?;
+    let sig = signing.sign(&bootstrap_attestation_message(bootstrap_fp));
+    Ok(crate::encoding::base64_encode(&sig.to_bytes()))
+}
+
+pub fn verify_bootstrap_attestation(
+    ca_cert_pem: &str,
+    bootstrap_fp: &str,
+    signature_b64: &str,
+) -> Result<()> {
+    use ed25519_dalek::Verifier;
+    let der = first_cert_der(ca_cert_pem)?;
+    let (_, parsed) =
+        x509_parser::parse_x509_certificate(der.as_ref()).context("parse mesh CA cert")?;
+    let pk: [u8; 32] = parsed
+        .public_key()
+        .subject_public_key
+        .data
+        .as_ref()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("mesh CA key is not Ed25519"))?;
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).context("parse mesh CA pubkey")?;
+    let sig_bytes = crate::encoding::base64_decode(signature_b64).context("decode attestation")?;
+    let sig_arr: [u8; 64] = sig_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("attestation must be 64 bytes"))?;
+    vk.verify(
+        &bootstrap_attestation_message(bootstrap_fp),
+        &ed25519_dalek::Signature::from_bytes(&sig_arr),
+    )
+    .context("mesh CA attestation of the bootstrap key did not verify")
 }
 
 #[derive(Debug)]
 struct CapturingFpVerifier {
     captured: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    ca_pin: Option<String>,
 }
 
 impl rustls::client::danger::ServerCertVerifier for CapturingFpVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
         _server_name: &rustls::pki_types::ServerName<'_>,
         _ocsp: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if let Some(pin) = &self.ca_pin
+            && !intermediates
+                .iter()
+                .any(|c| mesh_ca_pin_der(c.as_ref()) == *pin)
+        {
+            return Err(rustls::Error::General(
+                "inviter's mesh CA does not match the join token".into(),
+            ));
+        }
         let fp = spki_fingerprint_der(end_entity.as_ref())
             .map_err(|e| rustls::Error::General(format!("extract SPKI fp from cert: {e}")))?;
         if let Ok(mut slot) = self.captured.lock() {
@@ -3043,6 +3117,47 @@ mod tests {
             v.supported_verify_schemes()
                 .contains(&rustls::SignatureScheme::ED25519)
         );
+    }
+
+    #[test]
+    fn ca_pinned_verifier_requires_the_pinned_ca_in_the_chain() {
+        let _p = rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+        let ca_pem = std::fs::read_to_string(mesh_ca_cert_path(dir.path())).unwrap();
+        let ca_der = first_cert_der(&ca_pem).unwrap();
+        let (cert_pem, _) = load_or_init_bootstrap_cert(dir.path()).unwrap();
+        let leaf = first_cert_der(&cert_pem).unwrap();
+        let sn = rustls::pki_types::ServerName::try_from("mesh-bootstrap.orca.local").unwrap();
+        let now = rustls::pki_types::UnixTime::now();
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let good =
+            ca_pinned_capturing_bootstrap_verifier(slot.clone(), mesh_ca_pin(&ca_pem).unwrap());
+        good.verify_server_cert(&leaf, std::slice::from_ref(&ca_der), &sn, &[], now)
+            .unwrap();
+        assert!(slot.lock().unwrap().is_some());
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let bad = ca_pinned_capturing_bootstrap_verifier(slot.clone(), "00".repeat(32));
+        assert!(
+            bad.verify_server_cert(&leaf, std::slice::from_ref(&ca_der), &sn, &[], now)
+                .is_err()
+        );
+        assert!(bad.verify_server_cert(&leaf, &[], &sn, &[], now).is_err());
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn bootstrap_attestation_verifies_only_for_the_attested_fp() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+        let ca_pem = std::fs::read_to_string(mesh_ca_cert_path(dir.path())).unwrap();
+        let sig = attest_bootstrap_fp(dir.path(), "fp-a").unwrap();
+        verify_bootstrap_attestation(&ca_pem, "fp-a", &sig).unwrap();
+        assert!(verify_bootstrap_attestation(&ca_pem, "fp-b", &sig).is_err());
+        let other = tempfile::tempdir().unwrap();
+        init_mesh_ca(other.path(), "34647a14a251e863cdf8dcee692f2915").unwrap();
+        let other_pem = std::fs::read_to_string(mesh_ca_cert_path(other.path())).unwrap();
+        assert!(verify_bootstrap_attestation(&other_pem, "fp-a", &sig).is_err());
     }
 
     #[test]

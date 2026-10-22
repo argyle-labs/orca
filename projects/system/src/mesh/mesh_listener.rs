@@ -191,10 +191,14 @@ impl HotReloadResolver {
     }
 
     fn load_bootstrap_ck(&self) -> Result<rustls::sign::CertifiedKey> {
-        let cert_pem = std::fs::read_to_string(utils::pki::bootstrap_cert_path(&self.pki_dir))
+        let mut cert_pem = std::fs::read_to_string(utils::pki::bootstrap_cert_path(&self.pki_dir))
             .context("read bootstrap cert")?;
         let key_pem = std::fs::read_to_string(utils::pki::bootstrap_key_path(&self.pki_dir))
             .context("read bootstrap key")?;
+        if let Ok(ca_pem) = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&self.pki_dir)) {
+            cert_pem.push('\n');
+            cert_pem.push_str(&ca_pem);
+        }
         Self::build_ck(&cert_pem, &key_pem)
     }
 
@@ -509,6 +513,13 @@ mod tests {
         assert!(
             !boot_ck.cert.is_empty(),
             "bootstrap certified key must carry a non-empty chain"
+        );
+        let ca_pem =
+            std::fs::read_to_string(utils::pki::mesh_ca_cert_path(pki.path())).expect("read ca");
+        assert_eq!(boot_ck.cert.len(), 2);
+        assert_eq!(
+            utils::pki::mesh_ca_pin_der(boot_ck.cert[1].as_ref()),
+            utils::pki::mesh_ca_pin(&ca_pem).unwrap()
         );
     }
 

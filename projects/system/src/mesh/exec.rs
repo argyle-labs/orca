@@ -511,12 +511,19 @@ pub fn issue_join_token() -> Result<MeshJoinTokenOutput> {
     if !utils::pki::has_mesh_ca_key(&pki_dir()) {
         anyhow::bail!("this host holds no mesh CA key and cannot admit joiners");
     }
+    let ca_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_dir()))
+        .context("read mesh CA cert")?;
+    let ca_pin = utils::pki::mesh_ca_pin(&ca_pem)?;
     let mut buf = [0u8; 32];
     rand::rng().fill_bytes(&mut buf);
-    let token: String = buf.iter().map(|b| format!("{b:02x}")).collect();
-    let expires_at =
-        db::pool::with_pooled_or_open(|conn| pdb::insert_join_token(conn, &token, OFFER_TTL_SECS))?;
-    Ok(MeshJoinTokenOutput { token, expires_at })
+    let secret = utils::hash::hex_encode(&buf);
+    let expires_at = db::pool::with_pooled_or_open(|conn| {
+        pdb::insert_join_token(conn, &secret, OFFER_TTL_SECS)
+    })?;
+    Ok(MeshJoinTokenOutput {
+        token: format!("{secret}.{ca_pin}"),
+        expires_at,
+    })
 }
 
 /// Kick a peer: drop its rows locally and send a one-way "you've been removed"
