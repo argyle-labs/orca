@@ -116,6 +116,15 @@ log() { echo "→ $*"; }
 
 ORCA_CODESIGN_IDENTIFIER="wtf.argyle.orca"
 
+secq() {
+  case "$1" in
+    *$'\n'*) echo "error: security -i value contains a newline" >&2; return 1 ;;
+  esac
+  local s=${1//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '"%s"' "$s"
+}
+
 codesign_orca() {
   local identity="${ORCA_CODESIGN_IDENTITY:--}"
   local args=(--force --sign "$identity" --identifier "$ORCA_CODESIGN_IDENTIFIER" --timestamp=none)

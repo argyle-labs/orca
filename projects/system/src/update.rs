@@ -485,13 +485,23 @@ pub fn codesign_args(identity: Option<&str>) -> Vec<String> {
     args
 }
 
-pub fn codesign_attempts(identity: Option<&str>) -> Vec<Vec<String>> {
+pub fn codesign_attempts(
+    identity: Option<&str>,
+    require_identity: bool,
+) -> Result<Vec<Vec<String>>> {
     let primary = codesign_args(identity);
     let ad_hoc = codesign_args(None);
     if primary == ad_hoc {
-        vec![ad_hoc]
+        if require_identity {
+            anyhow::bail!(
+                "ORCA_CODESIGN_REQUIRE_IDENTITY is set but ORCA_CODESIGN_IDENTITY is empty"
+            );
+        }
+        Ok(vec![ad_hoc])
+    } else if require_identity {
+        Ok(vec![primary])
     } else {
-        vec![primary, ad_hoc]
+        Ok(vec![primary, ad_hoc])
     }
 }
 
@@ -567,8 +577,10 @@ pub fn apply_binary(bytes: &[u8], version: &str) -> Result<()> {
             .is_ok_and(|s| s.success());
         if !signed {
             let identity = std::env::var("ORCA_CODESIGN_IDENTITY").ok();
+            let require_identity =
+                std::env::var("ORCA_CODESIGN_REQUIRE_IDENTITY").is_ok_and(|v| !v.is_empty());
             let mut last_status = None;
-            for args in codesign_attempts(identity.as_deref()) {
+            for args in codesign_attempts(identity.as_deref(), require_identity)? {
                 let status = std::process::Command::new("codesign")
                     .args(&args)
                     .arg(&current)
@@ -1222,7 +1234,7 @@ mod tests {
 
     #[test]
     fn codesign_attempts_falls_back_to_ad_hoc_keeping_identifier() {
-        let attempts = codesign_attempts(Some("Argyle Labs orca Code Signing"));
+        let attempts = codesign_attempts(Some("Argyle Labs orca Code Signing"), false).unwrap();
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0][2], "Argyle Labs orca Code Signing");
         assert_eq!(attempts[1], codesign_args(None));
@@ -1231,8 +1243,25 @@ mod tests {
 
     #[test]
     fn codesign_attempts_single_ad_hoc_without_identity() {
-        assert_eq!(codesign_attempts(None), vec![codesign_args(None)]);
-        assert_eq!(codesign_attempts(Some("")), vec![codesign_args(None)]);
+        assert_eq!(
+            codesign_attempts(None, false).unwrap(),
+            vec![codesign_args(None)]
+        );
+        assert_eq!(
+            codesign_attempts(Some(""), false).unwrap(),
+            vec![codesign_args(None)]
+        );
+    }
+
+    #[test]
+    fn codesign_attempts_require_identity_disables_ad_hoc_fallback() {
+        let attempts = codesign_attempts(Some("Argyle Labs orca Code Signing"), true).unwrap();
+        assert_eq!(
+            attempts,
+            vec![codesign_args(Some("Argyle Labs orca Code Signing"))]
+        );
+        assert!(codesign_attempts(None, true).is_err());
+        assert!(codesign_attempts(Some(""), true).is_err());
     }
 
     // Guards the MCP-drops-on-every-update regression: `launchctl kickstart -k`

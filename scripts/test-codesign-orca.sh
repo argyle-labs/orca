@@ -31,3 +31,27 @@ check ad-hoc "--force --sign - --identifier wtf.argyle.orca --timestamp=none /bi
 
 PATH="$stub_dir:$PATH" ORCA_CODESIGN_IDENTITY="Argyle Labs orca Code Signing" ORCA_CODESIGN_KEYCHAIN="/k/orca.keychain-db" codesign_orca /bin/orca
 check keychain "--force --sign Argyle Labs orca Code Signing --identifier wtf.argyle.orca --timestamp=none --options runtime --keychain /k/orca.keychain-db /bin/orca "
+
+cat > "$stub_dir/security" <<STUB
+#!/usr/bin/env bash
+python3 -c 'import shlex, sys; sys.stdout.write("\n".join(shlex.split(sys.stdin.read())) + "\n")' > "$log"
+STUB
+chmod +x "$stub_dir/security"
+
+# shellcheck disable=SC2016
+for value in 'pa"ss' 'b\ack\\slash' 'with space' '100%s' '$HOME $(id)' 'mix "\ $x %d\"'; do
+  printf 'unlock-keychain -p %s %s\n' "$(secq "$value")" "$(secq "/k/$value")" | PATH="$stub_dir:$PATH" security -i
+  expected="$(printf 'unlock-keychain\n-p\n%s\n/k/%s' "$value" "$value")"
+  actual="$(cat "$log")"
+  if [ "$actual" != "$expected" ]; then
+    echo "FAIL secq '$value': got '$actual'" >&2
+    exit 1
+  fi
+done
+echo "ok secq round-trip"
+
+if secq $'a\nb' 2>/dev/null; then
+  echo "FAIL secq accepted a newline" >&2
+  exit 1
+fi
+echo "ok secq rejects newline"

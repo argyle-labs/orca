@@ -72,7 +72,9 @@ ORCA_CODESIGN_KEYCHAIN_PASSWORD=... ORCA_CODESIGN_P12_PASSWORD=... \
 ```
 
 Self-update re-signs only unsigned binaries, using `ORCA_CODESIGN_IDENTITY`
-when set and falling back to ad-hoc signing with the same identifier.
+when set and falling back to ad-hoc signing with the same identifier. Set
+`ORCA_CODESIGN_REQUIRE_IDENTITY=1` to disable the ad-hoc fallback and fail
+the update instead.
 
 ## Why one binary
 

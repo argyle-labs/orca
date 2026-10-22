@@ -95,7 +95,17 @@ jobs:
                 ;;
             esac
           fi
-          printf 'unlock-keychain -p "%s" "%s"\n' "$KEYCHAIN_PASSWORD" "$kc" | security -i
+          secq() {
+            case "$1" in
+              *$'\n'*) echo "::error::security -i value contains a newline" >&2; return 1 ;;
+            esac
+            local s=${1//\\/\\\\}
+            s=${s//\"/\\\"}
+            printf '"%s"' "$s"
+          }
+          q_pw=$(secq "$KEYCHAIN_PASSWORD")
+          q_kc=$(secq "$kc")
+          printf 'unlock-keychain -p %s %s\n' "$q_pw" "$q_kc" | security -i
           security set-keychain-settings -lut 3600 "$kc"
           if ! security find-identity -v -p codesigning "$kc" | grep -qF "\"$IDENTITY\""; then
             echo "::error::codesigning identity '$IDENTITY' not found in $kc; run scripts/macos-codesign-setup.sh on the runner"
