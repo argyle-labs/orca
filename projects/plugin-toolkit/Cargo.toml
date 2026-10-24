@@ -187,6 +187,9 @@ native-tls = { workspace = true, optional = true }
 rust-embed = { workspace = true, optional = true }
 mime_guess = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 # Rotation tests write real files and must not touch the operator's state dir.
 tempfile = { workspace = true }
