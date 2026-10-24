@@ -4816,6 +4816,7 @@ dependencies = [
  "colored",
  "crossterm",
  "futures",
+ "glob",
  "if-addrs 0.14.0",
  "libc",
  "md-5 0.10.6",

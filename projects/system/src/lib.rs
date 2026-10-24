@@ -47,6 +47,7 @@ mod shared_endpoint_tests;
 pub mod shares;
 pub mod source_election;
 pub mod storage_permissions;
+pub mod storage_quota;
 pub mod storage_tools;
 pub mod supervisor;
 pub mod system_id;
