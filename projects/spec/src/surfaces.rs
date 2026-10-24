@@ -455,9 +455,9 @@ async fn run(
     }
     let insecure = row.get(&fields.insecure).is_some_and(truthy);
     let routes = routes_of(&row, &fields.routes)
-        .with_context(|| format!("{tool}: endpoint `{endpoint}`"))?;
+        .map_err(|e| anyhow!("{tool}: endpoint `{endpoint}`: {e:#}"))?;
     let columns =
-        auth_columns(surface, &row).with_context(|| format!("{tool}: endpoint `{endpoint}`"))?;
+        auth_columns(surface, &row).map_err(|e| anyhow!("{tool}: endpoint `{endpoint}`: {e:#}"))?;
     let route_key = format!("{plugin}.{endpoint}");
     let secret_name = surface
         .auth
@@ -554,14 +554,35 @@ fn auth_columns(surface: &ApiSurface, row: &DbRow) -> Result<BTreeMap<String, St
         .auth_columns()?
         .into_iter()
         .map(|col| {
-            let value = match row.get(col) {
+            let value = match row.get(col).or_else(|| row.get(shared_column(col))) {
                 Some(DbValue::Text(t)) => t.clone(),
                 Some(DbValue::Int(i)) => i.to_string(),
-                _ => bail!("no `{col}` column"),
+                _ => match shared_config_field(row, col) {
+                    Some(v) => v,
+                    None => bail!("no `{col}` column"),
+                },
             };
             Ok((col.to_string(), value))
         })
         .collect()
+}
+
+fn shared_column(field: &str) -> &str {
+    match field {
+        "token_id" => "auth_principal",
+        other => other,
+    }
+}
+
+fn shared_config_field(row: &DbRow, field: &str) -> Option<String> {
+    let Some(DbValue::Text(cfg)) = row.get("config") else {
+        return None;
+    };
+    match serde_json::from_str::<Value>(cfg).ok()?.get(field)? {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 fn truthy(v: &DbValue) -> bool {
@@ -986,6 +1007,43 @@ mod tests {
         value["endpoint"]["public_columns"] = public;
         s = ApiSurface::parse(&value.to_string()).unwrap();
         s
+    }
+
+    fn token_id_surface() -> ApiSurface {
+        let mut value = serde_json::to_value(column_auth("tokp", "header")).unwrap();
+        value["auth"]["template"] = json!("PVEAPIToken={endpoint.token_id}={secret}");
+        value["endpoint"]["columns"] = json!(["token_id"]);
+        ApiSurface::parse(&value.to_string()).unwrap()
+    }
+
+    #[test]
+    fn shared_row_auth_principal_satisfies_token_id() {
+        let row = DbRow::from([(
+            "auth_principal".to_string(),
+            DbValue::Text("root@pam!orca".into()),
+        )]);
+        let cols = auth_columns(&token_id_surface(), &row).unwrap();
+        assert_eq!(
+            cols.get("token_id").map(String::as_str),
+            Some("root@pam!orca")
+        );
+    }
+
+    #[test]
+    fn literal_column_wins_over_shared_mapping() {
+        let row = DbRow::from([
+            ("token_id".to_string(), DbValue::Text("lit".into())),
+            ("auth_principal".to_string(), DbValue::Text("shared".into())),
+        ]);
+        let cols = auth_columns(&token_id_surface(), &row).unwrap();
+        assert_eq!(cols.get("token_id").map(String::as_str), Some("lit"));
+    }
+
+    #[test]
+    fn missing_auth_column_names_the_column() {
+        let err = auth_columns(&token_id_surface(), &DbRow::new()).unwrap_err();
+        let wrapped = anyhow!("tokp.item: endpoint `main`: {err:#}");
+        assert!(format!("{wrapped:#}").contains("no `token_id` column"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
