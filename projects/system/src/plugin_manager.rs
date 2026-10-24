@@ -76,8 +76,20 @@ fn catalog_disk_path() -> Option<PathBuf> {
 fn load_disk_catalog() -> Vec<CatalogEntry> {
     catalog_disk_path()
         .and_then(|p| std::fs::read(p).ok())
-        .and_then(|b| serde_json::from_slice(&b).ok())
+        .and_then(|b| serde_json::from_slice::<Vec<CatalogEntry>>(&b).ok())
         .unwrap_or_default()
+        .into_iter()
+        .filter(disk_entry_trusted)
+        .collect()
+}
+
+fn disk_entry_trusted(entry: &CatalogEntry) -> bool {
+    crate::plugin_discovery::is_allowed_plugin_id(&entry.name)
+        && crate::plugin_discovery::is_allowed_plugin_id(&entry.target_software)
+        && entry.repo_url.starts_with(&format!(
+            "https://github.com/{}/",
+            crate::plugin_discovery::PLUGIN_ORG
+        ))
 }
 
 fn save_disk_catalog(entries: &[CatalogEntry]) {
@@ -1078,9 +1090,18 @@ pub(crate) async fn install_from_catalog(
     allow_unsigned: bool,
     ctx: &ToolCtx,
 ) -> Result<PluginInstallOutput> {
+    if !crate::plugin_discovery::is_allowed_plugin_id(name) {
+        bail!("'{name}' is not a valid plugin name");
+    }
     let entry = find_catalog_entry(catalog_resolved().await, name, true).with_context(|| {
-        format!("'{name}' is not a valid plugin name (see `plugin.list` for known plugins)")
+        format!("plugin '{name}' not found in the catalog (see `plugin.list` for known plugins)")
     })?;
+    if !crate::plugin_discovery::is_allowed_plugin_id(&entry.target_software) {
+        bail!(
+            "catalog entry '{name}' has an invalid plugin name '{}'",
+            entry.target_software
+        );
+    }
     db::pool::with_pooled_or_open(|c| {
         db::plugins::refuse_undotted_secret_collision(c, &entry.target_software)
     })?;
@@ -3117,6 +3138,34 @@ mod tests {
             );
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn install_from_catalog_refuses_a_reserved_or_invalid_name() {
+        let _env = crate::test_env::snapshot();
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        for bad in ["ui", "github_token", "Bad/Name"] {
+            let err = install_from_catalog(bad, None, false, false, &ctx)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("not a valid plugin name"),
+                "{bad}: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn disk_catalog_entries_must_be_valid_and_from_the_org() {
+        assert!(disk_entry_trusted(&entry("nut", "available")));
+        assert!(!disk_entry_trusted(&entry("ui", "available")));
+        let mut foreign = entry("nut", "available");
+        foreign.repo_url = "https://github.com/evil/nut".to_string();
+        assert!(!disk_entry_trusted(&foreign));
+        let mut prefix = entry("nut", "available");
+        prefix.repo_url = "https://github.com/argyle-labs.evil/nut".to_string();
+        assert!(!disk_entry_trusted(&prefix));
     }
 
     #[test]

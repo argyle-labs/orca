@@ -50,14 +50,8 @@ pub fn is_plugin_repo(repo: &OrgRepo) -> bool {
     !repo.archived && repo.topics.iter().any(|t| t == PLUGIN_TOPIC)
 }
 
-pub fn is_valid_plugin_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= 64
-        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+pub fn is_allowed_plugin_id(name: &str) -> bool {
+    plugin_loader::is_valid_plugin_id(name) && !plugin_loader::is_reserved_plugin_id(name)
 }
 
 pub fn repo_url_for(full_name: &str) -> String {
@@ -65,7 +59,7 @@ pub fn repo_url_for(full_name: &str) -> String {
 }
 
 pub fn synthesized_entry(name: &str) -> Option<CatalogEntry> {
-    if !is_valid_plugin_name(name) {
+    if !is_allowed_plugin_id(name) {
         return None;
     }
     let repo_url = repo_url_for(&format!("{PLUGIN_ORG}/{name}"));
@@ -92,7 +86,7 @@ fn plugin_name_of(asset: &str, version: &str) -> Option<(String, String)> {
     TARGET_TRIPLES.iter().find_map(|triple| {
         let stem = asset.strip_suffix(&format!("-{triple}"))?;
         let name = stem.strip_suffix(&format!("-v{version}"))?;
-        is_valid_plugin_name(name).then(|| (name.to_string(), triple.to_string()))
+        is_allowed_plugin_id(name).then(|| (name.to_string(), triple.to_string()))
     })
 }
 
@@ -137,7 +131,7 @@ pub fn entries_for_repo(
             }
         }
     }
-    if status.is_empty() && is_valid_plugin_name(&repo.name) {
+    if status.is_empty() && is_allowed_plugin_id(&repo.name) {
         status.insert(repo.name.clone(), "unreleased");
     }
     let repo_url = repo_url_for(&repo.full_name);
@@ -171,31 +165,29 @@ fn owns_name(entry: &CatalogEntry) -> bool {
 }
 
 pub fn dedupe_entries(entries: Vec<CatalogEntry>) -> Vec<CatalogEntry> {
-    let mut by_name: BTreeMap<String, CatalogEntry> = BTreeMap::new();
+    let mut by_name: BTreeMap<String, Vec<CatalogEntry>> = BTreeMap::new();
     for entry in entries {
-        match by_name.get(&entry.name) {
-            None => {
-                by_name.insert(entry.name.clone(), entry);
+        by_name.entry(entry.name.clone()).or_default().push(entry);
+    }
+    by_name
+        .into_iter()
+        .filter_map(|(name, mut claimants)| {
+            if claimants.len() == 1 {
+                return claimants.pop();
             }
-            Some(kept) => {
-                let replace = match (owns_name(kept), owns_name(&entry)) {
-                    (false, true) => true,
-                    (true, false) => false,
-                    _ => entry.repo_url < kept.repo_url,
-                };
-                let (winner, loser) = if replace {
-                    (&entry.repo_url, &kept.repo_url)
-                } else {
-                    (&kept.repo_url, &entry.repo_url)
-                };
-                tracing::warn!(plugin = %entry.name, kept = %winner, dropped = %loser, "plugin name published by more than one repo");
-                if replace {
-                    by_name.insert(entry.name.clone(), entry);
+            let repos: Vec<&str> = claimants.iter().map(|e| e.repo_url.as_str()).collect();
+            match claimants.iter().position(owns_name) {
+                Some(i) => {
+                    tracing::warn!(plugin = %name, kept = %claimants[i].repo_url, claimants = ?repos, "plugin name published by more than one repo");
+                    Some(claimants.swap_remove(i))
+                }
+                None => {
+                    tracing::warn!(plugin = %name, claimants = ?repos, "plugin name claimed by several repos and none is named after it; dropping all");
+                    None
                 }
             }
-        }
-    }
-    by_name.into_values().collect()
+        })
+        .collect()
 }
 
 async fn repo_entries(
@@ -514,23 +506,30 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_names_without_an_owner_pick_the_lowest_repo_url() {
-        let mut a = synthesized_entry("x").unwrap();
-        a.repo_url = "https://github.com/argyle-labs/b".to_string();
-        let mut b = synthesized_entry("x").unwrap();
-        b.repo_url = "https://github.com/argyle-labs/a".to_string();
-        let got = dedupe_entries(vec![a, b]);
-        assert_eq!(got[0].repo_url, "https://github.com/argyle-labs/a");
+    fn duplicate_names_without_an_owner_are_dropped() {
+        let mut a = synthesized_entry("sonarr").unwrap();
+        a.repo_url = "https://github.com/argyle-labs/arr".to_string();
+        let mut b = synthesized_entry("sonarr").unwrap();
+        b.repo_url = "https://github.com/argyle-labs/evil".to_string();
+        assert!(dedupe_entries(vec![a.clone(), b]).is_empty());
+        let got = dedupe_entries(vec![a.clone()]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].repo_url, a.repo_url);
     }
 
     #[test]
     fn plugin_names_are_validated() {
-        for ok in ["nut", "a", "0x", "arr-sonarr", &"a".repeat(64)] {
-            assert!(is_valid_plugin_name(ok), "{ok}");
+        for ok in ["nut", "a", "x0", "arr-sonarr", &"a".repeat(64)] {
+            assert!(is_allowed_plugin_id(ok), "{ok}");
         }
         for bad in [
             "",
             "-x",
+            "0x",
+            "x-",
+            "a--b",
+            "ui",
+            "github_token",
             "Nut",
             "a_b",
             "a/b",
@@ -538,10 +537,11 @@ mod tests {
             "a.b",
             &"a".repeat(65),
         ] {
-            assert!(!is_valid_plugin_name(bad), "{bad}");
+            assert!(!is_allowed_plugin_id(bad), "{bad}");
         }
         assert!(plugin_name_of("../x-v0.1.0-x86_64-unknown-linux-musl", "0.1.0").is_none());
         assert!(synthesized_entry("Bad/Name").is_none());
+        assert!(synthesized_entry("ui").is_none());
     }
 
     #[test]
