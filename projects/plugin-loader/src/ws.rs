@@ -40,6 +40,11 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[cfg(not(test))]
+const INSECURE_RECHECK: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const INSECURE_RECHECK: Duration = Duration::from_millis(50);
+
 /// Inbound messages / bytes a plugin may leave unread before its session is
 /// dropped, bounding host memory without ever stalling the socket pump. The
 /// byte bound grows to two max-size messages for sessions that raise the cap.
@@ -242,6 +247,7 @@ pub(crate) fn open(mut req: WsOpen, principal: &str) -> Result<WsChunk> {
     let wait = wait_limit(req.timeout_ms);
     let url = redact_url(&req.url);
     let insecure_url = req.insecure.then(|| req.url.clone());
+    let db_path = db::db_path_override_snapshot();
     let ws = run_on_cap_runtime(async move { timeout(wait, connect(req, max_message)).await })?
         .map_err(|_| anyhow!("ws.open: '{url}' timed out after {wait:?}"))??;
 
@@ -267,8 +273,50 @@ pub(crate) fn open(mut req: WsOpen, principal: &str) -> Result<WsChunk> {
     }
     owned.next += 1;
     let id = owned.next;
+    let watch = session.insecure_url.clone();
     owned.sessions.insert(id, session);
+    drop(table);
+    if let Some(url) = watch {
+        cap_runtime().spawn(revoke_when_unmarked(
+            principal.to_string(),
+            id,
+            url,
+            db_path,
+        ));
+    }
     Ok(WsChunk::Open { session: id })
+}
+
+async fn revoke_when_unmarked(
+    principal: String,
+    session: u64,
+    url: String,
+    db_path: Option<std::path::PathBuf>,
+) {
+    let mut tick = tokio::time::interval(INSECURE_RECHECK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if with_session(&principal, session, "ws", |_| ()).is_err() {
+            return;
+        }
+        let (p, u, path) = (principal.clone(), url.clone(), db_path.clone());
+        let allowed = tokio::task::spawn_blocking(move || {
+            let check = || crate::tls_policy::effective_insecure(&p, &u, true).is_ok();
+            match path {
+                Some(path) => db::with_thread_db_path(&path, check),
+                None => check(),
+            }
+        })
+        .await
+        .unwrap_or(true);
+        if !allowed {
+            if let Some(s) = remove(&principal, session) {
+                s.pump.abort();
+            }
+            return;
+        }
+    }
 }
 
 /// Next inbound message; `None` once the peer closed cleanly. A dropped
@@ -1222,6 +1270,30 @@ mod tests {
             .unwrap_err()
             .to_string();
             assert!(err.contains("may not skip TLS verification"), "got: {err}");
+            assert_eq!(session_count(principal), 0);
+        });
+    }
+
+    #[test]
+    fn insecure_session_is_revoked_without_send_or_recv() {
+        let (url, _closed) = serve(Peer::Echo, true);
+        let principal = "ws-tls-revoke";
+        with_marked_endpoint(principal, &url, || {
+            let reply =
+                handle_cap("ws.open", json!({"url": url, "insecure": true}), principal).unwrap();
+            let WsChunk::Open { .. } = serde_json::from_value(reply).unwrap() else {
+                panic!("expected Open");
+            };
+            assert_eq!(session_count(principal), 1);
+            db::pool::with_pooled_or_open(|conn| {
+                conn.execute("UPDATE endpoints SET enabled = 0", [])?;
+                Ok(())
+            })
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while session_count(principal) != 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
             assert_eq!(session_count(principal), 0);
         });
     }
