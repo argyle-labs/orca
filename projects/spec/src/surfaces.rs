@@ -1061,13 +1061,22 @@ mod tests {
         let mut value = serde_json::to_value(column_auth("cfgs", "header")).unwrap();
         value["auth"]["template"] = json!("Tok={endpoint.token}={secret}");
         value["endpoint"]["columns"] = json!(["token"]);
-        let surface = ApiSurface::parse(&value.to_string()).unwrap();
+        let err = ApiSurface::parse(&value.to_string()).unwrap_err();
+        assert!(format!("{err:#}").contains("`token`"));
+        let mut surface = ApiSurface::parse(
+            &serde_json::to_value(column_auth("cfgs", "header"))
+                .unwrap()
+                .to_string(),
+        )
+        .unwrap();
+        surface.endpoint.columns = vec!["token".into()];
+        surface.auth.as_mut().unwrap().template = "Tok={endpoint.token}={secret}".into();
         let row = DbRow::from([(
             "config".to_string(),
             DbValue::Text(json!({"token": "leaked"}).to_string()),
         )]);
         let err = auth_columns(&surface, &row).unwrap_err();
-        assert!(format!("{err:#}").contains("no `token` column"));
+        assert!(format!("{err:#}").contains("`token`"));
     }
 
     #[test]
