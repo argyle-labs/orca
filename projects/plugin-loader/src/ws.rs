@@ -163,6 +163,7 @@ struct Session {
     backlog: Arc<Backlog>,
     max_message: usize,
     pump: JoinHandle<()>,
+    insecure_url: Option<String>,
 }
 
 /// One plugin's sessions. Ids are per plugin, so an id names nothing outside
@@ -240,6 +241,7 @@ pub(crate) fn open(mut req: WsOpen, principal: &str) -> Result<WsChunk> {
     }
     let wait = wait_limit(req.timeout_ms);
     let url = redact_url(&req.url);
+    let insecure_url = req.insecure.then(|| req.url.clone());
     let ws = run_on_cap_runtime(async move { timeout(wait, connect(req, max_message)).await })?
         .map_err(|_| anyhow!("ws.open: '{url}' timed out after {wait:?}"))??;
 
@@ -253,6 +255,7 @@ pub(crate) fn open(mut req: WsOpen, principal: &str) -> Result<WsChunk> {
         backlog,
         max_message,
         pump,
+        insecure_url,
     };
 
     let mut table = table();
@@ -271,6 +274,7 @@ pub(crate) fn open(mut req: WsOpen, principal: &str) -> Result<WsChunk> {
 /// Next inbound message; `None` once the peer closed cleanly. A dropped
 /// connection is an error. Either ends the session.
 pub(crate) fn recv(req: WsRecv, principal: &str) -> Result<Option<WsChunk>> {
+    recheck_insecure(principal, req.session, "ws.recv")?;
     let (inbound, backlog) = with_session(principal, req.session, "ws.recv", |s| {
         (Arc::clone(&s.inbound), Arc::clone(&s.backlog))
     })?;
@@ -296,6 +300,7 @@ pub(crate) fn recv(req: WsRecv, principal: &str) -> Result<Option<WsChunk>> {
 }
 
 pub(crate) fn send(req: WsSend, principal: &str) -> Result<()> {
+    recheck_insecure(principal, req.session, "ws.send")?;
     let (cmds, max_message) = with_session(principal, req.session, "ws.send", |s| {
         (s.cmds.clone(), s.max_message)
     })?;
@@ -399,9 +404,23 @@ pub(crate) fn insert_idle_session(principal: &str) -> IdleSession {
             backlog,
             max_message: DEFAULT_MESSAGE,
             pump,
+            insecure_url: None,
         },
     );
     IdleSession(cmd_rx)
+}
+
+fn recheck_insecure(principal: &str, session: u64, op: &str) -> Result<()> {
+    let Some(url) = with_session(principal, session, op, |s| s.insecure_url.clone())? else {
+        return Ok(());
+    };
+    if let Err(e) = crate::tls_policy::effective_insecure(principal, &url, true) {
+        if let Some(s) = remove(principal, session) {
+            s.pump.abort();
+        }
+        bail!("{op}: session {session} closed: {e}");
+    }
+    Ok(())
 }
 
 fn remove(principal: &str, session: u64) -> Option<Session> {
@@ -437,21 +456,16 @@ async fn connect(req: WsOpen, max_message: usize) -> Result<WebSocketStream<Box<
             .map_err(|e| anyhow!("ws.open: bad header value for '{k}': {e}"))?;
         request.headers_mut().append(name, value);
     }
-    let uri = request.uri().clone();
-    let tls = match uri.scheme_str() {
-        Some("wss") => true,
-        Some("ws") => false,
+    let crate::tls_policy::Target { scheme, host, port } =
+        crate::tls_policy::target(&req.url).map_err(|e| anyhow!("ws.open: {e}"))?;
+    let tls = match scheme.as_str() {
+        "wss" => true,
+        "ws" => false,
         _ => bail!(
             "ws.open: '{}' is not a ws:// or wss:// URL",
             redact_url(&req.url)
         ),
     };
-    let host = uri
-        .host()
-        .ok_or_else(|| anyhow!("ws.open: '{}' has no host", redact_url(&req.url)))?
-        .trim_matches(['[', ']'])
-        .to_string();
-    let port = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
     let tcp = tokio::net::TcpStream::connect((host.as_str(), port))
         .await
         .map_err(|e| anyhow!("ws.open: connect {host}:{port}: {e}"))?;
@@ -1137,28 +1151,17 @@ mod tests {
         }
     }
 
-    fn with_marked_endpoint<R>(principal: &str, f: impl FnOnce() -> R) -> R {
-        let db = tempfile::NamedTempFile::new().unwrap();
-        db::with_thread_db_path(db.path(), || {
-            db::pool::with_pooled_or_open(|conn| {
-                conn.execute(
-                    "INSERT INTO endpoints (id, provider, name, routes, enabled, insecure) VALUES (?1, ?1, 'n', ?2, 1, 1)",
-                    rusqlite::params![
-                        principal,
-                        r#"[{"kind":"lan_v4","scheme":"https","value":"127.0.0.1"}]"#
-                    ],
-                )?;
-                Ok(())
-            })
-            .unwrap();
-            f()
-        })
+    fn with_marked_endpoint<R>(principal: &str, url: &str, f: impl FnOnce() -> R) -> R {
+        let port = crate::tls_policy::target(url).unwrap().port;
+        let routes =
+            format!(r#"[{{"kind":"lan_v4","scheme":"wss","value":"127.0.0.1","port":{port}}}]"#);
+        crate::tls_policy::with_marked(principal, &routes, f)
     }
 
     #[test]
     fn wss_insecure_refuses_a_server_without_the_cert_private_key() {
         let (url, _closed) = serve_with(Peer::Echo, Some(tls_acceptor(true)));
-        let err = with_marked_endpoint("ws-tls-impostor", || {
+        let err = with_marked_endpoint("ws-tls-impostor", &url, || {
             handle_cap(
                 "ws.open",
                 json!({"url": url, "insecure": true}),
@@ -1173,27 +1176,54 @@ mod tests {
     #[test]
     fn wss_insecure_accepts_a_self_signed_server() {
         let (url, _closed) = serve(Peer::Echo, true);
-        let reply = with_marked_endpoint("ws-tls", || {
-            handle_cap("ws.open", json!({"url": url, "insecure": true}), "ws-tls")
-        })
-        .unwrap();
-        let WsChunk::Open { session } = serde_json::from_value(reply).unwrap() else {
-            panic!("expected Open");
-        };
-        handle_cap(
-            "ws.send",
-            json!({"session": session, "text": "tls"}),
-            "ws-tls",
-        )
-        .unwrap();
-        assert_eq!(
-            recv(session, "ws-tls").unwrap(),
-            json!({"t": "text", "text": "tls"})
-        );
+        with_marked_endpoint("ws-tls", &url, || {
+            let reply =
+                handle_cap("ws.open", json!({"url": url, "insecure": true}), "ws-tls").unwrap();
+            let WsChunk::Open { session } = serde_json::from_value(reply).unwrap() else {
+                panic!("expected Open");
+            };
+            handle_cap(
+                "ws.send",
+                json!({"session": session, "text": "tls"}),
+                "ws-tls",
+            )
+            .unwrap();
+            assert_eq!(
+                recv(session, "ws-tls").unwrap(),
+                json!({"t": "text", "text": "tls"})
+            );
+        });
         let err = handle_cap("ws.open", json!({"url": url}), "ws-tls-strict")
             .unwrap_err()
             .to_string();
         assert!(err.contains("TLS handshake"), "got: {err}");
+    }
+
+    #[test]
+    fn insecure_session_closes_once_its_endpoint_is_unmarked() {
+        let (url, _closed) = serve(Peer::Echo, true);
+        let principal = "ws-tls-unmark";
+        with_marked_endpoint(principal, &url, || {
+            let reply =
+                handle_cap("ws.open", json!({"url": url, "insecure": true}), principal).unwrap();
+            let WsChunk::Open { session } = serde_json::from_value(reply).unwrap() else {
+                panic!("expected Open");
+            };
+            db::pool::with_pooled_or_open(|conn| {
+                conn.execute("UPDATE endpoints SET insecure = 0", [])?;
+                Ok(())
+            })
+            .unwrap();
+            let err = handle_cap(
+                "ws.send",
+                json!({"session": session, "text": "x"}),
+                principal,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("may not skip TLS verification"), "got: {err}");
+            assert_eq!(session_count(principal), 0);
+        });
     }
 
     #[test]
