@@ -381,17 +381,15 @@ fn rename_column_if_present(conn: &Connection, table: &str, from: &str, to: &str
     Ok(())
 }
 
-/// `options_rendered` is derived per mount at converge time. A row whose authored
-/// `options` is empty or a JSON object keeps its real mount options only in the
-/// retired column, so fold those onto `options` before dropping it.
+/// `options_rendered` was the string fed to `mount -o`, so it wins over `options`
+/// whenever non-empty; mount behavior is unchanged across the drop.
 fn retire_shares_options_rendered(conn: &Connection) -> Result<()> {
     if !column_exists(conn, "shares", "options_rendered")? {
         return Ok(());
     }
     conn.execute_batch(
         "UPDATE shares SET options = options_rendered \
-         WHERE (options IS NULL OR TRIM(options) = '' OR TRIM(options) LIKE '{%') \
-         AND options_rendered IS NOT NULL AND TRIM(options_rendered) != '';",
+         WHERE options_rendered IS NOT NULL AND TRIM(options_rendered) != '';",
     )
     .map_err(|e| anyhow::anyhow!("shares options_rendered fold: {e}"))?;
     drop_column_if_present(conn, "shares", "options_rendered")
@@ -823,7 +821,8 @@ mod tests {
             "CREATE TABLE shares (name TEXT PRIMARY KEY, options TEXT, options_rendered TEXT);\
              INSERT INTO shares VALUES ('json', '{\"x\":1}', 'vers=3.1.1,nosharesock');\
              INSERT INTO shares VALUES ('empty', '', 'vers=4.2');\
-             INSERT INTO shares VALUES ('authored', 'vers=3.0', 'stale');",
+             INSERT INTO shares VALUES ('diverged', 'vers=3.0', 'vers=3.0,nosharesock');\
+             INSERT INTO shares VALUES ('unrendered', 'vers=3.0', '');",
         )
         .unwrap();
         retire_shares_options_rendered(&conn).unwrap();
@@ -836,7 +835,8 @@ mod tests {
         };
         assert_eq!(opt("json"), "vers=3.1.1,nosharesock");
         assert_eq!(opt("empty"), "vers=4.2");
-        assert_eq!(opt("authored"), "vers=3.0");
+        assert_eq!(opt("diverged"), "vers=3.0,nosharesock");
+        assert_eq!(opt("unrendered"), "vers=3.0");
         retire_shares_options_rendered(&conn).unwrap();
     }
 
