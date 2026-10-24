@@ -541,6 +541,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn csp_hash_rejects_malformed_sources() {
+        let b64 = "bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI=";
+        for (src, ok) in [
+            (format!("'sha256-{b64}'"), true),
+            (format!("'sha256-{}'", &b64[1..]), false),
+            (format!("'sha256-{b64}AAAA'"), false),
+            (format!("'sha1-{b64}'"), false),
+            (format!("'SHA256-{b64}'"), false),
+            (format!("'sha256-{b64}' ; x"), false),
+            (format!("'sha256-{b64}'; script-src *"), false),
+            (format!("'sha256-{}=='", &b64[..b64.len() - 1]), false),
+            (format!("sha256-{b64}"), false),
+            (format!("'sha256-{b64}"), false),
+            (String::new(), false),
+        ] {
+            assert_eq!(is_csp_hash(&src), ok, "{src:?}");
+        }
+    }
+
     struct Fake {
         name: &'static str,
         route: WebRoute,

@@ -1370,7 +1370,12 @@ const CSP_MAX_DECLARED_BYTES: usize = 8 * 1024;
 
 fn declared_csp(route: &contract::web::WebRoute) -> middleware::CspAdditions {
     use std::collections::BTreeSet;
-    let set = |v: &[String]| v.iter().cloned().collect::<BTreeSet<_>>();
+    let set = |v: &[String]| {
+        v.iter()
+            .filter(|h| contract::web::is_csp_hash(h))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    };
     let scripts = set(&route.csp_script_hashes);
     let styles = set(&route.csp_style_hashes);
     let attrs = set(&route.csp_style_attr_hashes);
@@ -2640,6 +2645,24 @@ mod tests {
     }
 
     #[test]
+    fn declared_csp_revalidates_route_hashes_at_emission() {
+        let good = fake_hash(3);
+        let style = fake_hash(4);
+        let mut route = hash_route(&[]);
+        route.csp_script_hashes = vec![
+            "'unsafe-inline'".to_string(),
+            format!("{good}; script-src *"),
+            good.clone(),
+        ];
+        route.csp_style_hashes = vec![style.clone(), "*".to_string()];
+        route.csp_style_attr_hashes = vec!["'unsafe-inline'".to_string()];
+        assert_eq!(
+            declared_csp(&route).0,
+            vec![("script-src", good), ("style-src", style)]
+        );
+    }
+
+    #[test]
     fn declared_csp_over_cap_fails_closed() {
         let at_cap: Vec<String> = (0..CSP_MAX_DECLARED_HASHES)
             .map(|i| format!("csp_script_hash={}", fake_hash(i)))
@@ -2667,9 +2690,11 @@ mod tests {
         let declared = fake_hash(7);
         let html = "/__csp_fixture_html_charset__";
         let css = "/__csp_fixture_css__";
+        let no_ct = "/__csp_fixture_no_content_type__";
         for (name, path, ct) in [
             ("csp-html-charset", html, "Text/HTML; charset=utf-8"),
             ("csp-css", css, "text/css"),
+            ("csp-no-ct", no_ct, ""),
         ] {
             let provider: Arc<dyn contract::web::WebProvider> = Arc::new(MockProvider {
                 name: name.to_string(),
@@ -2679,7 +2704,11 @@ mod tests {
                 ),
                 behavior: MockBehavior::Fixed {
                     status: 200,
-                    headers: vec![("content-type".into(), ct.into())],
+                    headers: if ct.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![("content-type".into(), ct.into())]
+                    },
                     body: b"<script>undeclared()</script>".to_vec(),
                 },
                 counter: std::sync::atomic::AtomicUsize::new(0),
@@ -2710,6 +2739,7 @@ mod tests {
             format!("{}; script-src 'self' {declared}", system::csp::strict())
         );
         assert_eq!(policy_for(css).await, system::csp::strict());
+        assert_eq!(policy_for(no_ct).await, system::csp::strict());
     }
 
     #[tokio::test]
