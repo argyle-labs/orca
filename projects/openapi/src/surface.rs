@@ -997,8 +997,20 @@ mod tests {
             req.headers,
             vec![("Authorization".into(), "root@pam!t=k".into())]
         );
-        assert!(column_surface("{endpoint.tokenId}={secret}", json!(["token_id"])).is_err());
-        assert!(column_surface("{endpoint.token_id}={secret}", json!(["tokenId"])).is_err());
+        let err = column_surface("{endpoint.tokenId}={secret}", json!(["token_id"]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("undeclared endpoint column `tokenId`"),
+            "{err}"
+        );
+        let err = column_surface("{endpoint.token_id}={secret}", json!(["tokenId"]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("undeclared endpoint column `token_id`"),
+            "{err}"
+        );
     }
 
     #[test]
