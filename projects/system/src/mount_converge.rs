@@ -136,7 +136,7 @@ pub fn desired_for_host(this_host: &str) -> anyhow::Result<Vec<DesiredMount>> {
             routes,
             remount_policy,
             replication: share.replication.clone(),
-            options: share.options_rendered.clone(),
+            options: share.options.clone(),
             credential: share.credential.clone(),
         });
     }
@@ -184,7 +184,7 @@ pub fn desired_guest_mounts_for_host(
             backend: share.backend.clone(),
             fstype: share.fstype.clone(),
             sources,
-            options: share.options_rendered.clone(),
+            options: share.options.clone(),
             credential: share.credential.clone(),
         };
         out.push(spec);
@@ -3445,8 +3445,7 @@ mod tests {
             name: format!("share-{id}"),
             backend: "nfs".into(),
             fstype: "nfs4".into(),
-            options: "{}".into(),
-            options_rendered: "vers=4.2".into(),
+            options: "vers=4.2".into(),
             credential: None,
             replication: None,
             routes: plugin_toolkit::route::Routes::from(vec![route]),
@@ -3487,6 +3486,7 @@ mod tests {
             assert_eq!(dm.backend, "nfs");
             // The enabled route folds to an `host:/export` source.
             assert_eq!(dm.sources, vec!["10.0.0.1:/export".to_string()]);
+            assert_eq!(dm.options, "vers=4.2");
         });
     }
 
@@ -3920,8 +3920,7 @@ mod tests {
             name: format!("share-{id}"),
             backend: "bind".into(),
             fstype: "none".into(),
-            options: "{}".into(),
-            options_rendered: String::new(),
+            options: String::new(),
             credential: None,
             replication: None,
             routes: plugin_toolkit::route::Routes::from(vec![Route::new(
@@ -4363,8 +4362,7 @@ mod tests {
                 name: "media".to_string(),
                 backend: "nfs".into(),
                 fstype: "nfs4".into(),
-                options: "{}".into(),
-                options_rendered: "vers=4.2,soft".into(),
+                options: "vers=4.2,soft".into(),
                 credential: Some("secret.cred-ref".to_string()),
                 replication: Some("rep-abc".to_string()),
                 routes: plugin_toolkit::route::Routes::from(vec![enabled_route, held_route]),

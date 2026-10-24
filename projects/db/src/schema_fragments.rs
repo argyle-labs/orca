@@ -165,7 +165,7 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
         // `CREATE TABLE IF NOT EXISTS` no-op hazard as `replication` — a fleet DB
         // whose `shares` predates these fields never gains them, so the generic
         // replication *export* (`SELECT name, id, backend, fstype, options,
-        // options_rendered, credential, routes, … FROM shares`) faults with
+        // credential, routes, … FROM shares`) faults with
         // `no such column: fstype` and ALL share config replication from that
         // host silently dies. Ensure each here. The model types them as
         // non-`Option` `String`, so backfill with a non-null default so a legacy
@@ -176,13 +176,7 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("shares fstype reconcile: {e}"))?;
         ensure_column(conn, "shares", "options", "TEXT NOT NULL DEFAULT ''")
             .map_err(|e| anyhow::anyhow!("shares options reconcile: {e}"))?;
-        ensure_column(
-            conn,
-            "shares",
-            "options_rendered",
-            "TEXT NOT NULL DEFAULT ''",
-        )
-        .map_err(|e| anyhow::anyhow!("shares options_rendered reconcile: {e}"))?;
+        retire_shares_options_rendered(conn)?;
         ensure_column(conn, "shares", "credential", "TEXT")
             .map_err(|e| anyhow::anyhow!("shares credential reconcile: {e}"))?;
     }
@@ -385,6 +379,23 @@ fn rename_column_if_present(conn: &Connection, table: &str, from: &str, to: &str
         ))?;
     }
     Ok(())
+}
+
+/// `options_rendered` is derived per mount at converge time. A row whose authored
+/// `options` is empty or a JSON object keeps its real mount options only in the
+/// retired column, so fold those onto `options` before dropping it.
+fn retire_shares_options_rendered(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "shares", "options_rendered")? {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "UPDATE shares SET options = options_rendered \
+         WHERE (options IS NULL OR TRIM(options) = '' OR TRIM(options) LIKE '{%') \
+         AND options_rendered IS NOT NULL AND TRIM(options_rendered) != '';",
+    )
+    .map_err(|e| anyhow::anyhow!("shares options_rendered fold: {e}"))?;
+    drop_column_if_present(conn, "shares", "options_rendered")
+        .map_err(|e| anyhow::anyhow!("shares drop options_rendered: {e}"))
 }
 
 /// Drop `column` from `table` when present (SQLite ≥ 3.35 `DROP COLUMN`). A
@@ -755,7 +766,7 @@ mod tests {
     #[test]
     fn legacy_shares_missing_model_columns_are_backfilled_for_export() {
         // The live controller→peer bug: a `shares` table created before the
-        // `Share` model gained `id`/`fstype`/`options`/`options_rendered` never
+        // `Share` model gained `id`/`fstype`/`options` never
         // gains them (`CREATE TABLE IF NOT EXISTS` no-ops on an existing table),
         // so the generic replication export `SELECT … fstype … FROM shares`
         // faults `no such column: fstype` and ALL share replication from that
@@ -779,7 +790,7 @@ mod tests {
         apply_fragments(&conn).unwrap();
 
         let after = cols(&conn, "shares");
-        for c in ["id", "fstype", "options", "options_rendered", "credential"] {
+        for c in ["id", "fstype", "options", "credential"] {
             assert!(after.contains(&c.to_string()), "missing model column {c}");
         }
 
@@ -787,7 +798,7 @@ mod tests {
         // the non-null String columns backfilled to '' on the legacy row.
         let (fstype, options): (String, String) = conn
             .query_row(
-                "SELECT name, id, backend, fstype, options, options_rendered, \
+                "SELECT name, id, backend, fstype, options, \
                  credential, routes, enabled, created_at, updated_at FROM shares",
                 [],
                 |r| {
@@ -803,6 +814,30 @@ mod tests {
 
         // Idempotent: a second pass is a clean no-op.
         apply_fragments(&conn).unwrap();
+    }
+
+    #[test]
+    fn shares_options_rendered_is_folded_then_dropped() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE shares (name TEXT PRIMARY KEY, options TEXT, options_rendered TEXT);\
+             INSERT INTO shares VALUES ('json', '{\"x\":1}', 'vers=3.1.1,nosharesock');\
+             INSERT INTO shares VALUES ('empty', '', 'vers=4.2');\
+             INSERT INTO shares VALUES ('authored', 'vers=3.0', 'stale');",
+        )
+        .unwrap();
+        retire_shares_options_rendered(&conn).unwrap();
+        assert!(!cols(&conn, "shares").contains(&"options_rendered".to_string()));
+        let opt = |n: &str| -> String {
+            conn.query_row("SELECT options FROM shares WHERE name = ?1", [n], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(opt("json"), "vers=3.1.1,nosharesock");
+        assert_eq!(opt("empty"), "vers=4.2");
+        assert_eq!(opt("authored"), "vers=3.0");
+        retire_shares_options_rendered(&conn).unwrap();
     }
 
     #[test]

@@ -386,7 +386,6 @@ async fn storage_share_list(
             backend: row.backend.clone(),
             fstype: row.fstype.clone(),
             options: row.options.clone(),
-            options_rendered: row.options_rendered.clone(),
             has_credential: row.credential.is_some(),
             replication: row.replication.clone(),
             routes: row.routes.clone(),
@@ -423,7 +422,6 @@ fn share_entry(row: &crate::shares::EndpointRow) -> crate::shares::EndpointEntry
         backend: row.backend.clone(),
         fstype: row.fstype.clone(),
         options: row.options.clone(),
-        options_rendered: row.options_rendered.clone(),
         has_credential: row.credential.is_some(),
         replication: row.replication.clone(),
         routes: row.routes.clone(),
@@ -520,7 +518,7 @@ pub struct StorageShareUpdateArgs {
     pub fstype: Option<String>,
     #[arg(long)]
     pub options: Option<String>,
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub options_rendered: Option<String>,
     #[arg(long)]
     pub credential: Option<String>,
@@ -693,6 +691,11 @@ async fn wait_source_healthy(
 /// Edit a share row (CRUD PATCH) — mirrors the macro-generated update the
 /// `skip = "update"` withholds.
 fn share_row_edit(args: &StorageShareUpdateArgs) -> anyhow::Result<StorageShareEditOutput> {
+    if args.options_rendered.is_some() {
+        anyhow::bail!(
+            "`optionsRendered` is derived per mount from `options` at converge time; set `options` instead"
+        );
+    }
     let mut row = crate::shares::endpoint_db::get(&args.name)?
         .ok_or_else(|| plugin_toolkit::runtime::missing_row_error("storage.share", &args.name))?;
     let mut applied: Vec<String> = Vec::new();
@@ -711,10 +714,6 @@ fn share_row_edit(args: &StorageShareUpdateArgs) -> anyhow::Result<StorageShareE
     if let Some(v) = args.options.clone() {
         row.options = v;
         applied.push("options".to_string());
-    }
-    if let Some(v) = args.options_rendered.clone() {
-        row.options_rendered = v;
-        applied.push("options_rendered".to_string());
     }
     if let Some(v) = args.credential.clone() {
         row.credential = Some(v);
@@ -2764,8 +2763,7 @@ mod tests {
             name: "data".into(),
             backend: "nfs".into(),
             fstype: "nfs4".into(),
-            options: "{}".into(),
-            options_rendered: "vers=4.2".into(),
+            options: "vers=4.2".into(),
             credential: None,
             replication: None,
             routes: plugin_toolkit::route::Routes::from(routes),
@@ -3803,8 +3801,7 @@ mod tests {
             name: "data".into(),
             backend: "nfs".into(),
             fstype: "nfs4".into(),
-            options: "{}".into(),
-            options_rendered: "vers=4.2".into(),
+            options: "vers=4.2".into(),
             credential: None,
             replication: None,
             routes: Default::default(),
@@ -3839,26 +3836,19 @@ mod tests {
         with_db("shares_edit.db", || {
             seed_share();
             let args: StorageShareUpdateArgs = serde_json::from_str(
-                r#"{"name":"data","backend":"smb","fstype":"cifs","options":"{\"x\":1}","optionsRendered":"vers=3.0","credential":"cred-ref","enabled":false}"#,
+                r#"{"name":"data","backend":"smb","fstype":"cifs","options":"vers=3.0,nosharesock","credential":"cred-ref","enabled":false}"#,
             )
             .unwrap();
             let out = share_row_edit(&args).expect("edit ok");
             // Every changed field is reported.
-            for f in [
-                "backend",
-                "fstype",
-                "options",
-                "options_rendered",
-                "credential",
-                "enabled",
-            ] {
+            for f in ["backend", "fstype", "options", "credential", "enabled"] {
                 assert!(out.applied.iter().any(|a| a == f), "missing applied {f}");
             }
             // Persisted round-trip.
             let stored = crate::shares::endpoint_db::get("data").unwrap().unwrap();
             assert_eq!(stored.backend, "smb");
             assert_eq!(stored.fstype, "cifs");
-            assert_eq!(stored.options_rendered, "vers=3.0");
+            assert_eq!(stored.options, "vers=3.0,nosharesock");
             assert_eq!(stored.credential.as_deref(), Some("cred-ref"));
             assert!(!stored.enabled);
         });
@@ -3902,6 +3892,19 @@ mod tests {
             let args: StorageShareUpdateArgs = serde_json::from_str(r#"{"name":"data"}"#).unwrap();
             let err = share_row_edit(&args).unwrap_err();
             assert!(err.to_string().contains("no fields to update"));
+        });
+    }
+
+    #[test]
+    fn share_row_edit_refuses_options_rendered() {
+        with_db("shares_rendered.db", || {
+            seed_share();
+            let args: StorageShareUpdateArgs =
+                serde_json::from_str(r#"{"name":"data","optionsRendered":"vers=3.0"}"#).unwrap();
+            let err = share_row_edit(&args).unwrap_err().to_string();
+            assert!(err.contains("set `options` instead"), "{err}");
+            let stored = crate::shares::endpoint_db::get("data").unwrap().unwrap();
+            assert_eq!(stored.options, "vers=4.2");
         });
     }
 
@@ -4166,8 +4169,7 @@ mod tests {
                 name: "odd".into(),
                 backend: "not-a-real-backend".into(),
                 fstype: "nfs4".into(),
-                options: "{}".into(),
-                options_rendered: String::new(),
+                options: String::new(),
                 credential: None,
                 replication: None,
                 routes: Default::default(),
