@@ -280,6 +280,8 @@ impl ApiOp {
     }
 }
 
+const NON_SECRET_COLUMNS: &[&str] = &["token_id"];
+
 impl ApiSurface {
     pub fn parse(text: &str) -> Result<Self> {
         let surface: Self = serde_json::from_str(text).context("api-surface: invalid document")?;
@@ -305,6 +307,13 @@ impl ApiSurface {
     }
 
     pub fn auth_columns(&self) -> Result<Vec<&str>> {
+        if let Some(col) = self.endpoint.columns.iter().find(|c| {
+            !NON_SECRET_COLUMNS.contains(&c.as_str()) && utils::scrub::is_sensitive_key(c)
+        }) {
+            bail!(
+                "api-surface: endpoint column `{col}` is secret-bearing; secrets come from the vault"
+            );
+        }
         let Some(auth) = &self.auth else {
             return Ok(Vec::new());
         };
@@ -951,6 +960,17 @@ mod tests {
 
     fn cols_ok() -> BTreeMap<String, String> {
         BTreeMap::from([("token_id".to_string(), "t".to_string())])
+    }
+
+    #[test]
+    fn secret_bearing_endpoint_columns_refused() {
+        for col in ["password", "api_key", "secret", "auth_token"] {
+            let err = column_surface("{secret}", json!([col]))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("`{col}`")), "{col}: {err}");
+        }
+        assert!(column_surface("{endpoint.token_id}={secret}", json!(["token_id"])).is_ok());
     }
 
     #[test]
