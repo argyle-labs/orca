@@ -980,14 +980,31 @@ pub(crate) async fn write_atomic(
         open.mode(m);
     }
     let mut f = open.open(&tmp).await?;
-    f.write_all(contents.as_bytes()).await?;
-    f.sync_all().await?;
-    drop(f);
-    if let Some(m) = mode {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(m)).await?;
+    let written = async {
+        if let Some(m) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(m))
+                .await?;
+        }
+        f.write_all(contents.as_bytes()).await?;
+        f.sync_all().await?;
+        drop(f);
+        tokio::fs::rename(&tmp, path).await
     }
-    tokio::fs::rename(&tmp, path).await
+    .await;
+    if let Err(e) = written {
+        tokio::fs::remove_file(&tmp).await.ok();
+        return Err(e);
+    }
+    if let Some(dir) = p.parent() {
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        tokio::fs::File::open(dir).await?.sync_all().await?;
+    }
+    Ok(())
 }
 
 /// Remove secret-files under [`plugin_toolkit::storage::SECRET_FILE_DIR`] not in
