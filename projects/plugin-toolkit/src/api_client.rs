@@ -95,6 +95,21 @@ impl ApiClientBuilder {
         self.header("authorization", format!("Bearer {}", token.as_ref()))
     }
 
+    pub fn basic(
+        self,
+        user: impl AsRef<str>,
+        password: ::utils::secret::Secret<String>,
+    ) -> Result<Self> {
+        let creds = format!("{}:{}", user.as_ref(), password.expose_secret());
+        self.header(
+            "authorization",
+            format!(
+                "Basic {}",
+                ::utils::encoding::base64_encode(creds.as_bytes())
+            ),
+        )
+    }
+
     /// Skip TLS certificate verification. Required for homelab Proxmox
     /// nodes and any other endpoint behind a self-signed cert.
     pub fn insecure(mut self, on: bool) -> Self {
@@ -585,6 +600,34 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
+        let r = http
+            .get(format!("{}/probe", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn basic_attaches_authorization_header_and_redacts() {
+        install_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/probe"))
+            .and(header("authorization", "Basic YWxpY2U6czNjcmV0"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let builder = ApiClientBuilder::new()
+            .basic("alice", ::utils::secret::Secret::new("s3cret".to_string()))
+            .unwrap();
+        let dbg = format!("{builder:?}");
+        assert!(
+            !dbg.contains("YWxpY2U6czNjcmV0") && !dbg.contains("s3cret"),
+            "{dbg}"
+        );
+        let http = builder.build().unwrap();
         let r = http
             .get(format!("{}/probe", server.uri()))
             .send()
