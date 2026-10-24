@@ -2473,7 +2473,7 @@ mod registry_tests {
                  peer_id TEXT PRIMARY KEY REFERENCES pod_peers(peer_id) ON DELETE CASCADE
              );
              CREATE TABLE pod_self (
-                 id INTEGER PRIMARY KEY, pod_id TEXT,
+                 id INTEGER PRIMARY KEY, self_secure INTEGER NOT NULL DEFAULT 0, pod_id TEXT,
                  ca_previous_expires_at INTEGER, set_at INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE pod_discovery (pubkey_fp TEXT PRIMARY KEY);
@@ -2543,6 +2543,41 @@ mod registry_tests {
             .query_row("SELECT mesh_id FROM mesh_self", [], |r| r.get(0))
             .expect("pod_id became mesh_id, carrying its value");
         assert_eq!(mesh_id, "mesh-1");
+    }
+
+    fn tier_after_migration(old_flag: i64) -> i64 {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE mesh_self (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 self_secure INTEGER NOT NULL DEFAULT 0,
+                 mesh_id TEXT, ca_previous_expires_at INTEGER, set_at INTEGER NOT NULL
+             );",
+        )
+        .expect("legacy mesh_self");
+        conn.execute(
+            "INSERT INTO mesh_self (id, self_secure, mesh_id, set_at) VALUES (1, ?1, 'm', 5)",
+            [old_flag],
+        )
+        .expect("seed");
+        conn.execute_batch(include_str!(
+            "../migrations/20261024000000__mesh_self_tier.up.sql"
+        ))
+        .expect("migrate");
+        conn.query_row("SELECT secure FROM mesh_self WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .expect("tier")
+    }
+
+    #[test]
+    fn mesh_self_tier_migration_keeps_secure_members_secure() {
+        assert_eq!(tier_after_migration(1), 1);
+    }
+
+    #[test]
+    fn mesh_self_tier_migration_keeps_other_members_insecure() {
+        assert_eq!(tier_after_migration(0), 0);
     }
 
     #[test]

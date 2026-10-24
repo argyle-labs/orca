@@ -7,6 +7,6 @@ CREATE TABLE mesh_self_tier (
     set_at                   INTEGER NOT NULL
 );
 INSERT INTO mesh_self_tier (id, secure, mesh_id, ca_previous_expires_at, set_at)
-    SELECT id, 0, mesh_id, ca_previous_expires_at, set_at FROM mesh_self;
+    SELECT id, self_secure, mesh_id, ca_previous_expires_at, set_at FROM mesh_self;
 DROP TABLE mesh_self;
 ALTER TABLE mesh_self_tier RENAME TO mesh_self;
