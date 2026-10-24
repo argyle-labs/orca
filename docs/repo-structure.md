@@ -115,7 +115,6 @@ never gets `sudo`. See [`install-runbook.md`](install-runbook.md).
 | `test-changed.sh` | Run tests only for changed crates (`make test-changed`) |
 | `linux-coverage.sh` | Linux llvm-cov coverage run |
 | `scaffold-plugin.sh` | Generate a new out-of-process plugin skeleton |
-| `gen-plugin-catalog.py` | Regenerate the plugin catalog |
 | `unraid-install-plg.sh` | Build + install orca on an Unraid host via the plugin manager (`make unraid-install`) |
 
 Release flow is user-owned: never run `make release` or

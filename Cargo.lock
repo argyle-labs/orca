@@ -4860,6 +4860,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
  "wiremock",
 ]

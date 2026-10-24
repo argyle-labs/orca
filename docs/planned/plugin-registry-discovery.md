@@ -2,11 +2,8 @@
 
 Status: **planned** · Owner: TBD · Prompted by nut's first release (2026-08)
 
-Replace the hand-curated `status` field in
-`projects/system/src/plugin_catalog.json` with a **discovery** model. Flipping a
-manual `unreleased → available` setting per plugin is the wrong pattern: the
-catalog should reflect reality, and reality is "did the plugin publish a
-release?" A plugin should declare its own published state; orca picks it up.
+Phases 1 and 2 have landed for the first-party org; phase 3 (third-party
+manifests) remains.
 
 ## Principles
 
@@ -28,18 +25,19 @@ release?" A plugin should declare its own published state; orca picks it up.
    Per-plugin **provenance** (which manifest it came from) is always visible;
    first-party vs third-party is never ambiguous.
 
-## Today (what's being replaced)
+## Today
 
-- `projects/system/src/plugin_catalog.json` — embedded via `include_str!` in
-  `plugin_manager.rs` AND served as the canonical remote manifest from
-  `raw.githubusercontent.com/argyle-labs/orca/main/...`. Runtime refresh
-  supersedes the embedded copy (10-min TTL), so a manifest edit merged to `main`
-  propagates to the fleet without an orca release.
-- `status: available | unreleased | planned` — hand-set. `plugin.install --name`
-  is refused unless `available`; `--file` sideloads regardless.
-- `validate_catalog_entry` (`release_targets.rs`) is a pure schema check;
-  `missing_release_assets` (release-asset completeness) exists but is a TODO —
-  not wired to the network or a test.
+- `projects/system/src/plugin_discovery.rs` lists the `argyle-labs` org on the
+  active release source (`release_source_api`: Gitea, else GitHub) and keeps
+  non-archived repos carrying the `plugin` topic.
+- Each plugin repo's recent releases name its plugins: an asset
+  `{bin}-v{ver}-{triple}` yields an entry `bin` (so `arr` yields sonarr, radarr,
+  …). A repo with no such asset yields one entry named after the repo.
+- `status` is derived: `available` (stable release with an asset for this
+  daemon's triple), `prerelease` (only prereleases have one), `unreleased`.
+- `docsUrl` is the repo website when set, else `{repoUrl}#readme`.
+- Results are cached in-process for 10 minutes and persisted to
+  `$ORCA_HOME/cache/plugin-catalog.json`, the fallback when discovery fails.
 
 ## Target design
 
@@ -67,9 +65,3 @@ release?" A plugin should declare its own published state; orca picks it up.
    of a static list; drop the embedded membership list to a bootstrap fallback.
 3. **Multi-manifest + trust:** support additional org manifests, provenance, and
    the 2FA-gated + loud add flow for third-party libraries.
-
-## Interim
-
-Until phase 1 lands, the canonical `plugin_catalog.json` is kept truthful by
-hand (e.g. nut → `available` once it published `v0.0.1-rc.2`). This is
-explicitly a stopgap, not the model.
