@@ -280,7 +280,7 @@ impl ApiOp {
     }
 }
 
-const NON_SECRET_COLUMNS: &[&str] = &["token_id"];
+const NON_SECRET_COLUMNS: &[&str] = &["tokenid"];
 
 impl ApiSurface {
     pub fn parse(text: &str) -> Result<Self> {
@@ -308,7 +308,8 @@ impl ApiSurface {
 
     pub fn auth_columns(&self) -> Result<Vec<&str>> {
         if let Some(col) = self.endpoint.columns.iter().find(|c| {
-            !NON_SECRET_COLUMNS.contains(&c.as_str()) && utils::scrub::is_sensitive_key(c)
+            !NON_SECRET_COLUMNS.contains(&utils::scrub::normalize_key(c).as_str())
+                && utils::scrub::is_sensitive_key(c)
         }) {
             bail!(
                 "api-surface: endpoint column `{col}` is secret-bearing; secrets come from the vault"
@@ -971,6 +972,9 @@ mod tests {
             assert!(err.contains(&format!("`{col}`")), "{col}: {err}");
         }
         assert!(column_surface("{endpoint.token_id}={secret}", json!(["token_id"])).is_ok());
+        for col in ["tokenId", "token-id", "TOKEN_ID"] {
+            assert!(column_surface("{secret}", json!([col])).is_ok(), "{col}");
+        }
     }
 
     #[test]
