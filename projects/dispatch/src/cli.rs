@@ -1104,7 +1104,7 @@ async fn run_diag(name: &str, args: serde_json::Value, ctx: &ToolCtx) -> Result<
     } else {
         match crate::diagnostics_surface::diagnostics_dispatch(name, &args).await {
             Some(r) => r?,
-            None => anyhow::bail!("unknown diagnostics op: {name}"),
+            None => anyhow::bail!("unknown op: {name}"),
         }
     };
     println!("{}", crate::value_to_text(&out));
@@ -2414,7 +2414,7 @@ mod tests {
     fn dispatch_ups_state_routes_provider_id_to_ups_state_op() {
         // provider + id are lifted into the payload and the op resolves to
         // `ups.state`; with no daemon, the in-process diagnostics dispatch
-        // doesn't own that name → a clear "unknown diagnostics op" error.
+        // doesn't own that name → a clear "unknown op" error.
         let m = ups_root().get_matches_from([
             "orca",
             "ups",
@@ -2427,11 +2427,7 @@ mod tests {
         let err = with_unreachable_daemon(|| dispatch_ups(&m, test_ctx()))
             .expect("top matched → Some")
             .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unknown diagnostics op: ups.state"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("unknown op: ups.state"), "{err}");
     }
 
     #[test]
@@ -2440,11 +2436,7 @@ mod tests {
         let err = with_unreachable_daemon(|| dispatch_ups(&m, test_ctx()))
             .expect("Some")
             .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unknown diagnostics op: ups.config"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("unknown op: ups.config"), "{err}");
     }
 
     #[test]
@@ -2464,8 +2456,7 @@ mod tests {
             .expect("Some")
             .unwrap_err();
         assert!(
-            err.to_string()
-                .contains("unknown diagnostics op: ups.configure"),
+            err.to_string().contains("unknown op: ups.configure"),
             "{err}"
         );
     }
@@ -2479,8 +2470,7 @@ mod tests {
             .expect("Some")
             .unwrap_err();
         assert!(
-            err.to_string()
-                .contains("unknown diagnostics op: ups.configure"),
+            err.to_string().contains("unknown op: ups.configure"),
             "{err}"
         );
     }

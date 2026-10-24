@@ -87,6 +87,11 @@ const NATURAL_KEY_IDS: &[(&str, &str, &str)] = &[
     ("plugin.data.detail", "id", "plugin manifest id"),
     ("plugin.data.update", "id", "plugin manifest id"),
     (
+        "security.findings.detail",
+        "id",
+        "security scanner: CVE or check id",
+    ),
+    (
         "storage.detail",
         "id",
         "storage backend locator (`s3://bucket/prefix`, …)",

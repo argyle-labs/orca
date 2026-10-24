@@ -388,6 +388,30 @@ impl Plugin {
         self
     }
 
+    #[must_use]
+    pub fn security<S: crate::contract::security::SecurityScanner + 'static>(
+        mut self,
+        scanner: S,
+    ) -> Self {
+        let prefix = format!("security.__backend.{}", scanner.name());
+        self.defs.push(BackendDef {
+            domain: "security".to_string(),
+            name: scanner.name().to_string(),
+            invoke_prefix: prefix.clone(),
+            ..Default::default()
+        });
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::security::dispatch_op(&scanner, op, args),
+                ))
+            }));
+        self
+    }
+
     /// Register a **diagnostics** facet: this plugin diagnoses/repairs an
     /// external subsystem. Implements the typed
     /// [`DiagnosticsProvider`](crate::contract::diagnostics::DiagnosticsProvider).
@@ -738,5 +762,45 @@ mod tests {
         assert_eq!(out["primary"], "http://abs:13378");
         // An unrelated tool falls through (None → #[orca_tool] dispatch).
         assert!(dispatch("audiobookshelf.some_tool", serde_json::json!({})).is_none());
+    }
+
+    struct DemoScanner;
+    impl crate::contract::security::SecurityScanner for DemoScanner {
+        fn name(&self) -> &str {
+            "trivy"
+        }
+        fn scan(
+            &self,
+            _request: crate::contract::security::ScanRequest,
+        ) -> crate::contract::BoxFuture<
+            '_,
+            crate::anyhow::Result<crate::contract::security::ScanReport>,
+        > {
+            Box::pin(async move {
+                Ok(crate::contract::security::ScanReport {
+                    complete: true,
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn security_facet_advertises_and_routes_its_prefix() {
+        let spec = Plugin::named("trivy").security(DemoScanner).into_spec();
+        let defs: Vec<BackendDef> = serde_json::from_str(&spec.backends_json).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].domain, "security");
+        assert_eq!(defs[0].invoke_prefix, "security.__backend.trivy");
+        let dispatch = spec.backend_dispatch.expect("has a dispatcher");
+        let out = dispatch(
+            "security.__backend.trivy.scan",
+            serde_json::json!({ "unitId": crate::id::new() }),
+        )
+        .expect("facet matched")
+        .expect("op ok");
+        assert_eq!(out["complete"], true);
+        assert!(dispatch("security.__backend.other.scan", serde_json::json!({})).is_none());
+        assert!(dispatch("security.__backend.trivyx.scan", serde_json::json!({})).is_none());
     }
 }
