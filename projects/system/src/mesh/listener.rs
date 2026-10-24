@@ -2315,6 +2315,23 @@ mod tests {
     }
 
     #[test]
+    fn a_dry_run_aware_plugin_tool_counts_as_mutating() {
+        let tool = "listener_test_plugin.aware_status";
+        dispatch::tool_roles::install_plugin_tools([(
+            tool.to_string(),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                tool,
+                Some("any"),
+                Some(false),
+                Some(false),
+            )
+            .dry_run_aware(true),
+        )]);
+        assert!(is_mutating_tool(tool));
+        dispatch::tool_roles::remove_plugin_tools([tool]);
+    }
+
+    #[test]
     fn any_role_plugin_tool_explicitly_ungated_needs_an_explicit_read_for_mesh() {
         let unconfirmed = "listener_test_plugin.status";
         let confirmed = "listener_test_plugin.detail";

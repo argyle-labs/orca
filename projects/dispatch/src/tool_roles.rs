@@ -72,6 +72,10 @@ impl PluginToolPolicy {
 
     pub fn dry_run_aware(mut self, dry_run_aware: bool) -> Self {
         self.dry_run_aware = dry_run_aware;
+        if dry_run_aware {
+            self.role = "admin";
+            self.read_unconfirmed = false;
+        }
         self
     }
 }

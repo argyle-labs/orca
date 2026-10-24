@@ -502,6 +502,7 @@ pub fn tool_manifest_json() -> String {
 /// Dispatch a `tools/call` by name, returning a structured JSON value.
 /// Returns `Err` for unknown tool names.
 pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
+    crate::erased::dry_run_requested(&args)?;
     #[cfg(feature = "in-process")]
     if ctx.verified_caller().is_some() {
         let Some(key) = CORE_VERB_KEY.get() else {
@@ -626,6 +627,9 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
     // unit surface, before giving up — so loaded plugin tools AND the
     // universal `unit.<kind>.<verb>` surface share this one entrypoint.
     match dynamic_dispatch(name, &args, ctx).await {
+        Some(result) if dry_run && crate::tool_roles::plugin_dry_run_aware(name) => {
+            crate::erased::require_dry_run_marked(name, result?)
+        }
         Some(result) => result,
         None => {
             match crate::unit_surface::unit_dispatch(name, &args, ctx.verified_caller()).await {
@@ -715,14 +719,19 @@ async fn forward_to_peer(peer: &str, name: &str, mut args: Value, ctx: &ToolCtx)
             obj.remove(contract::plan::EXECUTE_FIELD);
         }
     }
-    svc.exec(
-        peer,
-        name,
-        args,
-        ctx.caller(),
-        ctx.correlation_id().map(str::to_string),
-    )
-    .await
+    let result = svc
+        .exec(
+            peer,
+            name,
+            args,
+            ctx.caller(),
+            ctx.correlation_id().map(str::to_string),
+        )
+        .await?;
+    if dry_run && crate::tool_roles::plugin_dry_run_aware(name) {
+        return crate::erased::require_dry_run_marked(name, result);
+    }
+    Ok(result)
 }
 
 /// Dispatch and render the result as plain text. MCP + CLI use this; REST
@@ -1297,7 +1306,8 @@ mod tests {
             _caller: Option<contract::CallerIdentity>,
             _cid: Option<String>,
         ) -> Result<Value> {
-            Ok(serde_json::json!({ "peer": peer, "tool": tool, "args": args }))
+            let dry_run = args.get("dryRun").cloned().unwrap_or(Value::Bool(false));
+            Ok(serde_json::json!({ "peer": peer, "tool": tool, "args": args, "dryRun": dry_run }))
         }
     }
 
@@ -1805,7 +1815,12 @@ mod tests {
                     }
                     if name == AWARE_PLUGIN_TOOL {
                         AWARE_SEEN.lock().unwrap().push(args.clone());
-                        return Some(Ok(json!({})));
+                        let marked = args["dryRun"] == json!(true) && args["lie"] != json!(true);
+                        return Some(Ok(if marked {
+                            json!({ "dryRun": true })
+                        } else {
+                            json!({})
+                        }));
                     }
                     if name == OWN_SYSTEM_TOOL {
                         return Some(Ok(args.clone()));
@@ -1880,7 +1895,47 @@ mod tests {
                 json!({ "id": "a", "dryRun": true }),
             ]
         );
-        let err = dispatch(FAKE_PLUGIN_TOOL, json!({ "dryRun": true }), &ctx)
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_aware_plugin_reply_without_the_marker_fails_closed() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        let err = dispatch(
+            AWARE_PLUGIN_TOOL,
+            json!({ "dryRun": true, "lie": true }),
+            &make_ctx(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("without `dryRun: true`"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_host_without_the_aware_flag_refuses_a_forwarded_dry_run() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        SEEN_ARGS.lock().unwrap().clear();
+        let err = dispatch(FAKE_PLUGIN_TOOL, json!({ "dryRun": true }), &make_ctx())
+            .await
+            .unwrap_err();
+        let oe = find_orca_error(&err).unwrap_or_else(|| panic!("{err}"));
+        assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{oe}");
+        assert!(SEEN_ARGS.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_non_boolean_dry_run_is_refused_before_the_verb_scope() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        let ctx = make_ctx().with_auth(contract::CallerIdentity {
+            user_id: "u".into(),
+            username: "u".into(),
+            role: "admin".into(),
+            can_mutate: true,
+        });
+        let err = dispatch("ghost.tool", json!({ "dryRun": "yes" }), &ctx)
             .await
             .unwrap_err();
         let oe = find_orca_error(&err).unwrap_or_else(|| panic!("{err}"));

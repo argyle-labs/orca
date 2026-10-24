@@ -340,8 +340,12 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
             }
             let parsed = parse_args::<T>(args, ctx)?;
             let out = T::run(parsed, ctx).await?;
-            serde_json::to_value(&out)
-                .map_err(|e| anyhow::anyhow!("failed to serialize output of {}: {e}", T::NAME))
+            let mut value = serde_json::to_value(&out)
+                .map_err(|e| anyhow::anyhow!("failed to serialize output of {}: {e}", T::NAME))?;
+            if dry_run && let Some(obj) = value.as_object_mut() {
+                obj.insert(contract::plan::DRY_RUN_FIELD.into(), Value::Bool(true));
+            }
+            Ok(value)
         })
     }
 }
@@ -349,6 +353,20 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
 /// Absent or `false` executes, `true` dry-runs. Any other value is refused:
 /// guessing either way would apply a change the caller meant to preview, or
 /// silently skip one they meant to apply.
+pub fn dry_run_marked(result: &Value) -> bool {
+    result.get(contract::plan::DRY_RUN_FIELD) == Some(&Value::Bool(true))
+}
+
+pub fn require_dry_run_marked(name: &str, result: Value) -> Result<Value> {
+    if dry_run_marked(&result) {
+        return Ok(result);
+    }
+    Err(contract::OrcaError::internal(format!(
+        "{name}: dry run returned a result without `dryRun: true`; refusing it as possibly applied"
+    ))
+    .into())
+}
+
 pub(crate) fn dry_run_requested(args: &Value) -> Result<bool> {
     match args.get(contract::plan::DRY_RUN_FIELD) {
         None => Ok(false),
