@@ -1352,23 +1352,53 @@ async fn static_handler(req: axum::extract::Request) -> axum::response::Response
             ))
             .expect("hardcoded response is valid");
     };
-    let route = provider.route();
-    let additions = middleware::CspAdditions(
-        route
-            .csp_script_hashes
-            .iter()
-            .map(|h| ("script-src", h.clone()))
-            .chain(
-                route
-                    .csp_style_hashes
-                    .iter()
-                    .map(|h| ("style-src", h.clone())),
-            )
-            .collect(),
-    );
+    let additions = declared_csp(provider.route());
     let mut resp = render_static(req, provider).await;
-    resp.extensions_mut().insert(additions);
+    let is_html = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim_start().to_ascii_lowercase().starts_with("text/html"));
+    if is_html {
+        resp.extensions_mut().insert(additions);
+    }
     resp
+}
+
+const CSP_MAX_DECLARED_HASHES: usize = 64;
+const CSP_MAX_DECLARED_BYTES: usize = 8 * 1024;
+
+fn declared_csp(route: &contract::web::WebRoute) -> middleware::CspAdditions {
+    use std::collections::BTreeSet;
+    let set = |v: &[String]| {
+        v.iter()
+            .filter(|h| contract::web::is_csp_hash(h))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    };
+    let scripts = set(&route.csp_script_hashes);
+    let styles = set(&route.csp_style_hashes);
+    let attrs = set(&route.csp_style_attr_hashes);
+    let all = || scripts.iter().chain(&styles).chain(&attrs);
+    let count = all().count();
+    let bytes: usize = all().map(String::len).sum();
+    if count > CSP_MAX_DECLARED_HASHES || bytes > CSP_MAX_DECLARED_BYTES {
+        tracing::warn!(
+            prefix = %route.prefix,
+            count,
+            bytes,
+            "csp: provider declares too many hashes; serving strict policy"
+        );
+        return middleware::CspAdditions::default();
+    }
+    let mut out: Vec<(&'static str, String)> = Vec::with_capacity(count + 1);
+    out.extend(scripts.into_iter().map(|h| ("script-src", h)));
+    out.extend(styles.into_iter().map(|h| ("style-src", h)));
+    if !attrs.is_empty() {
+        out.push(("style-src-attr", "'unsafe-hashes'".to_string()));
+        out.extend(attrs.into_iter().map(|h| ("style-src-attr", h)));
+    }
+    middleware::CspAdditions(out)
 }
 
 /// Fallback handler in prod: route the request to the matching registered
@@ -2504,6 +2534,7 @@ mod tests {
                 dev_upstream,
                 csp_script_hashes: Vec::new(),
                 csp_style_hashes: Vec::new(),
+                csp_style_attr_hashes: Vec::new(),
             },
             behavior,
             counter: std::sync::atomic::AtomicUsize::new(0),
@@ -2580,6 +2611,135 @@ mod tests {
             format!("{}; script-src 'self' {declared}", system::csp::strict())
         );
         assert_eq!(policy_for(plain).await, system::csp::strict());
+    }
+
+    fn hash_route(caps: &[String]) -> contract::web::WebRoute {
+        contract::web::WebRoute::from_def_axes("/", caps)
+    }
+
+    fn fake_hash(i: usize) -> String {
+        let digest = utils::hash::sha256(i.to_string().as_bytes());
+        format!("'sha256-{}'", utils::encoding::base64_encode(&digest))
+    }
+
+    #[test]
+    fn declared_csp_dedupes_and_scopes_style_attrs() {
+        let s = fake_hash(1);
+        let a = fake_hash(2);
+        let got = declared_csp(&hash_route(&[
+            format!("csp_script_hash={s}"),
+            format!("csp_script_hash={s}"),
+            format!("csp_style_attr_hash={a}"),
+            format!("csp_style_attr_hash={a}"),
+            "csp_style_attr_hash='unsafe-inline'".to_string(),
+        ]));
+        assert_eq!(
+            got.0,
+            vec![
+                ("script-src", s),
+                ("style-src-attr", "'unsafe-hashes'".to_string()),
+                ("style-src-attr", a),
+            ]
+        );
+        assert!(declared_csp(&hash_route(&[])).0.is_empty());
+    }
+
+    #[test]
+    fn declared_csp_revalidates_route_hashes_at_emission() {
+        let good = fake_hash(3);
+        let style = fake_hash(4);
+        let mut route = hash_route(&[]);
+        route.csp_script_hashes = vec![
+            "'unsafe-inline'".to_string(),
+            format!("{good}; script-src *"),
+            good.clone(),
+        ];
+        route.csp_style_hashes = vec![style.clone(), "*".to_string()];
+        route.csp_style_attr_hashes = vec!["'unsafe-inline'".to_string()];
+        assert_eq!(
+            declared_csp(&route).0,
+            vec![("script-src", good), ("style-src", style)]
+        );
+    }
+
+    #[test]
+    fn declared_csp_over_cap_fails_closed() {
+        let at_cap: Vec<String> = (0..CSP_MAX_DECLARED_HASHES)
+            .map(|i| format!("csp_script_hash={}", fake_hash(i)))
+            .collect();
+        assert_eq!(
+            declared_csp(&hash_route(&at_cap)).0.len(),
+            CSP_MAX_DECLARED_HASHES
+        );
+        let mut over = at_cap;
+        over.push(format!(
+            "csp_style_hash={}",
+            fake_hash(CSP_MAX_DECLARED_HASHES)
+        ));
+        assert!(declared_csp(&hash_route(&over)).0.is_empty());
+        let mut route = hash_route(&[]);
+        route.csp_script_hashes = (0..40)
+            .map(|i| format!("'sha512-{}{i:0>3}'", "A".repeat(250)))
+            .collect();
+        assert!(declared_csp(&route).0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn declared_hashes_apply_only_to_html_responses() {
+        use tower::ServiceExt;
+        let declared = fake_hash(7);
+        let html = "/__csp_fixture_html_charset__";
+        let css = "/__csp_fixture_css__";
+        let no_ct = "/__csp_fixture_no_content_type__";
+        for (name, path, ct) in [
+            ("csp-html-charset", html, "Text/HTML; charset=utf-8"),
+            ("csp-css", css, "text/css"),
+            ("csp-no-ct", no_ct, ""),
+        ] {
+            let provider: Arc<dyn contract::web::WebProvider> = Arc::new(MockProvider {
+                name: name.to_string(),
+                route: contract::web::WebRoute::from_def_axes(
+                    path,
+                    &[format!("csp_script_hash={declared}")],
+                ),
+                behavior: MockBehavior::Fixed {
+                    status: 200,
+                    headers: if ct.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![("content-type".into(), ct.into())]
+                    },
+                    body: b"<script>undeclared()</script>".to_vec(),
+                },
+                counter: std::sync::atomic::AtomicUsize::new(0),
+            });
+            contract::web::register_provider(provider).expect("register");
+        }
+        let relax = system::csp::Relaxations::default();
+        let csp = middleware::CspPolicies {
+            default: Arc::from(system::csp::strict()),
+            docs: Arc::from(system::csp::compose(DOCS_CSP_EXTRA, &relax)),
+            relax: Arc::new(relax),
+        };
+        let router = axum::Router::new().fallback(static_handler).layer(
+            axum::middleware::from_fn_with_state(csp, middleware::security_headers),
+        );
+        let policy_for = |p: &'static str| {
+            let router = router.clone();
+            async move {
+                let resp = router.oneshot(get(p)).await.unwrap();
+                resp.headers()[axum::http::header::CONTENT_SECURITY_POLICY]
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            }
+        };
+        assert_eq!(
+            policy_for(html).await,
+            format!("{}; script-src 'self' {declared}", system::csp::strict())
+        );
+        assert_eq!(policy_for(css).await, system::csp::strict());
+        assert_eq!(policy_for(no_ct).await, system::csp::strict());
     }
 
     #[tokio::test]

@@ -2,7 +2,9 @@
 
 use std::sync::{Arc, LazyLock, RwLock};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
+#[cfg(feature = "in-process")]
+use anyhow::anyhow;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use utils::id::Id;
