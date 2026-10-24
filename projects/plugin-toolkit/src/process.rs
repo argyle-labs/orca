@@ -174,6 +174,7 @@ impl Command {
         match crate::time::timeout(budget, guard.wait_leader(&mut child)).await {
             Some(result) => {
                 result?;
+                guard.kill();
                 let st = child.wait().await?;
                 guard.disarm();
                 Ok(Some(ExitStatus {
@@ -642,6 +643,18 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some_and(|out| out.status.success)
+        })
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn status_within_kills_group_after_normal_exit() {
+        grandchild_dies("", async |cmd| {
+            cmd.status_within(Duration::from_secs(10))
+                .await
+                .unwrap()
+                .is_some_and(|st| st.success)
         })
         .await;
     }
