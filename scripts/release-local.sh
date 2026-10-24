@@ -99,7 +99,7 @@ cmd_rc() {
 
   run_release_checks
   build_orca_targets "${TARGETS[@]}"
-  build_native_packages
+  build_os_packages
   log "release build complete"
 
   log "commit + tag + push"

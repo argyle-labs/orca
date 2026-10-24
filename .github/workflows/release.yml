@@ -124,7 +124,7 @@ jobs:
         with:
           tag: ${{ env.TAG }}
 
-  package-macos:
+  package-macos-pkg:
     needs: build-aarch64-apple-darwin
     runs-on: macos
     continue-on-error: true
@@ -137,7 +137,7 @@ jobs:
   # No `if:` on publish: Gitea's act never schedules a job whose `if` reads
   # needs.*.result, and hangs one that needs a skipped job.
   publish:
-    needs: [package, package-macos]
+    needs: [package, package-macos-pkg]
     runs-on: ubuntu-latest
     steps:
       - name: Publish
