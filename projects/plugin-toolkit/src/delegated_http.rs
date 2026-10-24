@@ -60,6 +60,7 @@ pub mod reqwest {
         pub(crate) body: Vec<u8>,
         pub(crate) max_body_bytes: Option<u64>,
         pub(crate) follow_redirects: Option<bool>,
+        pub(crate) timeout: Option<::std::time::Duration>,
     }
 
     /// A response the generated code inspects (`status()`, `headers()`) and the
@@ -148,6 +149,8 @@ pub mod reqwest {
                 body: Vec::new(),
                 max_body_bytes: None,
                 follow_redirects: None,
+                timeout: self.timeout,
+                connect_timeout: self.connect_timeout,
                 error: None,
             }
         }
@@ -164,7 +167,10 @@ pub mod reqwest {
                     .map(|(k, v)| (k.clone(), v.0.clone()))
                     .collect(),
                 body: request.body,
-                timeout_ms: self.timeout.map(|d| d.as_millis() as u64),
+                timeout_ms: request
+                    .timeout
+                    .or(self.timeout)
+                    .map(|d| d.as_millis() as u64),
                 insecure: self.insecure,
                 max_body_bytes: request.max_body_bytes,
                 body_b64: true,
@@ -236,17 +242,23 @@ pub mod reqwest {
         body: Vec<u8>,
         max_body_bytes: Option<u64>,
         follow_redirects: Option<bool>,
+        timeout: Option<::std::time::Duration>,
+        connect_timeout: Option<::std::time::Duration>,
         error: Option<String>,
     }
     impl RequestBuilder {
         pub fn header(mut self, name: impl AsHeaderName, value: HeaderValue) -> Self {
-            self.headers.append_str(name.as_header_name(), &value.0);
+            self.headers.append_value(name.as_header_name(), value);
             self
         }
         pub fn headers(mut self, map: HeaderMap) -> Self {
             for (k, v) in map.iter() {
-                self.headers.append_str(k, &v.0);
+                self.headers.append_value(k, v.clone());
             }
+            self
+        }
+        pub fn timeout(mut self, dur: ::std::time::Duration) -> Self {
+            self.timeout = Some(dur);
             self
         }
         pub fn query<T: super::serialize::ToQuery>(mut self, params: &T) -> Self {
@@ -305,6 +317,7 @@ pub mod reqwest {
                 body: self.body,
                 max_body_bytes: self.max_body_bytes,
                 follow_redirects: self.follow_redirects,
+                timeout: self.timeout,
             })
         }
         #[doc(hidden)]
@@ -318,9 +331,11 @@ pub mod reqwest {
         /// this builder's `insecure` flag.
         pub async fn send(self) -> Result<Response> {
             let insecure = self.insecure;
+            let connect_timeout = self.connect_timeout;
             let request = self.build()?;
             Client {
                 insecure,
+                connect_timeout,
                 ..Client::default()
             }
             .execute(request)
@@ -364,11 +379,21 @@ pub mod header {
             HeaderMap(Vec::with_capacity(n))
         }
         pub fn append(&mut self, name: HeaderName, value: HeaderValue) {
-            self.0.push((name.0, value));
+            self.append_value(&name.0, value);
+        }
+        pub fn insert(&mut self, name: HeaderName, value: HeaderValue) {
+            self.remove(&name.0);
+            self.append_value(&name.0, value);
         }
         pub(crate) fn append_str(&mut self, name: &str, value: &str) {
-            self.0
-                .push((name.to_ascii_lowercase(), HeaderValue(value.to_string())));
+            self.append_value(name, HeaderValue(value.to_string(), false));
+        }
+        pub(crate) fn append_value(&mut self, name: &str, mut value: HeaderValue) {
+            let name = name.to_ascii_lowercase();
+            if is_sensitive_name(&name) {
+                value.1 = true;
+            }
+            self.0.push((name, value));
         }
         pub fn get(&self, name: impl AsRef<str>) -> Option<&HeaderValue> {
             let n = name.as_ref().to_ascii_lowercase();
@@ -403,19 +428,46 @@ pub mod header {
 
     /// A header value. `to_str` is fallible in reqwest; here values are always
     /// valid UTF-8 (we build them from strings), so it never errors.
-    #[derive(Debug, Clone)]
-    pub struct HeaderValue(pub(crate) String);
+    #[derive(Clone)]
+    pub struct HeaderValue(pub(crate) String, pub(crate) bool);
     impl HeaderValue {
         pub fn from_static(s: &'static str) -> Self {
-            HeaderValue(s.to_string())
+            HeaderValue(s.to_string(), false)
         }
         #[allow(clippy::should_implement_trait)] // mirrors reqwest's inherent `from_str`
         pub fn from_str(s: &str) -> Result<Self, InvalidHeaderValue> {
-            Ok(HeaderValue(s.to_string()))
+            Ok(HeaderValue(s.to_string(), false))
         }
         pub fn to_str(&self) -> Result<&str, InvalidHeaderValue> {
             Ok(&self.0)
         }
+        pub fn set_sensitive(&mut self, on: bool) {
+            self.1 = on;
+        }
+        pub fn is_sensitive(&self) -> bool {
+            self.1
+        }
+    }
+    impl std::fmt::Debug for HeaderValue {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if self.1 {
+                f.write_str("Sensitive")
+            } else {
+                std::fmt::Debug::fmt(&self.0, f)
+            }
+        }
+    }
+
+    const SENSITIVE_NAMES: &[&str] = &[
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+    ];
+
+    fn is_sensitive_name(name: &str) -> bool {
+        SENSITIVE_NAMES.contains(&name) || ::utils::scrub::is_sensitive_key(name)
     }
 
     /// Placeholder error type for the fallible header constructors.
@@ -747,15 +799,34 @@ pub mod api_client {
         pub fn header(mut self, name: &str, value: impl AsRef<str>) -> AnyResult<Self> {
             let name = HeaderName::from_bytes(name.as_bytes())
                 .with_context(|| format!("invalid HTTP header name: {name:?}"))?;
-            let v = HeaderValue::from_str(value.as_ref())
+            let mut v = HeaderValue::from_str(value.as_ref())
                 .with_context(|| format!("invalid HTTP header value for {}", name.as_str()))?;
-            self.headers.append(name, v);
+            v.set_sensitive(true);
+            self.headers.insert(name, v);
             Ok(self)
         }
 
         /// `Authorization: Bearer <token>` shorthand.
         pub fn bearer(self, token: impl AsRef<str>) -> AnyResult<Self> {
             self.header("authorization", format!("Bearer {}", token.as_ref()))
+        }
+
+        pub fn basic(
+            self,
+            user: impl AsRef<str>,
+            password: ::utils::secret::Secret<String>,
+        ) -> AnyResult<Self> {
+            let user = user.as_ref();
+            if user.contains(':') {
+                ::anyhow::bail!("basic auth user-id must not contain ':'");
+            }
+            let creds =
+                ::utils::secret::Secret::new(format!("{user}:{}", password.expose_secret()));
+            let value = ::utils::secret::Secret::new(format!(
+                "Basic {}",
+                ::utils::encoding::base64_encode(creds.expose_secret().as_bytes())
+            ));
+            self.header("authorization", value.expose_secret())
         }
 
         /// Skip TLS verification (self-signed homelab endpoints). Forwarded to
@@ -1030,5 +1101,164 @@ mod tests {
             .get("http://h/p")
             .query(&QueryParam::new("x", &vec![vec![1]]));
         assert!(rb.build().is_err());
+    }
+
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        let mut fut = std::pin::pin!(fut);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match fut.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(v) => v,
+            std::task::Poll::Pending => panic!("delegated request pending"),
+        }
+    }
+
+    fn captured_wire(send: impl FnOnce()) -> String {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink_seen = seen.clone();
+        crate::capsink::with_cap_sink(
+            Box::new(move |_: &str, json: &str| {
+                *sink_seen.lock().unwrap() = json.to_string();
+                Ok(r#"{"status":200,"headers":[],"body":[]}"#.to_string())
+            }),
+            send,
+        );
+        seen.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn sensitive_header_values_never_debug_print() {
+        let mut map = super::header::HeaderMap::new();
+        for name in [
+            "authorization",
+            "Proxy-Authorization",
+            "cookie",
+            "set-cookie",
+            "X-Api-Key",
+        ] {
+            map.append(
+                super::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                super::header::HeaderValue::from_str("hunter2").unwrap(),
+            );
+        }
+        let mut custom = super::header::HeaderValue::from_str("hunter2").unwrap();
+        custom.set_sensitive(true);
+        map.append(super::header::HeaderName::from_static("x-custom"), custom);
+        map.append(
+            super::header::HeaderName::from_static("accept"),
+            super::header::HeaderValue::from_static("application/json"),
+        );
+        let out = format!("{map:?}");
+        assert!(!out.contains("hunter2"), "{out}");
+        assert!(out.contains("application/json"), "{out}");
+        let req = super::reqwest::Client::new()
+            .get("http://x/")
+            .headers(map)
+            .build()
+            .unwrap();
+        assert!(!format!("{req:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn client_timeout_reaches_the_wire() {
+        let client = super::reqwest::ClientBuilder::new()
+            .timeout(::std::time::Duration::from_secs(7))
+            .connect_timeout(::std::time::Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let wire = captured_wire(|| {
+            block_on(client.get("http://x/").send()).unwrap();
+        });
+        assert!(wire.contains("\"timeout_ms\":7000"), "{wire}");
+        assert!(wire.contains("\"connect_timeout_ms\":3000"), "{wire}");
+    }
+
+    #[test]
+    fn request_timeout_overrides_client_default() {
+        let client = super::reqwest::ClientBuilder::new()
+            .timeout(::std::time::Duration::from_secs(7))
+            .build()
+            .unwrap();
+        let wire = captured_wire(|| {
+            let req = client
+                .get("http://x/")
+                .timeout(::std::time::Duration::from_secs(2))
+                .build()
+                .unwrap();
+            block_on(client.execute(req)).unwrap();
+        });
+        assert!(wire.contains("\"timeout_ms\":2000"), "{wire}");
+    }
+
+    #[test]
+    fn basic_auth_sets_header_and_redacts() {
+        let client = super::api_client::ApiClientBuilder::new()
+            .basic("alice", ::utils::secret::Secret::new("s3cret".to_string()))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(!format!("{client:?}").contains("s3cret"));
+        assert!(!format!("{client:?}").contains("YWxpY2U6czNjcmV0"));
+        let wire = captured_wire(|| {
+            block_on(client.get("http://x/").send()).unwrap();
+        });
+        assert!(wire.contains("Basic YWxpY2U6czNjcmV0"), "{wire}");
+    }
+
+    #[test]
+    fn basic_rejects_colon_in_user() {
+        assert!(
+            super::api_client::ApiClientBuilder::new()
+                .basic("al:ice", ::utils::secret::Secret::new("p".to_string()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn repeated_authorization_yields_one_header() {
+        let client = super::api_client::ApiClientBuilder::new()
+            .bearer("tok-xyz")
+            .unwrap()
+            .basic("alice", ::utils::secret::Secret::new("s3cret".to_string()))
+            .unwrap()
+            .build()
+            .unwrap();
+        let wire = captured_wire(|| {
+            block_on(client.get("http://x/").send()).unwrap();
+        });
+        assert!(!wire.contains("tok-xyz"), "{wire}");
+        assert_eq!(wire.matches("Basic YWxpY2U6czNjcmV0").count(), 1, "{wire}");
+    }
+
+    #[test]
+    fn header_map_insert_replaces_case_insensitively() {
+        let mut map = super::header::HeaderMap::new();
+        map.append(
+            super::header::HeaderName::from_static("x-a"),
+            super::header::HeaderValue::from_static("1"),
+        );
+        map.insert(
+            super::header::HeaderName::from_bytes(b"X-A").unwrap(),
+            super::header::HeaderValue::from_static("2"),
+        );
+        assert_eq!(map.iter().count(), 1);
+        assert_eq!(map.get("x-a").unwrap().to_str().unwrap(), "2");
+    }
+
+    #[test]
+    fn scrub_keyword_headers_are_sensitive() {
+        let mut map = super::header::HeaderMap::new();
+        for name in [
+            "x-auth-token",
+            "X-Vault-Token",
+            "x-gitea-token",
+            "x-client-secret",
+        ] {
+            map.append(
+                super::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                super::header::HeaderValue::from_str("hunter2").unwrap(),
+            );
+        }
+        assert!(map.iter().all(|(_, v)| v.is_sensitive()));
+        assert!(!format!("{map:?}").contains("hunter2"));
     }
 }
