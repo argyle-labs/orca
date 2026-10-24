@@ -4,7 +4,7 @@
 //! loader (`plugin-loader`). It gives operators three things, routed through the
 //! `plugin_toolkit::prelude` gateway like any other tool:
 //!
-//! * `plugin.list` — the embedded first-party catalog joined with whatever is
+//! * `plugin.list` — the plugins discovered in the argyle-labs org joined with whatever is
 //!   installed on disk and whatever is loaded live.
 //! * `plugin.install` — **sideload** an executable plugin from a local file. The
 //!   plugin is spawned and completes the `plugin-proto` wire handshake *before*
@@ -43,70 +43,20 @@ use plugin_toolkit::prelude::{Context, JsonSchema, Result, ToolCtx, bail, orca_t
 use plugin_toolkit::serde_json;
 use serde::{Deserialize, Serialize};
 
-/// The running orca version, baked in by `system`'s `build.rs`. The loader
-/// checks this against each plugin's declared `orca_compat` range.
-const ORCA_VERSION: &str = env!("ORCA_VERSION");
-
-/// Embedded first-party catalog. Adding a plugin = adding a JSON entry.
-const CATALOG_JSON: &str = include_str!("plugin_catalog.json");
-
 // ── Catalog ────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct CatalogFile {
-    plugins: Vec<CatalogEntry>,
-}
-
-/// One first-party plugin known to orca. Installability is NOT read from
-/// `status`: `plugin.install --name` is release-derived — it resolves the repo's
-/// actual release asset for this target triple and succeeds iff the plugin has
-/// published one, so a plugin declares itself installable by cutting a release.
-/// `status` is descriptive metadata only (a coarse hint for `plugin.list`); it
-/// no longer gates install and may lag the repo's real release state.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogEntry {
-    /// Catalog name, e.g. `"jellyfin"`. Matches the plugin's `target_software`.
     pub name: String,
-    /// External software the plugin integrates, e.g. `"jellyfin"`.
     pub target_software: String,
-    /// Public GitHub repo hosting the plugin's source + release pipeline.
     pub repo_url: String,
-    /// Where to read about the plugin.
     pub docs_url: String,
-    /// Descriptive hint only — **nothing gates on it**, not `plugin.install`
-    /// and not `plugin.update`. Installability is release-derived: the catalog
-    /// contract says publish a release, not hand-tune this field.
-    ///
-    /// It is hand-maintained and therefore drifts. Measured 2026-09-27:
-    /// `agents` and `syncthing` each publish five releases while this field
-    /// still reads `"unreleased"`, so reading it as "has releases" is wrong in
-    /// practice as well as in principle.
-    ///
-    /// This doc previously claimed `plugin.update` gated on it while the code
-    /// ~1000 lines below said the opposite in as many words. That contradiction
-    /// was load-bearing: it is the premise that produced two withdrawn claims on
-    /// #648 (see #650). Keep this aligned with `plugin_update`, which is the
-    /// authority.
     pub status: String,
 }
 
-/// Parse the embedded catalog. Invalid embedded JSON is a build-time bug, so we
-/// surface it as an error rather than panicking in a tool body.
-fn catalog() -> Result<Vec<CatalogEntry>> {
-    let parsed: CatalogFile =
-        serde_json::from_str(CATALOG_JSON).context("embedded plugin catalog is not valid JSON")?;
-    Ok(parsed.plugins)
-}
-
-/// Canonical GitHub-hosted catalog manifest — the SAME file on `main`. A
-/// successful runtime refresh supersedes the embedded copy, so adding or
-/// updating a plugin entry needs only a merge to `main`, not a new orca release.
-const REMOTE_CATALOG_URL: &str = "https://raw.githubusercontent.com/argyle-labs/orca/main/projects/system/src/plugin_catalog.json";
-
-/// In-process TTL for the refreshed catalog, so `plugin.list`/`plugin.install`
-/// don't hit GitHub on every call.
 const CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+const CATALOG_NEGATIVE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 type CatalogCache = std::sync::Mutex<Option<(std::time::Instant, Vec<CatalogEntry>)>>;
 
@@ -115,52 +65,102 @@ fn catalog_cache() -> &'static CatalogCache {
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-/// The catalog to use: the embedded default, overlaid by a runtime refresh from
-/// [`REMOTE_CATALOG_URL`] when reachable (cached for [`CATALOG_TTL`]). Any
-/// failure — offline, parse error, empty — silently falls back to the embedded
-/// catalog, so installs still work air-gapped. This is the hybrid model: ship a
-/// default in the binary, prefer the live manifest when we can reach it.
-async fn catalog_resolved() -> Vec<CatalogEntry> {
-    if let Some((at, cached)) = catalog_cache().lock().unwrap().as_ref()
-        && at.elapsed() < CATALOG_TTL
-    {
-        return cached.clone();
-    }
-    let resolved = match fetch_remote_catalog().await {
-        Ok(entries) if !entries.is_empty() => {
-            tracing::debug!(
-                count = entries.len(),
-                "refreshed plugin catalog from remote manifest"
-            );
-            entries
+fn catalog_disk_path() -> Option<PathBuf> {
+    Some(
+        files::ops::orca_home()?
+            .join("cache")
+            .join("plugin-catalog.json"),
+    )
+}
+
+fn load_disk_catalog() -> Vec<CatalogEntry> {
+    catalog_disk_path()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<Vec<CatalogEntry>>(&b).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(disk_entry_trusted)
+        .collect()
+}
+
+fn disk_entry_trusted(entry: &CatalogEntry) -> bool {
+    crate::plugin_discovery::is_allowed_plugin_id(&entry.name)
+        && crate::plugin_discovery::is_allowed_plugin_id(&entry.target_software)
+        && entry.repo_url.starts_with(&format!(
+            "https://github.com/{}/",
+            crate::plugin_discovery::PLUGIN_ORG
+        ))
+}
+
+fn save_disk_catalog(entries: &[CatalogEntry]) {
+    let Some(path) = catalog_disk_path() else {
+        return;
+    };
+    let write = (|| -> Result<()> {
+        if let Some(dir) = path.parent() {
+            files::ops::mkdir_p(dir)?;
         }
-        Ok(_) => catalog().unwrap_or_default(),
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(entries)?)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+        }
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    })();
+    if let Err(e) = write {
+        tracing::debug!(path = %path.display(), error = %format!("{e:#}"), "could not persist plugin catalog");
+    }
+}
+
+async fn catalog_resolved() -> Vec<CatalogEntry> {
+    let stale = {
+        let guard = catalog_cache().lock().unwrap();
+        match guard.as_ref() {
+            Some((expires, cached)) if std::time::Instant::now() < *expires => {
+                return cached.clone();
+            }
+            Some((_, cached)) => Some(cached.clone()),
+            None => None,
+        }
+    };
+    let previous = stale.unwrap_or_else(load_disk_catalog);
+    let (resolved, ttl) = match crate::plugin_discovery::discover(&previous).await {
+        Ok(d) if !d.entries.is_empty() => {
+            if d.complete {
+                save_disk_catalog(&d.entries);
+            }
+            (d.entries, CATALOG_TTL)
+        }
+        Ok(_) => (previous, CATALOG_NEGATIVE_TTL),
         Err(e) => {
             tracing::debug!(
                 error = %format!("{e:#}"),
-                "remote plugin-catalog refresh failed; using embedded catalog"
+                "plugin discovery failed; using last known catalog"
             );
-            catalog().unwrap_or_default()
+            (previous, CATALOG_NEGATIVE_TTL)
         }
     };
-    *catalog_cache().lock().unwrap() = Some((std::time::Instant::now(), resolved.clone()));
+    *catalog_cache().lock().unwrap() = Some((std::time::Instant::now() + ttl, resolved.clone()));
     resolved
 }
 
-/// Fetch + parse the remote catalog manifest. Short timeout — this is a
-/// best-effort overlay, never a hard dependency.
-async fn fetch_remote_catalog() -> Result<Vec<CatalogEntry>> {
-    let client = utils::http::Client::new();
-    let parsed: CatalogFile = client
-        .get(REMOTE_CATALOG_URL.to_string())
-        .header("User-Agent", format!("orca/{ORCA_VERSION}"))
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await
-        .context("fetch remote plugin catalog")?
-        .json()
-        .context("remote plugin catalog is not valid JSON")?;
-    Ok(parsed.plugins)
+fn find_catalog_entry(
+    catalog: Vec<CatalogEntry>,
+    name: &str,
+    synthesize: bool,
+) -> Option<CatalogEntry> {
+    let synthesize = synthesize || catalog.is_empty();
+    catalog
+        .into_iter()
+        .find(|e| e.name == name || e.target_software == name)
+        .or_else(|| {
+            synthesize
+                .then(|| crate::plugin_discovery::synthesized_entry(name))
+                .flatten()
+        })
 }
 
 // ── Install dir ──────────────────────────────────────────────────────────────
@@ -1090,13 +1090,18 @@ pub(crate) async fn install_from_catalog(
     allow_unsigned: bool,
     ctx: &ToolCtx,
 ) -> Result<PluginInstallOutput> {
-    let entry = catalog_resolved()
-        .await
-        .into_iter()
-        .find(|e| e.name == name || e.target_software == name)
-        .with_context(|| {
-            format!("'{name}' is not in the plugin catalog (see `plugin.list` for known plugins)")
-        })?;
+    if !crate::plugin_discovery::is_allowed_plugin_id(name) {
+        bail!("'{name}' is not a valid plugin name");
+    }
+    let entry = find_catalog_entry(catalog_resolved().await, name, true).with_context(|| {
+        format!("plugin '{name}' not found in the catalog (see `plugin.list` for known plugins)")
+    })?;
+    if !crate::plugin_discovery::is_allowed_plugin_id(&entry.target_software) {
+        bail!(
+            "catalog entry '{name}' has an invalid plugin name '{}'",
+            entry.target_software
+        );
+    }
     db::pool::with_pooled_or_open(|c| {
         db::plugins::refuse_undotted_secret_collision(c, &entry.target_software)
     })?;
@@ -1347,10 +1352,7 @@ fn neutralize_plugin_update(args: &mut PluginUpdateArgs) {
     dry_run_neutralize = neutralize_plugin_update
 )]
 async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUpdateOutput> {
-    let entry = catalog_resolved()
-        .await
-        .into_iter()
-        .find(|e| e.name == args.name || e.target_software == args.name);
+    let entry = find_catalog_entry(catalog_resolved().await, &args.name, false);
 
     // Installed version from the live/on-disk registry join (same source as
     // `plugin.list`). `None` when the plugin isn't installed on this host.
@@ -1382,14 +1384,9 @@ async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUp
         .map(|l| l.semver.clone());
 
     // Deliberately NOT gated on the catalog `status` hint. That field is
-    // descriptive and may lag the repo's real release state (see the contract at
-    // the top of plugin_catalog.json: installability is release-derived, and
-    // operators are told to publish a release rather than hand-tune `status`).
-    // Gating here contradicted that: a plugin could publish releases — the
-    // documented way to become installable — and still be unupdatable until
-    // someone edited a field that supposedly gates nothing, while the skip note
-    // falsely claimed "no releases published". Let release resolution below
-    // decide; it already fails honestly when no asset exists.
+    // derived from a bounded window of recent releases, so it can miss an older
+    // matching release. Let release resolution below decide; it already fails
+    // honestly when no asset exists.
 
     // Resolve-only: pick the target version WITHOUT downloading the asset.
     let target_version = crate::plugin_fetch::resolve_version(
@@ -1862,31 +1859,6 @@ mod tests {
         );
     }
 
-    // ── embedded catalog ──────────────────────────────────────────────────────
-
-    #[test]
-    fn embedded_catalog_parses_and_is_nonempty() {
-        let entries = catalog().expect("embedded catalog must parse");
-        assert!(!entries.is_empty());
-        // Every entry has a name and a github repo url; name == target_software
-        // is the invariant the loader relies on.
-        for e in &entries {
-            assert!(!e.name.is_empty());
-            assert_eq!(e.name, e.target_software);
-            assert!(e.repo_url.starts_with("https://github.com/"));
-            assert!(e.status == "available" || e.status == "unreleased" || e.status == "planned");
-        }
-    }
-
-    #[test]
-    fn embedded_catalog_has_known_entries() {
-        let entries = catalog().unwrap();
-        assert!(entries.iter().any(|e| e.name == "jellyfin"));
-        assert!(entries.iter().any(|e| e.name == "proxmox"));
-        assert!(entries.iter().any(|e| e.status == "available"));
-        assert!(entries.iter().any(|e| e.status == "unreleased"));
-    }
-
     // ── install_filename ──────────────────────────────────────────────────────
 
     #[cfg(unix)]
@@ -2224,18 +2196,6 @@ mod tests {
         assert_eq!(back.repo_url, original.repo_url);
         assert_eq!(back.docs_url, original.docs_url);
         assert_eq!(back.status, original.status);
-    }
-
-    // ── CatalogFile parses the plugins array wrapper ──────────────────────────
-
-    #[test]
-    fn catalog_file_deserializes_plugins_wrapper() {
-        let src = r#"{"plugins":[{
-            "name":"a","targetSoftware":"a","repoUrl":"https://github.com/x/a",
-            "docsUrl":"https://x/a","status":"available"}]}"#;
-        let f: CatalogFile = serde_json::from_str(src).unwrap();
-        assert_eq!(f.plugins.len(), 1);
-        assert_eq!(f.plugins[0].name, "a");
     }
 
     // ── PluginLoadStatus deserialize (camelCase) ──────────────────────────────
@@ -3107,13 +3067,13 @@ mod tests {
 
     // ── catalog cache + async tool bodies (network-free via seeded cache) ──────
     //
-    // `catalog_resolved` reads a fresh in-process cache before hitting GitHub, so
+    // `catalog_resolved` reads a fresh in-process cache before org discovery, so
     // seeding it lets us exercise `plugin.list`/`plugin.detail`/`install_from_catalog`
     // deterministically offline. All serialized under `env` since they also drive
     // ORCA_HOME and share the process-global catalog cache.
 
     fn seed_catalog(entries: Vec<CatalogEntry>) {
-        *catalog_cache().lock().unwrap() = Some((std::time::Instant::now(), entries));
+        *catalog_cache().lock().unwrap() = Some((std::time::Instant::now() + CATALOG_TTL, entries));
     }
 
     #[tokio::test]
@@ -3178,6 +3138,43 @@ mod tests {
             );
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn install_from_catalog_refuses_a_reserved_or_invalid_name() {
+        let _env = crate::test_env::snapshot();
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        for bad in ["ui", "github_token", "Bad/Name"] {
+            let err = install_from_catalog(bad, None, false, false, &ctx)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("not a valid plugin name"),
+                "{bad}: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn disk_catalog_entries_must_be_valid_and_from_the_org() {
+        assert!(disk_entry_trusted(&entry("nut", "available")));
+        assert!(!disk_entry_trusted(&entry("ui", "available")));
+        let mut foreign = entry("nut", "available");
+        foreign.repo_url = "https://github.com/evil/nut".to_string();
+        assert!(!disk_entry_trusted(&foreign));
+        let mut prefix = entry("nut", "available");
+        prefix.repo_url = "https://github.com/argyle-labs.evil/nut".to_string();
+        assert!(!disk_entry_trusted(&prefix));
+    }
+
+    #[test]
+    fn a_missing_name_synthesizes_an_org_entry_for_install() {
+        let got = find_catalog_entry(vec![entry("other", "available")], "nut", true).unwrap();
+        assert_eq!(got.repo_url, "https://github.com/argyle-labs/nut");
+        assert!(find_catalog_entry(vec![entry("other", "available")], "nut", false).is_none());
+        assert!(find_catalog_entry(Vec::new(), "nut", false).is_some());
+        assert!(find_catalog_entry(Vec::new(), "../nut", true).is_none());
     }
 
     #[tokio::test]
@@ -3263,7 +3260,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn install_by_name_unknown_catalog_is_refused() {
+    async fn install_by_name_invalid_name_is_refused() {
         let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
@@ -3273,7 +3270,7 @@ mod tests {
             PluginInstallArgs {
                 allow_unsigned: false,
                 file: None,
-                name: Some("totally-unknown-plugin".to_string()),
+                name: Some("Totally/Unknown".to_string()),
                 version: None,
                 prerelease: false,
                 replace: false,
@@ -3283,7 +3280,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("not in the plugin catalog"),
+            format!("{err:#}").contains("not a valid plugin name"),
             "unexpected: {err:#}"
         );
     }
@@ -3334,9 +3331,7 @@ mod tests {
         // Regression: update short-circuited on `status != "available"` with the note
         // "is unreleased (no releases published); skipping". That note can be flatly
         // false — syncthing had five published releases and was still refused on
-        // every host — and plugin_catalog.json documents `status` as descriptive,
-        // telling operators to publish a release rather than hand-tune it. Publishing
-        // releases did not clear this; only editing the field did. Update now
+        // every host. Update now
         // resolves the real release and fails only because "wip" publishes none.
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
@@ -3725,7 +3720,7 @@ mod tests {
         // the error naming that repo rather than a catalog-miss or status gate.
         let msg = format!("{err:#}");
         assert!(
-            !msg.contains("not in the plugin catalog"),
+            !msg.contains("not a valid plugin name"),
             "alias should have matched the catalog entry: {msg}"
         );
         assert!(

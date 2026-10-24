@@ -122,6 +122,7 @@ pub mod logs_tui;
 /// Root side of `orca admin plugin-apply`, the plugin privileged seam (orca#762).
 #[cfg(unix)]
 pub mod plugin_apply;
+pub mod plugin_discovery;
 pub mod plugin_fetch;
 pub mod plugin_manager;
 /// Minisign verification of plugin release binaries (orca#872).
