@@ -10,7 +10,7 @@
     },
     {
       "name": "agents",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "agents",
       "repoUrl": "https://github.com/argyle-labs/agents",
       "docsUrl": "https://github.com/argyle-labs/agents#readme"
@@ -150,7 +150,7 @@
     },
     {
       "name": "mylar3",
-      "status": "unreleased",
+      "status": "available",
       "targetSoftware": "mylar3",
       "repoUrl": "https://github.com/argyle-labs/mylar3",
       "docsUrl": "https://github.com/argyle-labs/mylar3#readme"
