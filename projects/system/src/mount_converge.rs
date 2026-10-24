@@ -905,6 +905,74 @@ async fn resolve_secret_file(d: &DesiredMount) -> Option<crate::mount_exec::Secr
     }
 }
 
+async fn resolve_secret_files(
+    desired: &[DesiredMount],
+) -> HashMap<String, crate::mount_exec::SecretFile> {
+    let mut out = HashMap::new();
+    for d in desired {
+        if let Some(sf) = resolve_secret_file(d).await {
+            out.insert(d.target.clone(), sf);
+        }
+    }
+    out
+}
+
+fn written_secret_files() -> &'static Mutex<HashMap<String, String>> {
+    static WRITTEN: std::sync::OnceLock<Mutex<HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    WRITTEN.get_or_init(Default::default)
+}
+
+/// The secret-files to (re)write, or `None` when every file already holds its
+/// current contents and no previously written file has gone away.
+fn secret_file_sync(
+    files: &[&crate::mount_exec::SecretFile],
+    written: &HashMap<String, String>,
+) -> Option<Vec<crate::mount_exec::SecretFile>> {
+    let writes: Vec<_> = files
+        .iter()
+        .filter(|sf| {
+            written.get(&sf.path) != Some(&utils::hash::sha256_hex(sf.contents.as_bytes()))
+        })
+        .map(|sf| (*sf).clone())
+        .collect();
+    let dropped = written
+        .keys()
+        .any(|p| !files.iter().any(|sf| &sf.path == p));
+    (!writes.is_empty() || dropped).then_some(writes)
+}
+
+async fn sync_secret_files(secret_files: &HashMap<String, crate::mount_exec::SecretFile>) {
+    let files: Vec<_> = secret_files.values().collect();
+    let Some(writes) = ({
+        let written = written_secret_files()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        secret_file_sync(&files, &written)
+    }) else {
+        return;
+    };
+    let r = run_privileged(&PrivilegedOp::SecretFiles {
+        files: writes.clone(),
+        keep_secret_files: files.iter().map(|sf| sf.path.clone()).collect(),
+    })
+    .await;
+    for e in &r.errors {
+        warn!("[converge] secret-file error: {e}");
+    }
+    let mut written = written_secret_files()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    written.retain(|p, _| files.iter().any(|sf| &sf.path == p));
+    for sf in writes.iter().filter(|sf| r.changed.contains(&sf.path)) {
+        info!("[converge] wrote managed secret-file {}", sf.path);
+        written.insert(
+            sf.path.clone(),
+            utils::hash::sha256_hex(sf.contents.as_bytes()),
+        );
+    }
+}
+
 /// Parse the server host out of a mount source by shape alone (`//server/share`
 /// → `server`, `host:/export` → `host`). Used to aim the NFS RPC-NULL probe,
 /// which needs only the host (it dials port 2049 itself).
@@ -999,6 +1067,7 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     let this_host = host_identity::machine_id();
     let desired = desired_for_host(this_host)?;
     let desired_targets: HashSet<String> = desired.iter().map(|d| d.target.clone()).collect();
+    let secret_files = resolve_secret_files(&desired).await;
     let timeout = Duration::from_secs(PROBE_TIMEOUT_SECS);
 
     // The kernel mount table, read once: maps each desired target to the source
@@ -1385,8 +1454,7 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
                                 MountExec::Proceed => {}
                             }
                         }
-                        let secret_file = resolve_secret_file(d).await;
-                        reqs.push(mount_req(d, &src, secret_file));
+                        reqs.push(mount_req(d, &src, secret_files.get(target).cloned()));
                     }
                     None => warn!(
                         "[converge] {} has NO live source ({} ordered sources down); \
@@ -1424,10 +1492,8 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         // mounted. The root helper reaps any secret-file under SECRET_FILE_DIR not in
         // this set (deleted mount / rotated secret). Grammar-agnostic — core sees
         // only paths a backend produced.
-        let keep_secret_files: Vec<String> = reqs
-            .iter()
-            .filter_map(|r| r.secret_file.as_ref().map(|sf| sf.path.clone()))
-            .collect();
+        let keep_secret_files: Vec<String> =
+            secret_files.values().map(|sf| sf.path.clone()).collect();
         let source_by_target = mounted_sources(&reqs);
         let r = run_privileged(&PrivilegedOp::Mount {
             mounts: reqs,
@@ -1442,6 +1508,8 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
             warn!("[converge] mount error: {e}");
         }
     }
+
+    sync_secret_files(&secret_files).await;
 
     adopt_desired_owned(&mut ledger, &desired, &active_by_norm, &fstype_by_norm);
 
@@ -4191,6 +4259,58 @@ mod tests {
             got.is_none(),
             "a validate_spec error must fail closed to None"
         );
+    }
+
+    fn sf(path: &str, contents: &str) -> crate::mount_exec::SecretFile {
+        crate::mount_exec::SecretFile {
+            path: path.into(),
+            contents: contents.into(),
+        }
+    }
+
+    #[test]
+    fn inline_credential_secret_file_is_written_on_first_converge() {
+        let a = sf(
+            "/run/orca/secret-files/mnt-data",
+            "username=u\npassword=p\n",
+        );
+        let writes = secret_file_sync(&[&a], &HashMap::new()).expect("write");
+        assert_eq!(writes, vec![a]);
+    }
+
+    #[test]
+    fn rotated_secret_is_rewritten_and_unchanged_is_skipped() {
+        let old = sf("/run/orca/secret-files/mnt-data", "password=old\n");
+        let written: HashMap<String, String> = [(
+            old.path.clone(),
+            utils::hash::sha256_hex(old.contents.as_bytes()),
+        )]
+        .into();
+        assert!(secret_file_sync(&[&old], &written).is_none());
+        let new = sf("/run/orca/secret-files/mnt-data", "password=new\n");
+        assert_eq!(secret_file_sync(&[&new], &written), Some(vec![new]));
+    }
+
+    #[test]
+    fn file_form_credential_writes_nothing_but_reaps_a_dropped_file() {
+        assert!(secret_file_sync(&[], &HashMap::new()).is_none());
+        let written: HashMap<String, String> = [(
+            "/run/orca/secret-files/mnt-data".to_string(),
+            "h".to_string(),
+        )]
+        .into();
+        assert_eq!(secret_file_sync(&[], &written), Some(vec![]));
+    }
+
+    #[test]
+    fn secret_files_op_round_trips() {
+        let op = PrivilegedOp::SecretFiles {
+            files: vec![sf("/run/orca/secret-files/x", "c")],
+            keep_secret_files: vec!["/run/orca/secret-files/x".into()],
+        };
+        let back: PrivilegedOp =
+            serde_json::from_str(&serde_json::to_string(&op).unwrap()).unwrap();
+        assert_eq!(back, op);
     }
 
     // ── replication_health_by_target: no-ref fast path ────────────────────

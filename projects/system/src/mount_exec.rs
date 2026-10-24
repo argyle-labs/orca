@@ -128,15 +128,7 @@ pub async fn run_mount(req: &MountReq) -> Result<(), String> {
     // allowlist — it never trusts an arbitrary path from the plugin — but knows
     // nothing of the file's grammar (the plugin rendered `contents`).
     if let Some(sf) = &req.secret_file {
-        if !plugin_toolkit::storage::is_valid_secret_file_path(&sf.path) {
-            return Err(format!(
-                "refused non-allowlisted secret-file path: {}",
-                sf.path
-            ));
-        }
-        if let Err(e) = write_secret_file(&sf.path, &sf.contents).await {
-            return Err(format!("write secret-file {}: {e}", sf.path));
-        }
+        materialize_secret_file(sf).await?;
     }
     exec("mount", &mount_argv(req)).await?;
     // why: make the mountpoint `shared` so a re-established mount after a flap
@@ -153,6 +145,18 @@ pub async fn run_mount(req: &MountReq) -> Result<(), String> {
         ),
     }
     Ok(())
+}
+
+pub(crate) async fn materialize_secret_file(sf: &SecretFile) -> Result<(), String> {
+    if !plugin_toolkit::storage::is_valid_secret_file_path(&sf.path) {
+        return Err(format!(
+            "refused non-allowlisted secret-file path: {}",
+            sf.path
+        ));
+    }
+    write_secret_file(&sf.path, &sf.contents)
+        .await
+        .map_err(|e| format!("write secret-file {}: {e}", sf.path))
 }
 
 /// Atomic 0600 write of a secret-file: sibling temp, chmod-before-rename so the
