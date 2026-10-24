@@ -48,6 +48,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// rejected with `HttpError::ResponseTooLarge`.
 pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 10;
+pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(200);
+const RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
 /// Default-deny: the only request headers carried to a different origin on a
 /// redirect. Anything else may be a credential.
 const CROSS_ORIGIN_SAFE_HEADERS: &[&str] =
@@ -225,7 +228,13 @@ impl Client {
     }
 
     pub fn raw_request(&self, req: RawRequest) -> Result<RequestBuilder, HttpError> {
-        let mut builder = self
+        let client = match req.connect_timeout_ms {
+            Some(ms) if Duration::from_millis(ms) != self.inner.config.connect_timeout => {
+                with_connect_timeout(ms)
+            }
+            _ => self.clone(),
+        };
+        let mut builder = client
             .request_str(&req.method, req.url)?
             .insecure(req.insecure);
         for (k, v) in &req.headers {
@@ -236,6 +245,9 @@ impl Client {
         }
         if let Some(ms) = req.timeout_ms {
             builder = builder.timeout(Duration::from_millis(ms));
+        }
+        if let Some(on) = req.retry {
+            builder = builder.retry(on);
         }
         Ok(builder)
     }
@@ -252,6 +264,8 @@ impl Client {
             timeout: DEFAULT_TIMEOUT,
             max_body: None,
             follow_redirects: true,
+            retry: None,
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
         }
     }
 
@@ -302,6 +316,8 @@ pub struct RequestBuilder {
     timeout: Duration,
     max_body: Option<usize>,
     follow_redirects: bool,
+    retry: Option<bool>,
+    max_attempts: u32,
 }
 
 enum Body {
@@ -375,6 +391,63 @@ impl RequestBuilder {
         self.follow_redirects = on;
         self
     }
+    pub fn retry(mut self, on: bool) -> Self {
+        self.retry = Some(on);
+        self
+    }
+    pub fn max_attempts(mut self, n: u32) -> Self {
+        self.max_attempts = n.max(1);
+        self
+    }
+
+    fn retry_enabled(&self) -> bool {
+        self.retry.unwrap_or(matches!(
+            self.method,
+            reqwest::Method::GET
+                | reqwest::Method::HEAD
+                | reqwest::Method::PUT
+                | reqwest::Method::DELETE
+                | reqwest::Method::OPTIONS
+        ))
+    }
+
+    async fn dispatch(
+        &self,
+        extra_headers: &[(&str, &str)],
+        apply_timeout: bool,
+    ) -> Result<reqwest::Response, HttpError> {
+        let deadline = apply_timeout.then(|| std::time::Instant::now() + self.timeout);
+        let attempts = if self.retry_enabled() {
+            self.max_attempts
+        } else {
+            1
+        };
+        let mut attempt = 1;
+        loop {
+            let result = self.dispatch_once(extra_headers, deadline).await;
+            if attempt >= attempts {
+                return result;
+            }
+            let delay = match &result {
+                Ok(resp) => match resp.status().as_u16() {
+                    429 => retry_after(resp.headers()).unwrap_or_else(|| backoff(attempt)),
+                    502..=504 => backoff(attempt),
+                    _ => return result,
+                },
+                Err(HttpError::Request(e)) if e.is_connect() || e.is_timeout() => backoff(attempt),
+                Err(_) => return result,
+            };
+            if let Some(d) = deadline {
+                let left = d.saturating_duration_since(std::time::Instant::now());
+                if delay >= left {
+                    return result;
+                }
+            }
+            drop(result);
+            tokio::time::sleep(delay).await;
+            attempt += 1;
+        }
+    }
 
     /// Assemble one hop's `reqwest` request: pooled client, headers, body.
     /// `timeout` is the hop's share of the total deadline; `None` for the
@@ -418,10 +491,10 @@ impl RequestBuilder {
     /// (`x-api-key`, `x-csrf-token`, ...) would leak to whatever host a 30x
     /// names (orca#738). Cross-origin hops keep only [`CROSS_ORIGIN_SAFE_HEADERS`];
     /// https→http hops are refused.
-    async fn dispatch(
+    async fn dispatch_once(
         &self,
         extra_headers: &[(&str, &str)],
-        apply_timeout: bool,
+        deadline: Option<std::time::Instant>,
     ) -> Result<reqwest::Response, HttpError> {
         let mut url =
             url::Url::parse(&self.url).map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
@@ -434,8 +507,6 @@ impl RequestBuilder {
         }
         let mut method = self.method.clone();
         let mut with_body = true;
-        // One deadline for the whole chain, so redirects can't multiply it.
-        let deadline = apply_timeout.then(|| std::time::Instant::now() + self.timeout);
         for _ in 0..=MAX_REDIRECTS {
             let hop_timeout = match deadline {
                 Some(d) => {
@@ -606,6 +677,8 @@ pub struct RawRequest {
     pub body: Vec<u8>,
     pub timeout_ms: Option<u64>,
     pub insecure: bool,
+    pub retry: Option<bool>,
+    pub connect_timeout_ms: Option<u64>,
 }
 
 /// Response from [`RequestBuilder::send_bytes`]. Body is the raw byte stream.
@@ -729,6 +802,39 @@ pub fn redact_url(raw: &str) -> String {
     }
 }
 
+fn with_connect_timeout(ms: u64) -> Client {
+    static CLIENTS: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, Client>>> =
+        std::sync::OnceLock::new();
+    CLIENTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(ms)
+        .or_insert_with(|| {
+            Client::builder()
+                .connect_timeout(Duration::from_millis(ms))
+                .build()
+        })
+        .clone()
+}
+
+fn backoff(attempt: u32) -> Duration {
+    let exp = RETRY_BASE_DELAY.saturating_mul(1 << attempt.saturating_sub(1).min(16));
+    let capped = exp.min(RETRY_MAX_DELAY);
+    let ms = capped.as_millis() as u64;
+    Duration::from_millis(ms / 2 + rand::random_range(0..=ms / 2))
+}
+
+fn retry_after(h: &reqwest::header::HeaderMap) -> Option<Duration> {
+    h.get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+}
+
 const BODY_HEADERS: &[&str] = &[
     "content-length",
     "content-encoding",
@@ -793,6 +899,140 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn flaky(server: &MockServer, verb: &str, first: ResponseTemplate, fails: u64) {
+        Mock::given(method(verb))
+            .respond_with(first)
+            .up_to_n_times(fails)
+            .mount(server)
+            .await;
+        Mock::given(method(verb))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn get_retries_transient_status_then_succeeds() {
+        let server = MockServer::start().await;
+        flaky(&server, "GET", ResponseTemplate::new(503), 2).await;
+        let resp = Client::new().get(server.uri()).send().await.unwrap();
+        assert_eq!(resp.status, 200);
+    }
+
+    #[tokio::test]
+    async fn retry_gives_up_after_max_attempts() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(502))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let err = Client::new()
+            .get(server.uri())
+            .max_attempts(2)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::Status { status: 502, .. }));
+    }
+
+    #[tokio::test]
+    async fn too_many_requests_honors_retry_after() {
+        let server = MockServer::start().await;
+        flaky(
+            &server,
+            "GET",
+            ResponseTemplate::new(429).insert_header("Retry-After", "1"),
+            1,
+        )
+        .await;
+        let start = std::time::Instant::now();
+        let resp = Client::new().get(server.uri()).send().await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert!(start.elapsed() >= Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn post_not_retried_by_default() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let err = Client::new().post(server.uri()).send().await.unwrap_err();
+        assert!(matches!(err, HttpError::Status { status: 503, .. }));
+    }
+
+    #[tokio::test]
+    async fn post_retries_when_opted_in() {
+        let server = MockServer::start().await;
+        flaky(&server, "POST", ResponseTemplate::new(503), 1).await;
+        let resp = Client::new()
+            .post(server.uri())
+            .retry(true)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+    }
+
+    #[tokio::test]
+    async fn raw_request_carries_retry_flag() {
+        let server = MockServer::start().await;
+        flaky(&server, "POST", ResponseTemplate::new(504), 1).await;
+        let resp = Client::new()
+            .raw_request(RawRequest {
+                method: "POST".into(),
+                url: server.uri(),
+                retry: Some(true),
+                connect_timeout_ms: Some(2000),
+                ..Default::default()
+            })
+            .unwrap()
+            .send_raw()
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+    }
+
+    #[tokio::test]
+    async fn retries_stay_within_total_deadline() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "30"))
+            .mount(&server)
+            .await;
+        let start = std::time::Instant::now();
+        let err = Client::new()
+            .get(server.uri())
+            .timeout(Duration::from_millis(500))
+            .max_attempts(10)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::Status { status: 429, .. }));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn connect_error_is_retried_within_deadline() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let start = std::time::Instant::now();
+        let err = Client::new()
+            .get(format!("http://127.0.0.1:{port}/"))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::Request(e) if e.is_connect()));
+        assert!(start.elapsed() >= RETRY_BASE_DELAY / 2);
+    }
 
     #[tokio::test]
     async fn get_returns_parsed_json() {

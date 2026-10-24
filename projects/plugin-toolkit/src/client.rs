@@ -105,6 +105,8 @@ impl Request {
             max_body_bytes: self.max_body_bytes,
             body_b64: true,
             follow_redirects: self.follow_redirects,
+            connect_timeout_ms: None,
+            retry: None,
         }
     }
 

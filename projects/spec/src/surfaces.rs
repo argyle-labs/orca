@@ -509,6 +509,7 @@ async fn run(
             body: req.body,
             timeout_ms: None,
             insecure,
+            ..Default::default()
         })
         .map_err(|e| anyhow!("{tool}: {e}"))?;
     let resp = builder

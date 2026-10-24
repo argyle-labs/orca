@@ -455,6 +455,10 @@ pub struct HttpRequest {
     /// unfollowed; `None` follows redirects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_redirects: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<bool>,
 }
 
 /// Capability name core advertises in `Welcome` when it accepts a base64
@@ -495,6 +499,10 @@ pub struct LegacyHttpRequest<'a> {
     pub body_b64: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub follow_redirects: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<bool>,
 }
 
 impl HttpRequest {
@@ -509,6 +517,8 @@ impl HttpRequest {
             max_body_bytes: self.max_body_bytes,
             body_b64: self.body_b64,
             follow_redirects: self.follow_redirects,
+            connect_timeout_ms: self.connect_timeout_ms,
+            retry: self.retry,
         }
     }
 }
@@ -863,6 +873,8 @@ mod tests {
             max_body_bytes: Some(9),
             body_b64: true,
             follow_redirects: Some(false),
+            connect_timeout_ms: None,
+            retry: None,
         };
         let mut typed = serde_json::to_value(&req).unwrap();
         typed["body"] = json!([1, 2, 255]);

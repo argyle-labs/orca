@@ -250,6 +250,8 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
                     body: req.body,
                     timeout_ms: req.timeout_ms,
                     insecure: req.insecure,
+                    retry: req.retry,
+                    connect_timeout_ms: req.connect_timeout_ms,
                 })
                 .map_err(|e| anyhow!("http.request: {e}"))?;
             if let Some(n) = max_body {
@@ -363,6 +365,7 @@ fn exec_http_stream(
             body: req.body,
             timeout_ms: req.timeout_ms,
             insecure: req.insecure,
+            ..Default::default()
         })
         .map_err(|e| anyhow!("http.stream: {e}"))?;
 
