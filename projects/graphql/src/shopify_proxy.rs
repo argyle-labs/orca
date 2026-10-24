@@ -70,26 +70,17 @@ pub async fn proxy_graphql(
         payload["operationName"] = Value::String(op.to_string());
     }
 
-    // reqwest only strips Authorization/Cookie on redirect; the access token
-    // header would follow a 30x to any host.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
-    let resp = client
+    let resp = utils::http::shared()
         .post(&url)
         .header("X-Shopify-Access-Token", token)
-        .header("Content-Type", "application/json")
         .json(&payload)
-        .send()
+        .follow_redirects(false)
+        .send_raw()
         .await
         .with_context(|| format!("POST {url}"))?;
 
-    let status = resp.status().as_u16();
-    let body: Value = resp
-        .json()
-        .await
-        .context("upstream did not return JSON")
-        .unwrap_or(Value::Null);
+    let status = resp.status;
+    let body: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
     Ok(GraphqlProxyResult { status, body })
 }
 

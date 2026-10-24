@@ -381,6 +381,9 @@ impl RequestBuilder {
         self.timeout = t;
         self
     }
+    pub fn no_timeout(self) -> Self {
+        self.timeout(Duration::MAX)
+    }
     /// Override the default 8 MiB response cap. Use for legitimate large
     /// payloads (binary releases, container images, backup archives).
     pub fn max_body(mut self, n: usize) -> Self {
@@ -416,7 +419,9 @@ impl RequestBuilder {
         extra_headers: &[(&str, &str)],
         apply_timeout: bool,
     ) -> Result<reqwest::Response, HttpError> {
-        let deadline = apply_timeout.then(|| std::time::Instant::now() + self.timeout);
+        let deadline = apply_timeout
+            .then(|| std::time::Instant::now().checked_add(self.timeout))
+            .flatten();
         let attempts = if self.retry_enabled() {
             self.max_attempts
         } else {

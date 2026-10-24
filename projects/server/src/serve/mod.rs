@@ -1618,29 +1618,23 @@ async fn proxy_http(req: axum::extract::Request, origin: String) -> axum::respon
         .to_string();
     let url = format!("{origin}{path_and_query}");
 
-    let method = reqwest::Method::from_bytes(req.method().as_str().as_bytes())
-        .unwrap_or(reqwest::Method::GET);
-
-    // Process-cached client so the dev-proxy doesn't churn a new connection
-    // pool per request.
-    static DEV_PROXY_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    let client = DEV_PROXY_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .pool_max_idle_per_host(8)
-            .pool_idle_timeout(Duration::from_secs(30))
-            // Relay 30x to the browser; following would forward its cookies
-            // and custom headers to whatever host the upstream names.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("dev proxy reqwest client")
-    });
-    let mut rb = client.request(method, &url);
+    let Ok(mut rb) = utils::http::shared().request_str(req.method().as_str(), &url) else {
+        return Response::builder()
+            .status(axum::http::StatusCode::METHOD_NOT_ALLOWED)
+            .body(Body::empty())
+            .expect("405 response is valid");
+    };
+    // Relay 30x to the browser; following would forward its cookies and
+    // custom headers to whatever host the upstream names.
+    rb = rb.follow_redirects(false).no_timeout().max_body(usize::MAX);
 
     for (k, v) in req.headers() {
         if is_hop_by_hop(k.as_str()) || k == axum::http::header::HOST {
             continue;
         }
-        rb = rb.header(k.as_str(), v);
+        if let Ok(v) = v.to_str() {
+            rb = rb.header(k.as_str(), v);
+        }
     }
 
     // Match DefaultBodyLimit (4 MiB). Larger payloads would buffer entirely in
@@ -1648,32 +1642,28 @@ async fn proxy_http(req: axum::extract::Request, origin: String) -> axum::respon
     let body = axum::body::to_bytes(req.into_body(), 4 * 1024 * 1024)
         .await
         .unwrap_or_default();
-    rb = rb.body(body);
+    rb = rb.raw_body(body.to_vec());
 
-    match rb.send().await {
+    match rb.send_raw().await {
         Ok(resp) => {
-            let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
+            let status = axum::http::StatusCode::from_u16(resp.status)
                 .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
             let mut builder = Response::builder().status(status);
-            for (k, v) in resp.headers() {
-                if is_hop_by_hop(k.as_str()) {
+            for (k, v) in &resp.header_pairs {
+                if is_hop_by_hop(k) {
                     continue;
                 }
                 // An absolute Location at the upstream would take the browser
                 // off orca's origin; keep it relative.
-                if k == reqwest::header::LOCATION
-                    && let Some(rel) = v
-                        .to_str()
-                        .ok()
-                        .and_then(|l| l.strip_prefix(origin.as_str()))
+                if k.eq_ignore_ascii_case("location")
+                    && let Some(rel) = v.strip_prefix(origin.as_str())
                 {
-                    builder = builder.header(k.as_str(), if rel.is_empty() { "/" } else { rel });
+                    builder = builder.header(k, if rel.is_empty() { "/" } else { rel });
                     continue;
                 }
-                builder = builder.header(k.as_str(), v);
+                builder = builder.header(k, v);
             }
-            let bytes = resp.bytes().await.unwrap_or_default();
-            builder.body(Body::from(bytes)).unwrap_or_else(|_| {
+            builder.body(Body::from(resp.body)).unwrap_or_else(|_| {
                 Response::builder()
                     .status(502)
                     .body(Body::empty())
@@ -2111,7 +2101,7 @@ mod tests {
         // Port 1 is not a listening dev server → connection refused → the
         // handler's error branch returns a 502 with a diagnostic body. No
         // listener is bound in-process; this only makes a failing outbound dial.
-        // The dev-proxy reqwest client needs a rustls crypto provider installed
+        // The dev-proxy HTTP client needs a rustls crypto provider installed
         // (normally done in build_router); do it here since we call proxy_http
         // in isolation. Idempotent.
         ::model::ensure_crypto_provider();

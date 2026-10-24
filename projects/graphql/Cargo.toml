@@ -28,17 +28,15 @@ schemars       = { workspace = true }
 graphql-parser = { workspace = true, optional = true }
 graphql_client = { workspace = true }
 utoipa         = { workspace = true, optional = true }
-# `reqwest` + `toml` are used ONLY by `shopify_proxy`. The generic GraphQL path
-# goes through delegated `utils::http`, so a plugin that never proxies Shopify
-# has no reason to link an HTTP client or a TOML parser.
-reqwest        = { workspace = true, optional = true }
+# `toml` is used ONLY by `shopify_proxy`; a plugin that never proxies Shopify
+# has no reason to link a TOML parser.
 toml           = { workspace = true, optional = true }
 
 [features]
 # `shopify` is on by default so daemon-side consumers (`spec`) are unaffected;
 # `plugin-toolkit` takes this crate with `default-features = false`.
 default = ["shopify", "http", "introspection"]
-shopify = ["http", "dep:reqwest", "dep:toml"]
+shopify = ["http", "dep:toml"]
 http = ["utils/http"]
 introspection = ["dep:graphql-parser", "dep:utoipa"]
 

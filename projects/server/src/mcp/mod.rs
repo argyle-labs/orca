@@ -609,18 +609,15 @@ async fn fetch_daemon_catalog() -> Option<(String, Vec<Value>)> {
     let token = auth::loopback_token::get()
         .map(|s| s.to_string())
         .or_else(auth::loopback_token::read_from_disk)?;
-    let client = auth::loopback_token::loopback_only_reqwest_client(&url).ok()?;
-    let resp = client
-        .get(&url)
-        .bearer_auth(token)
+    let resp = auth::loopback_token::loopback_only_request("GET", &url)
+        .ok()?
+        .bearer(token)
         .timeout(std::time::Duration::from_secs(5))
+        .max_body(usize::MAX)
         .send()
         .await
         .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let payload: Value = resp.json().await.ok()?;
+    let payload: Value = resp.json().ok()?;
     let version = payload.get("version").and_then(Value::as_str)?.to_string();
     let tools = payload.get("tools").and_then(Value::as_array)?.clone();
     Some((version, tools))
@@ -649,23 +646,24 @@ async fn call_core_tool_via_daemon(name: &str, args: &Value) -> Result<Option<Va
         .context("loopback token unavailable — is the daemon running?")?;
     // Forward args verbatim: the daemon's `http_dispatch` performs the same
     // ambient-peer / correlation-id overlay this child would, off the body.
-    let resp = auth::loopback_token::loopback_only_reqwest_client(&url)?
-        .post(&url)
-        .bearer_auth(token)
+    let resp = auth::loopback_token::loopback_only_request("POST", &url)?
+        .bearer(token)
         .json(args)
         .timeout(PLUGIN_TOOL_CALL_TIMEOUT)
-        .send()
+        .max_body(usize::MAX)
+        .send_raw()
         .await
         .with_context(|| format!("POST {url}"))?;
-    let status = resp.status();
-    let payload: Value = resp.json().await.context("tool response was not JSON")?;
-    if status.is_success() {
+    let status = resp.status;
+    let payload: Value =
+        serde_json::from_slice(&resp.body).context("tool response was not JSON")?;
+    if (200..300).contains(&status) {
         return Ok(Some(payload));
     }
     // A `tool.unknown` from the daemon means fall through to legacy dispatch.
     let code = payload.get("code").and_then(Value::as_str).unwrap_or("");
     let kind = payload.get("kind").and_then(Value::as_str).unwrap_or("");
-    if status.as_u16() == 404 || code == "tool.unknown" || kind == "not_found" {
+    if status == 404 || code == "tool.unknown" || kind == "not_found" {
         return Ok(None);
     }
     if let Some(oe) = structured_daemon_error(&payload) {
@@ -676,7 +674,7 @@ async fn call_core_tool_via_daemon(name: &str, args: &Value) -> Result<Option<Va
         .or_else(|| payload.get("error"))
         .and_then(Value::as_str)
         .unwrap_or("unknown error");
-    anyhow::bail!("tool '{name}' failed ({}): {msg}", status.as_u16());
+    anyhow::bail!("tool '{name}' failed ({}): {msg}", status);
 }
 
 /// A daemon error body that carries a remediation, rebuilt so the MCP reply
