@@ -134,21 +134,37 @@ enum Call {
 }
 
 impl BackendCall {
+    #[cfg(feature = "reactor")]
     pub fn targeted(&self) -> bool {
         matches!(self.0, Call::Verb { targeted: true, .. })
     }
 
+    #[cfg(not(feature = "reactor"))]
+    pub fn targeted(&self) -> bool {
+        match self.0 {}
+    }
+
+    #[cfg(feature = "reactor")]
     pub fn verb(&self) -> Option<&CoreVerb> {
         match &self.0 {
-            #[cfg(feature = "reactor")]
             Call::Verb { verb, .. } => Some(verb),
-            #[cfg(feature = "reactor")]
             Call::Daemon => None,
         }
     }
 
+    #[cfg(not(feature = "reactor"))]
+    pub fn verb(&self) -> Option<&CoreVerb> {
+        match self.0 {}
+    }
+
+    #[cfg(feature = "reactor")]
     pub fn is_daemon(&self) -> bool {
         matches!(self.0, Call::Daemon)
+    }
+
+    #[cfg(not(feature = "reactor"))]
+    pub fn is_daemon(&self) -> bool {
+        match self.0 {}
     }
 }
 
