@@ -13,9 +13,9 @@ use anyhow::Result;
 use colored::Colorize;
 #[cfg(target_os = "macos")]
 use contract::config::APP_PLIST_LABEL;
-#[cfg(target_os = "linux")]
-use contract::config::APP_SYSTEMD_SERVICE;
 use contract::config::{APP_DAEMON_STDERR_FILE, APP_LOGS_SUBDIR, APP_NAME, APP_STATE_DIR};
+#[cfg(target_os = "linux")]
+use contract::config::{APP_SYSTEMD_SERVICE, APP_SYSTEMD_SERVICE_LEGACY};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
@@ -353,10 +353,73 @@ fn launchd_uid() -> Result<u32> {
 }
 
 #[cfg(target_os = "linux")]
+fn canonical_path(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .unwrap_or_else(|| path.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn render_user_unit(binary: &str, port: u16, home: &str, daemon_log: &str) -> String {
+    format!(
+        "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target\n\n\
+         [Service]\nExecStart={binary} daemon --port {port}\n\
+         Environment=HOME={home}\nRestart=always\nRestartSec=5\n\
+         StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
+         [Install]\nWantedBy=default.target\n"
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn is_orca_daemon_unit(content: &str) -> bool {
+    content.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("ExecStart=") && l.contains(" daemon --port ")
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn remove_legacy_unit(unit_dir: &str, user_mode: bool) -> Result<()> {
+    let path = format!("{unit_dir}/{APP_SYSTEMD_SERVICE_LEGACY}.service");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    if !is_orca_daemon_unit(&content) {
+        return Ok(());
+    }
+    let scope: &[&str] = if user_mode { &["--user"] } else { &[] };
+    match Command::new("systemctl")
+        .args(scope)
+        .args(["disable", "--now", APP_SYSTEMD_SERVICE_LEGACY])
+        .status()
+    {
+        Ok(s) if s.success() => {}
+        Ok(s) => tracing::warn!("systemctl disable --now {APP_SYSTEMD_SERVICE_LEGACY} exited {s}"),
+        Err(e) => {
+            tracing::warn!("invoking systemctl disable --now {APP_SYSTEMD_SERVICE_LEGACY}: {e:#}")
+        }
+    }
+    std::fs::remove_file(&path)?;
+    println!("{} removed legacy {}", "✓".green(), path);
+    let reload = Command::new("systemctl")
+        .args(scope)
+        .arg("daemon-reload")
+        .status()
+        .context("invoking systemctl daemon-reload")?;
+    if !reload.success() {
+        anyhow::bail!("systemctl daemon-reload failed with status {reload}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn install_service(binary: &str, port: u16) -> Result<()> {
-    let home = std::env::var("HOME")?;
+    let home = canonical_path(&std::env::var("HOME")?);
+    let binary = canonical_path(binary);
     let service_dir = format!("{home}/.config/systemd/user");
     std::fs::create_dir_all(&service_dir)?;
+    remove_legacy_unit(&service_dir, true)?;
     let service_path = format!("{service_dir}/{APP_SYSTEMD_SERVICE}.service");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
@@ -364,13 +427,7 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     // rotated tee (`daemon.jsonl`). See APP_DAEMON_STDERR_FILE.
     let daemon_log = format!("{logs_dir}/{APP_DAEMON_STDERR_FILE}");
 
-    let service = format!(
-        "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target\n\n\
-         [Service]\nExecStart={binary} daemon --port {port}\n\
-         Environment=HOME={home}\nRestart=always\nRestartSec=5\n\
-         StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
-         [Install]\nWantedBy=default.target\n"
-    );
+    let service = render_user_unit(&binary, port, &home, &daemon_log);
 
     std::fs::write(&service_path, &service)?;
     println!("{} wrote {}", "✓".green(), service_path);
@@ -435,6 +492,9 @@ fn install_system_service(binary: &str, port: u16, user: &str, home: &str) -> Re
 
 #[cfg(target_os = "linux")]
 fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Result<()> {
+    let home = canonical_path(home);
+    let binary = canonical_path(binary);
+    remove_legacy_unit("/etc/systemd/system", false)?;
     let path = format!("/etc/systemd/system/{APP_SYSTEMD_SERVICE}.service");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
@@ -481,7 +541,7 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
 
 #[cfg(target_os = "linux")]
 fn install_openrc(binary: &str, port: u16, user: &str, home: &str) -> Result<()> {
-    let path = format!("/etc/init.d/{APP_SYSTEMD_SERVICE}");
+    let path = format!("/etc/init.d/{APP_NAME}");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
     let chown = Command::new("chown")
@@ -518,16 +578,16 @@ fn install_openrc(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
     println!("{} wrote {}", "✓".green(), path);
 
     let status = Command::new("rc-update")
-        .args(["add", APP_SYSTEMD_SERVICE, "default"])
+        .args(["add", APP_NAME, "default"])
         .status()?;
     if !status.success() {
-        anyhow::bail!("rc-update add {APP_SYSTEMD_SERVICE} default failed");
+        anyhow::bail!("rc-update add {APP_NAME} default failed");
     }
     let status = Command::new("rc-service")
-        .args([APP_SYSTEMD_SERVICE, "start"])
+        .args([APP_NAME, "start"])
         .status()?;
     if !status.success() {
-        anyhow::bail!("rc-service {APP_SYSTEMD_SERVICE} start failed");
+        anyhow::bail!("rc-service {APP_NAME} start failed");
     }
     println!("{} {APP_NAME} (openrc) enabled and started", "✓".green());
     Ok(())
@@ -624,8 +684,10 @@ pub(crate) fn uninstall_service() -> Result<()> {
         ),
     }
 
-    let home = std::env::var("HOME")?;
-    let service_path = format!("{home}/.config/systemd/user/{APP_SYSTEMD_SERVICE}.service");
+    let home = canonical_path(&std::env::var("HOME")?);
+    let service_dir = format!("{home}/.config/systemd/user");
+    remove_legacy_unit(&service_dir, true)?;
+    let service_path = format!("{service_dir}/{APP_SYSTEMD_SERVICE}.service");
     if std::path::Path::new(&service_path).exists() {
         std::fs::remove_file(&service_path)?;
         println!("{} removed {}", "✓".green(), service_path);
@@ -657,6 +719,30 @@ pub(crate) fn uninstall_service() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn user_unit_runs_the_daemon_under_the_new_name() {
+        assert_eq!(APP_SYSTEMD_SERVICE, "orca-daemon");
+        let unit = render_user_unit("/usr/bin/orca", 12001, "/home/u", "/home/u/l");
+        assert!(unit.contains("ExecStart=/usr/bin/orca daemon --port 12001"));
+        assert!(unit.contains("Environment=HOME=/home/u"));
+        assert!(!unit.contains("Alias="));
+        assert!(is_orca_daemon_unit(&unit));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn legacy_cleanup_ignores_a_foreign_orca_unit() {
+        let screen_reader =
+            "[Unit]\nDescription=Orca screen reader\n\n[Service]\nExecStart=/usr/bin/orca\n";
+        assert!(!is_orca_daemon_unit(screen_reader));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orca.service");
+        std::fs::write(&path, screen_reader).unwrap();
+        remove_legacy_unit(dir.path().to_str().unwrap(), true).unwrap();
+        assert!(path.exists());
+    }
 
     // The render_unraid_rc_script template was retired 2026-06-06 along
     // with the rc.orca lifecycle path. The HOME-through-runuser regression
