@@ -131,6 +131,19 @@ pub struct Auth {
     pub secret: String,
 }
 
+fn envelope_key<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let key = Option::<String>::deserialize(deserializer)?;
+    match key {
+        Some(k) if k.is_empty() || k.contains('/') => Err(serde::de::Error::custom(format!(
+            "response.envelope must be a top-level object key, not a JSON pointer (got {k:?})"
+        ))),
+        other => Ok(other),
+    }
+}
+
 fn default_template() -> String {
     "{secret}".to_string()
 }
@@ -138,7 +151,11 @@ fn default_template() -> String {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseRules {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "envelope_key"
+    )]
     pub envelope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub null_as: Option<Value>,
@@ -649,7 +666,11 @@ pub fn peel_envelope(rules: &ResponseRules, value: Value) -> Value {
         (Some(key), Value::Object(mut map)) if map.contains_key(key) => {
             map.remove(key).unwrap_or(Value::Null)
         }
-        (_, other) => other,
+        (Some(key), other) => {
+            tracing::debug!(envelope = %key, "envelope key absent or body not an object");
+            other
+        }
+        (None, other) => other,
     };
     match (inner, &rules.null_as) {
         (Value::Null, Some(replacement)) => replacement.clone(),
@@ -1442,6 +1463,38 @@ mod tests {
         assert_eq!(peel_envelope(&rules, json!({"x": 1})), json!({"x": 1}));
         assert_eq!(peel_envelope(&rules, json!([1])), json!([1]));
         assert_eq!(peel_envelope(&rules, Value::Null), Value::Null);
+    }
+
+    #[test]
+    fn envelope_rejects_json_pointer_and_empty_key() {
+        let err = serde_json::from_value::<ResponseRules>(json!({"envelope": "/data"}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a JSON pointer"), "{err}");
+        assert!(serde_json::from_value::<ResponseRules>(json!({"envelope": ""})).is_err());
+        assert!(serde_json::from_value::<ResponseRules>(json!({"envelope": "data"})).is_ok());
+    }
+
+    #[test]
+    fn envelope_missing_or_null_is_none() {
+        let missing = serde_json::from_value::<ResponseRules>(json!({})).unwrap();
+        assert_eq!(missing.envelope, None);
+        let null = serde_json::from_value::<ResponseRules>(json!({"envelope": null})).unwrap();
+        assert_eq!(null.envelope, None);
+    }
+
+    #[test]
+    fn parse_rejects_pointer_envelope() {
+        let doc = json!({"format": FORMAT, "surface": "s", "kind": "openapi", "ops": [],
+            "response": {"envelope": "/data"}});
+        let err = format!("{:#}", ApiSurface::parse(&doc.to_string()).unwrap_err());
+        assert!(err.contains("not a JSON pointer"), "{err}");
+        assert_eq!(err.matches("api-surface:").count(), 1, "{err}");
+    }
+
+    #[test]
+    fn envelope_rejects_nested_key() {
+        assert!(serde_json::from_value::<ResponseRules>(json!({"envelope": "a/b"})).is_err());
     }
 
     #[test]
