@@ -414,7 +414,7 @@ fn drop_column_if_present(conn: &Connection, table: &str, column: &str) -> Resul
 }
 
 /// True when `table` has a column named `column`.
-fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+pub(crate) fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let found = stmt
         .query_map([], |row| row.get::<_, String>(1))?

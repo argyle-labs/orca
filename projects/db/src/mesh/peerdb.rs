@@ -1172,11 +1172,7 @@ pub fn wipe_mesh_membership(conn: &Connection) -> Result<()> {
     tx.execute("DELETE FROM mesh_peers", [])?;
     tx.execute("DELETE FROM mesh_pending_offers", [])?;
     tx.execute("DELETE FROM mesh_discovery", [])?;
-    tx.execute(
-        "INSERT INTO mesh_self (id, secure, mesh_id, set_at) VALUES (1, 0, NULL, ?)
-         ON CONFLICT(id) DO UPDATE SET secure = 0, mesh_id = NULL, set_at = excluded.set_at",
-        params![now_secs()],
-    )?;
+    tx.execute("DELETE FROM mesh_self", [])?;
     tx.commit()?;
     Ok(())
 }

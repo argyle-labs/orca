@@ -1707,18 +1707,36 @@ fn bootstrap_attestation_message(bootstrap_fp: &str) -> Vec<u8> {
 }
 
 pub fn attest_bootstrap_fp(pki_dir: &Path, bootstrap_fp: &str) -> Result<String> {
-    use ed25519_dalek::Signer;
-    use ed25519_dalek::pkcs8::DecodePrivateKey;
-    let key_pem = read_pki_file(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
-    let signing =
-        ed25519_dalek::SigningKey::from_pkcs8_pem(&key_pem).context("parse mesh CA key PEM")?;
-    let sig = signing.sign(&bootstrap_attestation_message(bootstrap_fp));
-    Ok(crate::encoding::base64_encode(&sig.to_bytes()))
+    sign_with_mesh_ca(pki_dir, &bootstrap_attestation_message(bootstrap_fp))
 }
 
 pub fn verify_bootstrap_attestation(
     ca_cert_pem: &str,
     bootstrap_fp: &str,
+    signature_b64: &str,
+) -> Result<()> {
+    verify_mesh_ca_signature(
+        ca_cert_pem,
+        &bootstrap_attestation_message(bootstrap_fp),
+        signature_b64,
+    )
+    .context("mesh CA attestation of the bootstrap key did not verify")
+}
+
+pub fn sign_with_mesh_ca(pki_dir: &Path, message: &[u8]) -> Result<String> {
+    use ed25519_dalek::Signer;
+    use ed25519_dalek::pkcs8::DecodePrivateKey;
+    let key_pem = read_pki_file(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
+    let signing =
+        ed25519_dalek::SigningKey::from_pkcs8_pem(&key_pem).context("parse mesh CA key PEM")?;
+    Ok(crate::encoding::base64_encode(
+        &signing.sign(message).to_bytes(),
+    ))
+}
+
+pub fn verify_mesh_ca_signature(
+    ca_cert_pem: &str,
+    message: &[u8],
     signature_b64: &str,
 ) -> Result<()> {
     use ed25519_dalek::Verifier;
@@ -1733,16 +1751,13 @@ pub fn verify_bootstrap_attestation(
         .try_into()
         .map_err(|_| anyhow::anyhow!("mesh CA key is not Ed25519"))?;
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).context("parse mesh CA pubkey")?;
-    let sig_bytes = crate::encoding::base64_decode(signature_b64).context("decode attestation")?;
+    let sig_bytes = crate::encoding::base64_decode(signature_b64).context("decode signature")?;
     let sig_arr: [u8; 64] = sig_bytes
         .as_slice()
         .try_into()
-        .map_err(|_| anyhow::anyhow!("attestation must be 64 bytes"))?;
-    vk.verify(
-        &bootstrap_attestation_message(bootstrap_fp),
-        &ed25519_dalek::Signature::from_bytes(&sig_arr),
-    )
-    .context("mesh CA attestation of the bootstrap key did not verify")
+        .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?;
+    vk.verify(message, &ed25519_dalek::Signature::from_bytes(&sig_arr))
+        .context("mesh CA signature did not verify")
 }
 
 #[derive(Debug)]

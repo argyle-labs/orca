@@ -1284,6 +1284,9 @@ pub enum MeshUpdateAction {
     Unpin,
     /// Issue a single-use, short-lived join token for one joiner.
     JoinToken,
+    /// Promote member `id` to secure with a mesh-CA-signed grant. Run on a
+    /// secure member that holds the mesh CA key.
+    Promote,
 }
 
 /// Union of args across the mesh-update operations; required fields are
@@ -1296,10 +1299,16 @@ pub struct MeshUpdateArgs {
     #[arg(long, default_value = "settings")]
     pub action: MeshUpdateAction,
     /// (settings) Member tier: `true` = secure (may hold other members'
-    /// secrets), `false` = insecure (holds only its own). Promotion must be
-    /// relayed from a member this one trusts; `None` reads the current tier.
+    /// secrets), `false` = insecure (holds only its own). `true` needs a
+    /// mesh-CA-signed `grant` (see `promote`); `None` reads the current tier.
     #[arg(long)]
     pub secure: Option<bool>,
+    /// (settings) Mesh-CA signature authorising promotion of this member.
+    #[arg(skip)]
+    pub grant: Option<String>,
+    /// (settings) Unix seconds at which `grant` expires.
+    #[arg(skip)]
+    pub grant_expires_at: Option<i64>,
     /// (trust/recover/unpin/cancel_offer) Target system.
     // Aliases: pre-rename daemons send `peer_id` over the mesh.
     #[arg(long)]
@@ -1737,6 +1746,7 @@ async fn mesh_create(
 ///   - `unpin`        — drop this host's identity pin for `peer_id`, so it
 ///     is accepted again with a cert that carries no identity name.
 ///   - `join_token`   — issue a single-use, short-lived join token.
+///   - `promote`      — promote member `id` to secure (mesh-CA-signed grant).
 #[orca_tool(domain = "system.mesh", verb = "update", role = "admin")]
 async fn mesh_update(
     args: MeshUpdateArgs,
@@ -1747,7 +1757,12 @@ async fn mesh_update(
             let secure = match args.secure {
                 Some(true) => {
                     let relaying = ctx.service::<RelayingPeer>().ok();
-                    exec::promote(relaying.as_ref().map(|p| p.0.as_str())).await?
+                    exec::accept_promotion(
+                        relaying.as_ref().map(|p| p.0.as_str()),
+                        args.grant.as_deref(),
+                        args.grant_expires_at,
+                    )
+                    .await?
                 }
                 Some(false) => exec::set_secure(false).await?,
                 None => exec::get_secure()?,
@@ -1817,6 +1832,13 @@ async fn mesh_update(
             Ok(MeshUpdateOutput::Unpin(exec::unpin(&peer_id)?))
         }
         MeshUpdateAction::JoinToken => Ok(MeshUpdateOutput::JoinToken(exec::issue_join_token()?)),
+        MeshUpdateAction::Promote => {
+            let target = args.id.ok_or_else(|| {
+                anyhow::anyhow!("system.mesh.update action=promote requires `id`")
+            })?;
+            let secure = exec::promote(target.as_str(), ctx.caller()).await?;
+            Ok(MeshUpdateOutput::Settings(MeshSettingsOutput { secure }))
+        }
     }
 }
 
@@ -5101,22 +5123,86 @@ mod handler_dispatch_tests {
 
     // ── mesh_update: DB-backed arms ────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn two_tier_promotion_needs_a_trusted_relaying_peer_or_the_mesh_ca() {
-        const PROMOTER: &str = "019e7105-0000-7000-8000-0000000abc09";
-        let tmp = tmp_db();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let pki = tempfile::tempdir().unwrap();
-            assert!(exec::authorize_promotion(pki.path(), None).is_err());
-            let conn = db::open_default().unwrap();
-            db::mesh::upsert_peer(&conn, PROMOTER, "mint", "10.0.0.2", 12002, None, "ca").unwrap();
-            assert!(exec::authorize_promotion(pki.path(), Some(PROMOTER)).is_err());
-            db::mesh::set_trust(&conn, PROMOTER, Some(true), None).unwrap();
-            assert!(exec::authorize_promotion(pki.path(), Some(PROMOTER)).is_ok());
-            utils::pki::init_mesh_ca(pki.path(), "founder").unwrap();
-            assert!(exec::authorize_promotion(pki.path(), None).is_ok());
-        })
-        .await;
+    #[test]
+    fn two_tier_promotion_needs_a_mesh_ca_signed_grant() {
+        const TARGET: &str = "019e7105-0000-7000-8000-0000000abc0a";
+        const RELAY: &str = "019e7105-0000-7000-8000-0000000abc09";
+        let now = 1_000_000;
+        let mesh = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(mesh.path(), "founder").unwrap();
+        let rogue = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(rogue.path(), "rogue").unwrap();
+        let insecure = tempfile::tempdir().unwrap();
+
+        assert!(exec::issue_promotion_grant(insecure.path(), TARGET, now).is_err());
+        assert!(
+            exec::verify_promotion_grant(mesh.path(), TARGET, Some(RELAY), None, None, now)
+                .is_err(),
+            "a locally trusted relaying peer without a grant cannot promote"
+        );
+
+        let (grant, exp) = exec::issue_promotion_grant(mesh.path(), TARGET, now).unwrap();
+        assert!(
+            exec::verify_promotion_grant(
+                mesh.path(),
+                TARGET,
+                Some(RELAY),
+                Some(&grant),
+                Some(exp),
+                now
+            )
+            .is_ok()
+        );
+        assert!(
+            exec::verify_promotion_grant(
+                mesh.path(),
+                RELAY,
+                Some(TARGET),
+                Some(&grant),
+                Some(exp),
+                now
+            )
+            .is_err(),
+            "a grant names exactly one member"
+        );
+        assert!(
+            exec::verify_promotion_grant(
+                mesh.path(),
+                TARGET,
+                Some(RELAY),
+                Some(&grant),
+                Some(exp),
+                exp
+            )
+            .is_err(),
+            "expired grant"
+        );
+        assert!(
+            exec::verify_promotion_grant(
+                mesh.path(),
+                TARGET,
+                Some(TARGET),
+                Some(&grant),
+                Some(exp),
+                now
+            )
+            .is_err(),
+            "a member cannot relay its own promotion"
+        );
+
+        let (forged, fexp) = exec::issue_promotion_grant(rogue.path(), TARGET, now).unwrap();
+        assert!(
+            exec::verify_promotion_grant(
+                mesh.path(),
+                TARGET,
+                Some(RELAY),
+                Some(&forged),
+                Some(fexp),
+                now
+            )
+            .is_err(),
+            "a grant from another CA is refused"
+        );
     }
 
     #[tokio::test]

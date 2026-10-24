@@ -486,9 +486,12 @@ fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
     Ok(())
 }
 
-fn reject_insecure_secret_source(tool: &str, secure: bool) -> Result<()> {
+fn reject_insecure_secret_source(tool: &str, secure: impl FnOnce() -> Result<bool>) -> Result<()> {
+    if tool != "secrets.detail" {
+        return Ok(());
+    }
     refuse_unless!(
-        secure || tool != "secrets.detail",
+        secure()?,
         "mesh/exec refused: '{tool}' — an insecure member never serves secret values to peers"
     );
     Ok(())
@@ -647,10 +650,9 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> 
     // the denylist check; `required_role` is the orthogonal auth-tightening axis,
     // covering plugin tools through the roles their manifests declared.
     reject_remote_local_only_action(&params.tool, &params.args)?;
-    reject_insecure_secret_source(
-        &params.tool,
-        db::pool::with_pooled_or_open(db::mesh::get_secure).unwrap_or(false),
-    )?;
+    reject_insecure_secret_source(&params.tool, || {
+        db::pool::with_pooled_or_open(db::mesh::get_secure)
+    })?;
 
     let required_role = remote_role_gate(
         &params.tool,
@@ -1018,9 +1020,12 @@ mod tests {
 
     #[test]
     fn two_tier_insecure_member_never_serves_secret_values_to_peers() {
-        assert!(reject_insecure_secret_source("secrets.detail", false).is_err());
-        assert!(reject_insecure_secret_source("secrets.detail", true).is_ok());
-        assert!(reject_insecure_secret_source("secrets.upsert", false).is_ok());
+        assert!(reject_insecure_secret_source("secrets.detail", || Ok(false)).is_err());
+        assert!(reject_insecure_secret_source("secrets.detail", || Ok(true)).is_ok());
+        assert!(reject_insecure_secret_source("secrets.upsert", || Ok(false)).is_ok());
+        assert!(
+            reject_insecure_secret_source("secrets.detail", || Err(anyhow::anyhow!("db"))).is_err()
+        );
     }
 
     #[test]

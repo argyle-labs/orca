@@ -716,6 +716,32 @@ pub fn applied_count(conn: &Connection) -> Result<u32> {
 /// Run pending up-migrations automatically after `apply_schema`. Idempotent.
 fn run_pending_migrations(conn: &Connection) -> Result<()> {
     migrate(conn, MigrateDirection::Up, usize::MAX)?;
+    converge_mesh_self_tier(conn)?;
+    Ok(())
+}
+
+const LEGACY_TIER_COLUMN: &str = "self_secure";
+
+fn converge_mesh_self_tier(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch("DROP TABLE IF EXISTS mesh_self_tier;")?;
+    if schema_fragments::column_exists(&tx, "mesh_self", LEGACY_TIER_COLUMN)? {
+        tx.execute_batch(&format!(
+            "CREATE TABLE mesh_self_tier (
+                 id                       INTEGER PRIMARY KEY CHECK (id = 1),
+                 secure                   INTEGER NOT NULL DEFAULT 0,
+                 mesh_id                  TEXT,
+                 ca_previous_expires_at   INTEGER,
+                 set_at                   INTEGER NOT NULL
+             );
+             INSERT INTO mesh_self_tier (id, secure, mesh_id, ca_previous_expires_at, set_at)
+                 SELECT id, {LEGACY_TIER_COLUMN}, mesh_id, ca_previous_expires_at, set_at
+                 FROM mesh_self;
+             DROP TABLE mesh_self;
+             ALTER TABLE mesh_self_tier RENAME TO mesh_self;"
+        ))?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -2545,25 +2571,27 @@ mod registry_tests {
         assert_eq!(mesh_id, "mesh-1");
     }
 
-    fn tier_after_migration(old_flag: i64) -> i64 {
+    fn legacy_mesh_self(old_flag: i64) -> Connection {
         let conn = Connection::open_in_memory().expect("open");
-        conn.execute_batch(
+        conn.execute_batch(&format!(
             "CREATE TABLE mesh_self (
                  id INTEGER PRIMARY KEY CHECK (id = 1),
-                 self_secure INTEGER NOT NULL DEFAULT 0,
+                 {LEGACY_TIER_COLUMN} INTEGER NOT NULL DEFAULT 0,
                  mesh_id TEXT, ca_previous_expires_at INTEGER, set_at INTEGER NOT NULL
-             );",
-        )
+             );"
+        ))
         .expect("legacy mesh_self");
         conn.execute(
-            "INSERT INTO mesh_self (id, self_secure, mesh_id, set_at) VALUES (1, ?1, 'm', 5)",
+            &format!(
+                "INSERT INTO mesh_self (id, {LEGACY_TIER_COLUMN}, mesh_id, set_at) VALUES (1, ?1, 'm', 5)"
+            ),
             [old_flag],
         )
         .expect("seed");
-        conn.execute_batch(include_str!(
-            "../migrations/20261024000000__mesh_self_tier.up.sql"
-        ))
-        .expect("migrate");
+        conn
+    }
+
+    fn tier(conn: &Connection) -> i64 {
         conn.query_row("SELECT secure FROM mesh_self WHERE id = 1", [], |r| {
             r.get(0)
         })
@@ -2571,13 +2599,40 @@ mod registry_tests {
     }
 
     #[test]
-    fn mesh_self_tier_migration_keeps_secure_members_secure() {
-        assert_eq!(tier_after_migration(1), 1);
+    fn mesh_self_tier_convergence_keeps_secure_members_secure() {
+        let conn = legacy_mesh_self(1);
+        converge_mesh_self_tier(&conn).unwrap();
+        assert_eq!(tier(&conn), 1);
+        assert!(!schema_fragments::column_exists(&conn, "mesh_self", LEGACY_TIER_COLUMN).unwrap());
     }
 
     #[test]
-    fn mesh_self_tier_migration_keeps_other_members_insecure() {
-        assert_eq!(tier_after_migration(0), 0);
+    fn mesh_self_tier_convergence_keeps_other_members_insecure() {
+        let conn = legacy_mesh_self(0);
+        converge_mesh_self_tier(&conn).unwrap();
+        assert_eq!(tier(&conn), 0);
+    }
+
+    #[test]
+    fn mesh_self_tier_convergence_recovers_a_leftover_side_table() {
+        let conn = legacy_mesh_self(1);
+        conn.execute_batch("CREATE TABLE mesh_self_tier (junk TEXT);")
+            .unwrap();
+        converge_mesh_self_tier(&conn).unwrap();
+        assert_eq!(tier(&conn), 1);
+        converge_mesh_self_tier(&conn).unwrap();
+        assert_eq!(tier(&conn), 1);
+    }
+
+    #[test]
+    fn mesh_self_tier_convergence_is_a_no_op_on_a_fresh_baseline() {
+        let conn = Connection::open_in_memory().expect("open");
+        register_sql_functions(&conn).expect("fns");
+        apply_schema(&conn).expect("apply_schema");
+        run_pending_migrations(&conn).expect("migrate");
+        crate::mesh::set_secure(&conn, true).unwrap();
+        run_pending_migrations(&conn).expect("re-run");
+        assert_eq!(tier(&conn), 1);
     }
 
     #[test]

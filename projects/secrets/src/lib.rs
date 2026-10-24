@@ -78,7 +78,7 @@ pub fn ensure_write_allowed(conn: &Connection, name: &str) -> Result<()> {
         Some(_) => anyhow::bail!(
             "secret '{name}' is not owned by this member: an insecure member holds only \
              secrets for plugins installed on it; promote it to secure from a secure member \
-             (`orca --peer <this-member> system mesh update --action settings --secure true`) \
+             (`orca system mesh update --action promote --id <this-member>`) \
              to hold other members' secrets"
         ),
     }
@@ -100,12 +100,15 @@ fn owned_by_this_member(conn: &Connection, name: &str) -> Result<bool> {
     let Some((plugin, rest)) = name.split_once('.') else {
         return Ok(false);
     };
-    if rest.is_empty() || !valid_principal(plugin) {
+    if rest.is_empty()
+        || !valid_principal(plugin)
+        || contract::plugin::is_reserved_plugin_id(plugin)
+    {
         return Ok(false);
     }
     Ok(conn
         .query_row(
-            "SELECT 1 FROM plugins WHERE id = ?1",
+            "SELECT 1 FROM plugins WHERE id = ?1 AND enabled = 1",
             rusqlite::params![plugin],
             |_| Ok(()),
         )
@@ -626,6 +629,27 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn insecure_member_refuses_disabled_and_reserved_plugin_namespaces() {
+        let conn = test_conn();
+        join_with_tier(&conn, false);
+        install_plugin(&conn, "opnsense");
+        conn.execute("UPDATE plugins SET enabled = 0 WHERE id = 'opnsense'", [])
+            .unwrap();
+        assert!(upsert(&conn, "opnsense.main.api_key", "inline", "", None).is_err());
+        install_plugin(&conn, "orca");
+        assert!(upsert(&conn, "orca.github_token", "inline", "", None).is_err());
+    }
+
+    #[test]
+    fn a_member_that_left_the_mesh_is_not_gated() {
+        let conn = test_conn();
+        join_with_tier(&conn, false);
+        db::mesh::wipe_mesh_membership(&conn).unwrap();
+        upsert(&conn, "orca.github_token", "inline", "", None).unwrap();
+        write_inline_value(&conn, "orca.github_token", "t").unwrap();
     }
 
     #[test]

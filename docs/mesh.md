@@ -17,7 +17,7 @@ leave, and the security model.
 | Accept an offer | `orca system join --action accept <6-char-code>` |
 | List mesh members | `orca system list` |
 | Promote a peer to mutually-trusted | `orca system mesh update --action trust --id <system-id> --on true` |
-| Promote a member to secure (run on a secure member) | `orca --peer <system-id> system mesh update --action settings --secure true` |
+| Promote a member to secure (run on a secure member) | `orca system mesh update --action promote --id <system-id>` |
 | Verify a peer end-to-end | `orca system health --id <system-id>` |
 | Show cert expiry / rotation status | `orca system certs list` |
 | Rotate the mesh CA (with overlap) | `orca system mesh update --action recover [--overlap-days 14]` |
@@ -77,7 +77,7 @@ After this:
   (`orca system list` shows the inviter's `id`).
 * `orca system list` on both hosts shows the other.
 * The joiner is **insecure** until a secure member promotes it with
-  `orca --peer <joiner-id> system mesh update --action settings --secure true`.
+  `orca system mesh update --action promote --id <joiner-id>`.
 
 ### Manual fallback (no mDNS)
 
@@ -122,7 +122,7 @@ peer; mutual-trust falls back to false on both sides.
 ## Secrets tiers (secure / insecure)
 
 ```
-orca --peer <system-id> system mesh update --action settings --secure true   # on a secure member: promote <system-id>
+orca system mesh update --action promote --id <system-id>   # on a secure member holding the mesh CA key
 orca system mesh update --action settings --secure false                     # demote this member
 orca system mesh update --action settings                                    # current tier
 ```
@@ -135,9 +135,12 @@ orca system mesh update --action settings                                    # c
 * **secure**: may additionally hold other members' secrets and act as a
   secret source for peers.
 
-A member cannot promote itself. Promotion is accepted only when relayed over
-the mesh by a peer this member trusts (`local_secure`, set automatically for
-the inviter on join), or locally on the host that holds the mesh CA key.
+A member cannot promote itself. `promote` runs on a secure member holding the
+mesh CA key: it signs a short-lived grant (10 min) naming the target member
+with the mesh CA key, and the target verifies that signature against its own
+copy of the mesh CA cert before switching to secure. Local trust of a peer
+(including the automatic trust of the inviter on join) confers no promotion
+rights. Leaving the mesh removes the tier entirely.
 `orca system join --action init` makes the first host secure.
 
 ## Leaving the mesh
