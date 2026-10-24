@@ -173,6 +173,7 @@ if-addrs = "0.14"
 include_dir = "0.7"
 indexmap = "2"
 libc = "0.2"
+rustix = { version = "1", features = ["fs"] }
 md-5 = "0.10"
 mdns-sd = "0.19"
 # `profiling` compiles jemalloc with `--enable-prof` so heap profiling is

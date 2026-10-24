@@ -79,6 +79,7 @@ orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 # is already present transitively; declared direct for every unix target.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+rustix = { workspace = true }
 
 [dev-dependencies]
 utils = { workspace = true, features = ["test-scope"] }

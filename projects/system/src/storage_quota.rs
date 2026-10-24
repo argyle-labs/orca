@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use derive::orca_tool;
 use notifications::{Event, EventClass, Severity};
@@ -13,11 +14,40 @@ use serde::{Deserialize, Serialize};
 use crate::periodic::{self, PeriodicSpec};
 
 pub const CONFIG_KEY: &str = "storage.quota.config";
+pub const OPT_IN_MARKER: &str = ".orca-quota-ok";
 const DEFAULT_FLOOR_PCT: u8 = 15;
 const MAX_FLOOR_PCT: u8 = 90;
+const DEFAULT_FLOOR_MIN_AGE_SECS: u64 = 6 * 3600;
+const DEFAULT_FLOOR_MAX_BYTES: u64 = 50 * 1024 * 1024 * 1024;
+const DEFAULT_FLOOR_MAX_UNITS: u32 = 20;
 const TICK_INTERVAL: Duration = Duration::from_secs(1800);
+const LIST_TTL: Duration = Duration::from_secs(60);
 const WALK_WORKERS: usize = 4;
 const LOCK_FILES: &[&str] = &[".cargo-lock", ".package-cache", ".lock"];
+const CARGO_MARKERS: &[&str] = &["CACHEDIR.TAG", ".rustc_info.json"];
+const SYSTEM_DIRS: &[&str] = &[
+    "/Applications",
+    "/Library",
+    "/System",
+    "/bin",
+    "/boot",
+    "/cores",
+    "/dev",
+    "/etc",
+    "/lib",
+    "/lib64",
+    "/opt/homebrew",
+    "/private/etc",
+    "/private/var",
+    "/proc",
+    "/sbin",
+    "/sys",
+    "/usr",
+    "/var",
+];
+
+static ENFORCE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static LIST_CACHE: Mutex<Option<(Instant, String, StorageQuotaListOutput)>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -34,15 +64,31 @@ impl PathClass {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", default)]
 pub struct QuotaConfig {
     /// Run the janitor on the scheduler. The verbs work whenever budgets exist.
+    #[arg(long, default_value_t = false)]
     pub enabled: bool,
-    /// Directories every root must resolve strictly inside.
+    /// Directories every root must resolve strictly inside. `/`, `$HOME`, its
+    /// ancestors and system directories are refused.
+    #[arg(long)]
     pub bases: Vec<String>,
-    /// Minimum free space per volume, percent of its size. Default 15.
+    /// Minimum free space per volume, percent of its size. Default 15, max 90.
+    #[arg(long)]
     pub floor_pct: Option<u8>,
+    /// Floor eviction only takes items untouched for at least this long. Default 6h.
+    #[arg(long)]
+    pub floor_min_age_secs: Option<u64>,
+    /// Most bytes floor eviction may delete per run. Default 50 GiB.
+    #[arg(long)]
+    pub floor_max_bytes: Option<u64>,
+    /// Most items floor eviction may delete per run. Default 20.
+    #[arg(long)]
+    pub floor_max_units: Option<u32>,
+    /// Per-class budgets. On the CLI, one JSON object per flag:
+    /// `--budgets '{"class":"cargo-target","budgetBytes":1,"roots":["~/code/*/target"]}'`.
+    #[arg(long, value_parser = parse_budget)]
     pub budgets: Vec<ClassBudget>,
 }
 
@@ -52,6 +98,17 @@ impl QuotaConfig {
             .unwrap_or(DEFAULT_FLOOR_PCT)
             .min(MAX_FLOOR_PCT)
     }
+
+    fn floor_limits(&self) -> FloorLimits {
+        FloorLimits {
+            floor_pct: self.floor_pct(),
+            min_age_secs: self
+                .floor_min_age_secs
+                .unwrap_or(DEFAULT_FLOOR_MIN_AGE_SECS),
+            max_bytes: self.floor_max_bytes.unwrap_or(DEFAULT_FLOOR_MAX_BYTES),
+            max_units: self.floor_max_units.unwrap_or(DEFAULT_FLOOR_MAX_UNITS),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -59,11 +116,17 @@ impl QuotaConfig {
 pub struct ClassBudget {
     pub class: PathClass,
     pub budget_bytes: u64,
-    /// Paths or globs (`~` expanded), e.g. `~/code/*/target`.
+    /// Paths or globs (`~` expanded), e.g. `~/code/*/target`. A `cargo-target` root
+    /// needs `CACHEDIR.TAG` or `.rustc_info.json`; `ci-cache` and `tmp` roots need
+    /// an `.orca-quota-ok` marker file.
     pub roots: Vec<String>,
     /// Member id this budget applies to; absent applies to every member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member: Option<String>,
+}
+
+fn parse_budget(s: &str) -> Result<ClassBudget, String> {
+    serde_json::from_str(s).map_err(|e| format!("invalid budget JSON: {e}"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -73,16 +136,36 @@ pub struct RefusedRoot {
     pub reason: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FloorLimits {
+    floor_pct: u8,
+    min_age_secs: u64,
+    max_bytes: u64,
+    max_units: u32,
+}
+
+type FileId = (u64, u64);
+
 #[derive(Clone, Debug)]
 struct Unit {
     path: PathBuf,
+    name: OsString,
+    id: Option<FileId>,
     root: PathBuf,
+    root_id: Option<FileId>,
     class_idx: usize,
     volume: Option<String>,
     bytes: u64,
     newest_unix: u64,
     locked: bool,
+    crosses: bool,
     rebuildable: bool,
+}
+
+impl Unit {
+    fn evictable(&self) -> bool {
+        self.rebuildable && !self.locked && !self.crosses
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -101,6 +184,7 @@ struct Volume {
 
 #[derive(Debug, Default)]
 struct Scan {
+    refused_bases: Vec<RefusedRoot>,
     classes: Vec<ClassScan>,
     units: Vec<Unit>,
     volumes: HashMap<String, Volume>,
@@ -110,12 +194,56 @@ fn applies_to(member: Option<&str>, local: &str) -> bool {
     member.is_none_or(|m| m == local)
 }
 
-fn canonical_bases(bases: &[String]) -> Vec<PathBuf> {
-    bases
+fn temp_roots() -> Vec<PathBuf> {
+    [std::env::temp_dir(), PathBuf::from("/tmp")]
         .iter()
-        .filter_map(|b| std::fs::canonicalize(utils::path::expand_tilde(b)).ok())
-        .filter(|b| b.parent().is_some())
+        .filter_map(|p| std::fs::canonicalize(p).ok())
         .collect()
+}
+
+fn check_base(base: &Path, home: Option<&Path>, temps: &[PathBuf]) -> Result<(), &'static str> {
+    if base.parent().is_none() {
+        return Err("is the filesystem root");
+    }
+    if let Some(home) = home
+        && home.starts_with(base)
+    {
+        return Err("is the home directory or one of its ancestors");
+    }
+    if temps.iter().any(|t| base.starts_with(t)) {
+        return Ok(());
+    }
+    if SYSTEM_DIRS
+        .iter()
+        .map(Path::new)
+        .any(|s| base.starts_with(s) || s.starts_with(base))
+    {
+        return Err("is or contains a system directory");
+    }
+    Ok(())
+}
+
+fn resolve_bases(bases: &[String], home: Option<&Path>) -> (Vec<PathBuf>, Vec<RefusedRoot>) {
+    let temps = temp_roots();
+    let mut ok = Vec::new();
+    let mut refused = Vec::new();
+    for b in bases {
+        let reason = match std::fs::canonicalize(utils::path::expand_tilde(b)) {
+            Err(_) => "does not exist",
+            Ok(canon) => match check_base(&canon, home, &temps) {
+                Ok(()) => {
+                    ok.push(canon);
+                    continue;
+                }
+                Err(r) => r,
+            },
+        };
+        refused.push(RefusedRoot {
+            path: b.clone(),
+            reason: reason.to_string(),
+        });
+    }
+    (ok, refused)
 }
 
 fn check_root(root: &Path, bases: &[PathBuf], home: Option<&Path>) -> Result<(), &'static str> {
@@ -133,7 +261,20 @@ fn check_root(root: &Path, bases: &[PathBuf], home: Option<&Path>) -> Result<(),
     Ok(())
 }
 
+fn is_plain_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
+}
+
+fn has_class_marker(class: PathClass, root: &Path) -> bool {
+    match class {
+        PathClass::CargoTarget => CARGO_MARKERS.iter().any(|m| is_plain_file(&root.join(m))),
+        PathClass::CiCache | PathClass::Tmp => is_plain_file(&root.join(OPT_IN_MARKER)),
+        PathClass::VmDisk => true,
+    }
+}
+
 fn resolve_roots(
+    class: PathClass,
     patterns: &[String],
     bases: &[PathBuf],
     home: Option<&Path>,
@@ -156,7 +297,14 @@ fn resolve_roots(
             let Ok(canon) = std::fs::canonicalize(&found) else {
                 continue;
             };
-            match check_root(&canon, bases, home) {
+            let verdict = check_root(&canon, bases, home).and_then(|()| {
+                if has_class_marker(class, &canon) {
+                    Ok(())
+                } else {
+                    Err("missing the class marker file")
+                }
+            });
+            match verdict {
                 Ok(()) => {
                     if !roots.contains(&canon) {
                         roots.push(canon);
@@ -202,14 +350,18 @@ fn unit_lock_files(root: &Path, unit: &Path) -> Vec<PathBuf> {
 }
 
 #[cfg(unix)]
-fn dev_of(md: &std::fs::Metadata) -> Option<u64> {
+fn id_of(md: &std::fs::Metadata) -> Option<FileId> {
     use std::os::unix::fs::MetadataExt;
-    Some(md.dev())
+    Some((md.dev(), md.ino()))
 }
 
 #[cfg(not(unix))]
-fn dev_of(_md: &std::fs::Metadata) -> Option<u64> {
+fn id_of(_md: &std::fs::Metadata) -> Option<FileId> {
     None
+}
+
+fn dev_of(md: &std::fs::Metadata) -> Option<u64> {
+    id_of(md).map(|(d, _)| d)
 }
 
 #[cfg(unix)]
@@ -230,18 +382,30 @@ fn mtime_unix(md: &std::fs::Metadata) -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-fn measure(path: &Path, dev: Option<u64>) -> (u64, u64, bool) {
+struct Measured {
+    id: Option<FileId>,
+    bytes: u64,
+    newest: u64,
+    crosses: bool,
+}
+
+fn measure(path: &Path, dev: Option<u64>) -> Measured {
     let Ok(md) = std::fs::symlink_metadata(path) else {
-        return (0, 0, false);
+        return Measured {
+            id: None,
+            bytes: 0,
+            newest: 0,
+            crosses: false,
+        };
     };
-    if dev.is_some() && dev_of(&md) != dev {
-        return (0, 0, true);
-    }
-    let mut bytes = disk_bytes(&md);
-    let mut newest = mtime_unix(&md);
-    let mut crosses = false;
-    if !md.is_dir() {
-        return (bytes, newest, crosses);
+    let mut out = Measured {
+        id: id_of(&md),
+        bytes: disk_bytes(&md),
+        newest: mtime_unix(&md),
+        crosses: dev.is_some() && dev_of(&md) != dev,
+    };
+    if out.crosses || !md.is_dir() {
+        return out;
     }
     let mut stack = vec![path.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -253,17 +417,17 @@ fn measure(path: &Path, dev: Option<u64>) -> (u64, u64, bool) {
                 continue;
             };
             if dev.is_some() && dev_of(&md) != dev {
-                crosses = true;
+                out.crosses = true;
                 continue;
             }
-            bytes = bytes.saturating_add(disk_bytes(&md));
-            newest = newest.max(mtime_unix(&md));
+            out.bytes = out.bytes.saturating_add(disk_bytes(&md));
+            out.newest = out.newest.max(mtime_unix(&md));
             if md.is_dir() {
                 stack.push(e.path());
             }
         }
     }
-    (bytes, newest, crosses)
+    out
 }
 
 fn units_of(class: PathClass, root: &Path) -> Vec<PathBuf> {
@@ -276,8 +440,16 @@ fn units_of(class: PathClass, root: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = rd
         .flatten()
         .filter(|e| {
-            e.file_type().is_ok_and(|t| !t.is_symlink())
-                && !LOCK_FILES.iter().any(|n| e.file_name() == *n)
+            let Ok(t) = e.file_type() else { return false };
+            let name = e.file_name();
+            match class {
+                PathClass::CargoTarget => t.is_dir(),
+                _ => {
+                    !t.is_symlink()
+                        && name != OPT_IN_MARKER
+                        && !LOCK_FILES.iter().any(|n| name == *n)
+                }
+            }
         })
         .map(|e| e.path())
         .collect();
@@ -314,15 +486,18 @@ fn volume_for(path: &Path, table: &[(PathBuf, Volume)]) -> Option<(String, Volum
 struct Pending {
     path: PathBuf,
     root: PathBuf,
+    root_id: Option<FileId>,
     class_idx: usize,
     class: PathClass,
-    dev: Option<u64>,
 }
 
-fn scan(cfg: &QuotaConfig, local: &str, home: Option<&Path>) -> Scan {
-    let bases = canonical_bases(&cfg.bases);
+fn scan(cfg: &QuotaConfig, local: &str, home: Option<&Path>, probe_locks: bool) -> Scan {
+    let (bases, refused_bases) = resolve_bases(&cfg.bases, home);
     let table = volume_table();
-    let mut out = Scan::default();
+    let mut out = Scan {
+        refused_bases,
+        ..Scan::default()
+    };
     let mut seen = HashSet::new();
     let mut pending: Vec<Pending> = Vec::new();
     for b in cfg
@@ -330,23 +505,21 @@ fn scan(cfg: &QuotaConfig, local: &str, home: Option<&Path>) -> Scan {
         .iter()
         .filter(|b| applies_to(b.member.as_deref(), local))
     {
-        let (roots, refused) = resolve_roots(&b.roots, &bases, home);
+        let (roots, refused) = resolve_roots(b.class, &b.roots, &bases, home);
         let class_idx = out.classes.len();
         for root in &roots {
             if let Some((name, vol)) = volume_for(root, &table) {
                 out.volumes.insert(name, vol);
             }
-            let dev = std::fs::symlink_metadata(root)
-                .ok()
-                .and_then(|m| dev_of(&m));
+            let root_id = std::fs::symlink_metadata(root).ok().and_then(|m| id_of(&m));
             for unit in units_of(b.class, root) {
                 if seen.insert(unit.clone()) {
                     pending.push(Pending {
                         path: unit,
                         root: root.clone(),
+                        root_id,
                         class_idx,
                         class: b.class,
-                        dev,
                     });
                 }
             }
@@ -366,28 +539,26 @@ fn scan(cfg: &QuotaConfig, local: &str, home: Option<&Path>) -> Scan {
             s.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(Pending {
-                        path,
-                        root,
-                        class_idx,
-                        class,
-                        dev,
-                    }) = pending.get(i)
-                    else {
+                    let Some(p) = pending.get(i) else {
                         break;
                     };
-                    let (bytes, newest_unix, crosses) = measure(path, *dev);
-                    let locked =
-                        class.rebuildable() && try_lock_all(&unit_lock_files(root, path)).is_none();
+                    let m = measure(&p.path, p.root_id.map(|(d, _)| d));
+                    let locked = probe_locks
+                        && p.class.rebuildable()
+                        && try_lock_all(&unit_lock_files(&p.root, &p.path)).is_none();
                     let unit = Unit {
-                        path: path.clone(),
-                        root: root.clone(),
-                        class_idx: *class_idx,
-                        volume: volume_for(path, &table).map(|(n, _)| n),
-                        bytes,
-                        newest_unix,
+                        path: p.path.clone(),
+                        name: p.path.file_name().map(OsString::from).unwrap_or_default(),
+                        id: m.id,
+                        root: p.root.clone(),
+                        root_id: p.root_id,
+                        class_idx: p.class_idx,
+                        volume: volume_for(&p.path, &table).map(|(n, _)| n),
+                        bytes: m.bytes,
+                        newest_unix: m.newest,
                         locked,
-                        rebuildable: class.rebuildable() && !crosses,
+                        crosses: m.crosses,
+                        rebuildable: p.class.rebuildable(),
                     };
                     if let Ok(mut r) = results.lock() {
                         r.push((i, unit));
@@ -406,31 +577,47 @@ fn floor_bytes(total: u64, floor_pct: u8) -> u64 {
     total / 100 * u64::from(floor_pct)
 }
 
-fn plan_evictions(scan: &Scan, floor_pct: u8) -> Vec<usize> {
-    let mut chosen: Vec<usize> = Vec::new();
+fn class_used(scan: &Scan, class_idx: usize) -> u64 {
+    scan.units
+        .iter()
+        .filter(|u| u.class_idx == class_idx && !u.crosses)
+        .map(|u| u.bytes)
+        .sum()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FloorShortfall {
+    pub volume: String,
+    pub need_bytes: u64,
+    pub reachable_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct Plan {
+    evict: Vec<usize>,
+    shortfalls: Vec<FloorShortfall>,
+}
+
+fn plan_evictions(scan: &Scan, limits: FloorLimits, now_unix: u64) -> Plan {
+    let mut plan = Plan::default();
     let mut picked: HashSet<usize> = HashSet::new();
     let mut freed: HashMap<&str, u64> = HashMap::new();
 
     let mut oldest_first: Vec<usize> = (0..scan.units.len()).collect();
     oldest_first.sort_by_key(|&i| scan.units[i].newest_unix);
-    let evictable = |i: usize| scan.units[i].rebuildable && !scan.units[i].locked;
 
     for (class_idx, class) in scan.classes.iter().enumerate() {
         if !class.class.rebuildable() {
             continue;
         }
-        let mut used: u64 = scan
-            .units
-            .iter()
-            .filter(|u| u.class_idx == class_idx)
-            .map(|u| u.bytes)
-            .sum();
+        let mut used = class_used(scan, class_idx);
         for &i in &oldest_first {
             if used <= class.budget_bytes {
                 break;
             }
             let u = &scan.units[i];
-            if u.class_idx != class_idx || !evictable(i) {
+            if u.class_idx != class_idx || !u.evictable() {
                 continue;
             }
             used = used.saturating_sub(u.bytes);
@@ -438,31 +625,59 @@ fn plan_evictions(scan: &Scan, floor_pct: u8) -> Vec<usize> {
                 *freed.entry(v.as_str()).or_default() += u.bytes;
             }
             picked.insert(i);
-            chosen.push(i);
+            plan.evict.push(i);
         }
     }
 
+    let mut floor_units: u32 = 0;
+    let mut floor_spent: u64 = 0;
     let mut vols: Vec<(&String, &Volume)> = scan.volumes.iter().collect();
     vols.sort_by_key(|(n, _)| n.as_str());
     for (name, vol) in vols {
-        let need = floor_bytes(vol.total, floor_pct);
-        let mut free = vol
+        let need = floor_bytes(vol.total, limits.floor_pct);
+        let start = vol
             .avail
             .saturating_add(freed.get(name.as_str()).copied().unwrap_or(0));
+        if start >= need {
+            continue;
+        }
+        let mut free = start;
+        let mut tentative = Vec::new();
+        let (mut units, mut spent) = (floor_units, floor_spent);
         for &i in &oldest_first {
             if free >= need {
                 break;
             }
             let u = &scan.units[i];
-            if picked.contains(&i) || !evictable(i) || u.volume.as_ref() != Some(name) {
+            if picked.contains(&i)
+                || !u.evictable()
+                || u.volume.as_ref() != Some(name)
+                || now_unix.saturating_sub(u.newest_unix) < limits.min_age_secs
+            {
                 continue;
             }
+            if units >= limits.max_units || spent.saturating_add(u.bytes) > limits.max_bytes {
+                break;
+            }
+            units += 1;
+            spent = spent.saturating_add(u.bytes);
             free = free.saturating_add(u.bytes);
-            picked.insert(i);
-            chosen.push(i);
+            tentative.push(i);
         }
+        if free < need {
+            plan.shortfalls.push(FloorShortfall {
+                volume: name.clone(),
+                need_bytes: need,
+                reachable_bytes: free,
+            });
+            continue;
+        }
+        floor_units = units;
+        floor_spent = spent;
+        picked.extend(tentative.iter().copied());
+        plan.evict.extend(tentative);
     }
-    chosen
+    plan
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -487,37 +702,118 @@ pub struct Eviction {
     pub error: Option<String>,
 }
 
-fn still_safe(unit: &Unit) -> bool {
-    let Ok(root_now) = std::fs::canonicalize(&unit.root) else {
-        return false;
+type RemoveResult = Result<(), (EvictionOutcome, String)>;
+
+#[cfg(unix)]
+mod fd_remove {
+    use std::ffi::OsStr;
+    use std::os::fd::OwnedFd;
+    use std::path::Path;
+
+    use rustix::fs::{
+        AtFlags, CWD, Dir, FileType, Mode, OFlags, Stat, fstat, openat, statat, unlinkat,
     };
-    if root_now != unit.root || unit.path.parent() != Some(unit.root.as_path()) {
-        return false;
+    use rustix::io::Errno;
+    use rustix::path::Arg;
+
+    use super::{EvictionOutcome, FileId, RemoveResult};
+
+    #[allow(clippy::unnecessary_cast)]
+    fn id(st: &Stat) -> FileId {
+        (st.st_dev as u64, st.st_ino as u64)
     }
-    let (Ok(md), Ok(root_md)) = (
-        std::fs::symlink_metadata(&unit.path),
-        std::fs::symlink_metadata(&unit.root),
-    ) else {
-        return false;
-    };
-    !md.file_type().is_symlink() && dev_of(&md) == dev_of(&root_md)
+
+    fn refuse(why: &str) -> (EvictionOutcome, String) {
+        (EvictionOutcome::SkippedUnsafe, why.to_string())
+    }
+
+    fn io(e: Errno) -> (EvictionOutcome, String) {
+        (EvictionOutcome::Failed, std::io::Error::from(e).to_string())
+    }
+
+    fn open_dir<P: Arg>(dir: impl std::os::fd::AsFd, p: P) -> Result<OwnedFd, Errno> {
+        openat(
+            dir,
+            p,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+    }
+
+    pub(super) fn remove_unit(
+        root: &Path,
+        root_id: FileId,
+        name: &OsStr,
+        unit_id: FileId,
+    ) -> RemoveResult {
+        let rfd = open_dir(CWD, root).map_err(|_| refuse("root is no longer a real directory"))?;
+        if id(&fstat(&rfd).map_err(io)?) != root_id {
+            return Err(refuse("root changed since the scan"));
+        }
+        let st = statat(&rfd, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|_| refuse("item vanished since the scan"))?;
+        if id(&st) != unit_id {
+            return Err(refuse("item changed since the scan"));
+        }
+        if FileType::from_raw_mode(st.st_mode) == FileType::Directory {
+            remove_tree(&rfd, name, root_id.0)
+        } else {
+            unlinkat(&rfd, name, AtFlags::empty()).map_err(io)
+        }
+    }
+
+    fn remove_tree<P: Arg + Copy>(parent: &OwnedFd, name: P, dev: u64) -> RemoveResult {
+        let fd = open_dir(parent, name).map_err(io)?;
+        if id(&fstat(&fd).map_err(io)?).0 != dev {
+            return Err(refuse("crosses onto another filesystem"));
+        }
+        let names: Vec<std::ffi::CString> = Dir::read_from(&fd)
+            .map_err(io)?
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_owned())
+            .filter(|n| n.as_bytes() != b"." && n.as_bytes() != b"..")
+            .collect();
+        for n in &names {
+            let st = statat(&fd, n.as_c_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
+            if id(&st).0 != dev {
+                return Err(refuse("crosses onto another filesystem"));
+            }
+            if FileType::from_raw_mode(st.st_mode) == FileType::Directory {
+                remove_tree(&fd, n.as_c_str(), dev)?;
+            } else {
+                unlinkat(&fd, n.as_c_str(), AtFlags::empty()).map_err(io)?;
+            }
+        }
+        unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(io)
+    }
+}
+
+#[cfg(unix)]
+fn remove_unit(unit: &Unit) -> RemoveResult {
+    match (unit.root_id, unit.id) {
+        (Some(root_id), Some(id)) => fd_remove::remove_unit(&unit.root, root_id, &unit.name, id),
+        _ => Err((
+            EvictionOutcome::SkippedUnsafe,
+            "item identity unknown".to_string(),
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+fn remove_unit(_unit: &Unit) -> RemoveResult {
+    Err((
+        EvictionOutcome::SkippedUnsafe,
+        "eviction is supported on unix only".to_string(),
+    ))
 }
 
 fn evict(unit: &Unit) -> (EvictionOutcome, Option<String>) {
-    if !still_safe(unit) {
-        return (EvictionOutcome::SkippedUnsafe, None);
-    }
     let Some(_guards) = try_lock_all(&unit_lock_files(&unit.root, &unit.path)) else {
         return (EvictionOutcome::SkippedLocked, None);
     };
-    let removed = if unit.path.is_dir() {
-        std::fs::remove_dir_all(&unit.path)
-    } else {
-        std::fs::remove_file(&unit.path)
-    };
-    match removed {
+    match remove_unit(unit) {
         Ok(()) => (EvictionOutcome::Deleted, None),
-        Err(e) => (EvictionOutcome::Failed, Some(e.to_string())),
+        Err((outcome, why)) => (outcome, Some(why)),
     }
 }
 
@@ -542,12 +838,20 @@ fn apply(scan: &Scan, plan: &[usize], dry_run: bool) -> Vec<Eviction> {
         .collect()
 }
 
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 fn load_config() -> anyhow::Result<Option<QuotaConfig>> {
     let raw = db::pool::with_pooled_or_open(|conn| db::settings::get(conn, CONFIG_KEY))?;
     match raw.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         None => Ok(None),
         Some(s) => Ok(Some(serde_json::from_str(s).map_err(|e| {
-            anyhow::anyhow!("settings key `{CONFIG_KEY}` is not a valid quota config: {e}")
+            anyhow::anyhow!(
+                "stored storage quota config is invalid ({e}); rewrite it with storage.quota.config.upsert"
+            )
         })?)),
     }
 }
@@ -556,17 +860,11 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").and_then(|h| std::fs::canonicalize(h).ok())
 }
 
-async fn scan_local(cfg: QuotaConfig) -> anyhow::Result<Scan> {
-    let local = crate::host_identity::machine_id().to_string();
-    let home = home_dir();
-    Ok(tokio::task::spawn_blocking(move || scan(&cfg, &local, home.as_deref())).await?)
-}
-
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StorageQuotaListArgs {}
 
-#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ClassReport {
     pub class: PathClass,
@@ -576,9 +874,11 @@ pub struct ClassReport {
     pub roots: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<RefusedRoot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crossing: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeReport {
     pub mount: String,
@@ -588,12 +888,14 @@ pub struct VolumeReport {
     pub below_floor: bool,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageQuotaListOutput {
     pub configured: bool,
     pub enabled: bool,
     pub floor_pct: u8,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused_bases: Vec<RefusedRoot>,
     pub classes: Vec<ClassReport>,
     pub volumes: Vec<VolumeReport>,
 }
@@ -605,12 +907,7 @@ fn report(cfg: &QuotaConfig, scan: &Scan) -> StorageQuotaListOutput {
         .iter()
         .enumerate()
         .map(|(idx, c)| {
-            let used_bytes = scan
-                .units
-                .iter()
-                .filter(|u| u.class_idx == idx)
-                .map(|u| u.bytes)
-                .sum();
+            let used_bytes = class_used(scan, idx);
             ClassReport {
                 class: c.class,
                 budget_bytes: c.budget_bytes,
@@ -618,6 +915,12 @@ fn report(cfg: &QuotaConfig, scan: &Scan) -> StorageQuotaListOutput {
                 over_budget: used_bytes > c.budget_bytes,
                 roots: c.roots.iter().map(|r| r.display().to_string()).collect(),
                 refused: c.refused.clone(),
+                crossing: scan
+                    .units
+                    .iter()
+                    .filter(|u| u.class_idx == idx && u.crosses)
+                    .map(|u| u.path.display().to_string())
+                    .collect(),
             }
         })
         .collect();
@@ -640,13 +943,27 @@ fn report(cfg: &QuotaConfig, scan: &Scan) -> StorageQuotaListOutput {
         configured: true,
         enabled: cfg.enabled,
         floor_pct,
+        refused_bases: scan.refused_bases.clone(),
         classes,
         volumes,
     }
 }
 
+fn cached_list(key: &str) -> Option<StorageQuotaListOutput> {
+    let guard = LIST_CACHE.lock().ok()?;
+    let (at, k, out) = guard.as_ref()?;
+    (k == key && at.elapsed() < LIST_TTL).then(|| out.clone())
+}
+
+fn invalidate_list_cache() {
+    if let Ok(mut g) = LIST_CACHE.lock() {
+        *g = None;
+    }
+}
+
 /// Usage of each declared path class against its budget, and free space of every
-/// volume a root lives on against the free floor. Reads only.
+/// volume a root lives on against the free floor. Reads only; results are cached
+/// for a minute.
 #[orca_tool(domain = "storage.quota", verb = "list")]
 async fn storage_quota_list(
     _args: StorageQuotaListArgs,
@@ -657,12 +974,26 @@ async fn storage_quota_list(
             configured: false,
             enabled: false,
             floor_pct: DEFAULT_FLOOR_PCT,
+            refused_bases: Vec::new(),
             classes: Vec::new(),
             volumes: Vec::new(),
         });
     };
-    let scan = scan_local(cfg.clone()).await?;
-    Ok(report(&cfg, &scan))
+    let key = serde_json::to_string(&cfg)?;
+    if let Some(hit) = cached_list(&key) {
+        return Ok(hit);
+    }
+    let local = crate::host_identity::machine_id().to_string();
+    let home = home_dir();
+    let out = tokio::task::spawn_blocking(move || {
+        let s = scan(&cfg, &local, home.as_deref(), false);
+        report(&cfg, &s)
+    })
+    .await?;
+    if let Ok(mut g) = LIST_CACHE.lock() {
+        *g = Some((Instant::now(), key, out.clone()));
+    }
+    Ok(out)
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -674,20 +1005,23 @@ pub struct StorageQuotaEnforceArgs {}
 pub struct StorageQuotaEnforceOutput {
     pub dry_run: bool,
     pub evictions: Vec<Eviction>,
-    /// Bytes freed, or with `dryRun` the bytes that would be freed.
     pub freed_bytes: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floor_shortfalls: Vec<FloorShortfall>,
 }
 
-async fn enforce(cfg: QuotaConfig, dry_run: bool) -> anyhow::Result<StorageQuotaEnforceOutput> {
-    let floor_pct = cfg.floor_pct();
-    let evictions = tokio::task::spawn_blocking({
-        let local = crate::host_identity::machine_id().to_string();
-        let home = home_dir();
-        move || {
-            let scan = scan(&cfg, &local, home.as_deref());
-            let plan = plan_evictions(&scan, floor_pct);
-            apply(&scan, &plan, dry_run)
-        }
+async fn enforce_with(
+    cfg: QuotaConfig,
+    local: String,
+    home: Option<PathBuf>,
+    dry_run: bool,
+) -> anyhow::Result<StorageQuotaEnforceOutput> {
+    let _serial = ENFORCE_LOCK.lock().await;
+    let limits = cfg.floor_limits();
+    let (evictions, floor_shortfalls) = tokio::task::spawn_blocking(move || {
+        let s = scan(&cfg, &local, home.as_deref(), true);
+        let plan = plan_evictions(&s, limits, now_unix());
+        (apply(&s, &plan.evict, dry_run), plan.shortfalls)
     })
     .await?;
     let freed_bytes = evictions
@@ -701,17 +1035,27 @@ async fn enforce(cfg: QuotaConfig, dry_run: bool) -> anyhow::Result<StorageQuota
         .map(|e| e.bytes)
         .sum();
     if !dry_run {
-        record(&evictions, freed_bytes).await;
+        invalidate_list_cache();
     }
     Ok(StorageQuotaEnforceOutput {
         dry_run,
         evictions,
         freed_bytes,
+        floor_shortfalls,
     })
 }
 
-async fn record(evictions: &[Eviction], freed_bytes: u64) {
-    for e in evictions {
+async fn enforce(cfg: QuotaConfig, dry_run: bool) -> anyhow::Result<StorageQuotaEnforceOutput> {
+    let local = crate::host_identity::machine_id().to_string();
+    let out = enforce_with(cfg, local, home_dir(), dry_run).await?;
+    if !dry_run {
+        record(&out).await;
+    }
+    Ok(out)
+}
+
+async fn record(out: &StorageQuotaEnforceOutput) {
+    for e in &out.evictions {
         let line = format!(
             "[storage.quota] {:?} {} ({} MiB, {:?}){}",
             e.outcome,
@@ -725,26 +1069,38 @@ async fn record(evictions: &[Eviction], freed_bytes: u64) {
         );
         tracing::info!("{}", utils::scrub::scrub_line(&line));
     }
-    let deleted = evictions
+    for s in &out.floor_shortfalls {
+        let line = format!(
+            "[storage.quota] floor unreachable on {}: need {} MiB free, eligible items reach {} MiB; floor eviction skipped",
+            s.volume,
+            s.need_bytes / 1_048_576,
+            s.reachable_bytes / 1_048_576
+        );
+        tracing::warn!("{}", utils::scrub::scrub_line(&line));
+    }
+    let deleted = out
+        .evictions
         .iter()
         .filter(|e| e.outcome == EvictionOutcome::Deleted)
         .count();
-    let failed = evictions
+    let failed = out
+        .evictions
         .iter()
         .filter(|e| e.outcome == EvictionOutcome::Failed)
         .count();
-    if deleted == 0 && failed == 0 {
+    let short = out.floor_shortfalls.len();
+    if deleted == 0 && failed == 0 && short == 0 {
         return;
     }
     let host = sysinfo::System::host_name().unwrap_or_else(|| "this host".to_string());
-    let severity = if failed > 0 {
+    let severity = if failed > 0 || short > 0 {
         Severity::Warn
     } else {
         Severity::Info
     };
     let body = utils::scrub::scrub_line(&format!(
-        "Storage janitor on {host} evicted {deleted} item(s), freeing {} MiB; {failed} failed.",
-        freed_bytes / 1_048_576
+        "Storage janitor on {host} evicted {deleted} item(s), freeing {} MiB; {failed} failed; {short} volume(s) below the free floor with too little eligible data to recover it.",
+        out.freed_bytes / 1_048_576
     ))
     .into_owned();
     let event = Event::new(
@@ -752,7 +1108,7 @@ async fn record(evictions: &[Eviction], freed_bytes: u64) {
         severity,
         format!(
             "storage quota janitor freed {} MiB on {host}",
-            freed_bytes / 1_048_576
+            out.freed_bytes / 1_048_576
         ),
         "storage.quota.enforce",
     )
@@ -762,10 +1118,11 @@ async fn record(evictions: &[Eviction], freed_bytes: u64) {
 }
 
 /// [MUTATES STATE] Delete least-recently-used items in rebuildable path classes
-/// (`cargo-target`, `ci-cache`, `tmp`) until every class is within budget and every
-/// volume is above the free floor. Never touches anything outside a declared root,
-/// and skips items whose cargo/CI lock is held. `dryRun` lists exactly what would
-/// be deleted and deletes nothing.
+/// (`cargo-target`, `ci-cache`, `tmp`) until every class is within budget, then
+/// (bounded by min age and per-run caps) until every volume is above the free
+/// floor. Never touches anything outside a declared root, and skips items whose
+/// cargo/CI lock is held. `dryRun` lists exactly what would be deleted and
+/// deletes nothing.
 #[orca_tool(
     domain = "storage.quota",
     verb = "enforce",
@@ -778,9 +1135,55 @@ async fn storage_quota_enforce(
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<StorageQuotaEnforceOutput> {
     let cfg = load_config()?.ok_or_else(|| {
-        anyhow::anyhow!("no storage quota configured; set settings key `{CONFIG_KEY}`")
+        anyhow::anyhow!("no storage quota configured; set one with storage.quota.config.upsert")
     })?;
     enforce(cfg, ctx.dry_run()).await
+}
+
+fn validate(cfg: &QuotaConfig, home: Option<&Path>) -> anyhow::Result<()> {
+    if let Some(p) = cfg.floor_pct
+        && p > MAX_FLOOR_PCT
+    {
+        anyhow::bail!("floorPct {p} exceeds the maximum of {MAX_FLOOR_PCT}");
+    }
+    if cfg.bases.is_empty() && !cfg.budgets.is_empty() {
+        anyhow::bail!("at least one base is required");
+    }
+    let (_, refused) = resolve_bases(&cfg.bases, home);
+    if let Some(r) = refused.first() {
+        anyhow::bail!("base `{}` refused: {}", r.path, r.reason);
+    }
+    for b in &cfg.budgets {
+        if b.roots.is_empty() {
+            anyhow::bail!("{:?} budget has no roots", b.class);
+        }
+        for r in &b.roots {
+            glob::Pattern::new(&utils::path::expand_tilde(r))
+                .map_err(|e| anyhow::anyhow!("root `{r}` is not a valid glob: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageQuotaConfigUpsertOutput {
+    pub config: QuotaConfig,
+}
+
+/// [MUTATES STATE] Replace this member's storage quota config after validating
+/// it: bases may not be `/`, `$HOME`, its ancestors or system directories, the
+/// floor is capped at 90%, and every root must be a valid path or glob.
+#[orca_tool(domain = "storage.quota.config", verb = "upsert", role = "admin")]
+async fn storage_quota_config_upsert(
+    args: QuotaConfig,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageQuotaConfigUpsertOutput> {
+    validate(&args, home_dir().as_deref())?;
+    let json = serde_json::to_string(&args)?;
+    db::pool::with_pooled_or_open(|conn| db::settings::set(conn, CONFIG_KEY, &json))?;
+    invalidate_list_cache();
+    Ok(StorageQuotaConfigUpsertOutput { config: args })
 }
 
 async fn janitor_tick() -> anyhow::Result<()> {
@@ -813,6 +1216,13 @@ pub fn spawn_periodic() {
 mod tests {
     use super::*;
 
+    const OPEN: FloorLimits = FloorLimits {
+        floor_pct: 0,
+        min_age_secs: 0,
+        max_bytes: u64::MAX,
+        max_units: u32::MAX,
+    };
+
     fn write(path: &Path, bytes: usize) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, vec![7u8; bytes]).unwrap();
@@ -836,6 +1246,12 @@ mod tests {
         }
     }
 
+    fn tmp_base() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        (dir, base)
+    }
+
     fn cfg(base: &Path, class: PathClass, budget: u64, roots: Vec<String>) -> QuotaConfig {
         QuotaConfig {
             enabled: true,
@@ -847,17 +1263,23 @@ mod tests {
                 roots,
                 member: None,
             }],
+            ..QuotaConfig::default()
         }
     }
 
     fn target_with_profiles(base: &Path) -> PathBuf {
         let target = base.join("repo/target");
+        write(&target.join("CACHEDIR.TAG"), 10);
         for (name, mtime) in [("debug", 3_000), ("release", 1_000), ("prepush", 2_000)] {
             write(&target.join(name).join("deps/blob"), 64 * 1024);
             set_mtime(&target.join(name).join("deps"), mtime);
             set_mtime(&target.join(name), mtime);
         }
         target
+    }
+
+    fn opted_in(root: &Path) {
+        write(&root.join(OPT_IN_MARKER), 0);
     }
 
     fn names(ev: &[Eviction]) -> Vec<String> {
@@ -872,10 +1294,46 @@ mod tests {
             .collect()
     }
 
+    fn synthetic(units: Vec<Unit>, budget: u64, avail: u64) -> Scan {
+        Scan {
+            classes: vec![ClassScan {
+                class: PathClass::Tmp,
+                budget_bytes: budget,
+                roots: vec![],
+                refused: vec![],
+            }],
+            units,
+            volumes: HashMap::from([(
+                "/v".to_string(),
+                Volume {
+                    total: 10_000,
+                    avail,
+                },
+            )]),
+            ..Scan::default()
+        }
+    }
+
+    fn unit(name: &str, newest: u64, bytes: u64) -> Unit {
+        Unit {
+            path: PathBuf::from(format!("/b/r/{name}")),
+            name: name.into(),
+            id: None,
+            root: PathBuf::from("/b/r"),
+            root_id: None,
+            class_idx: 0,
+            volume: Some("/v".into()),
+            bytes,
+            newest_unix: newest,
+            locked: false,
+            crosses: false,
+            rebuildable: true,
+        }
+    }
+
     #[test]
     fn budget_accounting_sums_every_unit_of_a_class() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let (_d, base) = tmp_base();
         target_with_profiles(&base);
         let c = cfg(
             &base,
@@ -883,7 +1341,7 @@ mod tests {
             u64::MAX,
             vec![format!("{}/*/target", base.display())],
         );
-        let s = scan(&c, "m", None);
+        let s = scan(&c, "m", None, true);
         let r = report(&c, &s);
         assert_eq!(r.classes.len(), 1);
         assert_eq!(s.units.len(), 3);
@@ -893,8 +1351,7 @@ mod tests {
 
     #[test]
     fn evicts_oldest_first_until_under_budget() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let (_d, base) = tmp_base();
         let target = target_with_profiles(&base);
         let c = cfg(
             &base,
@@ -902,21 +1359,20 @@ mod tests {
             0,
             vec![target.display().to_string()],
         );
-        let s = scan(&c, "m", None);
+        let s = scan(&c, "m", None, true);
         let one = s.units[0].bytes;
         let mut c2 = c.clone();
         c2.budgets[0].budget_bytes = one * 2;
-        let s2 = scan(&c2, "m", None);
-        let ev = apply(&s2, &plan_evictions(&s2, 0), true);
+        let s2 = scan(&c2, "m", None, true);
+        let ev = apply(&s2, &plan_evictions(&s2, OPEN, 0).evict, true);
         assert_eq!(names(&ev), vec!["release"]);
-        let ev = apply(&s, &plan_evictions(&s, 0), true);
+        let ev = apply(&s, &plan_evictions(&s, OPEN, 0).evict, true);
         assert_eq!(names(&ev), vec!["release", "prepush", "debug"]);
     }
 
     #[test]
     fn dry_run_deletes_nothing_and_execute_deletes_planned() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let (_d, base) = tmp_base();
         let target = target_with_profiles(&base);
         let c = cfg(
             &base,
@@ -924,55 +1380,115 @@ mod tests {
             0,
             vec![target.display().to_string()],
         );
-        let s = scan(&c, "m", None);
-        let plan = plan_evictions(&s, 0);
+        let s = scan(&c, "m", None, true);
+        let plan = plan_evictions(&s, OPEN, 0).evict;
         let ev = apply(&s, &plan, true);
         assert!(ev.iter().all(|e| e.outcome == EvictionOutcome::Planned));
         assert!(target.join("debug").exists());
         assert!(target.join("release").exists());
         let ev = apply(&s, &plan, false);
-        assert!(ev.iter().all(|e| e.outcome == EvictionOutcome::Deleted));
+        assert!(
+            ev.iter().all(|e| e.outcome == EvictionOutcome::Deleted),
+            "{ev:?}"
+        );
         assert!(!target.join("debug").exists());
-        assert!(target.exists());
+        assert!(target.join("CACHEDIR.TAG").exists());
     }
 
     #[test]
     fn floor_evicts_beyond_budget_until_free_space_recovers() {
-        let mk = |name: &str, newest: u64, bytes: u64| Unit {
-            path: PathBuf::from(format!("/b/r/{name}")),
-            root: PathBuf::from("/b/r"),
-            class_idx: 0,
-            volume: Some("/v".into()),
-            bytes,
-            newest_unix: newest,
-            locked: false,
-            rebuildable: true,
+        let s = synthetic(
+            vec![unit("a", 30, 100), unit("b", 10, 100), unit("c", 20, 100)],
+            1_000,
+            1_350,
+        );
+        let at = |pct| FloorLimits {
+            floor_pct: pct,
+            ..OPEN
         };
-        let s = Scan {
-            classes: vec![ClassScan {
-                class: PathClass::Tmp,
-                budget_bytes: 1_000,
-                roots: vec![],
-                refused: vec![],
-            }],
-            units: vec![mk("a", 30, 100), mk("b", 10, 100), mk("c", 20, 100)],
-            volumes: HashMap::from([(
-                "/v".to_string(),
-                Volume {
-                    total: 10_000,
-                    avail: 1_350,
-                },
-            )]),
+        assert!(plan_evictions(&s, at(13), 100).evict.is_empty());
+        assert_eq!(plan_evictions(&s, at(15), 100).evict, vec![1, 2]);
+        assert_eq!(plan_evictions(&s, at(16), 100).evict, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn floor_skips_recently_used_items() {
+        let s = synthetic(
+            vec![unit("a", 30, 100), unit("b", 10, 100), unit("c", 95, 100)],
+            1_000,
+            1_350,
+        );
+        let limits = FloorLimits {
+            floor_pct: 15,
+            min_age_secs: 10,
+            ..OPEN
         };
-        assert!(plan_evictions(&s, 13).is_empty());
-        assert_eq!(plan_evictions(&s, 15), vec![1, 2]);
-        assert_eq!(plan_evictions(&s, 90), vec![1, 2, 0]);
+        let plan = plan_evictions(&s, limits, 100);
+        assert_eq!(plan.evict, vec![1, 0]);
+        assert!(plan.shortfalls.is_empty());
+    }
+
+    #[test]
+    fn floor_respects_per_run_caps() {
+        let s = synthetic(
+            vec![unit("a", 30, 100), unit("b", 10, 100), unit("c", 20, 100)],
+            1_000,
+            1_350,
+        );
+        let units_capped = FloorLimits {
+            floor_pct: 15,
+            max_units: 1,
+            ..OPEN
+        };
+        let plan = plan_evictions(&s, units_capped, 100);
+        assert!(plan.evict.is_empty());
+        assert_eq!(plan.shortfalls.len(), 1);
+        let bytes_capped = FloorLimits {
+            floor_pct: 15,
+            max_bytes: 150,
+            ..OPEN
+        };
+        assert!(plan_evictions(&s, bytes_capped, 100).evict.is_empty());
+    }
+
+    #[test]
+    fn unreachable_floor_deletes_nothing_and_reports_shortfall() {
+        let s = synthetic(vec![unit("a", 30, 100), unit("b", 10, 100)], 1_000, 1_000);
+        let plan = plan_evictions(
+            &s,
+            FloorLimits {
+                floor_pct: 50,
+                ..OPEN
+            },
+            100,
+        );
+        assert!(plan.evict.is_empty());
+        assert_eq!(
+            plan.shortfalls,
+            vec![FloorShortfall {
+                volume: "/v".into(),
+                need_bytes: 5_000,
+                reachable_bytes: 1_200,
+            }]
+        );
+    }
+
+    #[test]
+    fn crossing_units_are_neither_counted_nor_evicted() {
+        let mut big = unit("mnt", 1, 1_000_000);
+        big.crosses = true;
+        let s = synthetic(vec![big, unit("a", 5, 100)], 500, 10_000);
+        let plan = plan_evictions(&s, OPEN, 100);
+        assert!(plan.evict.is_empty());
+        let c = QuotaConfig::default();
+        let r = report(&c, &s);
+        assert_eq!(r.classes[0].used_bytes, 100);
+        assert_eq!(r.classes[0].crossing, vec!["/b/r/mnt".to_string()]);
     }
 
     #[test]
     fn non_rebuildable_class_is_reported_never_evicted() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let (_d, base) = tmp_base();
         write(&base.join("vm/disk.img"), 4096);
         let c = cfg(
             &base,
@@ -980,18 +1496,27 @@ mod tests {
             0,
             vec![base.join("vm/disk.img").display().to_string()],
         );
-        let s = scan(&c, "m", None);
+        let s = scan(&c, "m", None, true);
         assert!(report(&c, &s).classes[0].over_budget);
-        assert!(plan_evictions(&s, 90).is_empty());
+        assert!(
+            plan_evictions(
+                &s,
+                FloorLimits {
+                    floor_pct: 90,
+                    ..OPEN
+                },
+                0
+            )
+            .evict
+            .is_empty()
+        );
     }
 
     #[test]
     fn unsafe_roots_are_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let (_d, base) = tmp_base();
         let home = base.join("home");
-        let outside = tempfile::tempdir().unwrap();
-        let outside = std::fs::canonicalize(outside.path()).unwrap();
+        let (_o, outside) = tmp_base();
         std::fs::create_dir_all(home.join("code/x")).unwrap();
         std::fs::create_dir_all(outside.join("t")).unwrap();
         #[cfg(unix)]
@@ -1005,16 +1530,83 @@ mod tests {
             base.join("escape").display().to_string(),
             home.join("code/x").display().to_string(),
         ];
-        let (roots, refused) = resolve_roots(&patterns, &bases, Some(&home));
+        let (roots, refused) = resolve_roots(PathClass::VmDisk, &patterns, &bases, Some(&home));
         assert_eq!(roots, vec![home.join("code/x")]);
         #[cfg(unix)]
         assert_eq!(refused.len(), 5);
     }
 
     #[test]
+    fn unsafe_bases_are_refused_and_their_roots_with_them() {
+        let (_d, base) = tmp_base();
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join("Documents")).unwrap();
+        opted_in(&home.join("Documents"));
+        let c = QuotaConfig {
+            bases: vec![
+                home.display().to_string(),
+                base.display().to_string(),
+                "/".to_string(),
+                "/etc".to_string(),
+                "/usr".to_string(),
+            ],
+            floor_pct: Some(0),
+            budgets: vec![ClassBudget {
+                class: PathClass::Tmp,
+                budget_bytes: 0,
+                roots: vec![home.join("Documents").display().to_string()],
+                member: None,
+            }],
+            ..QuotaConfig::default()
+        };
+        let s = scan(&c, "m", Some(&home), true);
+        assert_eq!(s.refused_bases.len(), 5);
+        assert!(s.classes[0].roots.is_empty());
+        assert_eq!(
+            s.classes[0].refused[0].reason,
+            "outside every configured base"
+        );
+        assert!(s.units.is_empty());
+        assert!(validate(&c, Some(&home)).is_err());
+        let mut ok = c.clone();
+        ok.bases = vec![
+            home.join("Documents")
+                .parent()
+                .unwrap()
+                .join("code")
+                .display()
+                .to_string(),
+        ];
+        std::fs::create_dir_all(home.join("code")).unwrap();
+        assert!(validate(&ok, Some(&home)).is_ok());
+    }
+
+    #[test]
+    fn roots_without_class_marker_are_refused() {
+        let (_d, base) = tmp_base();
+        let target = base.join("repo/target");
+        write(&target.join("debug/x"), 10);
+        let tmp = base.join("scratch");
+        write(&tmp.join("old"), 10);
+        let bases = vec![base.clone()];
+        let (roots, refused) = resolve_roots(
+            PathClass::CargoTarget,
+            &[target.display().to_string()],
+            &bases,
+            None,
+        );
+        assert!(roots.is_empty());
+        assert_eq!(refused[0].reason, "missing the class marker file");
+        let (roots, _) = resolve_roots(PathClass::Tmp, &[tmp.display().to_string()], &bases, None);
+        assert!(roots.is_empty());
+        opted_in(&tmp);
+        let (roots, _) = resolve_roots(PathClass::Tmp, &[tmp.display().to_string()], &bases, None);
+        assert_eq!(roots, vec![tmp]);
+    }
+
+    #[test]
     fn member_scoped_budget_applies_only_to_its_member() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let (_d, base) = tmp_base();
         let target = target_with_profiles(&base);
         let mut c = cfg(
             &base,
@@ -1023,14 +1615,13 @@ mod tests {
             vec![target.display().to_string()],
         );
         c.budgets[0].member = Some("other".into());
-        assert!(scan(&c, "m", None).classes.is_empty());
-        assert_eq!(scan(&c, "other", None).classes.len(), 1);
+        assert!(scan(&c, "m", None, true).classes.is_empty());
+        assert_eq!(scan(&c, "other", None, true).classes.len(), 1);
     }
 
     #[test]
     fn held_cargo_lock_skips_unit() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let (_d, base) = tmp_base();
         let target = target_with_profiles(&base);
         let lock_path = target.join("release/.cargo-lock");
         write(&lock_path, 0);
@@ -1042,18 +1633,19 @@ mod tests {
         );
         let holder = File::open(&lock_path).unwrap();
         holder.lock().unwrap();
-        let s = scan(&c, "m", None);
-        let ev = apply(&s, &plan_evictions(&s, 0), false);
+        let s = scan(&c, "m", None, true);
+        let ev = apply(&s, &plan_evictions(&s, OPEN, 0).evict, false);
         assert_eq!(names(&ev), vec!["prepush", "debug"]);
         assert!(target.join("release").exists());
+        assert!(!scan(&c, "m", None, false).units.iter().any(|u| u.locked));
         drop(holder);
     }
 
     #[test]
     fn lock_taken_after_scan_skips_at_eviction() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let (_d, base) = tmp_base();
         let root = base.join("ci");
+        opted_in(&root);
         write(&root.join("slot1/data"), 1024);
         write(&root.join("slot1/.lock"), 0);
         let c = cfg(
@@ -1062,8 +1654,8 @@ mod tests {
             0,
             vec![root.display().to_string()],
         );
-        let s = scan(&c, "m", None);
-        let plan = plan_evictions(&s, 0);
+        let s = scan(&c, "m", None, true);
+        let plan = plan_evictions(&s, OPEN, 0).evict;
         let holder = File::open(root.join("slot1/.lock")).unwrap();
         holder.lock().unwrap();
         let ev = apply(&s, &plan, false);
@@ -1074,19 +1666,86 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlinked_units_are_never_followed_or_deleted() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let (_d, base) = tmp_base();
         let keep = base.join("keep/precious");
         write(&keep, 1024);
         let root = base.join("tmpdir");
+        opted_in(&root);
         write(&root.join("old/file"), 1024);
         std::os::unix::fs::symlink(base.join("keep"), root.join("link")).unwrap();
         std::os::unix::fs::symlink(base.join("keep"), root.join("old/inner")).unwrap();
         let c = cfg(&base, PathClass::Tmp, 0, vec![root.display().to_string()]);
-        let s = scan(&c, "m", None);
-        let ev = apply(&s, &plan_evictions(&s, 0), false);
+        let s = scan(&c, "m", None, true);
+        let ev = apply(&s, &plan_evictions(&s, OPEN, 0).evict, false);
         assert_eq!(names(&ev), vec!["old"]);
+        assert_eq!(ev[0].outcome, EvictionOutcome::Deleted);
         assert!(keep.exists());
         assert!(root.join("link").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swapped_root_or_unit_is_refused_at_eviction() {
+        let (_d, base) = tmp_base();
+        let root = base.join("tmpdir");
+        opted_in(&root);
+        write(&root.join("old/file"), 1024);
+        let c = cfg(&base, PathClass::Tmp, 0, vec![root.display().to_string()]);
+        let s = scan(&c, "m", None, true);
+        let plan = plan_evictions(&s, OPEN, 0).evict;
+
+        std::fs::rename(&root, base.join("moved")).unwrap();
+        write(&root.join("old/file"), 1024);
+        let ev = apply(&s, &plan, false);
+        assert_eq!(ev[0].outcome, EvictionOutcome::SkippedUnsafe);
+        assert!(root.join("old/file").exists());
+
+        std::fs::remove_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(base.join("moved"), &root).unwrap();
+        let ev = apply(&s, &plan, false);
+        assert_eq!(ev[0].outcome, EvictionOutcome::SkippedUnsafe);
+        assert!(base.join("moved/old/file").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_unit_is_refused_at_eviction() {
+        let (_d, base) = tmp_base();
+        let root = base.join("tmpdir");
+        opted_in(&root);
+        write(&root.join("old/file"), 1024);
+        let c = cfg(&base, PathClass::Tmp, 0, vec![root.display().to_string()]);
+        let s = scan(&c, "m", None, true);
+        let plan = plan_evictions(&s, OPEN, 0).evict;
+        std::fs::remove_dir_all(root.join("old")).unwrap();
+        std::os::unix::fs::symlink(base.join("elsewhere"), root.join("old")).unwrap();
+        let ev = apply(&s, &plan, false);
+        assert_eq!(ev[0].outcome, EvictionOutcome::SkippedUnsafe);
+        assert!(root.join("old").symlink_metadata().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_enforce_runs_serially() {
+        let (_d, base) = tmp_base();
+        let target = target_with_profiles(&base);
+        let c = cfg(
+            &base,
+            PathClass::CargoTarget,
+            0,
+            vec![target.display().to_string()],
+        );
+        let (a, b) = tokio::join!(
+            enforce_with(c.clone(), "m".into(), None, false),
+            enforce_with(c.clone(), "m".into(), None, false),
+        );
+        let all: Vec<Eviction> = a
+            .unwrap()
+            .evictions
+            .into_iter()
+            .chain(b.unwrap().evictions)
+            .collect();
+        assert_eq!(all.len(), 3, "{all:?}");
+        assert!(all.iter().all(|e| e.outcome == EvictionOutcome::Deleted));
     }
 }
