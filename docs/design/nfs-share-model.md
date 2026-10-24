@@ -72,6 +72,15 @@ Core never interprets `options`. The owning backend renders them per mount at
 converge time (so per-target values such as an inline credential's
 `credentials=` path are derived, never stored).
 
+The retired `options_rendered` column was folded onto `options` (non-empty
+rendered wins) and then dropped. `v0.2.1-rc.38` and `rc.39` ran an earlier fold
+that copied rendered only when `options` was empty or JSON, so a share on those
+hosts that had both an authored `options` and a different `options_rendered` kept
+the authored string. No automatic repair exists, because the dropped column was the
+only copy. On a host that ran rc.38 or rc.39, compare `orca storage share list` with the
+live `mount -o` options and restore any lost options with `orca storage share update`
+(for example, `nosharesock`).
+
 ### `mounts`
 | col | type | note |
 |---|---|---|
