@@ -75,6 +75,12 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
                 )
             })?;
         }
+        if f.name == "unit_identities" {
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS unit_identities_uuid ON unit_identities(uuid)",
+            )
+            .map_err(|e| anyhow::anyhow!("schema fragment `unit_identities` uuid index: {e}"))?;
+        }
         if f.name == "mounts" {
             migrate_mounts_to_id_pk(conn, f.sql)
                 .map_err(|e| anyhow::anyhow!("schema fragment `mounts` id-PK migration: {e}"))?;

@@ -40,15 +40,19 @@ fn retention() -> Retention {
     r
 }
 
-fn unit_known(id: &str) -> anyhow::Result<bool> {
-    if crate::unit_identity::exists(id)? || crate::host_identity::machine_id() == id {
+fn unit_known(id: &str, this_member: Option<&str>) -> anyhow::Result<bool> {
+    if this_member == Some(id) || crate::unit_identity::exists(id)? {
         return Ok(true);
     }
-    db::pool::with_read_pooled_or_open(|conn| {
-        Ok(db::mesh::peerdb::list_peers(conn)?
-            .iter()
-            .any(|p| p.peer_id == id))
-    })
+    db::pool::with_read_pooled_or_open(|conn| db::mesh::peerdb::peer_exists(conn, id))
+}
+
+fn require_known_unit(id: &str, this_member: Option<&str>) -> anyhow::Result<()> {
+    if unit_known(id, this_member)? {
+        Ok(())
+    } else {
+        Err(contract::OrcaError::not_found(format!("no unit with id {id}")).into())
+    }
 }
 
 fn severity_parser() -> clap::builder::PossibleValuesParser {
@@ -100,14 +104,13 @@ async fn security_scan(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ScanSummary> {
     require_verified_dispatch()?;
-    if !unit_known(args.unit_id.as_str())? {
-        return Err(
-            contract::OrcaError::not_found(format!("no unit with id {}", args.unit_id)).into(),
-        );
-    }
+    let member = crate::host_identity::try_machine_id().ok_or_else(|| {
+        anyhow::anyhow!("security.scan: this system's identity is not initialized")
+    })?;
+    require_known_unit(args.unit_id.as_str(), Some(member))?;
     store::scan_into(
         &store::store_path()?,
-        crate::host_identity::machine_id(),
+        member,
         &args.unit_id,
         args.scanner.as_deref(),
         retention(),
@@ -227,6 +230,31 @@ mod tests {
         assert!(err.to_string().contains("requires role 'admin'"), "{err}");
         utils::invocation_scope::testing::sync_core_verb(verb("admin"), require_verified_dispatch)
             .unwrap();
+    }
+
+    #[test]
+    fn known_units_are_minted_ids_this_member_and_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        db::with_thread_db_path(&dir.path().join("orca.db"), || {
+            let unit = crate::unit_identity::resolve_or_mint("docker@h/container/web")
+                .unwrap()
+                .to_string();
+            let member = utils::id::new();
+            let peer = utils::id::new();
+            {
+                let conn = db::open_default().unwrap();
+                db::mesh::peerdb::upsert_peer(&conn, &peer, "p", "10.0.0.12", 9443, None, "")
+                    .unwrap();
+            }
+            for id in [&unit, &member, &peer] {
+                require_known_unit(id, Some(&member)).unwrap();
+            }
+            let err = require_known_unit(&utils::id::new(), Some(&member)).unwrap_err();
+            let orca = err
+                .downcast_ref::<contract::OrcaError>()
+                .expect("OrcaError");
+            assert_eq!(orca.kind, contract::ErrorKind::NotFound, "{err}");
+        });
     }
 
     #[tokio::test]
