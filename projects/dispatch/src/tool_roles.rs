@@ -167,11 +167,13 @@ pub fn known_role(tool: &str) -> Option<&'static str> {
 }
 
 fn fixed_surface_role(tool: &str) -> Option<&'static str> {
-    use crate::{diagnostics_surface as diag, ups_surface as ups};
+    use crate::{diagnostics_surface as diag, security_surface as sec, ups_surface as ups};
     let pairs = if diag::diagnostics_owns(tool) {
         diag::diagnostics_role_pairs()
     } else if ups::ups_owns(tool) {
         ups::ups_role_pairs()
+    } else if sec::security_owns(tool) {
+        sec::security_role_pairs()
     } else {
         return None;
     };

@@ -863,6 +863,59 @@ pub async fn dispatch_ups(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Res
     Some(run_diag(name, Value::Object(map), &ctx).await)
 }
 
+#[allow(clippy::disallowed_types)]
+pub async fn dispatch_security(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Result<()>> {
+    use serde_json::{Map, Value};
+    let (top, sub) = matches.subcommand()?;
+    if top != "security" {
+        return None;
+    }
+    let ctx = match ctx_with_peer(matches, ctx) {
+        Ok(ctx) => ctx,
+        Err(e) => return Some(Err(e)),
+    };
+    let usage =
+        || anyhow::anyhow!("usage: orca security <scan|findings list|findings detail> [flags]");
+    let Some((op, op_sub)) = sub.subcommand() else {
+        return Some(Err(usage()));
+    };
+    let mut map = Map::new();
+    let mut put = |m: &ArgMatches, keys: &[&str]| {
+        for k in keys {
+            if let Some(v) = m.get_one::<String>(k) {
+                map.insert((*k).into(), Value::String(v.clone()));
+            }
+        }
+    };
+    let name = match (op, op_sub.subcommand()) {
+        ("scan", _) => {
+            put(op_sub, &["unit_id", "scanner"]);
+            crate::security_surface::SCAN_TOOL
+        }
+        ("findings", Some(("list", l))) => {
+            put(l, &["unit_id", "scanner", "min_severity", "cursor"]);
+            if let Some(n) = l.get_one::<String>("limit") {
+                match n.parse::<u32>() {
+                    Ok(n) => {
+                        map.insert("limit".into(), Value::from(n));
+                    }
+                    Err(_) => return Some(Err(anyhow::anyhow!("--limit must be a number"))),
+                }
+            }
+            if l.get_flag("include_resolved") {
+                map.insert("include_resolved".into(), Value::Bool(true));
+            }
+            crate::security_surface::FINDINGS_LIST_TOOL
+        }
+        ("findings", Some(("detail", d))) => {
+            put(d, &["unit_id", "scanner", "id", "package"]);
+            crate::security_surface::FINDINGS_DETAIL_TOOL
+        }
+        _ => return Some(Err(usage())),
+    };
+    Some(run_diag(name, Value::Object(map), &ctx).await)
+}
+
 // ── Live plugin-verb surface (runtime registry projection) ──────────────────────
 //
 // Loaded-plugin tools (`agents.install`, `dockge.<verb>`, …) aren't in the static
@@ -1104,7 +1157,10 @@ async fn run_diag(name: &str, args: serde_json::Value, ctx: &ToolCtx) -> Result<
     } else {
         match crate::diagnostics_surface::diagnostics_dispatch(name, &args).await {
             Some(r) => r?,
-            None => anyhow::bail!("unknown diagnostics op: {name}"),
+            None => match crate::security_surface::security_dispatch(name, &args).await {
+                Some(r) => r?,
+                None => anyhow::bail!("unknown diagnostics op: {name}"),
+            },
         }
     };
     println!("{}", crate::value_to_text(&out));

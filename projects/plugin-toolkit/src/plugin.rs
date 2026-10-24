@@ -388,6 +388,30 @@ impl Plugin {
         self
     }
 
+    #[must_use]
+    pub fn security<S: crate::contract::security::SecurityScanner + 'static>(
+        mut self,
+        scanner: S,
+    ) -> Self {
+        let prefix = format!("security.__backend.{}", scanner.name());
+        self.defs.push(BackendDef {
+            domain: "security".to_string(),
+            name: scanner.name().to_string(),
+            invoke_prefix: prefix.clone(),
+            ..Default::default()
+        });
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::security::dispatch_op(&scanner, op, args),
+                ))
+            }));
+        self
+    }
+
     /// Register a **diagnostics** facet: this plugin diagnoses/repairs an
     /// external subsystem. Implements the typed
     /// [`DiagnosticsProvider`](crate::contract::diagnostics::DiagnosticsProvider).
