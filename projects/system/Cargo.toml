@@ -40,6 +40,7 @@ dev = { workspace = true }
 # Mesh transport (folded in from the former mesh crate): mTLS over
 # SNI=mesh.orca.local, mDNS discovery, and the concurrent fleet fan-out.
 futures = { workspace = true }
+url = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }

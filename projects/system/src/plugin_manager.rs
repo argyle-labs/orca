@@ -56,6 +56,7 @@ pub struct CatalogEntry {
 }
 
 const CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+const CATALOG_NEGATIVE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 type CatalogCache = std::sync::Mutex<Option<(std::time::Instant, Vec<CatalogEntry>)>>;
 
@@ -87,7 +88,14 @@ fn save_disk_catalog(entries: &[CatalogEntry]) {
         if let Some(dir) = path.parent() {
             files::ops::mkdir_p(dir)?;
         }
-        std::fs::write(&path, serde_json::to_vec(entries)?)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(entries)?)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+        }
+        std::fs::rename(&tmp, &path)?;
         Ok(())
     })();
     if let Err(e) = write {
@@ -99,27 +107,48 @@ async fn catalog_resolved() -> Vec<CatalogEntry> {
     let stale = {
         let guard = catalog_cache().lock().unwrap();
         match guard.as_ref() {
-            Some((at, cached)) if at.elapsed() < CATALOG_TTL => return cached.clone(),
+            Some((expires, cached)) if std::time::Instant::now() < *expires => {
+                return cached.clone();
+            }
             Some((_, cached)) => Some(cached.clone()),
             None => None,
         }
     };
-    let resolved = match crate::plugin_discovery::discover().await {
-        Ok(entries) if !entries.is_empty() => {
-            save_disk_catalog(&entries);
-            entries
+    let previous = stale.unwrap_or_else(load_disk_catalog);
+    let (resolved, ttl) = match crate::plugin_discovery::discover(&previous).await {
+        Ok(d) if !d.entries.is_empty() => {
+            if d.complete {
+                save_disk_catalog(&d.entries);
+            }
+            (d.entries, CATALOG_TTL)
         }
-        Ok(_) => stale.unwrap_or_else(load_disk_catalog),
+        Ok(_) => (previous, CATALOG_NEGATIVE_TTL),
         Err(e) => {
             tracing::debug!(
                 error = %format!("{e:#}"),
                 "plugin discovery failed; using last known catalog"
             );
-            stale.unwrap_or_else(load_disk_catalog)
+            (previous, CATALOG_NEGATIVE_TTL)
         }
     };
-    *catalog_cache().lock().unwrap() = Some((std::time::Instant::now(), resolved.clone()));
+    *catalog_cache().lock().unwrap() = Some((std::time::Instant::now() + ttl, resolved.clone()));
     resolved
+}
+
+fn find_catalog_entry(
+    catalog: Vec<CatalogEntry>,
+    name: &str,
+    synthesize: bool,
+) -> Option<CatalogEntry> {
+    let synthesize = synthesize || catalog.is_empty();
+    catalog
+        .into_iter()
+        .find(|e| e.name == name || e.target_software == name)
+        .or_else(|| {
+            synthesize
+                .then(|| crate::plugin_discovery::synthesized_entry(name))
+                .flatten()
+        })
 }
 
 // ── Install dir ──────────────────────────────────────────────────────────────
@@ -1049,13 +1078,9 @@ pub(crate) async fn install_from_catalog(
     allow_unsigned: bool,
     ctx: &ToolCtx,
 ) -> Result<PluginInstallOutput> {
-    let entry = catalog_resolved()
-        .await
-        .into_iter()
-        .find(|e| e.name == name || e.target_software == name)
-        .with_context(|| {
-            format!("'{name}' is not in the plugin catalog (see `plugin.list` for known plugins)")
-        })?;
+    let entry = find_catalog_entry(catalog_resolved().await, name, true).with_context(|| {
+        format!("'{name}' is not a valid plugin name (see `plugin.list` for known plugins)")
+    })?;
     db::pool::with_pooled_or_open(|c| {
         db::plugins::refuse_undotted_secret_collision(c, &entry.target_software)
     })?;
@@ -1306,10 +1331,7 @@ fn neutralize_plugin_update(args: &mut PluginUpdateArgs) {
     dry_run_neutralize = neutralize_plugin_update
 )]
 async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUpdateOutput> {
-    let entry = catalog_resolved()
-        .await
-        .into_iter()
-        .find(|e| e.name == args.name || e.target_software == args.name);
+    let entry = find_catalog_entry(catalog_resolved().await, &args.name, false);
 
     // Installed version from the live/on-disk registry join (same source as
     // `plugin.list`). `None` when the plugin isn't installed on this host.
@@ -3030,7 +3052,7 @@ mod tests {
     // ORCA_HOME and share the process-global catalog cache.
 
     fn seed_catalog(entries: Vec<CatalogEntry>) {
-        *catalog_cache().lock().unwrap() = Some((std::time::Instant::now(), entries));
+        *catalog_cache().lock().unwrap() = Some((std::time::Instant::now() + CATALOG_TTL, entries));
     }
 
     #[tokio::test]
@@ -3095,6 +3117,15 @@ mod tests {
             );
         })
         .await;
+    }
+
+    #[test]
+    fn a_missing_name_synthesizes_an_org_entry_for_install() {
+        let got = find_catalog_entry(vec![entry("other", "available")], "nut", true).unwrap();
+        assert_eq!(got.repo_url, "https://github.com/argyle-labs/nut");
+        assert!(find_catalog_entry(vec![entry("other", "available")], "nut", false).is_none());
+        assert!(find_catalog_entry(Vec::new(), "nut", false).is_some());
+        assert!(find_catalog_entry(Vec::new(), "../nut", true).is_none());
     }
 
     #[tokio::test]
@@ -3180,7 +3211,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn install_by_name_unknown_catalog_is_refused() {
+    async fn install_by_name_invalid_name_is_refused() {
         let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
@@ -3190,7 +3221,7 @@ mod tests {
             PluginInstallArgs {
                 allow_unsigned: false,
                 file: None,
-                name: Some("totally-unknown-plugin".to_string()),
+                name: Some("Totally/Unknown".to_string()),
                 version: None,
                 prerelease: false,
                 replace: false,
@@ -3200,7 +3231,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            format!("{err:#}").contains("not in the plugin catalog"),
+            format!("{err:#}").contains("not a valid plugin name"),
             "unexpected: {err:#}"
         );
     }
@@ -3640,7 +3671,7 @@ mod tests {
         // the error naming that repo rather than a catalog-miss or status gate.
         let msg = format!("{err:#}");
         assert!(
-            !msg.contains("not in the plugin catalog"),
+            !msg.contains("not a valid plugin name"),
             "alias should have matched the catalog entry: {msg}"
         );
         assert!(
