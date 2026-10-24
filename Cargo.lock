@@ -4579,6 +4579,7 @@ dependencies = [
  "graphql_client",
  "http",
  "inventory",
+ "libc",
  "mime_guess",
  "native-tls",
  "orca-container-runtime",

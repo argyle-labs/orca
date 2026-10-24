@@ -66,6 +66,7 @@ pub struct Command {
     /// The program name, retained so [`run_checked`](Command::run_checked) can
     /// name the tool in a [`ToolError`] without re-plumbing it from the caller.
     program: String,
+    kill_group: bool,
 }
 
 impl Command {
@@ -78,7 +79,31 @@ impl Command {
         Self {
             inner,
             program: name,
+            kill_group: false,
         }
+    }
+
+    /// Start the child in its own process group so a timeout in
+    /// [`status_within`](Command::status_within) / [`output_within`](Command::output_within)
+    /// SIGKILLs the whole group, grandchildren included. Unix only; elsewhere
+    /// only the direct child is killed.
+    pub fn kill_process_group_on_timeout(mut self) -> Self {
+        #[cfg(unix)]
+        self.inner.process_group(0);
+        self.kill_group = true;
+        self
+    }
+
+    fn kill_on_timeout(&self, child: &mut tokio::process::Child) {
+        #[cfg(unix)]
+        if self.kill_group
+            && let Some(pid) = child.id()
+        {
+            unsafe {
+                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        drop(child.start_kill());
     }
 
     /// Run to completion and return captured stdout bytes on success, or a
@@ -166,8 +191,55 @@ impl Command {
                 }))
             }
             None => {
-                // Timed out — request the kill (kill_on_drop reaps it).
-                drop(child.start_kill());
+                self.kill_on_timeout(&mut child);
+                child.wait().await?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Run up to `budget`, capturing stdout + stderr. `Ok(None)` if it timed out
+    /// (the child, or its process group, is killed and reaped).
+    pub async fn output_within(mut self, budget: Duration) -> std::io::Result<Option<Output>> {
+        self.inner
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = self.inner.spawn()?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .expect("stdout was piped, so it is present");
+        let mut stderr = child
+            .stderr
+            .take()
+            .expect("stderr was piped, so it is present");
+        let run = async {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let (status, o, e) = tokio::join!(
+                child.wait(),
+                tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut out),
+                tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut err),
+            );
+            o?;
+            e?;
+            std::io::Result::Ok((status?, out, err))
+        };
+        match crate::time::timeout(budget, run).await {
+            Some(result) => {
+                let (status, stdout, stderr) = result?;
+                Ok(Some(Output {
+                    status: ExitStatus {
+                        success: status.success(),
+                        code: status.code(),
+                    },
+                    stdout,
+                    stderr,
+                }))
+            }
+            None => {
+                self.kill_on_timeout(&mut child);
+                child.wait().await?;
                 Ok(None)
             }
         }
@@ -392,6 +464,68 @@ mod tests {
             .await
             .expect("spawn sleep");
         assert!(st.is_none(), "expected timeout → None");
+    }
+
+    #[cfg(unix)]
+    async fn grandchild_dies_after_timeout(run: impl AsyncFnOnce(Command) -> bool) {
+        let dir = std::env::temp_dir().join(format!("pgkill-{}", crate::mint_uuidv7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("pid");
+        let cmd = Command::new("sh")
+            .arg("-c")
+            .arg(format!("sleep 30 & echo $! > {}; wait", pidfile.display()))
+            .kill_process_group_on_timeout();
+        assert!(run(cmd).await, "expected timeout");
+        let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let mut alive = true;
+        for _ in 0..50 {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                alive = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(!alive, "grandchild sleep {pid} survived the timeout");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn status_within_kills_process_group_on_timeout() {
+        grandchild_dies_after_timeout(async |cmd| {
+            cmd.status_within(Duration::from_millis(300))
+                .await
+                .unwrap()
+                .is_none()
+        })
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_within_kills_process_group_on_timeout() {
+        grandchild_dies_after_timeout(async |cmd| {
+            cmd.output_within(Duration::from_millis(300))
+                .await
+                .unwrap()
+                .is_none()
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn output_within_captures_fast_command() {
+        let out = Command::new("printf")
+            .arg("hi")
+            .output_within(Duration::from_secs(5))
+            .await
+            .unwrap()
+            .expect("in time");
+        assert_eq!(out.stdout, b"hi");
     }
 
     #[tokio::test]
