@@ -428,6 +428,7 @@ const MESH_ANY_ROLE_DENY: &[&str] = &["auth.login"];
 fn is_mutating_tool(tool: &str) -> bool {
     dispatch::tool_roles::is_data_mutation(tool)
         || dispatch::tool_roles::plugin_execute_gated(tool)
+        || dispatch::tool_roles::plugin_dry_run_aware(tool)
         || dispatch::tool_roles::plugin_read_unconfirmed(tool)
         || dispatch::execute_gated_names().contains(&tool)
 }
@@ -2311,6 +2312,23 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("changes state"), "got: {err}");
+    }
+
+    #[test]
+    fn a_dry_run_aware_plugin_tool_counts_as_mutating() {
+        let tool = "listener_test_plugin.aware_status";
+        dispatch::tool_roles::install_plugin_tools([(
+            tool.to_string(),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                tool,
+                Some("any"),
+                Some(false),
+                Some(false),
+            )
+            .dry_run_aware(true),
+        )]);
+        assert!(is_mutating_tool(tool));
+        dispatch::tool_roles::remove_plugin_tools([tool]);
     }
 
     #[test]

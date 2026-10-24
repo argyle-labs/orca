@@ -378,3 +378,19 @@ fn every_dry_run_aware_tool_neutralizes_its_forwarded_args() {
         );
     }
 }
+
+#[test]
+fn tool_manifest_carries_dry_run_aware() {
+    let manifest: Vec<plugin_toolkit::abi::ToolDef> =
+        serde_json::from_str(&dispatch::tool_manifest_json()).expect("manifest decodes");
+    let aware = dispatch::dry_run_aware_names();
+    assert!(!aware.is_empty());
+    for def in &manifest {
+        assert_eq!(
+            def.dry_run_aware,
+            aware.contains(&def.name.as_str()),
+            "{}",
+            def.name
+        );
+    }
+}

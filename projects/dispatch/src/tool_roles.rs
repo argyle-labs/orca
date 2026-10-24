@@ -19,6 +19,7 @@ static PLUGIN_TOOLS: RwLock<Option<HashMap<String, PluginToolPolicy>>> = RwLock:
 pub struct PluginToolPolicy {
     pub role: &'static str,
     pub execute_gated: bool,
+    pub dry_run_aware: bool,
     pub data_mutation: bool,
     pub local_only: bool,
     /// An `any` tool that explicitly opted out of the execute gate without
@@ -47,6 +48,7 @@ impl PluginToolPolicy {
         Self {
             role,
             execute_gated: execute_gated.unwrap_or(default_gated),
+            dry_run_aware: false,
             data_mutation: data_mutation.unwrap_or(false),
             local_only: false,
             read_unconfirmed: role == "any"
@@ -65,6 +67,15 @@ impl PluginToolPolicy {
 
     pub fn tool_callable(mut self, tool_callable: Option<bool>) -> Self {
         self.tool_callable = tool_callable.unwrap_or(false);
+        self
+    }
+
+    pub fn dry_run_aware(mut self, dry_run_aware: bool) -> Self {
+        self.dry_run_aware = dry_run_aware;
+        if dry_run_aware {
+            self.role = "admin";
+            self.read_unconfirmed = false;
+        }
         self
     }
 }
@@ -103,6 +114,14 @@ fn plugin_policy(tool: &str) -> Option<PluginToolPolicy> {
 /// plans on `dryRun` instead of applying.
 pub fn plugin_execute_gated(tool: &str) -> bool {
     plugin_policy(tool).is_some_and(|p| p.execute_gated)
+}
+
+pub fn plugin_dry_run_aware(tool: &str) -> bool {
+    plugin_policy(tool).is_some_and(|p| p.dry_run_aware)
+}
+
+pub fn plugin_dry_run_ok(tool: &str) -> bool {
+    plugin_policy(tool).is_some_and(|p| p.execute_gated || p.dry_run_aware)
 }
 
 pub fn is_tool_callable(tool: &str) -> bool {

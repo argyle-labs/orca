@@ -46,6 +46,8 @@ pub struct ToolDef {
     /// Whether the tool executes by default and plans under `dryRun: true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execute_gated: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run_aware: bool,
     /// Whether the tool writes to an external managed system.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_mutation: Option<bool>,
@@ -824,6 +826,26 @@ mod b64_or_bytes {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tool_def_dry_run_aware_round_trips_and_defaults_off() {
+        let base =
+            json!({"name": "p.x", "description": "d", "input_schema": {}, "output_schema": {}});
+        let old: ToolDef = serde_json::from_value(base.clone()).unwrap();
+        assert!(!old.dry_run_aware);
+        assert!(
+            serde_json::to_value(&old)
+                .unwrap()
+                .get("dry_run_aware")
+                .is_none()
+        );
+        let mut aware = base;
+        aware["dry_run_aware"] = json!(true);
+        let def: ToolDef = serde_json::from_value(aware).unwrap();
+        assert!(def.dry_run_aware);
+        let back: ToolDef = serde_json::from_value(serde_json::to_value(&def).unwrap()).unwrap();
+        assert!(back.dry_run_aware);
+    }
 
     #[test]
     fn http_response_body_serializes_base64() {

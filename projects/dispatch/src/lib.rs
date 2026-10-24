@@ -56,7 +56,7 @@ pub mod tool_roles;
 pub mod unit_surface;
 pub mod ups_surface;
 
-pub use erased::{ErasedTool, ToolWrapper, value_to_text};
+pub use erased::{ErasedTool, ToolWrapper, dry_run_marked, require_dry_run_marked, value_to_text};
 pub use inventory_slice::ToolRegistration;
 #[cfg(feature = "in-process")]
 pub use registry::init;

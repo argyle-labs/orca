@@ -1328,6 +1328,7 @@ fn surface_tools(
                 dispatch::tool_roles::PluginToolPolicy {
                     role,
                     execute_gated: surface.execute_gated(op),
+                    dry_run_aware: false,
                     data_mutation: false,
                     local_only: op.policy.local_only,
                     read_unconfirmed: false,
@@ -1397,7 +1398,8 @@ fn install_tool_policies(software: &str, tools: &HashMap<String, ToolDef>) {
                 d.data_mutation,
             )
             .local_only(d.local_only)
-            .tool_callable(d.tool_callable),
+            .tool_callable(d.tool_callable)
+            .dry_run_aware(d.dry_run_aware),
         )
     }));
 }
@@ -1633,6 +1635,9 @@ pub(crate) fn refuse_reentry(ctx: &ToolCtx, software: &str, name: &str) -> Resul
 
 fn plan_with_reaches(result: Result<sj::Value>, name: &str, dry_run: bool) -> Result<sj::Value> {
     let mut value = result?;
+    if dry_run && dispatch::tool_roles::plugin_dry_run_aware(name) {
+        value = dispatch::require_dry_run_marked(name, value)?;
+    }
     let reaches = tool_reaches(name);
     if dry_run
         && !reaches.is_empty()
@@ -2090,6 +2095,25 @@ mod extra_domain_tests {
 
     static REGISTERED: AtomicUsize = AtomicUsize::new(0);
     static DEREGISTERED: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn install_tool_policies_copies_dry_run_aware_and_raises_role() {
+        let name = "policyprobe.aware";
+        let def: ToolDef = sj::from_value(sj::json!({
+            "name": name,
+            "description": "",
+            "input_schema": { "type": "object" },
+            "output_schema": { "type": "object" },
+            "role": "any",
+            "execute_gated": false,
+            "dry_run_aware": true,
+        }))
+        .unwrap();
+        install_tool_policies("policyprobe", &HashMap::from([(name.to_string(), def)]));
+        assert!(dispatch::tool_roles::plugin_dry_run_aware(name));
+        assert_eq!(dispatch::tool_roles::known_role(name), Some("admin"));
+        dispatch::tool_roles::remove_plugin_tools([name]);
+    }
 
     #[test]
     fn data_mutation_gates_even_a_read_shaped_any_tool() {
@@ -3075,6 +3099,7 @@ mod loader_tests {
                     output_schema: sj::json!({ "type": "object" }),
                     role: Some("admin".into()),
                     execute_gated: Some(false),
+                    dry_run_aware: false,
                     data_mutation: Some(true),
                     local_only: Some(true),
                     reaches: Vec::new(),
@@ -3088,6 +3113,7 @@ mod loader_tests {
                     output_schema: sj::json!({ "type": "object" }),
                     role: None,
                     execute_gated: None,
+                    dry_run_aware: false,
                     data_mutation: None,
                     local_only: None,
                     reaches: Vec::new(),
