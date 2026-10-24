@@ -19,14 +19,11 @@
 //!   binary carries its own libc and runs on both musl and glibc hosts) and
 //!   falls back to the matching *gnu* asset. Non-linux daemons (darwin) resolve
 //!   to their own single triple with no fallback.
-//! * [`is_release_triple`] — membership test used by catalog / asset-completeness
+//! * [`is_release_triple`] — membership test used by plugin discovery / asset-completeness
 //!   validation.
 //!
 //! ## What is scaffolded here (structural — flagged, NOT forced)
 //!
-//! * [`validate_catalog_schema`] — a *pure* schema/consistency validator over
-//!   catalog entries. Wiring it into the embedded-catalog load path and into a
-//!   build-time test is the structural step; see its doc-comment TODO.
 //! * [`RcAssetCompleteness`] — the shape of an "does this release publish all
 //!   N×2 assets?" check (one binary + one sha256 per triple). The
 //!   network-touching half must live next to
@@ -103,62 +100,6 @@ pub fn linux_asset_candidates(build_target: &str) -> Vec<String> {
 }
 
 // ── Scaffolded / structural centralizations (flagged, not forced) ───────────
-
-/// A single catalog-entry validation problem, as text (kept dependency-free so
-/// this can run at build time and in a unit test without pulling serde_json's
-/// error types through the signature).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CatalogIssue {
-    pub entry: String,
-    pub problem: String,
-}
-
-/// Pure schema/consistency validation for one catalog entry's fields.
-///
-/// Checks the invariants documented in `plugin_catalog.json`'s header comment:
-/// non-empty name/targetSoftware, `name == targetSoftware`, a `github.com`
-/// `repoUrl`, a non-empty `docsUrl`, and a `status` in the known set.
-///
-/// TODO(structural): wire this into (a) `plugin_manager::catalog()` so a
-/// malformed embedded catalog fails loudly at load, and (b) a `#[test]` that
-/// runs it over every embedded entry so a bad PR can't merge. Both are
-/// mechanical but touch the catalog load path's error type, so they are left as
-/// a follow-up rather than forced in this consolidation PR.
-pub fn validate_catalog_entry(
-    name: &str,
-    target_software: &str,
-    repo_url: &str,
-    docs_url: &str,
-    status: &str,
-) -> Vec<CatalogIssue> {
-    const KNOWN_STATUS: &[&str] = &["available", "unreleased", "planned"];
-    let mut issues = Vec::new();
-    let mut push = |p: &str| {
-        issues.push(CatalogIssue {
-            entry: name.to_string(),
-            problem: p.to_string(),
-        })
-    };
-    if name.trim().is_empty() {
-        push("name is empty");
-    }
-    if target_software.trim().is_empty() {
-        push("targetSoftware is empty");
-    }
-    if !name.trim().is_empty() && name != target_software {
-        push("name must equal targetSoftware (one catalog entry == one plugin artifact)");
-    }
-    if !repo_url.starts_with("https://github.com/") {
-        push("repoUrl must be a https://github.com/ URL (no hostnames or IPs)");
-    }
-    if docs_url.trim().is_empty() {
-        push("docsUrl is empty");
-    }
-    if !KNOWN_STATUS.contains(&status) {
-        push("status must be one of: available, unreleased, planned");
-    }
-    issues
-}
 
 /// The result shape of a per-release asset-completeness check: for a given
 /// plugin `name` + release `tag`, which of the `TARGET_TRIPLES` are missing
@@ -256,26 +197,6 @@ mod tests {
     fn unknown_target_yields_no_candidates() {
         assert!(linux_asset_candidates("unknown-target").is_empty());
         assert!(linux_asset_candidates("").is_empty());
-    }
-
-    #[test]
-    fn catalog_validation_flags_mismatches() {
-        // Clean entry — no issues.
-        assert!(
-            validate_catalog_entry(
-                "ntfy",
-                "ntfy",
-                "https://github.com/argyle-labs/ntfy",
-                "https://github.com/argyle-labs/ntfy#readme",
-                "available",
-            )
-            .is_empty()
-        );
-        // name != targetSoftware, bad url, bad status.
-        let issues = validate_catalog_entry("a", "b", "http://x", "d", "bogus");
-        assert!(issues.iter().any(|i| i.problem.contains("name must equal")));
-        assert!(issues.iter().any(|i| i.problem.contains("repoUrl")));
-        assert!(issues.iter().any(|i| i.problem.contains("status")));
     }
 
     #[test]

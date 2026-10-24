@@ -183,9 +183,8 @@ Design of record: [`../design/unified-media-acquisition.md`](../design/unified-m
 - **Cross-repo release orchestration** + **Gitea cargo-registry migration**
   (version-pinnable builds) + channel-based fleet-roll (rc→beta, stable→both;
   fleet update pulls PUBLIC GitHub assets).
-- **Plugin registry discovery** — release-derived availability + org-topic
-  membership + 2FA-gated third-party manifests (retires the hand-curated
-  `plugin_catalog.json` status). See
+- **Plugin registry discovery** — 2FA-gated third-party manifests (first-party
+  org-topic membership + release-derived availability have landed). See
   [`plugin-registry-discovery.md`](plugin-registry-discovery.md).
 - **Deploy-target provisioning (opt-in)** — any host opts in to become a deploy
   target; generic Linux hosts get a provisioned docker/podman runtime via one
