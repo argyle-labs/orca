@@ -89,7 +89,7 @@ default_targets() {
 host_target() {
   # Prefer rustc so we agree with cargo's notion of host. Fall back to
   # uname so this works on CI runners that haven't installed a toolchain
-  # (the package-native job downloads pre-built binaries — no rustc).
+  # (the package job downloads pre-built binaries — no rustc).
   if command -v rustc >/dev/null 2>&1; then
     rustc -vV | awk '/^host:/ {print $2}'
     return
@@ -560,8 +560,8 @@ build_orca_targets() {
 
 # Print asset paths for `gh release create`. Args: target1 target2 ...
 # Emits both the versioned and legacy unversioned aliases (see stage_target_asset
-# for the transition rationale), then native-package artifacts produced by
-# build_native_packages (skipped silently if none present).
+# for the transition rationale), then OS-package artifacts produced by
+# build_os_packages (skipped silently if none present).
 release_asset_paths() {
   local version t
   version="$(current_cargo_version)"
@@ -571,7 +571,7 @@ release_asset_paths() {
     echo "${DIST_DIR}/orca-${t}"
     echo "${DIST_DIR}/orca-${t}.sha256"
   done
-  # Native packages live next to the binaries in dist-release/. Globs
+  # OS packages live next to the binaries in dist-release/. Globs
   # are safe — missing matches expand to nothing under `nullglob`.
   local f
   shopt -s nullglob
@@ -589,8 +589,8 @@ release_asset_paths() {
   shopt -u nullglob
 }
 
-# Build every native installer format the host can produce, alongside the
-# binaries in dist-release/. Mirrors the package-native matrix in
+# Build every OS package format the host can produce, alongside the
+# binaries in dist-release/. Mirrors the package job in
 # .github/workflows/release.yml (see [[feedback-ci-makefile-parity]]).
 #
 # Each format runs `orca system build --execute --format <fmt>` via the
@@ -598,11 +598,11 @@ release_asset_paths() {
 # Formats whose external tool is missing (dpkg-deb, rpmbuild, pkgbuild) are
 # skipped with a warning instead of failing the release — local hosts rarely
 # have every packager installed.
-build_native_packages() {
+build_os_packages() {
   local host
   host="$(host_target)"
   local runner="${DIST_DIR}/orca-${host}"
-  [ -x "$runner" ] || die "build_native_packages: host binary ${runner} missing — run build_orca_targets first"
+  [ -x "$runner" ] || die "build_os_packages: host binary ${runner} missing — run build_orca_targets first"
 
   # (format, target-arch, target-triple, required-tool) per matrix entry.
   # An empty required-tool means the format only writes source files.
@@ -743,7 +743,7 @@ bump_and_build() {
   log "bumping ${SERVER_TOML} → ${new}"
   write_cargo_version "$new"
   build_orca_targets "${targets[@]}"
-  build_native_packages
+  build_os_packages
 }
 
 # Bash-3.2-safe replacement for `mapfile`. Reads stdin of $2 into array $1.
