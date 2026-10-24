@@ -2472,7 +2472,10 @@ mod registry_tests {
              CREATE TABLE pod_trust (
                  peer_id TEXT PRIMARY KEY REFERENCES pod_peers(peer_id) ON DELETE CASCADE
              );
-             CREATE TABLE pod_self (pod_id TEXT);
+             CREATE TABLE pod_self (
+                 id INTEGER PRIMARY KEY, pod_id TEXT,
+                 ca_previous_expires_at INTEGER, set_at INTEGER NOT NULL DEFAULT 0
+             );
              CREATE TABLE pod_discovery (pubkey_fp TEXT PRIMARY KEY);
              CREATE TABLE pod_pending_offers (
                  offer_id       TEXT PRIMARY KEY,
@@ -2485,7 +2488,7 @@ mod registry_tests {
              );
              INSERT INTO pod_peers (peer_id, peer_hostname) VALUES ('id-thor', 'thor');
              INSERT INTO pod_peers (peer_id, peer_hostname) VALUES ('id-loki', 'loki');
-             INSERT INTO pod_self (pod_id) VALUES ('mesh-1');",
+             INSERT INTO pod_self (id, pod_id) VALUES (1, 'mesh-1');",
         )
         .expect("legacy schema");
         // Everything before the rename is already applied on such a host.
