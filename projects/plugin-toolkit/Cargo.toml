@@ -198,5 +198,9 @@ rustls   = { workspace = true }
 name = "doc_authoring_anchor"
 required-features = ["full"]
 
+[[test]]
+name = "thin_plugin_features"
+required-features = ["tools"]
+
 [lints]
 workspace = true

@@ -92,6 +92,7 @@ jobs:
           cargo-checks: |
             check -p orca-notifications --no-default-features
             check -p orca-plugin-toolkit --no-default-features --features tools,notify
+            test -p orca-plugin-toolkit --no-default-features --features tools,db,containers --test thin_plugin_features
             test -p orca-plugin-toolkit --features full --test doc_authoring_anchor
           package-publishable: 'true'
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
