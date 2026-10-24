@@ -221,7 +221,8 @@ fn session_limit(principal: &str) -> anyhow::Error {
 }
 
 /// Open a WebSocket for `principal` and register its session.
-pub(crate) fn open(req: WsOpen, principal: &str) -> Result<WsChunk> {
+pub(crate) fn open(mut req: WsOpen, principal: &str) -> Result<WsChunk> {
+    req.insecure = crate::tls_policy::effective_insecure(principal, &req.url, req.insecure)?;
     let max_message = message_limit(req.max_message_bytes);
     let budget = {
         let mut table = table();
@@ -1136,14 +1137,34 @@ mod tests {
         }
     }
 
+    fn with_marked_endpoint<R>(principal: &str, f: impl FnOnce() -> R) -> R {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        db::with_thread_db_path(db.path(), || {
+            db::pool::with_pooled_or_open(|conn| {
+                conn.execute(
+                    "INSERT INTO endpoints (id, provider, name, routes, enabled, insecure) VALUES (?1, ?1, 'n', ?2, 1, 1)",
+                    rusqlite::params![
+                        principal,
+                        r#"[{"kind":"lan_v4","scheme":"https","value":"127.0.0.1"}]"#
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            f()
+        })
+    }
+
     #[test]
     fn wss_insecure_refuses_a_server_without_the_cert_private_key() {
         let (url, _closed) = serve_with(Peer::Echo, Some(tls_acceptor(true)));
-        let err = handle_cap(
-            "ws.open",
-            json!({"url": url, "insecure": true}),
-            "ws-tls-impostor",
-        )
+        let err = with_marked_endpoint("ws-tls-impostor", || {
+            handle_cap(
+                "ws.open",
+                json!({"url": url, "insecure": true}),
+                "ws-tls-impostor",
+            )
+        })
         .unwrap_err()
         .to_string();
         assert!(err.contains("TLS handshake"), "got: {err}");
@@ -1152,7 +1173,10 @@ mod tests {
     #[test]
     fn wss_insecure_accepts_a_self_signed_server() {
         let (url, _closed) = serve(Peer::Echo, true);
-        let reply = handle_cap("ws.open", json!({"url": url, "insecure": true}), "ws-tls").unwrap();
+        let reply = with_marked_endpoint("ws-tls", || {
+            handle_cap("ws.open", json!({"url": url, "insecure": true}), "ws-tls")
+        })
+        .unwrap();
         let WsChunk::Open { session } = serde_json::from_value(reply).unwrap() else {
             panic!("expected Open");
         };
@@ -1170,6 +1194,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("TLS handshake"), "got: {err}");
+    }
+
+    #[test]
+    fn wss_insecure_refused_without_an_admin_marked_endpoint() {
+        let (url, _closed) = serve(Peer::Echo, true);
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let err = db::with_thread_db_path(db.path(), || {
+            handle_cap("ws.open", json!({"url": url, "insecure": true}), "ws-tls")
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("may not skip TLS verification"), "got: {err}");
     }
 
     #[test]

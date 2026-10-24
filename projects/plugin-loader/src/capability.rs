@@ -242,6 +242,8 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
             let body_b64 = req.body_b64;
             let reserve = max_body.unwrap_or(utils::http::MAX_RESPONSE_BYTES);
             let share = plugin_body_share(principal);
+            let insecure =
+                crate::tls_policy::effective_insecure(principal, &req.url, req.insecure)?;
             let mut builder = utils::http::shared()
                 .raw_request(utils::http::RawRequest {
                     method: req.method,
@@ -249,7 +251,7 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
                     headers: req.headers,
                     body: req.body,
                     timeout_ms: req.timeout_ms,
-                    insecure: req.insecure,
+                    insecure,
                 })
                 .map_err(|e| anyhow!("http.request: {e}"))?;
             if let Some(n) = max_body {
@@ -335,13 +337,14 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
 pub fn handle_cap_stream(
     cap: &str,
     args: Value,
+    principal: &str,
     on_chunk: &mut dyn FnMut(u64, Value) -> Result<()>,
 ) -> Result<()> {
     match cap {
         "http.stream" => {
             let req: HttpStreamRequest = serde_json::from_value(args)
                 .map_err(|e| anyhow!("http.stream: bad request payload: {e}"))?;
-            exec_http_stream(req, on_chunk)
+            exec_http_stream(req, principal, on_chunk)
         }
         other => Err(anyhow!("unknown streaming capability '{other}'")),
     }
@@ -353,8 +356,10 @@ pub fn handle_cap_stream(
 /// whole body.
 fn exec_http_stream(
     req: HttpStreamRequest,
+    principal: &str,
     on_chunk: &mut dyn FnMut(u64, Value) -> Result<()>,
 ) -> Result<()> {
+    let insecure = crate::tls_policy::effective_insecure(principal, &req.url, req.insecure)?;
     let builder = utils::http::shared()
         .raw_request(utils::http::RawRequest {
             method: req.method,
@@ -362,7 +367,7 @@ fn exec_http_stream(
             headers: req.headers,
             body: req.body,
             timeout_ms: req.timeout_ms,
-            insecure: req.insecure,
+            insecure,
         })
         .map_err(|e| anyhow!("http.stream: {e}"))?;
 
@@ -533,6 +538,7 @@ mod tests {
         handle_cap_stream(
             "http.stream",
             json!({"method": "GET", "url": url}),
+            "p",
             &mut sink,
         )
         .expect("stream succeeds");
@@ -677,7 +683,7 @@ mod tests {
     #[test]
     fn stream_unknown_capability_errors() {
         let mut sink = |_seq: u64, _v: Value| Ok(());
-        let err = handle_cap_stream("bogus.cap", json!({}), &mut sink)
+        let err = handle_cap_stream("bogus.cap", json!({}), "p", &mut sink)
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown streaming capability"), "got: {err}");
@@ -988,6 +994,7 @@ mod tests {
             handle_cap_stream(
                 "http.stream",
                 json!({"method": "GET", "url": url}),
+                "p",
                 &mut sink,
             )
             .expect("stream succeeds");
@@ -1008,6 +1015,7 @@ mod tests {
         let err = handle_cap_stream(
             "http.stream",
             json!({"method": "GET", "url": url}),
+            "p",
             &mut sink,
         )
         .unwrap_err()
@@ -1021,6 +1029,7 @@ mod tests {
         let err = handle_cap_stream(
             "http.stream",
             json!({"method": "GET", "url": "not a valid url"}),
+            "p",
             &mut sink,
         )
         .unwrap_err()
@@ -1037,7 +1046,7 @@ mod tests {
             called = true;
             Ok(())
         };
-        let err = handle_cap_stream("http.stream", json!({"method": "GET"}), &mut sink)
+        let err = handle_cap_stream("http.stream", json!({"method": "GET"}), "p", &mut sink)
             .unwrap_err()
             .to_string();
         assert!(
