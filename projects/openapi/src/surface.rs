@@ -978,6 +978,30 @@ mod tests {
     }
 
     #[test]
+    fn non_secret_columns_are_normalized() {
+        for entry in NON_SECRET_COLUMNS {
+            assert_eq!(*entry, utils::scrub::normalize_key(entry), "{entry}");
+        }
+    }
+
+    #[test]
+    fn auth_template_columns_match_declared_spelling_exactly() {
+        let s = column_surface("{endpoint.tokenId}={secret}", json!(["tokenId"])).unwrap();
+        assert_eq!(s.auth_columns().unwrap(), vec!["tokenId"]);
+        let op = s.find("s.get").unwrap();
+        let cols = BTreeMap::from([("tokenId".to_string(), "root@pam!t".to_string())]);
+        let req = s
+            .build_request_with(op, "https://h", &Map::new(), Some("k"), &cols)
+            .unwrap();
+        assert_eq!(
+            req.headers,
+            vec![("Authorization".into(), "root@pam!t=k".into())]
+        );
+        assert!(column_surface("{endpoint.tokenId}={secret}", json!(["token_id"])).is_err());
+        assert!(column_surface("{endpoint.token_id}={secret}", json!(["tokenId"])).is_err());
+    }
+
+    #[test]
     fn public_columns_must_be_declared() {
         let parse = |endpoint: Value| {
             ApiSurface::parse(
