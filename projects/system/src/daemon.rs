@@ -363,12 +363,66 @@ fn canonical_path(path: &str) -> String {
 #[cfg(target_os = "linux")]
 fn render_user_unit(binary: &str, port: u16, home: &str, daemon_log: &str) -> String {
     format!(
-        "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target\n\n\
+        "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target {APP_SYSTEMD_SERVICE_LEGACY}.service\n\
+         Conflicts={APP_SYSTEMD_SERVICE_LEGACY}.service\n\n\
          [Service]\nExecStart={binary} daemon --port {port}\n\
          Environment=HOME={home}\nRestart=always\nRestartSec=5\n\
          StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
          [Install]\nWantedBy=default.target\n"
     )
+}
+
+#[cfg(target_os = "linux")]
+fn render_system_unit(binary: &str, port: u16, user: &str, home: &str, daemon_log: &str) -> String {
+    format!(
+        "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target {APP_SYSTEMD_SERVICE_LEGACY}.service\n\
+         Conflicts={APP_SYSTEMD_SERVICE_LEGACY}.service\n\n\
+         [Service]\nType=simple\nUser={user}\n\
+         Environment=HOME={home}\nExecStart={binary} daemon --port {port}\n\
+         Restart=always\nRestartSec=5\n\
+         StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
+         [Install]\nWantedBy=multi-user.target\n"
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq)]
+struct UnitFields {
+    binary: String,
+    port: u16,
+    user: Option<String>,
+    home: String,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_unit(content: &str) -> Option<UnitFields> {
+    let value = |key: &str| {
+        content
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(key).map(str::to_owned))
+    };
+    let exec = value("ExecStart=")?;
+    let (binary, port) = exec.split_once(" daemon --port ")?;
+    Some(UnitFields {
+        binary: binary.trim().to_string(),
+        port: port.split_whitespace().next()?.parse().ok()?,
+        user: value("User="),
+        home: value("Environment=HOME=")?,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn fresh_unit_for(legacy: &str, user_mode: bool) -> Option<String> {
+    let f = parse_unit(legacy)?;
+    let log = format!(
+        "{}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}/{APP_DAEMON_STDERR_FILE}",
+        f.home
+    );
+    Some(if user_mode {
+        render_user_unit(&f.binary, f.port, &f.home, &log)
+    } else {
+        render_system_unit(&f.binary, f.port, f.user.as_deref()?, &f.home, &log)
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -383,14 +437,26 @@ fn is_orca_daemon_unit(content: &str) -> bool {
 fn stable_binary(binary: &str, home: &str) -> String {
     let resolved = canonical_path(binary);
     [
+        Some(binary.to_string()),
         utils::path::which(APP_NAME),
         Some(format!("{home}/.local/bin/{APP_NAME}")),
         Some(format!("/usr/local/bin/{APP_NAME}")),
     ]
     .into_iter()
     .flatten()
-    .find(|c| std::path::Path::new(c).exists() && canonical_path(c) == resolved)
-    .unwrap_or_else(|| binary.to_string())
+    .find(|c| {
+        std::path::Path::new(c).exists() && canonical_path(c) == resolved && parent_root_owned(c)
+    })
+    .unwrap_or(resolved)
+}
+
+#[cfg(target_os = "linux")]
+fn parent_root_owned(path: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::path::Path::new(path)
+        .parent()
+        .and_then(|d| std::fs::metadata(d).ok())
+        .is_some_and(|m| m.uid() == 0)
 }
 
 #[cfg(target_os = "linux")]
@@ -469,13 +535,10 @@ fn handoff_commands(user_mode: bool) -> [Vec<Vec<String>>; 2] {
     );
     [
         vec![run],
-        vec![
-            systemctl(
-                user_mode,
-                &["--no-block", "stop", APP_SYSTEMD_SERVICE_LEGACY],
-            ),
-            systemctl(user_mode, &["--no-block", "start", APP_SYSTEMD_SERVICE]),
-        ],
+        vec![systemctl(
+            user_mode,
+            &["--no-block", "start", APP_SYSTEMD_SERVICE],
+        )],
     ]
 }
 
@@ -551,39 +614,73 @@ fn legacy_scope_from_cgroup(cgroup: &str) -> Option<bool> {
 }
 
 #[cfg(target_os = "linux")]
+fn migrate_unit_dir(
+    unit_dir: &str,
+    user_mode: bool,
+    run: &mut dyn FnMut(&[String]) -> bool,
+) -> Result<bool> {
+    let Some(legacy_path) = owned_unit(unit_dir, APP_SYSTEMD_SERVICE_LEGACY) else {
+        return Ok(false);
+    };
+    let legacy = std::fs::read_to_string(&legacy_path)?;
+    let unit = fresh_unit_for(&legacy, user_mode)
+        .ok_or_else(|| anyhow::anyhow!("cannot parse legacy unit {legacy_path}"))?;
+    std::fs::write(format!("{unit_dir}/{APP_SYSTEMD_SERVICE}.service"), unit)?;
+    run_plan(&activation_plan(user_mode, true), unit_dir, user_mode, run)?;
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
 fn migrate_legacy_unit(
     cgroup: &str,
     home: &str,
     root: bool,
     run: &mut dyn FnMut(&[String]) -> bool,
 ) -> Result<bool> {
-    let Some(user_mode) = legacy_scope_from_cgroup(cgroup) else {
-        return Ok(false);
-    };
-    if !user_mode && !root {
-        tracing::warn!(
-            "running under legacy system unit {APP_SYSTEMD_SERVICE_LEGACY}.service; re-run `orca system install --service-user` as root to migrate"
-        );
-        return Ok(false);
+    match legacy_scope_from_cgroup(cgroup) {
+        None => Ok(false),
+        Some(true) => migrate_unit_dir(&format!("{home}/.config/systemd/user"), true, run),
+        Some(false) if root => migrate_unit_dir(SYSTEM_UNIT_DIR, false, run),
+        Some(false) => {
+            let exe = utils::path::privileged_exe()?;
+            let exe = exe.to_string_lossy();
+            if run(&unit_migrate_command(&exe)) {
+                return Ok(true);
+            }
+            tracing::warn!(
+                "running under legacy system unit {APP_SYSTEMD_SERVICE_LEGACY}.service and `sudo -n {exe} admin unit-migrate` is not granted; run `sudo orca identity privilege repair`"
+            );
+            Ok(false)
+        }
     }
-    let unit_dir = if user_mode {
-        format!("{home}/.config/systemd/user")
-    } else {
-        SYSTEM_UNIT_DIR.to_string()
-    };
-    let Some(legacy_path) = owned_unit(&unit_dir, APP_SYSTEMD_SERVICE_LEGACY) else {
-        return Ok(false);
-    };
-    let new_path = format!("{unit_dir}/{APP_SYSTEMD_SERVICE}.service");
-    if !std::path::Path::new(&new_path).exists() {
-        std::fs::copy(&legacy_path, &new_path)?;
-    }
-    run_plan(&activation_plan(user_mode, true), &unit_dir, user_mode, run)?;
-    Ok(true)
 }
 
-/// Move a daemon still running under the legacy `orca.service` onto
-/// `orca-daemon.service`; hosts that self-update never re-run install.
+#[cfg(target_os = "linux")]
+fn unit_migrate_command(exe: &str) -> Vec<String> {
+    ["sudo", "-n", exe, "admin", "unit-migrate"]
+        .map(String::from)
+        .to_vec()
+}
+
+#[cfg(target_os = "linux")]
+pub fn admin_unit_migrate() -> Result<()> {
+    if !is_root() {
+        anyhow::bail!("admin unit-migrate must run as root");
+    }
+    if migrate_unit_dir(SYSTEM_UNIT_DIR, false, &mut run_command)? {
+        println!(
+            "{} handed {APP_SYSTEMD_SERVICE_LEGACY}.service -> {APP_SYSTEMD_SERVICE}.service switch to systemd",
+            "✓".green()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn admin_unit_migrate() -> Result<()> {
+    anyhow::bail!("admin unit-migrate is only supported on Linux")
+}
+
 #[cfg(target_os = "linux")]
 pub fn migrate_legacy_unit_on_startup() {
     let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
@@ -703,14 +800,7 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
     // Supervisor capture only — the structured log is the subscriber's
     // rotated tee (`daemon.jsonl`). See APP_DAEMON_STDERR_FILE.
     let daemon_log = format!("{logs_dir}/{APP_DAEMON_STDERR_FILE}");
-    let unit = format!(
-        "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target\n\n\
-         [Service]\nType=simple\nUser={user}\n\
-         Environment=HOME={home}\nExecStart={binary} daemon --port {port}\n\
-         Restart=always\nRestartSec=5\n\
-         StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
-         [Install]\nWantedBy=multi-user.target\n"
-    );
+    let unit = render_system_unit(&binary, port, user, &home, &daemon_log);
     std::fs::write(&path, &unit)?;
     println!("{} wrote {}", "✓".green(), path);
 
@@ -896,6 +986,10 @@ mod tests {
         "[Unit]\nDescription=Orca screen reader\n\n[Service]\nExecStart=/usr/bin/orca\n";
 
     #[cfg(target_os = "linux")]
+    const LEGACY_USER_UNIT: &str = "[Unit]\nDescription=orca daemon\n\n[Service]\n\
+         ExecStart=/usr/bin/orca daemon --port 12001\nEnvironment=HOME=/home/u\n";
+
+    #[cfg(target_os = "linux")]
     fn daemon_unit() -> String {
         render_user_unit("/usr/bin/orca", 12001, "/home/u", "/home/u/l")
     }
@@ -980,7 +1074,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let dir = home.path().join(".config/systemd/user");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("orca.service"), daemon_unit()).unwrap();
+        std::fs::write(dir.join("orca.service"), LEGACY_USER_UNIT).unwrap();
         let mut ran = Vec::new();
         let migrated = migrate_legacy_unit(
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/orca.service\n",
@@ -993,12 +1087,96 @@ mod tests {
         )
         .unwrap();
         assert!(migrated);
-        assert_eq!(
-            std::fs::read_to_string(dir.join("orca-daemon.service")).unwrap(),
-            daemon_unit()
-        );
+        let unit = std::fs::read_to_string(dir.join("orca-daemon.service")).unwrap();
+        assert!(unit.contains("Conflicts=orca.service"), "{unit}");
+        assert!(unit.contains("ExecStart=/usr/bin/orca daemon --port 12001"));
+        assert!(unit.contains("Environment=HOME=/home/u"));
         assert!(!dir.join("orca.service").exists());
         assert!(ran.iter().any(|c| c.starts_with("systemd-run --user")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_root_system_migration_goes_through_the_sudo_grant() {
+        let mut ran = Vec::new();
+        let migrated = migrate_legacy_unit(
+            "0::/system.slice/orca.service\n",
+            "/x",
+            false,
+            &mut |argv| {
+                ran.push(argv.to_vec());
+                true
+            },
+        )
+        .unwrap();
+        assert!(migrated);
+        assert_eq!(ran.len(), 1);
+        assert_eq!(&ran[0][..2], ["sudo", "-n"]);
+        assert_eq!(&ran[0][3..], ["admin", "unit-migrate"]);
+        let refused =
+            migrate_legacy_unit("0::/system.slice/orca.service\n", "/x", false, &mut |_| {
+                false
+            })
+            .unwrap();
+        assert!(!refused);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rendered_units_conflict_with_the_legacy_unit() {
+        let system =
+            render_system_unit("/usr/local/bin/orca", 12001, "orca", "/var/lib/orca", "/l");
+        for unit in [daemon_unit(), system] {
+            assert!(unit.contains("Conflicts=orca.service\n"), "{unit}");
+            assert!(
+                unit.contains("After=network.target orca.service\n"),
+                "{unit}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fallback_handoff_is_one_non_blocking_start() {
+        let [_, fallback] = handoff_commands(true);
+        assert_eq!(
+            fallback,
+            vec![systemctl(true, &["--no-block", "start", "orca-daemon"])]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn legacy_system_unit_parses_into_a_fresh_render() {
+        let legacy = "[Service]\nType=simple\nUser=orca\nEnvironment=HOME=/var/lib/orca\n\
+                      ExecStart=/usr/local/bin/orca daemon --port 12001\n";
+        assert_eq!(
+            parse_unit(legacy),
+            Some(UnitFields {
+                binary: "/usr/local/bin/orca".into(),
+                port: 12001,
+                user: Some("orca".into()),
+                home: "/var/lib/orca".into(),
+            })
+        );
+        let unit = fresh_unit_for(legacy, false).unwrap();
+        assert!(unit.contains("User=orca") && unit.contains("Conflicts=orca.service"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stable_binary_resolves_symlinks_in_user_owned_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("orca-1.2.3");
+        std::fs::write(&real, b"").unwrap();
+        let link = dir.path().join("orca");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let got = stable_binary(link.to_str().unwrap(), "/nonexistent");
+        if parent_root_owned(link.to_str().unwrap()) {
+            assert_eq!(got, link.to_str().unwrap());
+        } else {
+            assert_eq!(got, canonical_path(real.to_str().unwrap()));
+        }
     }
 
     #[cfg(target_os = "linux")]

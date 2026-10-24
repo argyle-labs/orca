@@ -323,6 +323,10 @@ enum AdminAction {
     /// never is. Invoked by the daemon via `sudo -n` for `system.cron.*`.
     /// Never exposed over REST/MCP/peer.
     CronApply,
+    /// Move orca's own legacy `orca.service` system unit onto
+    /// `orca-daemon.service` as root. Takes no input; invoked by the daemon via
+    /// `sudo -n` at startup. Never exposed over REST/MCP/peer.
+    UnitMigrate,
     /// Generic privileged seam for plugins: reads `{plugin, op, payload}` JSON
     /// from stdin, resolves `plugin` only in the installed-plugin dir, checks
     /// its binary (owned by the invoking user) against the sha256 in the
@@ -1061,6 +1065,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::LxcExec => cmd_admin_lxc_exec().await,
         AdminAction::LxcPush => cmd_admin_lxc_push().await,
         AdminAction::CronApply => cmd_admin_cron_apply().await,
+        AdminAction::UnitMigrate => system::daemon::admin_unit_migrate(),
         AdminAction::PluginApply => cmd_admin_plugin_apply().await,
         AdminAction::PluginTrust { name, unsigned } => cmd_admin_plugin_trust(&name, unsigned),
         AdminAction::PluginTrustSigned => cmd_admin_plugin_trust_signed(),

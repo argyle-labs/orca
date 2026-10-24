@@ -223,7 +223,7 @@ fn install_autofs_sudoers(user: &str) -> Result<()> {
     }
 
     println!(
-        "{} sudoers: {user} may run '{binary} admin storage-apply' + 'admin plugin-apply' + 'admin plugin-trust-signed'{}{}",
+        "{} sudoers: {user} may run '{binary} admin storage-apply' + 'admin plugin-apply' + 'admin plugin-trust-signed' + 'admin unit-migrate'{}{}",
         "✓".green(),
         if cron { " + 'admin cron-apply'" } else { "" },
         if is_proxmox {
@@ -643,7 +643,9 @@ fn sudoers_contents(user: &str, binary: &str, is_proxmox: bool, cron: bool) -> S
          {user} ALL=(root) NOPASSWD: {binary} admin plugin-apply\n\
          # Record a just-installed plugin as trusted once its signature verifies.\n\
          # The name arrives on stdin: sudo `*` would also match `--unsigned`.\n\
-         {user} ALL=(root) NOPASSWD: {binary} admin plugin-trust-signed\n"
+         {user} ALL=(root) NOPASSWD: {binary} admin plugin-trust-signed\n\
+         # Move orca's own legacy orca.service onto orca-daemon.service.\n\
+         {user} ALL=(root) NOPASSWD: {binary} admin unit-migrate\n"
     );
     if cron {
         contents.push_str(&format!(
@@ -1030,6 +1032,9 @@ mod sudoers_tests {
         )));
         assert!(c.contains(&format!(
             "orca ALL=(root) NOPASSWD: {bin} admin plugin-trust-signed\n"
+        )));
+        assert!(c.contains(&format!(
+            "orca ALL=(root) NOPASSWD: {bin} admin unit-migrate\n"
         )));
         assert!(!c.contains("cron-apply"), "no allow-list, no cron grant");
         let cron = sudoers_contents("orca", bin, false, true);
