@@ -226,6 +226,16 @@ fn build_deb(
     let staged_bin = bin_dir.join("orca");
     std::fs::copy(binary, &staged_bin)?;
     set_mode_755(&staged_bin)?;
+    set_mode(&debian.join("control"), 0o644)?;
+    for dir in [
+        staging.clone(),
+        debian.clone(),
+        staging.join("usr"),
+        staging.join("usr/local"),
+        bin_dir.clone(),
+    ] {
+        set_mode_755(&dir)?;
+    }
 
     let pkg_name = format!("orca_{version}_{deb_arch}.deb");
     let out = out_dir.join(&pkg_name);
@@ -1084,16 +1094,21 @@ fn write_script(path: &Path, content: &str) -> Result<()> {
     set_mode_755(path)
 }
 
-#[cfg(unix)]
 fn set_mode_755(path: &Path) -> Result<()> {
+    set_mode(path, 0o755)
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)?.permissions();
-    perms.set_mode(0o755);
-    Ok(std::fs::set_permissions(path, perms)?)
+    Ok(std::fs::set_permissions(
+        path,
+        std::fs::Permissions::from_mode(mode),
+    )?)
 }
 
 #[cfg(not(unix))]
-fn set_mode_755(_path: &Path) -> Result<()> {
+fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
@@ -1886,6 +1901,43 @@ mod tests {
                 .mode();
             assert_eq!(bm & 0o777, 0o755);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(umask)]
+    fn deb_staging_dirs_are_0755_under_umask_000() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_binary(dir.path());
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        struct Restore(libc::mode_t);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe { libc::umask(self.0) };
+            }
+        }
+        let _restore = Restore(unsafe { libc::umask(0) });
+        let Ok(()) = build_deb(&bin, "1.2.3", "x86_64", "M", &out) else {
+            panic!("build_deb failed under umask 000");
+        };
+        if utils::path::which("dpkg-deb").is_some() {
+            assert!(out.join("orca_1.2.3_amd64.deb").exists());
+            return;
+        }
+        let staged = out.join("orca-deb-staging");
+        let mode = |p: &str| {
+            std::fs::metadata(staged.join(p))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        for d in ["", "DEBIAN", "usr", "usr/local", "usr/local/bin"] {
+            assert_eq!(mode(d), 0o755, "{d}");
+        }
+        assert_eq!(mode("DEBIAN/control"), 0o644);
     }
 
     // ── rpm spec: every scriptlet + payload directive ─────────────────
