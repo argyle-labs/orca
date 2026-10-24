@@ -8,10 +8,11 @@
 //! `updated_at` clock end to end — it is stamped on every write and never a tool
 //! argument.
 //!
-//! Core is generic: `options` and `options_rendered` are **opaque** strings the
-//! owning backend plugin (`argyle-labs/nfs`, `argyle-labs/smb`) produced. Core
-//! never interprets them — the applier feeds `options_rendered` to `mount(8)`
-//! verbatim. The typed, per-backend option surface lives in the plugins, so an
+//! Core is generic: `options` is the authored comma-separated mount option
+//! string, opaque to core. The owning backend plugin (`argyle-labs/nfs`,
+//! `argyle-labs/smb`) validates and renders it per mount at converge time, so
+//! per-target details (an inline credential's `credentials=` path) are derived,
+//! never stored. The typed, per-backend option surface lives in the plugins, so an
 //! NFS caller never sees an SMB field and vice-versa.
 //!
 //! Ordered failover sources are the share's typed `routes` (built into every
@@ -49,12 +50,9 @@ pub struct Share {
     pub backend: String,
     /// Filesystem type passed to `mount -t` (`nfs4`, `cifs`).
     pub fstype: String,
-    /// The owning plugin's typed option object as opaque JSON, kept for
-    /// edit/round-trip. Core never parses it.
+    /// Authored comma-separated mount options (`vers=3.1.1,nosharesock`). The
+    /// backend renders them per mount; core never parses them.
     pub options: String,
-    /// The concrete `mount(8)` option string the plugin rendered from `options`
-    /// at declare time — what the applier feeds `mount -o`. Opaque to core.
-    pub options_rendered: String,
     /// Credential reference (a SecretRef the secrets domain resolves). Persisted,
     /// never surfaced.
     #[secret]

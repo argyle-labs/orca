@@ -64,14 +64,13 @@ Both tables replicate mesh-wide, LWW-converged on `updated_at`.
 | backend | text | `nfs` (which plugin owns rendering/validation) |
 | fstype | text | `nfs4` |
 | sources | json | ordered `["host:/export", …]`, index 0 = primary, rest failover |
-| options | json | opaque to core; the plugin's typed option object |
-| options_rendered | text | the kernel option string the plugin produced at declare time |
+| options | text | authored comma-separated mount options; opaque to core |
 | credential | text (secret) | optional SecretRef |
 | updated_at | int | LWW clock |
 
-`options` (typed, for edit/round-trip) + `options_rendered` (what core feeds
-`mount`) travel together; core never interprets `options`, only emits
-`options_rendered`.
+Core never interprets `options`. The owning backend renders them per mount at
+converge time (so per-target values such as an inline credential's
+`credentials=` path are derived, never stored).
 
 ### `mounts`
 | col | type | note |
@@ -115,7 +114,7 @@ Replace autofs entirely.
   `attributeCache` ms, `extra[]`) with canonical `Default`.
 - Renders `(fstype, options_string)` + validates at declare time; writes the
   Share/Mount desired state into core (on the target host's daemon).
-- Core calls nothing NFS-specific at apply time — it emits `options_rendered`.
+- Core calls nothing NFS-specific at apply time — it hands `options` to the backend's renderer.
 
 ## Migration (gated, not auto-applied)
 

@@ -27,7 +27,6 @@ pub const RENAMED_ARGS: &[(&str, &[&str])] = &[
     ("pki.create", &["pluginId"]),
     ("plugin.data.detail", &["dataKey"]),
     ("secrets.upsert", &["refPath", "valueStdin"]),
-    ("storage.share.create", &["optionsRendered"]),
     (
         "system.build",
         &[
