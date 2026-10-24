@@ -452,6 +452,16 @@ pub fn task_db_path_snapshot() -> Option<std::path::PathBuf> {
     TASK_DB_PATH.try_with(|p| p.clone()).ok()
 }
 
+/// Snapshot the active DB-path override (task-local, else thread-local) so
+/// work moved onto another thread can reopen the same database.
+pub fn db_path_override_snapshot() -> Option<std::path::PathBuf> {
+    task_db_path_snapshot().or_else(|| {
+        THREAD_DB_PATH
+            .with(|p| p.borrow().clone())
+            .map(std::path::PathBuf::from)
+    })
+}
+
 /// Legacy: set a per-thread DB path override. Prefer `with_db_path` — this
 /// breaks the moment a handler awaits and resumes on another worker thread.
 pub fn set_thread_db_path(path: Option<&str>) {
