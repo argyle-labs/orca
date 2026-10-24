@@ -23,7 +23,7 @@ env:
 
 jobs:
   build-x86_64-linux-gnu:
-    runs-on: ubuntu-latest
+    runs-on: ci-large
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
       credentials:
@@ -47,7 +47,7 @@ jobs:
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
 
   build-x86_64-linux-musl:
-    runs-on: ubuntu-latest
+    runs-on: ci-large
     container:
       image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
       credentials:
