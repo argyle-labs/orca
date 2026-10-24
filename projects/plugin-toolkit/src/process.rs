@@ -627,14 +627,15 @@ mod tests {
             .arg(format!("sleep 30 & echo $! > {}{tail}", pidfile.display()))
             .kill_process_group_on_timeout();
         assert!(run(cmd).await, "expected timeout");
-        let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
-            .unwrap()
+        let pid: libc::pid_t = wait_for_file(&pidfile)
+            .await
+            .expect("grandchild pid written")
             .trim()
             .parse()
             .unwrap();
         let mut alive = true;
         for _ in 0..50 {
-            if unsafe { libc::kill(pid, 0) } != 0 {
+            if !process_alive(pid) {
                 alive = false;
                 break;
             }
@@ -642,6 +643,20 @@ mod tests {
         }
         std::fs::remove_dir_all(&dir).ok();
         assert!(!alive, "grandchild sleep {pid} survived the timeout");
+    }
+
+    #[cfg(unix)]
+    fn process_alive(pid: libc::pid_t) -> bool {
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            && let Some((_, rest)) = stat.rsplit_once(')')
+        {
+            return !matches!(rest.trim_start().chars().next(), Some('Z' | 'X'));
+        }
+        true
     }
 
     #[cfg(unix)]
