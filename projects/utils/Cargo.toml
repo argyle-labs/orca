@@ -38,7 +38,8 @@ search = ["dep:glob"]
 # `utils::config_format` — parse-check managed config files. Pulls the toml and
 # xml parsers and reuses the gated yaml one; off for thin consumers that never
 # write config.
-config_format = ["yaml", "dep:toml", "dep:roxmltree"]
+config_format = ["yaml", "dep:toml", "xml"]
+xml = ["dep:roxmltree"]
 # `utils::yaml` — YAML deserialization (serde_yaml, unmaintained → confined here
 # so it can be swapped with zero call-site churn). Off unless a consumer parses
 # YAML.

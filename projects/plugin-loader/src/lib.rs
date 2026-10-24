@@ -30,6 +30,7 @@ pub mod capability;
 #[cfg(unix)]
 pub mod privileged;
 pub mod supervisor;
+mod tls_policy;
 pub mod tool_call;
 mod ws;
 

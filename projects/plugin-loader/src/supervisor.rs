@@ -244,7 +244,7 @@ pub fn invoke_on<S: Read + Write>(
                 let mut sink_err: Option<anyhow::Error> = None;
                 let result = {
                     let sink_err = &mut sink_err;
-                    capability::handle_cap_stream(&cap, args, &mut |seq, data| {
+                    capability::handle_cap_stream(&cap, args, principal, &mut |seq, data| {
                         write_frame(
                             stream,
                             &Frame::CapStreamChunk {

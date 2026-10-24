@@ -11,7 +11,7 @@ path = "src/lib.rs"
 # Default is the light core only; every consumer enables the features it uses.
 [features]
 default = []
-full = ["in-process", "tools", "endpoints", "containers", "notify", "graphql", "openapi", "http", "descriptor", "jemalloc-stats"]
+full = ["in-process", "tools", "endpoints", "containers", "notify", "graphql", "openapi", "http", "descriptor", "jemalloc-stats", "xml"]
 # Host-side domain-proxy profile: the daemon/loader links this to turn on the
 # subcrate host-side JSON proxies (storage/service/deploy-target/contract/
 # dispatch `in-process`) that drive a loaded subprocess plugin's registered
@@ -81,6 +81,7 @@ delegated-http = ["dep:regress"]
 # swaps the `reqwest`/`api_client` names and excludes `http`; a plugin on the
 # real `http` stack can still delegate WebSocket. Dependency-free.
 delegated-ws = []
+xml = ["utils/xml"]
 # Meta-feature: the canonical profile for a full OpenAPI plugin built with
 # `plugin_toolkit_build::openapi_plugin`. Bundles the tool surface (`tools`),
 # the endpoint registry (`db`), and delegated HTTP so the generated progenitor

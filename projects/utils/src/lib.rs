@@ -17,6 +17,8 @@ pub mod atomic;
 /// Base64 encode/decode (standard + url-safe). orca-owned; the base64 lib is
 /// hidden.
 pub mod encoding;
+#[cfg(feature = "xml")]
+pub use roxmltree;
 pub mod hash;
 /// Time-ordered unique ID generation. orca-owned; the UUID lib is hidden.
 pub mod home;

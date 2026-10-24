@@ -115,6 +115,21 @@ The plugin HTTP surface is `plugin_toolkit::client`, exposing the orca-owned
 abstraction* — a plugin never names reqwest or `futures_util`). Transport and
 log caps are tracked as future additions.
 
+### TLS verification policy
+
+A plugin's `insecure` flag on `http.request`, `http.stream`, and `ws.open` is a
+request, not a decision. Core grants it only when an enabled endpoint owned by
+that plugin is admin-marked `insecure` and one of its enabled routes matches the
+target URL's host, port (a portless route means its scheme's default port), and
+TLS family (`https`/`wss` or `http`/`ws`); otherwise the call is refused.
+Insecure HTTP requests never follow redirects, and open insecure WebSocket
+sessions are closed on the next `ws.send`/`ws.recv` once the endpoint is
+unmarked or disabled.
+
+Marking an `fqdn` route insecure trusts DNS for that name: whoever controls its
+resolution receives unverified TLS traffic. Prefer IP-literal routes for
+insecure endpoints.
+
 `db.op` is the same seam established for DB ([[plugin-db-through-core-design]]),
 generalized to every heavy capability and carried on the socket.
 

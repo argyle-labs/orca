@@ -95,6 +95,23 @@ impl ApiClientBuilder {
         self.header("authorization", format!("Bearer {}", token.as_ref()))
     }
 
+    pub fn basic(
+        self,
+        user: impl AsRef<str>,
+        password: ::utils::secret::Secret<String>,
+    ) -> Result<Self> {
+        let user = user.as_ref();
+        if user.contains(':') {
+            bail!("basic auth user-id must not contain ':'");
+        }
+        let creds = ::utils::secret::Secret::new(format!("{user}:{}", password.expose_secret()));
+        let value = ::utils::secret::Secret::new(format!(
+            "Basic {}",
+            ::utils::encoding::base64_encode(creds.expose_secret().as_bytes())
+        ));
+        self.header("authorization", value.expose_secret())
+    }
+
     /// Skip TLS certificate verification. Required for homelab Proxmox
     /// nodes and any other endpoint behind a self-signed cert.
     pub fn insecure(mut self, on: bool) -> Self {
@@ -591,5 +608,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn basic_attaches_authorization_header_and_redacts() {
+        install_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/probe"))
+            .and(header("authorization", "Basic YWxpY2U6czNjcmV0"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let builder = ApiClientBuilder::new()
+            .basic("alice", ::utils::secret::Secret::new("s3cret".to_string()))
+            .unwrap();
+        let dbg = format!("{builder:?}");
+        assert!(
+            !dbg.contains("YWxpY2U6czNjcmV0") && !dbg.contains("s3cret"),
+            "{dbg}"
+        );
+        let http = builder.build().unwrap();
+        let r = http
+            .get(format!("{}/probe", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+    }
+
+    #[test]
+    fn basic_rejects_colon_in_user() {
+        assert!(
+            ApiClientBuilder::new()
+                .basic("al:ice", ::utils::secret::Secret::new("p".to_string()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn bearer_then_basic_yields_one_authorization() {
+        let b = ApiClientBuilder::new()
+            .bearer("tok-xyz")
+            .unwrap()
+            .basic("alice", ::utils::secret::Secret::new("s3cret".to_string()))
+            .unwrap();
+        assert_eq!(b.headers.get_all("authorization").iter().count(), 1);
+        assert_eq!(b.headers["authorization"], "Basic YWxpY2U6czNjcmV0");
     }
 }

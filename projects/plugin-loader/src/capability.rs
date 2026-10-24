@@ -242,6 +242,8 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
             let body_b64 = req.body_b64;
             let reserve = max_body.unwrap_or(utils::http::MAX_RESPONSE_BYTES);
             let share = plugin_body_share(principal);
+            let insecure =
+                crate::tls_policy::effective_insecure(principal, &req.url, req.insecure)?;
             let mut builder = utils::http::shared()
                 .raw_request(utils::http::RawRequest {
                     method: req.method,
@@ -249,7 +251,7 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
                     headers: req.headers,
                     body: req.body,
                     timeout_ms: req.timeout_ms,
-                    insecure: req.insecure,
+                    insecure,
                     retry: req.retry,
                     connect_timeout_ms: req.connect_timeout_ms,
                 })
@@ -259,6 +261,9 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
             }
             if let Some(follow) = req.follow_redirects {
                 builder = builder.follow_redirects(follow);
+            }
+            if insecure {
+                builder = builder.follow_redirects(false);
             }
             let resp = run_on_cap_runtime(async move {
                 let _permits =
@@ -337,13 +342,14 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
 pub fn handle_cap_stream(
     cap: &str,
     args: Value,
+    principal: &str,
     on_chunk: &mut dyn FnMut(u64, Value) -> Result<()>,
 ) -> Result<()> {
     match cap {
         "http.stream" => {
             let req: HttpStreamRequest = serde_json::from_value(args)
                 .map_err(|e| anyhow!("http.stream: bad request payload: {e}"))?;
-            exec_http_stream(req, on_chunk)
+            exec_http_stream(req, principal, on_chunk)
         }
         other => Err(anyhow!("unknown streaming capability '{other}'")),
     }
@@ -355,19 +361,24 @@ pub fn handle_cap_stream(
 /// whole body.
 fn exec_http_stream(
     req: HttpStreamRequest,
+    principal: &str,
     on_chunk: &mut dyn FnMut(u64, Value) -> Result<()>,
 ) -> Result<()> {
-    let builder = utils::http::shared()
+    let insecure = crate::tls_policy::effective_insecure(principal, &req.url, req.insecure)?;
+    let mut builder = utils::http::shared()
         .raw_request(utils::http::RawRequest {
             method: req.method,
             url: req.url,
             headers: req.headers,
             body: req.body,
             timeout_ms: req.timeout_ms,
-            insecure: req.insecure,
+            insecure,
             ..Default::default()
         })
         .map_err(|e| anyhow!("http.stream: {e}"))?;
+    if insecure {
+        builder = builder.follow_redirects(false);
+    }
 
     // `on_chunk` is borrowed and not `Send`, so the stream is driven on the cap
     // runtime and each chunk is relayed back to run `on_chunk` on this thread.
@@ -536,6 +547,7 @@ mod tests {
         handle_cap_stream(
             "http.stream",
             json!({"method": "GET", "url": url}),
+            "p",
             &mut sink,
         )
         .expect("stream succeeds");
@@ -680,7 +692,7 @@ mod tests {
     #[test]
     fn stream_unknown_capability_errors() {
         let mut sink = |_seq: u64, _v: Value| Ok(());
-        let err = handle_cap_stream("bogus.cap", json!({}), &mut sink)
+        let err = handle_cap_stream("bogus.cap", json!({}), "p", &mut sink)
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown streaming capability"), "got: {err}");
@@ -709,6 +721,83 @@ mod tests {
             }
         });
         format!("http://{addr}/")
+    }
+
+    const REDIRECT_TO_UNMARKED: &[u8] =
+        b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.2:9/\r\nContent-Length: 0\r\n\r\n";
+
+    fn marked_routes(url: &str) -> String {
+        let port = crate::tls_policy::target(url).unwrap().port;
+        format!(r#"[{{"kind":"lan_v4","scheme":"http","value":"127.0.0.1","port":{port}}}]"#)
+    }
+
+    #[test]
+    fn http_request_insecure_refused_without_a_marked_endpoint() {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let err = db::with_thread_db_path(db.path(), || {
+            handle_cap(
+                "http.request",
+                json!({"method": "GET", "url": "https://10.0.0.1/", "insecure": true}),
+                "unmarked",
+            )
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("may not skip TLS verification"), "got: {err}");
+    }
+
+    #[test]
+    fn http_stream_insecure_refused_without_a_marked_endpoint() {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let mut sink = |_: u64, _: Value| -> Result<()> { Ok(()) };
+        let err = db::with_thread_db_path(db.path(), || {
+            handle_cap_stream(
+                "http.stream",
+                json!({"method": "GET", "url": "https://10.0.0.1/", "insecure": true}),
+                "unmarked",
+                &mut sink,
+            )
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("may not skip TLS verification"), "got: {err}");
+    }
+
+    #[test]
+    fn http_request_insecure_does_not_follow_a_redirect() {
+        let url = oneshot_http(REDIRECT_TO_UNMARKED);
+        let reply = crate::tls_policy::with_marked("redir", &marked_routes(&url), || {
+            handle_cap(
+                "http.request",
+                json!({"method": "GET", "url": url, "insecure": true, "follow_redirects": true}),
+                "redir",
+            )
+        })
+        .unwrap();
+        let resp: HttpResponse = serde_json::from_value(reply).unwrap();
+        assert_eq!(resp.status, 302);
+    }
+
+    #[test]
+    fn http_stream_insecure_does_not_follow_a_redirect() {
+        let url = oneshot_http(REDIRECT_TO_UNMARKED);
+        let mut status = None;
+        let mut sink = |_: u64, v: Value| -> Result<()> {
+            if let HttpStreamChunk::Head { status: s, .. } = serde_json::from_value(v)? {
+                status = Some(s);
+            }
+            Ok(())
+        };
+        crate::tls_policy::with_marked("redir", &marked_routes(&url), || {
+            handle_cap_stream(
+                "http.stream",
+                json!({"method": "GET", "url": url, "insecure": true}),
+                "redir",
+                &mut sink,
+            )
+        })
+        .unwrap();
+        assert_eq!(status, Some(302));
     }
 
     #[test]
@@ -991,6 +1080,7 @@ mod tests {
             handle_cap_stream(
                 "http.stream",
                 json!({"method": "GET", "url": url}),
+                "p",
                 &mut sink,
             )
             .expect("stream succeeds");
@@ -1011,6 +1101,7 @@ mod tests {
         let err = handle_cap_stream(
             "http.stream",
             json!({"method": "GET", "url": url}),
+            "p",
             &mut sink,
         )
         .unwrap_err()
@@ -1024,6 +1115,7 @@ mod tests {
         let err = handle_cap_stream(
             "http.stream",
             json!({"method": "GET", "url": "not a valid url"}),
+            "p",
             &mut sink,
         )
         .unwrap_err()
@@ -1040,7 +1132,7 @@ mod tests {
             called = true;
             Ok(())
         };
-        let err = handle_cap_stream("http.stream", json!({"method": "GET"}), &mut sink)
+        let err = handle_cap_stream("http.stream", json!({"method": "GET"}), "p", &mut sink)
             .unwrap_err()
             .to_string();
         assert!(
