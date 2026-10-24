@@ -353,6 +353,18 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
 /// Absent or `false` executes, `true` dry-runs. Any other value is refused:
 /// guessing either way would apply a change the caller meant to preview, or
 /// silently skip one they meant to apply.
+pub(crate) fn dry_run_requested(args: &Value) -> Result<bool> {
+    match args.get(contract::plan::DRY_RUN_FIELD) {
+        None => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(contract::OrcaError::invalid(format!(
+            "dryRun must be a boolean, got {other}"
+        ))
+        .with_code("args.invalid")
+        .into()),
+    }
+}
+
 pub fn dry_run_marked(result: &Value) -> bool {
     result.get(contract::plan::DRY_RUN_FIELD) == Some(&Value::Bool(true))
 }
@@ -365,18 +377,6 @@ pub fn require_dry_run_marked(name: &str, result: Value) -> Result<Value> {
         "{name}: dry run returned a result without `dryRun: true`; refusing it as possibly applied"
     ))
     .into())
-}
-
-pub(crate) fn dry_run_requested(args: &Value) -> Result<bool> {
-    match args.get(contract::plan::DRY_RUN_FIELD) {
-        None => Ok(false),
-        Some(Value::Bool(b)) => Ok(*b),
-        Some(other) => Err(contract::OrcaError::invalid(format!(
-            "dryRun must be a boolean, got {other}"
-        ))
-        .with_code("args.invalid")
-        .into()),
-    }
 }
 
 fn without_dry_run_field(mut args: Value) -> Value {
