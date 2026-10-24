@@ -50,6 +50,7 @@ pub async fn dispatch(
     args: Value,
     correlation_id: Option<String>,
     caller: Option<contract::CallerIdentity>,
+    relaying_peer: &str,
 ) -> Result<Value> {
     let ctx = {
         let guard = CTX.lock().expect("mesh dispatcher mutex poisoned");
@@ -67,6 +68,7 @@ pub async fn dispatch(
         local.set_correlation_id(correlation_id);
     }
     local.set_verified_caller(caller);
+    local.register_service(crate::mesh::RelayingPeer(relaying_peer.to_string()));
     dispatch::dispatch(name, args, &local).await
 }
 
@@ -111,7 +113,7 @@ pub(crate) mod tests {
     async fn dispatch_before_install_returns_err() {
         let _g = test_guard().await;
         reset_for_tests();
-        let err = dispatch("some.tool", serde_json::json!({}), None, None)
+        let err = dispatch("some.tool", serde_json::json!({}), None, None, "peer")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not installed"));
@@ -122,7 +124,7 @@ pub(crate) mod tests {
         let _g = test_guard().await;
         reset_for_tests();
         install(make_ctx());
-        let err = dispatch("ghost.tool", serde_json::json!({}), None, None)
+        let err = dispatch("ghost.tool", serde_json::json!({}), None, None, "peer")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("ghost.tool") || !err.to_string().is_empty());

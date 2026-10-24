@@ -112,8 +112,8 @@ orca system join --action accept <6-char-code>     # (on the joiner) completes p
 
 If mDNS is blocked or the joiner is on a different subnet, push an offer to a
 specific address from a secure member with `orca system join --action offer <addr>`, or dial the
-inviter from the joiner with `orca system join --action connect <addr>`. Secrets storage on a fresh
-joiner stays **off** until the operator opts in with `orca system mesh update --action settings --self-secure on`.
+inviter from the joiner with `orca system join --action connect <addr>`. A fresh
+joiner is **insecure** (holds only its own plugins' secrets) until a secure member promotes it with `orca --peer <joiner-id> system mesh update --action settings --secure true`.
 
 ---
 

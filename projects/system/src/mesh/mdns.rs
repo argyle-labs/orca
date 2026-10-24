@@ -8,7 +8,7 @@
 //!                   macOS mDNS conflicts and DHCP renames). Never a short or
 //!                   prefixed form; join state travels in `state`, not the id.
 //!   state         — `unclaimed` | `mesh:<mesh_id>`
-//!   can_invite    — `1` iff we have mesh CA key AND self_secure=true
+//!   can_invite    — `1` iff we have mesh CA key AND secure=true
 //!   pubkey_fp     — first-16-byte SHA-256 hex of our bootstrap ed25519 pubkey
 //!   port          — TCP port for the mesh surface (default 12002)
 //!
@@ -155,7 +155,7 @@ impl Mdns {
     }
 
     /// Refresh the advertisement (e.g. after `orca mesh accept` flips state from
-    /// unclaimed to mesh-member, or after `orca mesh self-secure on` flips
+    /// unclaimed to mesh-member, or after a promotion to secure flips
     /// `can_invite`).
     pub fn republish(&self, ad: Advertisement) -> Result<()> {
         _ = self.daemon.unregister(&self.instance_fullname);
@@ -261,15 +261,15 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
 
     let hostname = crate::host_identity::hostname().to_string();
     let can_invite = utils::pki::has_mesh_ca_key(&pki_dir);
-    // mesh_id + self_secure from DB; failures non-fatal (we just advertise unclaimed).
-    let (mesh_id, self_secure) = db::pool::with_pooled_or_open(|conn| {
+    // mesh_id + secure from DB; failures non-fatal (we just advertise unclaimed).
+    let (mesh_id, secure) = db::pool::with_pooled_or_open(|conn| {
         Ok((
             db::mesh::get_mesh_id(conn).unwrap_or(None),
-            db::mesh::get_self_secure(conn).unwrap_or(false),
+            db::mesh::get_secure(conn).unwrap_or(false),
         ))
     })
     .unwrap_or((None, false));
-    let can_invite = can_invite && self_secure;
+    let can_invite = can_invite && secure;
     Ok(Advertisement::from_local(
         crate::host_identity::machine_id(),
         &hostname,

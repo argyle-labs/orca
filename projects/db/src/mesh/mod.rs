@@ -35,15 +35,15 @@ pub struct PeerSummary {
     pub pubkey_fp: Option<String>,
 }
 
-/// Read the host-local `self_secure` flag from `mesh_self`. Returns `false`
+/// Read the host-local `secure` flag from `mesh_self`. Returns `false`
 /// when the row is absent (host hasn't opted into Tier-2 cred sync yet).
 ///
 /// This is a read-only helper exposed to non-server crates that need to
-/// surface the value in a snapshot. The mutating side (`set_self_secure`)
+/// surface the value in a snapshot. The mutating side (`set_secure`)
 /// stays in `server::system::mesh::db` next to the Tier-2 state machine.
-pub fn get_self_secure(conn: &Connection) -> Result<bool> {
+pub fn get_secure(conn: &Connection) -> Result<bool> {
     let row = conn
-        .query_row("SELECT self_secure FROM mesh_self WHERE id = 1", [], |r| {
+        .query_row("SELECT secure FROM mesh_self WHERE id = 1", [], |r| {
             r.get::<_, bool>(0)
         })
         .optional()?;

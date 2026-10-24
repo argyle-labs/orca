@@ -133,7 +133,8 @@ defaults. Always read via `http_port()` / `https_port()` / `mesh_port()`
 
 Each host has a stable `peer_id` anchored to `/etc/machine-id` (or
 a fixed path on systems where `$HOME` churns). Pairing = mutual mTLS trust;
-no asserted-role fallbacks. Self-secure = Tier-2 cred sync opt-in.
+no asserted-role fallbacks. Each member is `secure` (may hold other members' secrets) or insecure
+(holds only its own plugins' secrets); promotion is relayed from a trusted member.
 
 Cross-host dispatch is opt-out via `local_only` flag. A verb's system id argument
 routes the call through the mesh to that system; verbs without one take the

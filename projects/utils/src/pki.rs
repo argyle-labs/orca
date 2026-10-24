@@ -709,7 +709,7 @@ pub fn should_rotate(cert_pem: &str, threshold_days: i64) -> Result<bool> {
 // Hoisted up from the `mesh` crate (was `MeshCertStatusOutput`) so cert-status
 // reads no longer require a mesh dependency — the `system` crate exposes this
 // via `system.certs.list` without depending on `mesh`. Pure filesystem read; no
-// DB, no network. The DB-backed `self_secure` policy flag is layered on by the
+// DB, no network. The DB-backed `secure` policy flag is layered on by the
 // caller (utils has no DB access).
 
 /// One cert's expiry summary.
@@ -741,7 +741,7 @@ pub struct MeshCertStatus {
     /// paired host can still refuse to be a secrets sink. Left at its default
     /// by [`mesh_cert_status`]; the caller fills it from the DB policy.
     #[serde(default)]
-    pub self_secure: bool,
+    pub secure: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mesh_ca: Option<CertInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -755,7 +755,7 @@ pub struct MeshCertStatus {
 }
 
 /// Read the mesh cert material under `pki_dir` and summarize expiry + role.
-/// Pure filesystem read — `self_secure` is left `false`; the caller sets it
+/// Pure filesystem read — `secure` is left `false`; the caller sets it
 /// from the DB policy.
 /// `version` is supplied by the CALLER, never read here.
 ///
@@ -778,7 +778,7 @@ pub fn mesh_cert_status(pki_dir: &Path, version: &str) -> MeshCertStatus {
         founder: has_mesh_ca_key(pki_dir),
         member: mesh_ca_cert_path(pki_dir).exists(),
         version: version.to_string(),
-        self_secure: false,
+        secure: false,
         mesh_ca: parse(mesh_ca_cert_path(pki_dir)),
         leaf_server: parse(mesh_server_cert_path(pki_dir)),
         leaf_client: parse(mesh_client_cert_path(pki_dir)),

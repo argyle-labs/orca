@@ -1173,8 +1173,8 @@ pub fn wipe_mesh_membership(conn: &Connection) -> Result<()> {
     tx.execute("DELETE FROM mesh_pending_offers", [])?;
     tx.execute("DELETE FROM mesh_discovery", [])?;
     tx.execute(
-        "INSERT INTO mesh_self (id, self_secure, mesh_id, set_at) VALUES (1, 0, NULL, ?)
-         ON CONFLICT(id) DO UPDATE SET self_secure = 0, mesh_id = NULL, set_at = excluded.set_at",
+        "INSERT INTO mesh_self (id, secure, mesh_id, set_at) VALUES (1, 0, NULL, ?)
+         ON CONFLICT(id) DO UPDATE SET secure = 0, mesh_id = NULL, set_at = excluded.set_at",
         params![now_secs()],
     )?;
     tx.commit()?;
@@ -1243,11 +1243,11 @@ pub fn is_mutual_secure(t: TrustState) -> bool {
 
 // ── mesh_self ─────────────────────────────────────────────────────────────────
 
-pub fn set_self_secure(conn: &Connection, secure: bool) -> Result<()> {
+pub fn set_secure(conn: &Connection, secure: bool) -> Result<()> {
     let now = now_secs();
     conn.execute(
-        "INSERT INTO mesh_self (id, self_secure, set_at) VALUES (1, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET self_secure = excluded.self_secure, set_at = excluded.set_at",
+        "INSERT INTO mesh_self (id, secure, set_at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET secure = excluded.secure, set_at = excluded.set_at",
         params![secure as i64, now],
     )?;
     Ok(())
@@ -1276,7 +1276,7 @@ pub fn get_ca_previous_expires_at(conn: &Connection) -> Result<Option<i64>> {
 pub fn set_ca_previous_expires_at(conn: &Connection, expires_at: Option<i64>) -> Result<()> {
     let now = now_secs();
     conn.execute(
-        "INSERT INTO mesh_self (id, self_secure, ca_previous_expires_at, set_at)
+        "INSERT INTO mesh_self (id, secure, ca_previous_expires_at, set_at)
          VALUES (1, 0, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
              ca_previous_expires_at = excluded.ca_previous_expires_at,
@@ -1289,7 +1289,7 @@ pub fn set_ca_previous_expires_at(conn: &Connection, expires_at: Option<i64>) ->
 pub fn set_mesh_id(conn: &Connection, mesh_id: &str) -> Result<()> {
     let now = now_secs();
     conn.execute(
-        "INSERT INTO mesh_self (id, self_secure, mesh_id, set_at) VALUES (1, 0, ?, ?)
+        "INSERT INTO mesh_self (id, secure, mesh_id, set_at) VALUES (1, 0, ?, ?)
          ON CONFLICT(id) DO UPDATE SET mesh_id = excluded.mesh_id, set_at = excluded.set_at",
         params![mesh_id, now],
     )?;
@@ -1857,11 +1857,11 @@ mod tests {
     }
 
     #[test]
-    fn self_secure_and_mesh_id() {
+    fn secure_and_mesh_id() {
         let (_d, c) = test_conn();
-        assert!(!crate::mesh::get_self_secure(&c).unwrap());
-        set_self_secure(&c, true).unwrap();
-        assert!(crate::mesh::get_self_secure(&c).unwrap());
+        assert!(!crate::mesh::get_secure(&c).unwrap());
+        set_secure(&c, true).unwrap();
+        assert!(crate::mesh::get_secure(&c).unwrap());
         assert!(get_mesh_id(&c).unwrap().is_none());
         set_mesh_id(&c, "mesh-xyz").unwrap();
         assert_eq!(get_mesh_id(&c).unwrap().as_deref(), Some("mesh-xyz"));
@@ -1883,11 +1883,11 @@ mod tests {
             false,
         )
         .unwrap();
-        set_self_secure(&c, true).unwrap();
+        set_secure(&c, true).unwrap();
         wipe_mesh_membership(&c).unwrap();
         assert!(list_peers(&c).unwrap().is_empty());
         assert!(list_discovery(&c).unwrap().is_empty());
-        assert!(!crate::mesh::get_self_secure(&c).unwrap());
+        assert!(!crate::mesh::get_secure(&c).unwrap());
     }
 
     // ── hash_code / addr_route_kind / csv helpers ────────────────────────────

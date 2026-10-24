@@ -149,7 +149,7 @@ pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
     std::fs::write(utils::pki::mesh_client_key_path(&pki_d), &client_key_pem)?;
 
     db::pool::with_pooled_or_open(|conn| {
-        pdb::set_self_secure(conn, false)?;
+        pdb::set_secure(conn, false)?;
         pdb::set_mesh_id(conn, &r.mesh_id)?;
         pdb::upsert_peer(
             conn,
@@ -183,7 +183,7 @@ pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
         inviter_hostname: offer.peer_hostname,
         inviter_addr: dialed_addr,
         inviter_port: offer.peer_port,
-        self_secure: false,
+        secure: false,
     })
 }
 
@@ -749,16 +749,16 @@ pub async fn leave_self() -> Result<crate::mesh::MeshLeaveSelfOutput> {
 }
 
 /// Full host cert status: every mesh cert's rotation state plus the current
-/// `self_secure` (Tier-2 secrets-storage) flag, in one read. The user-facing
+/// `secure` (Tier-2 secrets-storage) flag, in one read. The user-facing
 /// surface for this is `system.certs.list`; this stays as mesh's in-process
-/// accessor. No separate cert/self_secure round-trip.
+/// accessor. No separate cert/secure round-trip.
 pub fn status() -> Result<MeshCertStatusOutput> {
     let mut out = cert_status()?;
-    out.self_secure = get_self_secure().unwrap_or(false);
+    out.secure = get_secure().unwrap_or(false);
     Ok(out)
 }
 
-/// File-only cert status (no DB). `self_secure` stays `false` — `status()`
+/// File-only cert status (no DB). `secure` stays `false` — `status()`
 /// layers the DB flag on top. Delegates to the hoisted `utils::pki` reader.
 pub fn cert_status() -> Result<MeshCertStatusOutput> {
     Ok(utils::pki::mesh_cert_status(
@@ -767,13 +767,40 @@ pub fn cert_status() -> Result<MeshCertStatusOutput> {
     ))
 }
 
-pub fn get_self_secure() -> Result<bool> {
-    db::pool::with_pooled_or_open(db::mesh::get_self_secure)
+pub fn get_secure() -> Result<bool> {
+    db::pool::with_pooled_or_open(db::mesh::get_secure)
 }
 
-pub async fn set_self_secure(on: bool) -> Result<bool> {
-    db::pool::with_pooled_or_open(|conn| pdb::set_self_secure(conn, on))?;
+pub async fn set_secure(on: bool) -> Result<bool> {
+    db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, on))?;
     Ok(on)
+}
+
+pub async fn promote(relaying_peer: Option<&str>) -> Result<bool> {
+    authorize_promotion(&pki_dir(), relaying_peer)?;
+    set_secure(true).await
+}
+
+pub(crate) fn authorize_promotion(
+    pki: &std::path::Path,
+    relaying_peer: Option<&str>,
+) -> Result<()> {
+    match relaying_peer {
+        Some(peer) => {
+            let trust = db::pool::with_pooled_or_open(|conn| pdb::get_trust(conn, peer))?;
+            if !trust.local_secure {
+                anyhow::bail!(
+                    "promotion to secure refused: this member does not trust the relaying peer {peer}"
+                );
+            }
+        }
+        None if utils::pki::has_mesh_ca_key(pki) => {}
+        None => anyhow::bail!(
+            "a member cannot promote itself to secure; run it from a secure member: \
+             `orca --peer <this-member> system mesh update --action settings --secure true`"
+        ),
+    }
+    Ok(())
 }
 
 /// Build the local-host row for `system.list`. Uses the in-process lifecycle
@@ -1826,15 +1853,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn self_secure_round_trips_through_db() {
+    async fn secure_round_trips_through_db() {
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             // Default is false on a fresh, migrated db.
-            assert!(!get_self_secure().unwrap());
-            assert!(set_self_secure(true).await.unwrap());
-            assert!(get_self_secure().unwrap());
-            assert!(!set_self_secure(false).await.unwrap());
-            assert!(!get_self_secure().unwrap());
+            assert!(!get_secure().unwrap());
+            assert!(set_secure(true).await.unwrap());
+            assert!(get_secure().unwrap());
+            assert!(!set_secure(false).await.unwrap());
+            assert!(!get_secure().unwrap());
         })
         .await;
     }
@@ -2166,14 +2193,14 @@ mod tests {
             inviter_hostname: "host-i".into(),
             inviter_addr: "10.0.0.3".into(),
             inviter_port: 12002,
-            self_secure: false,
+            secure: false,
         };
         let s = serde_json::to_string(&out).unwrap();
         let back: MeshAcceptOutput = serde_json::from_str(&s).unwrap();
         assert_eq!(back.mesh_id, "mesh-1");
         assert_eq!(back.inviter_peer_id, "inv");
         assert_eq!(back.inviter_port, 12002);
-        assert!(!back.self_secure);
+        assert!(!back.secure);
     }
 
     // ── cert-status output DTO shape ──────────────────────────────────────────
@@ -2184,7 +2211,7 @@ mod tests {
             founder: false,
             member: false,
             version: "0.20.0".into(),
-            self_secure: false,
+            secure: false,
             mesh_ca: None,
             leaf_server: Some(crate::mesh::CertInfo {
                 cn: String::new(),
@@ -2209,35 +2236,35 @@ mod tests {
     // ── cert_status: file-only read, no db/network ────────────────────────────
 
     #[test]
-    fn cert_status_reports_compiled_version_and_self_secure_false() {
+    fn cert_status_reports_compiled_version_and_secure_false() {
         // cert_status only reads PKI files (absent on a test host → all cert
-        // infos None) and hard-codes self_secure=false; it never touches the db.
+        // infos None) and hard-codes secure=false; it never touches the db.
         let out = cert_status().unwrap();
         let expected = env!("ORCA_VERSION");
         assert_eq!(out.version, expected, "version must be the compiled value");
         assert!(
-            !out.self_secure,
-            "cert_status always reports self_secure=false; status() layers the db flag on top"
+            !out.secure,
+            "cert_status always reports secure=false; status() layers the db flag on top"
         );
     }
 
-    // ── status(): layers db self_secure over the file-only cert_status ────────
+    // ── status(): layers db secure over the file-only cert_status ────────
 
     #[tokio::test]
-    async fn status_layers_db_self_secure_over_cert_status() {
+    async fn status_layers_db_secure_over_cert_status() {
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
-            // cert_status() hard-codes self_secure=false; status() reads the db
+            // cert_status() hard-codes secure=false; status() reads the db
             // flag and overrides it. Default db → false.
             let out = status().unwrap();
-            assert!(!out.self_secure, "fresh db defaults self_secure=false");
+            assert!(!out.secure, "fresh db defaults secure=false");
             let expected = env!("ORCA_VERSION");
             assert_eq!(out.version, expected);
             // Flip the db flag; status() must now surface true.
-            set_self_secure(true).await.unwrap();
+            set_secure(true).await.unwrap();
             assert!(
-                status().unwrap().self_secure,
-                "status() must layer the db self_secure flag on top of cert_status"
+                status().unwrap().secure,
+                "status() must layer the db secure flag on top of cert_status"
             );
         })
         .await;

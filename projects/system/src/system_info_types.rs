@@ -183,12 +183,12 @@ pub struct SystemInfoReport {
     pub mesh_peer_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_paired_count: Option<u32>,
-    /// Tier-2 secrets-storage permission (`self_secure`) for this host.
+    /// Tier-2 secrets-storage permission (`secure`) for this host.
     /// `true` = this host is authorized to hold encrypted secrets replicated
     /// from other mesh members. Surfaced in the host drawer as a SECURE
     /// toggle, independent of cert trust.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub self_secure: Option<bool>,
+    pub secure: Option<bool>,
 
     /// `true` when this host's mesh accept loop (plugin host, default
     /// port 12002) currently holds a TCP listener. `false` when the

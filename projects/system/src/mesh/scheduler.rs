@@ -344,13 +344,13 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn tick_does_not_offer_when_not_self_secure() {
+    fn tick_does_not_offer_when_not_secure() {
         let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             let pki = pki_dir();
             utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
-            // self_secure defaults to false → the self_secure gate returns early.
+            // secure defaults to false → the secure gate returns early.
             db::pool::with_pooled_or_open(|conn| {
                 pdb::upsert_discovery(
                     conn,
@@ -369,7 +369,7 @@ mod tests {
                 pdb::has_open_outbound_offer(conn, "fp-insecure")
             })
             .unwrap();
-            assert!(!has, "non-self-secure host must not extend offers");
+            assert!(!has, "insecure member must not extend offers");
         });
     }
 
@@ -383,7 +383,7 @@ mod tests {
             let pki = pki_dir();
             utils::pki::init_mesh_ca(&pki, "24647a14a251e863cdf8dcee692f2915").unwrap();
             db::pool::with_pooled_or_open(|conn| {
-                pdb::set_self_secure(conn, true)?;
+                pdb::set_secure(conn, true)?;
                 pdb::upsert_discovery(
                     conn,
                     "fp-claim-me",

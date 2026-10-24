@@ -1153,7 +1153,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         -- bootstrap pubkey fingerprint (stable across restarts and IP changes).
         -- state = 'unclaimed' (no mesh CA) or 'mesh:<mesh_id>' (member of a mesh).
         -- can_invite = 1 iff that peer advertises it has the mesh CA private key
-        -- AND has self_secure=true.
+        -- AND has secure=true.
         CREATE TABLE IF NOT EXISTS mesh_discovery (
             pubkey_fp     TEXT PRIMARY KEY,
             peer_id       TEXT,
@@ -1236,7 +1236,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS mesh_self (
             id                       INTEGER PRIMARY KEY CHECK (id = 1),
-            self_secure              INTEGER NOT NULL DEFAULT 0,
+            secure              INTEGER NOT NULL DEFAULT 0,
             mesh_id                   TEXT,
             ca_previous_expires_at   INTEGER,
             set_at                   INTEGER NOT NULL

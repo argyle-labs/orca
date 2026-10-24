@@ -289,7 +289,7 @@ notifications, mcp, media.
 - **Renames:** `db` → `database`; `contract` → `contracts`; `inventory` →
   `topology`; `model` → `models`.
 - **Data moves:** `SystemInfoReport` mesh fields
-  (`mesh_peer_count`/`mesh_paired_count`/`self_secure`) are write-only → delete;
+  (`mesh_peer_count`/`mesh_paired_count`/`secure`) are write-only → delete;
   the `system_info` hardware snapshot → `systems`.
 
 ---

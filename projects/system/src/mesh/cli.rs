@@ -3,7 +3,7 @@
 #![allow(clippy::disallowed_types)]
 
 //! CLI handlers for `orca mesh {discover,pending,accept,connect,offer,list,
-//! trust,self-secure,leave}`. Init lives in main.rs. Host liveness is no longer
+//! trust,leave}`. Init lives in main.rs. Host liveness is no longer
 //! a mesh verb — it moved to the first-class `system.health` tool; the internal
 //! `crate::mesh::ping` wire probe (route-health/dialer/fanout transport) stays.
 
@@ -225,7 +225,7 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
     std::fs::write(utils::pki::mesh_client_key_path(&pki_d), &client_key_pem)?;
 
     let conn = db::open_default()?;
-    pdb::set_self_secure(&conn, false)?;
+    pdb::set_secure(&conn, false)?;
     pdb::set_mesh_id(&conn, &r.mesh_id)?;
     pdb::upsert_peer(
         &conn,
@@ -272,7 +272,7 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
         r.mesh_id, offer.peer_hostname, r.inviter_peer_id, offer.peer_addr, offer.peer_port
     );
     println!(
-        "  self_secure is OFF — run `orca mesh self-secure on` to enable secrets writes on this host."
+        "  tier: insecure — holds only its own plugins' secrets until a secure member promotes it."
     );
     Ok(())
 }
@@ -748,33 +748,6 @@ async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
         println!("  peer has CA key; we don't — they should push to us on their side");
     }
     Ok(())
-}
-
-// ── mesh self-secure ──────────────────────────────────────────────────────────
-
-pub fn cmd_mesh_self_secure(action: SelfSecureAction) -> Result<()> {
-    let conn = db::open_default()?;
-    match action {
-        SelfSecureAction::Show => {
-            let v = db::mesh::get_self_secure(&conn)?;
-            println!("self_secure: {v}");
-        }
-        SelfSecureAction::On => {
-            pdb::set_self_secure(&conn, true)?;
-            println!("✓ self_secure: true (secrets writes enabled)");
-        }
-        SelfSecureAction::Off => {
-            pdb::set_self_secure(&conn, false)?;
-            println!("✓ self_secure: false (secrets writes will be refused)");
-        }
-    }
-    Ok(())
-}
-
-pub enum SelfSecureAction {
-    On,
-    Off,
-    Show,
 }
 
 // ── mesh cert-status ──────────────────────────────────────────────────────────
@@ -1643,22 +1616,6 @@ mod tests {
 
     fn tmp_db() -> tempfile::NamedTempFile {
         tempfile::NamedTempFile::new().unwrap()
-    }
-
-    #[tokio::test]
-    async fn cmd_mesh_self_secure_on_off_show_round_trip() {
-        let tmp = tmp_db();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            // Fresh DB: default is false.
-            assert!(!db::mesh::get_self_secure(&db::open_default().unwrap()).unwrap());
-            cmd_mesh_self_secure(SelfSecureAction::On).unwrap();
-            assert!(db::mesh::get_self_secure(&db::open_default().unwrap()).unwrap());
-            cmd_mesh_self_secure(SelfSecureAction::Off).unwrap();
-            assert!(!db::mesh::get_self_secure(&db::open_default().unwrap()).unwrap());
-            // Show is print-only; it must not error against a live DB.
-            cmd_mesh_self_secure(SelfSecureAction::Show).unwrap();
-        })
-        .await;
     }
 
     #[tokio::test]

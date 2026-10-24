@@ -17,7 +17,7 @@ leave, and the security model.
 | Accept an offer | `orca system join --action accept <6-char-code>` |
 | List mesh members | `orca system list` |
 | Promote a peer to mutually-trusted | `orca system mesh update --action trust --id <system-id> --on true` |
-| Enable secrets storage on this host | `orca system mesh update --action settings --self-secure true` |
+| Promote a member to secure (run on a secure member) | `orca --peer <system-id> system mesh update --action settings --secure true` |
 | Verify a peer end-to-end | `orca system health --id <system-id>` |
 | Show cert expiry / rotation status | `orca system certs list` |
 | Rotate the mesh CA (with overlap) | `orca system mesh update --action recover [--overlap-days 14]` |
@@ -44,9 +44,9 @@ The mesh is one or more orca systems that have exchanged mesh-CA-signed client
   peer_secure)` pair. When both bits are true, that peer is *mutually
   trusted* and the mesh CA private key replicates to them — promoting them
   from "member" to "inviter".
-* **Secrets gate**: a host only stores secret material when its own
-  `self_secure` flag is on. Joiners default to off so a freshly-paired
-  device can't silently absorb credentials.
+* **Secrets tiers**: every member is `secure` or insecure. An insecure
+  member holds only its own secrets (names under a plugin installed on it);
+  a secure member may also hold other members'. Joiners start insecure.
 
 The mesh has no central server. Every member is symmetric once they hold the
 mesh CA key. The first host is just the one that started the mesh.
@@ -76,8 +76,8 @@ After this:
 * `orca system health --id <inviter-id>` should succeed both directions
   (`orca system list` shows the inviter's `id`).
 * `orca system list` on both hosts shows the other.
-* Secrets storage on the joiner is **off** until the user opts in with
-  `orca system mesh update --action settings --self-secure true`.
+* The joiner is **insecure** until a secure member promotes it with
+  `orca --peer <joiner-id> system mesh update --action settings --secure true`.
 
 ### Manual fallback (no mDNS)
 
@@ -119,19 +119,26 @@ offers (`can_invite=1` in its mDNS advertisement).
 `orca system mesh update --action trust --id <system-id> --on false` reverses the local flag and notifies the
 peer; mutual-trust falls back to false on both sides.
 
-## self-secure (secrets gate)
+## Secrets tiers (secure / insecure)
 
 ```
-orca system mesh update --action settings --self-secure true        # secrets writes enabled on this host
-orca system mesh update --action settings --self-secure false       # secrets writes refused
-orca system mesh update --action settings      # current state
+orca --peer <system-id> system mesh update --action settings --secure true   # on a secure member: promote <system-id>
+orca system mesh update --action settings --secure false                     # demote this member
+orca system mesh update --action settings                                    # current tier
 ```
 
-`orca system join --action init` flips it on for the first host. Joiners start with it
-off. Code paths that write to the `secrets` table consult this flag and
-refuse if it's off, which prevents a freshly-paired device from
-inadvertently mirroring credentials before its operator has reviewed the
-mesh's posture.
+* **insecure** (default for every joiner): stores and resolves only its own
+  secrets — names of the form `<plugin>.<...>` where `<plugin>` is installed
+  on this member (e.g. `opnsense.main.api_key` on the member running the
+  opnsense plugin). Any other name is refused, and it never serves secret
+  values (`secrets.detail`) to mesh peers.
+* **secure**: may additionally hold other members' secrets and act as a
+  secret source for peers.
+
+A member cannot promote itself. Promotion is accepted only when relayed over
+the mesh by a peer this member trusts (`local_secure`, set automatically for
+the inviter on join), or locally on the host that holds the mesh CA key.
+`orca system join --action init` makes the first host secure.
 
 ## Leaving the mesh
 
@@ -231,7 +238,7 @@ Reaching mutual-trust with a peer:
 
 * Replicates the mesh CA private key to that peer (`mesh/push-ca-key`).
 * Lets that peer flip its mDNS advertisement to `can_invite=1` (when
-  combined with `self_secure=on`), so it auto-offers to any new
+  combined with the `secure` tier), so it auto-offers to any new
   unclaimed orca on its LAN.
 * Is the prerequisite for any federation primitive that handles
   sensitive material across hosts.
