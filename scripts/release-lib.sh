@@ -665,8 +665,6 @@ build_os_packages() {
   done
 }
 
-build_native_packages() { build_os_packages "$@"; }
-
 # ── rc cleanup ──────────────────────────────────────────────────────────────
 #
 # Delete every published RC release + matching git tag for a given stable
