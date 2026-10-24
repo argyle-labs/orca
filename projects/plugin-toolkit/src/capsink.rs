@@ -42,7 +42,11 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-#[cfg(any(test, all(feature = "tools", feature = "endpoints")))]
+#[cfg(any(
+    test,
+    feature = "testing",
+    all(feature = "tools", feature = "endpoints")
+))]
 pub(crate) fn set_core_privileged(caps: &[String]) {
     let privileged = [
         crate::abi::LXC_EXEC,
@@ -75,14 +79,40 @@ pub(crate) fn privileged_route(
     cap_route(cap, op_json).map(|reply| Ok(serde_json::from_str(&reply?)?))
 }
 
-#[cfg(any(test, all(feature = "tools", feature = "endpoints")))]
+#[cfg(any(
+    test,
+    feature = "testing",
+    all(feature = "tools", feature = "endpoints")
+))]
 pub(crate) fn set_core_body_b64(on: bool) {
     CORE_BODY_B64.with(|c| c.set(on));
 }
 
-#[cfg(any(test, all(feature = "tools", feature = "endpoints")))]
+#[cfg(any(
+    test,
+    feature = "testing",
+    all(feature = "tools", feature = "endpoints")
+))]
 pub(crate) fn set_core_no_follow(on: bool) {
     CORE_NO_FOLLOW.with(|c| c.set(on));
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn with_core_caps<R>(caps: &[&str], body: impl FnOnce() -> R) -> R {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            set_core_body_b64(false);
+            set_core_no_follow(false);
+            set_core_privileged(&[]);
+        }
+    }
+    let caps: Vec<String> = caps.iter().map(|c| c.to_string()).collect();
+    set_core_body_b64(caps.iter().any(|c| c == crate::abi::HTTP_BODY_B64));
+    set_core_no_follow(caps.iter().any(|c| c == crate::abi::HTTP_NO_FOLLOW));
+    set_core_privileged(&caps);
+    let _reset = Reset;
+    body()
 }
 
 fn request_wire(req: &HttpRequest) -> Result<String> {
@@ -362,5 +392,26 @@ mod tests {
             || http_request(&post(b"")),
         );
         assert_eq!(followed.unwrap().status, 200);
+    }
+
+    #[test]
+    fn with_core_caps_enables_no_follow_in_scope_only() {
+        let req = HttpRequest {
+            follow_redirects: Some(false),
+            ..post(b"")
+        };
+        let sink = || -> CapSink {
+            Box::new(|_: &str, _: &str| Ok(r#"{"status":302,"headers":[],"body":[]}"#.into()))
+        };
+        let before = with_cap_sink(sink(), || http_request(&req));
+        assert!(before.is_err());
+        let out = with_core_caps(&[crate::abi::HTTP_NO_FOLLOW], || {
+            with_cap_sink(sink(), || http_request(&req))
+        });
+        assert_eq!(out.unwrap().status, 302);
+        let err = with_cap_sink(sink(), || http_request(&req))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(crate::abi::HTTP_NO_FOLLOW), "got: {err}");
     }
 }

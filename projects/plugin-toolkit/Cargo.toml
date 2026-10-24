@@ -92,6 +92,7 @@ jemalloc-stats = ["jemalloc", "dep:tikv-jemalloc-ctl"]
 # Serve an embedded built site (`plugin_toolkit::ui`) on a claimed web prefix,
 # plus the typed `web` BackendDef builder.
 ui = ["dep:contract", "dep:rust-embed", "dep:mime_guess"]
+testing = []
 
 [dependencies]
 # ── Always-on light core ────────────────────────────────────────────────
