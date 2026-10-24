@@ -52,7 +52,6 @@ mod inventory_slice;
 pub mod openapi;
 mod registry;
 pub mod remote_ok;
-pub mod security_surface;
 pub mod tool_roles;
 pub mod unit_surface;
 pub mod ups_surface;

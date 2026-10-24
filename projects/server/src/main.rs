@@ -1005,12 +1005,6 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
             root = root.subcommand(ups);
         }
     }
-    {
-        let security = dispatch::security_surface::security_cli_command();
-        if !existing.contains(security.get_name()) {
-            root = root.subcommand(security);
-        }
-    }
     // Live plugin verbs: project every loaded `<domain>.<verb>` tool as
     // `orca <domain> <verb>` (e.g. `orca agents install`). Static + unit + the
     // above commands win on a name collision, so recompute the taken set now and
@@ -1047,9 +1041,6 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
         return r;
     }
     if let Some(r) = op_cli::dispatch_ups(&matches, ctx.clone()).await {
-        return r;
-    }
-    if let Some(r) = op_cli::dispatch_security(&matches, ctx.clone()).await {
         return r;
     }
     // Live plugin verbs (`orca <domain> <verb>`) route through the daemon's REST

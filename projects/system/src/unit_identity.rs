@@ -62,6 +62,10 @@ pub fn resolve_or_mint(natural_key: &str) -> Result<Uuid> {
     }
 }
 
+pub fn exists(uuid: &str) -> Result<bool> {
+    Ok(endpoint_db::list()?.iter().any(|row| row.uuid == uuid))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,6 +89,15 @@ mod tests {
             assert_eq!(a, b, "the same natural key must resolve to the same uuid");
             // uuidv7 (version nibble == 7).
             assert_eq!(a.get_version_num(), 7, "identity must be uuidv7");
+        });
+    }
+
+    #[test]
+    fn exists_finds_only_minted_ids() {
+        with_db(|| {
+            let a = resolve_or_mint("cluster:a/lxc/102").expect("mint");
+            assert!(exists(&a.to_string()).expect("lookup"));
+            assert!(!exists(&Uuid::now_v7().to_string()).expect("lookup"));
         });
     }
 

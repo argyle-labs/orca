@@ -38,6 +38,7 @@ pub mod mounts;
 pub mod owner;
 pub mod remediation;
 pub mod replication;
+pub mod security;
 pub mod service_instance;
 pub mod service_tools;
 pub mod share_permissions;
