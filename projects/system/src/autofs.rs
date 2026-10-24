@@ -159,6 +159,14 @@ pub enum PrivilegedOp {
     /// traversal, no symlink escape), and `mode` must keep the owner fully able and
     /// carry no setuid/setgid/sticky bits — an additive perms overlay that can
     /// never touch a system path or escalate privilege.
+    /// Write each managed secret-file (path-validated, atomic, root-owned 0600)
+    /// and reap any under `SECRET_FILE_DIR` not in `keep_secret_files`. Lets a
+    /// rotated secret reach a host whose mount is already up.
+    SecretFiles {
+        files: Vec<crate::mount_exec::SecretFile>,
+        #[serde(default)]
+        keep_secret_files: Vec<String>,
+    },
     SetShareMode {
         path: String,
         mode: u32,
@@ -771,6 +779,20 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
                 Ok(()) => res.restarted = true,
                 Err(e) => res.errors.push(format!("reload autofs: {e}")),
             }
+            res
+        }
+        PrivilegedOp::SecretFiles {
+            files,
+            keep_secret_files,
+        } => {
+            let mut res = PrivilegedResult::default();
+            for f in &files {
+                match crate::mount_exec::materialize_secret_file(f).await {
+                    Ok(()) => res.changed.push(f.path.clone()),
+                    Err(e) => res.errors.push(e),
+                }
+            }
+            reap_orphan_secret_files(&keep_secret_files, &mut res).await;
             res
         }
         PrivilegedOp::SetShareMode {
