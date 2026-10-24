@@ -153,6 +153,8 @@ pub struct WebRoute {
     pub csp_script_hashes: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub csp_style_hashes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub csp_style_attr_hashes: Vec<String>,
 }
 
 impl WebRoute {
@@ -172,6 +174,7 @@ impl WebRoute {
                 .map(str::to_string),
             csp_script_hashes: csp_hashes(capabilities, CAP_CSP_SCRIPT_HASH),
             csp_style_hashes: csp_hashes(capabilities, CAP_CSP_STYLE_HASH),
+            csp_style_attr_hashes: csp_hashes(capabilities, CAP_CSP_STYLE_ATTR_HASH),
         }
     }
 }
@@ -222,6 +225,8 @@ pub const CAP_DEV_UPSTREAM: &str = "dev_upstream=";
 pub const CAP_CSP_SCRIPT_HASH: &str = "csp_script_hash=";
 
 pub const CAP_CSP_STYLE_HASH: &str = "csp_style_hash=";
+
+pub const CAP_CSP_STYLE_ATTR_HASH: &str = "csp_style_attr_hash=";
 
 /// One request the server hands a [`WebProvider`]. Body is base64 so the typed
 /// contract carries arbitrary bytes without a `serde_json::Value` escape hatch.
@@ -536,6 +541,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn csp_hash_rejects_malformed_sources() {
+        let b64 = "bhHHL3z2vDgxUt0W3dWQOrprscmda2Y5pLsLg4GF+pI=";
+        for (src, ok) in [
+            (format!("'sha256-{b64}'"), true),
+            (format!("'sha256-{}'", &b64[1..]), false),
+            (format!("'sha256-{b64}AAAA'"), false),
+            (format!("'sha1-{b64}'"), false),
+            (format!("'SHA256-{b64}'"), false),
+            (format!("'sha256-{b64}' ; x"), false),
+            (format!("'sha256-{b64}'; script-src *"), false),
+            (format!("'sha256-{}=='", &b64[..b64.len() - 1]), false),
+            (format!("sha256-{b64}"), false),
+            (format!("'sha256-{b64}"), false),
+            (String::new(), false),
+        ] {
+            assert_eq!(is_csp_hash(&src), ok, "{src:?}");
+        }
+    }
+
     struct Fake {
         name: &'static str,
         route: WebRoute,
@@ -559,6 +584,7 @@ mod tests {
             dev_upstream: None,
             csp_script_hashes: Vec::new(),
             csp_style_hashes: Vec::new(),
+            csp_style_attr_hashes: Vec::new(),
         }
     }
 
@@ -805,6 +831,7 @@ mod tests {
             dev_upstream: Some("http://127.0.0.1:12004".to_string()),
             csp_script_hashes: Vec::new(),
             csp_style_hashes: Vec::new(),
+            csp_style_attr_hashes: Vec::new(),
         };
         let json2 = serde_json::to_string(&with).unwrap();
         assert!(json2.contains("dev_upstream"));

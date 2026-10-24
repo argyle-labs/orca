@@ -8,8 +8,8 @@
 use std::marker::PhantomData;
 
 use contract::web::{
-    CAP_CSP_SCRIPT_HASH, CAP_CSP_STYLE_HASH, CAP_DEV_UPSTREAM, CAP_SPA_FALLBACK, WebRequest,
-    WebResponse,
+    CAP_CSP_SCRIPT_HASH, CAP_CSP_STYLE_ATTR_HASH, CAP_CSP_STYLE_HASH, CAP_DEV_UPSTREAM,
+    CAP_SPA_FALLBACK, WebRequest, WebResponse,
 };
 use rust_embed::RustEmbed;
 
@@ -212,6 +212,7 @@ pub fn web_backend(name: impl Into<String>, prefix: impl Into<String>) -> WebBac
         dev_upstream: None,
         csp_script_hashes: Vec::new(),
         csp_style_hashes: Vec::new(),
+        csp_style_attr_hashes: Vec::new(),
     }
 }
 
@@ -225,6 +226,7 @@ pub struct WebBackend {
     invoke_prefix: String,
     csp_script_hashes: Vec<String>,
     csp_style_hashes: Vec<String>,
+    csp_style_attr_hashes: Vec<String>,
 }
 
 impl WebBackend {
@@ -250,6 +252,11 @@ impl WebBackend {
         self
     }
 
+    pub fn csp_style_attr_hash(mut self, hash: impl Into<String>) -> Self {
+        self.csp_style_attr_hashes.push(hash.into());
+        self
+    }
+
     /// Tool prefix the loader invokes `"{prefix}.render"` on; defaults to `name`.
     pub fn invoke_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.invoke_prefix = prefix.into();
@@ -269,6 +276,9 @@ impl WebBackend {
         }
         for h in self.csp_style_hashes {
             capabilities.push(format!("{CAP_CSP_STYLE_HASH}{h}"));
+        }
+        for h in self.csp_style_attr_hashes {
+            capabilities.push(format!("{CAP_CSP_STYLE_ATTR_HASH}{h}"));
         }
         crate::abi::BackendDef {
             domain: "web".to_string(),
@@ -486,6 +496,8 @@ mod tests {
             .csp_style_hash(
                 "'sha384-xgelKlDcc+BYp0O+ZYzFesLnWCgGpEbXVVZWNQT6WyZYygN01tbEMygnjPXb5OPI'",
             )
+            .csp_style_attr_hash("'sha256-tcbDxjMo+xKqM21aCGYbs/QAJqB7yUXC06oPWDapBgc='")
+            .csp_style_attr_hash("'unsafe-hashes'")
             .invoke_prefix("pk")
             .build();
         let json = serde_json::to_string(&vec![def]).unwrap();
@@ -506,6 +518,9 @@ mod tests {
                     "'sha384-xgelKlDcc+BYp0O+ZYzFesLnWCgGpEbXVVZWNQT6WyZYygN01tbEMygnjPXb5OPI'"
                         .to_string()
                 ],
+                csp_style_attr_hashes: vec![
+                    "'sha256-tcbDxjMo+xKqM21aCGYbs/QAJqB7yUXC06oPWDapBgc='".to_string()
+                ],
             }
         );
 
@@ -519,6 +534,7 @@ mod tests {
                 dev_upstream: None,
                 csp_script_hashes: Vec::new(),
                 csp_style_hashes: Vec::new(),
+                csp_style_attr_hashes: Vec::new(),
             }
         );
     }
