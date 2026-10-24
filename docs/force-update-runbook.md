@@ -91,7 +91,7 @@ cert-expiry deadlock the mesh can't route around.
 2. scp to `/tmp`, `sha256sum` against the release checksum, then
    `install -o orca -g orca -m 755 /tmp/orca.new /var/lib/orca/.local/bin/orca`.
 3. Restart per the host's init system:
-   - systemd: `sudo systemctl restart orca`
+   - systemd: `sudo systemctl restart orca-daemon`
    - OpenRC (Alpine): `sudo rc-service orca restart`
    - supervise-daemon: `sudo kill <daemon-pid>` (supervisor respawns)
 4. Keep the previous binary as `orca.bak-<date>` so you can revert; verify the

@@ -397,9 +397,13 @@ restart_orca_service() {
       ;;
     Linux)
       if command -v systemctl >/dev/null 2>&1 \
-         && systemctl --user is-enabled orca.service >/dev/null 2>&1; then
-        systemctl --user restart orca.service 2>/dev/null \
+         && systemctl --user is-enabled orca-daemon.service >/dev/null 2>&1; then
+        systemctl --user restart orca-daemon.service 2>/dev/null \
           && echo "✓ daemon restarted (systemd --user)"
+      elif command -v systemctl >/dev/null 2>&1 \
+         && grep -qs 'daemon --port' "$HOME/.config/systemd/user/orca.service"; then
+        systemctl --user restart orca.service 2>/dev/null \
+          && echo "✓ daemon restarted (systemd --user, legacy unit)"
       fi
       ;;
   esac
@@ -451,8 +455,10 @@ if [ "$RUN_AS_ORCA" = "1" ]; then
   # Restart the service so it picks up the new binary instead of running the
   # old (now-deleted) inode. Detects systemd, openrc, and unraid rc scripts —
   # silent no-op if none match.
-  if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled orca.service >/dev/null 2>&1; then
-    systemctl restart orca.service 2>/dev/null && echo "✓ daemon restarted (systemd)"
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled orca-daemon.service >/dev/null 2>&1; then
+    systemctl restart orca-daemon.service 2>/dev/null && echo "✓ daemon restarted (systemd)"
+  elif command -v systemctl >/dev/null 2>&1 && grep -qs 'daemon --port' /etc/systemd/system/orca.service; then
+    systemctl restart orca.service 2>/dev/null && echo "✓ daemon restarted (systemd, legacy unit)"
   elif command -v rc-service >/dev/null 2>&1 && rc-service -e orca >/dev/null 2>&1; then
     rc-service orca restart 2>/dev/null && echo "✓ daemon restarted (openrc)"
   elif [ -x /etc/rc.d/rc.orca ]; then

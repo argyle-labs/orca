@@ -45,9 +45,9 @@ stop_system_daemon() {
       fi
       ;;
     linux)
-      if systemctl --user is-enabled orca.service >/dev/null 2>&1; then
-        echo "  stopping systemd --user daemon (orca.service)..."
-        systemctl --user stop orca.service 2>/dev/null || true
+      if systemctl --user is-enabled orca-daemon.service >/dev/null 2>&1; then
+        echo "  stopping systemd --user daemon (orca-daemon.service)..."
+        systemctl --user stop orca-daemon.service 2>/dev/null || true
         _DAEMON_WAS_LOADED=1
       fi
       ;;
@@ -62,7 +62,7 @@ start_system_daemon() {
       [[ -f "$plist" ]] && launchctl load "$plist" 2>/dev/null || true
       ;;
     linux)
-      systemctl --user start orca.service 2>/dev/null || true
+      systemctl --user start orca-daemon.service 2>/dev/null || true
       ;;
   esac
 }

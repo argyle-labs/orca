@@ -91,7 +91,7 @@ Once installed:
 /var/lib/orca/                 service-user home (when installed via root flow)
   .ssh/authorized_keys         seeded from --admin-pubkey
   .local/bin/orca              installed binary
-  .config/systemd/user/orca.service  user-systemd unit
+  .config/systemd/user/orca-daemon.service  user-systemd unit
 ```
 
 The service user is created by `install.sh` when run as root and
