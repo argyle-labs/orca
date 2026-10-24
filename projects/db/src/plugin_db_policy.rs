@@ -331,6 +331,25 @@ mod tests {
     }
 
     #[test]
+    fn endpoints_get_of_foreign_row_returns_nothing() {
+        let conn = policy_conn();
+        let get = |key: &str| DbOp::Get {
+            namespace: String::new(),
+            table: "endpoints".into(),
+            key_col: "id".into(),
+            key: key.into(),
+        };
+        assert!(
+            exec_db_op_policed(&conn, &get("b1"), "alpha")
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        let own = exec_db_op_policed(&conn, &get("a1"), "alpha").unwrap();
+        assert_eq!(own.rows.len(), 1);
+    }
+
+    #[test]
     fn endpoints_update_and_delete_of_foreign_row_refused() {
         let conn = policy_conn();
         let upd = DbOp::Update {
