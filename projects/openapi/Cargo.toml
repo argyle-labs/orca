@@ -27,6 +27,7 @@ oas3        = { workspace = true }
 # fix in ONE place instead of duplicated across each integration build.rs.
 openapiv3   = { workspace = true }
 indexmap    = { workspace = true }
+tracing     = { workspace = true }
 
 [lints]
 workspace = true

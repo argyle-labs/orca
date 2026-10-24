@@ -94,6 +94,9 @@ jobs:
             check -p orca-plugin-toolkit --no-default-features --features tools,notify
             test -p orca-plugin-toolkit --no-default-features --features tools,db,containers --test thin_plugin_features
             test -p orca-plugin-toolkit --features full --test doc_authoring_anchor
+            clippy -p orca-utils --no-default-features --all-targets -- -D warnings
+            clippy -p orca-utils --no-default-features --features reactor --all-targets -- -D warnings
+            clippy -p orca-utils --all-features --all-targets -- -D warnings
           package-publishable: 'true'
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
