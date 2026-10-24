@@ -127,7 +127,9 @@ pub struct BackendCall(Call);
 
 #[derive(Debug, Clone)]
 enum Call {
+    #[cfg(feature = "reactor")]
     Verb { verb: CoreVerb, targeted: bool },
+    #[cfg(feature = "reactor")]
     Daemon,
 }
 
@@ -138,7 +140,9 @@ impl BackendCall {
 
     pub fn verb(&self) -> Option<&CoreVerb> {
         match &self.0 {
+            #[cfg(feature = "reactor")]
             Call::Verb { verb, .. } => Some(verb),
+            #[cfg(feature = "reactor")]
             Call::Daemon => None,
         }
     }
