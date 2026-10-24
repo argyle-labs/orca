@@ -31,9 +31,9 @@ replication = ["dep:rusqlite", "dep:tracing"]
 
 [dependencies]
 # Workspace crates the macros emit paths into.
-contract    = { workspace = true, default-features = true }
+contract    = { workspace = true }
 derive      = { workspace = true }
-dispatch    = { workspace = true, default-features = true }
+dispatch    = { workspace = true }
 # Light utils seam — only the tree-shaken core (no contract/tokio/glob) — so
 # generated replication code can stamp the canonical unix-millis lww clock
 # (`now_millis_since_epoch`) instead of hand-rolling `SystemTime`.
