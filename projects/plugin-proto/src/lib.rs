@@ -65,6 +65,8 @@ pub struct ToolDef {
     /// Whether the tool executes by default and plans under `dryRun: true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execute_gated: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run_aware: bool,
     /// Whether the tool writes to an external managed system, which a
     /// `can_mutate` identity may invoke despite an `admin` role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -376,6 +378,7 @@ mod tests {
                 output_schema: json!({"type": "object"}),
                 role: Some("admin".into()),
                 execute_gated: Some(true),
+                dry_run_aware: false,
                 data_mutation: Some(true),
                 local_only: Some(true),
                 reaches: vec!["proxmox.vm_stop".into()],

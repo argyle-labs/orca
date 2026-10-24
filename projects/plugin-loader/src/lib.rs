@@ -1328,6 +1328,7 @@ fn surface_tools(
                 dispatch::tool_roles::PluginToolPolicy {
                     role,
                     execute_gated: surface.execute_gated(op),
+                    dry_run_aware: false,
                     data_mutation: false,
                     local_only: op.policy.local_only,
                     read_unconfirmed: false,
@@ -1397,7 +1398,8 @@ fn install_tool_policies(software: &str, tools: &HashMap<String, ToolDef>) {
                 d.data_mutation,
             )
             .local_only(d.local_only)
-            .tool_callable(d.tool_callable),
+            .tool_callable(d.tool_callable)
+            .dry_run_aware(d.dry_run_aware),
         )
     }));
 }
@@ -3075,6 +3077,7 @@ mod loader_tests {
                     output_schema: sj::json!({ "type": "object" }),
                     role: Some("admin".into()),
                     execute_gated: Some(false),
+                    dry_run_aware: false,
                     data_mutation: Some(true),
                     local_only: Some(true),
                     reaches: Vec::new(),
@@ -3088,6 +3091,7 @@ mod loader_tests {
                     output_schema: sj::json!({ "type": "object" }),
                     role: None,
                     execute_gated: None,
+                    dry_run_aware: false,
                     data_mutation: None,
                     local_only: None,
                     reaches: Vec::new(),

@@ -428,6 +428,7 @@ const MESH_ANY_ROLE_DENY: &[&str] = &["auth.login"];
 fn is_mutating_tool(tool: &str) -> bool {
     dispatch::tool_roles::is_data_mutation(tool)
         || dispatch::tool_roles::plugin_execute_gated(tool)
+        || dispatch::tool_roles::plugin_dry_run_aware(tool)
         || dispatch::tool_roles::plugin_read_unconfirmed(tool)
         || dispatch::execute_gated_names().contains(&tool)
 }

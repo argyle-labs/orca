@@ -486,6 +486,7 @@ pub fn tool_manifest_json() -> String {
                 "output_schema": t.output_schema(),
                 "role": t.required_role(),
                 "execute_gated": t.execute_gated(),
+                "dry_run_aware": t.dry_run_aware(),
                 "data_mutation": t.data_mutation(),
                 "local_only": !t.remote_ok(),
                 "reaches": t.reaches(),
@@ -558,9 +559,7 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
     if let Some(system) = take_system_target(name, &mut args, ctx).await? {
         // Same rule as an ambient-peer forward: nothing proves the target
         // honours `dryRun`, so only an execute-gated tool may dry-run remotely.
-        if crate::erased::dry_run_requested(&args)?
-            && !crate::tool_roles::plugin_execute_gated(name)
-        {
+        if crate::erased::dry_run_requested(&args)? && !crate::tool_roles::plugin_dry_run_ok(name) {
             return Err(contract::OrcaError::invalid(format!(
                 "{name}: a dry run can't be verified on system {system}; run it without dryRun"
             ))
@@ -584,6 +583,11 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
             obj.remove(contract::plan::DRY_RUN_FIELD);
             obj.insert(contract::plan::EXECUTE_FIELD.into(), Value::Bool(true));
         }
+    } else if dry_run
+        && crate::tool_roles::plugin_dry_run_aware(name)
+        && let Some(obj) = args.as_object_mut()
+    {
+        obj.remove(contract::plan::EXECUTE_FIELD);
     }
     // The surfaces below bypass the `run_json` gate, so a `dryRun` they
     // cannot honour would apply. A plugin tool declared execute-gated plans in
@@ -591,7 +595,7 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
     // peer named: no peer capability signal proves the peer honours `dryRun`,
     // and one that predates it would drop the flag and apply.
     if dry_run
-        && !crate::tool_roles::plugin_execute_gated(name)
+        && !crate::tool_roles::plugin_dry_run_ok(name)
         && !crate::unit_surface::unit_dry_run_ok(name)
     {
         let known_here = dynamic_owns(name)
@@ -707,6 +711,8 @@ async fn forward_to_peer(peer: &str, name: &str, mut args: Value, ctx: &ToolCtx)
                 obj.remove(contract::plan::DRY_RUN_FIELD);
                 obj.insert(contract::plan::EXECUTE_FIELD.into(), Value::Bool(true));
             }
+        } else if dry_run && crate::tool_roles::plugin_dry_run_aware(name) {
+            obj.remove(contract::plan::EXECUTE_FIELD);
         }
     }
     svc.exec(
@@ -1797,6 +1803,10 @@ mod tests {
                         GATED_SEEN.lock().unwrap().push(args.clone());
                         return Some(Ok(json!({})));
                     }
+                    if name == AWARE_PLUGIN_TOOL {
+                        AWARE_SEEN.lock().unwrap().push(args.clone());
+                        return Some(Ok(json!({})));
+                    }
                     if name == OWN_SYSTEM_TOOL {
                         return Some(Ok(args.clone()));
                     }
@@ -1813,6 +1823,7 @@ mod tests {
                     vec![
                         json!({ "name": FAKE_PLUGIN_TOOL }),
                         json!({ "name": GATED_PLUGIN_TOOL }),
+                        json!({ "name": AWARE_PLUGIN_TOOL }),
                         json!({
                             "name": OWN_SYSTEM_TOOL,
                             "input_schema": { "properties": { "systemId": { "type": "string" } } }
@@ -1829,7 +1840,100 @@ mod tests {
                     None,
                 ),
             )]);
+            crate::tool_roles::install_plugin_tools([(
+                AWARE_PLUGIN_TOOL.to_string(),
+                crate::tool_roles::PluginToolPolicy::from_manifest(
+                    AWARE_PLUGIN_TOOL,
+                    None,
+                    Some(false),
+                    None,
+                )
+                .dry_run_aware(true),
+            )]);
         });
+    }
+
+    const AWARE_PLUGIN_TOOL: &str = "rest_fallback_test_plugin.aware";
+
+    static AWARE_SEEN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+    #[tokio::test]
+    async fn a_dry_run_aware_plugin_receives_dry_run_without_execute() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        AWARE_SEEN.lock().unwrap().clear();
+        let ctx = make_ctx();
+        for args in [
+            json!({ "id": "a" }),
+            json!({ "id": "a", "dryRun": true }),
+            json!({ "id": "a", "dryRun": true, "execute": true }),
+        ] {
+            dispatch(AWARE_PLUGIN_TOOL, args, &ctx).await.unwrap();
+        }
+        let seen = AWARE_SEEN.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                json!({ "id": "a" }),
+                json!({ "id": "a", "dryRun": true }),
+                json!({ "id": "a", "dryRun": true }),
+            ]
+        );
+        let err = dispatch(FAKE_PLUGIN_TOOL, json!({ "dryRun": true }), &ctx)
+            .await
+            .unwrap_err();
+        let oe = find_orca_error(&err).unwrap_or_else(|| panic!("{err}"));
+        assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{oe}");
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_aware_plugin_dry_run_is_admin_only() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        AWARE_SEEN.lock().unwrap().clear();
+        let member = make_ctx().with_auth(contract::CallerIdentity {
+            user_id: "u".into(),
+            username: "u".into(),
+            role: "member".into(),
+            can_mutate: false,
+        });
+        let err = dispatch(AWARE_PLUGIN_TOOL, json!({ "dryRun": true }), &member)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("requires role 'admin'"), "{err}");
+        assert!(AWARE_SEEN.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_aware_plugin_dry_run_forwards_to_a_peer() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        let out = dispatch(
+            AWARE_PLUGIN_TOOL,
+            json!({ "systemId": REMOTE_ID, "id": "a", "dryRun": true, "execute": true }),
+            &roster_ctx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["peer"], REMOTE_ID);
+        assert_eq!(out["args"], json!({ "id": "a", "dryRun": true }));
+        let remote = Arc::new(RecordingRemote(std::sync::Mutex::new(Vec::new())));
+        let mut ctx = make_ctx();
+        ctx.register_service::<Arc<dyn contract::RemoteExec>>(remote.clone());
+        forward_to_peer("peer-a", AWARE_PLUGIN_TOOL, json!({ "id": "a" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            remote.0.lock().unwrap().clone(),
+            vec![(
+                "peer-a".into(),
+                AWARE_PLUGIN_TOOL.into(),
+                json!({ "id": "a" })
+            )]
+        );
     }
 
     const GATED_PLUGIN_TOOL: &str = "rest_fallback_test_plugin.gated";
