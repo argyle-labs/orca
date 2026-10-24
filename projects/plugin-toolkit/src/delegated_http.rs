@@ -381,6 +381,10 @@ pub mod header {
         pub fn append(&mut self, name: HeaderName, value: HeaderValue) {
             self.append_value(&name.0, value);
         }
+        pub fn insert(&mut self, name: HeaderName, value: HeaderValue) {
+            self.remove(&name.0);
+            self.append_value(&name.0, value);
+        }
         pub(crate) fn append_str(&mut self, name: &str, value: &str) {
             self.append_value(name, HeaderValue(value.to_string(), false));
         }
@@ -463,7 +467,7 @@ pub mod header {
     ];
 
     fn is_sensitive_name(name: &str) -> bool {
-        SENSITIVE_NAMES.contains(&name)
+        SENSITIVE_NAMES.contains(&name) || ::utils::scrub::is_sensitive_key(name)
     }
 
     /// Placeholder error type for the fallible header constructors.
@@ -798,7 +802,7 @@ pub mod api_client {
             let mut v = HeaderValue::from_str(value.as_ref())
                 .with_context(|| format!("invalid HTTP header value for {}", name.as_str()))?;
             v.set_sensitive(true);
-            self.headers.append(name, v);
+            self.headers.insert(name, v);
             Ok(self)
         }
 
@@ -812,14 +816,17 @@ pub mod api_client {
             user: impl AsRef<str>,
             password: ::utils::secret::Secret<String>,
         ) -> AnyResult<Self> {
-            let creds = format!("{}:{}", user.as_ref(), password.expose_secret());
-            self.header(
-                "authorization",
-                format!(
-                    "Basic {}",
-                    ::utils::encoding::base64_encode(creds.as_bytes())
-                ),
-            )
+            let user = user.as_ref();
+            if user.contains(':') {
+                ::anyhow::bail!("basic auth user-id must not contain ':'");
+            }
+            let creds =
+                ::utils::secret::Secret::new(format!("{user}:{}", password.expose_secret()));
+            let value = ::utils::secret::Secret::new(format!(
+                "Basic {}",
+                ::utils::encoding::base64_encode(creds.expose_secret().as_bytes())
+            ));
+            self.header("authorization", value.expose_secret())
         }
 
         /// Skip TLS verification (self-signed homelab endpoints). Forwarded to
@@ -1195,5 +1202,63 @@ mod tests {
             block_on(client.get("http://x/").send()).unwrap();
         });
         assert!(wire.contains("Basic YWxpY2U6czNjcmV0"), "{wire}");
+    }
+
+    #[test]
+    fn basic_rejects_colon_in_user() {
+        assert!(
+            super::api_client::ApiClientBuilder::new()
+                .basic("al:ice", ::utils::secret::Secret::new("p".to_string()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn repeated_authorization_yields_one_header() {
+        let client = super::api_client::ApiClientBuilder::new()
+            .bearer("tok-xyz")
+            .unwrap()
+            .basic("alice", ::utils::secret::Secret::new("s3cret".to_string()))
+            .unwrap()
+            .build()
+            .unwrap();
+        let wire = captured_wire(|| {
+            block_on(client.get("http://x/").send()).unwrap();
+        });
+        assert!(!wire.contains("tok-xyz"), "{wire}");
+        assert_eq!(wire.matches("Basic YWxpY2U6czNjcmV0").count(), 1, "{wire}");
+    }
+
+    #[test]
+    fn header_map_insert_replaces_case_insensitively() {
+        let mut map = super::header::HeaderMap::new();
+        map.append(
+            super::header::HeaderName::from_static("x-a"),
+            super::header::HeaderValue::from_static("1"),
+        );
+        map.insert(
+            super::header::HeaderName::from_bytes(b"X-A").unwrap(),
+            super::header::HeaderValue::from_static("2"),
+        );
+        assert_eq!(map.iter().count(), 1);
+        assert_eq!(map.get("x-a").unwrap().to_str().unwrap(), "2");
+    }
+
+    #[test]
+    fn scrub_keyword_headers_are_sensitive() {
+        let mut map = super::header::HeaderMap::new();
+        for name in [
+            "x-auth-token",
+            "X-Vault-Token",
+            "x-gitea-token",
+            "x-client-secret",
+        ] {
+            map.append(
+                super::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                super::header::HeaderValue::from_str("hunter2").unwrap(),
+            );
+        }
+        assert!(map.iter().all(|(_, v)| v.is_sensitive()));
+        assert!(!format!("{map:?}").contains("hunter2"));
     }
 }

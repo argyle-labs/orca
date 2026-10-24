@@ -100,14 +100,16 @@ impl ApiClientBuilder {
         user: impl AsRef<str>,
         password: ::utils::secret::Secret<String>,
     ) -> Result<Self> {
-        let creds = format!("{}:{}", user.as_ref(), password.expose_secret());
-        self.header(
-            "authorization",
-            format!(
-                "Basic {}",
-                ::utils::encoding::base64_encode(creds.as_bytes())
-            ),
-        )
+        let user = user.as_ref();
+        if user.contains(':') {
+            bail!("basic auth user-id must not contain ':'");
+        }
+        let creds = ::utils::secret::Secret::new(format!("{user}:{}", password.expose_secret()));
+        let value = ::utils::secret::Secret::new(format!(
+            "Basic {}",
+            ::utils::encoding::base64_encode(creds.expose_secret().as_bytes())
+        ));
+        self.header("authorization", value.expose_secret())
     }
 
     /// Skip TLS certificate verification. Required for homelab Proxmox
@@ -634,5 +636,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
+    }
+
+    #[test]
+    fn basic_rejects_colon_in_user() {
+        assert!(
+            ApiClientBuilder::new()
+                .basic("al:ice", ::utils::secret::Secret::new("p".to_string()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn bearer_then_basic_yields_one_authorization() {
+        let b = ApiClientBuilder::new()
+            .bearer("tok-xyz")
+            .unwrap()
+            .basic("alice", ::utils::secret::Secret::new("s3cret".to_string()))
+            .unwrap();
+        assert_eq!(b.headers.get_all("authorization").iter().count(), 1);
+        assert_eq!(b.headers["authorization"], "Basic YWxpY2U6czNjcmV0");
     }
 }
