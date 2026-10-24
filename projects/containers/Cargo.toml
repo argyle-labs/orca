@@ -25,7 +25,7 @@ tracing     = { workspace = true }
 utils       = { workspace = true }
 
 # `#[orca_tool]` machinery.
-contract    = { workspace = true }
+contract    = { workspace = true, features = ["in-process"] }
 derive      = { workspace = true }
 schemars    = { workspace = true }
 
