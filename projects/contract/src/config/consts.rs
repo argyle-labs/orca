@@ -32,7 +32,8 @@ pub const APP_DAEMON_STDERR_FILE: &str = "daemon.stderr.log";
 pub const APP_DAEMON_LOG_FILE_LEGACY: &str = "daemon.log";
 pub const APP_REPO_URL: &str = "https://github.com/argyle-labs/orca";
 pub const APP_REPO_API_URL: &str = "https://api.github.com/repos/argyle-labs/orca";
-pub const APP_SYSTEMD_SERVICE: &str = "orca";
+pub const APP_SYSTEMD_SERVICE: &str = "orca-daemon";
+pub const APP_SYSTEMD_SERVICE_LEGACY: &str = "orca";
 pub const APP_KEYRING_SERVICE: &str = "orca";
 /// Subdirectory inside APP_STATE_DIR where PKI material (CA, certs) is stored.
 pub const APP_PKI_DIR: &str = "pki";

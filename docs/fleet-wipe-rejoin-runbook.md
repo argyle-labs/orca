@@ -57,7 +57,7 @@ on Linux service installs; `system.certs.list` / logs show the resolved path).
    orca system mesh delete --action leave
    ```
 2. **Stop the daemon** so nothing rewrites identity mid-wipe:
-   - systemd: `sudo systemctl stop orca`
+   - systemd: `sudo systemctl stop orca-daemon`
    - OpenRC: `sudo rc-service orca stop`
 3. **Delete the persisted identity** so a fresh UUIDv7 is minted on next start:
    ```

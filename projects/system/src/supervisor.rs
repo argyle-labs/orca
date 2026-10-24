@@ -355,8 +355,8 @@ mod tests {
     #[test]
     fn other_managers_restart_in_one_step() {
         assert_eq!(
-            restart_plan(Init::Systemd, "orca.service"),
-            vec![vec!["systemctl", "restart", "orca.service"]]
+            restart_plan(Init::Systemd, "orca-daemon.service"),
+            vec![vec!["systemctl", "restart", "orca-daemon.service"]]
         );
         assert_eq!(restart_plan(Init::Launchd, "com.x").len(), 1);
     }

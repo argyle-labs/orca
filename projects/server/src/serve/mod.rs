@@ -252,6 +252,9 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // the unambiguous footprint of `cargo run` / `cargo watch`, and catches legacy
     // cargo-watch instances that pre-date the env-var convention.
     let dev_spawn = std::env::var("ORCA_DEV_PARENT_PID").is_ok() || spawned_by_cargo_watch();
+    if !dev_spawn {
+        tokio::task::spawn_blocking(system::daemon::migrate_legacy_unit_on_startup);
+    }
 
     if dev_spawn {
         if let Ok(Some(mut s)) = utils::state::read() {

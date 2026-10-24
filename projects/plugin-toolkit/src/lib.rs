@@ -525,6 +525,7 @@ pub mod service {
 /// orca owns the fit and the "is this filling, and when does it run out" verdict.
 /// Pure maths over `(ts, used, total)`, so it serves any resource that fills.
 pub use ::utils::capacity_trend;
+pub use ::utils::encoding as base64;
 /// SHA-256 / hex helpers — see [`utils::hash`].
 pub use ::utils::hash;
 /// Time-ordered ID generation (`new` / `new_short` / `is_valid`) — see [`utils::id`].
@@ -540,6 +541,8 @@ pub use ::utils::id::new as mint_uuidv7;
 /// means "a guest can fill the host" is orca's call. Without this re-export every
 /// plugin reimplements the severity rules and they drift.
 pub use ::utils::mount_audit;
+#[cfg(feature = "xml")]
+pub use ::utils::roxmltree;
 /// Secret scrubbing — see [`utils::scrub`].
 ///
 /// Re-exported so a plugin redacts against the SAME keyword list the daemon's
