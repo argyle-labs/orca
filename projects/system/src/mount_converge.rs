@@ -46,6 +46,9 @@ pub const PROBE_TIMEOUT_SECS: u64 = 5;
 /// one. A *missing* mount is not gated — it is mounted immediately.
 pub const CONFIRM_TICKS: u32 = 2;
 
+/// Ticks a `(target, source)` pair whose mount failed is passed over by election.
+const MOUNTFAIL_BACKOFF_TICKS: u32 = 5;
+
 /// A desired mount for THIS host: a placement joined to its share, with the
 /// share's ordered sources and pre-rendered options resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,7 +372,9 @@ fn should_swap(d: &DesiredMount, sig: &FailoverSignal) -> bool {
 /// its own retain). Keep a key iff it is failover-namespaced OR names a target
 /// still desired.
 fn keep_stale_counter_key(key: &str, desired: &[DesiredMount]) -> bool {
-    key.starts_with("failover:") || desired.iter().any(|d| d.target == key)
+    key.starts_with("failover:")
+        || key.starts_with("mountfail:")
+        || desired.iter().any(|d| d.target == key)
 }
 
 /// Whether a live mount's options have drifted from the share's rendered
@@ -1015,11 +1020,12 @@ async fn probe_live(source: &str, fstype: &str, probe: SourceProbe, timeout: Dur
 /// classify the transition; [`Election::Empty`] when every ordered source is down.
 async fn elect(
     sources: &[String],
+    backed_off: &HashSet<String>,
     fstype: &str,
     probe: SourceProbe,
     timeout: Duration,
 ) -> Election {
-    for (index, s) in sources.iter().enumerate() {
+    for (index, s) in candidate_order(sources, backed_off) {
         if probe_live(s, fstype, probe, timeout).await {
             return Election::Elected {
                 source: s.clone(),
@@ -1028,6 +1034,62 @@ async fn elect(
         }
     }
     Election::Empty
+}
+
+/// Sources in election order: those not backing off from a failed mount first,
+/// then the backed-off ones as a last resort. Indices stay the priority order.
+fn candidate_order<'a>(
+    sources: &'a [String],
+    backed_off: &HashSet<String>,
+) -> Vec<(usize, &'a String)> {
+    let (fresh, failed): (Vec<_>, Vec<_>) = sources
+        .iter()
+        .enumerate()
+        .partition(|(_, s)| !backed_off.contains(*s));
+    fresh.into_iter().chain(failed).collect()
+}
+
+fn mountfail_key(target: &str, source: &str) -> String {
+    format!("mountfail:{target}|{source}")
+}
+
+fn backed_off_sources(c: &HashMap<String, u32>, d: &DesiredMount) -> HashSet<String> {
+    d.sources
+        .iter()
+        .filter(|s| c.contains_key(&mountfail_key(&d.target, s)))
+        .cloned()
+        .collect()
+}
+
+/// Count down every mount-failure backoff, dropping those that expired or whose
+/// target is no longer desired, so a recovered source is retried.
+fn tick_mountfail_backoff(c: &mut HashMap<String, u32>, desired: &[DesiredMount]) {
+    c.retain(|k, n| {
+        let Some(rest) = k.strip_prefix("mountfail:") else {
+            return true;
+        };
+        let target = rest.split_once('|').map_or(rest, |(t, _)| t);
+        if !desired.iter().any(|d| d.target == target) {
+            return false;
+        }
+        *n = n.saturating_sub(1);
+        *n > 0
+    });
+}
+
+fn record_mount_outcomes(
+    c: &mut HashMap<String, u32>,
+    attempted: &[(String, String)],
+    changed: &[String],
+) {
+    for (target, source) in attempted {
+        let key = mountfail_key(target, source);
+        if changed.contains(target) {
+            c.remove(&key);
+        } else {
+            c.insert(key, MOUNTFAIL_BACKOFF_TICKS);
+        }
+    }
 }
 
 /// The elected source string, or `None` for an empty election.
@@ -1203,10 +1265,20 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     // resolved probe (RPC-NULL for nfs, so a hung primary with TCP up is NOT
     // elected). Reused below both for the failover swap decision and to source
     // the actual mount, so each source is probed once per tick.
+    let backed_off_by_target: HashMap<String, HashSet<String>> = {
+        let mut c = counters.lock().expect("converge counters poisoned");
+        tick_mountfail_backoff(&mut c, &desired);
+        desired
+            .iter()
+            .map(|d| (d.target.clone(), backed_off_sources(&c, d)))
+            .collect()
+    };
+    let no_backoff = HashSet::new();
     let mut elected_by_target: HashMap<String, Election> = HashMap::new();
     for d in &desired {
         let e = elect(
             &d.sources,
+            backed_off_by_target.get(&d.target).unwrap_or(&no_backoff),
             &d.fstype,
             d.remount_policy.failover.probe,
             timeout,
@@ -1404,6 +1476,7 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
                     None => elected_source(
                         &elect(
                             &d.sources,
+                            backed_off_by_target.get(target).unwrap_or(&no_backoff),
                             &d.fstype,
                             d.remount_policy.failover.probe,
                             timeout,
@@ -1454,6 +1527,7 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
                                 MountExec::Proceed => {}
                             }
                         }
+                        info!("[converge] {target}: elected source {src}");
                         reqs.push(mount_req(d, &src, secret_files.get(target).cloned()));
                     }
                     None => warn!(
@@ -1495,12 +1569,21 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         let keep_secret_files: Vec<String> =
             secret_files.values().map(|sf| sf.path.clone()).collect();
         let source_by_target = mounted_sources(&reqs);
+        let attempted: Vec<(String, String)> = reqs
+            .iter()
+            .map(|r| (r.target.clone(), r.source.clone()))
+            .collect();
         let r = run_privileged(&PrivilegedOp::Mount {
             mounts: reqs,
             keep_secret_files,
         })
         .await;
         record_mounted_sources(&mut ledger, &source_by_target, &r.changed);
+        record_mount_outcomes(
+            &mut counters.lock().expect("converge counters poisoned"),
+            &attempted,
+            &r.changed,
+        );
         for t in &r.changed {
             info!("[converge] mounted {t}");
         }
@@ -4313,6 +4396,59 @@ mod tests {
         assert_eq!(back, op);
     }
 
+    #[test]
+    fn failed_first_source_is_passed_over_for_the_next() {
+        let dm = DesiredMount {
+            sources: vec!["a:/x".into(), "b:/x".into()],
+            ..d("/mnt/data")
+        };
+        let mut c = HashMap::new();
+        record_mount_outcomes(&mut c, &[("/mnt/data".into(), "a:/x".into())], &[]);
+        let skip = backed_off_sources(&c, &dm);
+        let order: Vec<_> = candidate_order(&dm.sources, &skip)
+            .into_iter()
+            .map(|(i, s)| (i, s.as_str()))
+            .collect();
+        assert_eq!(order, vec![(1, "b:/x"), (0, "a:/x")]);
+        let live = |s: &str| s == "a:/x" || s == "b:/x";
+        let elected = order.iter().find(|(_, s)| live(s)).copied();
+        assert_eq!(elected, Some((1, "b:/x")));
+    }
+
+    #[test]
+    fn failed_source_is_retried_after_backoff_or_success() {
+        let dm = DesiredMount {
+            sources: vec!["a:/x".into(), "b:/x".into()],
+            ..d("/mnt/data")
+        };
+        let mut c = HashMap::new();
+        record_mount_outcomes(&mut c, &[("/mnt/data".into(), "a:/x".into())], &[]);
+        for _ in 0..MOUNTFAIL_BACKOFF_TICKS - 1 {
+            tick_mountfail_backoff(&mut c, std::slice::from_ref(&dm));
+            assert!(!backed_off_sources(&c, &dm).is_empty());
+        }
+        tick_mountfail_backoff(&mut c, std::slice::from_ref(&dm));
+        assert!(backed_off_sources(&c, &dm).is_empty());
+        assert_eq!(candidate_order(&dm.sources, &HashSet::new())[0].1, "a:/x");
+
+        record_mount_outcomes(&mut c, &[("/mnt/data".into(), "a:/x".into())], &[]);
+        record_mount_outcomes(
+            &mut c,
+            &[("/mnt/data".into(), "a:/x".into())],
+            &["/mnt/data".into()],
+        );
+        assert!(backed_off_sources(&c, &dm).is_empty());
+        assert!(keep_stale_counter_key("mountfail:/mnt/data|a:/x", &[]));
+    }
+
+    #[test]
+    fn mountfail_backoff_is_dropped_for_a_removed_target() {
+        let mut c = HashMap::new();
+        record_mount_outcomes(&mut c, &[("/mnt/gone".into(), "a:/x".into())], &[]);
+        tick_mountfail_backoff(&mut c, &[]);
+        assert!(c.is_empty());
+    }
+
     // ── replication_health_by_target: no-ref fast path ────────────────────
 
     #[tokio::test]
@@ -4388,7 +4524,14 @@ mod tests {
     #[tokio::test]
     async fn elect_empty_sources_is_empty_election() {
         // No sources to probe → election is Empty without any network I/O.
-        let out = elect(&[], "nfs4", SourceProbe::Tcp, Duration::from_millis(1)).await;
+        let out = elect(
+            &[],
+            &HashSet::new(),
+            "nfs4",
+            SourceProbe::Tcp,
+            Duration::from_millis(1),
+        )
+        .await;
         assert_eq!(out, Election::Empty);
     }
 
@@ -4432,7 +4575,14 @@ mod tests {
         // → each `probe_live` returns false, the loop exhausts, and the election is
         // Empty. Drives the `elect` loop body (index/enumerate) with no network.
         let sources = vec!["noscheme".to_string(), "alsonoscheme".to_string()];
-        let out = elect(&sources, "nfs4", SourceProbe::Nfs, Duration::from_millis(1)).await;
+        let out = elect(
+            &sources,
+            &HashSet::new(),
+            "nfs4",
+            SourceProbe::Nfs,
+            Duration::from_millis(1),
+        )
+        .await;
         assert_eq!(out, Election::Empty);
     }
 
@@ -4636,7 +4786,14 @@ mod tests {
         // The `elect` loop over ordered sources with the Tcp probe: each hostless
         // source probes down, the loop exhausts, and the election is Empty.
         let sources = vec!["noscheme".to_string(), "stillnone".to_string()];
-        let out = elect(&sources, "ext4", SourceProbe::Tcp, Duration::from_millis(1)).await;
+        let out = elect(
+            &sources,
+            &HashSet::new(),
+            "ext4",
+            SourceProbe::Tcp,
+            Duration::from_millis(1),
+        )
+        .await;
         assert_eq!(out, Election::Empty);
     }
 

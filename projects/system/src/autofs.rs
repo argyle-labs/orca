@@ -764,7 +764,9 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             for m in &mounts {
                 match crate::mount_exec::run_mount(m).await {
                     Ok(()) => res.changed.push(m.target.clone()),
-                    Err(e) => res.errors.push(format!("mount {}: {e}", m.target)),
+                    Err(e) => res
+                        .errors
+                        .push(format!("mount {} from {}: {e}", m.target, m.source)),
                 }
             }
             // Reap secret-files not in the authoritative keep-set (deleted mount /
