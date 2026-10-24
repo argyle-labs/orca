@@ -575,6 +575,9 @@ fn shared_column(field: &str) -> &str {
 }
 
 fn shared_config_field(row: &DbRow, field: &str) -> Option<String> {
+    if utils::scrub::is_sensitive_key(field) {
+        return None;
+    }
     let Some(DbValue::Text(cfg)) = row.get("config") else {
         return None;
     };
@@ -1051,6 +1054,20 @@ mod tests {
         )]);
         let cols = auth_columns(&surface, &row).unwrap();
         assert_eq!(cols.get("realm").map(String::as_str), Some("pve"));
+    }
+
+    #[test]
+    fn secret_auth_column_is_not_resolved_from_shared_config() {
+        let mut value = serde_json::to_value(column_auth("cfgs", "header")).unwrap();
+        value["auth"]["template"] = json!("Tok={endpoint.token}={secret}");
+        value["endpoint"]["columns"] = json!(["token"]);
+        let surface = ApiSurface::parse(&value.to_string()).unwrap();
+        let row = DbRow::from([(
+            "config".to_string(),
+            DbValue::Text(json!({"token": "leaked"}).to_string()),
+        )]);
+        let err = auth_columns(&surface, &row).unwrap_err();
+        assert!(format!("{err:#}").contains("no `token` column"));
     }
 
     #[test]
