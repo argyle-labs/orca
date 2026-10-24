@@ -138,7 +138,7 @@ where
     let key = Option::<String>::deserialize(deserializer)?;
     match key {
         Some(k) if k.is_empty() || k.contains('/') => Err(serde::de::Error::custom(format!(
-            "api-surface: response.envelope must be a top-level object key, not a JSON pointer (got {k:?})"
+            "response.envelope must be a top-level object key, not a JSON pointer (got {k:?})"
         ))),
         other => Ok(other),
     }
@@ -667,7 +667,7 @@ pub fn peel_envelope(rules: &ResponseRules, value: Value) -> Value {
             map.remove(key).unwrap_or(Value::Null)
         }
         (Some(key), other) => {
-            tracing::debug!(envelope = %key, "response envelope key absent; passing body through");
+            tracing::debug!(envelope = %key, "envelope key absent or body not an object");
             other
         }
         (None, other) => other,
@@ -1473,6 +1473,28 @@ mod tests {
         assert!(err.contains("not a JSON pointer"), "{err}");
         assert!(serde_json::from_value::<ResponseRules>(json!({"envelope": ""})).is_err());
         assert!(serde_json::from_value::<ResponseRules>(json!({"envelope": "data"})).is_ok());
+    }
+
+    #[test]
+    fn envelope_missing_or_null_is_none() {
+        let missing = serde_json::from_value::<ResponseRules>(json!({})).unwrap();
+        assert_eq!(missing.envelope, None);
+        let null = serde_json::from_value::<ResponseRules>(json!({"envelope": null})).unwrap();
+        assert_eq!(null.envelope, None);
+    }
+
+    #[test]
+    fn parse_rejects_pointer_envelope() {
+        let doc = json!({"format": FORMAT, "surface": "s", "kind": "openapi", "ops": [],
+            "response": {"envelope": "/data"}});
+        let err = format!("{:#}", ApiSurface::parse(&doc.to_string()).unwrap_err());
+        assert!(err.contains("not a JSON pointer"), "{err}");
+        assert_eq!(err.matches("api-surface:").count(), 1, "{err}");
+    }
+
+    #[test]
+    fn envelope_rejects_nested_key() {
+        assert!(serde_json::from_value::<ResponseRules>(json!({"envelope": "a/b"})).is_err());
     }
 
     #[test]
