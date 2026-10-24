@@ -1040,6 +1040,20 @@ mod tests {
     }
 
     #[test]
+    fn unmapped_auth_column_resolves_from_shared_config() {
+        let mut value = serde_json::to_value(column_auth("cfgp", "header")).unwrap();
+        value["auth"]["template"] = json!("Realm={endpoint.realm}={secret}");
+        value["endpoint"]["columns"] = json!(["realm"]);
+        let surface = ApiSurface::parse(&value.to_string()).unwrap();
+        let row = DbRow::from([(
+            "config".to_string(),
+            DbValue::Text(json!({"realm": "pve"}).to_string()),
+        )]);
+        let cols = auth_columns(&surface, &row).unwrap();
+        assert_eq!(cols.get("realm").map(String::as_str), Some("pve"));
+    }
+
+    #[test]
     fn missing_auth_column_names_the_column() {
         let err = auth_columns(&token_id_surface(), &DbRow::new()).unwrap_err();
         let wrapped = anyhow!("tokp.item: endpoint `main`: {err:#}");
