@@ -368,8 +368,7 @@ let_underscore_must_use = "deny"
 # if a profiler shows a hot loop that benefits.
 opt-level = 2
 # Thin LTO: parallel across codegen units, ~3-5% runtime cost vs fat for a
-# server binary at a fraction of the build time. Stable releases use it; RC
-# builds (CI and release-local.sh) override it with CARGO_PROFILE_RELEASE_LTO=off.
+# server binary at a fraction of the build time. RC and stable releases both use it.
 lto = "thin"
 # 16 parallel rustc codegen tasks. Without this, cargo serializes the final
 # codegen on a single core regardless of -j. Trade: binary ~10% larger.

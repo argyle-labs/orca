@@ -98,8 +98,6 @@ cmd_rc() {
   write_cargo_version "$RC"
 
   run_release_checks
-  # RCs build with LTO off, as CI does (#755); stable keeps the profile's thin LTO.
-  export CARGO_PROFILE_RELEASE_LTO=off
   build_orca_targets "${TARGETS[@]}"
   build_native_packages
   log "release build complete"
