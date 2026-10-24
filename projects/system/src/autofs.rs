@@ -733,11 +733,9 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
                     Err(e) => res.errors.push(format!("write {}: {e}", w.path)),
                 }
             }
-            // Teardown: prune secret-files not in the authoritative keep-set. When
-            // a mount is deleted or its secret changes target, its stale secret-file
-            // is removed so a resolved secret never lingers on disk. Scoped to
-            // `SECRET_FILE_DIR`; foreign files there are left alone.
-            reap_orphan_secret_files(&keep_secret_files, &mut res).await;
+            // Secret-file teardown is owned by the native Mount/SecretFiles ops;
+            // every Apply sender passes an empty keep-set.
+            let _ = keep_secret_files;
             if !res.changed.is_empty() {
                 match restart_autofs(init).await {
                     Ok(()) => res.restarted = true,

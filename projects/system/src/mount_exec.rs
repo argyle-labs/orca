@@ -168,7 +168,16 @@ async fn write_secret_file(path: &str, contents: &str) -> std::io::Result<()> {
         tokio::fs::create_dir_all(dir).await?;
     }
     let tmp = format!("{path}.orca.tmp");
-    tokio::fs::write(&tmp, contents).await?;
+    tokio::fs::remove_file(&tmp).await.ok();
+    let mut f = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .await?;
+    tokio::io::AsyncWriteExt::write_all(&mut f, contents.as_bytes()).await?;
+    f.sync_all().await?;
+    drop(f);
     tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await?;
     tokio::fs::rename(&tmp, path).await
 }
