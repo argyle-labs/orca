@@ -3526,38 +3526,42 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
 
-        let peer_id = utils::id::new();
-        {
-            let conn = db::open_default().expect("open orca.db under temp ORCA_HOME");
-            db::mesh::peerdb::upsert_peer(
-                &conn,
-                &peer_id,
-                "secure-host",
-                "10.0.0.11",
-                9443,
-                None,
-                "",
-            )
-            .expect("upsert peer");
-            // Promote to secure so it passes the `peer_secure` candidate filter.
-            db::mesh::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
-                .expect("mark peer secure");
-        }
+        let db_path = tmp.path().join("orca.db");
+        db::with_db_path(db_path, async {
+            let peer_id = utils::id::new();
+            {
+                let conn = db::open_default().expect("open orca.db under the pinned path");
+                db::mesh::peerdb::upsert_peer(
+                    &conn,
+                    &peer_id,
+                    "secure-host",
+                    "10.0.0.11",
+                    9443,
+                    None,
+                    "",
+                )
+                .expect("upsert peer");
+                // Promote to secure so it passes the `peer_secure` candidate filter.
+                db::mesh::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
+                    .expect("mark peer secure");
+            }
 
-        let entry = entry("sonarr", "available");
-        let err = match delegate_plugin_fetch(&entry, Some("0.1.0"), false, false, &ctx).await {
-            Ok(_) => panic!("expected delegate fetch to bail with no transport"),
-            Err(e) => e,
-        };
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("no RemoteExec transport"),
-            "a secure peer with no transport must bail at the transport check: {msg}"
-        );
-        assert!(
-            !msg.contains("no paired secure peer"),
-            "a secure peer is present, so it must pass the secure-peer guard: {msg}"
-        );
+            let entry = entry("sonarr", "available");
+            let err = match delegate_plugin_fetch(&entry, Some("0.1.0"), false, false, &ctx).await {
+                Ok(_) => panic!("expected delegate fetch to bail with no transport"),
+                Err(e) => e,
+            };
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("no RemoteExec transport"),
+                "a secure peer with no transport must bail at the transport check: {msg}"
+            );
+            assert!(
+                !msg.contains("no paired secure peer"),
+                "a secure peer is present, so it must pass the secure-peer guard: {msg}"
+            );
+        })
+        .await;
         unsafe {
             std::env::remove_var("ORCA_HOME");
             std::env::remove_var("HOME");

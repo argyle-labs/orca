@@ -14,8 +14,6 @@ pub const DAY_MS: i64 = 86_400_000;
 pub const DEFAULT_RESOLVED_RETENTION_DAYS: i64 = 30;
 pub const DEFAULT_MAX_RESOLVED_PER_UNIT: usize = 500;
 
-/// A stored finding. Identity is (member, unit, scanner, id, package); the
-/// member is the system that ran the scan and holds this row.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Finding {
@@ -43,9 +41,6 @@ pub struct MergeCounts {
     pub reopened: usize,
 }
 
-/// Bounds on resolved rows kept after a merge: resolved findings older than
-/// `resolved_max_age_ms` are dropped, then at most `max_resolved_per_unit`
-/// most-recently-resolved rows are kept per (member, unit).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Retention {
     pub resolved_max_age_ms: i64,
@@ -342,8 +337,6 @@ pub fn record(
     Ok(counts)
 }
 
-/// Run the selected scanners against one unit and record each report. A
-/// failing scanner is reported in its outcome and leaves its findings untouched.
 pub async fn scan_into(
     path: &Path,
     member_id: &str,
@@ -370,7 +363,19 @@ pub async fn scan_into(
             })
             .await
         {
-            Ok(report) => record(path, member_id, unit_id, &name, report, retention),
+            Ok(report) => {
+                let (path, member_id, unit_id, name) = (
+                    path.to_path_buf(),
+                    member_id.to_string(),
+                    unit_id.clone(),
+                    name.clone(),
+                );
+                tokio::task::spawn_blocking(move || {
+                    record(&path, &member_id, &unit_id, &name, report, retention)
+                })
+                .await
+                .unwrap_or_else(|e| Err(anyhow!("record task failed: {e}")))
+            }
             Err(e) => Err(e),
         };
         outcomes.push(match result {
@@ -440,11 +445,10 @@ mod tests {
         s.merge(M, &u(unit), scanner, r, now, Retention::default())
     }
 
-    fn temp_store() -> PathBuf {
-        utils::home::orca_home()
-            .expect("sandboxed orca home")
-            .join(format!("security-test-{}", utils::id::new()))
-            .join("findings.json")
+    fn temp_store() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("security").join("findings.json");
+        (dir, path)
     }
 
     fn counts(new: usize, updated: usize, resolved: usize, reopened: usize) -> MergeCounts {
@@ -741,8 +745,8 @@ mod tests {
     }
 
     #[test]
-    fn store_round_trips_through_file_under_orca_home() {
-        let path = temp_store();
+    fn store_round_trips_through_file() {
+        let (_dir, path) = temp_store();
         assert!(FindingsStore::load(&path).unwrap().findings().is_empty());
         record(
             &path,
@@ -756,12 +760,11 @@ mod tests {
         let loaded = FindingsStore::load(&path).unwrap();
         assert_eq!(loaded.findings().len(), 1);
         assert_eq!(loaded.list(&ListQuery::default()).items.len(), 1);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn concurrent_records_never_drop_writes() {
-        let path = temp_store();
+        let (_dir, path) = temp_store();
         let handles: Vec<_> = (0..8)
             .map(|i| {
                 let path = path.clone();
@@ -782,6 +785,21 @@ mod tests {
             h.join().unwrap();
         }
         assert_eq!(FindingsStore::load(&path).unwrap().findings().len(), 8);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_store_lock_excludes_other_handles() {
+        let (_dir, path) = temp_store();
+        record(
+            &path,
+            M,
+            &u(1),
+            "trivy",
+            report(vec![], true),
+            Retention::default(),
+        )
+        .unwrap();
         let lock = lock_path(&path);
         assert!(lock.exists());
         let held = OpenOptions::new().write(true).open(&lock).unwrap();
@@ -794,7 +812,6 @@ mod tests {
                 .try_lock()
                 .is_err()
         );
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     struct FakeScanner {
@@ -834,7 +851,7 @@ mod tests {
             name: "sec-store-bad",
             fail: true,
         }));
-        let path = temp_store();
+        let (_dir, path) = temp_store();
         let unit = u(3);
 
         let one = scan_into(&path, M, &unit, Some("sec-store-ok"), Retention::default())
@@ -882,6 +899,5 @@ mod tests {
         );
         assert!(deregister_scanner("sec-store-ok"));
         assert!(deregister_scanner("sec-store-bad"));
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

@@ -80,6 +80,7 @@ orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 libc = { workspace = true }
 
 [dev-dependencies]
+utils = { workspace = true, features = ["test-scope"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 serial_test = { workspace = true }

@@ -63,7 +63,16 @@ pub fn resolve_or_mint(natural_key: &str) -> Result<Uuid> {
 }
 
 pub fn exists(uuid: &str) -> Result<bool> {
-    Ok(endpoint_db::list()?.iter().any(|row| row.uuid == uuid))
+    db::pool::with_pooled_or_open(|conn| {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS unit_identities_uuid ON unit_identities(uuid)",
+        )?;
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM unit_identities WHERE uuid = ?1)",
+            [uuid],
+            |r| r.get::<_, bool>(0),
+        )?)
+    })
 }
 
 #[cfg(test)]
