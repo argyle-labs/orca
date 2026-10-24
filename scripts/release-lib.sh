@@ -89,7 +89,7 @@ default_targets() {
 host_target() {
   # Prefer rustc so we agree with cargo's notion of host. Fall back to
   # uname so this works on CI runners that haven't installed a toolchain
-  # (the package job downloads pre-built binaries — no rustc).
+  # (the package and package-macos-pkg jobs download pre-built binaries — no rustc).
   if command -v rustc >/dev/null 2>&1; then
     rustc -vV | awk '/^host:/ {print $2}'
     return
@@ -590,7 +590,7 @@ release_asset_paths() {
 }
 
 # Build every OS package format the host can produce, alongside the
-# binaries in dist-release/. Mirrors the package job in
+# binaries in dist-release/. Mirrors the package and package-macos-pkg jobs in
 # .github/workflows/release.yml (see [[feedback-ci-makefile-parity]]).
 #
 # Each format runs `orca system build --execute --format <fmt>` via the
@@ -664,6 +664,8 @@ build_os_packages() {
     rm -f "$marker"
   done
 }
+
+build_native_packages() { build_os_packages "$@"; }
 
 # ── rc cleanup ──────────────────────────────────────────────────────────────
 #
