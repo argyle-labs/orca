@@ -154,32 +154,9 @@ pub(crate) async fn materialize_secret_file(sf: &SecretFile) -> Result<(), Strin
             sf.path
         ));
     }
-    write_secret_file(&sf.path, &sf.contents)
+    crate::autofs::write_atomic(&sf.path, &sf.contents, Some(0o600))
         .await
         .map_err(|e| format!("write secret-file {}: {e}", sf.path))
-}
-
-/// Atomic 0600 write of a secret-file: sibling temp, chmod-before-rename so the
-/// bytes are never visible at a laxer mode, then rename over the target. Mirrors
-/// the autofs applier's creds-file write so the two paths behave identically.
-async fn write_secret_file(path: &str, contents: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    if let Some(dir) = std::path::Path::new(path).parent() {
-        tokio::fs::create_dir_all(dir).await?;
-    }
-    let tmp = format!("{path}.orca.tmp");
-    tokio::fs::remove_file(&tmp).await.ok();
-    let mut f = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)
-        .await?;
-    tokio::io::AsyncWriteExt::write_all(&mut f, contents.as_bytes()).await?;
-    f.sync_all().await?;
-    drop(f);
-    tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await?;
-    tokio::fs::rename(&tmp, path).await
 }
 
 /// Release `target` by exec-ing the native `umount -lf`. Idempotent enough for

@@ -112,12 +112,8 @@ pub enum PrivilegedOp {
     /// Write the given config files, then restart autofs via `init`. The daemon
     /// only emits this when at least one file actually differs from disk.
     ///
-    /// `keep_secret_files` is the authoritative set of secret-file paths that
-    /// should exist after this apply (every currently-declared inline-secret mount).
-    /// The root helper reaps any secret-file in `SECRET_FILE_DIR` NOT in this set —
-    /// the teardown path for a deleted mount or one whose secret changed. It is
-    /// distinct from `writes` because an unchanged secret-file is not rewritten but
-    /// must still be kept.
+    /// `keep_secret_files` is accepted for wire compatibility and ignored; the
+    /// native `Mount` and `SecretFiles` ops own secret-file teardown.
     Apply {
         writes: Vec<FileWrite>,
         #[serde(default)]
@@ -136,8 +132,7 @@ pub enum PrivilegedOp {
     /// should exist after this apply (every currently-declared inline-secret mount's
     /// secret-file). The root helper reaps any secret-file in `SECRET_FILE_DIR` NOT
     /// in this set — the generic teardown for a deleted mount or one whose secret
-    /// changed, mirroring `Apply`'s `keep_secret_files`. Core reaps by path validity,
-    /// never by the file's grammar.
+    /// changed. Core reaps by path validity, never by the file's grammar.
     Mount {
         mounts: Vec<crate::mount_exec::MountReq>,
         #[serde(default)]
@@ -718,7 +713,7 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
     match op {
         PrivilegedOp::Apply {
             writes,
-            keep_secret_files,
+            keep_secret_files: _,
             init,
         } => {
             let mut res = PrivilegedResult::default();
@@ -733,9 +728,6 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
                     Err(e) => res.errors.push(format!("write {}: {e}", w.path)),
                 }
             }
-            // Secret-file teardown is owned by the native Mount/SecretFiles ops;
-            // every Apply sender passes an empty keep-set.
-            let _ = keep_secret_files;
             if !res.changed.is_empty() {
                 match restart_autofs(init).await {
                     Ok(()) => res.restarted = true,
@@ -968,16 +960,29 @@ fn set_mode_tree(path: &str, mode: u32, recursive: bool) -> std::io::Result<usiz
 
 /// Atomic write: create the parent dir, write a sibling temp file, then rename
 /// over the target so a reader never sees a half-written map. When `mode` is set
-/// (a secret-file), the mode is applied to the **temp file before rename**
-/// so the file is never visible at a laxer mode — there is no window in which the
-/// secret is world-readable.
-async fn write_atomic(path: &str, contents: &str, mode: Option<u32>) -> std::io::Result<()> {
+/// (a secret-file), the temp file is created at that mode, so the bytes are never
+/// visible at a laxer one.
+pub(crate) async fn write_atomic(
+    path: &str,
+    contents: &str,
+    mode: Option<u32>,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
     let p = Path::new(path);
     if let Some(dir) = p.parent() {
         tokio::fs::create_dir_all(dir).await?;
     }
     let tmp = format!("{path}.orca.tmp");
-    tokio::fs::write(&tmp, contents).await?;
+    tokio::fs::remove_file(&tmp).await.ok();
+    let mut open = tokio::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    if let Some(m) = mode {
+        open.mode(m);
+    }
+    let mut f = open.open(&tmp).await?;
+    f.write_all(contents.as_bytes()).await?;
+    f.sync_all().await?;
+    drop(f);
     if let Some(m) = mode {
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(m)).await?;
@@ -2119,6 +2124,27 @@ mod tests {
         assert!(!is_allowed_write("/etc/orca/secret-files/../../shadow"));
         assert!(!is_allowed_write("/etc/orca/secret-files/sub/x.secret"));
         assert!(!is_allowed_write("/etc/shadow"));
+    }
+
+    #[tokio::test]
+    async fn write_atomic_secret_temp_is_never_wider_than_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("mnt_media.secret");
+        let path = target.to_str().unwrap();
+        std::fs::write(format!("{path}.orca.tmp"), "stale").unwrap();
+        std::fs::set_permissions(
+            format!("{path}.orca.tmp"),
+            std::fs::Permissions::from_mode(0o666),
+        )
+        .unwrap();
+        write_atomic(path, "password=p\n", Some(0o600))
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "password=p\n");
+        assert!(!std::path::Path::new(&format!("{path}.orca.tmp")).exists());
     }
 
     #[tokio::test]
