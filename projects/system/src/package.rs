@@ -226,16 +226,7 @@ fn build_deb(
     let staged_bin = bin_dir.join("orca");
     std::fs::copy(binary, &staged_bin)?;
     set_mode_755(&staged_bin)?;
-    set_mode(&debian.join("control"), 0o644)?;
-    for dir in [
-        staging.clone(),
-        debian.clone(),
-        staging.join("usr"),
-        staging.join("usr/local"),
-        bin_dir.clone(),
-    ] {
-        set_mode_755(&dir)?;
-    }
+    normalize_deb_staging_modes(&staging)?;
 
     let pkg_name = format!("orca_{version}_{deb_arch}.deb");
     let out = out_dir.join(&pkg_name);
@@ -1094,6 +1085,14 @@ fn write_script(path: &Path, content: &str) -> Result<()> {
     set_mode_755(path)
 }
 
+fn normalize_deb_staging_modes(staging: &Path) -> Result<()> {
+    set_mode(&staging.join("DEBIAN/control"), 0o644)?;
+    for dir in ["", "DEBIAN", "usr", "usr/local", "usr/local/bin"] {
+        set_mode_755(&staging.join(dir))?;
+    }
+    Ok(())
+}
+
 fn set_mode_755(path: &Path) -> Result<()> {
     set_mode(path, 0o755)
 }
@@ -1905,30 +1904,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[serial_test::serial(umask)]
-    fn deb_staging_dirs_are_0755_under_umask_000() {
+    fn deb_staging_modes_are_normalized_from_world_writable() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let bin = fake_binary(dir.path());
-        let out = dir.path().join("out");
-        std::fs::create_dir_all(&out).unwrap();
-        struct Restore(libc::mode_t);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe { libc::umask(self.0) };
-            }
-        }
-        let _restore = Restore(unsafe { libc::umask(0) });
-        let Ok(()) = build_deb(&bin, "1.2.3", "x86_64", "M", &out) else {
-            panic!("build_deb failed under umask 000");
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(staging.join("DEBIAN")).unwrap();
+        std::fs::create_dir_all(staging.join("usr/local/bin")).unwrap();
+        std::fs::write(staging.join("DEBIAN/control"), "x").unwrap();
+        let set = |p: &str, m: u32| {
+            std::fs::set_permissions(staging.join(p), std::fs::Permissions::from_mode(m)).unwrap()
         };
-        if utils::path::which("dpkg-deb").is_some() {
-            assert!(out.join("orca_1.2.3_amd64.deb").exists());
-            return;
+        for d in ["", "DEBIAN", "usr", "usr/local", "usr/local/bin"] {
+            set(d, 0o777);
         }
-        let staged = out.join("orca-deb-staging");
+        set("DEBIAN/control", 0o666);
+        normalize_deb_staging_modes(&staging).unwrap();
         let mode = |p: &str| {
-            std::fs::metadata(staged.join(p))
+            std::fs::metadata(staging.join(p))
                 .unwrap()
                 .permissions()
                 .mode()
