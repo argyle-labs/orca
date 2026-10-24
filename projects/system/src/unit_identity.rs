@@ -63,7 +63,13 @@ pub fn resolve_or_mint(natural_key: &str) -> Result<Uuid> {
 }
 
 pub fn exists(uuid: &str) -> Result<bool> {
-    Ok(endpoint_db::list()?.iter().any(|row| row.uuid == uuid))
+    db::pool::with_read_pooled_or_open(|conn| {
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM unit_identities WHERE uuid = ?1)",
+            [uuid],
+            |r| r.get::<_, bool>(0),
+        )?)
+    })
 }
 
 #[cfg(test)]
@@ -89,6 +95,21 @@ mod tests {
             assert_eq!(a, b, "the same natural key must resolve to the same uuid");
             // uuidv7 (version nibble == 7).
             assert_eq!(a.get_version_num(), 7, "identity must be uuidv7");
+        });
+    }
+
+    #[test]
+    fn uuid_lookup_is_indexed() {
+        with_db(|| {
+            let conn = db::open_default().expect("open");
+            let plan: String = conn
+                .query_row(
+                    "EXPLAIN QUERY PLAN SELECT 1 FROM unit_identities WHERE uuid = 'x'",
+                    [],
+                    |r| r.get(3),
+                )
+                .expect("plan");
+            assert!(plan.contains("unit_identities_uuid"), "{plan}");
         });
     }
 

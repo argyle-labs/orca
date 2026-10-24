@@ -12,24 +12,47 @@ use store::{DAY_MS, DetailQuery, Finding, ListQuery, Retention, ScanSummary};
 pub const RESOLVED_RETENTION_DAYS_SETTING: &str = "security.findings.resolved_retention_days";
 pub const MAX_RESOLVED_PER_UNIT_SETTING: &str = "security.findings.max_resolved_per_unit";
 
-fn retention() -> Retention {
-    let read = |key: &str| {
-        db::pool::with_pooled_or_open(|conn| db::settings::get(conn, key))
-            .ok()
-            .flatten()
+fn setting<T: std::str::FromStr>(key: &str, valid: impl Fn(&T) -> bool) -> Option<T> {
+    let raw = match db::pool::with_pooled_or_open(|conn| db::settings::get(conn, key)) {
+        Ok(raw) => raw?,
+        Err(e) => {
+            tracing::warn!(setting = key, error = %e, "read security retention setting; using default");
+            return None;
+        }
     };
+    match raw.trim().parse::<T>() {
+        Ok(v) if valid(&v) => Some(v),
+        _ => {
+            tracing::warn!(setting = key, value = %raw, "invalid security retention setting; using default");
+            None
+        }
+    }
+}
+
+fn retention() -> Retention {
     let mut r = Retention::default();
-    if let Some(days) = read(RESOLVED_RETENTION_DAYS_SETTING).and_then(|v| v.parse::<i64>().ok())
-        && days >= 0
-    {
+    if let Some(days) = setting::<i64>(RESOLVED_RETENTION_DAYS_SETTING, |d| *d >= 0) {
         r.resolved_max_age_ms = days * DAY_MS;
     }
-    if let Some(cap) = read(MAX_RESOLVED_PER_UNIT_SETTING).and_then(|v| v.parse::<usize>().ok())
-        && cap > 0
-    {
+    if let Some(cap) = setting::<usize>(MAX_RESOLVED_PER_UNIT_SETTING, |c| *c > 0) {
         r.max_resolved_per_unit = cap;
     }
     r
+}
+
+fn unit_known(id: &str, this_member: Option<&str>) -> anyhow::Result<bool> {
+    if this_member == Some(id) || crate::unit_identity::exists(id)? {
+        return Ok(true);
+    }
+    db::pool::with_read_pooled_or_open(|conn| db::mesh::peerdb::peer_exists(conn, id))
+}
+
+fn require_known_unit(id: &str, this_member: Option<&str>) -> anyhow::Result<()> {
+    if unit_known(id, this_member)? {
+        Ok(())
+    } else {
+        Err(contract::OrcaError::not_found(format!("no unit with id {id}")).into())
+    }
 }
 
 fn severity_parser() -> clap::builder::PossibleValuesParser {
@@ -41,11 +64,18 @@ fn parse_severity(raw: Option<String>) -> anyhow::Result<Option<Severity>> {
         .transpose()
 }
 
-fn require_daemon() -> anyhow::Result<()> {
-    if utils::invocation_scope::current_core_verb().is_none() {
+fn require_verified_dispatch() -> anyhow::Result<()> {
+    let Some(verb) = utils::invocation_scope::current_core_verb() else {
         return Err(contract::OrcaError::invalid(
             "security.scan: daemon required; run it through the orca daemon",
         )
+        .into());
+    };
+    if !dispatch::tool_roles::satisfies(&verb.caller().role, "admin") {
+        return Err(contract::OrcaError::forbidden(format!(
+            "security.scan requires role 'admin'; caller has '{}'",
+            verb.caller().role
+        ))
         .into());
     }
     Ok(())
@@ -63,20 +93,24 @@ pub struct SecurityScanArgs {
 
 /// [MUTATES STATE] Run registered security scanners against one unit and
 /// record their findings on this system. Requires the daemon.
-#[orca_tool(domain = "security", verb = "scan", role = "admin")]
+#[orca_tool(
+    domain = "security",
+    verb = "scan",
+    role = "admin",
+    execute_gated = true
+)]
 async fn security_scan(
     args: SecurityScanArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ScanSummary> {
-    require_daemon()?;
-    if !crate::unit_identity::exists(args.unit_id.as_str())? {
-        return Err(
-            contract::OrcaError::not_found(format!("no unit with id {}", args.unit_id)).into(),
-        );
-    }
+    require_verified_dispatch()?;
+    let member = crate::host_identity::try_machine_id().ok_or_else(|| {
+        anyhow::anyhow!("security.scan: this system's identity is not initialized")
+    })?;
+    require_known_unit(args.unit_id.as_str(), Some(member))?;
     store::scan_into(
         &store::store_path()?,
-        crate::host_identity::machine_id(),
+        member,
         &args.unit_id,
         args.scanner.as_deref(),
         retention(),
@@ -168,10 +202,86 @@ async fn security_findings_detail(
 mod tests {
     use super::*;
 
+    fn verb(role: &str) -> utils::invocation_scope::CoreVerb {
+        utils::invocation_scope::testing::verb(
+            utils::invocation_scope::VerbCaller {
+                user_id: "u".into(),
+                username: "u".into(),
+                role: role.into(),
+                can_mutate: false,
+            },
+            "admin",
+            true,
+            false,
+            true,
+            false,
+        )
+    }
+
     #[test]
-    fn scan_refuses_without_the_daemon() {
-        let err = require_daemon().unwrap_err();
+    fn scan_refuses_without_verified_dispatch_or_below_admin() {
+        let err = require_verified_dispatch().unwrap_err();
         assert!(err.to_string().contains("daemon required"), "{err}");
+        let err = utils::invocation_scope::testing::sync_core_verb(
+            verb("user"),
+            require_verified_dispatch,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("requires role 'admin'"), "{err}");
+        utils::invocation_scope::testing::sync_core_verb(verb("admin"), require_verified_dispatch)
+            .unwrap();
+    }
+
+    #[test]
+    fn known_units_are_minted_ids_this_member_and_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        db::with_thread_db_path(&dir.path().join("orca.db"), || {
+            let unit = crate::unit_identity::resolve_or_mint("docker@h/container/web")
+                .unwrap()
+                .to_string();
+            let member = utils::id::new();
+            let peer = utils::id::new();
+            {
+                let conn = db::open_default().unwrap();
+                db::mesh::peerdb::upsert_peer(&conn, &peer, "p", "10.0.0.12", 9443, None, "")
+                    .unwrap();
+            }
+            for id in [&unit, &member, &peer] {
+                require_known_unit(id, Some(&member)).unwrap();
+            }
+            let err = require_known_unit(&utils::id::new(), Some(&member)).unwrap_err();
+            let orca = err
+                .downcast_ref::<contract::OrcaError>()
+                .expect("OrcaError");
+            assert_eq!(orca.kind, contract::ErrorKind::NotFound, "{err}");
+        });
+    }
+
+    #[tokio::test]
+    async fn scan_dry_run_plans_without_running() {
+        const _: () = assert!(<SecurityScan as contract::OrcaToolDef>::EXECUTE_GATED);
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = contract::ToolCtx::new(std::sync::Arc::new(contract::config::Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: contract::config::Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: dir.path().to_path_buf(),
+            memory_root: dir.path().to_path_buf(),
+            db_path: dir.path().join("t.db"),
+            ports: Default::default(),
+        }));
+        let plan = dispatch::dispatch(
+            "security.scan",
+            serde_json::json!({ "unitId": utils::id::new(), "dryRun": true }),
+            &ctx,
+        )
+        .await
+        .expect("a dry run plans instead of hitting the daemon gate");
+        assert!(plan.to_string().contains("security.scan"), "{plan}");
     }
 
     #[test]

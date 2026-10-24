@@ -3431,17 +3431,20 @@ mod tests {
         // attempting any RemoteExec dispatch.
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
-        let entry = entry("sonarr", "available");
-        let err = match delegate_plugin_fetch(&entry, None, false, false, &ctx).await {
-            Ok(_) => panic!("expected delegate fetch to fail with no paired peers"),
-            Err(e) => e,
-        };
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("no paired secure peer available")
-                && msg.contains("no paired peers at all"),
-            "unexpected: {msg}"
-        );
+        db::with_db_path(tmp.path().join("orca.db"), async {
+            let entry = entry("sonarr", "available");
+            let err = match delegate_plugin_fetch(&entry, None, false, false, &ctx).await {
+                Ok(_) => panic!("expected delegate fetch to fail with no paired peers"),
+                Err(e) => e,
+            };
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("no paired secure peer available")
+                    && msg.contains("no paired peers at all"),
+                "unexpected: {msg}"
+            );
+        })
+        .await;
     }
 
     #[test]
@@ -3482,36 +3485,38 @@ mod tests {
         // no-peers-at-all message.
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
+        db::with_db_path(tmp.path().join("orca.db"), async {
+            let peer_id = utils::id::new();
+            {
+                let conn = db::open_default().expect("open pinned orca.db");
+                db::mesh::peerdb::upsert_peer(
+                    &conn,
+                    &peer_id,
+                    "insecure-host",
+                    "10.0.0.9",
+                    9443,
+                    None,
+                    "",
+                )
+                .expect("upsert insecure peer");
+            }
 
-        let peer_id = utils::id::new();
-        {
-            let conn = db::open_default().expect("open orca.db under temp ORCA_HOME");
-            db::mesh::peerdb::upsert_peer(
-                &conn,
-                &peer_id,
-                "insecure-host",
-                "10.0.0.9",
-                9443,
-                None,
-                "",
-            )
-            .expect("upsert insecure peer");
-        }
-
-        let entry = entry("sonarr", "available");
-        let err = match delegate_plugin_fetch(&entry, None, false, false, &ctx).await {
-            Ok(_) => panic!("expected delegate fetch to fail with no secure peer"),
-            Err(e) => e,
-        };
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("Trust a candidate peer") && msg.contains("insecure-host"),
-            "unexpected: {msg}"
-        );
-        assert!(
-            !msg.contains("no paired peers at all"),
-            "with an insecure peer present it must not claim zero peers: {msg}"
-        );
+            let entry = entry("sonarr", "available");
+            let err = match delegate_plugin_fetch(&entry, None, false, false, &ctx).await {
+                Ok(_) => panic!("expected delegate fetch to fail with no secure peer"),
+                Err(e) => e,
+            };
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("Trust a candidate peer") && msg.contains("insecure-host"),
+                "unexpected: {msg}"
+            );
+            assert!(
+                !msg.contains("no paired peers at all"),
+                "with an insecure peer present it must not claim zero peers: {msg}"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -3526,38 +3531,41 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
 
-        let peer_id = utils::id::new();
-        {
-            let conn = db::open_default().expect("open orca.db under temp ORCA_HOME");
-            db::mesh::peerdb::upsert_peer(
-                &conn,
-                &peer_id,
-                "secure-host",
-                "10.0.0.11",
-                9443,
-                None,
-                "",
-            )
-            .expect("upsert peer");
-            // Promote to secure so it passes the `peer_secure` candidate filter.
-            db::mesh::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
-                .expect("mark peer secure");
-        }
+        let db_path = tmp.path().join("orca.db");
+        db::with_db_path(db_path, async {
+            let peer_id = utils::id::new();
+            {
+                let conn = db::open_default().expect("open pinned orca.db");
+                db::mesh::peerdb::upsert_peer(
+                    &conn,
+                    &peer_id,
+                    "secure-host",
+                    "10.0.0.11",
+                    9443,
+                    None,
+                    "",
+                )
+                .expect("upsert peer");
+                db::mesh::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
+                    .expect("mark peer secure");
+            }
 
-        let entry = entry("sonarr", "available");
-        let err = match delegate_plugin_fetch(&entry, Some("0.1.0"), false, false, &ctx).await {
-            Ok(_) => panic!("expected delegate fetch to bail with no transport"),
-            Err(e) => e,
-        };
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("no RemoteExec transport"),
-            "a secure peer with no transport must bail at the transport check: {msg}"
-        );
-        assert!(
-            !msg.contains("no paired secure peer"),
-            "a secure peer is present, so it must pass the secure-peer guard: {msg}"
-        );
+            let entry = entry("sonarr", "available");
+            let err = match delegate_plugin_fetch(&entry, Some("0.1.0"), false, false, &ctx).await {
+                Ok(_) => panic!("expected delegate fetch to bail with no transport"),
+                Err(e) => e,
+            };
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("no RemoteExec transport"),
+                "a secure peer with no transport must bail at the transport check: {msg}"
+            );
+            assert!(
+                !msg.contains("no paired secure peer"),
+                "a secure peer is present, so it must pass the secure-peer guard: {msg}"
+            );
+        })
+        .await;
         unsafe {
             std::env::remove_var("ORCA_HOME");
             std::env::remove_var("HOME");
@@ -3605,26 +3613,25 @@ mod tests {
         // in its namespace (`plug__<ns>__<table>`), reachable via the typed db-op
         // surface — a List on the fresh table returns cleanly with no rows.
         let tmp = tempfile::tempdir().unwrap();
-        // guard_ctx points ORCA_HOME + HOME at the temp dir so open_default()
-        // uses an isolated db.
         let _ctx = guard_ctx(&tmp);
+        db::with_thread_db_path(&tmp.path().join("orca.db"), || {
+            let report = report_with_schema("covns", one_table_schema("covns", "widgets"));
+            apply_plugin_schema(&report);
 
-        let report = report_with_schema("covns", one_table_schema("covns", "widgets"));
-        apply_plugin_schema(&report);
-
-        let conn = db::open_default().expect("open db under temp ORCA_HOME");
-        let reply = db::plugin_tables::exec_db_op(
-            &conn,
-            &plugin_toolkit::abi::DbOp::List {
-                namespace: "covns".to_string(),
-                table: "widgets".to_string(),
-            },
-        )
-        .expect("declared table must exist after apply");
-        assert!(
-            reply.rows.is_empty(),
-            "a freshly materialized table holds no rows"
-        );
+            let conn = db::open_default().expect("open pinned db");
+            let reply = db::plugin_tables::exec_db_op(
+                &conn,
+                &plugin_toolkit::abi::DbOp::List {
+                    namespace: "covns".to_string(),
+                    table: "widgets".to_string(),
+                },
+            )
+            .expect("declared table must exist after apply");
+            assert!(
+                reply.rows.is_empty(),
+                "a freshly materialized table holds no rows"
+            );
+        });
         unsafe {
             std::env::remove_var("ORCA_HOME");
             std::env::remove_var("HOME");
@@ -3637,21 +3644,22 @@ mod tests {
         let _env = crate::test_env::snapshot();
         let tmp = tempfile::tempdir().unwrap();
         let _ctx = guard_ctx(&tmp);
+        db::with_thread_db_path(&tmp.path().join("orca.db"), || {
+            apply_plugin_schema(&report_with_schema(
+                "covns",
+                one_table_schema("victim", "widgets"),
+            ));
 
-        apply_plugin_schema(&report_with_schema(
-            "covns",
-            one_table_schema("victim", "widgets"),
-        ));
-
-        let conn = db::open_default().expect("open db under temp ORCA_HOME");
-        let n: i64 = conn
+            let conn = db::open_default().expect("open pinned db");
+            let n: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name LIKE 'plug\\_\\_%' ESCAPE '\\'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 0);
+            assert_eq!(n, 0);
+        });
         unsafe {
             std::env::remove_var("ORCA_HOME");
             std::env::remove_var("HOME");
@@ -3667,21 +3675,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let _ctx = guard_ctx(&tmp);
 
-        // Default SchemaDecl has an empty tables vec → early return before any db.
-        apply_plugin_schema(&report_with_schema("covempty", Default::default()));
+        db::with_thread_db_path(&tmp.path().join("orca.db"), || {
+            // Default SchemaDecl has an empty tables vec → early return before any db.
+            apply_plugin_schema(&report_with_schema("covempty", Default::default()));
 
-        let conn = db::open_default().expect("open db under temp ORCA_HOME");
-        let plugin_tables: i64 = conn
+            let conn = db::open_default().expect("open pinned db");
+            let plugin_tables: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name LIKE 'plug\\_\\_%' ESCAPE '\\'",
                 [],
                 |r| r.get(0),
             )
             .expect("count plug__ tables");
-        assert_eq!(
-            plugin_tables, 0,
-            "empty declaration must materialize no plugin tables"
-        );
+            assert_eq!(
+                plugin_tables, 0,
+                "empty declaration must materialize no plugin tables"
+            );
+        });
         unsafe {
             std::env::remove_var("ORCA_HOME");
             std::env::remove_var("HOME");

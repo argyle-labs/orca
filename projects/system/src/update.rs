@@ -2479,24 +2479,26 @@ mod tests {
             std::env::set_var("ORCA_DB_PATH", &dbp);
             std::env::set_var("GITHUB_TOKEN", "env-token");
         }
-        {
-            let conn = db::open_default().expect("open temp canonical db");
-            secrets::upsert(
-                &conn,
-                "orca.github_token",
-                "inline",
-                "orca.github_token",
-                None,
-            )
-            .expect("upsert secret metadata");
-            secrets::write_inline_value(&conn, "orca.github_token", "db-token")
-                .expect("write inline value");
-        }
-        assert_eq!(
-            resolve_github_token(),
-            "db-token",
-            "db secret must win over $GITHUB_TOKEN"
-        );
+        db::with_thread_db_path(&dbp, || {
+            {
+                let conn = db::open_default().expect("open temp canonical db");
+                secrets::upsert(
+                    &conn,
+                    "orca.github_token",
+                    "inline",
+                    "orca.github_token",
+                    None,
+                )
+                .expect("upsert secret metadata");
+                secrets::write_inline_value(&conn, "orca.github_token", "db-token")
+                    .expect("write inline value");
+            }
+            assert_eq!(
+                resolve_github_token(),
+                "db-token",
+                "db secret must win over $GITHUB_TOKEN"
+            );
+        });
         unsafe {
             std::env::remove_var("ORCA_DB_PATH");
             std::env::remove_var("GITHUB_TOKEN");
@@ -2514,13 +2516,15 @@ mod tests {
             std::env::set_var("ORCA_DB_PATH", &dbp);
             std::env::set_var("GITHUB_TOKEN", "env-only-token");
         }
-        // Materialize an empty schema (no github_token secret row).
-        db::open_default().expect("open temp canonical db");
-        assert_eq!(
-            resolve_github_token(),
-            "env-only-token",
-            "with no db secret, fall back to $GITHUB_TOKEN"
-        );
+        db::with_thread_db_path(&dbp, || {
+            // Materialize an empty schema (no github_token secret row).
+            db::open_default().expect("open temp canonical db");
+            assert_eq!(
+                resolve_github_token(),
+                "env-only-token",
+                "with no db secret, fall back to $GITHUB_TOKEN"
+            );
+        });
         unsafe {
             std::env::remove_var("ORCA_DB_PATH");
             std::env::remove_var("GITHUB_TOKEN");
@@ -2538,12 +2542,14 @@ mod tests {
             std::env::set_var("ORCA_DB_PATH", &dbp);
             std::env::remove_var("GITHUB_TOKEN");
         }
-        db::open_default().expect("open temp canonical db");
-        assert_eq!(
-            resolve_github_token(),
-            "",
-            "no db secret and no env var → empty string"
-        );
+        db::with_thread_db_path(&dbp, || {
+            db::open_default().expect("open temp canonical db");
+            assert_eq!(
+                resolve_github_token(),
+                "",
+                "no db secret and no env var → empty string"
+            );
+        });
         unsafe {
             std::env::remove_var("ORCA_DB_PATH");
         }
@@ -2562,24 +2568,26 @@ mod tests {
             std::env::set_var("ORCA_DB_PATH", &dbp);
             std::env::set_var("GITHUB_TOKEN", "fallback-token");
         }
-        {
-            let conn = db::open_default().expect("open temp canonical db");
-            secrets::upsert(
-                &conn,
-                "orca.github_token",
-                "inline",
-                "orca.github_token",
-                None,
-            )
-            .expect("upsert secret metadata");
-            secrets::write_inline_value(&conn, "orca.github_token", "")
-                .expect("write empty inline value");
-        }
-        assert_eq!(
-            resolve_github_token(),
-            "fallback-token",
-            "an empty db secret must not shadow a real env token"
-        );
+        db::with_thread_db_path(&dbp, || {
+            {
+                let conn = db::open_default().expect("open temp canonical db");
+                secrets::upsert(
+                    &conn,
+                    "orca.github_token",
+                    "inline",
+                    "orca.github_token",
+                    None,
+                )
+                .expect("upsert secret metadata");
+                secrets::write_inline_value(&conn, "orca.github_token", "")
+                    .expect("write empty inline value");
+            }
+            assert_eq!(
+                resolve_github_token(),
+                "fallback-token",
+                "an empty db secret must not shadow a real env token"
+            );
+        });
         unsafe {
             std::env::remove_var("ORCA_DB_PATH");
             std::env::remove_var("GITHUB_TOKEN");
