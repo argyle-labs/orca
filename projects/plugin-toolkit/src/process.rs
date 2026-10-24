@@ -207,7 +207,7 @@ impl Command {
             .take()
             .expect("stderr was piped, so it is present");
         let mut guard = GroupGuard::new(self.kill_group, &child);
-        let mut reader = tokio::spawn(read_pipes(stdout, stderr));
+        let mut reader = AbortOnDrop(tokio::spawn(read_pipes(stdout, stderr)));
         let deadline = tokio::time::Instant::now() + budget;
         if tokio::time::timeout_at(deadline, guard.wait_leader(&mut child))
             .await
@@ -247,6 +247,7 @@ impl Command {
                     reader.abort();
                     guard.kill_on_timeout(&mut child);
                     child.wait().await?;
+                    guard.disarm();
                     return Ok(None);
                 }
             }
@@ -298,6 +299,31 @@ impl Command {
 }
 
 const PIPE_GRACE: Duration = Duration::from_millis(200);
+
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> AbortOnDrop<T> {
+    fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl<T> std::future::Future for AbortOnDrop<T> {
+    type Output = std::result::Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 async fn read_pipes(
     mut stdout: tokio::process::ChildStdout,
@@ -370,19 +396,26 @@ impl GroupGuard {
 
 #[cfg(unix)]
 fn leader_exited(pid: u32) -> std::io::Result<bool> {
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    let rc = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            pid as libc::id_t,
-            &mut info,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error());
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if rc == 0 {
+            return Ok(unsafe { info.si_pid() } != 0);
+        }
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::ECHILD) => return Ok(true),
+            _ => return Err(e),
+        }
     }
-    Ok(info.si_signo != 0)
 }
 
 impl Drop for GroupGuard {
@@ -671,6 +704,84 @@ mod tests {
             .is_err()
         })
         .await;
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_file(path: &std::path::Path) -> Option<String> {
+        for _ in 0..250 {
+            if let Ok(s) = std::fs::read_to_string(path)
+                && s.ends_with('\n')
+            {
+                return Some(s);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        None
+    }
+
+    #[cfg(unix)]
+    fn detached_holder(dir: &std::path::Path) -> Command {
+        let script = format!(
+            "perl -MPOSIX -e 'POSIX::setsid(); $SIG{{PIPE}}=q(IGNORE); $|=1; \
+             open(P, q(>), q({pid})); print P qq($$\\n); close(P); \
+             for (1..600) {{ unless (print qq(x\\n)) {{ open(M, q(>), q({mark})); print M qq(epipe\\n); close(M); exit }} \
+             select(undef, undef, undef, 0.05) }}' &",
+            pid = dir.join("pid").display(),
+            mark = dir.join("mark").display(),
+        );
+        Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .kill_process_group_on_timeout()
+    }
+
+    #[cfg(unix)]
+    fn kill_holder(dir: &std::path::Path) {
+        if let Ok(s) = std::fs::read_to_string(dir.join("pid"))
+            && let Ok(pid) = s.trim().parse::<libc::pid_t>()
+        {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_within_errors_when_pipe_held_outside_group() {
+        let dir = std::env::temp_dir().join(format!("pghold-{}", crate::mint_uuidv7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let res = detached_holder(&dir)
+            .output_within(Duration::from_secs(10))
+            .await;
+        let pid = wait_for_file(&dir.join("pid")).await;
+        kill_holder(&dir);
+        assert!(pid.is_some(), "holder never wrote its pid");
+        let err = res.expect_err("expected pipe-held error");
+        assert!(
+            err.to_string().contains("outside the process group"),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_output_within_aborts_the_pipe_reader() {
+        let dir = std::env::temp_dir().join(format!("pgcancel-{}", crate::mint_uuidv7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(100),
+            detached_holder(&dir).output_within(Duration::from_secs(60)),
+        )
+        .await
+        .is_err();
+        let mark = wait_for_file(&dir.join("mark")).await;
+        kill_holder(&dir);
+        assert!(cancelled, "expected the outer timeout to cancel");
+        assert_eq!(
+            mark.as_deref(),
+            Some("epipe\n"),
+            "pipe reader leaked after cancel"
+        );
     }
 
     #[tokio::test]
