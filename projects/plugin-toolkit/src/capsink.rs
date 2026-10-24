@@ -99,19 +99,23 @@ pub(crate) fn set_core_no_follow(on: bool) {
 
 #[cfg(any(test, feature = "testing"))]
 pub fn with_core_caps<R>(caps: &[&str], body: impl FnOnce() -> R) -> R {
-    struct Reset;
-    impl Drop for Reset {
+    struct Restore(bool, bool, Vec<String>);
+    impl Drop for Restore {
         fn drop(&mut self) {
-            set_core_body_b64(false);
-            set_core_no_follow(false);
-            set_core_privileged(&[]);
+            set_core_body_b64(self.0);
+            set_core_no_follow(self.1);
+            set_core_privileged(&self.2);
         }
     }
+    let _restore = Restore(
+        CORE_BODY_B64.with(|c| c.get()),
+        CORE_NO_FOLLOW.with(|c| c.get()),
+        CORE_PRIVILEGED.with(|c| c.borrow().clone()),
+    );
     let caps: Vec<String> = caps.iter().map(|c| c.to_string()).collect();
     set_core_body_b64(caps.iter().any(|c| c == crate::abi::HTTP_BODY_B64));
     set_core_no_follow(caps.iter().any(|c| c == crate::abi::HTTP_NO_FOLLOW));
     set_core_privileged(&caps);
-    let _reset = Reset;
     body()
 }
 
@@ -413,5 +417,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains(crate::abi::HTTP_NO_FOLLOW), "got: {err}");
+    }
+
+    #[test]
+    fn nested_with_core_caps_restores_outer_scope() {
+        use crate::abi::{HTTP_BODY_B64, HTTP_NO_FOLLOW, LXC_EXEC, TOOL_CALL};
+        let no_follow = || CORE_NO_FOLLOW.with(|c| c.get());
+        let body_b64 = || CORE_BODY_B64.with(|c| c.get());
+        with_core_caps(&[HTTP_NO_FOLLOW, TOOL_CALL], || {
+            with_core_caps(&[HTTP_BODY_B64, LXC_EXEC], || {
+                assert!(body_b64() && !no_follow());
+                assert!(core_advertises(LXC_EXEC) && !core_advertises(TOOL_CALL));
+            });
+            assert!(no_follow() && !body_b64());
+            assert!(core_advertises(TOOL_CALL) && !core_advertises(LXC_EXEC));
+        });
+        assert!(!no_follow() && !body_b64() && !core_advertises(TOOL_CALL));
     }
 }
