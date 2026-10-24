@@ -31,6 +31,7 @@ openapi    = { workspace = true }
 spec       = { workspace = true }
 plugin-toolkit = { workspace = true, features = ["tools", "endpoints", "in-process", "notify", "containers"] }
 rusqlite   = { workspace = true }
+url        = { workspace = true }
 serde_json = { workspace = true }
 tokio      = { workspace = true }
 # The daemon's single HTTP/TLS stack. Plugins delegate HTTP through the
