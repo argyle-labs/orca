@@ -33,8 +33,7 @@ DIST_DIR="${REPO_ROOT}/dist-release"
 : "${RELEASE_FEATURES:=}"
 
 # Cargo profile. Defaults to `release` (thin LTO, 16 codegen units; see
-# Cargo.toml). RC builds keep it but turn LTO off via CARGO_PROFILE_RELEASE_LTO
-# (release-local.sh `rc`).
+# Cargo.toml) for RC and stable builds alike.
 : "${RELEASE_PROFILE:=release}"
 
 # ── target sets ─────────────────────────────────────────────────────────────
