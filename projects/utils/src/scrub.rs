@@ -77,14 +77,19 @@ const SENSITIVE_FRAGMENTS: &[&str] = &[
     "bearer",
 ];
 
+/// Lowercased ASCII alphanumerics of `key`: `token_id`, `tokenId`, `TOKEN-ID`
+/// all become `tokenid`.
+pub fn normalize_key(key: &str) -> String {
+    key.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
 /// Whether a field name should have its value withheld. Case- and
 /// separator-insensitive: `api_key`, `apiKey`, `API-KEY` all match.
 pub fn is_sensitive_key(key: &str) -> bool {
-    let normalized: String = key
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
+    let normalized = normalize_key(key);
     SENSITIVE_EXACT.contains(&normalized.as_str())
         || SENSITIVE_FRAGMENTS.iter().any(|f| normalized.contains(f))
 }

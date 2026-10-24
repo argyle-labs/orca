@@ -1061,13 +1061,35 @@ mod tests {
         let mut value = serde_json::to_value(column_auth("cfgs", "header")).unwrap();
         value["auth"]["template"] = json!("Tok={endpoint.token}={secret}");
         value["endpoint"]["columns"] = json!(["token"]);
-        let surface = ApiSurface::parse(&value.to_string()).unwrap();
+        let err = format!("{:#}", ApiSurface::parse(&value.to_string()).unwrap_err());
+        assert!(err.contains("`token`"), "{err}");
+        assert!(err.contains("secret-bearing"), "{err}");
+        let mut surface = ApiSurface::parse(
+            &serde_json::to_value(column_auth("cfgs", "header"))
+                .unwrap()
+                .to_string(),
+        )
+        .unwrap();
+        surface.endpoint.columns = vec!["token".into()];
+        surface.auth.as_mut().unwrap().template = "Tok={endpoint.token}={secret}".into();
         let row = DbRow::from([(
             "config".to_string(),
             DbValue::Text(json!({"token": "leaked"}).to_string()),
         )]);
-        let err = auth_columns(&surface, &row).unwrap_err();
-        assert!(format!("{err:#}").contains("no `token` column"));
+        let err = format!("{:#}", auth_columns(&surface, &row).unwrap_err());
+        assert!(err.contains("`token`"), "{err}");
+        assert!(err.contains("secret-bearing"), "{err}");
+    }
+
+    #[test]
+    fn missing_non_secret_auth_column_names_the_column() {
+        let mut value = serde_json::to_value(column_auth("rlmp", "header")).unwrap();
+        value["auth"]["template"] = json!("Tok={endpoint.realm}={secret}");
+        value["endpoint"]["columns"] = json!(["realm"]);
+        let surface = ApiSurface::parse(&value.to_string()).unwrap();
+        let err = format!("{:#}", auth_columns(&surface, &DbRow::new()).unwrap_err());
+        assert!(err.contains("no `realm` column"), "{err}");
+        assert!(!err.contains("secret-bearing"), "{err}");
     }
 
     #[test]

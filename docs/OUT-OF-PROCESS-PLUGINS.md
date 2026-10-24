@@ -280,3 +280,13 @@ transitively through the domain crates' `dispatch_op` seams
 out spanned six crates — `plugin-toolkit` plus `contract`, `dispatch`,
 `service`, `deploy-target`, `storage` — each `dispatch_op` now driving the
 backend future on `futures::executor::block_on` on the thin profile.
+
+## API surfaces (`orca.api-surface/v1`)
+
+`endpoint.columns` names the endpoint-row columns an auth template may
+substitute as `{endpoint.<col>}`. A column the secret scrubber treats as
+sensitive (`utils::scrub::is_sensitive_key`: `password`, `api_key`, `token`,
+…) is refused at parse and at resolve — secrets come only from the vault via
+`{secret}`. The one exemption is `token_id`, matched after the same
+normalisation (`utils::scrub::normalize_key`), so `tokenId` and `TOKEN-ID` are
+exempt too.
