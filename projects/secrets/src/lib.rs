@@ -136,6 +136,7 @@ pub fn delete(conn: &Connection, name: &str) -> Result<bool> {
             // Best-effort: ignore "not present" since the metadata is the
             // source of truth for whether the secret existed.
             let _ = settings::secret_delete(conn, name)?;
+            let _ = settings::delete(conn, &format!("{PREVIOUS_PREFIX}{name}"))?;
         }
     }
     Ok(removed)
@@ -152,6 +153,30 @@ pub fn read_inline_value(conn: &Connection, name: &str) -> Result<Option<String>
 pub fn write_inline_value(conn: &Connection, name: &str, value: &str) -> Result<()> {
     ensure_self_secure(conn)?;
     settings::secret_set(conn, name, value)
+}
+
+const PREVIOUS_PREFIX: &str = "secrets_previous.";
+
+pub fn put_inline_value(conn: &Connection, name: &str, value: &str) -> Result<()> {
+    ensure_self_secure(conn)?;
+    if let Some(old) = read_inline_value(conn, name)? {
+        settings::set(conn, &format!("{PREVIOUS_PREFIX}{name}"), &old)?;
+    }
+    settings::secret_set(conn, name, value)
+}
+
+pub fn restore_inline_value(conn: &Connection, name: &str) -> Result<()> {
+    ensure_self_secure(conn)?;
+    let key = format!("{PREVIOUS_PREFIX}{name}");
+    let previous = settings::get(conn, &key)?
+        .ok_or_else(|| anyhow::anyhow!("inline secret '{name}' has no previous value"))?;
+    match read_inline_value(conn, name)? {
+        Some(current) => settings::set(conn, &key, &current)?,
+        None => {
+            settings::delete(conn, &key)?;
+        }
+    }
+    settings::secret_set(conn, name, &previous)
 }
 
 /// Multi-instance secret convention. Keys follow `<provider>.<instance>.<field>`
@@ -479,6 +504,43 @@ pub fn exec_secret_op_pooled(
 mod tests {
     use super::*;
     use db::testing::test_conn;
+
+    #[test]
+    fn put_keeps_previous_and_restore_swaps_it_back() {
+        let conn = test_conn();
+        upsert(&conn, "app.pw", "inline", "", None).unwrap();
+        write_inline_value(&conn, "app.pw", "one").unwrap();
+        put_inline_value(&conn, "app.pw", "two").unwrap();
+        assert_eq!(
+            read_inline_value(&conn, "app.pw").unwrap().as_deref(),
+            Some("two")
+        );
+        restore_inline_value(&conn, "app.pw").unwrap();
+        assert_eq!(
+            read_inline_value(&conn, "app.pw").unwrap().as_deref(),
+            Some("one")
+        );
+        restore_inline_value(&conn, "app.pw").unwrap();
+        assert_eq!(
+            read_inline_value(&conn, "app.pw").unwrap().as_deref(),
+            Some("two")
+        );
+        assert!(delete(&conn, "app.pw").unwrap());
+        assert!(
+            settings::get(&conn, "secrets_previous.app.pw")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn restore_without_a_previous_value_errors() {
+        let conn = test_conn();
+        upsert(&conn, "fresh", "inline", "", None).unwrap();
+        put_inline_value(&conn, "fresh", "first").unwrap();
+        let err = restore_inline_value(&conn, "fresh").unwrap_err();
+        assert!(err.to_string().contains("no previous value"), "{err}");
+    }
 
     #[test]
     fn checked_grant_allows_holder_read_until_revoked() {
