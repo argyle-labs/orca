@@ -1367,8 +1367,59 @@ async fn static_handler(req: axum::extract::Request) -> axum::response::Response
             .collect(),
     );
     let mut resp = render_static(req, provider).await;
+    let mut additions = additions;
+    if let Some(inline) = resp.extensions_mut().remove::<middleware::CspAdditions>() {
+        additions.0.extend(inline.0);
+    }
     resp.extensions_mut().insert(additions);
     resp
+}
+
+fn csp_hash(content: &str) -> String {
+    format!(
+        "'sha256-{}'",
+        utils::encoding::base64_encode(&utils::hash::sha256(content.as_bytes()))
+    )
+}
+
+fn inline_csp_hashes(html: &str) -> middleware::CspAdditions {
+    let mut out = Vec::new();
+    let mut outside = String::new();
+    let mut rest = html;
+    while let Some(start) = rest.find("<script") {
+        outside.push_str(&rest[..start]);
+        let tag = &rest[start..];
+        let Some(open_end) = tag.find('>') else {
+            rest = "";
+            break;
+        };
+        let open = &tag[..open_end];
+        outside.push_str(open);
+        let after = &tag[open_end + 1..];
+        let close = after.find("</script>").unwrap_or(after.len());
+        let body = &after[..close];
+        if !open.contains(" src=") {
+            out.push(("script-src", csp_hash(body)));
+        }
+        rest = after.get(close + "</script>".len()..).unwrap_or("");
+    }
+    outside.push_str(rest);
+    let mut styles = Vec::new();
+    for quote in ['"', '\''] {
+        let needle = format!(" style={quote}");
+        let mut s = outside.as_str();
+        while let Some(i) = s.find(&needle) {
+            let v = &s[i + needle.len()..];
+            let end = v.find(quote).unwrap_or(v.len());
+            styles.push(csp_hash(&v[..end]));
+            s = &v[end..];
+        }
+    }
+    if !styles.is_empty() {
+        out.push(("style-src-attr", "'unsafe-hashes'".to_string()));
+        out.extend(styles.into_iter().map(|h| ("style-src-attr", h)));
+    }
+    middleware::CspAdditions(out)
 }
 
 /// Fallback handler in prod: route the request to the matching registered
@@ -1416,9 +1467,11 @@ async fn render_static(
     let render = |wr: contract::web::WebResponse| -> axum::response::Response {
         let mut builder = Response::builder().status(wr.status);
         let mut has_ct = false;
+        let mut is_html = false;
         for (k, v) in &wr.headers {
             if k.eq_ignore_ascii_case(header::CONTENT_TYPE.as_str()) {
                 has_ct = true;
+                is_html = v.to_ascii_lowercase().starts_with("text/html");
             }
             builder = builder.header(k, v);
         }
@@ -1426,6 +1479,9 @@ async fn render_static(
             builder = builder.header(header::CONTENT_TYPE, "application/octet-stream");
         }
         let body = utils::encoding::base64_decode(&wr.body_b64).unwrap_or_default();
+        if is_html {
+            builder = builder.extension(inline_csp_hashes(&String::from_utf8_lossy(&body)));
+        }
         builder
             .body(Body::from(body))
             .unwrap_or_else(|_| Response::builder().status(502).body(Body::empty()).unwrap())
@@ -2577,9 +2633,79 @@ mod tests {
         let policy = policy_for(path).await;
         assert_eq!(
             policy,
-            format!("{}; script-src 'self' {declared}", system::csp::strict())
+            format!(
+                "{}; script-src 'self' {declared} {}",
+                system::csp::strict(),
+                csp_hash("window.undeclared=1")
+            )
         );
-        assert_eq!(policy_for(plain).await, system::csp::strict());
+        assert_eq!(
+            policy_for(plain).await,
+            format!(
+                "{}; script-src 'self' {}",
+                system::csp::strict(),
+                csp_hash("x()")
+            )
+        );
+    }
+
+    #[test]
+    fn inline_hashes_cover_scripts_and_style_attrs_only() {
+        let html = "<html><body><div style=\"display: contents\"><script type=\"module\" src=\"/a.js\"></script><script>\n\t\t\tboot({ style=\"x\" });\n\t\t</script></div></body></html>";
+        let got = inline_csp_hashes(html).0;
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "script-src",
+                    csp_hash("\n\t\t\tboot({ style=\"x\" });\n\t\t")
+                ),
+                ("style-src-attr", "'unsafe-hashes'".to_string()),
+                ("style-src-attr", csp_hash("display: contents")),
+            ]
+        );
+        assert_eq!(
+            csp_hash("x()"),
+            "'sha256-".to_string()
+                + &utils::encoding::base64_encode(&utils::hash::sha256(b"x()"))
+                + "'"
+        );
+        for (d, h) in &got {
+            assert!(
+                *d == "style-src-attr" && h == "'unsafe-hashes'" || system::csp::is_hash_source(h)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn non_html_responses_get_no_inline_hashes() {
+        use tower::ServiceExt;
+        let path = "/__csp_fixture_js__";
+        register_mock(
+            "csp-js",
+            path,
+            false,
+            None,
+            MockBehavior::Fixed {
+                status: 200,
+                headers: vec![("content-type".into(), "text/javascript".into())],
+                body: b"<script>x()</script>".to_vec(),
+            },
+        );
+        let relax = system::csp::Relaxations::default();
+        let csp = middleware::CspPolicies {
+            default: Arc::from(system::csp::strict()),
+            docs: Arc::from(system::csp::compose(DOCS_CSP_EXTRA, &relax)),
+            relax: Arc::new(relax),
+        };
+        let router = axum::Router::new().fallback(static_handler).layer(
+            axum::middleware::from_fn_with_state(csp, middleware::security_headers),
+        );
+        let resp = router.oneshot(get(path)).await.unwrap();
+        assert_eq!(
+            resp.headers()[axum::http::header::CONTENT_SECURITY_POLICY],
+            system::csp::strict().as_str()
+        );
     }
 
     #[tokio::test]
