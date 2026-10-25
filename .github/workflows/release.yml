@@ -115,8 +115,25 @@ jobs:
           kc="${CODESIGN_KEYCHAIN_PATH:-}"
           [ -z "$kc" ] || [ ! -f "$kc" ] || security lock-keychain "$kc" || true
 
+  no-test-scope:
+    runs-on: ci-large
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Shipped binaries exclude utils test-scope
+        run: ./scripts/check-no-test-scope.sh
+
   package:
-    needs: [build-x86_64-linux-gnu, build-x86_64-linux-musl, build-aarch64-apple-darwin]
+    needs: [no-test-scope, build-x86_64-linux-gnu, build-x86_64-linux-musl, build-aarch64-apple-darwin]
     runs-on: ubuntu-latest
     steps:
       - name: Package deb/rpm/PKGBUILD/homebrew/plg

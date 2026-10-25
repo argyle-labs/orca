@@ -42,26 +42,17 @@ pub fn handle_privileged(
 }
 
 async fn run_helper(helper: &'static str, payload: Vec<u8>) -> Result<HelperOutput> {
-    use tokio::io::AsyncWriteExt;
-    let exe = utils::path::privileged_exe().map_err(|e| anyhow!("resolve orca binary: {e}"))?;
-    let mut child = tokio::process::Command::new("/usr/bin/sudo")
-        .arg("-n")
-        .arg(&exe)
-        .args(["admin", helper])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| anyhow!("spawn `sudo -n {} admin {helper}`: {e}", exe.display()))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(&payload).await?;
-        stdin.shutdown().await?;
-    }
-    let out = child.wait_with_output().await?;
+    let out = utils::privileged::run(utils::privileged::PrivilegedCall::helper(helper, payload))
+        .await
+        .map_err(|e| {
+            anyhow!(
+                "run `sudo -n {} admin {helper}`: {e}",
+                utils::path::PRIVILEGED_BIN
+            )
+        })?;
     Ok(HelperOutput {
-        success: out.status.success(),
-        code: out.status.code(),
+        success: out.success,
+        code: out.code,
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     })
@@ -71,6 +62,32 @@ async fn run_helper(helper: &'static str, payload: Vec<u8>) -> Result<HelperOutp
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn helpers_run_through_the_privileged_seam() {
+        use utils::privileged::testing::{Recorder, with_exec};
+        let rec = Recorder::new(utils::privileged::PrivilegedOutput {
+            success: true,
+            stdout: b"{}".to_vec(),
+            ..Default::default()
+        });
+        let out = with_exec(rec.clone(), run_helper("lxc-exec", b"op".to_vec()))
+            .await
+            .unwrap();
+        assert!(out.success);
+        let calls = rec.calls();
+        assert_eq!(
+            calls[0].argv,
+            [utils::path::PRIVILEGED_BIN, "admin", "lxc-exec"]
+        );
+        assert_eq!(calls[0].stdin, b"op");
+    }
+
+    #[tokio::test]
+    async fn helpers_never_reach_real_sudo_in_tests() {
+        let err = run_helper("lxc-exec", Vec::new()).await.unwrap_err();
+        assert!(err.to_string().contains("refused in test builds"), "{err}");
+    }
 
     fn invocation(role: &str, reaches: &[&str], dry_run: bool) -> spec::surfaces::Invocation {
         let mut ctx = contract::ToolCtx::new(std::sync::Arc::new(

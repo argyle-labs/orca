@@ -60,17 +60,19 @@ fn is_executable(p: &Path) -> bool {
 pub const PRIVILEGED_BIN: &str = "/usr/local/libexec/orca/orca";
 
 pub fn privileged_exe() -> std::io::Result<std::path::PathBuf> {
-    pick_privileged(Path::new(PRIVILEGED_BIN).is_file(), std::env::current_exe)
+    pick_privileged(Path::new(PRIVILEGED_BIN).is_file())
 }
 
-fn pick_privileged(
-    installed: bool,
-    current: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
-) -> std::io::Result<std::path::PathBuf> {
+fn pick_privileged(installed: bool) -> std::io::Result<std::path::PathBuf> {
     if installed {
         Ok(PRIVILEGED_BIN.into())
     } else {
-        current()
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "the root-owned helper {PRIVILEGED_BIN} is missing; run `sudo orca identity privilege repair`"
+            ),
+        ))
     }
 }
 
@@ -80,15 +82,14 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn privileged_exe_prefers_the_installed_root_copy() {
-        let cur = || Ok(std::path::PathBuf::from("/home/svc/bin/orca"));
-        assert_eq!(
-            pick_privileged(true, cur).unwrap(),
-            Path::new(PRIVILEGED_BIN)
-        );
-        assert_eq!(
-            pick_privileged(false, cur).unwrap(),
-            Path::new("/home/svc/bin/orca")
+    fn privileged_exe_is_only_the_installed_root_copy() {
+        assert_eq!(pick_privileged(true).unwrap(), Path::new(PRIVILEGED_BIN));
+        let err = pick_privileged(false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            err.to_string()
+                .contains("sudo orca identity privilege repair"),
+            "{err}"
         );
     }
 

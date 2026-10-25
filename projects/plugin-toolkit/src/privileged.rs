@@ -47,7 +47,6 @@ use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
 
 pub use crate::lxc_exec::ORCA_BIN_ENV;
 
@@ -103,33 +102,15 @@ pub async fn apply<P: Serialize>(plugin: &str, op: &str, payload: Option<&P>) ->
         std::path::Path::new(&orca_bin).is_absolute(),
         "{ORCA_BIN_ENV} must be an absolute path, got {orca_bin:?}"
     );
-    let mut child = tokio::process::Command::new("/usr/bin/sudo")
-        .arg("-n")
-        .arg(&orca_bin)
-        .args(["admin", "plugin-apply"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| format!("spawn `sudo -n {orca_bin} admin plugin-apply`"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&input)
-            .await
-            .context("send privileged op")?;
-        stdin
-            .shutdown()
-            .await
-            .context("close privileged op stdin")?;
-    }
-    let out = child
-        .wait_with_output()
-        .await
-        .context("wait for plugin-apply")?;
+    let out = utils::privileged::run(utils::privileged::PrivilegedCall::new(
+        [orca_bin.as_str(), "admin", "plugin-apply"],
+        input,
+    ))
+    .await
+    .with_context(|| format!("run `sudo -n {orca_bin} admin plugin-apply`"))?;
     parse_reply(
-        out.status.success(),
-        out.status.code(),
+        out.success,
+        out.code,
         &String::from_utf8_lossy(&out.stdout),
         &String::from_utf8_lossy(&out.stderr),
     )
@@ -368,5 +349,31 @@ mod tests {
         assert!(err.to_string().contains("tampered"));
         let err = parse_reply(false, Some(1), "", "sudo: a password is required").unwrap_err();
         assert!(err.to_string().contains("password is required"));
+    }
+
+    #[tokio::test]
+    async fn apply_goes_through_the_privileged_seam() {
+        use utils::privileged::testing::{Recorder, with_exec};
+        let rec = Recorder::new(utils::privileged::PrivilegedOutput {
+            success: true,
+            stdout: br#"{"ok":true,"detail":"done"}"#.to_vec(),
+            ..Default::default()
+        });
+        // SAFETY: no other toolkit test reads or writes ORCA_BIN.
+        unsafe { std::env::set_var(ORCA_BIN_ENV, "/usr/local/libexec/orca/orca") };
+        let detail = with_exec(
+            rec.clone(),
+            apply("p", "set_autostart", Some(&serde_json::json!({"on": true}))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(detail, "done");
+        let calls = rec.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].argv,
+            ["/usr/local/libexec/orca/orca", "admin", "plugin-apply"]
+        );
+        assert!(String::from_utf8_lossy(&calls[0].stdin).contains("set_autostart"));
     }
 }

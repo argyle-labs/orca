@@ -636,30 +636,26 @@ fn migrate_legacy_unit(
     home: &str,
     root: bool,
     run: &mut dyn FnMut(&[String]) -> bool,
+    elevate: &mut dyn FnMut(utils::privileged::PrivilegedCall) -> bool,
 ) -> Result<bool> {
     match legacy_scope_from_cgroup(cgroup) {
         None => Ok(false),
         Some(true) => migrate_unit_dir(&format!("{home}/.config/systemd/user"), true, run),
         Some(false) if root => migrate_unit_dir(SYSTEM_UNIT_DIR, false, run),
         Some(false) => {
-            let exe = utils::path::privileged_exe()?;
-            let exe = exe.to_string_lossy();
-            if run(&unit_migrate_command(&exe)) {
+            if elevate(utils::privileged::PrivilegedCall::helper(
+                "unit-migrate",
+                Vec::new(),
+            )) {
                 return Ok(true);
             }
             tracing::warn!(
-                "running under legacy system unit {APP_SYSTEMD_SERVICE_LEGACY}.service and `sudo -n {exe} admin unit-migrate` is not granted; run `sudo orca identity privilege repair`"
+                "running under legacy system unit {APP_SYSTEMD_SERVICE_LEGACY}.service and `sudo -n {} admin unit-migrate` is not granted; run `sudo orca identity privilege repair`",
+                utils::path::PRIVILEGED_BIN
             );
             Ok(false)
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn unit_migrate_command(exe: &str) -> Vec<String> {
-    ["sudo", "-n", exe, "admin", "unit-migrate"]
-        .map(String::from)
-        .to_vec()
 }
 
 #[cfg(target_os = "linux")]
@@ -682,12 +678,31 @@ pub fn admin_unit_migrate() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+fn elevate(call: utils::privileged::PrivilegedCall) -> bool {
+    match utils::reactor::block_on(utils::privileged::run(call)) {
+        Ok(out) if out.success => true,
+        Ok(out) => {
+            tracing::warn!(
+                "unit-migrate helper exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!("unit-migrate helper: {e}");
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub fn migrate_legacy_unit_on_startup() {
     let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
     let home = std::env::var("HOME")
         .map(|h| canonical_path(&h))
         .unwrap_or_default();
-    match migrate_legacy_unit(&cgroup, &home, is_root(), &mut run_command) {
+    match migrate_legacy_unit(&cgroup, &home, is_root(), &mut run_command, &mut elevate) {
         Ok(true) => tracing::info!(
             "handed {APP_SYSTEMD_SERVICE_LEGACY}.service -> {APP_SYSTEMD_SERVICE}.service switch to systemd"
         ),
@@ -1084,6 +1099,7 @@ mod tests {
                 ran.push(argv.join(" "));
                 true
             },
+            &mut |_| panic!("a user unit never elevates"),
         )
         .unwrap();
         assert!(migrated);
@@ -1098,26 +1114,35 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn non_root_system_migration_goes_through_the_sudo_grant() {
-        let mut ran = Vec::new();
+        use utils::privileged::PrivilegedExec;
+        use utils::privileged::testing::Recorder;
+        let rec = Recorder::new(utils::privileged::PrivilegedOutput {
+            success: true,
+            ..Default::default()
+        });
         let migrated = migrate_legacy_unit(
             "0::/system.slice/orca.service\n",
             "/x",
             false,
-            &mut |argv| {
-                ran.push(argv.to_vec());
-                true
-            },
+            &mut |_| panic!("no direct command for a system unit"),
+            &mut |call| utils::reactor::block_on(rec.exec(call)).unwrap().success,
         )
         .unwrap();
         assert!(migrated);
-        assert_eq!(ran.len(), 1);
-        assert_eq!(&ran[0][..2], ["sudo", "-n"]);
-        assert_eq!(&ran[0][3..], ["admin", "unit-migrate"]);
-        let refused =
-            migrate_legacy_unit("0::/system.slice/orca.service\n", "/x", false, &mut |_| {
-                false
-            })
-            .unwrap();
+        let calls = rec.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].argv,
+            [utils::path::PRIVILEGED_BIN, "admin", "unit-migrate"]
+        );
+        let refused = migrate_legacy_unit(
+            "0::/system.slice/orca.service\n",
+            "/x",
+            false,
+            &mut |_| panic!("no direct command for a system unit"),
+            &mut |_| false,
+        )
+        .unwrap();
         assert!(!refused);
     }
 
@@ -1191,6 +1216,7 @@ mod tests {
             home.path().to_str().unwrap(),
             false,
             &mut |_| panic!("no systemctl for a foreign unit"),
+            &mut |_| panic!("a foreign unit never elevates"),
         )
         .unwrap();
         assert!(!migrated);

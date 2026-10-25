@@ -837,6 +837,7 @@ impl ContainerRuntime for DockerCli {
     }
 
     async fn restart(&self, id: &str) -> Result<(), RecoverError> {
+        utils::privileged::refuse_host_mutation("docker")?;
         Command::new("docker")
             .arg("restart")
             .arg(id)
@@ -877,6 +878,7 @@ impl ContainerRuntime for DockerCli {
     }
 
     async fn start(&self, id: &str) -> Result<(), RecoverError> {
+        utils::privileged::refuse_host_mutation("docker")?;
         Command::new("docker")
             .arg("start")
             .arg(id)
@@ -961,6 +963,7 @@ pub struct PctCli;
 /// `pct list` → typed guest rows. A `pct` failure is a hard `Err` (the caller
 /// records it), mirroring `DockerCli::binds_under`.
 async fn pct_list() -> Result<Vec<PctGuest>, RecoverError> {
+    utils::privileged::refuse_host_mutation("pct")?;
     let stdout = Command::new("pct")
         .arg("list")
         .run_checked()
@@ -975,6 +978,7 @@ async fn pct_list() -> Result<Vec<PctGuest>, RecoverError> {
 
 /// `pct config <vmid>` → raw config text.
 async fn pct_config(vmid: &str) -> Result<String, RecoverError> {
+    utils::privileged::refuse_host_mutation("pct")?;
     let stdout = Command::new("pct")
         .arg("config")
         .arg(vmid)
@@ -990,6 +994,7 @@ async fn pct_config(vmid: &str) -> Result<String, RecoverError> {
 
 /// `pct start <vmid>`.
 async fn pct_start(vmid: &str) -> Result<(), RecoverError> {
+    utils::privileged::refuse_host_mutation("pct")?;
     Command::new("pct")
         .arg("start")
         .arg(vmid)
@@ -1022,6 +1027,7 @@ impl ContainerRuntime for PctCli {
         path: &str,
         timeout: Duration,
     ) -> Result<ConsumerProbe, RecoverError> {
+        utils::privileged::refuse_host_mutation("pct")?;
         let fut = Command::new("pct")
             .arg("exec")
             .arg(id)
@@ -1049,6 +1055,7 @@ impl ContainerRuntime for PctCli {
     }
 
     async fn restart(&self, id: &str) -> Result<(), RecoverError> {
+        utils::privileged::refuse_host_mutation("pct")?;
         Command::new("pct")
             .arg("reboot")
             .arg(id)
@@ -1883,5 +1890,20 @@ mod tests {
         );
         assert_eq!(parse_docker_state(""), None);
         assert_eq!(parse_docker_state("exited\n"), None);
+    }
+
+    #[tokio::test]
+    async fn runtime_mutations_never_spawn_under_test() {
+        for err in [
+            PctCli.restart("113").await.unwrap_err(),
+            pct_start("113").await.unwrap_err(),
+            DockerCli.restart("c").await.unwrap_err(),
+            DockerCli.start("c").await.unwrap_err(),
+        ] {
+            assert!(
+                matches!(&err, RecoverError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+                "{err}"
+            );
+        }
     }
 }

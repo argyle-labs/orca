@@ -332,10 +332,8 @@ async fn run_privileged_cron(op: &CronOp) -> CronOpResult {
         Ok(v) => v,
         Err(e) => return CronOpResult::refused(format!("serialize op: {e}")),
     };
-    let call = match utils::privileged::PrivilegedCall::helper("cron-apply", payload) {
-        Ok(c) => c.with_timeout(HELPER_TIMEOUT),
-        Err(e) => return CronOpResult::refused(format!("resolve orca binary: {e}")),
-    };
+    let call = utils::privileged::PrivilegedCall::helper("cron-apply", payload)
+        .with_timeout(HELPER_TIMEOUT);
     match utils::privileged::run(call).await {
         Ok(out) if out.success => serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
             CronOpResult::refused(format!(

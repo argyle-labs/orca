@@ -309,7 +309,6 @@ fn save_signature(dir: &Path, software: &str, minisig: Option<&str>) -> Result<(
 #[cfg(unix)]
 async fn request_trust(software: &str) -> Result<()> {
     let call = utils::privileged::PrivilegedCall::helper("plugin-trust-signed", software)
-        .context("resolve the privileged orca binary")?
         .with_timeout(std::time::Duration::from_secs(30));
     let out = utils::privileged::run(call)
         .await

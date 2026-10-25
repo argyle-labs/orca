@@ -498,10 +498,7 @@ pub async fn run_privileged_lxc(op: &LxcExecOp) -> LxcExecResult {
         Err(e) => return LxcExecResult::refused(format!("serialize op: {e}")),
     };
     let limit = exec_timeout(op) + LXC_EXEC_HELPER_GRACE;
-    let call = match utils::privileged::PrivilegedCall::helper("lxc-exec", payload) {
-        Ok(c) => c.with_timeout(limit),
-        Err(e) => return LxcExecResult::refused(format!("resolve orca binary: {e}")),
-    };
+    let call = utils::privileged::PrivilegedCall::helper("lxc-exec", payload).with_timeout(limit);
     match utils::privileged::run(call).await {
         Ok(out) if out.success => serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
             LxcExecResult::refused(format!(
@@ -530,6 +527,9 @@ pub async fn run_privileged_lxc(op: &LxcExecOp) -> LxcExecResult {
 pub async fn execute_privileged_lxc(op: LxcExecOp) -> LxcExecResult {
     if let Err(e) = validate(&op) {
         return LxcExecResult::refused(e);
+    }
+    if let Err(e) = utils::privileged::refuse_host_mutation("pct") {
+        return LxcExecResult::refused(e.to_string());
     }
 
     // `pct exec <vmid> -- <argv...>` — the `--` terminates pct's own option
@@ -713,10 +713,7 @@ pub async fn run_privileged_lxc_push(op: &LxcPushOp) -> LxcPushResult {
         Ok(v) => v,
         Err(e) => return LxcPushResult::refused(format!("serialize op: {e}")),
     };
-    let call = match utils::privileged::PrivilegedCall::helper("lxc-push", payload) {
-        Ok(c) => c,
-        Err(e) => return LxcPushResult::refused(format!("resolve orca binary: {e}")),
-    };
+    let call = utils::privileged::PrivilegedCall::helper("lxc-push", payload);
     match utils::privileged::run(call).await {
         Ok(out) if out.success => serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
             LxcPushResult::refused(format!(
@@ -770,6 +767,9 @@ pub async fn execute_privileged_lxc_push(op: LxcPushOp) -> LxcPushResult {
             "contents {} bytes exceeds the {LXC_PUSH_MAX_BYTES}-byte push cap",
             op.contents.len()
         ));
+    }
+    if let Err(e) = utils::privileged::refuse_host_mutation("pct") {
+        return LxcPushResult::refused(e.to_string());
     }
 
     if guest_path_is_symlink(op.vmid, &op.path).await {
@@ -1265,5 +1265,38 @@ mod tests {
             res.error
         );
         assert_eq!(res.exit_code, None);
+    }
+
+    #[tokio::test]
+    async fn an_allowlisted_command_never_spawns_pct_under_test() {
+        let res = execute_privileged_lxc(LxcExecOp {
+            vmid: 113,
+            argv: vec!["true".into()],
+        })
+        .await;
+        assert!(!res.success);
+        assert!(
+            res.error.contains("refusing to run host-mutating `pct`"),
+            "{}",
+            res.error
+        );
+    }
+
+    #[tokio::test]
+    async fn a_valid_push_never_spawns_pct_under_test() {
+        let res = execute_privileged_lxc_push(LxcPushOp {
+            vmid: 113,
+            path: "/etc/orca-test".into(),
+            contents: b"x".to_vec(),
+            mode: None,
+            owner: None,
+        })
+        .await;
+        assert!(!res.ok);
+        assert!(
+            res.error.contains("refusing to run host-mutating `pct`"),
+            "{}",
+            res.error
+        );
     }
 }

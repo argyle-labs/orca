@@ -130,7 +130,7 @@ fn helper_result(
 async fn via_direct_pct(vmid: u32, argv: &[&str]) -> anyhow::Result<LxcExecResult> {
     let vmid = vmid.to_string();
     let out = utils::privileged::run(utils::privileged::PrivilegedCall::new(
-        ["pct", "exec", vmid.as_str(), "--"]
+        ["/usr/sbin/pct", "exec", vmid.as_str(), "--"]
             .into_iter()
             .chain(argv.iter().copied()),
         Vec::new(),

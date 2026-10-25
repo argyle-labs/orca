@@ -115,6 +115,7 @@ mod daemon_signal_tests {
 
         let child = std::process::Command::new(orca_bin())
             .env("HOME", home)
+            .env("CARGO_TARGET_TMPDIR", env!("CARGO_TARGET_TMPDIR"))
             // Pin the canonical state resolver to the tempdir. Setting HOME
             // alone is NOT enough: `$ORCA_HOME` takes precedence over `$HOME`
             // in `contract::config::paths`, so an inherited `$ORCA_HOME` (from

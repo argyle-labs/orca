@@ -643,10 +643,7 @@ pub async fn run_privileged(op: &PrivilegedOp) -> PrivilegedResult {
         Ok(v) => v,
         Err(e) => return refused(format!("serialize op: {e}")),
     };
-    let call = match utils::privileged::PrivilegedCall::helper("storage-apply", payload) {
-        Ok(c) => c,
-        Err(e) => return refused(format!("resolve orca binary: {e}")),
-    };
+    let call = utils::privileged::PrivilegedCall::helper("storage-apply", payload);
     match utils::privileged::run(call).await {
         Ok(out) if out.success => serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
             refused(format!(
