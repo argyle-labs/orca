@@ -586,6 +586,9 @@ fn exec_error_object(e: &anyhow::Error) -> ErrorObject {
         e.chain()
             .find_map(|c| c.downcast_ref::<contract::OrcaError>())
     }) else {
+        if e.downcast_ref::<RelayedToolFailed>().is_some() {
+            return ErrorObject::internal(&format!("{MESH_EXEC_METHOD} failed"));
+        }
         return peer_facing_error(MESH_EXEC_METHOD, e);
     };
     ErrorObject {
@@ -594,10 +597,31 @@ fn exec_error_object(e: &anyhow::Error) -> ErrorObject {
         } else {
             -32603
         },
-        message: oe.message.clone(),
+        message: utils::scrub::scrub_line(&oe.message).into_owned(),
         data: Some(serde_json::json!({ "kind": oe.kind, "code": oe.code })),
     }
 }
+
+fn relayed_tool_error(tool: &str, e: anyhow::Error) -> anyhow::Error {
+    if e.chain()
+        .any(|c| c.downcast_ref::<contract::OrcaError>().is_some())
+    {
+        return e;
+    }
+    warn!("[mesh] dispatch mesh-relayed tool '{tool}': {e:#}");
+    anyhow::Error::new(RelayedToolFailed)
+}
+
+#[derive(Debug)]
+struct RelayedToolFailed;
+
+impl std::fmt::Display for RelayedToolFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("mesh-relayed tool failed")
+    }
+}
+
+impl std::error::Error for RelayedToolFailed {}
 
 /// Handle `mesh/exec`: dispatch an allowlisted local tool on this peer's behalf.
 /// The mesh mTLS chain proves the caller is a paired peer; the REMOTE_OK
@@ -649,7 +673,7 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> 
         caller,
     )
     .await
-    .with_context(|| format!("dispatch mesh-relayed tool '{}'", params.tool))?;
+    .map_err(|e| relayed_tool_error(&params.tool, e))?;
 
     Ok(MeshExecResult {
         tool: params.tool,
@@ -916,6 +940,67 @@ mod tests {
         let plain = crate::mesh::peer_error("10.0.0.1", plain);
         assert!(plain.downcast_ref::<contract::OrcaError>().is_none());
         assert!(plain.downcast_ref::<crate::mesh::PeerAnswered>().is_some());
+    }
+
+    #[test]
+    fn a_classified_relayed_tool_failure_reaches_the_caller() {
+        let e = relayed_tool_error(
+            "container.exec",
+            anyhow::Error::from(contract::OrcaError::forbidden(
+                "exec in syncthing refused: the container is not part of a registered stack",
+            )),
+        );
+        let obj = exec_error_object(&e);
+        assert_eq!(
+            obj.message,
+            "exec in syncthing refused: the container is not part of a registered stack"
+        );
+        assert_eq!(obj.code, -32603);
+        assert_eq!(
+            obj.data.unwrap()["kind"],
+            serde_json::json!(contract::ErrorKind::Forbidden)
+        );
+        let invalid = relayed_tool_error(
+            "t",
+            anyhow::Error::from(contract::OrcaError::invalid("invalid args for t: id: bad")),
+        );
+        assert_eq!(exec_error_object(&invalid).code, -32602);
+    }
+
+    #[test]
+    fn an_untyped_relayed_tool_failure_is_hidden() {
+        let e = relayed_tool_error(
+            "container.exec",
+            anyhow::anyhow!("open /secret/path/key.pem failed").context("token=ghp_abc123SECRET"),
+        );
+        let obj = exec_error_object(&e);
+        assert_eq!(obj.message, "internal error: mesh/exec failed");
+        assert!(obj.data.is_none());
+    }
+
+    #[test]
+    fn a_classified_relayed_tool_failure_drops_its_local_context() {
+        let e = relayed_tool_error(
+            "container.exec",
+            anyhow::Error::from(contract::OrcaError::forbidden("exec refused"))
+                .context("open /secret/path/key.pem"),
+        );
+        let obj = exec_error_object(&e);
+        assert_eq!(obj.message, "exec refused");
+        assert!(!obj.message.contains("/secret/path"));
+    }
+
+    #[test]
+    fn a_classified_relayed_tool_failure_reaches_the_peer_scrubbed() {
+        let e = relayed_tool_error(
+            "container.exec",
+            anyhow::Error::from(contract::OrcaError::forbidden(
+                "exec refused: authorization: Bearer hunter2secret",
+            )),
+        );
+        let msg = exec_error_object(&e).message;
+        assert!(!msg.contains("hunter2secret"), "{msg}");
+        assert!(msg.starts_with("exec refused: "), "{msg}");
     }
 
     #[test]

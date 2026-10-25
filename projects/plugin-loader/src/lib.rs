@@ -1709,7 +1709,7 @@ fn parse_invoke_result(
             .downcast_ref::<supervisor::ToolFailed>()
             .and_then(|f| f.kind)
         {
-            return contract::OrcaError::new(kind, msg).into();
+            return contract::OrcaError::new(kind, utils::scrub::scrub_line(&msg)).into();
         }
         anyhow!(msg)
     })
@@ -2545,6 +2545,19 @@ mod loader_tests {
             .to_string();
         assert!(err.contains("some.tool"), "names the tool: {err}");
         assert!(err.contains("boom"), "includes the error text: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_invoke_result_scrubs_a_kind_only_message() {
+        let failed = supervisor::ToolFailed {
+            message: "refused: authorization: Bearer hunter2secret".into(),
+            kind: Some(contract::ErrorKind::Forbidden),
+            error: None,
+        };
+        let err = parse_invoke_result(Err(failed.into()), "some.tool", "sw").unwrap_err();
+        let oe = err.downcast_ref::<contract::OrcaError>().unwrap();
+        assert!(!oe.message.contains("hunter2secret"), "{}", oe.message);
     }
 
     #[cfg(unix)]
