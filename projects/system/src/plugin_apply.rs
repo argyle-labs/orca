@@ -27,7 +27,6 @@
 // the plugin verbatim and never interpreted here.
 #![allow(clippy::disallowed_types)]
 
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -146,22 +145,7 @@ pub fn invoking_orca_home() -> Result<PathBuf> {
 }
 
 pub fn orca_home_for_uid(uid: u32) -> Result<PathBuf> {
-    let mut buf = vec![0 as libc::c_char; 16 * 1024];
-    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut result: *mut libc::passwd = std::ptr::null_mut();
-    let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
-    ensure!(
-        rc == 0,
-        "getpwuid_r({uid}) failed: {}",
-        std::io::Error::from_raw_os_error(rc)
-    );
-    ensure!(
-        !result.is_null() && !pwd.pw_dir.is_null(),
-        "no account for SUDO_UID {uid}"
-    );
-    let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
-    let home = PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes()));
-    Ok(home.join(contract::config::APP_STATE_DIR))
+    Ok(utils::user::home_for_uid(uid)?.join(contract::config::APP_STATE_DIR))
 }
 
 /// The invoking user's uid: `SUDO_UID` under sudo, else this process's own
@@ -1007,21 +991,6 @@ esac
             .await
             .unwrap();
         assert_eq!(out.exit_code, 3);
-    }
-
-    #[test]
-    fn orca_home_for_uid_resolves_the_current_user_home() {
-        let uid = unsafe { libc::getuid() };
-        let home = PathBuf::from(std::env::var("HOME").unwrap());
-        assert_eq!(
-            orca_home_for_uid(uid).unwrap(),
-            home.join(contract::config::APP_STATE_DIR)
-        );
-    }
-
-    #[test]
-    fn orca_home_for_uid_rejects_a_uid_with_no_account() {
-        assert!(orca_home_for_uid(3_999_999_999).is_err());
     }
 
     #[tokio::test]

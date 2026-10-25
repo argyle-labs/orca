@@ -17,7 +17,7 @@ path = "src/lib.rs"
 # [[plugins-stay-thin]].
 [features]
 default = ["full"]
-full = ["http", "git", "pki", "yaml", "schedule", "state", "rt", "search", "config_format", "scrub_text"]
+full = ["user", "http", "git", "pki", "yaml", "schedule", "state", "rt", "search", "config_format", "scrub_text"]
 # `utils::scrub::scrub_line` — the regex TEXT scrubber for log lines. Confines
 # `regex` so a thin consumer (contract, plugin tool plugins) links none of it;
 # the STRUCTURED redactor in the same module is always available and needs no
@@ -47,6 +47,7 @@ yaml = ["dep:serde_yaml"]
 # `utils::schedule` — cron parsing + firing-time math. Confines the `cron` crate
 # (and its transitive chrono) so a scheduling consumer needs neither directly.
 schedule = ["dep:cron"]
+user = ["dep:libc"]
 # `utils::http` — reqwest client + rustls TLS. Pulls `rt` for tokio: the module
 # is async and `tokio-rustls` needs it, so `http` alone failed to compile until
 # now — latent because every consumer took `full`, which enables `rt` anyway.

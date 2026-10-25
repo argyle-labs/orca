@@ -153,7 +153,7 @@ pub(crate) fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str
     validate_shell_safe("--service-user", user)?;
     validate_shell_safe("--home-dir", home_dir)?;
 
-    let user_exists = crate::cron::lookup_uid(user).is_some();
+    let user_exists = utils::user::uid_for_name(user).is_some();
 
     if user_exists {
         println!("{} user '{user}' already exists", "-".dimmed());
@@ -381,7 +381,7 @@ fn validate_service_user(user: &str) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn require_service_user(user: &str) -> Result<()> {
     validate_service_user(user)?;
-    if crate::cron::lookup_uid(user).is_none() {
+    if utils::user::uid_for_name(user).is_none() {
         anyhow::bail!("service user '{user}' does not exist on this host");
     }
     Ok(())

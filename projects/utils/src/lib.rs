@@ -102,6 +102,8 @@ pub mod shutdown;
 /// Daemon state file. Gated by the `state` feature (pulls `contract` + tokio).
 #[cfg(feature = "state")]
 pub mod state;
+#[cfg(all(unix, feature = "user"))]
+pub mod user;
 /// YAML deserialization. Gated by the `yaml` feature; the YAML lib is hidden.
 #[cfg(feature = "yaml")]
 pub mod yaml;
