@@ -562,7 +562,7 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
         // honours `dryRun`, so only an execute-gated tool may dry-run remotely.
         if crate::erased::dry_run_requested(&args)? && !crate::tool_roles::plugin_dry_run_ok(name) {
             let msg = if dynamic_owns(name) {
-                format!("{name} does not support dryRun")
+                format!("{name} does not support dryRun on system {system}; run it without dryRun")
             } else {
                 format!(
                     "{name}: a dry run can't be verified on system {system}; run it without dryRun"
@@ -2311,7 +2311,9 @@ mod tests {
         let oe = find_orca_error(&err).unwrap_or_else(|| panic!("{err}"));
         assert_eq!(
             oe.message,
-            format!("{FAKE_PLUGIN_TOOL} does not support dryRun")
+            format!(
+                "{FAKE_PLUGIN_TOOL} does not support dryRun on system {REMOTE_ID}; run it without dryRun"
+            )
         );
     }
 
