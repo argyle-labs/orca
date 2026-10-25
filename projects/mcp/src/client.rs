@@ -127,6 +127,7 @@ const SSE_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60)
 struct SseHttp {
     client: utils::http::Client,
     token: Option<String>,
+    open_timeout: std::time::Duration,
 }
 
 impl SseHttp {
@@ -145,6 +146,16 @@ impl SseHttp {
 
     fn post(&self, url: impl Into<String>) -> utils::http::RequestBuilder {
         self.prepare(self.client.post(url))
+    }
+
+    async fn open_sse(&self, base_url: &str) -> Result<utils::http::StreamResponse> {
+        let req = self
+            .get(utils::url::join(base_url, "sse"))
+            .header("Accept", "text/event-stream");
+        match tokio::time::timeout(self.open_timeout, req.send_stream()).await {
+            Ok(r) => Ok(r?),
+            Err(_) => anyhow::bail!("SSE open timed out"),
+        }
     }
 }
 
@@ -252,6 +263,7 @@ impl McpClient {
                 .connect_timeout(std::time::Duration::from_secs(2))
                 .build(),
             token: cfg.token.clone().filter(|t| !t.is_empty()),
+            open_timeout: SSE_HTTP_TIMEOUT,
         };
 
         // Probe with a health check before attempting handshake.
@@ -366,11 +378,7 @@ impl McpClient {
             Transport::Sse { base_url, http } => {
                 // Per-request SSE: open /sse, get session endpoint, POST request, read response.
                 // Each request gets its own isolated session so responses can't cross.
-                let sse_resp = http
-                    .get(utils::url::join(base_url, "sse"))
-                    .header("Accept", "text/event-stream")
-                    .send_stream()
-                    .await?;
+                let sse_resp = http.open_sse(base_url).await?;
 
                 if !sse_resp.is_success() {
                     anyhow::bail!("SSE open failed: HTTP {}", sse_resp.status());
@@ -449,11 +457,7 @@ impl McpClient {
                 // Notifications via SSE: open a session, POST the notification.
                 // The peer will ignore notifications that aren't JSON-RPC requests
                 // (no `id` field means no response expected). Fire and forget.
-                if let Ok(sse_resp) = http
-                    .get(utils::url::join(base_url, "sse"))
-                    .header("Accept", "text/event-stream")
-                    .send_stream()
-                    .await
+                if let Ok(sse_resp) = http.open_sse(base_url).await
                     && sse_resp.is_success()
                 {
                     let mut stream = Box::pin(sse_resp.bytes_stream());
@@ -2111,6 +2115,28 @@ for line in sys.stdin:
     // response, routes it to the matching SSE stream; notifications get no response).
     // Every response carries `Connection: close` so the client never pools a finished
     // socket.
+    #[tokio::test]
+    async fn sse_open_times_out_when_peer_never_answers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            drop(sock);
+        });
+        let http = SseHttp {
+            client: utils::http::Client::new(),
+            token: None,
+            open_timeout: std::time::Duration::from_millis(200),
+        };
+        let err = match http.open_sse(&format!("http://{addr}")).await {
+            Ok(_) => panic!("open_sse should time out"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("timed out"), "{err}");
+        held.abort();
+    }
+
     #[cfg(unix)]
     async fn spawn_sse_server(healthy: bool) -> (String, tokio::task::JoinHandle<()>) {
         use std::collections::HashMap as Map;

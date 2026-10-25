@@ -1656,15 +1656,17 @@ async fn proxy_http(req: axum::extract::Request, origin: String) -> axum::respon
     };
     // Relay 30x to the browser; following would forward its cookies and
     // custom headers to whatever host the upstream names.
-    rb = rb.follow_redirects(false).no_timeout().max_body(usize::MAX);
+    rb = rb
+        .follow_redirects(false)
+        .retry(false)
+        .no_timeout()
+        .max_body(usize::MAX);
 
     for (k, v) in req.headers() {
         if is_hop_by_hop(k.as_str()) || k == axum::http::header::HOST {
             continue;
         }
-        if let Ok(v) = v.to_str() {
-            rb = rb.header(k.as_str(), v);
-        }
+        rb = rb.append_header_bytes(k.as_str(), v.as_bytes());
     }
 
     // Match DefaultBodyLimit (4 MiB). Larger payloads would buffer entirely in
@@ -2148,6 +2150,38 @@ mod tests {
             body.contains("dev upstream unreachable"),
             "unexpected 502 body: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_http_relays_upstream_503_without_retry() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        ::model::ensure_crypto_provider();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                _ = sock.read(&mut buf).await;
+                _ = sock
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 4\r\nconnection: close\r\n\r\nbusy")
+                    .await;
+            }
+        });
+        let req = axum::extract::Request::builder()
+            .method("GET")
+            .uri("/anything")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = proxy_http(req, format!("http://{addr}")).await;
+        assert_eq!(resp.status(), 503);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&bytes[..], b"busy");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     // ── render_scalar (auth widget + Scalar wiring) ─────────────────────────────
