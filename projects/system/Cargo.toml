@@ -61,6 +61,7 @@ minisign-verify = { workspace = true }
 md-5 = { workspace = true }
 colored      = { workspace = true }
 regex        = { workspace = true }
+glob = { workspace = true }
 
 # `orca logs` TUI. ratatui/crossterm are already workspace deps (the
 # conversation TUI uses them); base64 is for the OSC 52 clipboard escape, which
@@ -78,6 +79,7 @@ orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 # is already present transitively; declared direct for every unix target.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+rustix = { workspace = true }
 
 [dev-dependencies]
 utils = { workspace = true, features = ["test-scope"] }

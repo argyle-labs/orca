@@ -985,6 +985,7 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     system::mesh::host_status_writer::spawn_local_writer();
     system::mesh::host_status_sweep::spawn();
     system::maintenance::spawn_periodic();
+    system::storage_quota::spawn_periodic();
     spawn_mesh_runtime(pki_dir).await;
     spawn_scheduler_runtime();
     // Migration: the version-pin feature was removed (hosts always track

@@ -2405,7 +2405,7 @@ mod tests {
         let ctx = guard_ctx(&tmp);
         let args = PluginInstallArgs {
             allow_unsigned: false,
-            file: Some("/tmp/x".to_string()),
+            file: Some(tmp.path().join("missing").display().to_string()),
             name: Some("jellyfin".to_string()),
             version: None,
             prerelease: false,
@@ -2609,7 +2609,7 @@ mod tests {
         let args = PluginCreateArgs {
             allow_unsigned: false,
             action: PluginCreateAction::Install,
-            file: Some("/tmp/x".to_string()),
+            file: Some(tmp.path().join("missing").display().to_string()),
             name: Some("jellyfin".to_string()),
             version: None,
             prerelease: false,
