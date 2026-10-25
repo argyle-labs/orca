@@ -1559,13 +1559,13 @@ mod tests {
         let (clean, peer, cid) = take_ambient(json!({
             "peer": "host-a",
             "correlation_id": "abc-123",
-            "self_secure": true
+            "secure": true
         }))
         .unwrap();
         assert_eq!(peer.as_deref(), Some("host-a"));
         assert_eq!(cid.as_deref(), Some("abc-123"));
         // Reserved keys removed so they never reach the tool's typed Args.
-        assert_eq!(clean, json!({ "self_secure": true }));
+        assert_eq!(clean, json!({ "secure": true }));
     }
 
     #[cfg(feature = "server")]
@@ -1679,8 +1679,7 @@ mod tests {
 
     #[test]
     fn advertise_ambient_injects_peer_only_for_remote_ok() {
-        let base =
-            json!({ "type": "object", "properties": { "self_secure": { "type": "boolean" } } });
+        let base = json!({ "type": "object", "properties": { "secure": { "type": "boolean" } } });
         let with = advertise_ambient(base.clone(), true);
         assert!(
             with["properties"]["peer"].is_object(),

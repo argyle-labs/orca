@@ -1012,10 +1012,10 @@ pub struct MeshAcceptOutput {
     pub inviter_hostname: String,
     pub inviter_addr: String,
     pub inviter_port: u16,
-    pub self_secure: bool,
+    pub secure: bool,
 }
 
-// ── system.mesh.update --action trust ────────────────────────────────────────────────────────────────
+// ── system.mesh.tier.update --action trust ────────────────────────────────────────────────────────────────
 
 #[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -1268,11 +1268,10 @@ pub use utils::pki::{CertInfo, MeshCertStatus as MeshCertStatusOutput};
 )]
 #[serde(rename_all = "snake_case")]
 pub enum MeshUpdateAction {
-    /// Toggle `self_secure` (Tier-2 secrets-storage). Default.
+    /// Read this member's tier, or accept a mesh-CA-signed promotion grant
+    /// (`secure=true` + `grant`). Default.
     #[default]
     Settings,
-    /// Set trust for a paired peer (needs `id` + `on`).
-    Trust,
     /// Force a one-shot replication tick (optional `peer` filter).
     Sync,
     /// Clear a stale `departed_at` flag on THIS host (needs `id`).
@@ -1286,30 +1285,69 @@ pub enum MeshUpdateAction {
     JoinToken,
 }
 
-/// Union of args across the mesh-update operations; required fields are
-/// validated per `action` at dispatch.
+/// Operation selector for `system.mesh.tier.update`.
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshTierAction {
+    /// Set trust for a paired peer (needs `id` + `on`). Default.
+    #[default]
+    Trust,
+    /// Promote member `id` to secure with a mesh-CA-signed grant. Run on a
+    /// secure member that holds the mesh CA key.
+    Promote,
+    /// Demote this member to insecure.
+    Demote,
+}
+
+/// Args for `system.mesh.tier.update`; required fields are validated per
+/// `action` at dispatch.
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct MeshUpdateArgs {
-    /// `settings` (default), `trust`, `sync`, `recover`, `cancel_offer`,
-    /// `unpin`, or `join_token`.
-    #[arg(long, default_value = "settings")]
-    pub action: MeshUpdateAction,
-    /// (settings) Toggle Tier-2 secrets-storage permission. `None` leaves the
-    /// current value unchanged.
-    #[arg(long)]
-    pub self_secure: Option<bool>,
-    /// (trust/recover/unpin/cancel_offer) Target system.
-    // Aliases: pre-rename daemons send `peer_id` over the mesh.
+pub struct MeshTierArgs {
+    /// `trust` (default), `promote`, or `demote`.
+    #[arg(long, default_value = "trust")]
+    pub action: MeshTierAction,
+    /// (trust/promote) Target system.
     #[arg(long)]
     #[serde(alias = "peerId", alias = "peer_id")]
     pub id: Option<crate::system_id::SystemId>,
     /// (trust) New trust value.
     #[arg(long, action = clap::ArgAction::Set)]
     pub on: Option<bool>,
-    /// (trust) Execute on the remote peer so THEY trust US.
+}
+
+/// Tagged result of `system.mesh.tier.update`, one variant per action.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum MeshTierOutput {
+    Trust(MeshTrustOutput),
+    Settings(MeshSettingsOutput),
+}
+
+/// Union of args across the mesh-update operations; required fields are
+/// validated per `action` at dispatch.
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MeshUpdateArgs {
+    /// `settings` (default), `sync`, `recover`, `cancel_offer`, `unpin`, or
+    /// `join_token`.
+    #[arg(long, default_value = "settings")]
+    pub action: MeshUpdateAction,
+    /// (settings) `true` accepts a mesh-CA-signed `grant` and makes this
+    /// member secure (see `system.mesh.tier.update --action promote`); `None`
+    /// reads the current tier. Demote with `system.mesh.tier.update --action demote`.
     #[arg(long)]
-    pub push: bool,
+    pub secure: Option<bool>,
+    /// (settings) Single-use mesh-CA-signed grant authorising promotion.
+    #[arg(skip)]
+    pub grant: Option<PromotionGrant>,
+    /// (recover/unpin/cancel_offer) Target system.
+    // Aliases: pre-rename daemons send `peer_id` over the mesh.
+    #[arg(long)]
+    #[serde(alias = "peerId", alias = "peer_id")]
+    pub id: Option<crate::system_id::SystemId>,
     /// (sync) Optional source-peer filter (hostname / peer_id / addr).
     #[arg(long)]
     pub peer: Option<String>,
@@ -1318,11 +1356,25 @@ pub struct MeshUpdateArgs {
     pub addr: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RelayingPeer(pub String);
+
+/// Single-use promotion grant signed by the mesh CA over
+/// `<target>:<issued_at>:<expires_at>:<nonce>`.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PromotionGrant {
+    pub signature: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+    pub nonce: String,
+}
+
 /// Result of `system.mesh.update action=settings`.
 #[derive::camel_aliases]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MeshSettingsOutput {
-    pub self_secure: bool,
+    pub secure: bool,
 }
 
 /// Tagged result of `system.mesh.update`, one variant per action.
@@ -1330,7 +1382,6 @@ pub struct MeshSettingsOutput {
 #[serde(untagged)]
 pub enum MeshUpdateOutput {
     Settings(MeshSettingsOutput),
-    Trust(MeshTrustOutput),
     Sync(MeshSyncOutput),
     Recover(MeshRecoverOutput),
     CancelOffer(MeshCancelOfferOutput),
@@ -1722,9 +1773,8 @@ async fn mesh_create(
 
 /// [MUTATES STATE] Mutate mesh membership state on this host (or a `--peer` target). `action`
 /// selects the operation:
-///   - `settings`     — toggle `self_secure` (Tier-2 secrets-storage). Default.
-///   - `trust`        — set trust for a paired peer (needs `id` + `on`;
-///     `push` flips THEIR trust of us over mTLS).
+///   - `settings`     — read this member's tier, or accept a promotion grant
+///     (`secure=true` + `grant`). Default.
 ///   - `sync`         — force a one-shot replication tick (optional `peer`
 ///     source filter).
 ///   - `recover`      — clear a stale `departed_at` flag on THIS host (needs
@@ -1733,6 +1783,8 @@ async fn mesh_create(
 ///   - `unpin`        — drop this host's identity pin for `peer_id`, so it
 ///     is accepted again with a cert that carries no identity name.
 ///   - `join_token`   — issue a single-use, short-lived join token.
+///
+/// Trust, promotion and demotion live on `system.mesh.tier.update`.
 #[orca_tool(domain = "system.mesh", verb = "update", role = "admin")]
 async fn mesh_update(
     args: MeshUpdateArgs,
@@ -1740,27 +1792,21 @@ async fn mesh_update(
 ) -> anyhow::Result<MeshUpdateOutput> {
     match args.action {
         MeshUpdateAction::Settings => {
-            let self_secure = match args.self_secure {
-                Some(v) => exec::set_self_secure(v).await?,
-                None => exec::get_self_secure()?,
+            let secure = match args.secure {
+                Some(true) => {
+                    let relaying = ctx.service::<RelayingPeer>().ok();
+                    exec::accept_promotion(
+                        relaying.as_ref().map(|p| p.0.as_str()),
+                        args.grant.as_ref(),
+                    )
+                    .await?
+                }
+                Some(false) => anyhow::bail!(
+                    "demote with `orca system mesh tier update --action demote` on this member"
+                ),
+                None => exec::get_secure()?,
             };
-            Ok(MeshUpdateOutput::Settings(MeshSettingsOutput {
-                self_secure,
-            }))
-        }
-        MeshUpdateAction::Trust => {
-            let peer_id = args
-                .id
-                .ok_or_else(|| anyhow::anyhow!("system.mesh.update action=trust requires `id`"))?;
-            let on = args
-                .on
-                .ok_or_else(|| anyhow::anyhow!("system.mesh.update action=trust requires `on`"))?;
-            let out = if args.push {
-                exec::push_trust(&peer_id, on, ctx.caller()).await?
-            } else {
-                exec::trust(&peer_id, on).await?
-            };
-            Ok(MeshUpdateOutput::Trust(out))
+            Ok(MeshUpdateOutput::Settings(MeshSettingsOutput { secure }))
         }
         MeshUpdateAction::Sync => {
             let reports = db::replicate_engine::sync_now(args.peer.as_deref()).await?;
@@ -1811,6 +1857,51 @@ async fn mesh_update(
             Ok(MeshUpdateOutput::Unpin(exec::unpin(&peer_id)?))
         }
         MeshUpdateAction::JoinToken => Ok(MeshUpdateOutput::JoinToken(exec::issue_join_token()?)),
+    }
+}
+
+/// [SENSITIVE] [MUTATES STATE] Change mesh trust and member tier on this host.
+/// `action` selects the operation:
+///   - `trust`   — set this host's trust for a paired peer (needs `id` + `on`). Default.
+///   - `promote` — promote member `id` to secure with a mesh-CA-signed grant;
+///     run on a secure member that holds the mesh CA key.
+///   - `demote`  — demote this member to insecure.
+#[orca_tool(
+    domain = "system.mesh.tier",
+    verb = "update",
+    role = "super-admin",
+    local_only = true
+)]
+async fn mesh_tier_update(
+    args: MeshTierArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<MeshTierOutput> {
+    match args.action {
+        MeshTierAction::Trust => {
+            let peer_id = args.id.ok_or_else(|| {
+                anyhow::anyhow!("system.mesh.tier.update action=trust requires `id`")
+            })?;
+            let on = args.on.ok_or_else(|| {
+                anyhow::anyhow!("system.mesh.tier.update action=trust requires `on`")
+            })?;
+            Ok(MeshTierOutput::Trust(exec::trust(&peer_id, on).await?))
+        }
+        MeshTierAction::Promote => {
+            let target = args.id.ok_or_else(|| {
+                anyhow::anyhow!("system.mesh.tier.update action=promote requires `id`")
+            })?;
+            if ctx
+                .service::<RelayingPeer>()
+                .is_ok_and(|p| p.0 == target.as_str())
+            {
+                anyhow::bail!("a member cannot relay its own promotion to secure");
+            }
+            let secure = exec::promote(target.as_str(), ctx.caller()).await?;
+            Ok(MeshTierOutput::Settings(MeshSettingsOutput { secure }))
+        }
+        MeshTierAction::Demote => Ok(MeshTierOutput::Settings(MeshSettingsOutput {
+            secure: exec::set_secure(false).await?,
+        })),
     }
 }
 
@@ -1972,7 +2063,7 @@ mod tests {
     }
 
     fn seed_membership(conn: &rusqlite::Connection) {
-        db::mesh::set_self_secure(conn, true).unwrap();
+        db::mesh::set_secure(conn, true).unwrap();
         db::mesh::upsert_peer(
             conn,
             "019e7105-0000-7000-8000-0000000abc01",
@@ -2053,7 +2144,7 @@ mod tests {
     }
 
     /// The mint-controller incident (2026-08): a host that WAS enrolled (mesh
-    /// membership + self_secure in the DB) whose entire `pki/mesh/` subtree is
+    /// membership + secure in the DB) whose entire `pki/mesh/` subtree is
     /// gone — CA and leaves both absent, e.g. a reinstall displaced it into
     /// `.orca-trash`. This must NOT be misread as `NotEnrolled` (which left the
     /// daemon "paired but identity-less", failing every handshake with
@@ -2435,9 +2526,8 @@ pub fn reconcile_mesh_leaf_identity(
             .context("migrate mesh leaf: re-issue server cert")?;
         utils::pki::reissue_mesh_client_cert(pki_dir, expected_cn)
             .context("migrate mesh leaf: re-issue client cert")?;
-        // Founder identity: keep self marked secure. Membership rows are left
-        // exactly as they were — this is the whole point of migrate-not-wipe.
-        db::mesh::set_self_secure(conn, true)?;
+        // Membership rows and the tier are left exactly as they were — this is
+        // the whole point of migrate-not-wipe.
         tracing::info!(
             "[mesh] mesh leaf migrated in place under CN {expected_cn:?}; \
              mesh membership + peer trust preserved (no re-pair needed)."
@@ -2447,7 +2537,7 @@ pub fn reconcile_mesh_leaf_identity(
 
     // No leaf and no CA. Two very different situations share this on-disk shape,
     // and the DB membership state is what tells them apart:
-    //   (a) Truly never enrolled — no `self_secure` marker and no peer rows.
+    //   (a) Truly never enrolled — no `secure` marker and no peer rows.
     //       Nothing to migrate, nothing to reset → `NotEnrolled`.
     //   (b) Enrolled before, but the mesh material (CA + leaves) is entirely
     //       gone while mesh membership rows survive in the DB — e.g. a reinstall
@@ -2458,7 +2548,7 @@ pub fn reconcile_mesh_leaf_identity(
     //       silent (the reconcile ran and reported "nothing to do"). Take the
     //       last-resort reset so it comes up ready to re-pair instead.
     if matches!(leaf, LeafState::Absent) {
-        let was_enrolled = db::mesh::get_self_secure(conn).unwrap_or(false)
+        let was_enrolled = db::mesh::get_secure(conn).unwrap_or(false)
             || !db::mesh::list_peer_summaries(conn)?.is_empty();
         if !was_enrolled {
             return Ok(LeafReconcileOutcome::NotEnrolled);
@@ -2515,6 +2605,32 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
         outcome,
         LeafReconcileOutcome::AlreadyCurrent | LeafReconcileOutcome::NotEnrolled
     ))
+}
+
+pub(crate) fn ca_keys_need_purge(
+    pki_dir: &std::path::Path,
+    conn: &rusqlite::Connection,
+) -> Result<bool> {
+    Ok(!db::mesh::get_secure(conn)? && utils::pki::has_mesh_ca_key(pki_dir))
+}
+
+pub(crate) fn purge_ca_keys_if_insecure(
+    pki_dir: &std::path::Path,
+    conn: &rusqlite::Connection,
+    holder_proved: bool,
+) -> Result<bool> {
+    if !ca_keys_need_purge(pki_dir, conn)? {
+        return Ok(false);
+    }
+    if !holder_proved {
+        tracing::warn!(
+            "[mesh] insecure member holds the mesh CA key and no peer proved it holds one; \
+             keeping it so the mesh CA is not lost — promote a member, then demote this one"
+        );
+        return Ok(false);
+    }
+    utils::pki::remove_mesh_ca_keys(pki_dir)?;
+    Ok(true)
 }
 
 /// Dial `host` over mTLS with SNI=mesh.orca.local, send a `mesh/ping`, and
@@ -2612,6 +2728,8 @@ mod exec_wire {
         pub caller_role: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub caller_token: Option<utils::pki::SignedEnvelope>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ca_proof: Option<String>,
         /// End-to-end trace id stamped by the originating REST/SDK request
         /// (or synthesized by the daemon middleware). The recipient sets it
         /// on its per-request ctx + tracing span so a single browser action
@@ -2680,13 +2798,15 @@ pub async fn exec_as(
     caller: Option<contract::CallerIdentity>,
     correlation_id: Option<String>,
 ) -> Result<MeshExecResult> {
-    let (caller_role, caller_token) = match caller {
+    let pki = pki_dir();
+    let (caller_role, caller_token, ca_proof) = match caller {
         Some(id) => {
-            let token =
-                caller_token::mint(&pki_dir(), &id, tool, &args, caller_token::DEFAULT_TTL_SECS)?;
-            (Some(id.role), Some(token))
+            let token = caller_token::mint(&pki, &id, tool, &args, caller_token::DEFAULT_TTL_SECS)?;
+            let nonce = serde_json::from_str::<caller_token::CallerToken>(&token.payload)?.nonce;
+            let proof = exec::ca_holder_proof(&pki, crate::host_identity::machine_id(), &nonce);
+            (Some(id.role), Some(token), proof)
         }
-        None => (None, None),
+        None => (None, None, None),
     };
     call_typed(
         host,
@@ -2696,6 +2816,7 @@ pub async fn exec_as(
             args,
             caller_role,
             caller_token,
+            ca_proof,
             correlation_id,
         }),
         Duration::from_secs(120),
@@ -4330,17 +4451,17 @@ mod added_coverage {
     }
 
     #[test]
-    fn mesh_update_args_deserializes_camel_case_self_secure() {
-        let a: MeshUpdateArgs =
-            serde_json::from_str(r#"{"action":"trust","peerId":"019f0000-0000-7000-8000-000000000000","on":true,"push":true}"#)
-                .unwrap();
-        assert_eq!(a.action, MeshUpdateAction::Trust);
+    fn mesh_tier_args_deserializes_camel_case_peer_id() {
+        let a: MeshTierArgs = serde_json::from_str(
+            r#"{"action":"trust","peerId":"019f0000-0000-7000-8000-000000000000","on":true}"#,
+        )
+        .unwrap();
+        assert_eq!(a.action, MeshTierAction::Trust);
         assert_eq!(
             a.id.as_deref(),
             Some("019f0000-0000-7000-8000-000000000000")
         );
         assert_eq!(a.on, Some(true));
-        assert!(a.push);
     }
 
     #[test]
@@ -4499,22 +4620,19 @@ mod added_coverage {
 
     #[test]
     fn mesh_update_output_untagged_settings() {
-        let out = MeshUpdateOutput::Settings(MeshSettingsOutput { self_secure: true });
-        assert_eq!(
-            serde_json::to_string(&out).unwrap(),
-            r#"{"self_secure":true}"#
-        );
+        let out = MeshUpdateOutput::Settings(MeshSettingsOutput { secure: true });
+        assert_eq!(serde_json::to_string(&out).unwrap(), r#"{"secure":true}"#);
     }
 
     // ── serde: cert-status defaults + skip ───────────────────────────────────
 
     #[test]
-    fn cert_status_defaults_version_and_self_secure() {
+    fn cert_status_defaults_version_and_secure() {
         let out: MeshCertStatusOutput =
             serde_json::from_str(r#"{"founder":true,"member":false}"#).unwrap();
         assert!(out.founder && !out.member);
         assert_eq!(out.version, "");
-        assert!(!out.self_secure);
+        assert!(!out.secure);
         assert!(out.mesh_ca.is_none() && out.bootstrap.is_none());
     }
 
@@ -5023,9 +5141,9 @@ mod handler_dispatch_tests {
     async fn mesh_update_trust_requires_peer_id() {
         let ctx = empty_ctx();
         let err = expect_err(
-            mesh_update(
-                MeshUpdateArgs {
-                    action: MeshUpdateAction::Trust,
+            mesh_tier_update(
+                MeshTierArgs {
+                    action: MeshTierAction::Trust,
                     ..Default::default()
                 },
                 &ctx,
@@ -5042,9 +5160,9 @@ mod handler_dispatch_tests {
     async fn mesh_update_trust_requires_on_when_peer_id_present() {
         let ctx = empty_ctx();
         let err = expect_err(
-            mesh_update(
-                MeshUpdateArgs {
-                    action: MeshUpdateAction::Trust,
+            mesh_tier_update(
+                MeshTierArgs {
+                    action: MeshTierAction::Trust,
                     id: Some(GHOST.parse().unwrap()),
                     ..Default::default()
                 },
@@ -5098,16 +5216,181 @@ mod handler_dispatch_tests {
 
     // ── mesh_update: DB-backed arms ────────────────────────────────────────────
 
+    #[test]
+    fn two_tier_promotion_needs_a_mesh_ca_signed_grant() {
+        const TARGET: &str = "019e7105-0000-7000-8000-0000000abc0a";
+        const RELAY: &str = "019e7105-0000-7000-8000-0000000abc09";
+        let now = 1_000_000;
+        let mesh = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(mesh.path(), "founder").unwrap();
+        let rogue = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(rogue.path(), "rogue").unwrap();
+        let insecure = tempfile::tempdir().unwrap();
+        let verify = |own: &str, relay: &str, g: &PromotionGrant, at: i64| {
+            exec::verify_promotion_grant(mesh.path(), own, Some(relay), Some(g), at).is_ok()
+        };
+
+        const OWN: &str = "019e7105-0000-7000-8000-0000000abc0b";
+        assert!(exec::issue_promotion_grant(insecure.path(), true, OWN, TARGET, now).is_err());
+        assert!(
+            exec::issue_promotion_grant(mesh.path(), false, OWN, TARGET, now).is_err(),
+            "an insecure CA-key holder cannot issue a grant"
+        );
+        assert!(
+            exec::issue_promotion_grant(mesh.path(), true, OWN, OWN, now).is_err(),
+            "a member cannot promote itself"
+        );
+        assert!(
+            exec::verify_promotion_grant(mesh.path(), TARGET, Some(RELAY), None, now).is_err(),
+            "a locally trusted relaying peer without a grant cannot promote"
+        );
+        let grant = exec::issue_promotion_grant(mesh.path(), true, OWN, TARGET, now).unwrap();
+        assert!(verify(TARGET, RELAY, &grant, now));
+        assert!(
+            !verify(RELAY, TARGET, &grant, now),
+            "a grant names exactly one member"
+        );
+        assert!(
+            !verify(TARGET, RELAY, &grant, grant.expires_at),
+            "expired grant"
+        );
+        assert!(
+            !verify(TARGET, TARGET, &grant, now),
+            "self-relayed promotion"
+        );
+        let mut tampered = grant.clone();
+        tampered.nonce = "other".into();
+        assert!(!verify(TARGET, RELAY, &tampered, now), "nonce is signed");
+        let forged = exec::issue_promotion_grant(rogue.path(), true, OWN, TARGET, now).unwrap();
+        assert!(
+            !verify(TARGET, RELAY, &forged, now),
+            "a grant from another CA is refused"
+        );
+    }
+
+    #[test]
+    fn two_tier_promotion_grants_are_single_use_and_die_on_demotion() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = ::db::open_unencrypted(&dir.path().join("orca.db")).unwrap();
+        let consume = |nonce: &str, issued: i64, now: i64| {
+            db::mesh::consume_promotion_grant(&conn, nonce, issued, issued + 600, now)
+        };
+        consume("n1", 100, 200).unwrap();
+        assert!(db::mesh::get_secure(&conn).unwrap());
+        assert!(
+            consume("n1", 100, 300).is_err(),
+            "a replayed grant is refused"
+        );
+        db::mesh::set_secure(&conn, false).unwrap();
+        let demoted_at: i64 = conn
+            .query_row(
+                "SELECT demoted_at FROM mesh_demotion WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            consume("n2", demoted_at, demoted_at + 1).is_err(),
+            "a grant issued at or before the last demotion is refused"
+        );
+        assert!(
+            consume("n3", demoted_at + 1, demoted_at + 599).is_err(),
+            "a grant consumed within one grant lifetime of the demotion is refused"
+        );
+        assert!(!db::mesh::get_secure(&conn).unwrap());
+        consume("n4", demoted_at + 600, demoted_at + 600).unwrap();
+        assert!(db::mesh::get_secure(&conn).unwrap());
+    }
+
     #[tokio::test]
-    async fn mesh_update_settings_reads_then_writes_self_secure() {
+    async fn two_tier_demotion_removes_the_mesh_ca_key() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pki = tempfile::tempdir().unwrap();
+            utils::pki::init_mesh_ca(pki.path(), "founder").unwrap();
+            assert!(utils::pki::has_mesh_ca_key(pki.path()));
+            db::pool::with_pooled_or_open(|c| db::mesh::set_secure(c, true)).unwrap();
+            assert!(
+                exec::set_secure_at(pki.path(), false, || async { false })
+                    .await
+                    .is_err(),
+                "the last secure CA holder cannot be demoted"
+            );
+            assert!(utils::pki::has_mesh_ca_key(pki.path()));
+            assert!(exec::get_secure().unwrap());
+            let calls = std::cell::Cell::new(0);
+            let vanishing = || {
+                calls.set(calls.get() + 1);
+                let first = calls.get() == 1;
+                async move { first }
+            };
+            assert!(
+                exec::set_secure_at(pki.path(), false, vanishing)
+                    .await
+                    .is_err(),
+                "a holder that vanishes mid-demotion rolls the tier back"
+            );
+            assert!(exec::get_secure().unwrap());
+            assert!(utils::pki::has_mesh_ca_key(pki.path()));
+            exec::set_secure_at(pki.path(), false, || async { true })
+                .await
+                .unwrap();
+            assert!(!exec::get_secure().unwrap());
+            assert!(!utils::pki::has_mesh_ca_key(pki.path()));
+            assert!(utils::pki::mesh_ca_cert_path(pki.path()).exists());
+        })
+        .await;
+    }
+
+    #[test]
+    fn two_tier_startup_purges_an_insecure_members_ca_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = ::db::open_unencrypted(&dir.path().join("orca.db")).unwrap();
+        let pki = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(pki.path(), "founder").unwrap();
+        db::mesh::set_secure(&conn, true).unwrap();
+        assert!(!purge_ca_keys_if_insecure(pki.path(), &conn, true).unwrap());
+        db::mesh::set_secure(&conn, false).unwrap();
+        assert!(!purge_ca_keys_if_insecure(pki.path(), &conn, false).unwrap());
+        assert!(
+            utils::pki::has_mesh_ca_key(pki.path()),
+            "kept until a peer proves it holds the CA"
+        );
+        assert!(purge_ca_keys_if_insecure(pki.path(), &conn, true).unwrap());
+        assert!(!utils::pki::has_mesh_ca_key(pki.path()));
+    }
+
+    #[tokio::test]
+    async fn two_tier_promote_refuses_a_relaying_peer_promoting_itself() {
+        const TARGET: &str = "019e7105-0000-7000-8000-0000000abc10";
+        let mut ctx = empty_ctx();
+        ctx.register_service(RelayingPeer(TARGET.into()));
+        let Err(err) = mesh_tier_update(
+            serde_json::from_value(serde_json::json!({ "action": "promote", "id": TARGET }))
+                .unwrap(),
+            &ctx,
+        )
+        .await
+        else {
+            panic!("a self-relayed promotion must be refused");
+        };
+        assert!(err.to_string().contains("its own promotion"), "got: {err}");
+    }
+
+    #[serial_test::serial(env)]
+    #[tokio::test]
+    async fn mesh_update_settings_reads_then_writes_secure() {
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::mesh::pin_home(home.path());
         let tmp = tmp_db();
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
-            // self_secure = None → read current (default false) without mutating.
+            // secure = None → read current (default false) without mutating.
             let out = mesh_update(
                 MeshUpdateArgs {
                     action: MeshUpdateAction::Settings,
-                    self_secure: None,
+                    secure: None,
                     ..Default::default()
                 },
                 &ctx,
@@ -5115,14 +5398,30 @@ mod handler_dispatch_tests {
             .await
             .unwrap();
             match out {
-                MeshUpdateOutput::Settings(s) => assert!(!s.self_secure),
+                MeshUpdateOutput::Settings(s) => assert!(!s.secure),
                 _ => panic!("expected Settings variant"),
             }
-            // self_secure = Some(true) → write and echo back the new value.
-            let out = mesh_update(
+            db::mesh::set_secure(&db::open_default().unwrap(), true).unwrap();
+            let Err(err) = mesh_update(
                 MeshUpdateArgs {
                     action: MeshUpdateAction::Settings,
-                    self_secure: Some(true),
+                    secure: Some(false),
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await
+            else {
+                panic!("settings must not demote");
+            };
+            assert!(
+                err.to_string().contains("tier update --action demote"),
+                "{err}"
+            );
+            assert!(db::mesh::get_secure(&db::open_default().unwrap()).unwrap());
+            let out = mesh_tier_update(
+                MeshTierArgs {
+                    action: MeshTierAction::Demote,
                     ..Default::default()
                 },
                 &ctx,
@@ -5130,10 +5429,10 @@ mod handler_dispatch_tests {
             .await
             .unwrap();
             match out {
-                MeshUpdateOutput::Settings(s) => assert!(s.self_secure),
+                MeshTierOutput::Settings(s) => assert!(!s.secure),
                 _ => panic!("expected Settings variant"),
             }
-            assert!(db::mesh::get_self_secure(&db::open_default().unwrap()).unwrap());
+            assert!(!db::mesh::get_secure(&db::open_default().unwrap()).unwrap());
         })
         .await;
     }
@@ -5390,19 +5689,18 @@ mod handler_dispatch_tests {
             // notify fails fast into the `warn:` arm instead of hanging.
             db::mesh::upsert_peer(&conn, &pid, "host-t", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
             drop(conn);
-            let out = mesh_update(
-                MeshUpdateArgs {
-                    action: MeshUpdateAction::Trust,
+            let out = mesh_tier_update(
+                MeshTierArgs {
+                    action: MeshTierAction::Trust,
                     id: Some(pid.parse().unwrap()),
                     on: Some(true),
-                    ..Default::default()
                 },
                 &ctx,
             )
             .await
             .unwrap();
             match out {
-                MeshUpdateOutput::Trust(t) => {
+                MeshTierOutput::Trust(t) => {
                     assert_eq!(t.peer_id, pid);
                     assert!(t.local_secure, "trust on must set local_secure");
                     // Peer never trusted us back, so the link is not mutual.
@@ -5419,19 +5717,18 @@ mod handler_dispatch_tests {
                 _ => panic!("expected Trust variant"),
             }
             // Toggling trust off persists the new value.
-            let out = mesh_update(
-                MeshUpdateArgs {
-                    action: MeshUpdateAction::Trust,
+            let out = mesh_tier_update(
+                MeshTierArgs {
+                    action: MeshTierAction::Trust,
                     id: Some(pid.parse().unwrap()),
                     on: Some(false),
-                    ..Default::default()
                 },
                 &ctx,
             )
             .await
             .unwrap();
             match out {
-                MeshUpdateOutput::Trust(t) => {
+                MeshTierOutput::Trust(t) => {
                     assert!(!t.local_secure, "trust off clears local_secure")
                 }
                 _ => panic!("expected Trust variant"),
@@ -5446,12 +5743,11 @@ mod handler_dispatch_tests {
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let err = expect_err(
-                mesh_update(
-                    MeshUpdateArgs {
-                        action: MeshUpdateAction::Trust,
+                mesh_tier_update(
+                    MeshTierArgs {
+                        action: MeshTierAction::Trust,
                         id: Some(GHOST.parse().unwrap()),
                         on: Some(true),
-                        ..Default::default()
                     },
                     &ctx,
                 )

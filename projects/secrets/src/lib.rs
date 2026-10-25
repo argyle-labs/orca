@@ -65,23 +65,21 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<SecretRecord>> {
     }
 }
 
-/// Mesh storage gate. Refuses secret writes when this host has joined a
-/// mesh but is not flagged secure (mesh_self.self_secure = 0). Hosts that
-/// have never run `orca system join` (no mesh_self row) bypass
-/// the gate so non-mesh workflows still work.
-pub fn ensure_write_allowed(conn: &Connection) -> Result<()> {
+pub fn ensure_write_allowed(conn: &Connection, name: &str) -> Result<()> {
     use rusqlite::OptionalExtension;
-    let v: Option<i64> = conn
-        .query_row("SELECT self_secure FROM mesh_self WHERE id = 1", [], |r| {
+    let tier: Option<i64> = conn
+        .query_row("SELECT secure FROM mesh_self WHERE id = 1", [], |r| {
             r.get(0)
         })
         .optional()?;
-    match v {
-        None => Ok(()), // host hasn't joined a mesh — no gating
-        Some(1) => Ok(()),
+    match tier {
+        None | Some(1) => Ok(()),
+        Some(_) if owned_by_this_member(conn, name)? => Ok(()),
         Some(_) => anyhow::bail!(
-            "secrets storage disabled on this host — run \
-             `orca system mesh update --action settings --self-secure true` to enable"
+            "secret '{name}' is not owned by this member: an insecure member holds only \
+             secrets for plugins installed on it; promote it to secure from a secure member \
+             (`orca system mesh tier update --action promote --id <this-member>`) \
+             to hold other members' secrets"
         ),
     }
 }
@@ -97,6 +95,27 @@ pub fn ensure_valid_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn owned_by_this_member(conn: &Connection, name: &str) -> Result<bool> {
+    use rusqlite::OptionalExtension;
+    let Some((plugin, rest)) = name.split_once('.') else {
+        return Ok(false);
+    };
+    if rest.is_empty()
+        || !valid_principal(plugin)
+        || contract::plugin::is_reserved_plugin_id(plugin)
+    {
+        return Ok(false);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM plugins WHERE id = ?1 AND enabled = 1",
+            rusqlite::params![plugin],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 /// Upsert a metadata row. Returns true if the row was created, false on update.
 pub fn upsert(
     conn: &Connection,
@@ -105,7 +124,7 @@ pub fn upsert(
     ref_path: &str,
     description: Option<&str>,
 ) -> Result<bool> {
-    ensure_write_allowed(conn)?;
+    ensure_write_allowed(conn, name)?;
     ensure_valid_name(name)?;
     let existed = conn
         .query_row(
@@ -132,7 +151,7 @@ pub fn upsert(
 
 /// Delete the metadata row and (for inline) any stored value. Returns true if anything was removed.
 pub fn delete(conn: &Connection, name: &str) -> Result<bool> {
-    ensure_write_allowed(conn)?;
+    ensure_write_allowed(conn, name)?;
     // Look up the record first so we know whether to also clean the inline value.
     let record = get(conn, name)?;
     let mut removed = false;
@@ -165,7 +184,7 @@ pub fn read_inline_value(conn: &Connection, name: &str) -> Result<Option<String>
 /// Store the inline value for `name`. The metadata row should already exist
 /// (caller `upsert`s first).
 pub fn write_inline_value(conn: &Connection, name: &str, value: &str) -> Result<()> {
-    ensure_write_allowed(conn)?;
+    ensure_write_allowed(conn, name)?;
     settings::secret_set(conn, name, value)
 }
 
@@ -176,7 +195,7 @@ fn clear_restore_state(conn: &Connection, name: &str) -> Result<()> {
 }
 
 pub fn put_inline_value(conn: &Connection, name: &str, value: &str) -> Result<()> {
-    ensure_write_allowed(conn)?;
+    ensure_write_allowed(conn, name)?;
     match read_inline_value(conn, name)? {
         Some(old) => settings::secret_previous_set(conn, name, &old)?,
         None => {
@@ -187,7 +206,7 @@ pub fn put_inline_value(conn: &Connection, name: &str, value: &str) -> Result<()
 }
 
 pub fn restore_inline_value(conn: &Connection, name: &str) -> Result<()> {
-    ensure_write_allowed(conn)?;
+    ensure_write_allowed(conn, name)?;
     let previous = settings::secret_previous_get(conn, name)?
         .ok_or_else(|| anyhow::anyhow!("inline secret '{name}' has no previous value"))?;
     settings::secret_previous_delete(conn, name)?;
@@ -199,7 +218,7 @@ fn restore_marker(record: &SecretRecord, epoch: &str) -> String {
 }
 
 pub fn arm_external_restore(conn: &Connection, record: &SecretRecord, epoch: &str) -> Result<()> {
-    ensure_write_allowed(conn)?;
+    ensure_write_allowed(conn, &record.name)?;
     settings::secret_restore_marker_set(conn, &record.name, &restore_marker(record, epoch))
 }
 
@@ -208,7 +227,7 @@ pub fn ensure_external_restore_armed(
     record: &SecretRecord,
     epoch: &str,
 ) -> Result<()> {
-    ensure_write_allowed(conn)?;
+    ensure_write_allowed(conn, &record.name)?;
     if settings::secret_restore_marker_get(conn, &record.name)?.as_deref()
         != Some(restore_marker(record, epoch).as_str())
     {
@@ -552,6 +571,101 @@ mod tests {
     use super::*;
     use db::testing::test_conn;
 
+    fn join_with_tier(conn: &Connection, secure: bool) {
+        conn.execute(
+            "INSERT INTO mesh_self (id, secure, set_at) VALUES (1, ?1, 0)",
+            rusqlite::params![secure as i64],
+        )
+        .unwrap();
+    }
+
+    fn install_plugin(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO plugins (id, manifest_path) VALUES (?1, '/x')",
+            rusqlite::params![id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn insecure_member_holds_and_resolves_its_own_plugins_secrets() {
+        let conn = test_conn();
+        join_with_tier(&conn, false);
+        install_plugin(&conn, "opnsense");
+        upsert(&conn, "opnsense.opnsense.api_key", "inline", "", None).unwrap();
+        write_inline_value(&conn, "opnsense.opnsense.api_key", "k").unwrap();
+        let reply = exec_secret_op(
+            &conn,
+            &Principal::Plugin("opnsense".into()),
+            &plugin_abi::SecretOp::Get {
+                name: "opnsense.opnsense.api_key".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(reply.value.as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn insecure_member_refuses_secrets_that_are_not_its_own() {
+        let conn = test_conn();
+        join_with_tier(&conn, false);
+        install_plugin(&conn, "opnsense");
+        for name in [
+            "proxmox.delta.api_token",
+            "orca.github_token",
+            "opnsense",
+            "opnsense.",
+            "Opnsense.main.key",
+        ] {
+            let err = upsert(&conn, name, "inline", "", None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("not owned by this member"), "{name}: {err}");
+            assert!(write_inline_value(&conn, name, "v").is_err(), "{name}");
+        }
+        assert!(get(&conn, "proxmox.delta.api_token").unwrap().is_none());
+        assert!(
+            read_inline_value(&conn, "proxmox.delta.api_token")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn insecure_member_refuses_disabled_and_reserved_plugin_namespaces() {
+        let conn = test_conn();
+        join_with_tier(&conn, false);
+        install_plugin(&conn, "opnsense");
+        conn.execute("UPDATE plugins SET enabled = 0 WHERE id = 'opnsense'", [])
+            .unwrap();
+        assert!(upsert(&conn, "opnsense.main.api_key", "inline", "", None).is_err());
+        install_plugin(&conn, "orca");
+        assert!(upsert(&conn, "orca.github_token", "inline", "", None).is_err());
+    }
+
+    #[test]
+    fn a_member_that_left_the_mesh_is_not_gated() {
+        let conn = test_conn();
+        join_with_tier(&conn, false);
+        db::mesh::wipe_mesh_membership(&conn).unwrap();
+        upsert(&conn, "orca.github_token", "inline", "", None).unwrap();
+        write_inline_value(&conn, "orca.github_token", "t").unwrap();
+    }
+
+    #[test]
+    fn secure_member_holds_other_members_secrets() {
+        let conn = test_conn();
+        join_with_tier(&conn, true);
+        upsert(&conn, "proxmox.delta.api_token", "inline", "", None).unwrap();
+        write_inline_value(&conn, "proxmox.delta.api_token", "t").unwrap();
+        assert_eq!(
+            read_inline_value(&conn, "proxmox.delta.api_token")
+                .unwrap()
+                .as_deref(),
+            Some("t")
+        );
+    }
+
     #[test]
     fn restore_applies_previous_once_then_fails() {
         let conn = test_conn();
@@ -604,11 +718,11 @@ mod tests {
         write_inline_value(&conn, "app.pw", "one").unwrap();
         put_inline_value(&conn, "app.pw", "two").unwrap();
         conn.execute(
-            "INSERT INTO mesh_self (id, self_secure, set_at) VALUES (1, 0, 0)",
+            "INSERT INTO mesh_self (id, secure, set_at) VALUES (1, 0, 0)",
             [],
         )
         .unwrap();
-        assert!(ensure_write_allowed(&conn).is_err());
+        assert!(ensure_write_allowed(&conn, "app.pw").is_err());
         assert!(put_inline_value(&conn, "app.pw", "x").is_err());
         assert!(restore_inline_value(&conn, "app.pw").is_err());
         assert!(upsert(&conn, "app.pw", "inline", "", None).is_err());

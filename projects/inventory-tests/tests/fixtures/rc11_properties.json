@@ -769,7 +769,7 @@
    "peer",
    "peerId",
    "push",
-   "selfSecure"
+   "secure"
   ],
   "system.profile": [
    "off",
@@ -2316,7 +2316,7 @@
    "leaf_server",
    "member",
    "mesh_ca",
-   "self_secure",
+   "secure",
    "version"
   ],
   "system.detail": [
@@ -2565,7 +2565,7 @@
    "runs_on",
    "samples_count",
    "scheme",
-   "self_secure",
+   "secure",
    "service_identity",
    "service_role",
    "snapshot_at_unix",
@@ -2611,7 +2611,7 @@
    "joiner_pubkey_fp",
    "mesh_id",
    "offer_id",
-   "self_secure"
+   "secure"
   ],
   "system.list": [
    "addr",
@@ -2747,7 +2747,7 @@
    "peer_secure",
    "peers",
    "rowsRemoved",
-   "self_secure",
+   "secure",
    "skip_reason",
    "status"
   ],
@@ -2856,7 +2856,7 @@
    "routes",
    "runs_on",
    "scheme",
-   "self_secure",
+   "secure",
    "service_identity",
    "service_role",
    "snapshot_at_unix",

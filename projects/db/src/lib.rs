@@ -716,6 +716,32 @@ pub fn applied_count(conn: &Connection) -> Result<u32> {
 /// Run pending up-migrations automatically after `apply_schema`. Idempotent.
 fn run_pending_migrations(conn: &Connection) -> Result<()> {
     migrate(conn, MigrateDirection::Up, usize::MAX)?;
+    converge_mesh_self_tier(conn)?;
+    Ok(())
+}
+
+const LEGACY_TIER_COLUMN: &str = "self_secure";
+
+fn converge_mesh_self_tier(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch("DROP TABLE IF EXISTS mesh_self_tier;")?;
+    if schema_fragments::column_exists(&tx, "mesh_self", LEGACY_TIER_COLUMN)? {
+        tx.execute_batch(&format!(
+            "CREATE TABLE mesh_self_tier (
+                 id                       INTEGER PRIMARY KEY CHECK (id = 1),
+                 secure                   INTEGER NOT NULL DEFAULT 0,
+                 mesh_id                  TEXT,
+                 ca_previous_expires_at   INTEGER,
+                 set_at                   INTEGER NOT NULL
+             );
+             INSERT INTO mesh_self_tier (id, secure, mesh_id, ca_previous_expires_at, set_at)
+                 SELECT id, {LEGACY_TIER_COLUMN}, mesh_id, ca_previous_expires_at, set_at
+                 FROM mesh_self;
+             DROP TABLE mesh_self;
+             ALTER TABLE mesh_self_tier RENAME TO mesh_self;"
+        ))?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -1153,7 +1179,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         -- bootstrap pubkey fingerprint (stable across restarts and IP changes).
         -- state = 'unclaimed' (no mesh CA) or 'mesh:<mesh_id>' (member of a mesh).
         -- can_invite = 1 iff that peer advertises it has the mesh CA private key
-        -- AND has self_secure=true.
+        -- AND has secure=true.
         CREATE TABLE IF NOT EXISTS mesh_discovery (
             pubkey_fp     TEXT PRIMARY KEY,
             peer_id       TEXT,
@@ -1234,9 +1260,19 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             set_at       INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS mesh_promotion_nonces (
+            nonce      TEXT PRIMARY KEY,
+            expires_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS mesh_demotion (
+            id         INTEGER PRIMARY KEY CHECK (id = 1),
+            demoted_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS mesh_self (
             id                       INTEGER PRIMARY KEY CHECK (id = 1),
-            self_secure              INTEGER NOT NULL DEFAULT 0,
+            secure              INTEGER NOT NULL DEFAULT 0,
             mesh_id                   TEXT,
             ca_previous_expires_at   INTEGER,
             set_at                   INTEGER NOT NULL
@@ -2472,7 +2508,10 @@ mod registry_tests {
              CREATE TABLE pod_trust (
                  peer_id TEXT PRIMARY KEY REFERENCES pod_peers(peer_id) ON DELETE CASCADE
              );
-             CREATE TABLE pod_self (pod_id TEXT);
+             CREATE TABLE pod_self (
+                 id INTEGER PRIMARY KEY, self_secure INTEGER NOT NULL DEFAULT 0, pod_id TEXT,
+                 ca_previous_expires_at INTEGER, set_at INTEGER NOT NULL DEFAULT 0
+             );
              CREATE TABLE pod_discovery (pubkey_fp TEXT PRIMARY KEY);
              CREATE TABLE pod_pending_offers (
                  offer_id       TEXT PRIMARY KEY,
@@ -2485,7 +2524,7 @@ mod registry_tests {
              );
              INSERT INTO pod_peers (peer_id, peer_hostname) VALUES ('id-thor', 'thor');
              INSERT INTO pod_peers (peer_id, peer_hostname) VALUES ('id-loki', 'loki');
-             INSERT INTO pod_self (pod_id) VALUES ('mesh-1');",
+             INSERT INTO pod_self (id, pod_id) VALUES (1, 'mesh-1');",
         )
         .expect("legacy schema");
         // Everything before the rename is already applied on such a host.
@@ -2540,6 +2579,70 @@ mod registry_tests {
             .query_row("SELECT mesh_id FROM mesh_self", [], |r| r.get(0))
             .expect("pod_id became mesh_id, carrying its value");
         assert_eq!(mesh_id, "mesh-1");
+    }
+
+    fn legacy_mesh_self(old_flag: i64) -> Connection {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(&format!(
+            "CREATE TABLE mesh_self (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 {LEGACY_TIER_COLUMN} INTEGER NOT NULL DEFAULT 0,
+                 mesh_id TEXT, ca_previous_expires_at INTEGER, set_at INTEGER NOT NULL
+             );"
+        ))
+        .expect("legacy mesh_self");
+        conn.execute(
+            &format!(
+                "INSERT INTO mesh_self (id, {LEGACY_TIER_COLUMN}, mesh_id, set_at) VALUES (1, ?1, 'm', 5)"
+            ),
+            [old_flag],
+        )
+        .expect("seed");
+        conn
+    }
+
+    fn tier(conn: &Connection) -> i64 {
+        conn.query_row("SELECT secure FROM mesh_self WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .expect("tier")
+    }
+
+    #[test]
+    fn mesh_self_tier_convergence_keeps_secure_members_secure() {
+        let conn = legacy_mesh_self(1);
+        converge_mesh_self_tier(&conn).unwrap();
+        assert_eq!(tier(&conn), 1);
+        assert!(!schema_fragments::column_exists(&conn, "mesh_self", LEGACY_TIER_COLUMN).unwrap());
+    }
+
+    #[test]
+    fn mesh_self_tier_convergence_keeps_other_members_insecure() {
+        let conn = legacy_mesh_self(0);
+        converge_mesh_self_tier(&conn).unwrap();
+        assert_eq!(tier(&conn), 0);
+    }
+
+    #[test]
+    fn mesh_self_tier_convergence_recovers_a_leftover_side_table() {
+        let conn = legacy_mesh_self(1);
+        conn.execute_batch("CREATE TABLE mesh_self_tier (junk TEXT);")
+            .unwrap();
+        converge_mesh_self_tier(&conn).unwrap();
+        assert_eq!(tier(&conn), 1);
+        converge_mesh_self_tier(&conn).unwrap();
+        assert_eq!(tier(&conn), 1);
+    }
+
+    #[test]
+    fn mesh_self_tier_convergence_is_a_no_op_on_a_fresh_baseline() {
+        let conn = Connection::open_in_memory().expect("open");
+        register_sql_functions(&conn).expect("fns");
+        apply_schema(&conn).expect("apply_schema");
+        run_pending_migrations(&conn).expect("migrate");
+        crate::mesh::set_secure(&conn, true).unwrap();
+        run_pending_migrations(&conn).expect("re-run");
+        assert_eq!(tier(&conn), 1);
     }
 
     #[test]

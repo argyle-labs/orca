@@ -47,6 +47,12 @@ struct NotifyTrustParams {
 #[derive(Debug, Serialize)]
 struct HasCaKeyResult {
     has_key: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof: Option<String>,
+}
+
+fn valid_ca_holder_nonce(nonce: &str) -> bool {
+    nonce.len() <= 64 && uuid::Uuid::try_parse(nonce).is_ok()
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,8 +189,30 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
         MESH_HAS_CA_KEY_METHOD => {
-            let has = utils::pki::has_mesh_ca_key(&pki_dir());
-            value_response(id, &HasCaKeyResult { has_key: has })
+            let pki = pki_dir();
+            let nonce = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("nonce"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if !nonce.is_empty() && !valid_ca_holder_nonce(nonce) {
+                return Response::err(
+                    id,
+                    peer_facing_error(&method, &anyhow::anyhow!("invalid nonce")),
+                );
+            }
+            let has_key = utils::pki::has_mesh_ca_key(&pki);
+            let proof = (has_key && !nonce.is_empty())
+                .then(|| {
+                    crate::mesh::exec::ca_holder_proof(
+                        &pki,
+                        crate::host_identity::machine_id(),
+                        nonce,
+                    )
+                })
+                .flatten();
+            value_response(id, &HasCaKeyResult { has_key, proof })
         }
         MESH_PUSH_CA_KEY_METHOD => match handle_push_ca_key(peer_cn, request) {
             Ok(()) => Response::ok(id, Value::Null),
@@ -262,12 +290,32 @@ fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
         Some(v) => serde_json::from_value(v).context("parse mesh/push-ca-key params")?,
         None => refuse!("mesh/push-ca-key requires params"),
     };
-    let t = db::pool::with_pooled_or_open(|conn| pdb::get_trust(conn, peer_cn))?;
+    let (t, secure) = db::pool::with_pooled_or_open(|conn| {
+        Ok((pdb::get_trust(conn, peer_cn)?, db::mesh::get_secure(conn)?))
+    })?;
     if !pdb::is_mutual_secure(t) {
         refuse!("mesh/push-ca-key refused: peer {peer_cn} is not mutually secure with this host");
     }
-    utils::pki::import_mesh_ca_keypair(&pki_dir(), &params.cert_pem, &params.key_pem)
-        .context(PeerRefusal("mesh/push-ca-key refused".into()))
+    refuse_unless!(
+        secure,
+        "mesh/push-ca-key refused: this member is insecure and never holds the mesh CA key"
+    );
+    let pki = pki_dir();
+    utils::pki::import_mesh_ca_keypair(&pki, &params.cert_pem, &params.key_pem)
+        .context(PeerRefusal("mesh/push-ca-key refused".into()))?;
+    drop_ca_keys_if_demoted(
+        &pki,
+        db::pool::with_pooled_or_open(db::mesh::get_secure)?,
+        MESH_PUSH_CA_KEY_METHOD,
+    )
+}
+
+fn drop_ca_keys_if_demoted(pki: &std::path::Path, secure: bool, method: &str) -> Result<()> {
+    if !secure {
+        utils::pki::remove_mesh_ca_keys(pki)?;
+        refuse!("{method} refused: this member was demoted while the CA key arrived");
+    }
+    Ok(())
 }
 
 fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
@@ -462,10 +510,12 @@ fn remote_role_gate(
 /// stay local-origin only. Pure over `(tool, args)` so it's unit-testable.
 fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
     let action = args.get("action").and_then(|v| v.as_str());
-    let forbidden = matches!(
-        (tool, action),
-        ("system.mesh.update", Some("recover")) | ("system.mesh.delete", Some("leave"))
-    );
+    let demote = args.get("secure") == Some(&Value::Bool(false));
+    let forbidden =
+        matches!(
+            (tool, action),
+            ("system.mesh.update", Some("recover")) | ("system.mesh.delete", Some("leave"))
+        ) || (tool == "system.mesh.update" && matches!(action, None | Some("settings")) && demote);
     refuse_unless!(
         !forbidden,
         "mesh/exec refused: '{tool}' action '{}' is local-only and cannot be invoked by a remote peer",
@@ -484,6 +534,23 @@ fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn reject_insecure_secret_source(tool: &str, secure: impl FnOnce() -> Result<bool>) -> Result<()> {
+    if tool != "secrets.detail" {
+        return Ok(());
+    }
+    refuse_unless!(
+        secure()?,
+        "mesh/exec refused: '{tool}' — an insecure member never serves secret values to peers"
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy, Default)]
+struct Presented<'a> {
+    caller_token: Option<&'a utils::pki::SignedEnvelope>,
+    ca_proof: Option<&'a str>,
 }
 
 /// Zero-trust authorization gate for a role-gated `mesh/exec` call.
@@ -511,9 +578,13 @@ fn authorize_role_gated(
     tool: &str,
     args: &serde_json::Value,
     required_role: &str,
-    caller_token: Option<&utils::pki::SignedEnvelope>,
+    presented: Presented<'_>,
     now: i64,
 ) -> Result<contract::CallerIdentity> {
+    let Presented {
+        caller_token,
+        ca_proof,
+    } = presented;
     let env = caller_token.ok_or_else(|| {
         PeerRefusal(format!(
             "mesh/exec refused: tool '{tool}' requires role '{required_role}' but no signed caller \
@@ -545,6 +616,17 @@ fn authorize_role_gated(
             ))
         })?;
     let role = effective_role(&user.role, &verified.token.role);
+    let role = if pdb::is_mutual_secure(pdb::get_trust(conn, peer_cn)?)
+        && crate::mesh::exec::proves_ca_possession(
+            &pki_dir(),
+            peer_cn,
+            &verified.token.nonce,
+            ca_proof,
+        ) {
+        role
+    } else {
+        effective_role(role, "user")
+    };
     refuse_unless!(
         role_satisfies(role, required_role),
         "mesh/exec refused: tool '{tool}' requires role '{required_role}' but user {} acts with \
@@ -639,6 +721,9 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> 
     // the denylist check; `required_role` is the orthogonal auth-tightening axis,
     // covering plugin tools through the roles their manifests declared.
     reject_remote_local_only_action(&params.tool, &params.args)?;
+    reject_insecure_secret_source(&params.tool, || {
+        db::pool::with_pooled_or_open(db::mesh::get_secure)
+    })?;
 
     let required_role = remote_role_gate(
         &params.tool,
@@ -658,7 +743,10 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> 
                 &params.tool,
                 &params.args,
                 required_role,
-                params.caller_token.as_ref(),
+                Presented {
+                    caller_token: params.caller_token.as_ref(),
+                    ca_proof: params.ca_proof.as_deref(),
+                },
                 utils::time::now().unix_seconds(),
             )
         })?)
@@ -671,6 +759,7 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> 
         params.args.clone(),
         params.correlation_id.clone(),
         caller,
+        peer_cn,
     )
     .await
     .map_err(|e| relayed_tool_error(&params.tool, e))?;
@@ -739,6 +828,10 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
                 "mesh/push-ca-state refused: peer {peer_cn} is not mutually secure with this host"
             );
         }
+        refuse_unless!(
+            db::mesh::get_secure(conn)?,
+            "mesh/push-ca-state refused: this member is insecure and never holds the mesh CA key"
+        );
         let pki_d = pki_dir();
         let local_current = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
             .context("mesh/push-ca-state: read local mesh CA cert")?;
@@ -761,7 +854,11 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
             params.previous_key_pem.as_deref(),
         )?;
         pdb::set_ca_previous_expires_at(conn, params.previous_expires_at)?;
-        Ok(())
+        drop_ca_keys_if_demoted(
+            &pki_d,
+            db::mesh::get_secure(conn)?,
+            MESH_PUSH_CA_STATE_METHOD,
+        )
     })
 }
 
@@ -1004,6 +1101,16 @@ mod tests {
     }
 
     #[test]
+    fn two_tier_insecure_member_never_serves_secret_values_to_peers() {
+        assert!(reject_insecure_secret_source("secrets.detail", || Ok(false)).is_err());
+        assert!(reject_insecure_secret_source("secrets.detail", || Ok(true)).is_ok());
+        assert!(reject_insecure_secret_source("secrets.upsert", || Ok(false)).is_ok());
+        assert!(
+            reject_insecure_secret_source("secrets.detail", || Err(anyhow::anyhow!("db"))).is_err()
+        );
+    }
+
+    #[test]
     fn remote_ok_gate_refuses_local_only() {
         // Only a local_only tool (remote_ok=false at the gate) is refused.
         let err = remote_ok_gate("system.dev_enable", false, "any").unwrap_err();
@@ -1073,6 +1180,28 @@ mod tests {
         let args = serde_json::json!({ "action": "leave" });
         let err = reject_remote_local_only_action("system.mesh.delete", &args).unwrap_err();
         assert!(err.to_string().contains("leave"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn two_tier_remote_demote_is_local_only() {
+        for args in [
+            serde_json::json!({ "action": "settings", "secure": false }),
+            serde_json::json!({ "secure": false }),
+        ] {
+            let params = serde_json::json!({ "tool": "system.mesh.update", "args": args });
+            let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("local-only"), "{args}: {err}");
+        }
+    }
+
+    #[test]
+    fn two_tier_remote_grant_delivery_stays_remote_dispatchable() {
+        let args = serde_json::json!({ "action": "settings", "secure": true });
+        assert!(reject_remote_local_only_action("system.mesh.update", &args).is_ok());
+        let read = serde_json::json!({ "action": "settings" });
+        assert!(reject_remote_local_only_action("system.mesh.update", &read).is_ok());
     }
 
     #[test]
@@ -1242,7 +1371,10 @@ mod tests {
             "system.update.create",
             &serde_json::json!({}),
             "admin",
-            Some(&env),
+            Presented {
+                caller_token: Some(&env),
+                ca_proof: None,
+            },
             0,
         )
         .unwrap_err();
@@ -1512,6 +1644,138 @@ mod tests {
     }
 
     #[test]
+    fn two_tier_ca_key_written_after_a_demotion_is_deleted() {
+        let pki = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(pki.path(), "founder").unwrap();
+        drop_ca_keys_if_demoted(pki.path(), true, MESH_PUSH_CA_KEY_METHOD).unwrap();
+        assert!(utils::pki::has_mesh_ca_key(pki.path()));
+        let err = drop_ca_keys_if_demoted(pki.path(), false, MESH_PUSH_CA_KEY_METHOD).unwrap_err();
+        assert!(err.to_string().contains("demoted"), "got: {err}");
+        assert!(!utils::pki::has_mesh_ca_key(pki.path()));
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn two_tier_forged_admin_token_from_a_non_mutually_secure_peer_acts_as_user() {
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::mesh::pin_home(home.path());
+        with_db(async {
+            let conn = db::open_default().unwrap();
+            utils::pki::init_mesh_ca(&pki_dir(), "founder").unwrap();
+            let signer = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(signer.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            const PEER: &str = "019e7105-0000-7000-8000-0000000abc0f";
+            pdb::upsert_peer(&conn, PEER, "hf", "127.0.0.1", 1, Some(&fp), "").unwrap();
+            identities::users::insert(&conn, "u-admin", "root", "h", "admin", "t0").unwrap();
+            let forged = contract::CallerIdentity {
+                user_id: "u-admin".into(),
+                username: "root".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            };
+            let args = serde_json::json!({});
+            let now = utils::time::now().unix_seconds();
+            let mint = |tool: &str| {
+                crate::mesh::caller_token::mint(signer.path(), &forged, tool, &args, 60).unwrap()
+            };
+            let proof_for = |env: &utils::pki::SignedEnvelope| {
+                let nonce =
+                    serde_json::from_str::<crate::mesh::caller_token::CallerToken>(&env.payload)
+                        .unwrap()
+                        .nonce;
+                utils::pki::sign_with_mesh_ca(
+                    &pki_dir(),
+                    &crate::mesh::exec::ca_holder_message(PEER, &nonce),
+                )
+                .unwrap()
+            };
+            let authorize = |tool: &str, required: &str, proof: Option<&str>, env| {
+                authorize_role_gated(
+                    &conn,
+                    PEER,
+                    tool,
+                    &args,
+                    required,
+                    Presented {
+                        caller_token: Some(env),
+                        ca_proof: proof,
+                    },
+                    now,
+                )
+            };
+
+            let env = mint("system.update.create");
+            let proof = proof_for(&env);
+            let err = authorize("system.update.create", "admin", Some(&proof), &env).unwrap_err();
+            assert!(err.to_string().contains("role 'user'"), "untrusted: {err}");
+            let env = mint("system.update.list");
+            assert_eq!(
+                authorize("system.update.list", "user", None, &env)
+                    .unwrap()
+                    .role,
+                "user"
+            );
+
+            pdb::set_trust(&conn, PEER, Some(true), Some(true)).unwrap();
+            let env = mint("system.update.create");
+            let err = authorize("system.update.create", "admin", None, &env).unwrap_err();
+            assert!(
+                err.to_string().contains("role 'user'"),
+                "insecure tier: {err}"
+            );
+            let env = mint("system.update.create");
+            let err = authorize("system.update.create", "admin", Some("bogus"), &env).unwrap_err();
+            assert!(err.to_string().contains("role 'user'"), "bad proof: {err}");
+            let env = mint("system.update.create");
+            let proof = proof_for(&env);
+            assert_eq!(
+                authorize("system.update.create", "admin", Some(&proof), &env)
+                    .unwrap()
+                    .role,
+                "admin"
+            );
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn two_tier_has_ca_key_without_a_valid_proof_does_not_prove_a_holder() {
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::mesh::pin_home(home.path());
+        let pki = pki_dir();
+        utils::pki::init_mesh_ca(&pki, "founder").unwrap();
+        const PEER: &str = "019e7105-0000-7000-8000-0000000abc11";
+        let nonce = "n-1";
+        let ok = |reply: serde_json::Value| {
+            let reply: crate::mesh::exec::CaHolderReply = serde_json::from_value(reply).unwrap();
+            crate::mesh::exec::reply_proves_ca_possession(&pki, PEER, nonce, &reply)
+        };
+        assert!(!ok(serde_json::json!({ "has_key": true })));
+        assert!(!ok(
+            serde_json::json!({ "has_key": true, "proof": "bogus" })
+        ));
+        let other_peer = utils::pki::sign_with_mesh_ca(
+            &pki,
+            &crate::mesh::exec::ca_holder_message("someone-else", nonce),
+        )
+        .unwrap();
+        assert!(!ok(
+            serde_json::json!({ "has_key": true, "proof": other_peer })
+        ));
+        let stale =
+            utils::pki::sign_with_mesh_ca(&pki, &crate::mesh::exec::ca_holder_message(PEER, "old"))
+                .unwrap();
+        assert!(!ok(serde_json::json!({ "has_key": true, "proof": stale })));
+        let good =
+            utils::pki::sign_with_mesh_ca(&pki, &crate::mesh::exec::ca_holder_message(PEER, nonce))
+                .unwrap();
+        assert!(ok(serde_json::json!({ "has_key": true, "proof": good })));
+    }
+
+    #[test]
     fn authorize_role_gated_without_token_refuses() {
         // The no-token branch returns before touching the connection, so an
         // empty in-memory DB is sufficient to exercise it.
@@ -1522,7 +1786,7 @@ mod tests {
             "system.update.create",
             &serde_json::json!({}),
             "admin",
-            None,
+            Presented::default(),
             0,
         )
         .unwrap_err();
@@ -1649,6 +1913,40 @@ mod tests {
                 err.to_string().contains("not mutually secure"),
                 "got: {err}"
             );
+        });
+    }
+
+    #[test]
+    fn two_tier_insecure_member_never_receives_the_mesh_ca_key() {
+        with_db(async {
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(
+                &conn,
+                "019e7105-0000-7000-8000-0000000abc0c",
+                "hc",
+                "127.0.0.1",
+                1,
+                Some("fp-t"),
+                "",
+            )
+            .unwrap();
+            pdb::set_trust(
+                &conn,
+                "019e7105-0000-7000-8000-0000000abc0c",
+                Some(true),
+                Some(true),
+            )
+            .unwrap();
+            pdb::set_secure(&conn, false).unwrap();
+            let err = handle_push_ca_key(
+                "019e7105-0000-7000-8000-0000000abc0c",
+                req_with_params(
+                    MESH_PUSH_CA_KEY_METHOD,
+                    serde_json::json!({ "cert_pem": "c", "key_pem": "k" }),
+                ),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("insecure"), "got: {err}");
         });
     }
 
@@ -1780,6 +2078,38 @@ mod tests {
             let resp = dispatch(req_no_params(MESH_HAS_CA_KEY_METHOD), &cn, addr()).await;
             let text = serde_json::to_string(&resp).unwrap();
             assert!(text.contains("has departed this mesh"), "got: {text}");
+        })
+        .await;
+    }
+
+    #[test]
+    fn ca_holder_nonce_must_be_a_uuid_within_64_bytes() {
+        assert!(valid_ca_holder_nonce(&utils::id::new()));
+        assert!(!valid_ca_holder_nonce("not-a-uuid"));
+        assert!(!valid_ca_holder_nonce(&"a".repeat(65)));
+        assert!(!valid_ca_holder_nonce(&format!(
+            "{}{}",
+            utils::id::new(),
+            " ".repeat(40)
+        )));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_has_ca_key_rejects_malformed_nonce() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("dispatch-hasca-nonce.db");
+        db::with_db_path(db_path, async {
+            let resp = dispatch(
+                req_with_params(
+                    MESH_HAS_CA_KEY_METHOD,
+                    serde_json::json!({ "nonce": "x".repeat(4096) }),
+                ),
+                "peer-ok",
+                addr(),
+            )
+            .await;
+            let text = serde_json::to_string(&resp).unwrap();
+            assert!(text.contains("\"error\""), "got: {text}");
         })
         .await;
     }
@@ -2250,6 +2580,7 @@ mod tests {
         let conn = db::open_default().unwrap();
         pdb::upsert_peer(&conn, cn, "hc", "127.0.0.1", 1, Some("fp-c"), "").unwrap();
         pdb::set_trust(&conn, cn, Some(true), Some(true)).unwrap();
+        pdb::set_secure(&conn, true).unwrap();
     }
 
     #[serial_test::serial(env)]

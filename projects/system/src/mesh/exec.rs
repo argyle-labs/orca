@@ -149,7 +149,8 @@ pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
     std::fs::write(utils::pki::mesh_client_key_path(&pki_d), &client_key_pem)?;
 
     db::pool::with_pooled_or_open(|conn| {
-        pdb::set_self_secure(conn, false)?;
+        pdb::set_secure(conn, false)?;
+        utils::pki::remove_mesh_ca_keys(&pki_d)?;
         pdb::set_mesh_id(conn, &r.mesh_id)?;
         pdb::upsert_peer(
             conn,
@@ -183,7 +184,7 @@ pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
         inviter_hostname: offer.peer_hostname,
         inviter_addr: dialed_addr,
         inviter_port: offer.peer_port,
-        self_secure: false,
+        secure: false,
     })
 }
 
@@ -256,47 +257,6 @@ pub async fn trust(peer_id: &str, on: bool) -> Result<MeshTrustOutput> {
         peer_secure: new.peer_secure,
         mutual: new.local_secure && new.peer_secure,
         notify_result,
-    })
-}
-
-pub async fn push_trust(
-    peer_id: &str,
-    on: bool,
-    caller: Option<contract::CallerIdentity>,
-) -> Result<MeshTrustOutput> {
-    // Our own peer_id as the remote knows us.
-    let own_id = crate::host_identity::machine_id().to_string();
-    // Execute system.mesh.update --action trust on the remote host, making THEM set their
-    // local_secure for us. `push: false` prevents recursion. The caller is the
-    // local admin who invoked `system.mesh.update --action trust` — the recipient authorizes the
-    // mutating handshake against that admin's replicated users row (zero-trust:
-    // no synthetic/asserted identity).
-    #[allow(clippy::disallowed_types)] // exec is the wire-level dispatch boundary
-    let dispatch = exec(
-        peer_id,
-        "system.mesh.update",
-        serde_json::json!({ "action": "trust", "peer_id": own_id, "on": on, "push": false }),
-        caller,
-        None,
-    )
-    .await?;
-    let remote: MeshTrustOutput = serde_json::from_value(dispatch.result)?;
-    // remote.local_secure = they now trust us (= our peer_secure for this peer).
-    // Our own local_secure for them is unchanged — read it from DB.
-    let our_local_secure = db::pool::with_pooled_or_open(|conn| {
-        Ok(pdb::list_peers(conn)?
-            .into_iter()
-            .find(|p| p.peer_id == peer_id)
-            .map(|p| p.local_secure)
-            .unwrap_or(false))
-    })?;
-    let peer_secure = remote.local_secure;
-    Ok(MeshTrustOutput {
-        peer_id: peer_id.to_string(),
-        local_secure: our_local_secure,
-        peer_secure,
-        mutual: our_local_secure && peer_secure,
-        notify_result: remote.notify_result,
     })
 }
 
@@ -749,16 +709,16 @@ pub async fn leave_self() -> Result<crate::mesh::MeshLeaveSelfOutput> {
 }
 
 /// Full host cert status: every mesh cert's rotation state plus the current
-/// `self_secure` (Tier-2 secrets-storage) flag, in one read. The user-facing
+/// `secure` (Tier-2 secrets-storage) flag, in one read. The user-facing
 /// surface for this is `system.certs.list`; this stays as mesh's in-process
-/// accessor. No separate cert/self_secure round-trip.
+/// accessor. No separate cert/secure round-trip.
 pub fn status() -> Result<MeshCertStatusOutput> {
     let mut out = cert_status()?;
-    out.self_secure = get_self_secure().unwrap_or(false);
+    out.secure = get_secure().unwrap_or(false);
     Ok(out)
 }
 
-/// File-only cert status (no DB). `self_secure` stays `false` — `status()`
+/// File-only cert status (no DB). `secure` stays `false` — `status()`
 /// layers the DB flag on top. Delegates to the hoisted `utils::pki` reader.
 pub fn cert_status() -> Result<MeshCertStatusOutput> {
     Ok(utils::pki::mesh_cert_status(
@@ -767,13 +727,248 @@ pub fn cert_status() -> Result<MeshCertStatusOutput> {
     ))
 }
 
-pub fn get_self_secure() -> Result<bool> {
-    db::pool::with_pooled_or_open(db::mesh::get_self_secure)
+pub fn get_secure() -> Result<bool> {
+    db::pool::with_pooled_or_open(db::mesh::get_secure)
 }
 
-pub async fn set_self_secure(on: bool) -> Result<bool> {
-    db::pool::with_pooled_or_open(|conn| pdb::set_self_secure(conn, on))?;
-    Ok(on)
+pub async fn set_secure(on: bool) -> Result<bool> {
+    set_secure_at(&pki_dir(), on, another_ca_holder).await
+}
+
+pub(crate) fn ca_holder_message(binding: &str, nonce: &str) -> Vec<u8> {
+    format!("orca-mesh-ca-holder:{binding}:{nonce}").into_bytes()
+}
+
+pub(crate) fn ca_holder_proof(pki: &std::path::Path, binding: &str, nonce: &str) -> Option<String> {
+    if nonce.is_empty() || !get_secure().unwrap_or(false) || !utils::pki::has_mesh_ca_key(pki) {
+        return None;
+    }
+    utils::pki::sign_with_mesh_ca(pki, &ca_holder_message(binding, nonce)).ok()
+}
+
+pub(crate) fn proves_ca_possession(
+    pki: &std::path::Path,
+    binding: &str,
+    nonce: &str,
+    proof: Option<&str>,
+) -> bool {
+    let (Some(proof), Ok(ca_pem)) = (
+        proof,
+        std::fs::read_to_string(utils::pki::mesh_ca_cert_path(pki)),
+    ) else {
+        return false;
+    };
+    !nonce.is_empty()
+        && utils::pki::verify_mesh_ca_signature(&ca_pem, &ca_holder_message(binding, nonce), proof)
+            .is_ok()
+}
+
+async fn another_ca_holder() -> bool {
+    let pki = pki_dir();
+    let Ok(peers) = db::pool::with_pooled_or_open(pdb::list_peers) else {
+        return false;
+    };
+    for p in peers.iter().filter(|p| p.local_secure && p.peer_secure) {
+        let nonce = utils::id::new();
+        if let Ok(reply) = crate::mesh::cli::peer_ca_holder_reply(p, &nonce).await
+            && reply_proves_ca_possession(&pki, &p.peer_id, &nonce, &reply)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn reply_proves_ca_possession(
+    pki: &std::path::Path,
+    peer_id: &str,
+    nonce: &str,
+    reply: &CaHolderReply,
+) -> bool {
+    proves_ca_possession(pki, peer_id, nonce, reply.proof.as_deref())
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct CaHolderReply {
+    #[serde(default)]
+    pub(crate) proof: Option<String>,
+}
+
+pub(crate) async fn set_secure_at<F, Fut>(
+    pki: &std::path::Path,
+    on: bool,
+    mut another_holder: F,
+) -> Result<bool>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    if on || !utils::pki::has_mesh_ca_key(pki) {
+        db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, on))?;
+        if !on {
+            utils::pki::remove_mesh_ca_keys(pki)?;
+        }
+        return Ok(on);
+    }
+    let refused = || {
+        anyhow::anyhow!(
+            "demotion refused: this is the last secure member holding the mesh CA key; \
+             promote another member first"
+        )
+    };
+    if !another_holder().await {
+        return Err(refused());
+    }
+    db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, false))?;
+    if !another_holder().await {
+        db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, true))?;
+        return Err(refused());
+    }
+    utils::pki::remove_mesh_ca_keys(pki)?;
+    Ok(false)
+}
+
+const PURGE_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_secs(30);
+const PURGE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(3600);
+
+fn next_purge_retry(delay: std::time::Duration) -> std::time::Duration {
+    (delay * 2).min(PURGE_RETRY_MAX)
+}
+
+pub async fn purge_insecure_ca_keys() {
+    let mut delay = PURGE_RETRY_INITIAL;
+    while purge_insecure_ca_keys_once().await {
+        tokio::time::sleep(delay).await;
+        delay = next_purge_retry(delay);
+    }
+}
+
+async fn purge_insecure_ca_keys_once() -> bool {
+    let pki = pki_dir();
+    let Ok(conn) = db::open_default() else {
+        return true;
+    };
+    if !crate::mesh::ca_keys_need_purge(&pki, &conn).unwrap_or(true) {
+        return false;
+    }
+    let proved = another_ca_holder().await;
+    if let Err(e) = crate::mesh::purge_ca_keys_if_insecure(&pki, &conn, proved) {
+        tracing::warn!("[mesh] insecure CA key purge failed: {e:#}");
+    }
+    crate::mesh::ca_keys_need_purge(&pki, &conn).unwrap_or(true)
+}
+
+pub(crate) const PROMOTION_GRANT_TTL_SECS: i64 = 600;
+
+pub(crate) const PROMOTION_CLOCK_SKEW_SECS: i64 = 30;
+
+fn promotion_message(target: &str, g: &crate::mesh::PromotionGrant) -> Vec<u8> {
+    format!(
+        "orca-mesh-promote:{target}:{}:{}:{}",
+        g.issued_at, g.expires_at, g.nonce
+    )
+    .into_bytes()
+}
+
+pub async fn promote(target: &str, caller: Option<contract::CallerIdentity>) -> Result<bool> {
+    let now = utils::time::now().unix_seconds();
+    let secure = get_secure()?;
+    let grant = issue_promotion_grant(
+        &pki_dir(),
+        secure,
+        crate::host_identity::machine_id(),
+        target,
+        now,
+    )?;
+    #[allow(clippy::disallowed_types)]
+    let dispatch = exec(
+        target,
+        "system.mesh.update",
+        serde_json::json!({ "action": "settings", "secure": true, "grant": grant }),
+        caller,
+        None,
+    )
+    .await?;
+    let out: crate::mesh::MeshSettingsOutput = serde_json::from_value(dispatch.result)?;
+    Ok(out.secure)
+}
+
+pub async fn accept_promotion(
+    relaying_peer: Option<&str>,
+    grant: Option<&crate::mesh::PromotionGrant>,
+) -> Result<bool> {
+    let now = utils::time::now().unix_seconds();
+    let grant = verify_promotion_grant(
+        &pki_dir(),
+        crate::host_identity::machine_id(),
+        relaying_peer,
+        grant,
+        now,
+    )?;
+    db::pool::with_pooled_or_open(|conn| {
+        pdb::consume_promotion_grant(conn, &grant.nonce, grant.issued_at, grant.expires_at, now)
+    })?;
+    Ok(true)
+}
+
+pub(crate) fn issue_promotion_grant(
+    pki: &std::path::Path,
+    issuer_secure: bool,
+    own_id: &str,
+    target: &str,
+    now: i64,
+) -> Result<crate::mesh::PromotionGrant> {
+    if !issuer_secure || !utils::pki::has_mesh_ca_key(pki) {
+        anyhow::bail!("only a secure member holding the mesh CA key can promote a member");
+    }
+    if target == own_id {
+        anyhow::bail!("a member cannot promote itself to secure");
+    }
+    let mut grant = crate::mesh::PromotionGrant {
+        signature: String::new(),
+        issued_at: now,
+        expires_at: now + PROMOTION_GRANT_TTL_SECS,
+        nonce: utils::id::new(),
+    };
+    grant.signature = utils::pki::sign_with_mesh_ca(pki, &promotion_message(target, &grant))?;
+    Ok(grant)
+}
+
+pub(crate) fn verify_promotion_grant<'a>(
+    pki: &std::path::Path,
+    own_id: &str,
+    relaying_peer: Option<&str>,
+    grant: Option<&'a crate::mesh::PromotionGrant>,
+    now: i64,
+) -> Result<&'a crate::mesh::PromotionGrant> {
+    let Some(relaying_peer) = relaying_peer else {
+        anyhow::bail!("promotion to secure refused: a grant must be relayed by the secure member");
+    };
+    if relaying_peer == own_id {
+        anyhow::bail!("promotion to secure refused: a member cannot relay its own promotion");
+    }
+    let Some(grant) = grant else {
+        anyhow::bail!(
+            "a member cannot promote itself to secure; a secure member must run \
+             `orca system mesh tier update --action promote --id <this-member>`"
+        );
+    };
+    if grant.issued_at > now + PROMOTION_CLOCK_SKEW_SECS
+        || grant.expires_at <= now
+        || grant.expires_at != grant.issued_at + PROMOTION_GRANT_TTL_SECS
+        || grant.nonce.is_empty()
+    {
+        anyhow::bail!("promotion to secure refused: the grant is expired or not yet valid");
+    }
+    let ca_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(pki))
+        .context("promotion to secure refused: this member has no mesh CA cert")?;
+    utils::pki::verify_mesh_ca_signature(
+        &ca_pem,
+        &promotion_message(own_id, grant),
+        &grant.signature,
+    )
+    .context("promotion to secure refused: the grant is not signed by the mesh CA")?;
+    Ok(grant)
 }
 
 /// Build the local-host row for `system.list`. Uses the in-process lifecycle
@@ -1265,6 +1460,19 @@ mod tests {
             local_secure: false,
             peer_secure: false,
         }
+    }
+
+    #[test]
+    fn purge_retry_doubles_up_to_the_cap() {
+        assert_eq!(
+            next_purge_retry(PURGE_RETRY_INITIAL),
+            PURGE_RETRY_INITIAL * 2
+        );
+        assert_eq!(next_purge_retry(PURGE_RETRY_MAX), PURGE_RETRY_MAX);
+        assert_eq!(
+            next_purge_retry(PURGE_RETRY_MAX / 2 + PURGE_RETRY_INITIAL),
+            PURGE_RETRY_MAX
+        );
     }
 
     #[test]
@@ -1825,16 +2033,20 @@ mod tests {
         .await;
     }
 
+    #[serial_test::serial(env)]
     #[tokio::test]
-    async fn self_secure_round_trips_through_db() {
+    async fn secure_round_trips_through_db() {
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::mesh::pin_home(home.path());
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             // Default is false on a fresh, migrated db.
-            assert!(!get_self_secure().unwrap());
-            assert!(set_self_secure(true).await.unwrap());
-            assert!(get_self_secure().unwrap());
-            assert!(!set_self_secure(false).await.unwrap());
-            assert!(!get_self_secure().unwrap());
+            assert!(!get_secure().unwrap());
+            assert!(set_secure(true).await.unwrap());
+            assert!(get_secure().unwrap());
+            assert!(!set_secure(false).await.unwrap());
+            assert!(!get_secure().unwrap());
         })
         .await;
     }
@@ -2166,14 +2378,14 @@ mod tests {
             inviter_hostname: "host-i".into(),
             inviter_addr: "10.0.0.3".into(),
             inviter_port: 12002,
-            self_secure: false,
+            secure: false,
         };
         let s = serde_json::to_string(&out).unwrap();
         let back: MeshAcceptOutput = serde_json::from_str(&s).unwrap();
         assert_eq!(back.mesh_id, "mesh-1");
         assert_eq!(back.inviter_peer_id, "inv");
         assert_eq!(back.inviter_port, 12002);
-        assert!(!back.self_secure);
+        assert!(!back.secure);
     }
 
     // ── cert-status output DTO shape ──────────────────────────────────────────
@@ -2184,7 +2396,7 @@ mod tests {
             founder: false,
             member: false,
             version: "0.20.0".into(),
-            self_secure: false,
+            secure: false,
             mesh_ca: None,
             leaf_server: Some(crate::mesh::CertInfo {
                 cn: String::new(),
@@ -2209,35 +2421,35 @@ mod tests {
     // ── cert_status: file-only read, no db/network ────────────────────────────
 
     #[test]
-    fn cert_status_reports_compiled_version_and_self_secure_false() {
+    fn cert_status_reports_compiled_version_and_secure_false() {
         // cert_status only reads PKI files (absent on a test host → all cert
-        // infos None) and hard-codes self_secure=false; it never touches the db.
+        // infos None) and hard-codes secure=false; it never touches the db.
         let out = cert_status().unwrap();
         let expected = env!("ORCA_VERSION");
         assert_eq!(out.version, expected, "version must be the compiled value");
         assert!(
-            !out.self_secure,
-            "cert_status always reports self_secure=false; status() layers the db flag on top"
+            !out.secure,
+            "cert_status always reports secure=false; status() layers the db flag on top"
         );
     }
 
-    // ── status(): layers db self_secure over the file-only cert_status ────────
+    // ── status(): layers db secure over the file-only cert_status ────────
 
     #[tokio::test]
-    async fn status_layers_db_self_secure_over_cert_status() {
+    async fn status_layers_db_secure_over_cert_status() {
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
-            // cert_status() hard-codes self_secure=false; status() reads the db
+            // cert_status() hard-codes secure=false; status() reads the db
             // flag and overrides it. Default db → false.
             let out = status().unwrap();
-            assert!(!out.self_secure, "fresh db defaults self_secure=false");
+            assert!(!out.secure, "fresh db defaults secure=false");
             let expected = env!("ORCA_VERSION");
             assert_eq!(out.version, expected);
             // Flip the db flag; status() must now surface true.
-            set_self_secure(true).await.unwrap();
+            set_secure(true).await.unwrap();
             assert!(
-                status().unwrap().self_secure,
-                "status() must layer the db self_secure flag on top of cert_status"
+                status().unwrap().secure,
+                "status() must layer the db secure flag on top of cert_status"
             );
         })
         .await;
@@ -2494,30 +2706,6 @@ mod tests {
             // the target itself are excluded.
             assert_eq!(out.notified.len(), 1, "only the live member is notified");
             assert_eq!(out.notified[0].peer_id, live);
-        })
-        .await;
-    }
-
-    // ── push_trust: fails at the remote-exec resolution guard ─────────────────
-
-    #[tokio::test]
-    async fn push_trust_unknown_peer_errors_at_remote_resolution() {
-        ensure_host_identity();
-        let tmp = tmp_db();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            // push_trust drives `exec` against the named peer to make THEM set
-            // their local_secure for us. With an empty peer table the inner
-            // exec resolves nothing and bails before any dial — the error is
-            // surfaced, not swallowed.
-            let err = match push_trust("nope", true, None).await {
-                Ok(_) => panic!("expected push_trust to fail for unknown peer"),
-                Err(e) => e,
-            };
-            assert!(
-                err.to_string()
-                    .contains("no active paired peer matches 'nope'"),
-                "got: {err}"
-            );
         })
         .await;
     }

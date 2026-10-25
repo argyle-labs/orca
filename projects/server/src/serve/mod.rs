@@ -1121,6 +1121,7 @@ async fn spawn_mesh_runtime(pki_dir: &std::path::Path) {
     // dead id lingers as an orphan in peers' rosters. Fire-and-forget; retries
     // next boot on failure.
     tokio::spawn(system::mesh::exec::retire_superseded_identities());
+    tokio::spawn(system::mesh::exec::purge_insecure_ca_keys());
 
     if let Err(e) = db::replicate_engine::register(system::mesh::transport::MeshTransport::new()) {
         tracing::warn!("[replicate] transport register failed: {e:#}");

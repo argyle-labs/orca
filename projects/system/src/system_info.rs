@@ -413,9 +413,9 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
         );
     }
     if let Ok(conn) = db::open_default()
-        && let Ok(v) = db::mesh::get_self_secure(&conn)
+        && let Ok(v) = db::mesh::get_secure(&conn)
     {
-        report.self_secure = Some(v);
+        report.secure = Some(v);
     }
 
     report.mesh_listening = Some(utils::mesh_status::is_listening());

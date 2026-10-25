@@ -337,7 +337,7 @@ pub async fn put_secret(name: &str, value: &str) -> anyhow::Result<String> {
     let _guard = lock_secret(name).await?;
     let row = db::pool::Db::process().tx(|c| {
         let row = record_in(c, name)?;
-        secrets::ensure_write_allowed(c)?;
+        secrets::ensure_write_allowed(c, name)?;
         if row.backend == "inline" {
             secrets::put_inline_value(c, name, value)?;
         }
@@ -1138,7 +1138,7 @@ mod tests {
             db::pool::Db::process()
                 .write(|c| {
                     c.execute(
-                        "INSERT INTO mesh_self (id, self_secure, set_at) VALUES (1, 0, 0)",
+                        "INSERT INTO mesh_self (id, secure, set_at) VALUES (1, 0, 0)",
                         [],
                     )?;
                     Ok(())

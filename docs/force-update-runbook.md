@@ -23,7 +23,7 @@ Read-only probes:
   `channel`, `pinned_to`, `update_available`, `pending_restart`. A
   `-dev+<hash>.dirty` version means a hand-built binary, not a release.
 - `system.certs.list`, addressed to the host's id — leaf/CA cert days-remaining
-  and `self_secure` for that host. A leaf at `0` days is the cert-expiry
+  and the `secure` tier for that host. A leaf at `0` days is the cert-expiry
   deadlock (mesh handshakes fail; see [self-heal](#appendix-cert-expiry-deadlock)).
 - `system.list` / `system.health --id <id>` — reachability,
   `local_secure`/`peer_secure`.

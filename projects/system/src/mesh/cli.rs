@@ -3,7 +3,7 @@
 #![allow(clippy::disallowed_types)]
 
 //! CLI handlers for `orca mesh {discover,pending,accept,connect,offer,list,
-//! trust,self-secure,leave}`. Init lives in main.rs. Host liveness is no longer
+//! trust,leave}`. Init lives in main.rs. Host liveness is no longer
 //! a mesh verb — it moved to the first-class `system.health` tool; the internal
 //! `crate::mesh::ping` wire probe (route-health/dialer/fanout transport) stays.
 
@@ -225,7 +225,8 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
     std::fs::write(utils::pki::mesh_client_key_path(&pki_d), &client_key_pem)?;
 
     let conn = db::open_default()?;
-    pdb::set_self_secure(&conn, false)?;
+    pdb::set_secure(&conn, false)?;
+    utils::pki::remove_mesh_ca_keys(&pki_d)?;
     pdb::set_mesh_id(&conn, &r.mesh_id)?;
     pdb::upsert_peer(
         &conn,
@@ -261,7 +262,7 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
     .await
     {
         tracing::warn!(
-            "mesh/notify-trust to {}:{} after accept failed: {e:#} — inviter will see peer_secure=false until next manual `orca system peer update <peer> true`",
+            "mesh/notify-trust to {}:{} after accept failed: {e:#} — inviter will see peer_secure=false until next manual `orca system mesh tier update --action trust --id <inviter-id> --on true`",
             offer.peer_addr,
             offer.peer_port
         );
@@ -272,7 +273,7 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
         r.mesh_id, offer.peer_hostname, r.inviter_peer_id, offer.peer_addr, offer.peer_port
     );
     println!(
-        "  self_secure is OFF — run `orca mesh self-secure on` to enable secrets writes on this host."
+        "  tier: insecure — holds only its own plugins' secrets until a secure member promotes it."
     );
     Ok(())
 }
@@ -718,9 +719,7 @@ pub async fn cmd_mesh_trust(peer_id: &str, on: bool) -> Result<()> {
     Ok(())
 }
 
-async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
-    let pki_d = pki_dir();
-    let i_have_key = utils::pki::has_mesh_ca_key(&pki_d);
+pub async fn peer_has_ca_key(peer: &pdb::PeerRow) -> Result<bool> {
     let resp = call_peer(
         &peer.peer_id,
         &peer.peer_addr,
@@ -729,11 +728,35 @@ async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
         serde_json::json!({}),
     )
     .await?;
-    let peer_has_key = resp
+    Ok(resp
         .get("has_key")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if i_have_key && !peer_has_key {
+        .unwrap_or(false))
+}
+
+pub(crate) async fn peer_ca_holder_reply(
+    peer: &pdb::PeerRow,
+    nonce: &str,
+) -> Result<crate::mesh::exec::CaHolderReply> {
+    let reply = call_peer(
+        &peer.peer_id,
+        &peer.peer_addr,
+        peer.peer_port,
+        "mesh/has-ca-key",
+        serde_json::json!({ "nonce": nonce }),
+    )
+    .await?;
+    Ok(serde_json::from_value(reply)?)
+}
+
+async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
+    let pki_d = pki_dir();
+    let i_have_key = utils::pki::has_mesh_ca_key(&pki_d);
+    let peer_has_key = peer_has_ca_key(peer).await?;
+    let i_am_secure = db::pool::with_pooled_or_open(db::mesh::get_secure)?;
+    if i_have_key && !peer_has_key && !i_am_secure {
+        println!("  not pushing the CA key: this member is insecure");
+    } else if i_have_key && !peer_has_key {
         let (cert_pem, key_pem) = utils::pki::export_mesh_ca_keypair(&pki_d)?;
         call_peer(
             &peer.peer_id,
@@ -748,33 +771,6 @@ async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
         println!("  peer has CA key; we don't — they should push to us on their side");
     }
     Ok(())
-}
-
-// ── mesh self-secure ──────────────────────────────────────────────────────────
-
-pub fn cmd_mesh_self_secure(action: SelfSecureAction) -> Result<()> {
-    let conn = db::open_default()?;
-    match action {
-        SelfSecureAction::Show => {
-            let v = db::mesh::get_self_secure(&conn)?;
-            println!("self_secure: {v}");
-        }
-        SelfSecureAction::On => {
-            pdb::set_self_secure(&conn, true)?;
-            println!("✓ self_secure: true (secrets writes enabled)");
-        }
-        SelfSecureAction::Off => {
-            pdb::set_self_secure(&conn, false)?;
-            println!("✓ self_secure: false (secrets writes will be refused)");
-        }
-    }
-    Ok(())
-}
-
-pub enum SelfSecureAction {
-    On,
-    Off,
-    Show,
 }
 
 // ── mesh cert-status ──────────────────────────────────────────────────────────
@@ -865,7 +861,10 @@ pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
         overlap_days
     );
 
-    // Replicate to every mutual-secure peer that has the CA key.
+    if !db::mesh::get_secure(&conn)? {
+        println!("  not replicating CA state: this member is insecure");
+        return Ok(());
+    }
     let cur_cert = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))?;
     let cur_key = std::fs::read_to_string(utils::pki::mesh_ca_key_path(&pki_d))?;
     let prev_cert = std::fs::read_to_string(utils::pki::mesh_ca_previous_cert_path(&pki_d))?;
@@ -1643,22 +1642,6 @@ mod tests {
 
     fn tmp_db() -> tempfile::NamedTempFile {
         tempfile::NamedTempFile::new().unwrap()
-    }
-
-    #[tokio::test]
-    async fn cmd_mesh_self_secure_on_off_show_round_trip() {
-        let tmp = tmp_db();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            // Fresh DB: default is false.
-            assert!(!db::mesh::get_self_secure(&db::open_default().unwrap()).unwrap());
-            cmd_mesh_self_secure(SelfSecureAction::On).unwrap();
-            assert!(db::mesh::get_self_secure(&db::open_default().unwrap()).unwrap());
-            cmd_mesh_self_secure(SelfSecureAction::Off).unwrap();
-            assert!(!db::mesh::get_self_secure(&db::open_default().unwrap()).unwrap());
-            // Show is print-only; it must not error against a live DB.
-            cmd_mesh_self_secure(SelfSecureAction::Show).unwrap();
-        })
-        .await;
     }
 
     #[tokio::test]

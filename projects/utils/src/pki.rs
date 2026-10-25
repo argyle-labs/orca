@@ -709,7 +709,7 @@ pub fn should_rotate(cert_pem: &str, threshold_days: i64) -> Result<bool> {
 // Hoisted up from the `mesh` crate (was `MeshCertStatusOutput`) so cert-status
 // reads no longer require a mesh dependency — the `system` crate exposes this
 // via `system.certs.list` without depending on `mesh`. Pure filesystem read; no
-// DB, no network. The DB-backed `self_secure` policy flag is layered on by the
+// DB, no network. The DB-backed `secure` policy flag is layered on by the
 // caller (utils has no DB access).
 
 /// One cert's expiry summary.
@@ -741,7 +741,7 @@ pub struct MeshCertStatus {
     /// paired host can still refuse to be a secrets sink. Left at its default
     /// by [`mesh_cert_status`]; the caller fills it from the DB policy.
     #[serde(default)]
-    pub self_secure: bool,
+    pub secure: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mesh_ca: Option<CertInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -755,7 +755,7 @@ pub struct MeshCertStatus {
 }
 
 /// Read the mesh cert material under `pki_dir` and summarize expiry + role.
-/// Pure filesystem read — `self_secure` is left `false`; the caller sets it
+/// Pure filesystem read — `secure` is left `false`; the caller sets it
 /// from the DB policy.
 /// `version` is supplied by the CALLER, never read here.
 ///
@@ -778,7 +778,7 @@ pub fn mesh_cert_status(pki_dir: &Path, version: &str) -> MeshCertStatus {
         founder: has_mesh_ca_key(pki_dir),
         member: mesh_ca_cert_path(pki_dir).exists(),
         version: version.to_string(),
-        self_secure: false,
+        secure: false,
         mesh_ca: parse(mesh_ca_cert_path(pki_dir)),
         leaf_server: parse(mesh_server_cert_path(pki_dir)),
         leaf_client: parse(mesh_client_cert_path(pki_dir)),
@@ -927,6 +927,18 @@ pub fn rotate_mesh_ca(pki_dir: &Path) -> Result<()> {
 pub fn drop_mesh_ca_previous(pki_dir: &Path) -> Result<()> {
     for p in [
         mesh_ca_previous_cert_path(pki_dir),
+        mesh_ca_previous_key_path(pki_dir),
+    ] {
+        if p.exists() {
+            std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
+        }
+    }
+    Ok(())
+}
+
+pub fn remove_mesh_ca_keys(pki_dir: &Path) -> Result<()> {
+    for p in [
+        mesh_ca_key_path(pki_dir),
         mesh_ca_previous_key_path(pki_dir),
     ] {
         if p.exists() {
@@ -1707,18 +1719,36 @@ fn bootstrap_attestation_message(bootstrap_fp: &str) -> Vec<u8> {
 }
 
 pub fn attest_bootstrap_fp(pki_dir: &Path, bootstrap_fp: &str) -> Result<String> {
-    use ed25519_dalek::Signer;
-    use ed25519_dalek::pkcs8::DecodePrivateKey;
-    let key_pem = read_pki_file(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
-    let signing =
-        ed25519_dalek::SigningKey::from_pkcs8_pem(&key_pem).context("parse mesh CA key PEM")?;
-    let sig = signing.sign(&bootstrap_attestation_message(bootstrap_fp));
-    Ok(crate::encoding::base64_encode(&sig.to_bytes()))
+    sign_with_mesh_ca(pki_dir, &bootstrap_attestation_message(bootstrap_fp))
 }
 
 pub fn verify_bootstrap_attestation(
     ca_cert_pem: &str,
     bootstrap_fp: &str,
+    signature_b64: &str,
+) -> Result<()> {
+    verify_mesh_ca_signature(
+        ca_cert_pem,
+        &bootstrap_attestation_message(bootstrap_fp),
+        signature_b64,
+    )
+    .context("mesh CA attestation of the bootstrap key did not verify")
+}
+
+pub fn sign_with_mesh_ca(pki_dir: &Path, message: &[u8]) -> Result<String> {
+    use ed25519_dalek::Signer;
+    use ed25519_dalek::pkcs8::DecodePrivateKey;
+    let key_pem = read_pki_file(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
+    let signing =
+        ed25519_dalek::SigningKey::from_pkcs8_pem(&key_pem).context("parse mesh CA key PEM")?;
+    Ok(crate::encoding::base64_encode(
+        &signing.sign(message).to_bytes(),
+    ))
+}
+
+pub fn verify_mesh_ca_signature(
+    ca_cert_pem: &str,
+    message: &[u8],
     signature_b64: &str,
 ) -> Result<()> {
     use ed25519_dalek::Verifier;
@@ -1733,16 +1763,13 @@ pub fn verify_bootstrap_attestation(
         .try_into()
         .map_err(|_| anyhow::anyhow!("mesh CA key is not Ed25519"))?;
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).context("parse mesh CA pubkey")?;
-    let sig_bytes = crate::encoding::base64_decode(signature_b64).context("decode attestation")?;
+    let sig_bytes = crate::encoding::base64_decode(signature_b64).context("decode signature")?;
     let sig_arr: [u8; 64] = sig_bytes
         .as_slice()
         .try_into()
-        .map_err(|_| anyhow::anyhow!("attestation must be 64 bytes"))?;
-    vk.verify(
-        &bootstrap_attestation_message(bootstrap_fp),
-        &ed25519_dalek::Signature::from_bytes(&sig_arr),
-    )
-    .context("mesh CA attestation of the bootstrap key did not verify")
+        .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?;
+    vk.verify(message, &ed25519_dalek::Signature::from_bytes(&sig_arr))
+        .context("mesh CA signature did not verify")
 }
 
 #[derive(Debug)]

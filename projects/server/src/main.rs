@@ -252,12 +252,6 @@ enum MeshAction {
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
-    /// Toggle whether THIS host stores secrets locally. Default off on
-    /// fresh joiners; `orca mesh init` flips it on automatically.
-    SelfSecure {
-        #[arg(value_parser = ["on", "off", "show"], default_value = "show")]
-        state: String,
-    },
     /// Show days-remaining + rotation status for every cert on this host.
     CertStatus,
     /// Rotate the mesh CA. Both old (`previous`) and new (`current`) CAs are
@@ -586,7 +580,7 @@ async fn main() -> Result<()> {
                 // cert) is present from the moment this host can join a mesh.
                 utils::pki::load_or_init_bootstrap_cert(&pki)?;
                 let conn = db::open_default()?;
-                db::mesh::set_self_secure(&conn, true)?;
+                db::mesh::set_secure(&conn, true)?;
                 // Mesh id is a persisted identity → full uuidv7, never a short
                 // handle (every orca identity is a full uuidv7; no truncation).
                 let mesh_id = utils::id::new();
@@ -597,7 +591,7 @@ async fn main() -> Result<()> {
                     "  founder peer id: {host}  (machine_id; display: {})",
                     system::host_identity::hostname()
                 );
-                println!("  self_secure: true (secrets storage enabled)");
+                println!("  tier: secure (may hold other members' secrets)");
                 println!(
                     "  next: start the daemon, then admit a host with `orca mesh token` here + \
                      `orca mesh join <this-host> --token <token>` on the joiner, or \
@@ -630,15 +624,6 @@ async fn main() -> Result<()> {
             MeshAction::List => system::mesh::cli::cmd_mesh_list(),
             MeshAction::Trust { peer_id, state } => {
                 system::mesh::cli::cmd_mesh_trust(&peer_id, state == "on").await
-            }
-            MeshAction::SelfSecure { state } => {
-                use system::mesh::cli::SelfSecureAction;
-                let action = match state.as_str() {
-                    "on" => SelfSecureAction::On,
-                    "off" => SelfSecureAction::Off,
-                    _ => SelfSecureAction::Show,
-                };
-                system::mesh::cli::cmd_mesh_self_secure(action)
             }
             MeshAction::CertStatus => system::mesh::cli::cmd_mesh_cert_status(),
             MeshAction::CaRotate { overlap_days } => {
