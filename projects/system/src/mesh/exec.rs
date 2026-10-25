@@ -828,17 +828,34 @@ where
     Ok(false)
 }
 
+const PURGE_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_secs(30);
+const PURGE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(3600);
+
+fn next_purge_retry(delay: std::time::Duration) -> std::time::Duration {
+    (delay * 2).min(PURGE_RETRY_MAX)
+}
+
 pub async fn purge_insecure_ca_keys() {
+    let mut delay = PURGE_RETRY_INITIAL;
+    while purge_insecure_ca_keys_once().await {
+        tokio::time::sleep(delay).await;
+        delay = next_purge_retry(delay);
+    }
+}
+
+async fn purge_insecure_ca_keys_once() -> bool {
     let pki = pki_dir();
     let Ok(conn) = db::open_default() else {
-        return;
+        return true;
     };
-    if crate::mesh::ca_keys_need_purge(&pki, &conn).unwrap_or(false) {
-        let proved = another_ca_holder().await;
-        if let Err(e) = crate::mesh::purge_ca_keys_if_insecure(&pki, &conn, proved) {
-            tracing::warn!("[mesh] insecure CA key purge failed: {e:#}");
-        }
+    if !crate::mesh::ca_keys_need_purge(&pki, &conn).unwrap_or(true) {
+        return false;
     }
+    let proved = another_ca_holder().await;
+    if let Err(e) = crate::mesh::purge_ca_keys_if_insecure(&pki, &conn, proved) {
+        tracing::warn!("[mesh] insecure CA key purge failed: {e:#}");
+    }
+    crate::mesh::ca_keys_need_purge(&pki, &conn).unwrap_or(true)
 }
 
 pub(crate) const PROMOTION_GRANT_TTL_SECS: i64 = 600;
@@ -1443,6 +1460,19 @@ mod tests {
             local_secure: false,
             peer_secure: false,
         }
+    }
+
+    #[test]
+    fn purge_retry_doubles_up_to_the_cap() {
+        assert_eq!(
+            next_purge_retry(PURGE_RETRY_INITIAL),
+            PURGE_RETRY_INITIAL * 2
+        );
+        assert_eq!(next_purge_retry(PURGE_RETRY_MAX), PURGE_RETRY_MAX);
+        assert_eq!(
+            next_purge_retry(PURGE_RETRY_MAX / 2 + PURGE_RETRY_INITIAL),
+            PURGE_RETRY_MAX
+        );
     }
 
     #[test]

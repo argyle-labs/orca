@@ -51,6 +51,10 @@ struct HasCaKeyResult {
     proof: Option<String>,
 }
 
+fn valid_ca_holder_nonce(nonce: &str) -> bool {
+    nonce.len() <= 64 && uuid::Uuid::try_parse(nonce).is_ok()
+}
+
 #[derive(Debug, Deserialize)]
 struct PushCaKeyParams {
     cert_pem: String,
@@ -192,6 +196,12 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
                 .and_then(|p| p.get("nonce"))
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
+            if !nonce.is_empty() && !valid_ca_holder_nonce(nonce) {
+                return Response::err(
+                    id,
+                    peer_facing_error(&method, &anyhow::anyhow!("invalid nonce")),
+                );
+            }
             let has_key = utils::pki::has_mesh_ca_key(&pki);
             let proof = (has_key && !nonce.is_empty())
                 .then(|| {
@@ -2071,6 +2081,38 @@ mod tests {
             let resp = dispatch(req_no_params(MESH_HAS_CA_KEY_METHOD), &cn, addr()).await;
             let text = serde_json::to_string(&resp).unwrap();
             assert!(text.contains("has departed this mesh"), "got: {text}");
+        })
+        .await;
+    }
+
+    #[test]
+    fn ca_holder_nonce_must_be_a_uuid_within_64_bytes() {
+        assert!(valid_ca_holder_nonce(&utils::id::new()));
+        assert!(!valid_ca_holder_nonce("not-a-uuid"));
+        assert!(!valid_ca_holder_nonce(&"a".repeat(65)));
+        assert!(!valid_ca_holder_nonce(&format!(
+            "{}{}",
+            utils::id::new(),
+            " ".repeat(40)
+        )));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_has_ca_key_rejects_malformed_nonce() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("dispatch-hasca-nonce.db");
+        db::with_db_path(db_path, async {
+            let resp = dispatch(
+                req_with_params(
+                    MESH_HAS_CA_KEY_METHOD,
+                    serde_json::json!({ "nonce": "x".repeat(4096) }),
+                ),
+                "peer-ok",
+                addr(),
+            )
+            .await;
+            let text = serde_json::to_string(&resp).unwrap();
+            assert!(text.contains("\"error\""), "got: {text}");
         })
         .await;
     }
