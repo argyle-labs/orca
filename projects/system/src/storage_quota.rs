@@ -144,7 +144,7 @@ struct FloorLimits {
     max_units: u32,
 }
 
-type FileId = (u64, u64);
+type FileId = (u64, u64, u32);
 
 #[derive(Clone, Debug)]
 struct Unit {
@@ -355,9 +355,10 @@ fn unit_lock_files(root: &Path, unit: &Path) -> Vec<PathBuf> {
 }
 
 #[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
 fn id_of(md: &std::fs::Metadata) -> Option<FileId> {
     use std::os::unix::fs::MetadataExt;
-    Some((md.dev(), md.ino()))
+    Some((md.dev(), md.ino(), md.mode() & libc::S_IFMT as u32))
 }
 
 #[cfg(not(unix))]
@@ -366,7 +367,7 @@ fn id_of(_md: &std::fs::Metadata) -> Option<FileId> {
 }
 
 fn dev_of(md: &std::fs::Metadata) -> Option<u64> {
-    id_of(md).map(|(d, _)| d)
+    id_of(md).map(|(d, _, _)| d)
 }
 
 #[cfg(unix)]
@@ -547,7 +548,7 @@ fn scan(cfg: &QuotaConfig, local: &str, home: Option<&Path>, probe_locks: bool) 
                     let Some(p) = pending.get(i) else {
                         break;
                     };
-                    let m = measure(&p.path, p.root_id.map(|(d, _)| d));
+                    let m = measure(&p.path, p.root_id.map(|(d, _, _)| d));
                     let locked = probe_locks
                         && p.class.rebuildable()
                         && any_lock_held(&unit_lock_files(&p.root, &p.path));
@@ -732,7 +733,11 @@ mod fd_remove {
 
     #[allow(clippy::unnecessary_cast)]
     fn id(st: &Stat) -> FileId {
-        (st.st_dev as u64, st.st_ino as u64)
+        (
+            st.st_dev as u64,
+            st.st_ino as u64,
+            st.st_mode as u32 & libc::S_IFMT as u32,
+        )
     }
 
     #[allow(clippy::unnecessary_cast)]
