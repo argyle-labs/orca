@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use derive::orca_tool;
@@ -47,6 +47,7 @@ const SYSTEM_DIRS: &[&str] = &[
 
 static ENFORCE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static LIST_CACHE: Mutex<Option<(Instant, String, StorageQuotaListOutput)>> = Mutex::new(None);
+static LIST_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -1087,7 +1088,16 @@ fn cached_list(key: &str) -> Option<StorageQuotaListOutput> {
 
 fn invalidate_list_cache() {
     if let Ok(mut g) = LIST_CACHE.lock() {
+        LIST_GENERATION.fetch_add(1, Ordering::SeqCst);
         *g = None;
+    }
+}
+
+fn store_list(generation: u64, key: String, out: &StorageQuotaListOutput) {
+    if let Ok(mut g) = LIST_CACHE.lock()
+        && LIST_GENERATION.load(Ordering::SeqCst) == generation
+    {
+        *g = Some((Instant::now(), key, out.clone()));
     }
 }
 
@@ -1113,6 +1123,7 @@ async fn storage_quota_list(
     if let Some(hit) = cached_list(&key) {
         return Ok(hit);
     }
+    let generation = LIST_GENERATION.load(Ordering::SeqCst);
     let local = crate::host_identity::machine_id().to_string();
     let home = home_dir();
     let out = tokio::task::spawn_blocking(move || {
@@ -1120,9 +1131,7 @@ async fn storage_quota_list(
         report(&cfg, &s)
     })
     .await?;
-    if let Ok(mut g) = LIST_CACHE.lock() {
-        *g = Some((Instant::now(), key, out.clone()));
-    }
+    store_list(generation, key, &out);
     Ok(out)
 }
 
@@ -1256,6 +1265,10 @@ async fn record(out: &StorageQuotaEnforceOutput) {
 /// floor. Never touches anything outside a declared root, and skips items whose
 /// cargo/CI lock is held. `dryRun` lists exactly what would be deleted and
 /// deletes nothing.
+///
+/// Lock probing is point-in-time: a cargo build that starts after an item's
+/// directory is locked for removal can still lose its unit. The min age bounds
+/// the exposure to targets idle for at least that long.
 #[orca_tool(
     domain = "storage.quota",
     verb = "enforce",
@@ -1960,8 +1973,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn failed_removal_reports_partial_freed_bytes() {
+        use std::os::unix::fs::MetadataExt;
         use std::os::unix::fs::PermissionsExt;
         let (_d, base) = tmp_base();
+        if std::fs::metadata(&base).unwrap().uid() == 0 {
+            return;
+        }
         let root = base.join("tmpdir");
         opted_in(&root);
         write(&root.join("item/a"), 64 * 1024);
@@ -1977,5 +1994,26 @@ mod tests {
         assert!(ev[0].partial);
         assert!(ev[0].freed_bytes >= 64 * 1024);
         assert!(!root.join("item/a").exists());
+    }
+
+    #[test]
+    fn list_store_is_dropped_after_invalidation() {
+        let out = StorageQuotaListOutput {
+            configured: true,
+            enabled: true,
+            floor_pct: DEFAULT_FLOOR_PCT,
+            refused_bases: Vec::new(),
+            classes: Vec::new(),
+            volumes: Vec::new(),
+        };
+        let key = "list-generation-test".to_string();
+        let stale = LIST_GENERATION.load(Ordering::SeqCst);
+        invalidate_list_cache();
+        store_list(stale, key.clone(), &out);
+        assert!(cached_list(&key).is_none());
+        let fresh = LIST_GENERATION.load(Ordering::SeqCst);
+        store_list(fresh, key.clone(), &out);
+        assert!(cached_list(&key).is_some());
+        invalidate_list_cache();
     }
 }
