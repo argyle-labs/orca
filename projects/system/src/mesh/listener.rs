@@ -616,8 +616,8 @@ fn authorize_role_gated(
             ))
         })?;
     let role = effective_role(&user.role, &verified.token.role);
-    let role = if pdb::is_mutual_secure(pdb::get_trust(conn, peer_cn)?)
-        && crate::mesh::exec::proves_ca_possession(
+    let role = if !dispatch::tool_roles::is_custody(custody_target(tool, args))
+        || crate::mesh::exec::proves_ca_possession(
             &pki_dir(),
             peer_cn,
             &verified.token.nonce,
@@ -641,6 +641,15 @@ fn authorize_role_gated(
         // A caller token carries no capability grant; unknown means no.
         can_mutate: false,
     })
+}
+
+fn custody_target<'a>(tool: &'a str, args: &'a Value) -> &'a str {
+    match (tool, args.get("action").and_then(Value::as_str)) {
+        ("plugin.create", Some("invoke")) => {
+            args.get("tool").and_then(Value::as_str).unwrap_or(tool)
+        }
+        _ => tool,
+    }
 }
 
 use dispatch::tool_roles::role_rank;
@@ -1654,31 +1663,43 @@ mod tests {
         assert!(!utils::pki::has_mesh_ca_key(pki.path()));
     }
 
-    #[serial_test::serial(env)]
-    #[test]
-    fn two_tier_forged_admin_token_from_a_non_mutually_secure_peer_acts_as_user() {
+    const ROLE_PEER: &str = "019e7105-0000-7000-8000-0000000abc0f";
+
+    fn with_role_gate_fixture(
+        user_role: &'static str,
+        body: impl FnOnce(
+            &rusqlite::Connection,
+            &dyn Fn(&str) -> utils::pki::SignedEnvelope,
+            &dyn Fn(&utils::pki::SignedEnvelope) -> String,
+        ) + Send
+        + 'static,
+    ) {
         let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = crate::mesh::pin_home(home.path());
-        with_db(async {
+        with_db(async move {
             let conn = db::open_default().unwrap();
             utils::pki::init_mesh_ca(&pki_dir(), "founder").unwrap();
             let signer = tempfile::tempdir().unwrap();
             let key = utils::pki::load_or_init_bootstrap_key(signer.path()).unwrap();
             let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
-            const PEER: &str = "019e7105-0000-7000-8000-0000000abc0f";
-            pdb::upsert_peer(&conn, PEER, "hf", "127.0.0.1", 1, Some(&fp), "").unwrap();
-            identities::users::insert(&conn, "u-admin", "root", "h", "admin", "t0").unwrap();
-            let forged = contract::CallerIdentity {
+            pdb::upsert_peer(&conn, ROLE_PEER, "hf", "127.0.0.1", 1, Some(&fp), "").unwrap();
+            identities::users::insert(&conn, "u-admin", "root", "h", user_role, "t0").unwrap();
+            let claimed = contract::CallerIdentity {
                 user_id: "u-admin".into(),
                 username: "root".into(),
                 role: "admin".into(),
                 can_mutate: true,
             };
-            let args = serde_json::json!({});
-            let now = utils::time::now().unix_seconds();
             let mint = |tool: &str| {
-                crate::mesh::caller_token::mint(signer.path(), &forged, tool, &args, 60).unwrap()
+                crate::mesh::caller_token::mint(
+                    signer.path(),
+                    &claimed,
+                    tool,
+                    &serde_json::json!({}),
+                    60,
+                )
+                .unwrap()
             };
             let proof_for = |env: &utils::pki::SignedEnvelope| {
                 let nonce =
@@ -1687,55 +1708,198 @@ mod tests {
                         .nonce;
                 utils::pki::sign_with_mesh_ca(
                     &pki_dir(),
-                    &crate::mesh::exec::ca_holder_message(PEER, &nonce),
+                    &crate::mesh::exec::ca_holder_message(ROLE_PEER, &nonce),
                 )
                 .unwrap()
             };
-            let authorize = |tool: &str, required: &str, proof: Option<&str>, env| {
-                authorize_role_gated(
-                    &conn,
-                    PEER,
-                    tool,
-                    &args,
-                    required,
-                    Presented {
-                        caller_token: Some(env),
-                        ca_proof: proof,
-                    },
-                    now,
-                )
-            };
+            body(&conn, &mint, &proof_for);
+        });
+    }
 
-            let env = mint("system.update.create");
-            let proof = proof_for(&env);
-            let err = authorize("system.update.create", "admin", Some(&proof), &env).unwrap_err();
-            assert!(err.to_string().contains("role 'user'"), "untrusted: {err}");
-            let env = mint("system.update.list");
-            assert_eq!(
-                authorize("system.update.list", "user", None, &env)
-                    .unwrap()
-                    .role,
-                "user"
-            );
+    fn authorize_as_peer(
+        conn: &rusqlite::Connection,
+        tool: &str,
+        required: &str,
+        env: &utils::pki::SignedEnvelope,
+        proof: Option<&str>,
+    ) -> Result<contract::CallerIdentity> {
+        authorize_role_gated(
+            conn,
+            ROLE_PEER,
+            tool,
+            &serde_json::json!({}),
+            required,
+            Presented {
+                caller_token: Some(env),
+                ca_proof: proof,
+            },
+            utils::time::now().unix_seconds(),
+        )
+    }
 
-            pdb::set_trust(&conn, PEER, Some(true), Some(true)).unwrap();
+    #[serial_test::serial(env)]
+    #[test]
+    fn an_ordinary_admin_tool_from_a_non_secure_peer_acts_as_admin() {
+        with_role_gate_fixture("admin", |conn, mint, _| {
             let env = mint("system.update.create");
-            let err = authorize("system.update.create", "admin", None, &env).unwrap_err();
-            assert!(
-                err.to_string().contains("role 'user'"),
-                "insecure tier: {err}"
-            );
-            let env = mint("system.update.create");
-            let err = authorize("system.update.create", "admin", Some("bogus"), &env).unwrap_err();
-            assert!(err.to_string().contains("role 'user'"), "bad proof: {err}");
-            let env = mint("system.update.create");
-            let proof = proof_for(&env);
             assert_eq!(
-                authorize("system.update.create", "admin", Some(&proof), &env)
+                authorize_as_peer(conn, "system.update.create", "admin", &env, None)
                     .unwrap()
                     .role,
                 "admin"
             );
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn an_admin_token_for_a_member_row_is_refused_an_admin_tool() {
+        with_role_gate_fixture("member", |conn, mint, proof_for| {
+            let env = mint("system.update.create");
+            let proof = proof_for(&env);
+            let err = authorize_as_peer(conn, "system.update.create", "admin", &env, Some(&proof))
+                .unwrap_err();
+            assert!(err.to_string().contains("role 'member'"), "got: {err}");
+        });
+    }
+
+    fn assert_custody_needs_a_ca_proof(tool: &'static str) {
+        with_role_gate_fixture("admin", move |conn, mint, proof_for| {
+            let env = mint(tool);
+            let err = authorize_as_peer(conn, tool, "admin", &env, None).unwrap_err();
+            assert!(
+                err.to_string().contains("role 'user'"),
+                "{tool} no proof: {err}"
+            );
+            let env = mint(tool);
+            let err = authorize_as_peer(conn, tool, "admin", &env, Some("bogus")).unwrap_err();
+            assert!(
+                err.to_string().contains("role 'user'"),
+                "{tool} bad proof: {err}"
+            );
+            let env = mint(tool);
+            let other = utils::pki::sign_with_mesh_ca(
+                &pki_dir(),
+                &crate::mesh::exec::ca_holder_message("someone-else", "n"),
+            )
+            .unwrap();
+            let err = authorize_as_peer(conn, tool, "admin", &env, Some(&other)).unwrap_err();
+            assert!(
+                err.to_string().contains("role 'user'"),
+                "{tool} foreign proof: {err}"
+            );
+            let env = mint(tool);
+            let proof = proof_for(&env);
+            assert_eq!(
+                authorize_as_peer(conn, tool, "admin", &env, Some(&proof))
+                    .unwrap()
+                    .role,
+                "admin",
+                "{tool} with a CA proof"
+            );
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_remote_system_update_needs_a_ca_proof_even_for_an_admin() {
+        assert_custody_needs_a_ca_proof("system.update");
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_remote_plugin_update_needs_a_ca_proof_even_for_an_admin() {
+        assert_custody_needs_a_ca_proof("plugin.update");
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_remote_plugin_engine_update_needs_a_ca_proof_even_for_an_admin() {
+        assert_custody_needs_a_ca_proof("docker.engine_update");
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_cross_machine_secret_read_needs_a_ca_proof() {
+        assert_custody_needs_a_ca_proof("secrets.detail");
+    }
+
+    #[test]
+    fn plugin_create_invoke_is_judged_by_its_inner_tool_for_custody() {
+        let invoke = serde_json::json!({ "action": "invoke", "tool": "secrets.detail" });
+        assert_eq!(custody_target("plugin.create", &invoke), "secrets.detail");
+        let other = serde_json::json!({ "action": "install", "tool": "secrets.detail" });
+        assert_eq!(custody_target("plugin.create", &other), "plugin.create");
+        assert_eq!(
+            custody_target("system.update.create", &invoke),
+            "system.update.create"
+        );
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn exec_as_params_prove_ca_possession_from_the_key_not_the_secure_flag() {
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::mesh::pin_home(home.path());
+        with_db(async {
+            let conn = db::open_default().unwrap();
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, "founder").unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(&pki).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let me = crate::host_identity::machine_id();
+            pdb::upsert_peer(&conn, me, "self", "127.0.0.1", 1, Some(&fp), "").unwrap();
+            identities::users::insert(&conn, "u-admin", "root", "h", "admin", "t0").unwrap();
+            pdb::set_secure(&conn, false).unwrap();
+            let caller = contract::CallerIdentity {
+                user_id: "u-admin".into(),
+                username: "root".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            };
+            const CUSTODY: &str = "system.update";
+            let args = serde_json::json!({});
+            let params = || {
+                let token = crate::mesh::caller_token::mint(
+                    &pki,
+                    &caller,
+                    CUSTODY,
+                    &args,
+                    crate::mesh::caller_token::DEFAULT_TTL_SECS,
+                )
+                .unwrap();
+                let nonce =
+                    serde_json::from_str::<crate::mesh::caller_token::CallerToken>(&token.payload)
+                        .unwrap()
+                        .nonce;
+                let proof = crate::mesh::exec::ca_holder_proof(&pki, me, &nonce);
+                (token, proof)
+            };
+            let authorize = |token: &utils::pki::SignedEnvelope, proof: Option<&str>| {
+                authorize_role_gated(
+                    &conn,
+                    me,
+                    CUSTODY,
+                    &args,
+                    "admin",
+                    Presented {
+                        caller_token: Some(token),
+                        ca_proof: proof,
+                    },
+                    utils::time::now().unix_seconds(),
+                )
+            };
+
+            let (token, proof) = params();
+            assert!(proof.is_some());
+            assert_eq!(authorize(&token, proof.as_deref()).unwrap().role, "admin");
+
+            utils::pki::remove_mesh_ca_keys(&pki).unwrap();
+            let (token, proof) = params();
+            assert!(proof.is_none());
+            let err = authorize(&token, proof.as_deref()).unwrap_err();
+            assert!(err.to_string().contains("role 'user'"), "no key: {err}");
         });
     }
 

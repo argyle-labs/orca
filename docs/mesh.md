@@ -157,10 +157,15 @@ remote-callable verb. A grant's issue time tolerates 30 s of clock skew, and a m
 refuses any grant consumed within one grant lifetime (10 min) of its last
 demotion.
 
-A `mesh/exec` caller token acts with at most the `user` role, whatever role
-the named user holds, unless the signing peer is mutually trusted with the
-recipient AND proves it is a secure member by signing the token nonce with the
-mesh CA key.
+A `mesh/exec` caller token acts with the lower of the named user's role and
+the token's role. Custody tools (`dispatch::tool_roles::is_custody`) are the
+exception: tier and grant delivery, secret-value reads and grants, PKI issue,
+and anything that installs or runs code on the recipient (`system.update`,
+`plugin.update`, `plugin.create`, `guest.exec`, `files.update`, and any
+`*.install`, `*.upgrade`, `*.engine_update` or `*.exec`). A call to one of
+these acts with at most the `user` role unless the signing peer proves it holds
+the mesh CA key by signing the token nonce with it. A `plugin.create
+--action invoke` call is judged by the tool it invokes.
 
 `promote` requires mutual trust between the two members to be set first
 (`trust --on true` run locally on each side). A demotion or the post-startup

@@ -740,7 +740,7 @@ pub(crate) fn ca_holder_message(binding: &str, nonce: &str) -> Vec<u8> {
 }
 
 pub(crate) fn ca_holder_proof(pki: &std::path::Path, binding: &str, nonce: &str) -> Option<String> {
-    if nonce.is_empty() || !get_secure().unwrap_or(false) || !utils::pki::has_mesh_ca_key(pki) {
+    if nonce.is_empty() || !utils::pki::has_mesh_ca_key(pki) {
         return None;
     }
     utils::pki::sign_with_mesh_ca(pki, &ca_holder_message(binding, nonce)).ok()
