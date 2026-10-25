@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -320,16 +319,21 @@ fn resolve_roots(
     (roots, refused)
 }
 
-fn try_lock_all(paths: &[PathBuf]) -> Option<Vec<File>> {
-    let mut held = Vec::new();
-    for p in paths {
-        let Ok(f) = File::open(p) else { continue };
-        match f.try_lock() {
-            Ok(()) => held.push(f),
-            Err(_) => return None,
-        }
-    }
-    Some(held)
+#[cfg(unix)]
+fn any_lock_held(paths: &[PathBuf]) -> bool {
+    paths.iter().any(|p| {
+        matches!(
+            fd_remove::lock_at(rustix::fs::CWD, p.as_path()),
+            fd_remove::LockProbe::Held
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn any_lock_held(paths: &[PathBuf]) -> bool {
+    paths
+        .iter()
+        .any(|p| std::fs::File::open(p).is_ok_and(|f| f.try_lock().is_err()))
 }
 
 fn lock_files_in(dir: &Path) -> Vec<PathBuf> {
@@ -545,7 +549,7 @@ fn scan(cfg: &QuotaConfig, local: &str, home: Option<&Path>, probe_locks: bool) 
                     let m = measure(&p.path, p.root_id.map(|(d, _)| d));
                     let locked = probe_locks
                         && p.class.rebuildable()
-                        && try_lock_all(&unit_lock_files(&p.root, &p.path)).is_none();
+                        && any_lock_held(&unit_lock_files(&p.root, &p.path));
                     let unit = Unit {
                         path: p.path.clone(),
                         name: p.path.file_name().map(OsString::from).unwrap_or_default(),
@@ -698,16 +702,19 @@ pub struct Eviction {
     pub bytes: u64,
     pub last_used_unix: u64,
     pub outcome: EvictionOutcome,
+    pub freed_bytes: u64,
+    pub partial: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-type RemoveResult = Result<(), (EvictionOutcome, String)>;
+type RemoveResult = Result<u64, (EvictionOutcome, String, u64)>;
 
 #[cfg(unix)]
 mod fd_remove {
-    use std::ffi::OsStr;
-    use std::os::fd::OwnedFd;
+    use std::ffi::{CString, OsStr};
+    use std::fs::File;
+    use std::os::fd::{AsFd, OwnedFd};
     use std::path::Path;
 
     use rustix::fs::{
@@ -716,11 +723,24 @@ mod fd_remove {
     use rustix::io::Errno;
     use rustix::path::Arg;
 
-    use super::{EvictionOutcome, FileId, RemoveResult};
+    use super::{EvictionOutcome, FileId, LOCK_FILES, RemoveResult};
+
+    const MAX_DEPTH: usize = 512;
+
+    type Step = Result<(), (EvictionOutcome, String)>;
 
     #[allow(clippy::unnecessary_cast)]
     fn id(st: &Stat) -> FileId {
         (st.st_dev as u64, st.st_ino as u64)
+    }
+
+    #[allow(clippy::unnecessary_cast)]
+    fn disk_bytes(st: &Stat) -> u64 {
+        (st.st_blocks as u64).saturating_mul(512)
+    }
+
+    fn is_dir(st: &Stat) -> bool {
+        FileType::from_raw_mode(st.st_mode) == FileType::Directory
     }
 
     fn refuse(why: &str) -> (EvictionOutcome, String) {
@@ -731,7 +751,7 @@ mod fd_remove {
         (EvictionOutcome::Failed, std::io::Error::from(e).to_string())
     }
 
-    fn open_dir<P: Arg>(dir: impl std::os::fd::AsFd, p: P) -> Result<OwnedFd, Errno> {
+    fn open_dir<P: Arg>(dir: impl AsFd, p: P) -> Result<OwnedFd, Errno> {
         openat(
             dir,
             p,
@@ -740,12 +760,78 @@ mod fd_remove {
         )
     }
 
+    fn list(dir: &OwnedFd) -> Result<Vec<CString>, Errno> {
+        let mut names: Vec<CString> = Dir::read_from(dir)?
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_owned())
+            .filter(|n| n.as_bytes() != b"." && n.as_bytes() != b"..")
+            .collect();
+        names.sort();
+        names.reverse();
+        Ok(names)
+    }
+
+    pub(super) enum LockProbe {
+        Absent,
+        Held,
+        Locked(File),
+    }
+
+    pub(super) fn lock_at<P: Arg>(dir: impl AsFd, p: P) -> LockProbe {
+        let Ok(fd) = openat(
+            dir,
+            p,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            return LockProbe::Absent;
+        };
+        match fstat(&fd) {
+            Ok(st) if FileType::from_raw_mode(st.st_mode) == FileType::RegularFile => {}
+            _ => return LockProbe::Absent,
+        }
+        let f = File::from(fd);
+        match f.try_lock() {
+            Ok(()) => LockProbe::Locked(f),
+            Err(_) => LockProbe::Held,
+        }
+    }
+
+    fn lock_dir(dir: &OwnedFd, guards: &mut Vec<File>) -> Step {
+        for n in LOCK_FILES {
+            match lock_at(dir, *n) {
+                LockProbe::Absent => {}
+                LockProbe::Locked(f) => guards.push(f),
+                LockProbe::Held => {
+                    return Err((
+                        EvictionOutcome::SkippedLocked,
+                        "a cargo/CI lock is held".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn remove_unit(
         root: &Path,
         root_id: FileId,
         name: &OsStr,
         unit_id: FileId,
     ) -> RemoveResult {
+        let mut freed = 0;
+        remove_unit_inner(root, root_id, name, unit_id, &mut freed)
+            .map(|()| freed)
+            .map_err(|(o, m)| (o, m, freed))
+    }
+
+    fn remove_unit_inner(
+        root: &Path,
+        root_id: FileId,
+        name: &OsStr,
+        unit_id: FileId,
+        freed: &mut u64,
+    ) -> Step {
         let rfd = open_dir(CWD, root).map_err(|_| refuse("root is no longer a real directory"))?;
         if id(&fstat(&rfd).map_err(io)?) != root_id {
             return Err(refuse("root changed since the scan"));
@@ -755,36 +841,79 @@ mod fd_remove {
         if id(&st) != unit_id {
             return Err(refuse("item changed since the scan"));
         }
-        if FileType::from_raw_mode(st.st_mode) == FileType::Directory {
-            remove_tree(&rfd, name, root_id.0)
-        } else {
-            unlinkat(&rfd, name, AtFlags::empty()).map_err(io)
+        let mut guards = Vec::new();
+        lock_dir(&rfd, &mut guards)?;
+        if !is_dir(&st) {
+            unlinkat(&rfd, name, AtFlags::empty()).map_err(io)?;
+            *freed += disk_bytes(&st);
+            return Ok(());
         }
+        let ufd = open_dir(&rfd, name).map_err(|_| refuse("item is no longer a real directory"))?;
+        if id(&fstat(&ufd).map_err(io)?) != unit_id {
+            return Err(refuse("item changed since the scan"));
+        }
+        lock_dir(&ufd, &mut guards)?;
+        for n in list(&ufd).map_err(io)? {
+            if let Ok(cfd) = open_dir(&ufd, n.as_c_str()) {
+                lock_dir(&cfd, &mut guards)?;
+            }
+        }
+        remove_tree(ufd, unit_id, root_id.0, freed)?;
+        unlinkat(&rfd, name, AtFlags::REMOVEDIR).map_err(io)
     }
 
-    fn remove_tree<P: Arg + Copy>(parent: &OwnedFd, name: P, dev: u64) -> RemoveResult {
-        let fd = open_dir(parent, name).map_err(io)?;
-        if id(&fstat(&fd).map_err(io)?).0 != dev {
-            return Err(refuse("crosses onto another filesystem"));
-        }
-        let names: Vec<std::ffi::CString> = Dir::read_from(&fd)
-            .map_err(io)?
-            .filter_map(Result::ok)
-            .map(|e| e.file_name().to_owned())
-            .filter(|n| n.as_bytes() != b"." && n.as_bytes() != b"..")
-            .collect();
-        for n in &names {
-            let st = statat(&fd, n.as_c_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
+    struct Frame {
+        name: CString,
+        id: FileId,
+        pending: Vec<CString>,
+    }
+
+    fn remove_tree(unit_fd: OwnedFd, unit_id: FileId, dev: u64, freed: &mut u64) -> Step {
+        let mut top = list(&unit_fd).map_err(io)?;
+        let mut cur = unit_fd;
+        let mut stack: Vec<Frame> = Vec::new();
+        loop {
+            let next = match stack.last_mut() {
+                Some(f) => f.pending.pop(),
+                None => top.pop(),
+            };
+            let Some(n) = next else {
+                let Some(done) = stack.pop() else {
+                    return Ok(());
+                };
+                let parent = open_dir(&cur, c"..").map_err(io)?;
+                let expect = stack.last().map_or(unit_id, |f| f.id);
+                if id(&fstat(&parent).map_err(io)?) != expect {
+                    return Err(refuse("parent changed during removal"));
+                }
+                cur = parent;
+                unlinkat(&cur, done.name.as_c_str(), AtFlags::REMOVEDIR).map_err(io)?;
+                continue;
+            };
+            let st = statat(&cur, n.as_c_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
             if id(&st).0 != dev {
                 return Err(refuse("crosses onto another filesystem"));
             }
-            if FileType::from_raw_mode(st.st_mode) == FileType::Directory {
-                remove_tree(&fd, n.as_c_str(), dev)?;
-            } else {
-                unlinkat(&fd, n.as_c_str(), AtFlags::empty()).map_err(io)?;
+            if !is_dir(&st) {
+                unlinkat(&cur, n.as_c_str(), AtFlags::empty()).map_err(io)?;
+                *freed += disk_bytes(&st);
+                continue;
             }
+            if stack.len() >= MAX_DEPTH {
+                return Err(refuse("directory tree is too deep"));
+            }
+            let child = open_dir(&cur, n.as_c_str()).map_err(io)?;
+            if id(&fstat(&child).map_err(io)?) != id(&st) {
+                return Err(refuse("directory changed during removal"));
+            }
+            let pending = list(&child).map_err(io)?;
+            stack.push(Frame {
+                name: n,
+                id: id(&st),
+                pending,
+            });
+            cur = child;
         }
-        unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(io)
     }
 }
 
@@ -795,6 +924,7 @@ fn remove_unit(unit: &Unit) -> RemoveResult {
         _ => Err((
             EvictionOutcome::SkippedUnsafe,
             "item identity unknown".to_string(),
+            0,
         )),
     }
 }
@@ -804,16 +934,14 @@ fn remove_unit(_unit: &Unit) -> RemoveResult {
     Err((
         EvictionOutcome::SkippedUnsafe,
         "eviction is supported on unix only".to_string(),
+        0,
     ))
 }
 
-fn evict(unit: &Unit) -> (EvictionOutcome, Option<String>) {
-    let Some(_guards) = try_lock_all(&unit_lock_files(&unit.root, &unit.path)) else {
-        return (EvictionOutcome::SkippedLocked, None);
-    };
+fn evict(unit: &Unit) -> (EvictionOutcome, Option<String>, u64) {
     match remove_unit(unit) {
-        Ok(()) => (EvictionOutcome::Deleted, None),
-        Err((outcome, why)) => (outcome, Some(why)),
+        Ok(freed) => (EvictionOutcome::Deleted, None, freed),
+        Err((outcome, why, freed)) => (outcome, Some(why), freed),
     }
 }
 
@@ -821,8 +949,8 @@ fn apply(scan: &Scan, plan: &[usize], dry_run: bool) -> Vec<Eviction> {
     plan.iter()
         .map(|&i| {
             let u = &scan.units[i];
-            let (outcome, error) = if dry_run {
-                (EvictionOutcome::Planned, None)
+            let (outcome, error, freed_bytes) = if dry_run {
+                (EvictionOutcome::Planned, None, 0)
             } else {
                 evict(u)
             };
@@ -832,6 +960,8 @@ fn apply(scan: &Scan, plan: &[usize], dry_run: bool) -> Vec<Eviction> {
                 bytes: u.bytes,
                 last_used_unix: u.newest_unix,
                 outcome,
+                freed_bytes,
+                partial: outcome != EvictionOutcome::Deleted && freed_bytes > 0,
                 error,
             }
         })
@@ -1026,13 +1156,13 @@ async fn enforce_with(
     .await?;
     let freed_bytes = evictions
         .iter()
-        .filter(|e| {
-            matches!(
-                e.outcome,
-                EvictionOutcome::Deleted | EvictionOutcome::Planned
-            )
+        .map(|e| {
+            if e.outcome == EvictionOutcome::Planned {
+                e.bytes
+            } else {
+                e.freed_bytes
+            }
         })
-        .map(|e| e.bytes)
         .sum();
     if !dry_run {
         invalidate_list_cache();
@@ -1057,9 +1187,11 @@ async fn enforce(cfg: QuotaConfig, dry_run: bool) -> anyhow::Result<StorageQuota
 async fn record(out: &StorageQuotaEnforceOutput) {
     for e in &out.evictions {
         let line = format!(
-            "[storage.quota] {:?} {} ({} MiB, {:?}){}",
+            "[storage.quota] {:?}{} {} ({} of {} MiB freed, {:?}){}",
             e.outcome,
+            if e.partial { " partial" } else { "" },
             e.path,
+            e.freed_bytes / 1_048_576,
             e.bytes / 1_048_576,
             e.class,
             e.error
@@ -1088,18 +1220,19 @@ async fn record(out: &StorageQuotaEnforceOutput) {
         .iter()
         .filter(|e| e.outcome == EvictionOutcome::Failed)
         .count();
+    let partial = out.evictions.iter().filter(|e| e.partial).count();
     let short = out.floor_shortfalls.len();
-    if deleted == 0 && failed == 0 && short == 0 {
+    if deleted == 0 && failed == 0 && short == 0 && partial == 0 {
         return;
     }
     let host = sysinfo::System::host_name().unwrap_or_else(|| "this host".to_string());
-    let severity = if failed > 0 || short > 0 {
+    let severity = if failed > 0 || short > 0 || partial > 0 {
         Severity::Warn
     } else {
         Severity::Info
     };
     let body = utils::scrub::scrub_line(&format!(
-        "Storage janitor on {host} evicted {deleted} item(s), freeing {} MiB; {failed} failed; {short} volume(s) below the free floor with too little eligible data to recover it.",
+        "Storage janitor on {host} evicted {deleted} item(s), freeing {} MiB; {failed} failed ({partial} partially deleted); {short} volume(s) below the free floor with too little eligible data to recover it.",
         out.freed_bytes / 1_048_576
     ))
     .into_owned();
@@ -1214,6 +1347,8 @@ pub fn spawn_periodic() {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+
     use super::*;
 
     const OPEN: FloorLimits = FloorLimits {
@@ -1747,5 +1882,100 @@ mod tests {
             .collect();
         assert_eq!(all.len(), 3, "{all:?}");
         assert!(all.iter().all(|e| e.outcome == EvictionOutcome::Deleted));
+    }
+
+    #[cfg(unix)]
+    fn deep_tree(parent: &Path, depth: usize) {
+        use rustix::fs::{Mode, OFlags, mkdirat, openat};
+        std::fs::create_dir_all(parent).unwrap();
+        let mut fd = openat(
+            rustix::fs::CWD,
+            parent,
+            OFlags::RDONLY | OFlags::DIRECTORY,
+            Mode::empty(),
+        )
+        .unwrap();
+        for _ in 0..depth {
+            mkdirat(&fd, "d", Mode::from_raw_mode(0o755)).unwrap();
+            fd = openat(&fd, "d", OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty()).unwrap();
+        }
+        std::fs::write(parent.join("top"), b"x").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overly_deep_tree_is_refused_and_bounded_tree_is_removed() {
+        let (_d, base) = tmp_base();
+        let root = base.join("tmpdir");
+        opted_in(&root);
+        deep_tree(&root.join("deep"), 520);
+        deep_tree(&root.join("ok"), 60);
+        let c = cfg(&base, PathClass::Tmp, 0, vec![root.display().to_string()]);
+        let s = scan(&c, "m", None, true);
+        let ev = apply(&s, &plan_evictions(&s, OPEN, 0).evict, false);
+        let by_name: HashMap<String, &Eviction> = names(&ev).into_iter().zip(ev.iter()).collect();
+        assert_eq!(by_name["deep"].outcome, EvictionOutcome::SkippedUnsafe);
+        assert_eq!(
+            by_name["deep"].error.as_deref(),
+            Some("directory tree is too deep")
+        );
+        assert_eq!(by_name["ok"].outcome, EvictionOutcome::Deleted);
+        assert!(!root.join("ok").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_and_symlinked_lock_files_are_not_locks() {
+        let (_d, base) = tmp_base();
+        let target = target_with_profiles(&base);
+        let fifo = std::ffi::CString::new(
+            target
+                .join("debug/.cargo-lock")
+                .as_os_str()
+                .as_encoded_bytes(),
+        )
+        .unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        let held = base.join("held.lock");
+        write(&held, 0);
+        let holder = File::open(&held).unwrap();
+        holder.lock().unwrap();
+        std::os::unix::fs::symlink(&held, target.join("release/.cargo-lock")).unwrap();
+        let c = cfg(
+            &base,
+            PathClass::CargoTarget,
+            0,
+            vec![target.display().to_string()],
+        );
+        let s = scan(&c, "m", None, true);
+        assert!(s.units.iter().all(|u| !u.locked));
+        let ev = apply(&s, &plan_evictions(&s, OPEN, 0).evict, false);
+        assert!(
+            ev.iter().all(|e| e.outcome == EvictionOutcome::Deleted),
+            "{ev:?}"
+        );
+        assert!(held.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_removal_reports_partial_freed_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, base) = tmp_base();
+        let root = base.join("tmpdir");
+        opted_in(&root);
+        write(&root.join("item/a"), 64 * 1024);
+        write(&root.join("item/z/f"), 10);
+        std::fs::set_permissions(root.join("item/z"), std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        let c = cfg(&base, PathClass::Tmp, 0, vec![root.display().to_string()]);
+        let s = scan(&c, "m", None, true);
+        let ev = apply(&s, &plan_evictions(&s, OPEN, 0).evict, false);
+        std::fs::set_permissions(root.join("item/z"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        assert_eq!(ev[0].outcome, EvictionOutcome::Failed, "{ev:?}");
+        assert!(ev[0].partial);
+        assert!(ev[0].freed_bytes >= 64 * 1024);
+        assert!(!root.join("item/a").exists());
     }
 }
