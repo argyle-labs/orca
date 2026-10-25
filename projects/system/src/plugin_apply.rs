@@ -27,6 +27,7 @@
 // the plugin verbatim and never interpreted here.
 #![allow(clippy::disallowed_types)]
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -132,14 +133,6 @@ fn validate_op_name(op: &str) -> Result<()> {
     Ok(())
 }
 
-/// Home directory of `uid` in passwd(5) text.
-pub fn home_for_uid(passwd: &str, uid: u32) -> Option<PathBuf> {
-    passwd.lines().find_map(|line| {
-        let f: Vec<&str> = line.split(':').collect();
-        (f.len() >= 7 && f[2].parse::<u32>().ok() == Some(uid)).then(|| PathBuf::from(f[5]))
-    })
-}
-
 /// The orca home of the user who invoked `sudo`: their passwd home plus the
 /// state dir. `SUDO_UID` is set by sudo itself, and sudo strips a caller's
 /// `ORCA_HOME`, so the passwd entry is the source of truth; a malformed
@@ -147,13 +140,28 @@ pub fn home_for_uid(passwd: &str, uid: u32) -> Option<PathBuf> {
 /// the current process's own orca home.
 pub fn invoking_orca_home() -> Result<PathBuf> {
     if std::env::var_os("SUDO_UID").is_some() {
-        let uid = invoking_uid()?;
-        let passwd = std::fs::read_to_string("/etc/passwd").context("read /etc/passwd")?;
-        return home_for_uid(&passwd, uid)
-            .map(|h| h.join(contract::config::APP_STATE_DIR))
-            .with_context(|| format!("no passwd entry for SUDO_UID {uid}"));
+        return orca_home_for_uid(invoking_uid()?);
     }
     files::ops::orca_home().context("no orca home for this process")
+}
+
+pub fn orca_home_for_uid(uid: u32) -> Result<PathBuf> {
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
+    ensure!(
+        rc == 0,
+        "getpwuid_r({uid}) failed: {}",
+        std::io::Error::from_raw_os_error(rc)
+    );
+    ensure!(
+        !result.is_null() && !pwd.pw_dir.is_null(),
+        "no account for SUDO_UID {uid}"
+    );
+    let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+    let home = PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes()));
+    Ok(home.join(contract::config::APP_STATE_DIR))
 }
 
 /// The invoking user's uid: `SUDO_UID` under sudo, else this process's own
@@ -1002,14 +1010,18 @@ esac
     }
 
     #[test]
-    fn home_for_uid_reads_the_passwd_home() {
-        let passwd = "root:x:0:0:root:/root:/bin/bash\n\
-                      orca:x:999:999::/mnt/user/appdata/orca:/bin/bash\n";
+    fn orca_home_for_uid_resolves_the_current_user_home() {
+        let uid = unsafe { libc::getuid() };
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
         assert_eq!(
-            home_for_uid(passwd, 999),
-            Some(PathBuf::from("/mnt/user/appdata/orca"))
+            orca_home_for_uid(uid).unwrap(),
+            home.join(contract::config::APP_STATE_DIR)
         );
-        assert_eq!(home_for_uid(passwd, 5), None);
+    }
+
+    #[test]
+    fn orca_home_for_uid_rejects_a_uid_with_no_account() {
+        assert!(orca_home_for_uid(3_999_999_999).is_err());
     }
 
     #[tokio::test]
