@@ -355,24 +355,24 @@ fn unit_lock_files(root: &Path, unit: &Path) -> Vec<PathBuf> {
 }
 
 #[cfg(unix)]
-#[allow(clippy::unnecessary_cast)]
-fn id_of(md: &std::fs::Metadata) -> Option<FileId> {
-    use std::os::unix::fs::MetadataExt;
-    let birth = md
-        .created()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
-    Some((md.dev(), md.ino(), md.mode() & libc::S_IFMT as u32, birth))
+fn id_of(path: &Path) -> Option<FileId> {
+    fd_remove::path_id(path)
 }
 
 #[cfg(not(unix))]
-fn id_of(_md: &std::fs::Metadata) -> Option<FileId> {
+fn id_of(_path: &Path) -> Option<FileId> {
     None
 }
 
+#[cfg(unix)]
 fn dev_of(md: &std::fs::Metadata) -> Option<u64> {
-    id_of(md).map(|(d, ..)| d)
+    use std::os::unix::fs::MetadataExt;
+    Some(md.dev())
+}
+
+#[cfg(not(unix))]
+fn dev_of(_md: &std::fs::Metadata) -> Option<u64> {
+    None
 }
 
 #[cfg(unix)]
@@ -410,7 +410,7 @@ fn measure(path: &Path, dev: Option<u64>) -> Measured {
         };
     };
     let mut out = Measured {
-        id: id_of(&md),
+        id: id_of(path),
         bytes: disk_bytes(&md),
         newest: mtime_unix(&md),
         crosses: dev.is_some() && dev_of(&md) != dev,
@@ -522,7 +522,7 @@ fn scan(cfg: &QuotaConfig, local: &str, home: Option<&Path>, probe_locks: bool) 
             if let Some((name, vol)) = volume_for(root, &table) {
                 out.volumes.insert(name, vol);
             }
-            let root_id = std::fs::symlink_metadata(root).ok().and_then(|m| id_of(&m));
+            let root_id = id_of(root);
             for unit in units_of(b.class, root) {
                 if seen.insert(unit.clone()) {
                     pending.push(Pending {
@@ -787,10 +787,15 @@ mod fd_remove {
         Ok(id(&st, birth(fd, c"", FD_ITSELF, &st)))
     }
 
-    fn stat_at(dir: &OwnedFd, name: &CStr) -> Result<(Stat, FileId), Errno> {
+    pub(super) fn stat_at(dir: &OwnedFd, name: &CStr) -> Result<(Stat, FileId), Errno> {
         let st = statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
         let fid = id(&st, birth(dir, name, AtFlags::SYMLINK_NOFOLLOW, &st));
         Ok((st, fid))
+    }
+
+    pub(super) fn path_id(path: &Path) -> Option<FileId> {
+        let st = statat(CWD, path, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        Some(id(&st, birth(CWD, path, AtFlags::SYMLINK_NOFOLLOW, &st)))
     }
 
     #[cfg(test)]
@@ -816,7 +821,7 @@ mod fd_remove {
         (EvictionOutcome::Failed, std::io::Error::from(e).to_string())
     }
 
-    fn open_dir<P: Arg>(dir: impl AsFd, p: P) -> Result<OwnedFd, Errno> {
+    pub(super) fn open_dir<P: Arg>(dir: impl AsFd, p: P) -> Result<OwnedFd, Errno> {
         openat(
             dir,
             p,
@@ -995,6 +1000,16 @@ mod fd_remove {
 #[cfg(unix)]
 fn remove_unit(unit: &Unit, used_after: u64) -> RemoveResult {
     match (unit.root_id, unit.id) {
+        (Some(root_id), Some(_))
+            if used_after != u64::MAX
+                && measure(&unit.path, Some(root_id.0)).newest > used_after =>
+        {
+            Err((
+                EvictionOutcome::SkippedUnsafe,
+                "item was used since the scan".to_string(),
+                0,
+            ))
+        }
         (Some(root_id), Some(id)) => {
             fd_remove::remove_unit(&unit.root, root_id, &unit.name, id, used_after)
         }
@@ -1991,6 +2006,72 @@ mod tests {
         let ev = apply(&s, &[0], &HashMap::from([(0, 2_000)]), false);
         assert_eq!(ev[0].outcome, EvictionOutcome::SkippedUnsafe, "{ev:?}");
         assert!(root.join("old/new").exists());
+    }
+
+    fn aged_unit(base: &Path) -> (PathBuf, Scan) {
+        let root = base.join("tmpdir");
+        opted_in(&root);
+        write(&root.join("old/sub/file"), 1024);
+        write(&root.join("old/top"), 10);
+        set_mtime(&root.join("old/sub"), 1_000);
+        set_mtime(&root.join("old"), 1_000);
+        let c = cfg(base, PathClass::Tmp, 0, vec![root.display().to_string()]);
+        let s = scan(&c, "m", None, true);
+        assert_eq!(s.units[0].newest_unix, 1_000);
+        (root, s)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deep_rewrite_after_scan_is_refused_before_any_unlink() {
+        let (_d, base) = tmp_base();
+        let (root, s) = aged_unit(&base);
+        std::fs::write(root.join("old/sub/file"), b"fresh").unwrap();
+        let ev = apply(&s, &[0], &HashMap::from([(0, 2_000)]), false);
+        assert_eq!(ev[0].outcome, EvictionOutcome::SkippedUnsafe, "{ev:?}");
+        assert_eq!(ev[0].error.as_deref(), Some("item was used since the scan"));
+        assert_eq!(ev[0].freed_bytes, 0);
+        assert!(root.join("old/top").exists());
+        assert!(root.join("old/sub/file").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn top_dir_touched_after_scan_is_refused() {
+        let (_d, base) = tmp_base();
+        let (root, s) = aged_unit(&base);
+        File::open(root.join("old"))
+            .unwrap()
+            .set_modified(SystemTime::now())
+            .unwrap();
+        let ev = apply(&s, &[0], &HashMap::from([(0, 2_000)]), false);
+        assert_eq!(ev[0].outcome, EvictionOutcome::SkippedUnsafe, "{ev:?}");
+        assert_eq!(ev[0].error.as_deref(), Some("item was used since the scan"));
+        assert!(root.join("old/top").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aged_unit_within_cutoff_is_deleted() {
+        let (_d, base) = tmp_base();
+        let (root, s) = aged_unit(&base);
+        let ev = apply(&s, &[0], &HashMap::from([(0, 2_000)]), false);
+        assert_eq!(ev[0].outcome, EvictionOutcome::Deleted, "{ev:?}");
+        assert!(!root.join("old").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_and_removal_compute_the_same_identity() {
+        let (_d, base) = tmp_base();
+        write(&base.join("fresh"), 10);
+        std::fs::create_dir(base.join("dir")).unwrap();
+        let dir = fd_remove::open_dir(rustix::fs::CWD, base.as_path()).unwrap();
+        for n in [c"fresh", c"dir"] {
+            let p = base.join(n.to_str().unwrap());
+            let (_, fid) = fd_remove::stat_at(&dir, n).unwrap();
+            assert_eq!(id_of(&p), Some(fid));
+        }
     }
 
     #[cfg(unix)]
