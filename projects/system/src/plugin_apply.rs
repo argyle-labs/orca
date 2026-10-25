@@ -939,6 +939,17 @@ esac
         !zombie && unsafe { libc::kill(pid, 0) } == 0
     }
 
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_sudo_uid_with_no_account_is_an_error() {
+        let _env = crate::test_env::snapshot();
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
+        unsafe {
+            std::env::set_var("SUDO_UID", "3999999999");
+        }
+        assert!(invoking_orca_home().is_err());
+    }
+
     #[tokio::test]
     async fn a_normal_exit_kills_the_plugins_leftover_process_group() {
         let home = tempfile::tempdir().unwrap();

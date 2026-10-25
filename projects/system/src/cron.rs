@@ -183,6 +183,12 @@ pub fn target_uid(user: &str, uid: Option<u32>) -> Result<u32, String> {
 
 /// The direct (no-sudo) path is for an unprivileged daemon's own crontab; a
 /// daemon running as root goes nowhere near it.
+#[cfg(unix)]
+fn resolve_target_uid(user: &str) -> Result<u32, String> {
+    let uid = utils::user::uid_for_name(user).map_err(|e| e.to_string())?;
+    target_uid(user, uid)
+}
+
 pub fn direct_path_allowed(euid: u32) -> Result<(), String> {
     if euid == 0 {
         return Err(
@@ -301,12 +307,17 @@ pub async fn run_cron(op: &CronOp) -> CronOpResult {
     }
     #[cfg(unix)]
     {
-        if let Err(e) = target_uid(op.user(), utils::user::uid_for_name(op.user())) {
+        if let Err(e) = resolve_target_uid(op.user()) {
             return CronOpResult::refused(e);
         }
-        if utils::user::name_for_uid(unsafe { libc::geteuid() }).as_deref() == Some(op.user()) {
-            // SAFETY: geteuid has no preconditions.
-            if let Err(e) = direct_path_allowed(unsafe { libc::geteuid() }) {
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        let me = match utils::user::name_for_uid(euid) {
+            Ok(me) => me,
+            Err(e) => return CronOpResult::refused(e.to_string()),
+        };
+        if me.as_deref() == Some(op.user()) {
+            if let Err(e) = direct_path_allowed(euid) {
                 return CronOpResult::refused(e);
             }
             return apply_op(None, op).await;
@@ -374,7 +385,7 @@ pub async fn execute_privileged_cron(op: CronOp) -> CronOpResult {
     }
     #[cfg(unix)]
     {
-        let uid = match target_uid(&user, utils::user::uid_for_name(&user)) {
+        let uid = match resolve_target_uid(&user) {
             Ok(uid) => uid,
             Err(e) => return CronOpResult::refused(e),
         };
@@ -1275,14 +1286,8 @@ MAILTO=\"\"
     #[cfg(unix)]
     #[test]
     fn root_and_unknown_users_are_refused_on_every_path() {
-        assert!(target_uid("root", utils::user::uid_for_name("root")).is_err());
-        assert!(
-            target_uid(
-                "no-such-user-x",
-                utils::user::uid_for_name("no-such-user-x")
-            )
-            .is_err()
-        );
+        assert!(resolve_target_uid("root").is_err());
+        assert!(resolve_target_uid("no-such-user-x").is_err());
     }
 
     #[test]
