@@ -224,6 +224,11 @@ pub fn satisfies(caller_role: &str, required: &str) -> bool {
     (need > 0 || required == "any") && role_rank(caller_role) >= need
 }
 
+/// A `super-admin` requirement also demands a verified second factor.
+pub fn second_factor_ok(required: &str, second_factor: bool) -> bool {
+    required != "super-admin" || second_factor
+}
+
 /// Authorization decision for an authenticated surface caller, combining the
 /// role hierarchy with the `can_mutate` opt-in.
 ///
@@ -291,6 +296,13 @@ mod tests {
         assert!(satisfies("admin", "any"));
         assert!(satisfies("member", "any"));
         assert!(satisfies("", "any"));
+    }
+
+    #[test]
+    fn super_admin_requirement_needs_a_second_factor() {
+        assert!(!second_factor_ok("super-admin", false));
+        assert!(second_factor_ok("super-admin", true));
+        assert!(second_factor_ok("admin", false));
     }
 
     #[test]

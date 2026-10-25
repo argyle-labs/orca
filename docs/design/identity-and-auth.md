@@ -40,6 +40,15 @@ The `auth` domain already provides primitives the subsystem builds on:
 - `projects/contract/src/secrets_backend.rs` — backend registry pattern (cloned
   for `AccountBackend`).
 
+`super-admin` tools (the secret writes `secrets.upsert` / `put` / `restore` /
+`delete`) are refused unless the caller has a verified second factor, and they
+are `local_only`, so `mesh/exec` never reaches them. The one exemption is the
+in-process owner path with no caller identity: a CLI run with no session
+dispatching in its own process. Its trust boundary is filesystem access to
+`$ORCA_HOME` and the DB key, the same boundary that already guards the encrypted
+store. No surface carries a second factor yet, so authenticated callers cannot
+run these tools until one does.
+
 Net-new external crates required: `jsonwebtoken`, a WebAuthn library, an
 OpenID-Connect client library.
 

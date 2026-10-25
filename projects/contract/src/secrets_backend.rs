@@ -34,6 +34,9 @@ pub trait SecretsBackend: Send + Sync {
 
     async fn resolve(&self, ref_path: &str) -> Result<String>;
 
+    /// One-shot restore contract: `put` keeps exactly one previous value,
+    /// `restore_previous` reinstates it and forgets it, so a second restore
+    /// without an intervening `put` errors. Core also refuses that second call.
     async fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities::read_only()
     }
@@ -105,17 +108,17 @@ impl BackendCapabilities {
 static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn SecretsBackend>>>> =
     LazyLock::new(|| RwLock::new(Vec::new()));
 
-/// Register a secrets backend with the process-global registry.
-/// Re-registering the same `name()` replaces the existing entry so a dev
-/// rebuild / plugin reload doesn't duplicate backends.
-pub fn register_provider(provider: Arc<dyn SecretsBackend>) {
+/// Register a secrets backend with the process-global registry. Names are
+/// unique: a second registration under a held name is refused, so a reload
+/// must deregister first.
+pub fn register_provider(provider: Arc<dyn SecretsBackend>) -> Result<()> {
     let mut g = GLOBAL.write().expect("secrets_backend registry poisoned");
     let name = provider.name().to_string();
-    if let Some(slot) = g.iter_mut().find(|p| p.name() == name) {
-        *slot = provider;
-    } else {
-        g.push(provider);
+    if g.iter().any(|p| p.name() == name) {
+        anyhow::bail!("secrets backend '{name}' is already registered");
     }
+    g.push(provider);
+    Ok(())
 }
 
 /// Snapshot of every registered backend.
@@ -273,8 +276,7 @@ fn str_arg<'a>(args: &'a serde_json::Value, field: &str) -> Option<&'a str> {
 /// Host-side loaded-plugin proxy — in-process only; a thin build links no tokio.
 #[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
-    register_provider(Arc::new(SecretsBackendProxy { name, invoke }));
-    Ok(())
+    register_provider(Arc::new(SecretsBackendProxy { name, invoke }))
 }
 
 /// A [`SecretsBackend`] backed by a subprocess plugin reached over the JSON-proxy
@@ -323,12 +325,14 @@ impl SecretsBackend for SecretsBackendProxy {
         )
         .await
         .map(drop)
+        .map_err(|e| anyhow::anyhow!(utils::scrub::redact_values(&format!("{e:#}"), &[value])))
     }
 
     async fn restore_previous(&self, ref_path: &str) -> Result<()> {
         self.call(RESTORE_OP, serde_json::json!({ "ref_path": ref_path }))
             .await
             .map(drop)
+            .map_err(|e| anyhow::anyhow!(utils::scrub::redact_values(&format!("{e:#}"), &[])))
     }
 }
 
@@ -412,7 +416,7 @@ mod tests {
     #[tokio::test]
     async fn put_then_restore_round_trips_through_the_registry() {
         let kind = "contract-test-writable";
-        register_provider(Fake::new(kind, BackendCapabilities::writable()));
+        register_provider(Fake::new(kind, BackendCapabilities::writable())).unwrap();
         put(kind, "r", "new").await.unwrap();
         assert_eq!(resolve(kind, "r").await.unwrap(), "new");
         restore_previous(kind, "r").await.unwrap();
@@ -427,7 +431,7 @@ mod tests {
             kind,
             BackendCapabilities::write_unavailable("read-only token"),
         );
-        register_provider(fake.clone());
+        register_provider(fake.clone()).unwrap();
         let err = put(kind, "r", "new").await.unwrap_err().to_string();
         assert!(err.contains("write unavailable: read-only token"), "{err}");
         assert_eq!(fake.value.lock().unwrap().0, "old");
@@ -435,9 +439,40 @@ mod tests {
         assert!(deregister_provider(kind));
     }
 
+    #[test]
+    fn duplicate_backend_name_is_refused() {
+        let kind = "contract-test-dup";
+        register_provider(Fake::new(kind, BackendCapabilities::writable())).unwrap();
+        let err = register_provider(Fake::new(kind, BackendCapabilities::read_only()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already registered"), "{err}");
+        assert!(deregister_provider(kind));
+        register_provider(Fake::new(kind, BackendCapabilities::read_only())).unwrap();
+        assert!(deregister_provider(kind));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_put_error_never_echoes_the_value() {
+        let proxy = SecretsBackendProxy {
+            name: "contract-test-scrub".into(),
+            invoke: Arc::new(|_op, args, _call| {
+                Err(serde_json::json!(format!("rejected {}", args["value"])))
+            }),
+        };
+        let err = proxy
+            .put("r", "hunter2-secret")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("hunter2-secret"), "{err}");
+        assert!(err.contains(utils::scrub::REDACTED_TEXT), "{err}");
+    }
+
     #[tokio::test]
     async fn default_backend_is_read_only() {
-        register_provider(Arc::new(ReadOnly));
+        register_provider(Arc::new(ReadOnly)).unwrap();
         let caps = capabilities("contract-test-readonly").await.unwrap();
         assert_eq!(caps, BackendCapabilities::read_only());
         let err = put("contract-test-readonly", "r", "x").await.unwrap_err();

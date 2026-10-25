@@ -299,6 +299,15 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
                 ))
                 .into());
             }
+            if ctx.caller().is_some()
+                && !crate::tool_roles::second_factor_ok(T::REQUIRED_ROLE, ctx.second_factor())
+            {
+                return Err(contract::OrcaError::forbidden(format!(
+                    "{} requires a verified second factor",
+                    T::NAME
+                ))
+                .into());
+            }
             // Gated verbs execute by default; `dryRun: true` describes and
             // returns without entering the body, so a plan cannot half-apply.
             // The role check above runs first: an admin verb's dry run is

@@ -665,6 +665,25 @@ async fn mcp_tools_call_secrets_detail_refuses_read_token() {
 }
 
 #[tokio::test]
+async fn mcp_tools_call_secrets_put_refuses_admin_token() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    let (status, body) = oneshot_json(
+        env.router(),
+        "POST",
+        "/api/mcp",
+        Some(&token),
+        Some(serde_json::json!({
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": { "name": "secrets.put", "arguments": { "name": "s", "value": "v" } }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["error"]["code"], -32000, "body: {body}");
+}
+
+#[tokio::test]
 async fn admin_token_cannot_write_secrets() {
     let env = with_isolated_env();
     let token = mint_admin_token(&env);

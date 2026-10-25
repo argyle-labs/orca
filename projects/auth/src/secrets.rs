@@ -226,12 +226,6 @@ pub async fn get_secret(name: &str) -> anyhow::Result<(String, utils::secret::Se
     Ok((row.backend, utils::secret::Secret::new(value)))
 }
 
-fn secret_record(name: &str) -> anyhow::Result<secrets::SecretRecord> {
-    db::pool::Db::process()
-        .read(|c| secrets::get(c, name))?
-        .ok_or_else(|| anyhow!("no secret named '{name}'"))
-}
-
 pub async fn backend_capabilities(
     backend: &str,
 ) -> anyhow::Result<contract::secrets_backend::BackendCapabilities> {
@@ -241,29 +235,85 @@ pub async fn backend_capabilities(
     contract::secrets_backend::capabilities(backend).await
 }
 
+static WRITE_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+async fn lock_secret(name: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = WRITE_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(name.to_string())
+        .or_default()
+        .clone();
+    lock.lock_owned().await
+}
+
+fn record_in(conn: &rusqlite::Connection, name: &str) -> anyhow::Result<secrets::SecretRecord> {
+    secrets::get(conn, name)?.ok_or_else(|| anyhow!("no secret named '{name}'"))
+}
+
+fn ensure_unchanged(
+    conn: &rusqlite::Connection,
+    before: &secrets::SecretRecord,
+) -> anyhow::Result<()> {
+    let after = secrets::get(conn, &before.name)?;
+    if after.as_ref().map(|r| (&r.backend, &r.ref_path))
+        != Some((&before.backend, &before.ref_path))
+    {
+        tracing::warn!(
+            secret = %before.name,
+            backend = %before.backend,
+            "secret registration changed during a backend write"
+        );
+        bail!(
+            "secret '{}' was re-registered while its backend write ran; refusing to record it",
+            before.name
+        );
+    }
+    Ok(())
+}
+
 pub async fn put_secret(name: &str, value: &str) -> anyhow::Result<String> {
     if value.is_empty() {
         bail!("refusing to write an empty value to secret '{name}'");
     }
-    let row = secret_record(name)?;
-    match row.backend.as_str() {
-        "inline" => db::pool::Db::process().tx(|c| secrets::put_inline_value(c, name, value))?,
-        _ => {
-            db::pool::Db::process().read(secrets::ensure_write_allowed)?;
-            contract::secrets_backend::put(&row.backend, &row.ref_path, value).await?
+    let _guard = lock_secret(name).await;
+    let row = db::pool::Db::process().tx(|c| {
+        let row = record_in(c, name)?;
+        secrets::ensure_write_allowed(c)?;
+        if row.backend == "inline" {
+            secrets::put_inline_value(c, name, value)?;
         }
+        Ok(row)
+    })?;
+    if row.backend != "inline" {
+        contract::secrets_backend::put(&row.backend, &row.ref_path, value).await?;
+        db::pool::Db::process().tx(|c| {
+            ensure_unchanged(c, &row)?;
+            secrets::arm_external_restore(c, &row)
+        })?;
     }
     Ok(row.backend)
 }
 
 pub async fn restore_secret(name: &str) -> anyhow::Result<String> {
-    let row = secret_record(name)?;
-    match row.backend.as_str() {
-        "inline" => db::pool::Db::process().tx(|c| secrets::restore_inline_value(c, name))?,
-        _ => {
-            db::pool::Db::process().read(secrets::ensure_write_allowed)?;
-            contract::secrets_backend::restore_previous(&row.backend, &row.ref_path).await?
+    let _guard = lock_secret(name).await;
+    let row = db::pool::Db::process().tx(|c| {
+        let row = record_in(c, name)?;
+        if row.backend == "inline" {
+            secrets::restore_inline_value(c, name)?;
+        } else {
+            secrets::ensure_external_restore_armed(c, &row)?;
         }
+        Ok(row)
+    })?;
+    if row.backend != "inline" {
+        contract::secrets_backend::restore_previous(&row.backend, &row.ref_path).await?;
+        db::pool::Db::process().tx(|c| {
+            secrets::disarm_external_restore(c, name)?;
+            ensure_unchanged(c, &row)
+        })?;
     }
     Ok(row.backend)
 }
@@ -354,6 +404,7 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
         "inline" => String::new(),
         _ => args.ref_path.clone().unwrap(),
     };
+    let _guard = lock_secret(&args.name).await;
     let created = db::pool::Db::process().tx(|conn| {
         let created = secrets::upsert(
             conn,
@@ -377,13 +428,13 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
 /// [MUTATES STATE] Idempotent upsert — create the secret if absent, replace it if
 /// present. The single canonical write, used for credential rotation. For
 /// 'inline' backend, `value` is required; for external backends, `ref_path` is
-/// required (e.g. 'op://Vault/Item/field'). Write the secret on a remote system
-/// with the top-level `--peer <h>` flag.
+/// required (e.g. 'op://Vault/Item/field'). Local-only: never reachable over mesh/exec.
 #[orca_tool(
     domain = "secrets",
     verb = "upsert",
     cli = manual,
     role = "super-admin",
+    local_only = true,
     data_mutation = false
 )]
 async fn secret_upsert(
@@ -401,6 +452,7 @@ async fn secret_upsert(
     verb = "put",
     cli = manual,
     role = "super-admin",
+    local_only = true,
     data_mutation = false
 )]
 async fn secret_put(
@@ -424,6 +476,7 @@ async fn secret_put(
     domain = "secrets",
     verb = "restore",
     role = "super-admin",
+    local_only = true,
     data_mutation = false
 )]
 async fn secret_restore(
@@ -604,12 +657,19 @@ stdin_value_cli!(SecretPut, "put");
 
 /// [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends
 /// only the orca registration is removed (the upstream vault is untouched).
-#[orca_tool(domain = "secrets", verb = "delete", data_mutation = false)]
+#[orca_tool(
+    domain = "secrets",
+    verb = "delete",
+    role = "super-admin",
+    local_only = true,
+    data_mutation = false
+)]
 async fn secret_delete(
     args: SecretDeleteArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SecretDeleteReport> {
-    let removed = db::pool::Db::process().write(|conn| secrets::delete(conn, &args.name))?;
+    let _guard = lock_secret(&args.name).await;
+    let removed = db::pool::Db::process().tx(|conn| secrets::delete(conn, &args.name))?;
     Ok(SecretDeleteReport {
         name: args.name,
         removed,
@@ -709,7 +769,7 @@ mod tests {
         use contract::OrcaToolDef;
         assert_eq!(<SecretList as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretDetail as OrcaToolDef>::REQUIRED_ROLE, "admin");
-        assert_eq!(<SecretDelete as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        assert_eq!(<SecretDelete as OrcaToolDef>::REQUIRED_ROLE, "super-admin");
         assert_eq!(<SecretGrantCreate as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretGrantDelete as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretGrantList as OrcaToolDef>::REQUIRED_ROLE, "admin");
@@ -717,6 +777,10 @@ mod tests {
         assert_eq!(<SecretPut as OrcaToolDef>::REQUIRED_ROLE, "super-admin");
         assert_eq!(<SecretRestore as OrcaToolDef>::REQUIRED_ROLE, "super-admin");
         assert_eq!(<SecretBackendList as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        const { assert!(!<SecretUpsert as OrcaToolDef>::REMOTE_OK) };
+        const { assert!(!<SecretPut as OrcaToolDef>::REMOTE_OK) };
+        const { assert!(!<SecretRestore as OrcaToolDef>::REMOTE_OK) };
+        const { assert!(!<SecretDelete as OrcaToolDef>::REMOTE_OK) };
         const { assert!(<SecretPut as OrcaToolDef>::EXECUTE_GATED) };
         const { assert!(<SecretRestore as OrcaToolDef>::EXECUTE_GATED) };
         const { assert!(!<SecretPut as OrcaToolDef>::DATA_MUTATION) };
@@ -836,7 +900,7 @@ mod tests {
                 anyhow::bail!("unused")
             }
         }
-        contract::secrets_backend::register_provider(std::sync::Arc::new(Upsertable));
+        contract::secrets_backend::register_provider(std::sync::Arc::new(Upsertable)).unwrap();
         let report = write_secret(SecretWriteArgs {
             name: "gh".into(),
             backend: "upsert-test-backend".into(),
@@ -932,11 +996,11 @@ mod tests {
             assert!(put_secret("s", "").await.is_err());
 
             let writable = write_backend(BackendCapabilities::writable());
-            contract::secrets_backend::register_provider(writable.clone());
+            contract::secrets_backend::register_provider(writable.clone()).unwrap();
             let readonly = write_backend(BackendCapabilities::write_unavailable(
                 "service account is read-only",
             ));
-            contract::secrets_backend::register_provider(readonly.clone());
+            contract::secrets_backend::register_provider(readonly.clone()).unwrap();
             for (name, backend) in [("w", "auth-test-writable"), ("r", "auth-test-readonly")] {
                 write_secret(SecretWriteArgs {
                     name: name.into(),
@@ -949,8 +1013,24 @@ mod tests {
                 .await
                 .expect("seed external");
             }
+            assert!(restore_secret("w").await.is_err());
             put_secret("w", "new").await.unwrap();
             restore_secret("w").await.unwrap();
+            let err = restore_secret("w").await.unwrap_err().to_string();
+            assert!(err.contains("no previous value"), "{err}");
+            put_secret("w", "again").await.unwrap();
+            write_secret(SecretWriteArgs {
+                name: "w".into(),
+                backend: "auth-test-writable".into(),
+                value: None,
+                value_stdin: false,
+                ref_path: Some("op://v/w/password".into()),
+                description: None,
+            })
+            .await
+            .expect("re-upsert external");
+            assert!(restore_secret("w").await.is_err());
+            writable.puts.lock().unwrap().pop();
             assert_eq!(
                 *writable.puts.lock().unwrap(),
                 vec![("op://v/w/password".to_string(), "new".to_string())]

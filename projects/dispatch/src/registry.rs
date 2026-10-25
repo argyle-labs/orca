@@ -658,6 +658,17 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
 /// reach a plugin/unit/diagnostics/UPS body. A name with no local role is
 /// left to the peer forward, whose recipient authorizes it.
 fn authorize_fallback(name: &str, ctx: &ToolCtx) -> Result<()> {
+    if let Some(required) = crate::tool_roles::known_role(name)
+        && (ctx.unbound_role().is_some()
+            || ctx.verified_caller().is_some()
+            || ctx.caller().is_some())
+        && !crate::tool_roles::second_factor_ok(required, ctx.second_factor())
+    {
+        return Err(contract::OrcaError::forbidden(format!(
+            "{name} requires a verified second factor"
+        ))
+        .into());
+    }
     if let Some(role) = ctx.unbound_role()
         && let Some(required) = crate::tool_roles::known_role(name)
         && !crate::tool_roles::satisfies(role, required)
