@@ -89,6 +89,8 @@ compile_error!("orca-utils `test-scope` is test-only and must not reach an optim
 #[cfg(feature = "pki")]
 pub mod pki;
 #[cfg(feature = "reactor")]
+pub mod privileged;
+#[cfg(feature = "reactor")]
 pub mod reactor;
 /// Cron scheduling. Gated by the `schedule` feature; hides the cron lib (and,
 /// with it, chrono) behind a `Timestamp`-only surface.

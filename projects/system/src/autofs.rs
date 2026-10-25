@@ -635,72 +635,31 @@ pub async fn retire_direct_map() -> ApplyOutcome {
 /// spawn/parse failure (e.g. no sudoers grant) surfaces as an error in the
 /// result rather than a panic.
 pub async fn run_privileged(op: &PrivilegedOp) -> PrivilegedResult {
-    use tokio::io::AsyncWriteExt;
-
-    let exe = match utils::path::privileged_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            return PrivilegedResult {
-                errors: vec![format!("resolve orca binary: {e}")],
-                ..Default::default()
-            };
-        }
+    let refused = |e: String| PrivilegedResult {
+        errors: vec![e],
+        ..Default::default()
     };
     let payload = match serde_json::to_vec(op) {
         Ok(v) => v,
-        Err(e) => {
-            return PrivilegedResult {
-                errors: vec![format!("serialize op: {e}")],
-                ..Default::default()
-            };
-        }
+        Err(e) => return refused(format!("serialize op: {e}")),
     };
-
-    let mut child = match Command::new("sudo")
-        .arg("-n")
-        .arg(&exe)
-        .args(["admin", "storage-apply"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
+    let call = match utils::privileged::PrivilegedCall::helper("storage-apply", payload) {
         Ok(c) => c,
-        Err(e) => {
-            return PrivilegedResult {
-                errors: vec![format!("spawn sudo helper: {e}")],
-                ..Default::default()
-            };
-        }
+        Err(e) => return refused(format!("resolve orca binary: {e}")),
     };
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _written = stdin.write_all(&payload).await;
-        let _shut = stdin.shutdown().await;
-    }
-
-    match child.wait_with_output().await {
-        Ok(out) if out.status.success() => {
-            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| PrivilegedResult {
-                errors: vec![format!(
-                    "parse helper output: {e}: {}",
-                    String::from_utf8_lossy(&out.stdout).trim()
-                )],
-                ..Default::default()
-            })
-        }
-        Ok(out) => PrivilegedResult {
-            errors: vec![format!(
-                "helper exit {}: {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            )],
-            ..Default::default()
-        },
-        Err(e) => PrivilegedResult {
-            errors: vec![format!("run sudo helper: {e}")],
-            ..Default::default()
-        },
+    match utils::privileged::run(call).await {
+        Ok(out) if out.success => serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            refused(format!(
+                "parse helper output: {e}: {}",
+                String::from_utf8_lossy(&out.stdout).trim()
+            ))
+        }),
+        Ok(out) => refused(format!(
+            "helper exit {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => refused(format!("run sudo helper: {e}")),
     }
 }
 
@@ -2863,35 +2822,65 @@ mod tests {
         }
     }
 
-    // ── run_privileged: no valid sudo helper in the test env => errors ────────
     #[tokio::test]
-    async fn run_privileged_reports_errors_without_a_valid_helper() {
-        // In the test process there is no passwordless sudo grant for the
-        // (non-existent) `admin storage-apply` helper, so `sudo -n` either fails
-        // to spawn/authenticate or the invoked binary produces no parseable
-        // PrivilegedResult — every branch collects an error rather than panicking.
+    async fn run_privileged_never_reaches_real_sudo_in_tests() {
         let r = run_privileged(&PrivilegedOp::Unmount {
             targets: vec!["/orca/not/mounted/xyz".into()],
         })
         .await;
+        assert_eq!(r.errors.len(), 1, "{r:?}");
         assert!(
-            !r.errors.is_empty(),
-            "an unavailable privileged helper surfaces an error, not a panic: {r:?}"
+            r.errors[0].contains("refused in test builds"),
+            "{:?}",
+            r.errors
         );
-        assert!(!r.restarted, "a failed helper never reports a restart");
-        assert!(r.changed.is_empty(), "a failed helper changes nothing");
+        assert!(!r.restarted);
+        assert!(r.changed.is_empty());
     }
 
-    // ── force_reload: routes through the privileged seam and surfaces errors ───
+    #[tokio::test]
+    async fn run_privileged_sends_the_op_to_the_storage_apply_helper() {
+        use utils::privileged::testing::{Recorder, with_exec};
+        let rec = Recorder::new(utils::privileged::PrivilegedOutput {
+            success: true,
+            stdout: br#"{"changed":[],"restarted":true,"errors":[]}"#.to_vec(),
+            ..Default::default()
+        });
+        let op = PrivilegedOp::Unmount {
+            targets: vec!["/orca/x".into()],
+        };
+        let r = with_exec(rec.clone(), run_privileged(&op)).await;
+        assert!(r.restarted, "{r:?}");
+        let calls = rec.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].argv[1..], ["admin", "storage-apply"]);
+        assert_eq!(calls[0].stdin, serde_json::to_vec(&op).unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_privileged_surfaces_a_helper_failure() {
+        use utils::privileged::testing::{Recorder, with_exec};
+        let rec = Recorder::new(utils::privileged::PrivilegedOutput {
+            success: false,
+            status: "exit status: 1".into(),
+            stderr: b"sudo: a password is required".to_vec(),
+            ..Default::default()
+        });
+        let r = with_exec(
+            rec,
+            run_privileged(&PrivilegedOp::Unmount {
+                targets: vec!["/orca/x".into()],
+            }),
+        )
+        .await;
+        assert!(r.errors[0].contains("a password is required"), "{r:?}");
+        assert!(!r.restarted);
+    }
+
     #[tokio::test]
     async fn force_reload_surfaces_helper_errors_without_a_grant() {
-        // `force_reload` emits a `Reload` op through `run_privileged`; with no
-        // helper available it returns the collected errors (never empty here).
         let errors = force_reload().await;
-        assert!(
-            !errors.is_empty(),
-            "force_reload reports the unavailable-helper error: {errors:?}"
-        );
+        assert!(!errors.is_empty(), "{errors:?}");
     }
 
     // ── force_and_retrigger: a permanently-missing target is never recovered ──

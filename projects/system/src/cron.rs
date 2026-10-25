@@ -328,45 +328,21 @@ pub async fn run_cron(op: &CronOp) -> CronOpResult {
 
 /// Spawn `sudo -n <self> admin cron-apply` with `op` on stdin.
 async fn run_privileged_cron(op: &CronOp) -> CronOpResult {
-    use tokio::io::AsyncWriteExt;
-
-    let exe = match utils::path::privileged_exe() {
-        Ok(p) => p,
-        Err(e) => return CronOpResult::refused(format!("resolve orca binary: {e}")),
-    };
     let payload = match serde_json::to_vec(op) {
         Ok(v) => v,
         Err(e) => return CronOpResult::refused(format!("serialize op: {e}")),
     };
-
-    let mut child = match Command::new("sudo")
-        .arg("-n")
-        .arg(&exe)
-        .args(["admin", "cron-apply"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return CronOpResult::refused(format!("spawn sudo helper: {e}")),
+    let call = match utils::privileged::PrivilegedCall::helper("cron-apply", payload) {
+        Ok(c) => c.with_timeout(HELPER_TIMEOUT),
+        Err(e) => return CronOpResult::refused(format!("resolve orca binary: {e}")),
     };
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _written = stdin.write_all(&payload).await;
-        let _shut = stdin.shutdown().await;
-    }
-
-    match wait_bounded(child, HELPER_TIMEOUT).await {
-        Ok(out) if out.status.success() => {
-            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
-                CronOpResult::refused(format!(
-                    "parse helper output ({} bytes): {e}",
-                    out.stdout.len()
-                ))
-            })
-        }
+    match utils::privileged::run(call).await {
+        Ok(out) if out.success => serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            CronOpResult::refused(format!(
+                "parse helper output ({} bytes): {e}",
+                out.stdout.len()
+            ))
+        }),
         Ok(out) => CronOpResult::refused(format!(
             "helper exit {}: {}. Is `{CRON_USERS_ALLOWLIST}` present and the \
              `orca admin cron-apply` sudoers grant installed? (re-run `orca system install`)",

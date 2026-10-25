@@ -196,6 +196,7 @@ tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock = { workspace = true }
 rustls   = { workspace = true }
+utils    = { workspace = true, features = ["test-scope"] }
 
 # Pins the full plugin-facing surface (`#[orca_tool]`, ToolCtx, …).
 [[test]]

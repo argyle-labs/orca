@@ -493,57 +493,30 @@ pub fn validate(op: &LxcExecOp) -> Result<(), String> {
 /// grant `orca admin lxc-exec` exposes — the sibling of [`crate::autofs::run_privileged`].
 /// A spawn/parse failure surfaces in the result's `error` rather than a panic.
 pub async fn run_privileged_lxc(op: &LxcExecOp) -> LxcExecResult {
-    use tokio::io::AsyncWriteExt;
-
-    let exe = match utils::path::privileged_exe() {
-        Ok(p) => p,
-        Err(e) => return LxcExecResult::refused(format!("resolve orca binary: {e}")),
-    };
     let payload = match serde_json::to_vec(op) {
         Ok(v) => v,
         Err(e) => return LxcExecResult::refused(format!("serialize op: {e}")),
     };
-
-    let mut child = match Command::new("sudo")
-        .arg("-n")
-        .arg(&exe)
-        .args(["admin", "lxc-exec"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return LxcExecResult::refused(format!("spawn sudo helper: {e}")),
-    };
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _written = stdin.write_all(&payload).await;
-        let _shut = stdin.shutdown().await;
-    }
-
     let limit = exec_timeout(op) + LXC_EXEC_HELPER_GRACE;
-    let waited = tokio::time::timeout(limit, child.wait_with_output()).await;
-    let Ok(waited) = waited else {
-        return LxcExecResult::refused(format!(
-            "lxc-exec helper did not finish within {}s",
-            limit.as_secs()
-        ));
+    let call = match utils::privileged::PrivilegedCall::helper("lxc-exec", payload) {
+        Ok(c) => c.with_timeout(limit),
+        Err(e) => return LxcExecResult::refused(format!("resolve orca binary: {e}")),
     };
-    match waited {
-        Ok(out) if out.status.success() => {
-            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
-                LxcExecResult::refused(format!(
-                    "parse helper output: {e}: {}",
-                    String::from_utf8_lossy(&out.stdout).trim()
-                ))
-            })
-        }
+    match utils::privileged::run(call).await {
+        Ok(out) if out.success => serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            LxcExecResult::refused(format!(
+                "parse helper output: {e}: {}",
+                String::from_utf8_lossy(&out.stdout).trim()
+            ))
+        }),
         Ok(out) => LxcExecResult::refused(format!(
             "helper exit {}: {}",
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => LxcExecResult::refused(format!(
+            "lxc-exec helper did not finish within {}s",
+            limit.as_secs()
         )),
         Err(e) => LxcExecResult::refused(format!("run sudo helper: {e}")),
     }
@@ -736,45 +709,21 @@ impl Drop for TempFileGuard {
 /// [`run_privileged_lxc`]; a spawn/parse failure surfaces in `error`, never a
 /// panic. The op's `contents` ride stdin, never argv or a log line.
 pub async fn run_privileged_lxc_push(op: &LxcPushOp) -> LxcPushResult {
-    use tokio::io::AsyncWriteExt;
-
-    let exe = match utils::path::privileged_exe() {
-        Ok(p) => p,
-        Err(e) => return LxcPushResult::refused(format!("resolve orca binary: {e}")),
-    };
     let payload = match serde_json::to_vec(op) {
         Ok(v) => v,
         Err(e) => return LxcPushResult::refused(format!("serialize op: {e}")),
     };
-
-    let mut child = match Command::new("sudo")
-        .arg("-n")
-        .arg(&exe)
-        .args(["admin", "lxc-push"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
+    let call = match utils::privileged::PrivilegedCall::helper("lxc-push", payload) {
         Ok(c) => c,
-        Err(e) => return LxcPushResult::refused(format!("spawn sudo helper: {e}")),
+        Err(e) => return LxcPushResult::refused(format!("resolve orca binary: {e}")),
     };
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _written = stdin.write_all(&payload).await;
-        let _shut = stdin.shutdown().await;
-    }
-
-    match child.wait_with_output().await {
-        Ok(out) if out.status.success() => {
-            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
-                LxcPushResult::refused(format!(
-                    "parse helper output: {e}: {}",
-                    String::from_utf8_lossy(&out.stdout).trim()
-                ))
-            })
-        }
+    match utils::privileged::run(call).await {
+        Ok(out) if out.success => serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            LxcPushResult::refused(format!(
+                "parse helper output: {e}: {}",
+                String::from_utf8_lossy(&out.stdout).trim()
+            ))
+        }),
         Ok(out) => LxcPushResult::refused(format!(
             "helper exit {}: {}",
             out.status,

@@ -1,5 +1,3 @@
-use tokio::io::AsyncWriteExt;
-
 use crate::lxc_exec::ORCA_BIN_ENV;
 
 #[derive(Debug, Clone, Default, crate::serde::Serialize, crate::serde::Deserialize)]
@@ -41,33 +39,15 @@ pub async fn lxc_push(
 }
 
 async fn via_orca(orca_bin: &str, payload: &str) -> anyhow::Result<LxcPushResult> {
-    let mut child = tokio::process::Command::new("sudo")
-        .arg("-n")
-        .arg(orca_bin)
-        .args(["admin", "lxc-push"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("spawn `sudo {orca_bin} admin lxc-push`: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(payload.as_bytes())
-            .await
-            .map_err(|e| anyhow::anyhow!("lxc-push: write op: {e}"))?;
-        stdin
-            .shutdown()
-            .await
-            .map_err(|e| anyhow::anyhow!("lxc-push: close stdin: {e}"))?;
-    }
-    let out = child
-        .wait_with_output()
-        .await
-        .map_err(|e| anyhow::anyhow!("wait lxc-push helper: {e}"))?;
+    let out = utils::privileged::run(utils::privileged::PrivilegedCall::new(
+        [orca_bin, "admin", "lxc-push"],
+        payload,
+    ))
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn `sudo {orca_bin} admin lxc-push`: {e}"))?;
     helper_result(
-        out.status.success(),
-        out.status.code(),
+        out.success,
+        out.code,
         &out.stdout,
         &String::from_utf8_lossy(&out.stderr),
     )

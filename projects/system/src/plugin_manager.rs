@@ -308,26 +308,13 @@ fn save_signature(dir: &Path, software: &str, minisig: Option<&str>) -> Result<(
 /// signature as root. Installing is the trust decision, so no admin step.
 #[cfg(unix)]
 async fn request_trust(software: &str) -> Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let exe = utils::path::privileged_exe().context("resolve the privileged orca binary")?;
-    let mut child = tokio::process::Command::new("sudo")
-        .arg("-n")
-        .arg(&exe)
-        .args(["admin", "plugin-trust-signed"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("spawn sudo plugin-trust-signed")?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(software.as_bytes()).await?;
-        stdin.shutdown().await?;
-    }
-    let out = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+    let call = utils::privileged::PrivilegedCall::helper("plugin-trust-signed", software)
+        .context("resolve the privileged orca binary")?
+        .with_timeout(std::time::Duration::from_secs(30));
+    let out = utils::privileged::run(call)
         .await
-        .context("plugin-trust-signed timed out")??;
-    if !out.status.success() {
+        .context("plugin-trust-signed")?;
+    if !out.success {
         bail!(
             "plugin-trust-signed exited {}: {}",
             out.status,

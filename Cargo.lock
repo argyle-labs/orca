@@ -4374,6 +4374,7 @@ dependencies = [
  "orca-server",
  "orca-spec",
  "orca-system",
+ "orca-utils",
  "orca-workspace-hack",
  "serde_json",
  "tempfile",
