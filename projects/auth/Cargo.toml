@@ -31,7 +31,6 @@ sha2 = { workspace = true }
 url = { workspace = true }
 rusqlite = { workspace = true }
 argon2 = { workspace = true }
-reqwest = { workspace = true }
 rpassword = { workspace = true }
 orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 

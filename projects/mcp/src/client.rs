@@ -119,10 +119,44 @@ enum Transport {
     /// Each request opens a fresh /sse connection, gets a session endpoint, POSTs
     /// the JSON-RPC message, then reads the response from that same SSE stream.
     /// This is stateless per-request and matches the MCP /sse + /message model.
-    Sse {
-        base_url: String,
-        http: reqwest::Client,
-    },
+    Sse { base_url: String, http: SseHttp },
+}
+
+const SSE_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+struct SseHttp {
+    client: utils::http::Client,
+    token: Option<String>,
+    open_timeout: std::time::Duration,
+}
+
+impl SseHttp {
+    fn prepare(&self, req: utils::http::RequestBuilder) -> utils::http::RequestBuilder {
+        // A 307 would replay the JSON-RPC body to wherever the server points.
+        let req = req.follow_redirects(false).timeout(SSE_HTTP_TIMEOUT);
+        match &self.token {
+            Some(t) => req.bearer(t),
+            None => req,
+        }
+    }
+
+    fn get(&self, url: impl Into<String>) -> utils::http::RequestBuilder {
+        self.prepare(self.client.get(url))
+    }
+
+    fn post(&self, url: impl Into<String>) -> utils::http::RequestBuilder {
+        self.prepare(self.client.post(url))
+    }
+
+    async fn open_sse(&self, base_url: &str) -> Result<utils::http::StreamResponse> {
+        let req = self
+            .get(utils::url::join(base_url, "sse"))
+            .header("Accept", "text/event-stream");
+        match tokio::time::timeout(self.open_timeout, req.send_stream()).await {
+            Ok(r) => Ok(r?),
+            Err(_) => anyhow::bail!("SSE open timed out"),
+        }
+    }
 }
 
 pub struct McpClient {
@@ -224,30 +258,21 @@ impl McpClient {
     async fn connect_sse(cfg: &McpServerConfig) -> Result<Self> {
         let base_url = cfg.command.trim_end_matches('/').to_string();
 
-        let mut headers = reqwest::header::HeaderMap::new();
-        if let Some(token) = &cfg.token
-            && !token.is_empty()
-        {
-            let val = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|e| anyhow::anyhow!("invalid token: {e}"))?;
-            headers.insert(reqwest::header::AUTHORIZATION, val);
-        }
-
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .connect_timeout(std::time::Duration::from_secs(2))
-            .timeout(std::time::Duration::from_secs(60))
-            // A 307 would replay the JSON-RPC body to wherever the server points.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+        let http = SseHttp {
+            client: utils::http::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(2))
+                .build(),
+            token: cfg.token.clone().filter(|t| !t.is_empty()),
+            open_timeout: SSE_HTTP_TIMEOUT,
+        };
 
         // Probe with a health check before attempting handshake.
         let health = http
             .get(utils::url::join(&base_url, "health"))
-            .send()
+            .send_raw()
             .await?;
-        if !health.status().is_success() {
-            anyhow::bail!("SSE server health check failed: HTTP {}", health.status());
+        if !(200..300).contains(&health.status) {
+            anyhow::bail!("SSE server health check failed: HTTP {}", health.status);
         }
 
         let mut client = McpClient {
@@ -353,17 +378,13 @@ impl McpClient {
             Transport::Sse { base_url, http } => {
                 // Per-request SSE: open /sse, get session endpoint, POST request, read response.
                 // Each request gets its own isolated session so responses can't cross.
-                let sse_resp = http
-                    .get(utils::url::join(base_url, "sse"))
-                    .header("Accept", "text/event-stream")
-                    .send()
-                    .await?;
+                let sse_resp = http.open_sse(base_url).await?;
 
-                if !sse_resp.status().is_success() {
+                if !sse_resp.is_success() {
                     anyhow::bail!("SSE open failed: HTTP {}", sse_resp.status());
                 }
 
-                let mut stream = sse_resp.bytes_stream();
+                let mut stream = Box::pin(sse_resp.bytes_stream());
                 let mut buf = String::new();
 
                 // Read until we get the `data: /message?sessionId=…` endpoint line.
@@ -392,7 +413,7 @@ impl McpClient {
                     format!("{base_url}{session_post}")
                 };
 
-                http.post(&post_url).json(&msg).send().await?;
+                http.post(&post_url).json(&msg).send_raw().await?;
 
                 match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
                     let mut buf = String::new();
@@ -436,14 +457,10 @@ impl McpClient {
                 // Notifications via SSE: open a session, POST the notification.
                 // The peer will ignore notifications that aren't JSON-RPC requests
                 // (no `id` field means no response expected). Fire and forget.
-                if let Ok(sse_resp) = http
-                    .get(utils::url::join(base_url, "sse"))
-                    .header("Accept", "text/event-stream")
-                    .send()
-                    .await
-                    && sse_resp.status().is_success()
+                if let Ok(sse_resp) = http.open_sse(base_url).await
+                    && sse_resp.is_success()
                 {
-                    let mut stream = sse_resp.bytes_stream();
+                    let mut stream = Box::pin(sse_resp.bytes_stream());
                     let mut buf = String::new();
                     // Read endpoint event.
                     let mut session_post = String::new();
@@ -465,7 +482,7 @@ impl McpClient {
                         } else {
                             format!("{base_url}{session_post}")
                         };
-                        _ = http.post(&post_url).json(&msg).send().await;
+                        _ = http.post(&post_url).json(&msg).send_raw().await;
                     }
                 }
             }
@@ -2081,7 +2098,7 @@ for line in sys.stdin:
 
     // ── SSE transport (connect_sse / request SSE branch / notify SSE branch) ──
 
-    // Install the process-wide rustls crypto provider once so `reqwest::Client`
+    // Install the process-wide rustls crypto provider once so the HTTP client
     // (built with `rustls-no-provider`) can construct. Idempotent: a second
     // `install_default` returns `Err`, which we intentionally ignore.
     #[cfg(unix)]
@@ -2096,8 +2113,30 @@ for line in sys.stdin:
     // responses as `data: {json}` frames), and POST /message?sessionId=… (parses the
     // JSON-RPC body, computes an initialize/tools-list/tools-call-echo/boom-error
     // response, routes it to the matching SSE stream; notifications get no response).
-    // Every response carries `Connection: close` so reqwest never pools a finished
+    // Every response carries `Connection: close` so the client never pools a finished
     // socket.
+    #[tokio::test]
+    async fn sse_open_times_out_when_peer_never_answers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            drop(sock);
+        });
+        let http = SseHttp {
+            client: utils::http::Client::new(),
+            token: None,
+            open_timeout: std::time::Duration::from_millis(200),
+        };
+        let err = match http.open_sse(&format!("http://{addr}")).await {
+            Ok(_) => panic!("open_sse should time out"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("timed out"), "{err}");
+        held.abort();
+    }
+
     #[cfg(unix)]
     async fn spawn_sse_server(healthy: bool) -> (String, tokio::task::JoinHandle<()>) {
         use std::collections::HashMap as Map;

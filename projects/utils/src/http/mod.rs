@@ -258,6 +258,7 @@ impl Client {
             method,
             url: url.into(),
             headers: HashMap::new(),
+            raw_headers: Vec::new(),
             query: Vec::new(),
             body: None,
             insecure: false,
@@ -310,6 +311,7 @@ pub struct RequestBuilder {
     method: reqwest::Method,
     url: String,
     headers: HashMap<String, String>,
+    raw_headers: Vec<(String, Vec<u8>)>,
     query: Vec<(String, String)>,
     body: Option<Body>,
     insecure: bool,
@@ -331,6 +333,10 @@ enum Body {
 }
 
 impl RequestBuilder {
+    pub fn append_header_bytes(mut self, k: impl Into<String>, v: impl Into<Vec<u8>>) -> Self {
+        self.raw_headers.push((k.into(), v.into()));
+        self
+    }
     pub fn header(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
         self.headers.insert(k.into(), v.into());
         self
@@ -381,6 +387,9 @@ impl RequestBuilder {
         self.timeout = t;
         self
     }
+    pub fn no_timeout(self) -> Self {
+        self.timeout(Duration::MAX)
+    }
     /// Override the default 8 MiB response cap. Use for legitimate large
     /// payloads (binary releases, container images, backup archives).
     pub fn max_body(mut self, n: usize) -> Self {
@@ -416,7 +425,9 @@ impl RequestBuilder {
         extra_headers: &[(&str, &str)],
         apply_timeout: bool,
     ) -> Result<reqwest::Response, HttpError> {
-        let deadline = apply_timeout.then(|| std::time::Instant::now() + self.timeout);
+        let deadline = apply_timeout
+            .then(|| std::time::Instant::now().checked_add(self.timeout))
+            .flatten();
         let attempts = if self.retry_enabled() {
             self.max_attempts
         } else {
@@ -457,6 +468,7 @@ impl RequestBuilder {
         method: &reqwest::Method,
         url: &url::Url,
         headers: &HashMap<String, String>,
+        raw_headers: &[(String, Vec<u8>)],
         with_body: bool,
         timeout: Option<Duration>,
     ) -> Result<reqwest::RequestBuilder, HttpError> {
@@ -464,6 +476,17 @@ impl RequestBuilder {
         let mut req = client.request(method.clone(), url.clone());
         for (k, v) in headers {
             req = req.header(k, v);
+        }
+        let mut raw = reqwest::header::HeaderMap::new();
+        for (k, v) in raw_headers {
+            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
+                .map_err(|e| HttpError::InvalidUrl(format!("bad header name '{k}': {e}")))?;
+            let value = reqwest::header::HeaderValue::from_bytes(v)
+                .map_err(|e| HttpError::InvalidUrl(format!("bad header value for '{k}': {e}")))?;
+            raw.append(name, value);
+        }
+        if !raw.is_empty() {
+            req = req.headers(raw);
         }
         match self.body.as_ref().filter(|_| with_body) {
             Some(Body::Json(v)) => {
@@ -502,6 +525,7 @@ impl RequestBuilder {
             url.query_pairs_mut().extend_pairs(&self.query);
         }
         let mut headers = self.headers.clone();
+        let mut raw_headers = self.raw_headers.clone();
         for (k, v) in extra_headers {
             headers.insert((*k).to_string(), (*v).to_string());
         }
@@ -522,7 +546,14 @@ impl RequestBuilder {
                 None => None,
             };
             let resp = self
-                .build_request(&method, &url, &headers, with_body, hop_timeout)
+                .build_request(
+                    &method,
+                    &url,
+                    &headers,
+                    &raw_headers,
+                    with_body,
+                    hop_timeout,
+                )
                 .await?
                 .send()
                 .await?;
@@ -549,6 +580,8 @@ impl RequestBuilder {
             }
             if !with_body {
                 headers.retain(|k, _| !BODY_HEADERS.iter().any(|h| k.eq_ignore_ascii_case(h)));
+                raw_headers
+                    .retain(|(k, _)| !BODY_HEADERS.iter().any(|h| k.eq_ignore_ascii_case(h)));
             }
             let cross_origin = !same_origin(&url, &next);
             if cross_origin && with_body && self.body.is_some() {
@@ -559,6 +592,11 @@ impl RequestBuilder {
             }
             if cross_origin {
                 headers.retain(|k, _| {
+                    CROSS_ORIGIN_SAFE_HEADERS
+                        .iter()
+                        .any(|s| k.eq_ignore_ascii_case(s))
+                });
+                raw_headers.retain(|(k, _)| {
                     CROSS_ORIGIN_SAFE_HEADERS
                         .iter()
                         .any(|s| k.eq_ignore_ascii_case(s))
@@ -1134,6 +1172,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status, 200);
+    }
+
+    #[tokio::test]
+    async fn append_header_bytes_keeps_repeats_and_non_utf8() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut chunk).await.unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            buf
+        });
+        Client::new()
+            .get(format!("http://{addr}/h"))
+            .append_header_bytes("x-a", b"1".to_vec())
+            .append_header_bytes("x-a", b"2".to_vec())
+            .append_header_bytes("x-b", vec![0xe9])
+            .send_raw()
+            .await
+            .unwrap();
+        let req = server.await.unwrap();
+        let has = |needle: &[u8]| req.windows(needle.len()).any(|w| w == needle);
+        assert!(has(b"x-a: 1\r\n"));
+        assert!(has(b"x-a: 2\r\n"));
+        assert!(has(b"x-b: \xe9\r\n"));
     }
 
     #[tokio::test]

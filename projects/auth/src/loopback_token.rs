@@ -75,12 +75,15 @@ pub fn get() -> Option<&'static str> {
     TOKEN.get().map(|s| s.as_str())
 }
 
-/// Build a `reqwest::Client` with `danger_accept_invalid_certs(true)` — but
-/// ONLY after asserting that `url` targets a loopback address. Panics (rather
+/// Start a `method` request with cert verification disabled — but ONLY after
+/// asserting that `url` targets a loopback address. Panics (rather
 /// than returning Err) so a mis-configured URL is caught immediately at the
 /// call site and can never silently talk to a non-loopback host with cert
 /// verification disabled.
-pub fn loopback_only_reqwest_client(url: &str) -> anyhow::Result<reqwest::Client> {
+pub fn loopback_only_request(
+    method: &str,
+    url: &str,
+) -> anyhow::Result<utils::http::RequestBuilder> {
     let after_scheme = url
         .trim_start_matches("https://")
         .trim_start_matches("http://");
@@ -97,14 +100,14 @@ pub fn loopback_only_reqwest_client(url: &str) -> anyhow::Result<reqwest::Client
     };
     assert!(
         host == "127.0.0.1" || host == "localhost" || host == "[::1]",
-        "loopback_only_reqwest_client called with non-loopback URL '{url}' — \
-         danger_accept_invalid_certs is only safe on the loopback interface"
+        "loopback_only_request called with non-loopback URL '{url}' — \
+         disabled cert verification is only safe on the loopback interface"
     );
-    Ok(reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+    Ok(utils::http::shared()
+        .request_str(method, url)?
+        .insecure(true)
         // A redirect would carry the loopback bearer and body off-box.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?)
+        .follow_redirects(false))
 }
 
 /// Test-only seeding hook — installs a deterministic loopback token from
@@ -256,32 +259,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loopback_only_reqwest_client_accepts_127() {
+    async fn loopback_only_request_accepts_127() {
         ::model::ensure_crypto_provider();
-        loopback_only_reqwest_client("https://127.0.0.1:12000/api/foo").unwrap();
+        loopback_only_request("GET", "https://127.0.0.1:12000/api/foo").unwrap();
     }
 
     #[tokio::test]
-    async fn loopback_only_reqwest_client_accepts_localhost() {
+    async fn loopback_only_request_accepts_localhost() {
         ::model::ensure_crypto_provider();
-        loopback_only_reqwest_client("http://localhost:8080/").unwrap();
+        loopback_only_request("GET", "http://localhost:8080/").unwrap();
     }
 
     #[tokio::test]
-    async fn loopback_only_reqwest_client_accepts_ipv6_loopback() {
+    async fn loopback_only_request_accepts_ipv6_loopback() {
         ::model::ensure_crypto_provider();
-        loopback_only_reqwest_client("https://[::1]:12000/").unwrap();
+        loopback_only_request("GET", "https://[::1]:12000/").unwrap();
     }
 
     #[test]
     #[should_panic(expected = "non-loopback URL")]
-    fn loopback_only_reqwest_client_panics_on_external_host() {
-        loopback_only_reqwest_client("https://example.com/api").unwrap();
+    fn loopback_only_request_panics_on_external_host() {
+        loopback_only_request("GET", "https://example.com/api").unwrap();
     }
 
     #[test]
     #[should_panic(expected = "non-loopback URL")]
-    fn loopback_only_reqwest_client_panics_on_non_loopback_ip() {
-        loopback_only_reqwest_client("https://10.0.0.1/api").unwrap();
+    fn loopback_only_request_panics_on_non_loopback_ip() {
+        loopback_only_request("GET", "https://10.0.0.1/api").unwrap();
     }
 }
