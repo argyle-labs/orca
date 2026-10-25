@@ -128,6 +128,16 @@ pub fn redact_json(mut value: serde_json::Value) -> serde_json::Value {
     value
 }
 
+pub fn redact_values(text: &str, values: &[&str]) -> String {
+    let out = values
+        .iter()
+        .filter(|v| !v.is_empty())
+        .fold(text.to_string(), |acc, v| acc.replace(v, REDACTED_TEXT));
+    #[cfg(feature = "scrub_text")]
+    let out = scrub_line(&out).into_owned();
+    out
+}
+
 // ── Textual scrub (log lines) ───────────────────────────────────────────────
 
 #[cfg(feature = "scrub_text")]
@@ -225,6 +235,15 @@ pub use text::scrub_line;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn redact_values_replaces_every_occurrence_and_skips_empty() {
+        assert_eq!(
+            redact_values("bad hunter2 then hunter2", &["hunter2", ""]),
+            format!("bad {REDACTED_TEXT} then {REDACTED_TEXT}")
+        );
+        assert_eq!(redact_values("clean", &[]), "clean");
+    }
 
     #[test]
     fn sensitive_keys_ignore_case_and_separators() {

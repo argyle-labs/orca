@@ -107,6 +107,30 @@ pub fn secret_delete(conn: &Connection, name: &str) -> Result<bool> {
     delete(conn, &format!("{SECRET_PREFIX}{name}"))
 }
 
+pub fn secret_previous_get(conn: &Connection, name: &str) -> Result<Option<String>> {
+    get(conn, &format!("{SECRET_PREFIX}{name}#previous"))
+}
+
+pub fn secret_previous_set(conn: &Connection, name: &str, value: &str) -> Result<()> {
+    set(conn, &format!("{SECRET_PREFIX}{name}#previous"), value)
+}
+
+pub fn secret_previous_delete(conn: &Connection, name: &str) -> Result<bool> {
+    delete(conn, &format!("{SECRET_PREFIX}{name}#previous"))
+}
+
+pub fn secret_restore_marker_get(conn: &Connection, name: &str) -> Result<Option<String>> {
+    get(conn, &format!("{SECRET_PREFIX}{name}#restore"))
+}
+
+pub fn secret_restore_marker_set(conn: &Connection, name: &str, marker: &str) -> Result<()> {
+    set(conn, &format!("{SECRET_PREFIX}{name}#restore"), marker)
+}
+
+pub fn secret_restore_marker_delete(conn: &Connection, name: &str) -> Result<bool> {
+    delete(conn, &format!("{SECRET_PREFIX}{name}#restore"))
+}
+
 /// Mask an API key for display: first 8 chars + ellipsis + last 4. Short keys (≤12) are fully masked.
 pub fn mask_key(key: &str) -> String {
     let chars: Vec<char> = key.chars().collect();
@@ -169,6 +193,21 @@ mod tests {
         );
         assert!(secret_delete(&conn, "ANTHROPIC_KEY").unwrap());
         assert!(secret_get(&conn, "ANTHROPIC_KEY").unwrap().is_none());
+    }
+
+    #[test]
+    fn secret_previous_and_marker_live_under_the_secret_prefix() {
+        let conn = test_conn();
+        secret_previous_set(&conn, "k", "old").unwrap();
+        secret_restore_marker_set(&conn, "k", "m").unwrap();
+        let all = list_prefix(&conn, "secrets.").unwrap();
+        assert!(all.iter().any(|(k, _)| k == "secrets.k#previous"));
+        assert!(all.iter().any(|(k, _)| k == "secrets.k#restore"));
+        assert_eq!(secret_get(&conn, "k").unwrap(), None);
+        assert!(secret_previous_delete(&conn, "k").unwrap());
+        assert!(secret_restore_marker_delete(&conn, "k").unwrap());
+        assert_eq!(secret_previous_get(&conn, "k").unwrap(), None);
+        assert_eq!(secret_restore_marker_get(&conn, "k").unwrap(), None);
     }
 
     #[test]

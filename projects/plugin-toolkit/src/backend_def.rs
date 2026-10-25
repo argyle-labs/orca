@@ -281,6 +281,14 @@ pub fn host_facts_backend_def(name: &str, invoke_prefix: &str) -> crate::abi::Ba
     }
 }
 
+fn secrets_backend_ops() -> Vec<String> {
+    use crate::contract::secrets_backend::{CAPABILITIES_OP, PUT_OP, RESOLVE_OP, RESTORE_OP};
+    [RESOLVE_OP, CAPABILITIES_OP, PUT_OP, RESTORE_OP]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 /// Build the `secrets_backend`-domain [`BackendDef`](crate::abi::BackendDef) a
 /// plugin advertises so orca resolves secrets whose `backend` kind matches
 /// `kind` (e.g. `onepassword`) by dispatching to the plugin.
@@ -297,7 +305,7 @@ pub fn secrets_backend_def(kind: &str, invoke_prefix: &str) -> crate::abi::Backe
         kind: String::new(),
         runtime: String::new(),
         endpoint: String::new(),
-        capabilities: vec![crate::contract::secrets_backend::RESOLVE_OP.to_string()],
+        capabilities: secrets_backend_ops(),
         invoke_prefix: invoke_prefix.to_string(),
         ..Default::default()
     }
@@ -775,14 +783,14 @@ mod tests {
     }
 
     #[test]
-    fn secrets_backend_def_advertises_the_resolve_op() {
+    fn secrets_backend_def_advertises_resolve_and_write_ops() {
         let def = secrets_backend_def("onepassword", "op");
         assert_eq!(def.domain, "secrets_backend");
         assert_eq!(def.name, "onepassword");
         assert_eq!(def.invoke_prefix, "op");
         assert_eq!(
             def.capabilities,
-            vec![crate::contract::secrets_backend::RESOLVE_OP.to_string()]
+            vec!["resolve", "capabilities", "put", "restore"]
         );
     }
 

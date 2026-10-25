@@ -69,7 +69,7 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<SecretRecord>> {
 /// mesh but is not flagged secure (mesh_self.self_secure = 0). Hosts that
 /// have never run `orca system join` (no mesh_self row) bypass
 /// the gate so non-mesh workflows still work.
-fn ensure_self_secure(conn: &Connection) -> Result<()> {
+pub fn ensure_write_allowed(conn: &Connection) -> Result<()> {
     use rusqlite::OptionalExtension;
     let v: Option<i64> = conn
         .query_row("SELECT self_secure FROM mesh_self WHERE id = 1", [], |r| {
@@ -86,6 +86,17 @@ fn ensure_self_secure(conn: &Connection) -> Result<()> {
     }
 }
 
+pub fn ensure_valid_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        anyhow::bail!("invalid secret name '{name}': use only A-Z a-z 0-9 . _ -");
+    }
+    Ok(())
+}
+
 /// Upsert a metadata row. Returns true if the row was created, false on update.
 pub fn upsert(
     conn: &Connection,
@@ -94,7 +105,8 @@ pub fn upsert(
     ref_path: &str,
     description: Option<&str>,
 ) -> Result<bool> {
-    ensure_self_secure(conn)?;
+    ensure_write_allowed(conn)?;
+    ensure_valid_name(name)?;
     let existed = conn
         .query_row(
             "SELECT 1 FROM secrets WHERE name = ?1",
@@ -114,11 +126,13 @@ pub fn upsert(
              updated_at  = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
         rusqlite::params![name, backend, ref_path, description],
     )?;
+    clear_restore_state(conn, name)?;
     Ok(!existed)
 }
 
 /// Delete the metadata row and (for inline) any stored value. Returns true if anything was removed.
 pub fn delete(conn: &Connection, name: &str) -> Result<bool> {
+    ensure_write_allowed(conn)?;
     // Look up the record first so we know whether to also clean the inline value.
     let record = get(conn, name)?;
     let mut removed = false;
@@ -137,6 +151,7 @@ pub fn delete(conn: &Connection, name: &str) -> Result<bool> {
             // source of truth for whether the secret existed.
             let _ = settings::secret_delete(conn, name)?;
         }
+        clear_restore_state(conn, name)?;
     }
     Ok(removed)
 }
@@ -150,8 +165,65 @@ pub fn read_inline_value(conn: &Connection, name: &str) -> Result<Option<String>
 /// Store the inline value for `name`. The metadata row should already exist
 /// (caller `upsert`s first).
 pub fn write_inline_value(conn: &Connection, name: &str, value: &str) -> Result<()> {
-    ensure_self_secure(conn)?;
+    ensure_write_allowed(conn)?;
     settings::secret_set(conn, name, value)
+}
+
+fn clear_restore_state(conn: &Connection, name: &str) -> Result<()> {
+    settings::secret_previous_delete(conn, name)?;
+    settings::secret_restore_marker_delete(conn, name)?;
+    Ok(())
+}
+
+pub fn put_inline_value(conn: &Connection, name: &str, value: &str) -> Result<()> {
+    ensure_write_allowed(conn)?;
+    match read_inline_value(conn, name)? {
+        Some(old) => settings::secret_previous_set(conn, name, &old)?,
+        None => {
+            settings::secret_previous_delete(conn, name)?;
+        }
+    }
+    settings::secret_set(conn, name, value)
+}
+
+pub fn restore_inline_value(conn: &Connection, name: &str) -> Result<()> {
+    ensure_write_allowed(conn)?;
+    let previous = settings::secret_previous_get(conn, name)?
+        .ok_or_else(|| anyhow::anyhow!("inline secret '{name}' has no previous value"))?;
+    settings::secret_previous_delete(conn, name)?;
+    settings::secret_set(conn, name, &previous)
+}
+
+fn restore_marker(record: &SecretRecord, epoch: &str) -> String {
+    format!("{}\n{}\n{epoch}", record.backend, record.ref_path)
+}
+
+pub fn arm_external_restore(conn: &Connection, record: &SecretRecord, epoch: &str) -> Result<()> {
+    ensure_write_allowed(conn)?;
+    settings::secret_restore_marker_set(conn, &record.name, &restore_marker(record, epoch))
+}
+
+pub fn ensure_external_restore_armed(
+    conn: &Connection,
+    record: &SecretRecord,
+    epoch: &str,
+) -> Result<()> {
+    ensure_write_allowed(conn)?;
+    if settings::secret_restore_marker_get(conn, &record.name)?.as_deref()
+        != Some(restore_marker(record, epoch).as_str())
+    {
+        anyhow::bail!(
+            "secret '{}' has no previous value to restore on backend '{}'",
+            record.name,
+            record.backend
+        );
+    }
+    Ok(())
+}
+
+pub fn disarm_external_restore(conn: &Connection, name: &str) -> Result<()> {
+    settings::secret_restore_marker_delete(conn, name)?;
+    Ok(())
 }
 
 /// Multi-instance secret convention. Keys follow `<provider>.<instance>.<field>`
@@ -481,6 +553,122 @@ mod tests {
     use db::testing::test_conn;
 
     #[test]
+    fn restore_applies_previous_once_then_fails() {
+        let conn = test_conn();
+        upsert(&conn, "app.pw", "inline", "", None).unwrap();
+        write_inline_value(&conn, "app.pw", "one").unwrap();
+        put_inline_value(&conn, "app.pw", "two").unwrap();
+        assert_eq!(
+            read_inline_value(&conn, "app.pw").unwrap().as_deref(),
+            Some("two")
+        );
+        restore_inline_value(&conn, "app.pw").unwrap();
+        assert_eq!(
+            read_inline_value(&conn, "app.pw").unwrap().as_deref(),
+            Some("one")
+        );
+        let err = restore_inline_value(&conn, "app.pw").unwrap_err();
+        assert!(err.to_string().contains("no previous value"), "{err}");
+        assert_eq!(
+            read_inline_value(&conn, "app.pw").unwrap().as_deref(),
+            Some("one")
+        );
+        put_inline_value(&conn, "app.pw", "three").unwrap();
+        assert!(delete(&conn, "app.pw").unwrap());
+        assert!(
+            settings::secret_previous_get(&conn, "app.pw")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn upsert_clears_the_previous_value() {
+        let conn = test_conn();
+        upsert(&conn, "app.pw", "inline", "", None).unwrap();
+        write_inline_value(&conn, "app.pw", "one").unwrap();
+        put_inline_value(&conn, "app.pw", "two").unwrap();
+        upsert(&conn, "app.pw", "inline", "", None).unwrap();
+        assert!(
+            settings::secret_previous_get(&conn, "app.pw")
+                .unwrap()
+                .is_none()
+        );
+        assert!(restore_inline_value(&conn, "app.pw").is_err());
+    }
+
+    #[test]
+    fn writes_are_refused_on_a_non_secure_mesh_member() {
+        let conn = test_conn();
+        upsert(&conn, "app.pw", "inline", "", None).unwrap();
+        write_inline_value(&conn, "app.pw", "one").unwrap();
+        put_inline_value(&conn, "app.pw", "two").unwrap();
+        conn.execute(
+            "INSERT INTO mesh_self (id, self_secure, set_at) VALUES (1, 0, 0)",
+            [],
+        )
+        .unwrap();
+        assert!(ensure_write_allowed(&conn).is_err());
+        assert!(put_inline_value(&conn, "app.pw", "x").is_err());
+        assert!(restore_inline_value(&conn, "app.pw").is_err());
+        assert!(upsert(&conn, "app.pw", "inline", "", None).is_err());
+        assert!(delete(&conn, "app.pw").is_err());
+        assert!(get(&conn, "app.pw").unwrap().is_some());
+        assert_eq!(
+            read_inline_value(&conn, "app.pw").unwrap().as_deref(),
+            Some("two")
+        );
+    }
+
+    #[test]
+    fn external_restore_is_armed_once_by_put_and_cleared_by_upsert_and_delete() {
+        let conn = test_conn();
+        upsert(&conn, "ext", "fake-959", "fake://a", None).unwrap();
+        let rec = get(&conn, "ext").unwrap().unwrap();
+        assert!(ensure_external_restore_armed(&conn, &rec, "e1").is_err());
+        arm_external_restore(&conn, &rec, "e1").unwrap();
+        ensure_external_restore_armed(&conn, &rec, "e1").unwrap();
+        assert!(ensure_external_restore_armed(&conn, &rec, "e2").is_err());
+        disarm_external_restore(&conn, "ext").unwrap();
+        assert!(ensure_external_restore_armed(&conn, &rec, "e1").is_err());
+
+        arm_external_restore(&conn, &rec, "e1").unwrap();
+        upsert(&conn, "ext", "fake-959", "fake://b", None).unwrap();
+        assert!(ensure_external_restore_armed(&conn, &rec, "e1").is_err());
+        let moved = get(&conn, "ext").unwrap().unwrap();
+        arm_external_restore(&conn, &rec, "e1").unwrap();
+        assert!(ensure_external_restore_armed(&conn, &moved, "e1").is_err());
+
+        arm_external_restore(&conn, &moved, "e1").unwrap();
+        assert!(delete(&conn, "ext").unwrap());
+        assert!(
+            settings::secret_restore_marker_get(&conn, "ext")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn upsert_rejects_names_outside_the_allowed_charset() {
+        let conn = test_conn();
+        for bad in ["x#restore", "x#previous", "", "a b", "a/b", "a:b"] {
+            assert!(upsert(&conn, bad, "inline", "", None).is_err(), "{bad:?}");
+        }
+        for good in ["proxmox.delta.api_url", "A-z_0.9"] {
+            upsert(&conn, good, "inline", "", None).unwrap();
+        }
+    }
+
+    #[test]
+    fn restore_without_a_previous_value_errors() {
+        let conn = test_conn();
+        upsert(&conn, "fresh", "inline", "", None).unwrap();
+        put_inline_value(&conn, "fresh", "first").unwrap();
+        let err = restore_inline_value(&conn, "fresh").unwrap_err();
+        assert!(err.to_string().contains("no previous value"), "{err}");
+    }
+
+    #[test]
     fn checked_grant_allows_holder_read_until_revoked() {
         let conn = test_conn();
         upsert(&conn, "gitea.api.token", "inline", "", None).unwrap();
@@ -516,7 +704,7 @@ mod tests {
 
     #[test]
     fn get_resolves_external_backend_for_granted_holder() {
-        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
+        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend)).ok();
         let conn = test_conn();
         upsert(
             &conn,
@@ -540,7 +728,7 @@ mod tests {
 
     #[test]
     fn ensure_backend_registered_rejects_unknown_and_lists_registered() {
-        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
+        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend)).ok();
         assert!(ensure_backend_registered("inline").is_ok());
         assert!(ensure_backend_registered("fake-959").is_ok());
         let err = ensure_backend_registered("op").unwrap_err().to_string();
@@ -550,7 +738,7 @@ mod tests {
 
     #[test]
     fn get_errors_for_unregistered_or_failing_backend() {
-        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
+        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend)).ok();
         let conn = test_conn();
         upsert(&conn, "a.tok", "absent-959", "x://y", None).unwrap();
         upsert(&conn, "b.tok", "fake-959", "fake://other", None).unwrap();
@@ -563,7 +751,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_resolves_from_inside_a_runtime() {
-        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
+        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend)).ok();
         let conn = test_conn();
         upsert(
             &conn,
@@ -582,7 +770,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_resolves_from_inside_a_multi_thread_runtime() {
-        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend));
+        contract::secrets_backend::register_provider(std::sync::Arc::new(FakeBackend)).ok();
         let conn = test_conn();
         upsert(
             &conn,
@@ -618,7 +806,7 @@ mod tests {
 
     #[test]
     fn external_resolve_runs_after_the_connection_is_released() {
-        contract::secrets_backend::register_provider(std::sync::Arc::new(CallsBackIntoDb));
+        contract::secrets_backend::register_provider(std::sync::Arc::new(CallsBackIntoDb)).unwrap();
         upsert(
             &ONE_CONN.lock().unwrap(),
             "cb.tok",
@@ -659,7 +847,7 @@ mod tests {
         assert!(grant_checked(&conn, "mylar", "nope.token", "a").is_err());
         assert!(grant_checked(&conn, "gitea", "gitea.api.token", "a").is_err());
         assert!(grant_checked(&conn, "Bad Id", "gitea.api.token", "a").is_err());
-        upsert(&conn, "gitea.*", "inline", "", None).unwrap();
+        assert!(upsert(&conn, "gitea.*", "inline", "", None).is_err());
         assert!(grant_checked(&conn, "mylar", "gitea.*", "a").is_err());
         assert!(grant_checked(&conn, "mylar", "gitea.%", "a").is_err());
         assert!(grant_checked(&conn, "mylar", "", "a").is_err());

@@ -1030,7 +1030,9 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
     // Reuse the MCP path's ToolCtx builder so every service trait (Docker,
     // Plugins, McpRegistry, etc.) is registered exactly once. Dispatch goes
     // through `OrcaTool::run` directly, not the inventory walk.
-    let ctx = Arc::new(mcp::build_local_tool_ctx(Arc::new(config)));
+    let mut ctx = mcp::build_local_tool_ctx(Arc::new(config));
+    ctx.set_owner_cli(true);
+    let ctx = Arc::new(ctx);
 
     // The managed-unit kinds route through the daemon's REST path, not the CliOp
     // inventory, so try them first (only claims `<kind>.<op>` names in `unit_routes`).

@@ -24,6 +24,15 @@ fn main() -> plugin_toolkit::anyhow::Result<()> {
 }
 ```
 
+Writes are optional. A backend that supports them overrides `capabilities`
+(returning `BackendCapabilities::writable()` or `write_unavailable(reason)`),
+`put` and `restore_previous`. Restore is one-shot: `put` keeps exactly one
+previous value and `restore_previous` reinstates and forgets it, so a second
+restore without an intervening `put` errors. Core enforces the same rule, gates
+every write on `secrets::ensure_write_allowed`, and requires `super-admin`; a
+backend never authorizes. Backend names are unique per host, so registering a
+name already held fails.
+
 A plugin that also exposes an `#[orca_tool]` surface just adds `.tools([..])`
 (plus the force-link `use <crate> as _;`) alongside the facet.
 

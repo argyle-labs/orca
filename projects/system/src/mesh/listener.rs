@@ -1318,6 +1318,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exec_refuses_secret_writes() {
+        use auth as _;
+        dispatch::remote_ok::install(dispatch::local_only_names());
+        for tool in [
+            "secrets.put",
+            "secrets.restore",
+            "secrets.upsert",
+            "secrets.delete",
+        ] {
+            let params = serde_json::json!({ "tool": tool, "args": { "name": "s", "value": "v" } });
+            let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("local_only"), "{tool}: {err}");
+        }
+    }
+
+    #[tokio::test]
     async fn exec_refuses_a_local_only_plugin_tool() {
         install_fake_plugin();
         let params = serde_json::json!({ "tool": PLUGIN_LOCAL_TOOL, "args": {} });

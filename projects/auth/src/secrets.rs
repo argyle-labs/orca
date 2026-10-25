@@ -114,6 +114,45 @@ pub struct SecretMutationReport {
     pub created: bool,
 }
 
+#[derive::snake_aliases]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretPutArgs {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[arg(long)]
+    pub value: Option<String>,
+    /// CLI only: read the value from stdin instead of `--value`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[arg(long)]
+    pub value_stdin: bool,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct SecretRestoreArgs {
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SecretValueChangeReport {
+    pub name: String,
+    pub backend: String,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+pub struct SecretBackendListArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SecretBackendEntry {
+    pub backend: String,
+    pub capabilities: contract::secrets_backend::BackendCapabilities,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SecretBackendListReport {
+    pub backends: Vec<SecretBackendEntry>,
+}
+
 // ── secret.delete ───────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -185,6 +224,155 @@ pub async fn get_secret(name: &str) -> anyhow::Result<(String, utils::secret::Se
         _ => contract::secrets_backend::resolve(&row.backend, &row.ref_path).await?,
     };
     Ok((row.backend, utils::secret::Secret::new(value)))
+}
+
+pub async fn backend_capabilities(
+    backend: &str,
+) -> anyhow::Result<contract::secrets_backend::BackendCapabilities> {
+    if backend == "inline" {
+        return Ok(contract::secrets_backend::BackendCapabilities::writable());
+    }
+    contract::secrets_backend::capabilities(backend).await
+}
+
+static WRITE_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+struct SecretWriteGuard {
+    name: String,
+    local: Option<tokio::sync::OwnedMutexGuard<()>>,
+    _file: Option<std::fs::File>,
+}
+
+impl Drop for SecretWriteGuard {
+    fn drop(&mut self) {
+        self.local.take();
+        let mut locks = WRITE_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+        if locks
+            .get(&self.name)
+            .is_some_and(|l| std::sync::Arc::strong_count(l) == 1)
+        {
+            locks.remove(&self.name);
+        }
+    }
+}
+
+async fn lock_secret(name: &str) -> anyhow::Result<SecretWriteGuard> {
+    let lock = WRITE_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(name.to_string())
+        .or_default()
+        .clone();
+    let local = lock.lock_owned().await;
+    let file = match utils::home::orca_home() {
+        Some(home) => {
+            let path = home.join("locks").join(format!(
+                "secret-{}.lock",
+                utils::hash::sha256_hex(name.as_bytes())
+            ));
+            Some(
+                tokio::task::spawn_blocking(move || -> anyhow::Result<std::fs::File> {
+                    if let Some(dir) = path.parent() {
+                        std::fs::create_dir_all(dir)?;
+                    }
+                    let file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .truncate(false)
+                        .write(true)
+                        .open(&path)?;
+                    file.lock()?;
+                    Ok(file)
+                })
+                .await
+                .map_err(|e| anyhow!("secret lock task failed: {e}"))??,
+            )
+        }
+        None => None,
+    };
+    Ok(SecretWriteGuard {
+        name: name.to_string(),
+        local: Some(local),
+        _file: file,
+    })
+}
+
+fn backend_epoch(backend: &str) -> anyhow::Result<String> {
+    contract::secrets_backend::provider_epoch(backend)
+        .ok_or_else(|| anyhow!("no secrets backend '{backend}' is registered on this host"))
+}
+
+fn record_in(conn: &rusqlite::Connection, name: &str) -> anyhow::Result<secrets::SecretRecord> {
+    secrets::get(conn, name)?.ok_or_else(|| anyhow!("no secret named '{name}'"))
+}
+
+fn ensure_unchanged(
+    conn: &rusqlite::Connection,
+    before: &secrets::SecretRecord,
+) -> anyhow::Result<()> {
+    let after = secrets::get(conn, &before.name)?;
+    if after
+        .as_ref()
+        .map(|r| (&r.backend, &r.ref_path, &r.updated_at))
+        != Some((&before.backend, &before.ref_path, &before.updated_at))
+    {
+        tracing::warn!(
+            secret = %before.name,
+            backend = %before.backend,
+            "secret registration changed during a backend write"
+        );
+        bail!(
+            "secret '{}' was re-registered while its backend write ran; refusing to record it",
+            before.name
+        );
+    }
+    Ok(())
+}
+
+pub async fn put_secret(name: &str, value: &str) -> anyhow::Result<String> {
+    if value.is_empty() {
+        bail!("refusing to write an empty value to secret '{name}'");
+    }
+    let _guard = lock_secret(name).await?;
+    let row = db::pool::Db::process().tx(|c| {
+        let row = record_in(c, name)?;
+        secrets::ensure_write_allowed(c)?;
+        if row.backend == "inline" {
+            secrets::put_inline_value(c, name, value)?;
+        }
+        Ok(row)
+    })?;
+    if row.backend != "inline" {
+        let epoch = backend_epoch(&row.backend)?;
+        contract::secrets_backend::put(&row.backend, &row.ref_path, value).await?;
+        db::pool::Db::process().tx(|c| {
+            ensure_unchanged(c, &row)?;
+            secrets::arm_external_restore(c, &row, &epoch)
+        })?;
+    }
+    Ok(row.backend)
+}
+
+pub async fn restore_secret(name: &str) -> anyhow::Result<String> {
+    let _guard = lock_secret(name).await?;
+    let row = db::pool::Db::process().tx(|c| {
+        let row = record_in(c, name)?;
+        if row.backend == "inline" {
+            secrets::restore_inline_value(c, name)?;
+        } else {
+            secrets::ensure_external_restore_armed(c, &row, &backend_epoch(&row.backend)?)?;
+        }
+        Ok(row)
+    })?;
+    if row.backend != "inline" {
+        contract::secrets_backend::restore_previous(&row.backend, &row.ref_path).await?;
+        db::pool::Db::process().tx(|c| {
+            secrets::disarm_external_restore(c, name)?;
+            ensure_unchanged(c, &row)
+        })?;
+    }
+    Ok(row.backend)
 }
 
 // ── Native dispatch ─────────────────────────────────────────────────────────
@@ -273,7 +461,8 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
         "inline" => String::new(),
         _ => args.ref_path.clone().unwrap(),
     };
-    let created = db::pool::Db::process().write(|conn| {
+    let _guard = lock_secret(&args.name).await?;
+    let created = db::pool::Db::process().tx(|conn| {
         let created = secrets::upsert(
             conn,
             &args.name,
@@ -296,9 +485,15 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
 /// [MUTATES STATE] Idempotent upsert — create the secret if absent, replace it if
 /// present. The single canonical write, used for credential rotation. For
 /// 'inline' backend, `value` is required; for external backends, `ref_path` is
-/// required (e.g. 'op://Vault/Item/field'). Write the secret on a remote system
-/// with the top-level `--peer <h>` flag.
-#[orca_tool(domain = "secrets", verb = "upsert", cli = manual, data_mutation = false)]
+/// required (e.g. 'op://Vault/Item/field'). Local-only: never reachable over mesh/exec.
+#[orca_tool(
+    domain = "secrets",
+    verb = "upsert",
+    cli = manual,
+    role = "super-admin",
+    local_only = true,
+    data_mutation = false
+)]
 async fn secret_upsert(
     args: SecretWriteArgs,
     _ctx: &contract::ToolCtx,
@@ -306,17 +501,103 @@ async fn secret_upsert(
     write_secret(args).await
 }
 
+/// [SENSITIVE] [MUTATES STATE] Write a new value for an existing secret through
+/// its backend, keeping the replaced value restorable with `secrets restore`.
+/// Fails cleanly when the backend reports write as unavailable.
+#[orca_tool(
+    domain = "secrets",
+    verb = "put",
+    cli = manual,
+    role = "super-admin",
+    local_only = true,
+    data_mutation = false
+)]
+async fn secret_put(
+    args: SecretPutArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<SecretValueChangeReport> {
+    if args.value_stdin {
+        bail!("`value_stdin` is a CLI-only flag; REST/MCP callers must send `value`");
+    }
+    let value = args.value.ok_or_else(|| anyhow!("`value` is required"))?;
+    let backend = put_secret(&args.name, &value).await?;
+    Ok(SecretValueChangeReport {
+        name: args.name,
+        backend,
+    })
+}
+
+/// [SENSITIVE] [MUTATES STATE] Restore the value a secret held before its last
+/// `secrets put`.
+#[orca_tool(
+    domain = "secrets",
+    verb = "restore",
+    role = "super-admin",
+    local_only = true,
+    data_mutation = false
+)]
+async fn secret_restore(
+    args: SecretRestoreArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<SecretValueChangeReport> {
+    let backend = restore_secret(&args.name).await?;
+    Ok(SecretValueChangeReport {
+        name: args.name,
+        backend,
+    })
+}
+
+/// List secrets backends on this host with their resolve/put/restore capability.
+#[orca_tool(domain = "secrets.backends", verb = "list", role = "admin")]
+async fn secret_backend_list(
+    _args: SecretBackendListArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<SecretBackendListReport> {
+    let mut names: Vec<String> = contract::secrets_backend::providers()
+        .iter()
+        .map(|p| p.name().to_string())
+        .collect();
+    names.sort();
+    names.insert(0, "inline".into());
+    let mut backends = Vec::with_capacity(names.len());
+    for backend in names {
+        let capabilities = backend_capabilities(&backend).await?;
+        backends.push(SecretBackendEntry {
+            backend,
+            capabilities,
+        });
+    }
+    Ok(SecretBackendListReport { backends })
+}
+
+trait StdinValue {
+    fn value_slots(&mut self) -> (&mut Option<String>, &mut bool);
+}
+
+impl StdinValue for SecretWriteArgs {
+    fn value_slots(&mut self) -> (&mut Option<String>, &mut bool) {
+        (&mut self.value, &mut self.value_stdin)
+    }
+}
+
+impl StdinValue for SecretPutArgs {
+    fn value_slots(&mut self) -> (&mut Option<String>, &mut bool) {
+        (&mut self.value, &mut self.value_stdin)
+    }
+}
+
 /// Consume `--value-stdin` into `args.value` by reading `src`. Split out from
 /// the CliOp so the conflict / newline / empty rules are unit-testable without
 /// a real stdin.
-fn resolve_value_from_stdin<R: std::io::Read>(
-    args: &mut SecretWriteArgs,
+fn resolve_value_from_stdin<A: StdinValue, R: std::io::Read>(
+    args: &mut A,
     src: &mut R,
 ) -> anyhow::Result<()> {
-    if !args.value_stdin {
+    let (value_slot, value_stdin) = args.value_slots();
+    if !*value_stdin {
         return Ok(());
     }
-    if args.value.is_some() {
+    if value_slot.is_some() {
         bail!("pass one of --value or --value-stdin, not both");
     }
     let mut buf = String::new();
@@ -330,19 +611,21 @@ fn resolve_value_from_stdin<R: std::io::Read>(
     if value.is_empty() {
         bail!("--value-stdin got empty stdin; pipe the secret value in");
     }
-    args.value = Some(value.to_string());
+    *value_slot = Some(value.to_string());
     // Cleared so the flag can never be serialized onto the wire.
-    args.value_stdin = false;
+    *value_stdin = false;
     Ok(())
 }
 
-/// Manual CLI block for `orca secrets upsert`. The generated `register_op!`
+/// Manual CLI block for `orca secrets upsert` and `orca secrets put`. The generated `register_op!`
 /// parses args and dispatches straight to the daemon, but `--value-stdin` has
 /// to be consumed in the *calling* process — only the CLI has a stdin. Same
 /// reasoning as `orca auth login`'s hand-rolled block: a purely client-side
 /// affordance the daemon must not know about. The dispatch below mirrors
 /// `register_op!`'s execute-gated path verbatim so `--dry-run` holds for this
 /// verb.
+macro_rules! stdin_value_cli {
+    ($tool:ident, $verb:literal) => {
 const _: () = {
     use __cp::contract::{
         OrcaToolDef,
@@ -352,8 +635,8 @@ const _: () = {
     use ::plugin_toolkit as __cp;
 
     fn build() -> __cp::clap::Command {
-        let cmd = __cp::clap::Command::new("upsert")
-            .about(<SecretUpsert as OrcaToolDef>::DESCRIPTION)
+        let cmd = __cp::clap::Command::new($verb)
+            .about(<$tool as OrcaToolDef>::DESCRIPTION)
             .arg(
                 __cp::clap::Arg::new(DRY_RUN_FIELD)
                     .long(__cp::dispatch::cli::DRY_RUN_FLAG)
@@ -366,7 +649,7 @@ const _: () = {
                     .action(__cp::clap::ArgAction::SetTrue)
                     .hide(true),
             );
-        <<SecretUpsert as OrcaToolDef>::Args as __cp::clap::Args>::augment_args(cmd)
+        <<$tool as OrcaToolDef>::Args as __cp::clap::Args>::augment_args(cmd)
     }
 
     fn run(
@@ -378,12 +661,12 @@ const _: () = {
         Box::pin(async move {
             let peer = ctx.peer().map(|s| s.to_string());
             let mut args =
-                <<SecretUpsert as OrcaToolDef>::Args as __cp::clap::FromArgMatches>::from_arg_matches(&m)
+                <<$tool as OrcaToolDef>::Args as __cp::clap::FromArgMatches>::from_arg_matches(&m)
                     .map_err(|e| __cp::anyhow::anyhow!("{e}"))?;
             resolve_value_from_stdin(&mut args, &mut ::std::io::stdin().lock())?;
 
             let dry_run = m.get_flag(DRY_RUN_FIELD);
-            let value = __cp::dispatch::cli::exec_gated::<SecretUpsert>(
+            let value = __cp::dispatch::cli::exec_gated::<$tool>(
                 args,
                 dry_run,
                 peer.as_deref(),
@@ -399,11 +682,11 @@ const _: () = {
                 );
                 return Ok(());
             }
-            let out: <SecretUpsert as OrcaToolDef>::Output = __cp::serde_json::from_value(value)
+            let out: <$tool as OrcaToolDef>::Output = __cp::serde_json::from_value(value)
                 .map_err(|e| {
                     __cp::anyhow::anyhow!(
                         "decode {} output: {e}",
-                        <SecretUpsert as OrcaToolDef>::NAME
+                        <$tool as OrcaToolDef>::NAME
                     )
                 })?;
             let s = __cp::serde_json::to_string_pretty(&out)
@@ -416,22 +699,34 @@ const _: () = {
     __cp::inventory::submit! {
         CliOp {
             domain: "secrets",
-            verb: "upsert",
-            summary: <SecretUpsert as OrcaToolDef>::DESCRIPTION,
+            verb: $verb,
+            summary: <$tool as OrcaToolDef>::DESCRIPTION,
             build: build as CliBuildFn,
             run: run as CliRunFn,
         }
     }
 };
+    };
+}
+
+stdin_value_cli!(SecretUpsert, "upsert");
+stdin_value_cli!(SecretPut, "put");
 
 /// [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends
 /// only the orca registration is removed (the upstream vault is untouched).
-#[orca_tool(domain = "secrets", verb = "delete", data_mutation = false)]
+#[orca_tool(
+    domain = "secrets",
+    verb = "delete",
+    role = "super-admin",
+    local_only = true,
+    data_mutation = false
+)]
 async fn secret_delete(
     args: SecretDeleteArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SecretDeleteReport> {
-    let removed = db::pool::Db::process().write(|conn| secrets::delete(conn, &args.name))?;
+    let _guard = lock_secret(&args.name).await?;
+    let removed = db::pool::Db::process().tx(|conn| secrets::delete(conn, &args.name))?;
     Ok(SecretDeleteReport {
         name: args.name,
         removed,
@@ -526,16 +821,43 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn lock_file_path_never_escapes_the_locks_dir() {
+        let home = utils::home::orca_home().expect("orca home");
+        for name in ["../escape-x", "a/b", "w"] {
+            let guard = lock_secret(name).await.expect("lock");
+            let expected = home.join("locks").join(format!(
+                "secret-{}.lock",
+                utils::hash::sha256_hex(name.as_bytes())
+            ));
+            assert!(expected.is_file(), "{name}: {}", expected.display());
+            drop(guard);
+        }
+        assert!(!home.join("escape-x.lock").exists());
+        assert!(!home.join("locks").join("secret-a").exists());
+    }
+
     #[test]
-    fn every_secrets_verb_is_admin_only() {
+    fn secrets_verbs_require_admin_and_writes_super_admin() {
         use contract::OrcaToolDef;
         assert_eq!(<SecretList as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretDetail as OrcaToolDef>::REQUIRED_ROLE, "admin");
-        assert_eq!(<SecretUpsert as OrcaToolDef>::REQUIRED_ROLE, "admin");
-        assert_eq!(<SecretDelete as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        assert_eq!(<SecretDelete as OrcaToolDef>::REQUIRED_ROLE, "super-admin");
         assert_eq!(<SecretGrantCreate as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretGrantDelete as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretGrantList as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        assert_eq!(<SecretUpsert as OrcaToolDef>::REQUIRED_ROLE, "super-admin");
+        assert_eq!(<SecretPut as OrcaToolDef>::REQUIRED_ROLE, "super-admin");
+        assert_eq!(<SecretRestore as OrcaToolDef>::REQUIRED_ROLE, "super-admin");
+        assert_eq!(<SecretBackendList as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        const { assert!(!<SecretUpsert as OrcaToolDef>::REMOTE_OK) };
+        const { assert!(!<SecretPut as OrcaToolDef>::REMOTE_OK) };
+        const { assert!(!<SecretRestore as OrcaToolDef>::REMOTE_OK) };
+        const { assert!(!<SecretDelete as OrcaToolDef>::REMOTE_OK) };
+        const { assert!(<SecretPut as OrcaToolDef>::EXECUTE_GATED) };
+        const { assert!(<SecretRestore as OrcaToolDef>::EXECUTE_GATED) };
+        const { assert!(!<SecretPut as OrcaToolDef>::DATA_MUTATION) };
+        const { assert!(!<SecretRestore as OrcaToolDef>::DATA_MUTATION) };
         const { assert!(!<SecretGrantCreate as OrcaToolDef>::DATA_MUTATION) };
         const { assert!(!<SecretGrantDelete as OrcaToolDef>::DATA_MUTATION) };
         const { assert!(!<SecretGrantList as OrcaToolDef>::DATA_MUTATION) };
@@ -651,7 +973,7 @@ mod tests {
                 anyhow::bail!("unused")
             }
         }
-        contract::secrets_backend::register_provider(std::sync::Arc::new(Upsertable));
+        contract::secrets_backend::register_provider(std::sync::Arc::new(Upsertable)).unwrap();
         let report = write_secret(SecretWriteArgs {
             name: "gh".into(),
             backend: "upsert-test-backend".into(),
@@ -678,5 +1000,171 @@ mod tests {
             None => unsafe { std::env::remove_var("ORCA_DB_PATH") },
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    struct WriteBackend {
+        caps: contract::secrets_backend::BackendCapabilities,
+        puts: std::sync::Mutex<Vec<(String, String)>>,
+        restores: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl contract::secrets_backend::SecretsBackend for WriteBackend {
+        fn name(&self) -> &str {
+            if self.caps.put.is_available() {
+                "auth-test-writable"
+            } else {
+                "auth-test-readonly"
+            }
+        }
+        async fn resolve(&self, _ref_path: &str) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        async fn capabilities(&self) -> contract::secrets_backend::BackendCapabilities {
+            self.caps.clone()
+        }
+        async fn put(&self, ref_path: &str, value: &str) -> anyhow::Result<()> {
+            self.puts
+                .lock()
+                .unwrap()
+                .push((ref_path.to_string(), value.to_string()));
+            Ok(())
+        }
+        async fn restore_previous(&self, ref_path: &str) -> anyhow::Result<()> {
+            self.restores.lock().unwrap().push(ref_path.to_string());
+            Ok(())
+        }
+    }
+
+    fn write_backend(
+        caps: contract::secrets_backend::BackendCapabilities,
+    ) -> std::sync::Arc<WriteBackend> {
+        std::sync::Arc::new(WriteBackend {
+            caps,
+            puts: Default::default(),
+            restores: Default::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn put_and_restore_route_through_the_secret_backend() {
+        use contract::secrets_backend::BackendCapabilities;
+        let dir = tempfile::tempdir().expect("tempdir");
+        db::with_db_path(dir.path().join("orca.db"), async {
+            write_secret(inline_args(Some("one"), false))
+                .await
+                .expect("seed inline");
+            assert_eq!(put_secret("s", "two").await.unwrap(), "inline");
+            assert_eq!(get_secret("s").await.unwrap().1.expose_secret(), "two");
+            restore_secret("s").await.unwrap();
+            assert_eq!(get_secret("s").await.unwrap().1.expose_secret(), "one");
+            assert!(restore_secret("s").await.is_err());
+            assert_eq!(get_secret("s").await.unwrap().1.expose_secret(), "one");
+            put_secret("s", "two").await.unwrap();
+            write_secret(inline_args(Some("three"), false))
+                .await
+                .expect("re-upsert inline");
+            assert!(restore_secret("s").await.is_err());
+            assert_eq!(get_secret("s").await.unwrap().1.expose_secret(), "three");
+            assert!(put_secret("s", "").await.is_err());
+
+            let writable = write_backend(BackendCapabilities::writable());
+            contract::secrets_backend::register_provider(writable.clone()).unwrap();
+            let readonly = write_backend(BackendCapabilities::write_unavailable(
+                "service account is read-only",
+            ));
+            contract::secrets_backend::register_provider(readonly.clone()).unwrap();
+            for (name, backend) in [("w", "auth-test-writable"), ("r", "auth-test-readonly")] {
+                write_secret(SecretWriteArgs {
+                    name: name.into(),
+                    backend: backend.into(),
+                    value: None,
+                    value_stdin: false,
+                    ref_path: Some(format!("op://v/{name}/password")),
+                    description: None,
+                })
+                .await
+                .expect("seed external");
+            }
+            assert!(restore_secret("w").await.is_err());
+            put_secret("w", "new").await.unwrap();
+            restore_secret("w").await.unwrap();
+            let err = restore_secret("w").await.unwrap_err().to_string();
+            assert!(err.contains("no previous value"), "{err}");
+            put_secret("w", "again").await.unwrap();
+            write_secret(SecretWriteArgs {
+                name: "w".into(),
+                backend: "auth-test-writable".into(),
+                value: None,
+                value_stdin: false,
+                ref_path: Some("op://v/w/password".into()),
+                description: None,
+            })
+            .await
+            .expect("re-upsert external");
+            assert!(restore_secret("w").await.is_err());
+            writable.puts.lock().unwrap().pop();
+            put_secret("w", "epoch").await.unwrap();
+            assert!(contract::secrets_backend::deregister_provider(
+                "auth-test-writable"
+            ));
+            contract::secrets_backend::register_provider(writable.clone()).unwrap();
+            let err = restore_secret("w").await.unwrap_err().to_string();
+            assert!(err.contains("no previous value"), "{err}");
+            writable.puts.lock().unwrap().pop();
+            assert!(!WRITE_LOCKS.lock().unwrap().contains_key("w"));
+            assert_eq!(
+                *writable.puts.lock().unwrap(),
+                vec![("op://v/w/password".to_string(), "new".to_string())]
+            );
+            assert_eq!(
+                *writable.restores.lock().unwrap(),
+                vec!["op://v/w/password"]
+            );
+
+            let err = put_secret("r", "new").await.unwrap_err().to_string();
+            assert!(err.contains("service account is read-only"), "{err}");
+            assert!(readonly.puts.lock().unwrap().is_empty());
+            let caps = backend_capabilities("auth-test-readonly").await.unwrap();
+            assert!(!caps.put.is_available());
+            assert!(
+                backend_capabilities("inline")
+                    .await
+                    .unwrap()
+                    .put
+                    .is_available()
+            );
+
+            db::pool::Db::process()
+                .write(|c| {
+                    c.execute(
+                        "INSERT INTO mesh_self (id, self_secure, set_at) VALUES (1, 0, 0)",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(put_secret("w", "blocked").await.is_err());
+            assert!(restore_secret("w").await.is_err());
+            assert!(put_secret("s", "blocked").await.is_err());
+            assert_eq!(writable.puts.lock().unwrap().len(), 1);
+            assert_eq!(writable.restores.lock().unwrap().len(), 1);
+
+            contract::secrets_backend::deregister_provider("auth-test-writable");
+            contract::secrets_backend::deregister_provider("auth-test-readonly");
+        })
+        .await;
+    }
+
+    #[test]
+    fn put_value_stdin_is_consumed_like_upsert() {
+        let mut args = SecretPutArgs {
+            name: "s".into(),
+            value: None,
+            value_stdin: true,
+        };
+        resolve_value_from_stdin(&mut args, &mut "tok\n".as_bytes()).expect("resolve");
+        assert_eq!(args.value.as_deref(), Some("tok"));
+        assert!(!args.value_stdin);
     }
 }

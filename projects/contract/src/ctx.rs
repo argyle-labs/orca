@@ -44,6 +44,7 @@ pub struct ToolCtx {
     unbound_role: Option<String>,
     local_transport: bool,
     second_factor: bool,
+    owner_cli: bool,
     call_chain: Vec<String>,
     call_budget: Option<Arc<std::sync::atomic::AtomicUsize>>,
     services: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
@@ -61,6 +62,7 @@ impl ToolCtx {
             unbound_role: None,
             local_transport: false,
             second_factor: false,
+            owner_cli: false,
             call_chain: Vec::new(),
             call_budget: None,
             services: HashMap::new(),
@@ -153,6 +155,14 @@ impl ToolCtx {
 
     pub fn second_factor(&self) -> bool {
         self.second_factor
+    }
+
+    pub fn set_owner_cli(&mut self, owner: bool) {
+        self.owner_cli = owner;
+    }
+
+    pub fn owner_cli(&self) -> bool {
+        self.owner_cli
     }
 
     /// Mark this invocation as a dry run (or not).
