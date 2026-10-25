@@ -1438,6 +1438,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stdio_tools_call_secrets_put_is_refused() {
+        use auth as _;
+        ::model::ensure_crypto_provider();
+        let cfg = Config::load().expect("config load");
+        let ctx = build_local_tool_ctx(Arc::new(cfg.clone()));
+        assert!(!ctx.owner_cli());
+        let pool = ::mcp::client::McpPool::new_with_db(cfg.db_path.clone());
+        let mut reg = HashMap::new();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": { "name": "secrets.put", "arguments": { "name": "s", "value": "v", "dryRun": true } }
+        });
+        let resp = handle_jsonrpc(&req, &ctx, &pool, &mut reg, &cfg, false, None, false)
+            .await
+            .expect("tools/call must reply");
+        assert_eq!(resp["result"]["isError"], true, "{resp}");
+        assert!(resp.to_string().contains("second factor"), "{resp}");
+    }
+
+    #[tokio::test]
     async fn handle_jsonrpc_initialize_reports_server_info() {
         ::model::ensure_crypto_provider();
         let (ctx, pool, cfg) = jsonrpc_fixtures();

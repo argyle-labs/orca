@@ -535,6 +535,12 @@ impl Parse for ToolAttr {
                 }
             }
         }
+        if remote_ok && role.as_ref().is_some_and(|r| r.value() == "super-admin") {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "role = \"super-admin\" requires local_only = true",
+            ));
+        }
         Ok(Self {
             domain: domain
                 .ok_or_else(|| syn::Error::new(Span::call_site(), "missing `domain = \"…\"`"))?,
@@ -1736,8 +1742,18 @@ mod tests {
 
     #[test]
     fn tool_attr_accepts_super_admin_role() {
-        let attr = parse_attr(quote!(domain = "x", verb = "y", role = "super-admin")).unwrap();
+        let attr = parse_attr(quote!(
+            domain = "x",
+            verb = "y",
+            role = "super-admin",
+            local_only = true
+        ))
+        .unwrap();
         assert_eq!(attr.role.unwrap().value(), "super-admin");
+        let err = parse_attr(quote!(domain = "x", verb = "y", role = "super-admin"))
+            .err()
+            .expect("remote super-admin");
+        assert!(err.to_string().contains("local_only"), "{err}");
     }
 
     #[test]

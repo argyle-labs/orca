@@ -105,8 +105,9 @@ impl BackendCapabilities {
     }
 }
 
-static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn SecretsBackend>>>> =
-    LazyLock::new(|| RwLock::new(Vec::new()));
+type Registered = (Arc<dyn SecretsBackend>, String);
+
+static GLOBAL: LazyLock<RwLock<Vec<Registered>>> = LazyLock::new(|| RwLock::new(Vec::new()));
 
 /// Register a secrets backend with the process-global registry. Names are
 /// unique: a second registration under a held name is refused, so a reload
@@ -114,10 +115,10 @@ static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn SecretsBackend>>>> =
 pub fn register_provider(provider: Arc<dyn SecretsBackend>) -> Result<()> {
     let mut g = GLOBAL.write().expect("secrets_backend registry poisoned");
     let name = provider.name().to_string();
-    if g.iter().any(|p| p.name() == name) {
+    if g.iter().any(|(p, _)| p.name() == name) {
         anyhow::bail!("secrets backend '{name}' is already registered");
     }
-    g.push(provider);
+    g.push((provider, utils::id::new()));
     Ok(())
 }
 
@@ -126,7 +127,19 @@ pub fn providers() -> Vec<Arc<dyn SecretsBackend>> {
     GLOBAL
         .read()
         .expect("secrets_backend registry poisoned")
-        .clone()
+        .iter()
+        .map(|(p, _)| p.clone())
+        .collect()
+}
+
+/// Identifies one registration of `name`; a re-registration gets a new epoch.
+pub fn provider_epoch(name: &str) -> Option<String> {
+    GLOBAL
+        .read()
+        .expect("secrets_backend registry poisoned")
+        .iter()
+        .find(|(p, _)| p.name() == name)
+        .map(|(_, e)| e.clone())
 }
 
 /// Deregister the backend named `name`, if present. The reversal path a plugin
@@ -134,7 +147,7 @@ pub fn providers() -> Vec<Arc<dyn SecretsBackend>> {
 pub fn deregister_provider(name: &str) -> bool {
     let mut g = GLOBAL.write().expect("secrets_backend registry poisoned");
     let before = g.len();
-    g.retain(|p| p.name() != name);
+    g.retain(|(p, _)| p.name() != name);
     before != g.len()
 }
 
@@ -447,8 +460,11 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("already registered"), "{err}");
+        let first = provider_epoch(kind).unwrap();
         assert!(deregister_provider(kind));
+        assert_eq!(provider_epoch(kind), None);
         register_provider(Fake::new(kind, BackendCapabilities::read_only())).unwrap();
+        assert_ne!(provider_epoch(kind).unwrap(), first);
         assert!(deregister_provider(kind));
     }
 

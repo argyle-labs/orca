@@ -659,9 +659,7 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
 /// left to the peer forward, whose recipient authorizes it.
 fn authorize_fallback(name: &str, ctx: &ToolCtx) -> Result<()> {
     if let Some(required) = crate::tool_roles::known_role(name)
-        && (ctx.unbound_role().is_some()
-            || ctx.verified_caller().is_some()
-            || ctx.caller().is_some())
+        && !ctx.owner_cli()
         && !crate::tool_roles::second_factor_ok(required, ctx.second_factor())
     {
         return Err(contract::OrcaError::forbidden(format!(

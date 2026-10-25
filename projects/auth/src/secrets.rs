@@ -239,14 +239,65 @@ static WRITE_LOCKS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 > = std::sync::LazyLock::new(Default::default);
 
-async fn lock_secret(name: &str) -> tokio::sync::OwnedMutexGuard<()> {
+struct SecretWriteGuard {
+    name: String,
+    local: Option<tokio::sync::OwnedMutexGuard<()>>,
+    _file: Option<std::fs::File>,
+}
+
+impl Drop for SecretWriteGuard {
+    fn drop(&mut self) {
+        self.local.take();
+        let mut locks = WRITE_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+        if locks
+            .get(&self.name)
+            .is_some_and(|l| std::sync::Arc::strong_count(l) == 1)
+        {
+            locks.remove(&self.name);
+        }
+    }
+}
+
+async fn lock_secret(name: &str) -> anyhow::Result<SecretWriteGuard> {
     let lock = WRITE_LOCKS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .entry(name.to_string())
         .or_default()
         .clone();
-    lock.lock_owned().await
+    let local = lock.lock_owned().await;
+    let file = match utils::home::orca_home() {
+        Some(home) => {
+            let path = home.join("locks").join(format!("secret-{name}.lock"));
+            Some(
+                tokio::task::spawn_blocking(move || -> anyhow::Result<std::fs::File> {
+                    if let Some(dir) = path.parent() {
+                        std::fs::create_dir_all(dir)?;
+                    }
+                    let file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .truncate(false)
+                        .write(true)
+                        .open(&path)?;
+                    file.lock()?;
+                    Ok(file)
+                })
+                .await
+                .map_err(|e| anyhow!("secret lock task failed: {e}"))??,
+            )
+        }
+        None => None,
+    };
+    Ok(SecretWriteGuard {
+        name: name.to_string(),
+        local: Some(local),
+        _file: file,
+    })
+}
+
+fn backend_epoch(backend: &str) -> anyhow::Result<String> {
+    contract::secrets_backend::provider_epoch(backend)
+        .ok_or_else(|| anyhow!("no secrets backend '{backend}' is registered on this host"))
 }
 
 fn record_in(conn: &rusqlite::Connection, name: &str) -> anyhow::Result<secrets::SecretRecord> {
@@ -258,8 +309,10 @@ fn ensure_unchanged(
     before: &secrets::SecretRecord,
 ) -> anyhow::Result<()> {
     let after = secrets::get(conn, &before.name)?;
-    if after.as_ref().map(|r| (&r.backend, &r.ref_path))
-        != Some((&before.backend, &before.ref_path))
+    if after
+        .as_ref()
+        .map(|r| (&r.backend, &r.ref_path, &r.updated_at))
+        != Some((&before.backend, &before.ref_path, &before.updated_at))
     {
         tracing::warn!(
             secret = %before.name,
@@ -278,7 +331,7 @@ pub async fn put_secret(name: &str, value: &str) -> anyhow::Result<String> {
     if value.is_empty() {
         bail!("refusing to write an empty value to secret '{name}'");
     }
-    let _guard = lock_secret(name).await;
+    let _guard = lock_secret(name).await?;
     let row = db::pool::Db::process().tx(|c| {
         let row = record_in(c, name)?;
         secrets::ensure_write_allowed(c)?;
@@ -288,23 +341,24 @@ pub async fn put_secret(name: &str, value: &str) -> anyhow::Result<String> {
         Ok(row)
     })?;
     if row.backend != "inline" {
+        let epoch = backend_epoch(&row.backend)?;
         contract::secrets_backend::put(&row.backend, &row.ref_path, value).await?;
         db::pool::Db::process().tx(|c| {
             ensure_unchanged(c, &row)?;
-            secrets::arm_external_restore(c, &row)
+            secrets::arm_external_restore(c, &row, &epoch)
         })?;
     }
     Ok(row.backend)
 }
 
 pub async fn restore_secret(name: &str) -> anyhow::Result<String> {
-    let _guard = lock_secret(name).await;
+    let _guard = lock_secret(name).await?;
     let row = db::pool::Db::process().tx(|c| {
         let row = record_in(c, name)?;
         if row.backend == "inline" {
             secrets::restore_inline_value(c, name)?;
         } else {
-            secrets::ensure_external_restore_armed(c, &row)?;
+            secrets::ensure_external_restore_armed(c, &row, &backend_epoch(&row.backend)?)?;
         }
         Ok(row)
     })?;
@@ -404,7 +458,7 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
         "inline" => String::new(),
         _ => args.ref_path.clone().unwrap(),
     };
-    let _guard = lock_secret(&args.name).await;
+    let _guard = lock_secret(&args.name).await?;
     let created = db::pool::Db::process().tx(|conn| {
         let created = secrets::upsert(
             conn,
@@ -668,7 +722,7 @@ async fn secret_delete(
     args: SecretDeleteArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SecretDeleteReport> {
-    let _guard = lock_secret(&args.name).await;
+    let _guard = lock_secret(&args.name).await?;
     let removed = db::pool::Db::process().tx(|conn| secrets::delete(conn, &args.name))?;
     Ok(SecretDeleteReport {
         name: args.name,
@@ -1031,6 +1085,15 @@ mod tests {
             .expect("re-upsert external");
             assert!(restore_secret("w").await.is_err());
             writable.puts.lock().unwrap().pop();
+            put_secret("w", "epoch").await.unwrap();
+            assert!(contract::secrets_backend::deregister_provider(
+                "auth-test-writable"
+            ));
+            contract::secrets_backend::register_provider(writable.clone()).unwrap();
+            let err = restore_secret("w").await.unwrap_err().to_string();
+            assert!(err.contains("no previous value"), "{err}");
+            writable.puts.lock().unwrap().pop();
+            assert!(!WRITE_LOCKS.lock().unwrap().contains_key("w"));
             assert_eq!(
                 *writable.puts.lock().unwrap(),
                 vec![("op://v/w/password".to_string(), "new".to_string())]

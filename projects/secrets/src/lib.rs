@@ -86,6 +86,17 @@ pub fn ensure_write_allowed(conn: &Connection) -> Result<()> {
     }
 }
 
+pub fn ensure_valid_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        anyhow::bail!("invalid secret name '{name}': use only A-Z a-z 0-9 . _ -");
+    }
+    Ok(())
+}
+
 /// Upsert a metadata row. Returns true if the row was created, false on update.
 pub fn upsert(
     conn: &Connection,
@@ -95,6 +106,7 @@ pub fn upsert(
     description: Option<&str>,
 ) -> Result<bool> {
     ensure_write_allowed(conn)?;
+    ensure_valid_name(name)?;
     let existed = conn
         .query_row(
             "SELECT 1 FROM secrets WHERE name = ?1",
@@ -182,19 +194,23 @@ pub fn restore_inline_value(conn: &Connection, name: &str) -> Result<()> {
     settings::secret_set(conn, name, &previous)
 }
 
-fn restore_marker(record: &SecretRecord) -> String {
-    format!("{}\n{}", record.backend, record.ref_path)
+fn restore_marker(record: &SecretRecord, epoch: &str) -> String {
+    format!("{}\n{}\n{epoch}", record.backend, record.ref_path)
 }
 
-pub fn arm_external_restore(conn: &Connection, record: &SecretRecord) -> Result<()> {
+pub fn arm_external_restore(conn: &Connection, record: &SecretRecord, epoch: &str) -> Result<()> {
     ensure_write_allowed(conn)?;
-    settings::secret_restore_marker_set(conn, &record.name, &restore_marker(record))
+    settings::secret_restore_marker_set(conn, &record.name, &restore_marker(record, epoch))
 }
 
-pub fn ensure_external_restore_armed(conn: &Connection, record: &SecretRecord) -> Result<()> {
+pub fn ensure_external_restore_armed(
+    conn: &Connection,
+    record: &SecretRecord,
+    epoch: &str,
+) -> Result<()> {
     ensure_write_allowed(conn)?;
     if settings::secret_restore_marker_get(conn, &record.name)?.as_deref()
-        != Some(restore_marker(record).as_str())
+        != Some(restore_marker(record, epoch).as_str())
     {
         anyhow::bail!(
             "secret '{}' has no previous value to restore on backend '{}'",
@@ -609,26 +625,38 @@ mod tests {
         let conn = test_conn();
         upsert(&conn, "ext", "fake-959", "fake://a", None).unwrap();
         let rec = get(&conn, "ext").unwrap().unwrap();
-        assert!(ensure_external_restore_armed(&conn, &rec).is_err());
-        arm_external_restore(&conn, &rec).unwrap();
-        ensure_external_restore_armed(&conn, &rec).unwrap();
+        assert!(ensure_external_restore_armed(&conn, &rec, "e1").is_err());
+        arm_external_restore(&conn, &rec, "e1").unwrap();
+        ensure_external_restore_armed(&conn, &rec, "e1").unwrap();
+        assert!(ensure_external_restore_armed(&conn, &rec, "e2").is_err());
         disarm_external_restore(&conn, "ext").unwrap();
-        assert!(ensure_external_restore_armed(&conn, &rec).is_err());
+        assert!(ensure_external_restore_armed(&conn, &rec, "e1").is_err());
 
-        arm_external_restore(&conn, &rec).unwrap();
+        arm_external_restore(&conn, &rec, "e1").unwrap();
         upsert(&conn, "ext", "fake-959", "fake://b", None).unwrap();
-        assert!(ensure_external_restore_armed(&conn, &rec).is_err());
+        assert!(ensure_external_restore_armed(&conn, &rec, "e1").is_err());
         let moved = get(&conn, "ext").unwrap().unwrap();
-        arm_external_restore(&conn, &rec).unwrap();
-        assert!(ensure_external_restore_armed(&conn, &moved).is_err());
+        arm_external_restore(&conn, &rec, "e1").unwrap();
+        assert!(ensure_external_restore_armed(&conn, &moved, "e1").is_err());
 
-        arm_external_restore(&conn, &moved).unwrap();
+        arm_external_restore(&conn, &moved, "e1").unwrap();
         assert!(delete(&conn, "ext").unwrap());
         assert!(
             settings::secret_restore_marker_get(&conn, "ext")
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn upsert_rejects_names_outside_the_allowed_charset() {
+        let conn = test_conn();
+        for bad in ["x#restore", "x#previous", "", "a b", "a/b", "a:b"] {
+            assert!(upsert(&conn, bad, "inline", "", None).is_err(), "{bad:?}");
+        }
+        for good in ["proxmox.delta.api_url", "A-z_0.9"] {
+            upsert(&conn, good, "inline", "", None).unwrap();
+        }
     }
 
     #[test]
@@ -819,7 +847,7 @@ mod tests {
         assert!(grant_checked(&conn, "mylar", "nope.token", "a").is_err());
         assert!(grant_checked(&conn, "gitea", "gitea.api.token", "a").is_err());
         assert!(grant_checked(&conn, "Bad Id", "gitea.api.token", "a").is_err());
-        upsert(&conn, "gitea.*", "inline", "", None).unwrap();
+        assert!(upsert(&conn, "gitea.*", "inline", "", None).is_err());
         assert!(grant_checked(&conn, "mylar", "gitea.*", "a").is_err());
         assert!(grant_checked(&conn, "mylar", "gitea.%", "a").is_err());
         assert!(grant_checked(&conn, "mylar", "", "a").is_err());

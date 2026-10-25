@@ -299,7 +299,7 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
                 ))
                 .into());
             }
-            if ctx.caller().is_some()
+            if !ctx.owner_cli()
                 && !crate::tool_roles::second_factor_ok(T::REQUIRED_ROLE, ctx.second_factor())
             {
                 return Err(contract::OrcaError::forbidden(format!(
