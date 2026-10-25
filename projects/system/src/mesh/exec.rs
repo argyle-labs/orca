@@ -1,7 +1,7 @@
 use crate::mesh::{
     MeshAcceptOutput, MeshCertStatusOutput, MeshDiscoveryRowDto, MeshExecDispatch,
     MeshJoinTokenOutput, MeshLeaveOutput, MeshOfferOutput, MeshPeerDto, MeshPendingOfferDto,
-    MeshPingOutput, MeshTrustOutput, Route, Routes,
+    MeshPingOutput, Route, Routes,
 };
 use crate::update_state::read_channel_marker;
 use anyhow::{Context, Result};
@@ -219,45 +219,6 @@ async fn notify_targets(
         async move { crate::mesh::cli::call_mesh_method_pub(&t, port, &method, params).await }
     })
     .await
-}
-
-pub async fn trust(peer_id: &str, on: bool) -> Result<MeshTrustOutput> {
-    let (peer, new, targets) = db::pool::with_pooled_or_open(|conn| {
-        let peer = pdb::list_peers(conn)?
-            .into_iter()
-            .find(|p| p.peer_id == peer_id)
-            .with_context(|| format!("no such peer: {peer_id}"))?;
-        let new = pdb::set_trust(conn, peer_id, Some(on), None)?;
-        let targets = dial_targets(conn, &peer);
-        Ok((peer, new, targets))
-    })?;
-
-    let notify_result = match notify_targets(
-        peer_id,
-        &targets,
-        peer.peer_port,
-        "mesh/notify-trust",
-        serde_json::json!({ "trust": on }),
-    )
-    .await
-    {
-        Ok(_) => "ok".to_string(),
-        Err(e) => format!("warn: {e:#}"),
-    };
-
-    if pdb::is_mutual_secure(new)
-        && let Err(e) = crate::mesh::cli::replicate_ca_key_if_needed_pub(&peer).await
-    {
-        tracing::warn!("CA-key replication: {e}");
-    }
-
-    Ok(MeshTrustOutput {
-        peer_id: peer_id.to_string(),
-        local_secure: new.local_secure,
-        peer_secure: new.peer_secure,
-        mutual: new.local_secure && new.peer_secure,
-        notify_result,
-    })
 }
 
 pub async fn ping(peer_id: &str) -> MeshPingOutput {
@@ -514,22 +475,21 @@ pub async fn leave_peer(peer_id: &str) -> Result<MeshLeaveOutput> {
         Err(e) => format!("warn: {e:#}"),
     };
 
-    db::pool::with_pooled_or_open(|conn| {
-        conn.execute("DELETE FROM mesh_peers WHERE peer_id = ?", [peer_id])?;
-        conn.execute("DELETE FROM mesh_trust WHERE peer_id = ?", [peer_id])?;
+    let rows_removed = db::pool::with_pooled_or_open(|conn| {
+        let removed = conn.execute("DELETE FROM mesh_peers WHERE peer_id = ?", [peer_id])?;
         // Durable, replicated forget-tombstone so a straggler that missed the
         // `mesh/peer-removed` notice cannot re-gossip the kicked peer back into the
         // mesh on the next roster tick (issue #232).
         if let Err(e) = pdb::write_forget_tombstone(conn, peer_id) {
             tracing::warn!("[mesh] kick tombstone for {peer_id} failed: {e:#}");
         }
-        Ok(())
+        Ok(removed as u32)
     })?;
 
     Ok(MeshLeaveOutput {
         peer_id: peer_id.to_string(),
         notify_result,
-        rows_removed: 2,
+        rows_removed,
     })
 }
 
@@ -585,7 +545,7 @@ pub async fn exec(
 }
 
 /// Voluntary mesh exit: notify every paired peer we're leaving (best-effort
-/// per peer), then drop all `mesh_peers` + `mesh_trust` rows. Returns a
+/// per peer), then drop all `mesh_peers` rows. Returns a
 /// per-peer notify result so the operator can see who heard from us. PKI
 /// material is left in place — call `system bootstrap` to fully reset.
 /// Clear a stale `departed_at` flag for a peer on this host. Used to recover
@@ -763,12 +723,82 @@ pub(crate) fn proves_ca_possession(
             .is_ok()
 }
 
+pub(crate) const CA_PUSH_TTL_SECS: i64 = 120;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CaPushAuth {
+    pub(crate) nonce: String,
+    pub(crate) expires_at: i64,
+    pub(crate) proof: String,
+}
+
+fn ca_push_binding<T: serde::Serialize>(
+    method: &str,
+    receiver: &str,
+    sender: &str,
+    expires_at: i64,
+    payload: &T,
+) -> Result<String> {
+    let hash = utils::hash::sha256_hex(&serde_json::to_vec(payload)?);
+    Ok(format!(
+        "push:{method}:{receiver}:{sender}:{expires_at}:{hash}"
+    ))
+}
+
+pub(crate) fn ca_push_auth<T: serde::Serialize>(
+    ca_key_pem: &str,
+    method: &str,
+    receiver: &str,
+    sender: &str,
+    payload: &T,
+    now: i64,
+) -> Result<CaPushAuth> {
+    let nonce = utils::id::new();
+    let expires_at = now + CA_PUSH_TTL_SECS;
+    let binding = ca_push_binding(method, receiver, sender, expires_at, payload)?;
+    let proof = utils::pki::sign_with_ca_key_pem(ca_key_pem, &ca_holder_message(&binding, &nonce))?;
+    Ok(CaPushAuth {
+        nonce,
+        expires_at,
+        proof,
+    })
+}
+
+pub(crate) fn verify_ca_push<'a, T: serde::Serialize>(
+    pki: &std::path::Path,
+    method: &str,
+    receiver: &str,
+    sender: &str,
+    payload: &T,
+    auth: Option<&'a CaPushAuth>,
+    now: i64,
+) -> Result<&'a CaPushAuth> {
+    let Some(auth) = auth else {
+        anyhow::bail!("{method} refused: the push carries no CA-possession proof");
+    };
+    anyhow::ensure!(
+        uuid::Uuid::try_parse(&auth.nonce).is_ok(),
+        "{method} refused: the CA-possession proof nonce is invalid"
+    );
+    anyhow::ensure!(
+        auth.expires_at > now
+            && auth.expires_at - now <= CA_PUSH_TTL_SECS + PROMOTION_CLOCK_SKEW_SECS,
+        "{method} refused: the CA-possession proof is expired or not yet valid"
+    );
+    let binding = ca_push_binding(method, receiver, sender, auth.expires_at, payload)?;
+    anyhow::ensure!(
+        proves_ca_possession(pki, &binding, &auth.nonce, Some(&auth.proof)),
+        "{method} refused: the CA-possession proof did not verify against this host's mesh CA"
+    );
+    Ok(auth)
+}
+
 async fn another_ca_holder() -> bool {
     let pki = pki_dir();
     let Ok(peers) = db::pool::with_pooled_or_open(pdb::list_peers) else {
         return false;
     };
-    for p in peers.iter().filter(|p| p.local_secure && p.peer_secure) {
+    for p in peers.iter().filter(|p| p.departed_at.is_none()) {
         let nonce = utils::id::new();
         if let Ok(reply) = crate::mesh::cli::peer_ca_holder_reply(p, &nonce).await
             && reply_proves_ca_possession(&pki, &p.peer_id, &nonce, &reply)
@@ -890,6 +920,14 @@ pub async fn promote(target: &str, caller: Option<contract::CallerIdentity>) -> 
     )
     .await?;
     let out: crate::mesh::MeshSettingsOutput = serde_json::from_value(dispatch.result)?;
+    if out.secure
+        && let Some(peer) = db::pool::with_pooled_or_open(pdb::list_peers)?
+            .into_iter()
+            .find(|p| p.peer_id == target)
+        && let Err(e) = crate::mesh::cli::replicate_ca_key_if_needed_pub(&peer).await
+    {
+        tracing::warn!("CA-key replication to promoted member {target}: {e:#}");
+    }
     Ok(out.secure)
 }
 
@@ -1015,8 +1053,7 @@ async fn local_peer_row() -> MeshPeerDto {
         addr,
         port: db::ports::mesh_port(),
         last_seen_at: utils::time::now().unix_seconds(),
-        local_secure: true,
-        peer_secure: true,
+        trust_wire: Default::default(),
         status: "active".into(),
         routes,
         local: true,
@@ -1415,9 +1452,9 @@ fn resolve_peer_row<'a>(peers: &'a [pdb::PeerRow], input: &str) -> Result<&'a pd
             // legacy `peer.`-prefixed id alongside the bare `machine_id_short`,
             // or a stale re-keyed identity next to the current one. All such
             // rows carry the same dial address. Collapse them — if every match
-            // points at one address, pick the best row (secure first, then most
-            // recently seen) and dial it. The mTLS handshake verifies identity
-            // by the peer's live cert, so the redundant rows don't matter. Only
+            // points at one address, pick the most recently seen row and dial
+            // it. The mTLS handshake verifies identity by the peer's live
+            // cert, so the redundant rows don't matter. Only
             // a genuine multi-host collision (one selector, distinct addresses)
             // stays ambiguous.
             let mut addrs: Vec<String> = many
@@ -1429,7 +1466,7 @@ fn resolve_peer_row<'a>(peers: &'a [pdb::PeerRow], input: &str) -> Result<&'a pd
             if addrs.len() == 1 {
                 let best = many
                     .iter()
-                    .max_by_key(|p| (p.peer_secure, p.last_seen_at))
+                    .max_by_key(|p| p.last_seen_at)
                     .expect("matches is non-empty in this arm");
                 return Ok(*best);
             }
@@ -1457,8 +1494,6 @@ mod tests {
             first_seen_at: 0,
             last_seen_at: 0,
             departed_at: if departed { Some(1) } else { None },
-            local_secure: false,
-            peer_secure: false,
         }
     }
 
@@ -1541,9 +1576,8 @@ mod tests {
         assert_eq!(resolve_peer_addr(&peers, "host-e").unwrap(), "10.0.0.2");
     }
 
-    fn peer_secure(id: &str, hostname: &str, addr: &str, secure: bool, seen: i64) -> pdb::PeerRow {
+    fn peer_seen(id: &str, hostname: &str, addr: &str, seen: i64) -> pdb::PeerRow {
         let mut p = peer(id, hostname, addr, false);
-        p.peer_secure = secure;
         p.last_seen_at = seen;
         p
     }
@@ -1553,8 +1587,8 @@ mod tests {
         // Real freyr shape: legacy `peer.`-prefixed secure row + bare insecure
         // row, same hostname, same dial address → collapse, don't bail.
         let peers = vec![
-            peer_secure("019e7105-991", "freyr", "192.0.2.15", true, 100),
-            peer_secure("019e7105-991", "freyr", "192.0.2.15", false, 90),
+            peer_seen("019e7105-991", "freyr", "192.0.2.15", 100),
+            peer_seen("019e7105-991", "freyr", "192.0.2.15", 90),
         ];
         assert_eq!(resolve_peer_addr(&peers, "freyr").unwrap(), "192.0.2.15");
     }
@@ -1564,9 +1598,9 @@ mod tests {
         // Real maple shape: three rows (two secure re-keyed ids + one bare
         // insecure), all one address → resolves.
         let peers = vec![
-            peer_secure("019e7105-683", "maple", "192.0.2.11", true, 100),
-            peer_secure("dd7a73cda622", "maple", "192.0.2.11", true, 100),
-            peer_secure("dd7a73cda622", "maple", "192.0.2.11", false, 100),
+            peer_seen("019e7105-683", "maple", "192.0.2.11", 100),
+            peer_seen("dd7a73cda622", "maple", "192.0.2.11", 100),
+            peer_seen("dd7a73cda622", "maple", "192.0.2.11", 100),
         ];
         assert_eq!(resolve_peer_addr(&peers, "maple").unwrap(), "192.0.2.11");
     }
@@ -1576,8 +1610,8 @@ mod tests {
         // Two genuinely different hosts sharing a hostname must still be
         // rejected — collapse only applies when the address is unambiguous.
         let peers = vec![
-            peer_secure("abc", "host-e", "10.0.0.1", true, 100),
-            peer_secure("def", "host-e", "10.0.0.2", true, 100),
+            peer_seen("abc", "host-e", "10.0.0.1", 100),
+            peer_seen("def", "host-e", "10.0.0.2", 100),
         ];
         let err = resolve_peer_addr(&peers, "host-e").unwrap_err();
         assert!(err.to_string().contains("ambiguous"), "got: {err}");
@@ -1595,20 +1629,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_peer_row_collapse_prefers_secure_then_recent() {
-        // Same identity, same address, three rows: the winner is secure-first,
-        // then most-recently-seen. resolve_peer_row exposes the chosen row so we
-        // can assert on the tie-break, not just the (identical) address.
+    fn resolve_peer_row_collapse_prefers_the_most_recent() {
+        // Same identity, same address, three rows: the most-recently-seen wins.
         let peers = vec![
-            peer_secure("019e7105-991", "freyr", "192.0.2.15", false, 200),
-            peer_secure("019e7105-991", "freyr", "192.0.2.15", true, 90),
-            peer_secure("019e7105-991", "freyr", "192.0.2.15", true, 150),
+            peer_seen("019e7105-991", "freyr", "192.0.2.15", 200),
+            peer_seen("019e7105-991", "freyr", "192.0.2.15", 90),
+            peer_seen("019e7105-991", "freyr", "192.0.2.15", 150),
         ];
         let row = resolve_peer_row(&peers, "freyr").unwrap();
-        // The two secure rows outrank the newer insecure one; among the secure
-        // pair the last_seen_at=150 row wins.
-        assert!(row.peer_secure);
-        assert_eq!(row.last_seen_at, 150);
+        assert_eq!(row.last_seen_at, 200);
     }
 
     // ── serde shapes (assert on serialized strings, never Value) ──────────────
@@ -1647,20 +1676,6 @@ mod tests {
         assert!(s.contains(r#""peerId":"abc""#), "{s}");
         assert!(s.contains(r#""hostname":"host-e""#), "{s}");
         assert!(s.contains(r#""version":"0.20.0""#), "{s}");
-    }
-
-    #[test]
-    fn trust_output_reports_mutual_flag() {
-        let out = MeshTrustOutput {
-            peer_id: "abc".into(),
-            local_secure: true,
-            peer_secure: true,
-            mutual: true,
-            notify_result: "ok".into(),
-        };
-        let s = serde_json::to_string(&out).unwrap();
-        assert!(s.contains(r#""mutual":true"#), "{s}");
-        assert!(s.contains(r#""notify_result":"ok""#), "{s}");
     }
 
     #[test]
@@ -2107,19 +2122,6 @@ mod tests {
     // ── mutation handlers: empty / unknown-peer paths (no network dial) ────────
 
     #[tokio::test]
-    async fn trust_unknown_peer_errors_before_dial() {
-        let tmp = tmp_db();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let err = match trust("nope", true).await {
-                Ok(_) => panic!("expected trust to fail for unknown peer"),
-                Err(e) => e,
-            };
-            assert!(err.to_string().contains("no such peer: nope"), "got: {err}");
-        })
-        .await;
-    }
-
-    #[tokio::test]
     async fn leave_peer_unknown_errors_before_dial() {
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
@@ -2181,7 +2183,7 @@ mod tests {
 
             let out = leave_peer(&pid).await.unwrap();
             assert_eq!(out.peer_id, pid);
-            assert_eq!(out.rows_removed, 2);
+            assert_eq!(out.rows_removed, 1);
             // Dial to a dead loopback port must have failed into the warn arm.
             assert!(
                 out.notify_result.starts_with("warn:"),
@@ -2458,7 +2460,7 @@ mod tests {
     // ── local_peer_row(): synthesized self row from local sources ─────────────
 
     #[tokio::test]
-    async fn local_peer_row_carries_local_identity_and_self_trust() {
+    async fn local_peer_row_carries_local_identity() {
         ensure_host_identity();
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
@@ -2467,8 +2469,7 @@ mod tests {
             assert!(me.local, "the synthetic row is flagged local");
             assert_eq!(me.peer_id, local_peer_id(), "carries the real machine id");
             assert_eq!(me.hostname, crate::host_identity::display_hostname());
-            // A host trusts itself on both sides and reports itself active/reachable.
-            assert!(me.local_secure && me.peer_secure);
+            // A host reports itself active/reachable.
             assert_eq!(me.status, "active");
             assert_eq!(me.reachable, Some(true));
             assert_eq!(me.latency_ms, Some(0));
@@ -2484,39 +2485,6 @@ mod tests {
     }
 
     // ── trust(): found-peer path warns on a dead dial, still flips local_secure ─
-
-    #[tokio::test]
-    async fn trust_found_peer_warns_on_dead_dial_but_sets_local_secure() {
-        let tmp = tmp_db();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let pid = utils::id::new();
-            let conn = db::open_default().unwrap();
-            // Loopback + unused port → notify-trust dial refused instantly → warn.
-            seed_peer(&conn, &pid);
-            drop(conn);
-
-            let out = trust(&pid, true).await.unwrap();
-            assert_eq!(out.peer_id, pid);
-            // We set OUR local_secure regardless of whether the peer heard us.
-            assert!(out.local_secure, "trust flips local_secure locally");
-            // The peer never acked → not mutual, and the best-effort notify warns.
-            assert!(!out.mutual);
-            assert!(
-                out.notify_result.starts_with("warn:"),
-                "dead dial must land in the warn arm, got: {}",
-                out.notify_result
-            );
-            // The flip is durable in the db.
-            let conn = db::open_default().unwrap();
-            let row = pdb::list_peers(&conn)
-                .unwrap()
-                .into_iter()
-                .find(|p| p.peer_id == pid)
-                .unwrap();
-            assert!(row.local_secure, "local_secure persisted");
-        })
-        .await;
-    }
 
     // ── accept(): pre-dial guards (bad code / missing CA) ─────────────────────
 
@@ -2675,8 +2643,8 @@ mod tests {
         // Same selector, two genuinely different hosts (distinct addresses) →
         // the error must enumerate every colliding peer_id for disambiguation.
         let peers = vec![
-            peer_secure("id-a", "dup", "10.0.0.1", true, 100),
-            peer_secure("id-b", "dup", "10.0.0.2", true, 100),
+            peer_seen("id-a", "dup", "10.0.0.1", 100),
+            peer_seen("id-b", "dup", "10.0.0.2", 100),
         ];
         let err = resolve_peer_row(&peers, "dup").unwrap_err();
         let msg = err.to_string();

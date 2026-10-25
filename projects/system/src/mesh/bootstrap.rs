@@ -371,11 +371,6 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
         Some(&signer_fp),
         &ca_cert_pem,
     )?;
-    // The inviter just chose to sign this joiner's CSR — that IS the local
-    // trust signal. Without this the trust flag stays false even after a
-    // successful pairing, which blocks every downstream mutual-trust gate
-    // (CA-key replication, secrets sync).
-    pdb::set_trust(&conn, &joiner_peer_id, Some(true), None)?;
     // Supersede any stale forget-tombstone for this joiner. `orca mesh join` re-admits
     // a host under its *stable* machine_id, but a prior `mesh-forget` wrote a
     // 30-day replicated delete-tombstone on that same id — so without this the
@@ -1817,7 +1812,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn handle_join_confirm_signs_csrs_trusts_peer_and_consumes_offer() {
+    fn handle_join_confirm_signs_csrs_pins_peer_and_consumes_offer() {
         let _env = crate::test_env::snapshot();
         run_with_home(true, |rt| {
             let dir = tempfile::tempdir().unwrap();
@@ -1867,14 +1862,13 @@ mod tests {
                 assert_eq!(res.inviter_peer_id, "inv-peer-id");
                 assert_eq!(res.mesh_id, "mesh-z");
 
-                // The joiner is now a trusted peer pinned to the signer fp…
+                // The joiner is now a member pinned to the signer fp…
                 let peers = pdb::list_peers(&conn).unwrap();
                 let p = peers
                     .iter()
                     .find(|p| p.peer_id == JOINER_UUID)
                     .expect("joiner peer row");
                 assert_eq!(p.pubkey_fp.as_deref(), Some(fp.as_str()));
-                assert!(p.local_secure, "signing the CSR sets local trust");
                 assert_eq!(p.peer_addr, "10.0.8.7");
                 // …and the pending offer has been consumed.
                 assert!(pdb::list_pending_offers(&conn, "out").unwrap().is_empty());

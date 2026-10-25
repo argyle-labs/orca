@@ -405,12 +405,8 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
         && let Ok(peers) = db::mesh::list_peer_summaries(&conn)
     {
         report.mesh_peer_count = Some(peers.len() as u32);
-        report.mesh_paired_count = Some(
-            peers
-                .iter()
-                .filter(|p| p.local_secure && p.peer_secure)
-                .count() as u32,
-        );
+        report.mesh_paired_count =
+            Some(peers.iter().filter(|p| p.status == "active").count() as u32);
     }
     if let Ok(conn) = db::open_default()
         && let Ok(v) = db::mesh::get_secure(&conn)

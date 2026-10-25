@@ -673,7 +673,7 @@ pub struct SystemUpdateOutput {
     /// when either side is missing or unparseable.
     pub update_available: Option<bool>,
     /// True when this host structurally cannot obtain a release asset: it holds
-    /// no local `github_token` and has no trusted peer to delegate the fetch to
+    /// no local `github_token` and has no paired member to delegate the fetch to
     /// (#652). Reported on a DRY RUN so an operator sees "this host cannot
     /// update" before committing to `--execute`, instead of discovering it
     /// per-host mid-fan-out.
@@ -1319,38 +1319,19 @@ async fn run_system_update(
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-/// Build an actionable error when no paired *secure* peer exists to delegate a
-/// private-asset fetch to. Because the caller only reaches this after filtering
-/// out every secure peer, `insecure_present` is exactly the set of present
-/// (non-departed) peers — the candidates the operator could trust. When it is
-/// empty the host has no paired peers at all, which we call out distinctly.
-pub(crate) fn no_secure_peer_message(insecure_present: &[(String, String)]) -> String {
-    if insecure_present.is_empty() {
-        return "no paired secure peer available to delegate the private-asset fetch, and this \
-                host has no paired peers at all. Pair a peer that holds an `orca.github_token` and \
-                trust it with `orca mesh trust <peer_id> on`, or set a local \
-                `orca.github_token` secret to fetch the asset directly."
-            .to_string();
-    }
-    let candidates = insecure_present
-        .iter()
-        .map(|(id, host)| format!("{host} ({id})"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "no paired secure peer available to delegate the private-asset fetch. Trust a candidate \
-         peer with `orca mesh trust <peer_id> on` (candidates: {candidates}), or set a \
-         local `orca.github_token` secret to fetch the asset directly."
-    )
+pub(crate) fn no_peer_message() -> String {
+    "no paired mesh member available to delegate the private-asset fetch. Pair a member that \
+     holds an `orca.github_token`, or set a local `orca.github_token` secret to fetch the asset \
+     directly."
+        .to_string()
 }
 
 /// Can this host obtain a release asset at all? Returns `(blocked, reason)`.
 ///
 /// Mirrors the runtime fallback chain exactly, so a dry run cannot promise an
 /// update the apply will refuse (#652): a direct fetch needs a local
-/// `github_token`, and the only fallback is delegating to a paired peer that is
-/// BOTH present and `peer_secure`. With neither, the apply reaches
-/// [`no_secure_peer_message`] every time.
+/// `github_token`, and the only fallback is delegating to a present paired
+/// member. With neither, the apply reaches [`no_peer_message`] every time.
 ///
 /// Scoped to GitHub sources. A Gitea origin serves the asset without a token —
 /// delegation cannot help it and is not attempted (#489) — so a tokenless host
@@ -1369,23 +1350,14 @@ pub(crate) fn fetch_capability() -> (bool, Option<String>) {
     let Ok(peers) = db::mesh::peerdb::list_peers(&conn) else {
         return (false, None);
     };
-    let present: Vec<_> = peers
-        .into_iter()
-        .filter(|p| p.departed_at.is_none())
-        .collect();
-    if present.iter().any(|p| p.peer_secure) {
+    if peers.iter().any(|p| p.departed_at.is_none()) {
         return (false, None);
     }
-    let insecure: Vec<(String, String)> = present
-        .iter()
-        .filter(|p| !p.peer_secure)
-        .map(|p| (p.peer_id.clone(), p.peer_hostname.clone()))
-        .collect();
-    (true, Some(no_secure_peer_message(&insecure)))
+    (true, Some(no_peer_message()))
 }
 
 /// Delegate-on-miss: when this peer has no `github_token` secret, ask a
-/// paired secure peer that does hold one to fetch the release asset on our
+/// paired member that does hold one to fetch the release asset on our
 /// behalf. The token never leaves the holder; we get back the verified bytes.
 ///
 /// Returns `Ok(Some(version))` if a peer served the asset and the local
@@ -1408,20 +1380,13 @@ async fn delegate_fetch_and_apply(
     let target = build_target().to_string();
 
     let conn = db::open_default().context("open orca.db for peer enumeration")?;
-    let present: Vec<db::mesh::peerdb::PeerRow> = db::mesh::peerdb::list_peers(&conn)
+    let candidates: Vec<db::mesh::peerdb::PeerRow> = db::mesh::peerdb::list_peers(&conn)
         .context("list paired peers")?
         .into_iter()
         .filter(|p| p.departed_at.is_none())
         .collect();
-    let candidates: Vec<&db::mesh::peerdb::PeerRow> =
-        present.iter().filter(|p| p.peer_secure).collect();
     if candidates.is_empty() {
-        let insecure: Vec<(String, String)> = present
-            .iter()
-            .filter(|p| !p.peer_secure)
-            .map(|p| (p.peer_id.clone(), p.peer_hostname.clone()))
-            .collect();
-        anyhow::bail!(no_secure_peer_message(&insecure));
+        anyhow::bail!(no_peer_message());
     }
 
     // Sanity: surface a clear error if no transport is registered, rather
@@ -1992,22 +1957,9 @@ mod tests {
     }
 
     #[test]
-    fn no_secure_peer_message_lists_candidates_and_remedy() {
-        let msg = no_secure_peer_message(&[
-            ("id-1".to_string(), "alpha".to_string()),
-            ("id-2".to_string(), "beta".to_string()),
-        ]);
-        assert!(msg.contains("orca mesh trust <peer_id> on"));
-        assert!(msg.contains("alpha (id-1)"));
-        assert!(msg.contains("beta (id-2)"));
-        assert!(msg.contains("github_token"));
-    }
-
-    #[test]
-    fn no_secure_peer_message_calls_out_zero_peers() {
-        let msg = no_secure_peer_message(&[]);
-        assert!(msg.contains("no paired peers at all"));
-        assert!(msg.contains("orca mesh trust <peer_id> on"));
+    fn no_peer_message_names_the_remedy() {
+        let msg = no_peer_message();
+        assert!(msg.contains("no paired mesh member"));
         assert!(msg.contains("github_token"));
     }
 
@@ -2199,17 +2151,6 @@ mod tests {
         assert_eq!(args.action, Some(SystemUpdateAction::DisableCap));
         assert_eq!(require_cap_name(&args).unwrap(), "docker");
         assert_eq!(args.reason.as_deref(), Some("maint"));
-    }
-
-    // ── no_secure_peer_message single candidate ──────────────────────────────
-
-    #[test]
-    fn no_secure_peer_message_single_candidate() {
-        let msg = no_secure_peer_message(&[("id-9".to_string(), "gamma".to_string())]);
-        assert!(msg.contains("gamma (id-9)"), "{msg}");
-        // With at least one candidate it does NOT claim there are no peers.
-        assert!(!msg.contains("no paired peers at all"), "{msg}");
-        assert!(msg.contains("orca mesh trust <peer_id> on"), "{msg}");
     }
 
     // ── require_cap_name: reason present but name absent still errors ─────────
@@ -2804,7 +2745,7 @@ mod tests {
     // ── delegate_fetch_and_apply peer-enumeration branches (offline) ─────────
     //
     // These exercise the db peer-enumeration + candidate-filtering logic that
-    // runs BEFORE any network/RemoteExec call: with no secure peer to delegate
+    // runs BEFORE any network/RemoteExec call: with no paired member to delegate
     // to, the function bails with an actionable message and never touches the
     // wire. An ephemeral, migrated SQLite file is scoped in via
     // `db::with_db_path` so the enumeration sees exactly the peers we insert.
@@ -2828,42 +2769,7 @@ mod tests {
         .await
         .expect_err("empty peer set must bail before any network call");
         let msg = err.to_string();
-        assert!(msg.contains("no paired peers at all"), "{msg}");
-        assert!(msg.contains("orca mesh trust <peer_id> on"), "{msg}");
-    }
-
-    #[tokio::test]
-    async fn delegate_fetch_and_apply_lists_insecure_candidate() {
-        // A paired-but-untrusted (insecure) peer is not a valid delegate, but
-        // IS surfaced as a candidate the operator could trust. No secure peer
-        // exists, so the call still bails offline — and names the insecure peer.
-        let ctx = serve_ctx();
-        let dbp = scratch_db_path("insecure");
-        let peer_id = utils::id::new();
-        let err = db::with_db_path(dbp, async {
-            {
-                let conn = db::open_default().expect("open scoped db");
-                db::mesh::peerdb::upsert_peer(
-                    &conn,
-                    &peer_id,
-                    "gamma-host",
-                    "10.0.0.7",
-                    8099,
-                    None,
-                    "",
-                )
-                .expect("insert insecure peer");
-            }
-            delegate_fetch_and_apply(Some("0.0.9"), &Channel::Stable, &ctx).await
-        })
-        .await
-        .expect_err("no secure peer means bail even with an insecure peer present");
-        let msg = err.to_string();
-        // Untrusted peer is a candidate, not a "no peers at all" case.
-        assert!(!msg.contains("no paired peers at all"), "{msg}");
-        assert!(msg.contains("gamma-host"), "{msg}");
-        assert!(msg.contains(&peer_id), "{msg}");
-        assert!(msg.contains("orca mesh trust <peer_id> on"), "{msg}");
+        assert!(msg.contains("no paired mesh member"), "{msg}");
     }
 
     // ── system_update dispatch (the tool wrapper) — offline error arms ───────
@@ -3016,15 +2922,11 @@ mod tests {
                     "",
                 )
                 .expect("insert peer");
-                // Promote to a secure (trusted) peer so it survives the
-                // candidate filter and we reach the transport check.
-                db::mesh::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
-                    .expect("set trust");
             }
             delegate_fetch_and_apply(Some("0.0.9"), &Channel::Stable, &ctx).await
         })
         .await
-        .expect_err("no RemoteExec transport must bail even with a secure peer");
+        .expect_err("no RemoteExec transport must bail even with a paired member");
         let msg = err.to_string();
         assert!(msg.contains("no RemoteExec transport"), "{msg}");
     }

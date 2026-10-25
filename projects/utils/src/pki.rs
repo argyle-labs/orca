@@ -1736,11 +1736,15 @@ pub fn verify_bootstrap_attestation(
 }
 
 pub fn sign_with_mesh_ca(pki_dir: &Path, message: &[u8]) -> Result<String> {
+    let key_pem = read_pki_file(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
+    sign_with_ca_key_pem(&key_pem, message)
+}
+
+pub fn sign_with_ca_key_pem(key_pem: &str, message: &[u8]) -> Result<String> {
     use ed25519_dalek::Signer;
     use ed25519_dalek::pkcs8::DecodePrivateKey;
-    let key_pem = read_pki_file(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
     let signing =
-        ed25519_dalek::SigningKey::from_pkcs8_pem(&key_pem).context("parse mesh CA key PEM")?;
+        ed25519_dalek::SigningKey::from_pkcs8_pem(key_pem).context("parse mesh CA key PEM")?;
     Ok(crate::encoding::base64_encode(
         &signing.sign(message).to_bytes(),
     ))

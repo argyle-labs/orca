@@ -1,7 +1,7 @@
 //! Read-only mesh_peers helpers exposed to the `fleet` domain crate's
 //! mesh-related `#[orca_tool]`s.
 //!
-//! The mutating side of the mesh registry (offers, trust handshakes, wipes)
+//! The mutating side of the mesh registry (offers, pairing, wipes)
 //! lives in `projects/db/src/mesh/peerdb.rs`, driven by the mTLS/bootstrap
 //! state machine in `projects/system/src/mesh/`. This module exists so
 //! callers can read the list of paired peers without pulling in that side.
@@ -20,8 +20,6 @@ pub struct PeerSummary {
     pub addr: String,
     pub port: u16,
     pub last_seen_at: i64,
-    pub local_secure: bool,
-    pub peer_secure: bool,
     pub status: String,
     /// Multi-channel routes learned for this peer (LAN v4/v6, Tailscale,
     /// FQDN, etc.) as shared [`Route`]s. Empty if no rows in
@@ -53,11 +51,8 @@ pub fn get_secure(conn: &Connection) -> Result<bool> {
 pub fn list_peer_summaries(conn: &Connection) -> Result<Vec<PeerSummary>> {
     let mut stmt = conn.prepare(
         "SELECT p.peer_id, p.peer_hostname, p.peer_port,
-                p.last_seen_at, p.departed_at,
-                COALESCE(t.local_secure, 0), COALESCE(t.peer_secure, 0),
-                p.pubkey_fp
+                p.last_seen_at, p.departed_at, p.pubkey_fp
          FROM mesh_peers p
-         LEFT JOIN mesh_trust t ON t.peer_id = p.peer_id
          ORDER BY p.last_seen_at DESC",
     )?;
     let mut rows = stmt
@@ -77,11 +72,9 @@ pub fn list_peer_summaries(conn: &Connection) -> Result<Vec<PeerSummary>> {
                 addr: String::new(),
                 port: r.get::<_, i64>(2)? as u16,
                 last_seen_at: r.get::<_, i64>(3)?,
-                local_secure: r.get(5)?,
-                peer_secure: r.get(6)?,
                 status,
                 routes: Routes::new(),
-                pubkey_fp: r.get::<_, Option<String>>(7)?,
+                pubkey_fp: r.get::<_, Option<String>>(5)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

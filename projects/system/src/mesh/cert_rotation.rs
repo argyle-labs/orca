@@ -375,11 +375,9 @@ async fn refresh_via_peer(policy: DialPolicy) -> Result<()> {
     }
 }
 
-/// Every other non-departed peer is a candidate. `local_secure`/`peer_secure`
-/// are secrets-tier trust flags that say nothing about CA custody, so they
-/// only order candidates; the signer (`listener::handle_refresh_cert`)
-/// enforces CA custody and CN identity. `local_secure` peers go first as the
-/// likeliest key holders, then most-recently-seen.
+/// Every other non-departed member is a candidate, most-recently-seen first;
+/// the signer (`listener::handle_refresh_cert`) enforces CA custody and CN
+/// identity.
 async fn refresh_via_peer_mtls(policy: DialPolicy) -> Result<()> {
     let host = crate::host_identity::machine_id().to_string();
     let mut plans: Vec<(pdb::PeerRow, Vec<String>)> = db::pool::with_pooled_or_open(|conn| {
@@ -398,7 +396,7 @@ async fn refresh_via_peer_mtls(policy: DialPolicy) -> Result<()> {
     if plans.is_empty() {
         anyhow::bail!("no peers available to sign a refresh");
     }
-    plans.sort_by_key(|(p, _)| (!p.local_secure, Reverse(p.last_seen_at)));
+    plans.sort_by_key(|(p, _)| Reverse(p.last_seen_at));
     let candidates: Vec<Candidate> = plans
         .iter()
         .flat_map(|(p, targets)| peer_candidates(p, targets, policy.canonical_port))
@@ -435,15 +433,10 @@ async fn refresh_via_peer_mtls(policy: DialPolicy) -> Result<()> {
 /// dialer so a peer with a stale legacy addr is still reached.
 async fn refresh_via_peer_bootstrap(policy: DialPolicy) -> Result<()> {
     let host = crate::host_identity::machine_id().to_string();
-    // Any non-departed peer with a pinned bootstrap fp is a candidate. We do
-    // NOT require mutual-secure here: a host whose leaf expired has usually
-    // already had its `peer_secure` flag drop across the fleet (peers stop
-    // trusting an unreachable member), so gating on mutual-secure would
-    // exclude the exact recovery case. The signer authorizes us server-side
-    // (known non-departed peer + matching bootstrap fp) and only a CA-key
-    // holder can actually sign — non-holders just return an error and we move
-    // on. Order `local_secure` first (most likely a CA-key holder we trust),
-    // then most-recently-seen.
+    // Any non-departed member with a pinned bootstrap fp is a candidate. The
+    // signer authorizes us server-side (known non-departed peer + matching
+    // bootstrap fp) and only a CA-key holder can actually sign — non-holders
+    // just return an error and we move on.
     let mut plans: Vec<(pdb::PeerRow, Vec<String>)> = db::pool::with_pooled_or_open(|conn| {
         let peers = pdb::list_peers(conn)?;
         Ok(peers
@@ -460,7 +453,7 @@ async fn refresh_via_peer_bootstrap(policy: DialPolicy) -> Result<()> {
     if plans.is_empty() {
         anyhow::bail!("no peers with a pinned bootstrap fp available to sign a refresh");
     }
-    plans.sort_by_key(|(p, _)| (!p.local_secure, Reverse(p.last_seen_at)));
+    plans.sort_by_key(|(p, _)| Reverse(p.last_seen_at));
     let candidates: Vec<Candidate> = plans
         .iter()
         .flat_map(|(p, targets)| peer_candidates(p, targets, policy.canonical_port))
@@ -675,13 +668,12 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn refresh_via_peer_mtls_tries_peers_without_trust_flags() {
+    fn refresh_via_peer_mtls_tries_every_member() {
         let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
-            // No set_trust: neither secure flag is set, yet the peer must still
-            // be a candidate. Reaching the candidate loop (not the "no peers"
+            // Reaching the candidate loop (not the "no peers"
             // bail) proves candidacy only; no dial happens, since this host
             // has no mesh client bundle to dial with.
             let conn = db::open_default().unwrap();
@@ -798,7 +790,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
-            // Seed one non-departed mutual-secure peer at an unroutable target.
+            // Seed one non-departed member at an unroutable target.
             // mtls path builds CSRs, sorts candidates, dials, and exhausts the
             // loop against the dead peer.
             let conn = db::open_default().unwrap();
@@ -813,7 +805,6 @@ mod tests {
                 "",
             )
             .unwrap();
-            pdb::set_trust(&conn, &peer_id, Some(true), Some(true)).unwrap();
             drop(conn);
             let err = refresh_via_peer_mtls(test_policy()).await.unwrap_err();
             assert!(
@@ -1086,8 +1077,6 @@ mod tests {
             first_seen_at: 0,
             last_seen_at: 0,
             departed_at: None,
-            local_secure: false,
-            peer_secure: false,
         }
     }
 

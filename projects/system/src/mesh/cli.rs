@@ -3,7 +3,7 @@
 #![allow(clippy::disallowed_types)]
 
 //! CLI handlers for `orca mesh {discover,pending,accept,connect,offer,list,
-//! trust,leave}`. Init lives in main.rs. Host liveness is no longer
+//! leave}`. Init lives in main.rs. Host liveness is no longer
 //! a mesh verb — it moved to the first-class `system.health` tool; the internal
 //! `crate::mesh::ping` wire probe (route-health/dialer/fanout transport) stays.
 
@@ -237,36 +237,12 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
         Some(&offer.peer_pubkey_fp),
         &r.ca_cert_pem,
     )?;
-    // Accepting an offer IS the local trust signal — without flipping this
-    // the new pairing stays untrusted forever and roster-sync can't see it
-    // as a usable source.
-    pdb::set_trust(&conn, &r.inviter_peer_id, Some(true), None)?;
     // Same legacy `"unknown"` stub cleanup as the inviter side: drop the
     // pre-rc.25 row at this peer's addr so the host_status puller stops
     // chasing a peer_id that means nothing.
     pdb::cleanup_unknown_stub_at(&conn, &offer.peer_addr)?;
     pdb::delete_pending_offer(&conn, &offer.offer_id)?;
     drop(conn);
-
-    // Notify the inviter so THEIR peer_secure for us flips to true. Without
-    // this the inviter sees mutual=false forever after accept — the
-    // initial DB write is local-only and roster-sync only carries identity,
-    // not trust state.
-    if let Err(e) = call_peer(
-        &r.inviter_peer_id,
-        &offer.peer_addr,
-        offer.peer_port,
-        "mesh/notify-trust",
-        serde_json::json!({ "trust": true }),
-    )
-    .await
-    {
-        tracing::warn!(
-            "mesh/notify-trust to {}:{} after accept failed: {e:#} — inviter will see peer_secure=false until next manual `orca system mesh tier update --action trust --id <inviter-id> --on true`",
-            offer.peer_addr,
-            offer.peer_port
-        );
-    }
 
     println!(
         "✓ joined mesh {} via {} ({}, {}:{})",
@@ -661,8 +637,8 @@ pub fn cmd_mesh_list() -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<28} {:<16} {:<22} {:<8} {:<8} status",
-        "peer_id", "hostname", "addr:port", "local", "peer"
+        "{:<28} {:<16} {:<22} status",
+        "peer_id", "hostname", "addr:port"
     );
     for p in peers {
         let status = if p.departed_at.is_some() {
@@ -671,55 +647,25 @@ pub fn cmd_mesh_list() -> Result<()> {
             "active"
         };
         println!(
-            "{:<28} {:<16} {:<22} {:<8} {:<8} {}",
+            "{:<28} {:<16} {:<22} {}",
             p.peer_id,
             p.peer_hostname,
             format!("{}:{}", p.peer_addr, p.peer_port),
-            p.local_secure,
-            p.peer_secure,
             status
         );
     }
     Ok(())
 }
 
-// ── mesh trust ────────────────────────────────────────────────────────────────
-
-pub async fn cmd_mesh_trust(peer_id: &str, on: bool) -> Result<()> {
-    let conn = db::open_default()?;
-    let peer = pdb::list_peers(&conn)?
-        .into_iter()
-        .find(|p| p.peer_id == peer_id)
-        .with_context(|| format!("no such peer: {peer_id}"))?;
-    let new = pdb::set_trust(&conn, peer_id, Some(on), None)?;
-    println!(
-        "✓ local trust for {peer_id} → {on} (peer side: {})",
-        new.peer_secure
-    );
-
-    match call_peer(
-        &peer.peer_id,
-        &peer.peer_addr,
-        peer.peer_port,
-        "mesh/notify-trust",
-        serde_json::json!({ "trust": on }),
-    )
-    .await
-    {
-        Ok(_) => println!("✓ notified {peer_id}"),
-        Err(e) => println!("  warning: notify-trust dial failed ({e}); peer will pick it up later"),
-    }
-
-    if pdb::is_mutual_secure(new) {
-        println!("→ mutual secure; replicating CA key if needed…");
-        if let Err(e) = replicate_ca_key_if_needed(&peer).await {
-            println!("  warning: CA-key replication: {e}");
-        }
-    }
-    Ok(())
+#[derive(Debug, Default, serde::Deserialize)]
+struct PeerCaStatus {
+    #[serde(default)]
+    has_key: bool,
+    #[serde(default)]
+    secure: bool,
 }
 
-pub async fn peer_has_ca_key(peer: &pdb::PeerRow) -> Result<bool> {
+async fn peer_ca_status(peer: &pdb::PeerRow) -> Result<PeerCaStatus> {
     let resp = call_peer(
         &peer.peer_id,
         &peer.peer_addr,
@@ -728,10 +674,7 @@ pub async fn peer_has_ca_key(peer: &pdb::PeerRow) -> Result<bool> {
         serde_json::json!({}),
     )
     .await?;
-    Ok(resp
-        .get("has_key")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false))
+    Ok(serde_json::from_value(resp)?)
 }
 
 pub(crate) async fn peer_ca_holder_reply(
@@ -751,25 +694,44 @@ pub(crate) async fn peer_ca_holder_reply(
 
 async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
     let pki_d = pki_dir();
-    let i_have_key = utils::pki::has_mesh_ca_key(&pki_d);
-    let peer_has_key = peer_has_ca_key(peer).await?;
-    let i_am_secure = db::pool::with_pooled_or_open(db::mesh::get_secure)?;
-    if i_have_key && !peer_has_key && !i_am_secure {
-        println!("  not pushing the CA key: this member is insecure");
-    } else if i_have_key && !peer_has_key {
-        let (cert_pem, key_pem) = utils::pki::export_mesh_ca_keypair(&pki_d)?;
-        call_peer(
-            &peer.peer_id,
-            &peer.peer_addr,
-            peer.peer_port,
-            "mesh/push-ca-key",
-            serde_json::json!({ "cert_pem": cert_pem, "key_pem": key_pem }),
-        )
-        .await?;
-        println!("✓ pushed CA key to {}", peer.peer_id);
-    } else if !i_have_key && peer_has_key {
-        println!("  peer has CA key; we don't — they should push to us on their side");
+    if !utils::pki::has_mesh_ca_key(&pki_d) {
+        return Ok(());
     }
+    if !db::pool::with_pooled_or_open(db::mesh::get_secure)? {
+        println!("  not pushing the CA key: this member is insecure");
+        return Ok(());
+    }
+    let status = peer_ca_status(peer).await?;
+    if status.has_key {
+        return Ok(());
+    }
+    if !status.secure {
+        println!("  not pushing the CA key: {} is insecure", peer.peer_id);
+        return Ok(());
+    }
+    let (cert_pem, key_pem) = utils::pki::export_mesh_ca_keypair(&pki_d)?;
+    let payload = crate::mesh::listener::CaKeyPayload { cert_pem, key_pem };
+    let auth = crate::mesh::exec::ca_push_auth(
+        &payload.key_pem,
+        "mesh/push-ca-key",
+        &peer.peer_id,
+        crate::host_identity::machine_id(),
+        &payload,
+        now_secs(),
+    )?;
+    let params = crate::mesh::listener::PushCaKeyParams {
+        payload,
+        auth: Some(auth),
+    };
+    call_peer(
+        &peer.peer_id,
+        &peer.peer_addr,
+        peer.peer_port,
+        "mesh/push-ca-key",
+        serde_json::to_value(&params)?,
+    )
+    .await?;
+    println!("✓ pushed CA key to {}", peer.peer_id);
     Ok(())
 }
 
@@ -865,37 +827,57 @@ pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
         println!("  not replicating CA state: this member is insecure");
         return Ok(());
     }
-    let cur_cert = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))?;
-    let cur_key = std::fs::read_to_string(utils::pki::mesh_ca_key_path(&pki_d))?;
-    let prev_cert = std::fs::read_to_string(utils::pki::mesh_ca_previous_cert_path(&pki_d))?;
     let prev_key = std::fs::read_to_string(utils::pki::mesh_ca_previous_key_path(&pki_d))?;
+    let payload = crate::mesh::listener::CaStatePayload {
+        current_cert_pem: std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))?,
+        current_key_pem: std::fs::read_to_string(utils::pki::mesh_ca_key_path(&pki_d))?,
+        previous_cert_pem: Some(std::fs::read_to_string(
+            utils::pki::mesh_ca_previous_cert_path(&pki_d),
+        )?),
+        previous_key_pem: Some(prev_key.clone()),
+        previous_expires_at: Some(expires_at),
+    };
     let peers = pdb::list_peers(&conn)?;
-    for p in peers {
-        if p.departed_at.is_some() || !p.local_secure || !p.peer_secure {
-            continue;
-        }
-        let params = serde_json::json!({
-            "current_cert_pem": cur_cert,
-            "current_key_pem": cur_key,
-            "previous_cert_pem": prev_cert,
-            "previous_key_pem": prev_key,
-            "previous_expires_at": expires_at,
-        });
-        match call_peer(
-            &p.peer_id,
-            &p.peer_addr,
-            p.peer_port,
-            "mesh/push-ca-state",
-            params,
-        )
-        .await
-        {
-            Ok(_) => println!("  ✓ replicated CA state to {}", p.peer_id),
+    for p in peers.into_iter().filter(|p| p.departed_at.is_none()) {
+        match push_ca_state(&p, &payload, &prev_key).await {
+            Ok(true) => println!("  ✓ replicated CA state to {}", p.peer_id),
+            Ok(false) => {}
             Err(e) => println!("  ! could not replicate to {} ({e})", p.peer_id),
         }
     }
     println!("Peer leaf certs auto-refresh on their next rotation tick (≤7d threshold).");
     Ok(())
+}
+
+async fn push_ca_state(
+    peer: &pdb::PeerRow,
+    payload: &crate::mesh::listener::CaStatePayload,
+    signer_key_pem: &str,
+) -> Result<bool> {
+    if !peer_ca_status(peer).await?.secure {
+        return Ok(false);
+    }
+    let auth = crate::mesh::exec::ca_push_auth(
+        signer_key_pem,
+        "mesh/push-ca-state",
+        &peer.peer_id,
+        crate::host_identity::machine_id(),
+        payload,
+        now_secs(),
+    )?;
+    let params = crate::mesh::listener::PushCaStateParams {
+        payload: payload.clone(),
+        auth: Some(auth),
+    };
+    call_peer(
+        &peer.peer_id,
+        &peer.peer_addr,
+        peer.peer_port,
+        "mesh/push-ca-state",
+        serde_json::to_value(&params)?,
+    )
+    .await?;
+    Ok(true)
 }
 
 // ── mesh leave ────────────────────────────────────────────────────────────────
@@ -965,7 +947,7 @@ use utils::time::now_secs_since_epoch as now_secs;
 const DIAL_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Dial a paired peer with our mesh client cert. Used by post-join methods
-/// (notify-trust, has-ca-key, push-ca-key, peer-leaving).
+/// (has-ca-key, push-ca-key, peer-leaving).
 pub async fn call_mesh_method_pub(
     host: &str,
     port: u16,
@@ -1786,21 +1768,6 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    async fn cmd_mesh_trust_unknown_peer_errors_before_any_dial() {
-        let tmp = tmp_db();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            // No matching peer row → the `with_context` guard bails before any
-            // trust write or network dial.
-            let err = cmd_mesh_trust("nope", true).await.unwrap_err();
-            assert!(
-                format!("{err:#}").contains("no such peer: nope"),
-                "got: {err:#}"
-            );
-        })
-        .await;
-    }
-
     // ── cmd_mesh_leave ─────────────────────────────────────────────────────────
     //
     // Point `HOME` at a throwaway dir so `pki_dir()` resolves inside the tempdir
@@ -1907,35 +1874,6 @@ mod tests {
             format!("{err:#}").contains("does not have the mesh CA key"),
             "got: {err:#}"
         );
-    }
-
-    #[tokio::test]
-    async fn cmd_mesh_trust_found_peer_writes_local_trust_then_notify_fails_soft() {
-        let tmp = tmp_db();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let pid = utils::id::new();
-            let conn = db::open_default().unwrap();
-            // Loopback + dead port → the `mesh/notify-trust` dial is refused
-            // instantly, driving the Err arm (warning printed, not propagated).
-            // peer_secure stays false so `is_mutual_secure` short-circuits and
-            // the CA-key replication branch is skipped — no PKI is touched.
-            pdb::upsert_peer(&conn, &pid, "host-t", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
-            drop(conn);
-
-            // Command completes Ok despite the failed notify (best-effort).
-            cmd_mesh_trust(&pid, true).await.unwrap();
-
-            // The local trust flag was persisted before the dial attempt.
-            let conn = db::open_default().unwrap();
-            let row = pdb::list_peers(&conn)
-                .unwrap()
-                .into_iter()
-                .find(|p| p.peer_id == pid)
-                .unwrap();
-            assert!(row.local_secure, "local trust must be written");
-            assert!(!row.peer_secure, "peer side unchanged → not mutual");
-        })
-        .await;
     }
 
     // ── cmd_mesh_accept — active offer with no CA cert ─────────────────────────
@@ -2054,50 +1992,6 @@ mod tests {
                 .query_row("SELECT COUNT(*) FROM plugin_data", [], |r| r.get(0))
                 .unwrap();
             assert_eq!(plugin, 1, "plugin_data must survive a secrets-only wipe");
-        })
-        .await;
-    }
-
-    // ── cmd_mesh_trust — mutual-secure path triggers replication (fails soft) ───
-    //
-    // Pre-seed the peer's `peer_secure` so that flipping local trust to true
-    // makes `is_mutual_secure` fire, driving the CA-key replication branch. With
-    // an empty HOME (no mesh client bundle) that replication dial bails at bundle
-    // load, but the failure is caught and printed as a warning — the command
-    // still returns Ok. The peer sits on a dead port so the notify-trust dial
-    // also fails soft. This covers the `is_mutual_secure` arm (replicate branch)
-    // plus the warning arm without any live network. Contrast with
-    // `cmd_mesh_trust_found_peer_…`, which keeps peer_secure=false so replication
-    // is short-circuited and never reached.
-    #[serial_test::serial(env)]
-    #[tokio::test]
-    async fn cmd_mesh_trust_mutual_secure_attempts_replication_and_soft_warns() {
-        let _env = crate::test_env::snapshot();
-        let home = tempfile::tempdir().unwrap();
-        let _home = set_home(home.path());
-        let tmp = tmp_db();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let pid = utils::id::new();
-            let conn = db::open_default().unwrap();
-            pdb::upsert_peer(&conn, &pid, "host-m", "127.0.0.1", 1, Some("fp"), "ca").unwrap();
-            // Pre-set the peer side secure so the upcoming local flip → mutual.
-            pdb::set_trust(&conn, &pid, None, Some(true)).unwrap();
-            drop(conn);
-
-            // Completes Ok despite the failed notify + failed replication dial.
-            cmd_mesh_trust(&pid, true).await.unwrap();
-
-            let conn = db::open_default().unwrap();
-            let row = pdb::list_peers(&conn)
-                .unwrap()
-                .into_iter()
-                .find(|p| p.peer_id == pid)
-                .unwrap();
-            assert!(row.local_secure, "local trust must be written");
-            assert!(
-                row.peer_secure,
-                "pre-seeded peer trust must persist → mutual"
-            );
         })
         .await;
     }
@@ -2471,6 +2365,7 @@ mod tests {
             let pki = pki_dir();
             utils::pki::init_mesh_ca(&pki, "system-y").unwrap();
             assert!(utils::pki::has_mesh_ca_key(&pki));
+            pdb::set_secure(&db::open_default().unwrap(), true).unwrap();
             let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -2496,8 +2391,6 @@ mod tests {
                 first_seen_at: 0,
                 last_seen_at: 0,
                 departed_at: None,
-                local_secure: true,
-                peer_secure: true,
             };
             let err = replicate_ca_key_if_needed(&peer).await.unwrap_err();
             assert!(
@@ -2524,7 +2417,7 @@ mod tests {
         let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
-        let err = call_mesh_method_pub("127.0.0.1", 1, "mesh/notify-trust", serde_json::json!({}))
+        let err = call_mesh_method_pub("127.0.0.1", 1, "mesh/ping", serde_json::json!({}))
             .await
             .unwrap_err();
         assert!(
@@ -2533,14 +2426,9 @@ mod tests {
         );
     }
 
-    // ── replicate_ca_key_if_needed_pub — has-ca-key dial fails at bundle load ──
-    //
-    // The first thing this does is a `mesh/has-ca-key` mTLS dial, which loads the
-    // (absent) mesh client bundle and bails "not a mesh member" before touching
-    // the network.
     #[serial_test::serial(env)]
     #[tokio::test]
-    async fn replicate_ca_key_if_needed_pub_bails_without_bundle() {
+    async fn replicate_ca_key_if_needed_pub_is_a_no_op_without_a_ca_key() {
         let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
@@ -2553,14 +2441,8 @@ mod tests {
             first_seen_at: 0,
             last_seen_at: 0,
             departed_at: None,
-            local_secure: true,
-            peer_secure: true,
         };
-        let err = replicate_ca_key_if_needed_pub(&peer).await.unwrap_err();
-        assert!(
-            format!("{err:#}").contains("not a mesh member"),
-            "got: {err:#}"
-        );
+        replicate_ca_key_if_needed_pub(&peer).await.unwrap();
     }
 
     // ── dial_bootstrap_pub — dead-port connect failure ────────────────────────

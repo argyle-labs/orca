@@ -1253,13 +1253,6 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             identity_pinned_at INTEGER
         );
 
-        CREATE TABLE IF NOT EXISTS mesh_trust (
-            peer_id      TEXT PRIMARY KEY REFERENCES mesh_peers(peer_id) ON DELETE CASCADE,
-            local_secure INTEGER NOT NULL DEFAULT 0,
-            peer_secure  INTEGER NOT NULL DEFAULT 0,
-            set_at       INTEGER NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS mesh_promotion_nonces (
             nonce      TEXT PRIMARY KEY,
             expires_at INTEGER NOT NULL
