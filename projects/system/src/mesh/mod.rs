@@ -86,7 +86,9 @@ pub(crate) fn labeled(mut route: Route) -> Route {
 }
 
 /// Every member is mutually secure. Daemons that predate membership-as-trust
-/// still require both keys on a joined roster row.
+/// still require both keys on a joined roster row, so `system.list` emits
+/// them only while the mesh still accepts unbound envelopes from such
+/// daemons (see [`trust_registry::require_bound`]).
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug)]
 pub struct MemberTrustWire {
     local_secure: bool,
@@ -121,7 +123,7 @@ pub struct MeshPeerDto {
     pub port: u16,
     pub last_seen_at: i64,
     #[serde(flatten, skip_deserializing)]
-    pub trust_wire: MemberTrustWire,
+    pub trust_wire: Option<MemberTrustWire>,
     /// "active" | "departed".
     pub status: String,
     /// Multi-channel routes (LAN v4/v6, Tailscale, FQDN, …) as shared
@@ -1415,7 +1417,7 @@ mod dto_conversions {
                 addr: p.addr,
                 port: p.port,
                 last_seen_at: p.last_seen_at,
-                trust_wire: MemberTrustWire::default(),
+                trust_wire: None,
                 status: p.status,
                 routes,
                 local: false,
@@ -1595,8 +1597,10 @@ async fn mesh_list(args: MeshListArgs, ctx: &contract::ToolCtx) -> anyhow::Resul
     // `SystemInfoReport` (~85 KB/host) is NOT fetched here; it lives on
     // `system.detail`, and the fat classified candidate/stale/inbound-offer
     // view lives on `system.list --snapshot` / `system.list --instances`.
-    let mut members: Vec<MeshMember> = exec::list_lite()
-        .await?
+    let legacy = ::db::pool::with_pooled_or_open(|conn| {
+        Ok(!trust_registry::require_bound(conn, &pki_dir()))
+    })?;
+    let mut members: Vec<MeshMember> = with_trust_wire(exec::list_lite().await?, legacy)
         .into_iter()
         .map(|p| MeshMember::Joined(Box::new(p)))
         .collect();
@@ -1612,6 +1616,13 @@ async fn mesh_list(args: MeshListArgs, ctx: &contract::ToolCtx) -> anyhow::Resul
         next_cursor: page.next_cursor,
         total: page.total,
     }))
+}
+
+fn with_trust_wire(mut peers: Vec<MeshPeerDto>, legacy: bool) -> Vec<MeshPeerDto> {
+    for p in &mut peers {
+        p.trust_wire = legacy.then(MemberTrustWire::default);
+    }
+    peers
 }
 
 /// Deterministic sort key for a [`MeshMember`]: `(state ordinal, identity)`.
@@ -5933,6 +5944,10 @@ mod rc14_roster_compat_tests {
     const DISCOVERED: &str = "019f9f7b-2222-7e40-9e30-4987d8d12dcb";
 
     fn roster() -> MeshListOutput {
+        roster_with(true)
+    }
+
+    fn roster_with(legacy: bool) -> MeshListOutput {
         let joined: MeshPeerDto = serde_json::from_value(serde_json::json!({
             "id": JOINED,
             "hostname": "mint",
@@ -5943,6 +5958,7 @@ mod rc14_roster_compat_tests {
             "status": "active",
         }))
         .unwrap();
+        let joined = super::with_trust_wire(vec![joined], legacy).remove(0);
         let discovered = |id: Option<&str>| MeshDiscoveryRowDto {
             pubkey_fp: "fp".into(),
             peer_id: id.map(str::to_string),
@@ -5963,6 +5979,16 @@ mod rc14_roster_compat_tests {
             next_cursor: None,
             total: Some(3),
         }
+    }
+
+    #[test]
+    fn the_legacy_trust_keys_are_emitted_only_while_unbound_peers_are_allowed() {
+        let joined =
+            |legacy: bool| serde_json::to_value(roster_with(legacy)).unwrap()["members"][0].clone();
+        assert_eq!(joined(true)["local_secure"], true);
+        assert_eq!(joined(true)["peer_secure"], true);
+        assert!(joined(false).get("local_secure").is_none());
+        assert!(joined(false).get("peer_secure").is_none());
     }
 
     #[test]

@@ -1,17 +1,25 @@
 //! CA-signed, replicated records: the secure-member registry and mesh policy
-//! switches. Rows are append-only: a peer's copy of an existing row can only
-//! advance `updated_at`, never its signed fields, and every reader verifies
-//! the mesh-CA signature, so a forged row cannot create or erase a record.
+//! switches. Rows are append-only and verified against the mesh CA both when
+//! a peer's row is merged and when a row is read, so a forged row can neither
+//! land nor erase a record.
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
+use std::path::Path;
 
 pub const SECURE_GRANTED: &str = "granted";
 pub const SECURE_REVOKED: &str = "revoked";
 pub const POLICY_REQUIRE_BOUND: &str = "require_bound_envelopes";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, derive::Replicated)]
-#[replicate(crate = ::macro_runtime, table = "mesh_secure_registry", pk = "id", lww = "updated_at")]
+#[replicate(
+    crate = ::macro_runtime,
+    table = "mesh_secure_registry",
+    pk = "id",
+    lww = "updated_at",
+    immutable = "true",
+    verify = verify_registry_row
+)]
 pub struct SecureRegistryEntry {
     pub id: String,
     pub member_id: String,
@@ -34,7 +42,14 @@ impl SecureRegistryEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, derive::Replicated)]
-#[replicate(crate = ::macro_runtime, table = "mesh_policy", pk = "id", lww = "updated_at")]
+#[replicate(
+    crate = ::macro_runtime,
+    table = "mesh_policy",
+    pk = "id",
+    lww = "updated_at",
+    immutable = "true",
+    verify = verify_policy_row
+)]
 pub struct MeshPolicyEntry {
     pub id: String,
     pub key: String,
@@ -54,6 +69,62 @@ impl MeshPolicyEntry {
             self.ca_fp.clone(),
         ]
     }
+}
+
+/// A mesh CA this host trusts: the current CA (rank 1) or the previous one
+/// still inside its rotation overlap (rank 0).
+pub struct MeshCa {
+    pub fp: String,
+    pub cert: String,
+    pub rank: u8,
+}
+
+pub fn ca_fp(cert_pem: &str) -> String {
+    utils::hash::sha256_hex(cert_pem.trim().as_bytes())
+}
+
+pub fn known_cas(pki: &Path) -> Vec<MeshCa> {
+    [
+        (utils::pki::mesh_ca_previous_cert_path(pki), 0),
+        (utils::pki::mesh_ca_cert_path(pki), 1),
+    ]
+    .into_iter()
+    .filter_map(|(path, rank)| {
+        let cert = std::fs::read_to_string(path).ok()?;
+        Some(MeshCa {
+            fp: ca_fp(&cert),
+            cert,
+            rank,
+        })
+    })
+    .collect()
+}
+
+/// Rank of the trusted CA named by `ca_fp` when it signed `fields`.
+pub fn verified_rank(
+    cas: &[MeshCa],
+    ca_fp: &str,
+    fields: &[String],
+    signature: &str,
+) -> Option<u8> {
+    let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+    cas.iter()
+        .find(|ca| ca.fp == ca_fp)
+        .filter(|ca| utils::pki::verify_ca_record(&ca.cert, &fields, signature).is_ok())
+        .map(|ca| ca.rank)
+}
+
+fn signed_by_this_mesh(ca_fp: &str, fields: &[String], signature: &str) -> bool {
+    contract::config::paths::pki_dir()
+        .is_ok_and(|pki| verified_rank(&known_cas(&pki), ca_fp, fields, signature).is_some())
+}
+
+fn verify_registry_row(_: &Connection, row: &SecureRegistryEntry) -> bool {
+    signed_by_this_mesh(&row.ca_fp, &row.signed_fields(), &row.signature)
+}
+
+fn verify_policy_row(_: &Connection, row: &MeshPolicyEntry) -> bool {
+    signed_by_this_mesh(&row.ca_fp, &row.signed_fields(), &row.signature)
 }
 
 pub fn insert_registry_entry(conn: &Connection, e: &SecureRegistryEntry) -> Result<()> {
@@ -154,51 +225,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = crate::open_unencrypted(&dir.path().join("orca.db")).unwrap();
         (dir, c)
-    }
-
-    fn entry(member: &str) -> SecureRegistryEntry {
-        SecureRegistryEntry {
-            id: utils::id::new(),
-            member_id: member.into(),
-            state: SECURE_GRANTED.into(),
-            ca_fp: "fp".into(),
-            updated_at: "2026-10-25T00:00:00.000Z".into(),
-            signature: "sig".into(),
-        }
-    }
-
-    #[test]
-    fn a_replicated_registry_row_keeps_its_signed_fields() {
-        let (_d, c) = conn();
-        let original = entry("m1");
-        insert_registry_entry(&c, &original).unwrap();
-        let mut forged = original.clone();
-        forged.state = SECURE_REVOKED.into();
-        forged.signature = "forged".into();
-        forged.updated_at = "2026-10-25T00:00:09.000Z".into();
-        let rows = serde_json::to_value(vec![forged]).unwrap();
-        macro_runtime::replicate_table::merge_table(
-            &c,
-            "mesh_secure_registry",
-            &[
-                "id",
-                "member_id",
-                "state",
-                "ca_fp",
-                "updated_at",
-                "signature",
-            ],
-            "id",
-            "updated_at",
-            &[],
-            rows,
-        )
-        .unwrap();
-        let kept = registry_entries(&c).unwrap().remove(0);
-        assert_eq!(
-            (kept.state, kept.signature),
-            (original.state, original.signature)
-        );
     }
 
     #[test]

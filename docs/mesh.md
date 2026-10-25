@@ -175,20 +175,25 @@ are accepted until a CA holder runs
 `orca system mesh update --action require_bound`. That switch is refused
 while any active member has not yet advertised support. Once on, it is a
 CA-signed, replicated, one-way policy, and every unbound envelope is refused.
+Until then, `system.list` still emits `local_secure`/`peer_secure` = true on
+joined rows for daemons that predate membership-as-trust; once the switch is
+on, it stops.
 
 ### Secure registry
 
 `mesh_secure_registry` is a replicated, append-only list of CA-signed grants
-and revocations. Readers verify each row against the current or previous mesh
-CA and ignore any row that fails. A replicated copy can never change a row's
-signed fields.
+and revocations. `mesh_policy` (the require-bound switch) works the same way.
+Each row is verified against the current or previous mesh CA when it is
+merged from a peer (a row that fails is dropped) and again when it is read. A
+replicated copy can never change or delete an existing row.
 
 - `promote` records a grant. A secure CA holder that the registry does not
   list yet (a founder, or a holder from before the registry) registers itself
   at startup.
 - `orca system mesh tier update --action demote --id <member>` (run on a CA
-  holder) records a revocation. The member does not need to take part. When
-  it sees its own revocation, it demotes itself and purges its CA key.
+  holder) records a revocation. The member does not need to take part. As
+  soon as a merge brings in its own revocation, it demotes itself and purges
+  its CA key, with no restart needed.
 - `orca mesh ca rotate` and the CA key push after a promotion go only to
   members that hold a grant with no revocation under the same or a newer CA,
   and that also prove the claim right then. For a rotation, the member must

@@ -4819,6 +4819,7 @@ dependencies = [
  "futures",
  "glob",
  "if-addrs 0.14.0",
+ "inventory",
  "libc",
  "md-5 0.10.6",
  "mdns-sd",

@@ -3034,10 +3034,20 @@ mod tests {
         receiver: &str,
         now: i64,
     ) -> utils::pki::SignedEnvelope {
+        bound_bundle_with(key, sender, receiver, now, Default::default())
+    }
+
+    fn bound_bundle_with(
+        key: &ed25519_dalek::SigningKey,
+        sender: &str,
+        receiver: &str,
+        now: i64,
+        entities: std::collections::BTreeMap<String, Value>,
+    ) -> utils::pki::SignedEnvelope {
         let body = super::super::ReplicateBundle {
             peer_id: sender.to_string(),
             issued_at: now,
-            entities: Default::default(),
+            entities,
         };
         utils::pki::sign_bound_envelope(
             key,
@@ -3102,6 +3112,36 @@ mod tests {
             pdb::mark_bound_envelopes(&db::open_default().unwrap(), &cn).unwrap();
             let unbound = push_bundle(&cn, &unbound);
             assert!(unbound.contains("not bound"), "{unbound}");
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_revocation_arriving_by_replicate_push_purges_the_key_without_a_restart() {
+        in_ca_home("revoked-by-push.db", || {
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, "holder").unwrap();
+            crate::host_identity::init(&pki).ok();
+            let me = crate::host_identity::machine_id();
+            let conn = db::open_default().unwrap();
+            pdb::set_secure(&conn, true).unwrap();
+            crate::mesh::trust_registry::grant(&conn, &pki, me).unwrap();
+            let scratch_dir = tempfile::tempdir().unwrap();
+            let scratch = db::open_unencrypted(&scratch_dir.path().join("holder.db")).unwrap();
+            crate::mesh::trust_registry::revoke(&scratch, &pki, me).unwrap();
+            let rows = serde_json::to_value(pdb::registry_entries(&scratch).unwrap()).unwrap();
+            let cn = utils::id::new();
+            let key = member_key(&cn);
+            let env = bound_bundle_with(
+                &key,
+                &cn,
+                me,
+                utils::time::now().unix_seconds(),
+                [("mesh_secure_registry".to_string(), rows)].into(),
+            );
+            assert_eq!(push_bundle(&cn, &env), "accepted");
+            assert!(!utils::pki::has_mesh_ca_key(&pki));
+            assert!(!pdb::get_secure(&conn).unwrap());
         });
     }
 

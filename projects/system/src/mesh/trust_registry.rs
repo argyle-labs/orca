@@ -12,40 +12,7 @@ use db::mesh as pdb;
 use rusqlite::Connection;
 use std::path::Path;
 
-struct Ca {
-    fp: String,
-    cert: String,
-    rank: u8,
-}
-
-fn ca_fp(cert_pem: &str) -> String {
-    utils::hash::sha256_hex(cert_pem.trim().as_bytes())
-}
-
-fn known_cas(pki: &Path) -> Vec<Ca> {
-    [
-        (utils::pki::mesh_ca_previous_cert_path(pki), 0),
-        (utils::pki::mesh_ca_cert_path(pki), 1),
-    ]
-    .into_iter()
-    .filter_map(|(path, rank)| {
-        let cert = std::fs::read_to_string(path).ok()?;
-        Some(Ca {
-            fp: ca_fp(&cert),
-            cert,
-            rank,
-        })
-    })
-    .collect()
-}
-
-fn verified_rank(cas: &[Ca], ca_fp: &str, fields: &[String], signature: &str) -> Option<u8> {
-    let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
-    cas.iter()
-        .find(|ca| ca.fp == ca_fp)
-        .filter(|ca| utils::pki::verify_ca_record(&ca.cert, &fields, signature).is_ok())
-        .map(|ca| ca.rank)
-}
+use db::mesh::{ca_fp, known_cas, verified_rank};
 
 struct Signer {
     key: String,
@@ -157,6 +124,27 @@ pub(crate) fn may_receive_ca_material(
     proved: bool,
 ) -> bool {
     proved && is_registered_secure(conn, pki, member_id)
+}
+
+/// After a merge: when the registry now revokes this host, demote it and
+/// purge its CA key. The revoking holder signed the revocation, so the mesh
+/// keeps a CA-key holder.
+fn react_to_own_revocation(conn: &Connection) -> Result<()> {
+    let Some(own_id) = crate::host_identity::try_machine_id() else {
+        return Ok(());
+    };
+    let pki = crate::mesh::pki_dir();
+    if apply_own_revocation(conn, &pki, own_id)? || is_revoked(conn, &pki, own_id) {
+        utils::pki::remove_mesh_ca_keys(&pki)?;
+    }
+    Ok(())
+}
+
+inventory::submit! {
+    db::replicate::MergeHook {
+        name: "mesh-secure-registry",
+        run: react_to_own_revocation,
+    }
 }
 
 /// Re-sign, under the current CA, every grant that is still in force and every
@@ -284,6 +272,80 @@ mod tests {
         revoke(&c, &pki, "me").unwrap();
         assert!(apply_own_revocation(&c, &pki, "me").unwrap());
         assert!(!pdb::get_secure(&c).unwrap());
+    }
+
+    fn merged(
+        conn: &Connection,
+        rows: Vec<pdb::SecureRegistryEntry>,
+    ) -> Vec<pdb::SecureRegistryEntry> {
+        db::replicate::merge_bundle(
+            conn,
+            [(
+                "mesh_secure_registry".to_string(),
+                serde_json::to_value(rows).unwrap(),
+            )]
+            .into(),
+        )
+        .unwrap();
+        pdb::registry_entries(conn).unwrap()
+    }
+
+    fn signed_by_mesh(pki: &Path, e: &pdb::SecureRegistryEntry) -> bool {
+        verified_rank(&known_cas(pki), &e.ca_fp, &e.signed_fields(), &e.signature).is_some()
+    }
+
+    fn pinned_mesh() -> (
+        crate::mesh::HomeEnvGuard,
+        tempfile::TempDir,
+        std::path::PathBuf,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let guard = crate::mesh::pin_home(home.path());
+        let pki = crate::mesh::pki_dir();
+        utils::pki::init_mesh_ca(&pki, "holder").unwrap();
+        (guard, home, pki)
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_replicated_registry_row_must_verify_against_the_mesh_ca() {
+        let _env = crate::test_env::snapshot();
+        let (_g, _home, pki) = pinned_mesh();
+        let (_d, source, _) = fixture();
+        let (_d2, c, _) = fixture();
+        grant(&source, &pki, "m1").unwrap();
+        grant(&source, &pki, "m2").unwrap();
+        let rogue = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(rogue.path(), "rogue").unwrap();
+        grant(&source, rogue.path(), "m3").unwrap();
+        let mut rows = pdb::registry_entries(&source).unwrap();
+        let good = rows.iter().find(|e| e.member_id == "m1").unwrap().clone();
+        rows.iter_mut()
+            .find(|e| e.member_id == "m2")
+            .unwrap()
+            .member_id = "m4".into();
+        assert_eq!(merged(&c, rows), vec![good]);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_replicated_registry_row_is_never_rewritten() {
+        let _env = crate::test_env::snapshot();
+        let (_g, _home, pki) = pinned_mesh();
+        let (_d, source, _) = fixture();
+        let (_d2, c, _) = fixture();
+        revoke(&source, &pki, "m1").unwrap();
+        let original = pdb::registry_entries(&source).unwrap();
+        assert_eq!(merged(&c, original.clone()), original);
+        let mut rewrite = original[0].clone();
+        rewrite.state = pdb::SECURE_GRANTED.into();
+        rewrite.updated_at =
+            utils::time::Timestamp::from_unix_seconds(utils::time::now().unix_seconds() + 5)
+                .unwrap()
+                .to_rfc3339();
+        rewrite.signature = sign(&signer(&pki).unwrap(), &rewrite.signed_fields()).unwrap();
+        assert!(signed_by_mesh(&pki, &rewrite));
+        assert_eq!(merged(&c, vec![rewrite]), original);
     }
 
     #[test]
