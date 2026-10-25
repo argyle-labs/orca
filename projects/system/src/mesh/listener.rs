@@ -2104,6 +2104,7 @@ mod tests {
         let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = crate::mesh::pin_home(home.path());
+        crate::host_identity::init(home.path()).ok();
         utils::pki::init_mesh_ca(&pki_dir(), "founder").unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
