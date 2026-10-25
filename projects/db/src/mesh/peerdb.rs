@@ -940,40 +940,139 @@ pub fn is_active_member(conn: &Connection, peer_id: &str) -> Result<bool> {
         && !is_peer_forgotten(conn, peer_id)?)
 }
 
-pub const MESH_NONCE_HORIZON_SECS: i64 = 600;
+pub const MESH_NONCE_HORIZON_SECS: i64 = 900;
+pub const MESH_NONCE_PRUNE_MARGIN_SECS: i64 = 300;
 pub const MESH_NONCE_CAP: i64 = 100_000;
+pub const MESH_NONCE_EXEC_CAP: i64 = 80_000;
+pub const MESH_NONCE_SENDER_CAP: i64 = 10_000;
+pub const MESH_EXEC_NONCE_METHOD: &str = "mesh/exec";
+pub const MESH_PROMOTE_NONCE_METHOD: &str = "mesh/promote";
 
-/// Record a single-use mesh nonce until `expires_at`. Returns false for a
-/// replay. Expired nonces are pruned first; a nonce valid beyond
-/// [`MESH_NONCE_HORIZON_SECS`] or a store already at [`MESH_NONCE_CAP`] is
-/// refused, so the store stays bounded.
+/// Record a single-use mesh nonce for `method` from `sender` until
+/// `expires_at`. Returns false for a replay.
+///
+/// Bounded: nonces past `expires_at + MESH_NONCE_PRUNE_MARGIN_SECS` are pruned,
+/// a nonce valid beyond [`MESH_NONCE_HORIZON_SECS`] is refused, and running
+/// counters cap the store at [`MESH_NONCE_CAP`] overall,
+/// [`MESH_NONCE_SENDER_CAP`] per sender and [`MESH_NONCE_EXEC_CAP`] for
+/// `mesh/exec`, leaving headroom for credential methods.
 pub fn record_mesh_nonce(
     conn: &Connection,
+    method: &str,
+    sender: &str,
     nonce: &str,
     expires_at: i64,
     now: i64,
 ) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    let inserted = record_nonce_in(&tx, method, sender, nonce, expires_at, now)?;
+    tx.commit()?;
+    Ok(inserted)
+}
+
+fn nonce_count(conn: &Connection, scope: &str) -> Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT n FROM mesh_nonce_counts WHERE scope = ?1",
+            params![scope],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+fn bump_nonce_count(conn: &Connection, scope: &str, by: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO mesh_nonce_counts (scope, n) VALUES (?1, MAX(?2, 0))
+         ON CONFLICT(scope) DO UPDATE SET n = MAX(n + ?2, 0)",
+        params![scope, by],
+    )?;
+    Ok(())
+}
+
+fn nonce_scopes(method: &str, sender: &str) -> Vec<String> {
+    let mut scopes = vec!["all".to_string(), format!("sender:{sender}")];
+    if method == MESH_EXEC_NONCE_METHOD {
+        scopes.push("exec".to_string());
+    }
+    scopes
+}
+
+fn prune_nonces(conn: &Connection, now: i64) -> Result<()> {
+    let cutoff = now - MESH_NONCE_PRUNE_MARGIN_SECS;
+    let expired: Vec<(String, String, i64)> = conn
+        .prepare(
+            "SELECT method, sender, COUNT(*) FROM mesh_seen_nonces
+             WHERE expires_at <= ?1 GROUP BY method, sender",
+        )?
+        .query_map(params![cutoff], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (method, sender, n) in &expired {
+        for scope in nonce_scopes(method, sender) {
+            bump_nonce_count(conn, &scope, -n)?;
+        }
+    }
+    conn.execute(
+        "DELETE FROM mesh_seen_nonces WHERE expires_at <= ?1",
+        params![cutoff],
+    )?;
+    conn.execute("DELETE FROM mesh_nonce_counts WHERE n <= 0", [])?;
+    Ok(())
+}
+
+fn record_nonce_in(
+    conn: &Connection,
+    method: &str,
+    sender: &str,
+    nonce: &str,
+    expires_at: i64,
+    now: i64,
+) -> Result<bool> {
+    anyhow::ensure!(utils::id::is_valid(nonce), "mesh nonce is not a UUID");
     anyhow::ensure!(
-        expires_at > now && expires_at - now <= MESH_NONCE_HORIZON_SECS,
+        expires_at > now - MESH_NONCE_PRUNE_MARGIN_SECS
+            && expires_at - now <= MESH_NONCE_HORIZON_SECS,
         "mesh nonce expiry is outside the replay window"
     );
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM mesh_seen_nonces WHERE expires_at <= ?1",
-        params![now],
-    )?;
-    let held: i64 = tx.query_row("SELECT COUNT(*) FROM mesh_seen_nonces", [], |r| r.get(0))?;
+    prune_nonces(conn, now)?;
     anyhow::ensure!(
-        held < MESH_NONCE_CAP,
+        nonce_count(conn, "all")? < MESH_NONCE_CAP,
         "mesh nonce store is full; refusing until entries expire"
     );
-    let inserted = tx.execute(
-        "INSERT INTO mesh_seen_nonces (nonce, expires_at) VALUES (?1, ?2)
+    anyhow::ensure!(
+        nonce_count(conn, &format!("sender:{sender}"))? < MESH_NONCE_SENDER_CAP,
+        "mesh nonce store is full for sender {sender}; refusing until entries expire"
+    );
+    if method == MESH_EXEC_NONCE_METHOD {
+        anyhow::ensure!(
+            nonce_count(conn, "exec")? < MESH_NONCE_EXEC_CAP,
+            "mesh nonce store is full for mesh/exec; refusing until entries expire"
+        );
+    }
+    let inserted = conn.execute(
+        "INSERT INTO mesh_seen_nonces (nonce, method, sender, expires_at) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(nonce) DO NOTHING",
-        params![nonce, expires_at],
-    )?;
-    tx.commit()?;
-    Ok(inserted == 1)
+        params![nonce, method, sender, expires_at],
+    )? == 1;
+    if inserted {
+        for scope in nonce_scopes(method, sender) {
+            bump_nonce_count(conn, &scope, 1)?;
+        }
+    }
+    Ok(inserted)
+}
+
+/// True when `nonce` is a promotion grant this member consumed from `issuer`
+/// and it has not been pruned.
+pub fn consumed_promotion_from(conn: &Connection, issuer: &str, nonce: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM mesh_seen_nonces WHERE nonce = ?1 AND method = ?2 AND sender = ?3",
+            params![nonce, MESH_PROMOTE_NONCE_METHOD, issuer],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 pub fn is_peer_forgotten(conn: &Connection, peer_id: &str) -> Result<bool> {
@@ -1034,16 +1133,13 @@ pub fn set_secure(conn: &Connection, secure: bool) -> Result<()> {
 
 pub fn consume_promotion_grant(
     conn: &Connection,
+    issuer: &str,
     nonce: &str,
     issued_at: i64,
     expires_at: i64,
     now: i64,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM mesh_promotion_nonces WHERE expires_at <= ?1",
-        params![now],
-    )?;
     let demoted_at: Option<i64> = tx
         .query_row(
             "SELECT demoted_at FROM mesh_demotion WHERE id = 1",
@@ -1057,12 +1153,14 @@ pub fn consume_promotion_grant(
              arrived within one grant lifetime of it"
         );
     }
-    let inserted = tx.execute(
-        "INSERT INTO mesh_promotion_nonces (nonce, expires_at) VALUES (?1, ?2)
-         ON CONFLICT(nonce) DO NOTHING",
-        params![nonce, expires_at],
-    )?;
-    if inserted == 0 {
+    if !record_nonce_in(
+        &tx,
+        MESH_PROMOTE_NONCE_METHOD,
+        issuer,
+        nonce,
+        expires_at,
+        now,
+    )? {
         anyhow::bail!("promotion to secure refused: the grant was already used");
     }
     tx.execute(
@@ -1531,46 +1629,114 @@ mod tests {
         assert_eq!(peers[0].peer_id, REAL);
     }
 
-    #[test]
-    fn a_mesh_nonce_is_single_use_across_reopen() {
-        let (d, c) = test_conn();
-        assert!(record_mesh_nonce(&c, "n1", 160, 100).unwrap());
-        assert!(!record_mesh_nonce(&c, "n1", 160, 100).unwrap());
-        drop(c);
-        let c = db::open_unencrypted(&d.path().join("orca.db")).unwrap();
-        assert!(!record_mesh_nonce(&c, "n1", 160, 110).unwrap());
+    fn n(i: u32) -> String {
+        format!("019f0000-0000-7000-8000-{i:012}")
+    }
+
+    fn held(c: &Connection, scope: &str) -> i64 {
+        super::nonce_count(c, scope).unwrap()
     }
 
     #[test]
-    fn expired_mesh_nonces_are_pruned() {
+    fn a_mesh_nonce_is_single_use_across_reopen() {
+        let (d, c) = test_conn();
+        assert!(record_mesh_nonce(&c, "m", "s", &n(1), 160, 100).unwrap());
+        assert!(!record_mesh_nonce(&c, "m", "s", &n(1), 160, 100).unwrap());
+        drop(c);
+        let c = db::open_unencrypted(&d.path().join("orca.db")).unwrap();
+        assert!(!record_mesh_nonce(&c, "m", "s", &n(1), 160, 110).unwrap());
+    }
+
+    #[test]
+    fn a_non_uuid_mesh_nonce_is_refused() {
         let (_d, c) = test_conn();
-        assert!(record_mesh_nonce(&c, "old", 150, 100).unwrap());
-        assert!(record_mesh_nonce(&c, "new", 400, 200).unwrap());
-        let held: i64 = c
-            .query_row("SELECT COUNT(*) FROM mesh_seen_nonces", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(held, 1);
+        let err = record_mesh_nonce(&c, "m", "s", "not-a-uuid", 160, 100).unwrap_err();
+        assert!(err.to_string().contains("UUID"), "{err}");
+    }
+
+    #[test]
+    fn mesh_nonces_are_pruned_only_after_a_skew_margin() {
+        let (_d, c) = test_conn();
+        assert!(record_mesh_nonce(&c, "m", "s", &n(1), 150, 100).unwrap());
+        assert!(!record_mesh_nonce(&c, "m", "s", &n(1), 150, 151).unwrap());
+        assert!(
+            record_mesh_nonce(&c, "m", "s", &n(2), 600, 150 + MESH_NONCE_PRUNE_MARGIN_SECS)
+                .unwrap()
+        );
+        assert_eq!(held(&c, "all"), 1);
+        assert_eq!(held(&c, "sender:s"), 1);
     }
 
     #[test]
     fn a_mesh_nonce_outside_the_window_is_refused() {
         let (_d, c) = test_conn();
-        assert!(record_mesh_nonce(&c, "past", 100, 100).is_err());
-        assert!(record_mesh_nonce(&c, "far", 100 + MESH_NONCE_HORIZON_SECS + 1, 100).is_err());
+        let stale = 100 - MESH_NONCE_PRUNE_MARGIN_SECS;
+        assert!(record_mesh_nonce(&c, "m", "s", &n(1), stale, 100).is_err());
+        assert!(
+            record_mesh_nonce(&c, "m", "s", &n(2), 100 + MESH_NONCE_HORIZON_SECS + 1, 100).is_err()
+        );
+    }
+
+    fn fill(c: &Connection, scope: &str, count: i64) {
+        c.execute(
+            "INSERT INTO mesh_nonce_counts (scope, n) VALUES (?1, ?2)
+             ON CONFLICT(scope) DO UPDATE SET n = excluded.n",
+            params![scope, count],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn one_sender_cannot_fill_the_nonce_store() {
+        let (_d, c) = test_conn();
+        fill(&c, "sender:noisy", MESH_NONCE_SENDER_CAP);
+        let err = record_mesh_nonce(&c, "m", "noisy", &n(1), 160, 100).unwrap_err();
+        assert!(err.to_string().contains("sender noisy"), "{err}");
+        assert!(record_mesh_nonce(&c, "m", "quiet", &n(2), 160, 100).unwrap());
+    }
+
+    #[test]
+    fn exec_nonces_leave_headroom_for_credential_methods() {
+        let (_d, c) = test_conn();
+        fill(&c, "exec", MESH_NONCE_EXEC_CAP);
+        let err = record_mesh_nonce(&c, MESH_EXEC_NONCE_METHOD, "s", &n(1), 160, 100).unwrap_err();
+        assert!(err.to_string().contains("mesh/exec"), "{err}");
+        assert!(record_mesh_nonce(&c, "mesh/push-ca-state", "s", &n(2), 160, 100).unwrap());
     }
 
     #[test]
     fn a_full_mesh_nonce_store_refuses_new_nonces() {
         let (_d, c) = test_conn();
-        c.execute(
-            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
-             INSERT INTO mesh_seen_nonces (nonce, expires_at) SELECT 'x' || i, 500 FROM n",
-            params![MESH_NONCE_CAP],
-        )
-        .unwrap();
-        let err = record_mesh_nonce(&c, "one-more", 500, 100).unwrap_err();
+        fill(&c, "all", MESH_NONCE_CAP);
+        let err = record_mesh_nonce(&c, "m", "s", &n(1), 160, 100).unwrap_err();
         assert!(err.to_string().contains("full"), "{err}");
-        assert!(record_mesh_nonce(&c, "after-expiry", 1_000, 600).unwrap());
+    }
+
+    #[test]
+    fn nonce_counters_track_inserts_and_prunes() {
+        let (_d, c) = test_conn();
+        for i in 0..3 {
+            record_mesh_nonce(&c, MESH_EXEC_NONCE_METHOD, "s", &n(i), 150, 100).unwrap();
+        }
+        assert_eq!(
+            (held(&c, "all"), held(&c, "exec"), held(&c, "sender:s")),
+            (3, 3, 3)
+        );
+        record_mesh_nonce(&c, "m", "t", &n(9), 1_000, 900).unwrap();
+        assert_eq!(
+            (held(&c, "all"), held(&c, "exec"), held(&c, "sender:s")),
+            (1, 0, 0)
+        );
+    }
+
+    #[test]
+    fn a_promotion_grant_is_recorded_against_its_issuer() {
+        let (_d, c) = test_conn();
+        consume_promotion_grant(&c, "issuer", &n(1), 100, 700, 110).unwrap();
+        assert!(consumed_promotion_from(&c, "issuer", &n(1)).unwrap());
+        assert!(!consumed_promotion_from(&c, "other", &n(1)).unwrap());
+        let err = consume_promotion_grant(&c, "issuer", &n(1), 100, 700, 120).unwrap_err();
+        assert!(err.to_string().contains("already used"), "{err}");
     }
 
     #[test]

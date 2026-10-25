@@ -76,13 +76,23 @@ impl ReplicationTransport for MeshTransport {
                 async move { fetch_replicate_bundle(&t, &nonce).await }
             })
             .await?;
+        let legacy = envelope.binding.is_none()
+            && db::pool::with_pooled_or_open(|conn| {
+                Ok(crate::mesh::trust_registry::unbound_allowed(
+                    conn,
+                    &pki_dir(),
+                    &peer.peer_id,
+                ))
+            })?;
+        if legacy {
+            return verify_legacy_bundle(&envelope, pinned_fp);
+        }
         verify_export(
             &envelope,
             pinned_fp,
             &peer.peer_id,
             crate::host_identity::machine_id(),
             &nonce,
-            utils::time::now().unix_seconds(),
         )
     }
 
@@ -167,22 +177,44 @@ pub fn verify_bundle<'a>(
     Ok((bundle.entities, binding))
 }
 
-/// Verify an exported bundle answers this host's own request `nonce`.
+/// Verify an unbound bundle from a peer that predates bound envelopes.
+pub fn verify_legacy_bundle(
+    envelope: &utils::pki::SignedEnvelope,
+    pinned_fp: &str,
+) -> Result<BTreeMap<String, Value>> {
+    let (bundle, verifying) = utils::pki::verify_envelope::<ReplicateBundle>(envelope)
+        .context("verify bundle envelope")?;
+    let signer_fp = utils::pki::bootstrap_pubkey_fingerprint(&verifying);
+    anyhow::ensure!(
+        signer_fp == pinned_fp,
+        "replicate bundle signer fp {signer_fp} does not match pinned peer fp {pinned_fp}"
+    );
+    Ok(bundle.entities)
+}
+
+/// Verify an exported bundle answers this host's own request `nonce`. The
+/// exporter's clock is accepted: the requester's fresh nonce already proves
+/// the answer is not a replay.
 pub fn verify_export(
     envelope: &utils::pki::SignedEnvelope,
     pinned_fp: &str,
     sender: &str,
     receiver: &str,
     nonce: &str,
-    now: i64,
 ) -> Result<BTreeMap<String, Value>> {
+    let exporter_now = envelope
+        .binding
+        .as_ref()
+        .context("envelope is not bound to a receiver and nonce")?
+        .expires_at
+        - BUNDLE_TTL_SECS;
     let (entities, binding) = verify_bundle(
         envelope,
         pinned_fp,
         crate::mesh::MESH_REPLICATE_EXPORT_METHOD,
         sender,
         receiver,
-        now,
+        exporter_now,
     )?;
     anyhow::ensure!(
         binding.nonce == nonce,

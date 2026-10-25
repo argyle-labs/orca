@@ -2032,22 +2032,50 @@ impl BoundEnvelope {
     }
 
     fn canonical(&self) -> Vec<u8> {
-        let expires_at = self.expires_at.to_string();
-        let mut out = Vec::new();
-        for field in [
+        canonical_fields(&[
             "orca-bound-envelope-v1",
             &self.method,
             &self.sender,
             &self.receiver,
             &self.nonce,
-            &expires_at,
+            &self.expires_at.to_string(),
             &self.payload_sha256,
-        ] {
-            out.extend_from_slice(&(field.len() as u32).to_be_bytes());
-            out.extend_from_slice(field.as_bytes());
-        }
-        out
+        ])
     }
+}
+
+/// Length-prefixed (u32 big-endian) concatenation of `fields`; no field can
+/// shift a boundary.
+pub fn canonical_fields(fields: &[&str]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for field in fields {
+        out.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        out.extend_from_slice(field.as_bytes());
+    }
+    out
+}
+
+/// Sign a mesh-CA record (registry entry, policy) over its canonical fields.
+pub fn sign_ca_record(ca_key_pem: &str, fields: &[&str]) -> Result<String> {
+    sign_with_ca_key_pem(ca_key_pem, &canonical_fields(fields))
+}
+
+pub fn verify_ca_record(ca_cert_pem: &str, fields: &[&str], signature_b64: &str) -> Result<()> {
+    verify_mesh_ca_signature(ca_cert_pem, &canonical_fields(fields), signature_b64)
+}
+
+const RECEIVER_TIME_TAG: &str = "[receiver_time=";
+
+/// Tag a refusal with the receiver's clock so the sender can retry with the
+/// measured offset.
+pub fn with_receiver_time(message: &str, now: i64) -> String {
+    format!("{message} {RECEIVER_TIME_TAG}{now}]")
+}
+
+pub fn receiver_time_in(message: &str) -> Option<i64> {
+    let start = message.rfind(RECEIVER_TIME_TAG)? + RECEIVER_TIME_TAG.len();
+    let rest = &message[start..];
+    rest[..rest.find(']')?].parse().ok()
 }
 
 /// Sign `body` with `signing` and bind it to `method`/`sender`/`receiver`/
@@ -2380,6 +2408,26 @@ mod tests {
         let env = sign_envelope(&bound_key(), &"hi").unwrap();
         let err = check(&env, "m/x", "bob", BOUND_NOW).unwrap_err();
         assert!(err.to_string().contains("not bound"), "{err}");
+    }
+
+    #[test]
+    fn receiver_time_round_trips_through_a_refusal() {
+        let msg = with_receiver_time("refused: expired", 1_800_000_123);
+        assert_eq!(
+            receiver_time_in(&format!("rpc: {msg}")),
+            Some(1_800_000_123)
+        );
+        assert_eq!(receiver_time_in("refused"), None);
+    }
+
+    #[test]
+    fn a_ca_record_verifies_only_for_its_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "h").unwrap();
+        let (cert, key) = export_mesh_ca_keypair(dir.path()).unwrap();
+        let sig = sign_ca_record(&key, &["registry", "m1", "granted", "5"]).unwrap();
+        verify_ca_record(&cert, &["registry", "m1", "granted", "5"], &sig).unwrap();
+        assert!(verify_ca_record(&cert, &["registry", "m1", "revoked", "5"], &sig).is_err());
     }
 
     #[test]

@@ -277,6 +277,20 @@ pub async fn cmd_mesh_join(addr: &str, token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Recover this member when the mesh refuses it (lost bootstrap key, binding
+/// lockout): drop its local membership, then re-join through `addr` with a
+/// join token from a CA holder. Joining clears any forget-tombstone the holder
+/// wrote for this member.
+pub async fn rejoin(
+    addr: &str,
+    port_override: Option<u16>,
+    token: &str,
+) -> Result<crate::mesh::MeshAcceptOutput> {
+    split_join_token(token)?;
+    db::pool::with_pooled_or_open(pdb::wipe_mesh_membership)?;
+    mesh_join_core(addr, port_override, None, token).await
+}
+
 /// Core joiner-initiated pairing. Dials the inviter's bootstrap SNI requiring the
 /// mesh CA pinned by the join token, verifies the CA's attestation of the
 /// inviter's bootstrap key, then sends a signed `mesh/request-offer` carrying the
@@ -686,7 +700,7 @@ async fn peer_holds_ca(peer: &pdb::PeerRow, ca_cert_pem: &str) -> Result<bool> {
 /// Push the CA key to `peer`, the member this host just promoted. Never fans
 /// out: who receives the key is decided by the promotion, not by any claim
 /// the receiver makes.
-async fn push_ca_key_to_promoted(peer: &pdb::PeerRow) -> Result<()> {
+async fn push_ca_key_to_promoted(peer: &pdb::PeerRow, grant_nonce: &str) -> Result<()> {
     let pki_d = pki_dir();
     if !utils::pki::has_mesh_ca_key(&pki_d) {
         return Ok(());
@@ -695,31 +709,55 @@ async fn push_ca_key_to_promoted(peer: &pdb::PeerRow) -> Result<()> {
         println!("  not pushing the CA key: this member is insecure");
         return Ok(());
     }
+    anyhow::ensure!(
+        db::pool::with_pooled_or_open(|conn| {
+            Ok(crate::mesh::trust_registry::is_registered_secure(
+                conn,
+                &pki_d,
+                &peer.peer_id,
+            ))
+        })?,
+        "not pushing the CA key: {} is not granted on the secure registry",
+        peer.peer_id
+    );
     let ca_cert = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))?;
     if peer_holds_ca(peer, &ca_cert).await? {
         return Ok(());
     }
     let (cert_pem, key_pem) = utils::pki::export_mesh_ca_keypair(&pki_d)?;
-    let payload = crate::mesh::listener::CaKeyPayload { cert_pem, key_pem };
-    let auth = crate::mesh::exec::ca_push_auth(
-        &payload.key_pem,
-        "mesh/push-ca-key",
-        &peer.peer_id,
-        crate::host_identity::machine_id(),
-        &payload,
-        now_secs(),
-    )?;
-    let params = crate::mesh::listener::PushCaKeyParams {
-        payload,
-        auth: Some(auth),
+    let payload = crate::mesh::listener::CaKeyPayload {
+        cert_pem,
+        key_pem,
+        grant_nonce: grant_nonce.to_string(),
     };
-    call_peer(
-        &peer.peer_id,
-        &peer.peer_addr,
-        peer.peer_port,
-        "mesh/push-ca-key",
-        serde_json::to_value(&params)?,
-    )
+    crate::mesh::clock_skew::with_clock_retry(&peer.peer_id, |now| {
+        let params = crate::mesh::exec::ca_push_auth(
+            &payload.key_pem,
+            "mesh/push-ca-key",
+            &peer.peer_id,
+            crate::host_identity::machine_id(),
+            &payload,
+            now,
+        )
+        .and_then(|auth| {
+            Ok(serde_json::to_value(
+                crate::mesh::listener::PushCaKeyParams {
+                    payload: payload.clone(),
+                    auth: Some(auth),
+                },
+            )?)
+        });
+        async move {
+            call_peer(
+                &peer.peer_id,
+                &peer.peer_addr,
+                peer.peer_port,
+                "mesh/push-ca-key",
+                params?,
+            )
+            .await
+        }
+    })
     .await?;
     println!("✓ pushed CA key to {}", peer.peer_id);
     Ok(())
@@ -790,11 +828,27 @@ pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
         "this host does not have the mesh CA key — cannot rotate"
     );
 
-    // Rotate: current → previous, generate fresh current.
+    let conn = db::open_default()?;
+    crate::mesh::trust_registry::ensure_self_registered(
+        &conn,
+        &pki_d,
+        crate::host_identity::machine_id(),
+    )?;
+    let candidates: Vec<pdb::PeerRow> = pdb::list_peers(&conn)?
+        .into_iter()
+        .filter(|p| p.departed_at.is_none())
+        .collect();
+    let old_cert = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))?;
+    let recipients = ca_state_recipients(&conn, &pki_d, candidates, |p| {
+        let (p, cert) = (p.clone(), old_cert.clone());
+        async move { peer_holds_ca(&p, &cert).await.unwrap_or(false) }
+    })
+    .await;
+
     utils::pki::rotate_mesh_ca(&pki_d)?;
+    crate::mesh::trust_registry::resign_all(&conn, &pki_d)?;
     let expires_at = now_secs() + overlap_days * 86_400;
 
-    let conn = db::open_default()?;
     pdb::set_ca_previous_expires_at(&conn, Some(expires_at))?;
 
     // Reissue our own peer certs immediately under the new CA so we present
@@ -827,11 +881,9 @@ pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
         previous_key_pem: Some(prev_key.clone()),
         previous_expires_at: Some(expires_at),
     };
-    let peers = pdb::list_peers(&conn)?;
-    for p in peers.into_iter().filter(|p| p.departed_at.is_none()) {
+    for p in recipients {
         match push_ca_state(&p, &payload, &prev_key).await {
-            Ok(true) => println!("  ✓ replicated CA state to {}", p.peer_id),
-            Ok(false) => {}
+            Ok(()) => println!("  ✓ replicated CA state to {}", p.peer_id),
             Err(e) => println!("  ! could not replicate to {} ({e})", p.peer_id),
         }
     }
@@ -839,38 +891,66 @@ pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
     Ok(())
 }
 
+/// Members that receive rotated CA state: on the secure registry, not
+/// revoked, and proving now that they hold the outgoing CA key.
+async fn ca_state_recipients<F, Fut>(
+    conn: &rusqlite::Connection,
+    pki: &std::path::Path,
+    peers: Vec<pdb::PeerRow>,
+    mut proves_holder: F,
+) -> Vec<pdb::PeerRow>
+where
+    F: FnMut(&pdb::PeerRow) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let mut out = Vec::new();
+    for p in peers {
+        if !crate::mesh::trust_registry::is_registered_secure(conn, pki, &p.peer_id) {
+            continue;
+        }
+        let proved = proves_holder(&p).await;
+        if crate::mesh::trust_registry::may_receive_ca_material(conn, pki, &p.peer_id, proved) {
+            out.push(p);
+        }
+    }
+    out
+}
+
 async fn push_ca_state(
     peer: &pdb::PeerRow,
     payload: &crate::mesh::listener::CaStatePayload,
     signer_key_pem: &str,
-) -> Result<bool> {
-    let Some(previous_cert) = payload.previous_cert_pem.as_deref() else {
-        return Ok(false);
-    };
-    if !peer_holds_ca(peer, previous_cert).await? {
-        return Ok(false);
-    }
-    let auth = crate::mesh::exec::ca_push_auth(
-        signer_key_pem,
-        "mesh/push-ca-state",
-        &peer.peer_id,
-        crate::host_identity::machine_id(),
-        payload,
-        now_secs(),
-    )?;
-    let params = crate::mesh::listener::PushCaStateParams {
-        payload: payload.clone(),
-        auth: Some(auth),
-    };
-    call_peer(
-        &peer.peer_id,
-        &peer.peer_addr,
-        peer.peer_port,
-        "mesh/push-ca-state",
-        serde_json::to_value(&params)?,
-    )
+) -> Result<()> {
+    crate::mesh::clock_skew::with_clock_retry(&peer.peer_id, |now| {
+        let params = crate::mesh::exec::ca_push_auth(
+            signer_key_pem,
+            "mesh/push-ca-state",
+            &peer.peer_id,
+            crate::host_identity::machine_id(),
+            payload,
+            now,
+        )
+        .and_then(|auth| {
+            Ok(serde_json::to_value(
+                crate::mesh::listener::PushCaStateParams {
+                    payload: payload.clone(),
+                    auth: Some(auth),
+                },
+            )?)
+        });
+        async move {
+            call_peer(
+                &peer.peer_id,
+                &peer.peer_addr,
+                peer.peer_port,
+                "mesh/push-ca-state",
+                params?,
+            )
+            .await
+        }
+    })
     .await?;
-    Ok(true)
+    Ok(())
 }
 
 // ── mesh leave ────────────────────────────────────────────────────────────────
@@ -977,8 +1057,8 @@ pub async fn dial_bootstrap_pub(
     dial_bootstrap(host, port, pinned_fp, method, params).await
 }
 
-pub async fn push_ca_key_to_promoted_member(peer: &pdb::PeerRow) -> Result<()> {
-    push_ca_key_to_promoted(peer).await
+pub async fn push_ca_key_to_promoted_member(peer: &pdb::PeerRow, grant_nonce: &str) -> Result<()> {
+    push_ca_key_to_promoted(peer, grant_nonce).await
 }
 
 async fn call_mesh_method(
@@ -2319,6 +2399,88 @@ mod tests {
         assert_eq!(frames[0].0, crate::mesh::bootstrap::MESH_CA_ATTEST_METHOD);
     }
 
+    #[tokio::test]
+    async fn a_demoted_holder_that_kept_its_key_is_excluded_from_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path().join("pki");
+        utils::pki::init_mesh_ca(&pki, "holder").unwrap();
+        let conn = db::open_unencrypted(&dir.path().join("orca.db")).unwrap();
+        let row = |id: &str| pdb::PeerRow {
+            peer_id: id.into(),
+            peer_hostname: id.into(),
+            peer_addr: "127.0.0.1".into(),
+            peer_port: 1,
+            pubkey_fp: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            departed_at: None,
+        };
+        let (kept, demoted, never) = (utils::id::new(), utils::id::new(), utils::id::new());
+        crate::mesh::trust_registry::grant(&conn, &pki, &kept).unwrap();
+        crate::mesh::trust_registry::grant(&conn, &pki, &demoted).unwrap();
+        crate::mesh::trust_registry::revoke(&conn, &pki, &demoted).unwrap();
+        let mut asked = Vec::new();
+        let recipients = ca_state_recipients(
+            &conn,
+            &pki,
+            vec![row(&kept), row(&demoted), row(&never)],
+            |p| {
+                asked.push(p.peer_id.clone());
+                async { true }
+            },
+        )
+        .await;
+        let ids: Vec<String> = recipients.into_iter().map(|p| p.peer_id).collect();
+        assert_eq!(ids, vec![kept.clone()]);
+        assert_eq!(asked, vec![kept]);
+    }
+
+    #[serial_test::serial(env)]
+    #[tokio::test]
+    async fn rejoin_drops_local_membership_then_joins_through_the_holder() {
+        drop(rustls::crypto::ring::default_provider().install_default());
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = set_home(home.path());
+        drop(crate::host_identity::init(home.path()));
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(
+                &conn,
+                &utils::id::new(),
+                "old",
+                "10.0.0.9",
+                1,
+                Some("fp"),
+                "",
+            )
+            .unwrap();
+            let err = rejoin("127.0.0.1", Some(1), "no-pin").await.err().unwrap();
+            assert!(!format!("{err:#}").is_empty());
+            assert_eq!(
+                pdb::list_peers(&conn).unwrap().len(),
+                1,
+                "a bad token wipes nothing"
+            );
+
+            let inviter = tempfile::tempdir().unwrap();
+            utils::pki::init_mesh_ca(inviter.path(), "inviter-host").unwrap();
+            let ca_pem =
+                std::fs::read_to_string(utils::pki::mesh_ca_cert_path(inviter.path())).unwrap();
+            let (port, frames) = serve_fake_inviter(inviter.path().to_path_buf()).await;
+            let token = format!("secret-3.{}", utils::pki::mesh_ca_pin(&ca_pem).unwrap());
+            let err = rejoin("127.0.0.1", Some(port), &token).await.err().unwrap();
+            assert!(
+                format!("{err:#}").contains("stop after request-offer"),
+                "got: {err:#}"
+            );
+            assert!(pdb::list_peers(&conn).unwrap().is_empty());
+            assert_eq!(frames.lock().unwrap().len(), 2);
+        })
+        .await;
+    }
+
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn mesh_join_core_dials_through_when_the_inviter_fp_matches() {
@@ -2358,7 +2520,9 @@ mod tests {
             let pki = pki_dir();
             utils::pki::init_mesh_ca(&pki, "system-y").unwrap();
             assert!(utils::pki::has_mesh_ca_key(&pki));
-            pdb::set_secure(&db::open_default().unwrap(), true).unwrap();
+            let conn = db::open_default().unwrap();
+            pdb::set_secure(&conn, true).unwrap();
+            crate::mesh::trust_registry::grant(&conn, &pki, "system-x").unwrap();
             let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -2385,7 +2549,9 @@ mod tests {
                 last_seen_at: 0,
                 departed_at: None,
             };
-            let err = push_ca_key_to_promoted(&peer).await.unwrap_err();
+            let err = push_ca_key_to_promoted(&peer, &utils::id::new())
+                .await
+                .unwrap_err();
             assert!(
                 format!("{err:#}").contains("answered as system system-y"),
                 "got: {err:#}"
@@ -2435,7 +2601,9 @@ mod tests {
             last_seen_at: 0,
             departed_at: None,
         };
-        push_ca_key_to_promoted_member(&peer).await.unwrap();
+        push_ca_key_to_promoted_member(&peer, &utils::id::new())
+            .await
+            .unwrap();
     }
 
     // ── dial_bootstrap_pub — dead-port connect failure ────────────────────────

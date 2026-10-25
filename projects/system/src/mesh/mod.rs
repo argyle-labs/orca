@@ -1269,6 +1269,13 @@ pub enum MeshUpdateAction {
     Unpin,
     /// Issue a single-use, short-lived join token for one joiner.
     JoinToken,
+    /// Recover this member when the mesh refuses it: drop its local
+    /// membership and re-join through `addr` with a join `token` from a CA
+    /// holder (`action=join_token`). LOCAL-ONLY.
+    Rejoin,
+    /// Refuse unbound envelopes mesh-wide. One-way; refused until every
+    /// active member has advertised bound-envelope support. Run on a CA holder.
+    RequireBound,
 }
 
 /// Operation selector for `system.mesh.tier.update`.
@@ -1281,7 +1288,8 @@ pub enum MeshTierAction {
     /// secure member that holds the mesh CA key. Default.
     #[default]
     Promote,
-    /// Demote this member to insecure.
+    /// Demote this member to insecure, or with `id`, revoke member `id`'s
+    /// secure grant (run on a CA holder; needs nothing from `id`).
     Demote,
 }
 
@@ -1293,7 +1301,7 @@ pub struct MeshTierArgs {
     /// `promote` (default) or `demote`.
     #[arg(long, default_value = "promote")]
     pub action: MeshTierAction,
-    /// (promote) Target system.
+    /// (promote, demote) Target system. Omit to demote this member.
     #[arg(long)]
     #[serde(alias = "peerId", alias = "peer_id")]
     pub id: Option<crate::system_id::SystemId>,
@@ -1311,8 +1319,8 @@ pub enum MeshTierOutput {
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MeshUpdateArgs {
-    /// `settings` (default), `sync`, `recover`, `cancel_offer`, `unpin`, or
-    /// `join_token`.
+    /// `settings` (default), `sync`, `recover`, `cancel_offer`, `unpin`,
+    /// `join_token`, `rejoin`, or `require_bound`.
     #[arg(long, default_value = "settings")]
     pub action: MeshUpdateAction,
     /// (settings) `true` accepts a mesh-CA-signed `grant` and makes this
@@ -1332,8 +1340,12 @@ pub struct MeshUpdateArgs {
     #[arg(long)]
     pub peer: Option<String>,
     /// (cancel_offer) Joiner address whose outbound offer(s) to clear; use `id` when several joiners share it.
+    /// (rejoin) Address of the CA holder that issued `token`.
     #[arg(long)]
     pub addr: Option<String>,
+    /// (rejoin) Join token from `action=join_token` on a CA holder.
+    #[arg(long)]
+    pub token: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1367,6 +1379,14 @@ pub enum MeshUpdateOutput {
     CancelOffer(MeshCancelOfferOutput),
     Unpin(MeshUnpinOutput),
     JoinToken(MeshJoinTokenOutput),
+    Rejoin(MeshAcceptOutput),
+    RequireBound(MeshRequireBoundOutput),
+}
+
+#[derive::camel_aliases]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct MeshRequireBoundOutput {
+    pub require_bound: bool,
 }
 
 // ── DTO conversions + wire-dispatch types ───────────────────────────────────
@@ -1835,6 +1855,22 @@ async fn mesh_update(
             Ok(MeshUpdateOutput::Unpin(exec::unpin(&peer_id)?))
         }
         MeshUpdateAction::JoinToken => Ok(MeshUpdateOutput::JoinToken(exec::issue_join_token()?)),
+        MeshUpdateAction::Rejoin => {
+            let (Some(addr), Some(token)) = (args.addr.as_deref(), args.token.as_deref()) else {
+                anyhow::bail!("system.mesh.update action=rejoin requires `addr` and `token`");
+            };
+            Ok(MeshUpdateOutput::Rejoin(
+                cli::rejoin(addr, None, token).await?,
+            ))
+        }
+        MeshUpdateAction::RequireBound => {
+            ::db::pool::with_pooled_or_open(|conn| {
+                trust_registry::enable_require_bound(conn, &pki_dir())
+            })?;
+            Ok(MeshUpdateOutput::RequireBound(MeshRequireBoundOutput {
+                require_bound: true,
+            }))
+        }
     }
 }
 
@@ -1842,7 +1878,8 @@ async fn mesh_update(
 /// `action` selects the operation:
 ///   - `promote` — promote member `id` to secure with a mesh-CA-signed grant;
 ///     run on a secure member that holds the mesh CA key. Default.
-///   - `demote`  — demote this member to insecure.
+///   - `demote`  — demote this member to insecure; with `id`, revoke member
+///     `id` in the secure registry so it is excluded from CA rotations.
 #[orca_tool(
     domain = "system.mesh.tier",
     verb = "update",
@@ -1868,7 +1905,10 @@ async fn mesh_tier_update(
             Ok(MeshTierOutput::Settings(MeshSettingsOutput { secure }))
         }
         MeshTierAction::Demote => Ok(MeshTierOutput::Settings(MeshSettingsOutput {
-            secure: exec::set_secure(false).await?,
+            secure: match args.id {
+                Some(target) => exec::revoke_member(target.as_str())?,
+                None => exec::set_secure(false).await?,
+            },
         })),
     }
 }
@@ -2228,6 +2268,7 @@ mod tests {
 mod bootstrap;
 pub mod caller_token;
 pub mod cert_rotation;
+pub(crate) mod clock_skew;
 pub mod dialer;
 pub mod dispatcher;
 pub(crate) mod listener;
@@ -2242,6 +2283,7 @@ pub mod subscribe;
 pub mod subscribe_demand;
 pub mod subscribe_wire;
 pub mod transport;
+pub(crate) mod trust_registry;
 pub mod wire_compat;
 
 pub use bootstrap::handle_mesh_bootstrap_connection;
@@ -2305,6 +2347,10 @@ pub struct MeshPingResult {
     /// camelCase wire omit it, so `false` means "would drop renamed args".
     #[serde(default)]
     pub camel_wire: bool,
+    /// The responder signs and accepts bound envelopes. Once seen, unbound
+    /// envelopes from that member are refused.
+    #[serde(default)]
+    pub bound_envelopes: bool,
     /// Addressing snapshot of the responding peer (rc.25+). Optional +
     /// `#[serde(default)]` so rc.≤24 daemons that omit the field still
     /// deserialize cleanly. Callers use this to refresh
@@ -2604,7 +2650,17 @@ pub(crate) fn purge_ca_keys_if_insecure(
 /// always uses the canonical SNI so the server's resolver returns the
 /// mesh-CA-signed cert.
 pub async fn ping(host: &str) -> Result<MeshPingResult> {
-    call_typed(host, MESH_PING_METHOD, None::<()>, Duration::from_secs(5)).await
+    let pong: MeshPingResult =
+        call_typed(host, MESH_PING_METHOD, None::<()>, Duration::from_secs(5)).await?;
+    if pong.bound_envelopes
+        && let Ok(peer) = DIAL_PEER.try_with(Clone::clone)
+        && let Err(e) = ::db::pool::Db::process()
+            .write_async(move |c| ::db::mesh::mark_bound_envelopes(c, &peer))
+            .await
+    {
+        tracing::warn!("record bound-envelope support: {e:#}");
+    }
+    Ok(pong)
 }
 
 /// Result of `mesh/dev-enable`. `status` is `"enabled"` on success, `"error"`
@@ -2675,8 +2731,8 @@ mod exec_wire {
     /// Parameters for `mesh/exec`. `tool` is a fully-qualified
     /// `<domain>.<verb>` name; `args` is the on-wire JSON args payload.
     ///
-    /// `caller_token` is an Ed25519-signed [`crate::mesh::caller_token::CallerToken`]
-    /// minted by the calling peer's bootstrap key. The recipient verifies the
+    /// `caller_token` is a bound envelope of [`crate::mesh::caller_token::CallerClaims`]
+    /// signed by the calling peer's bootstrap key. The recipient verifies the
     /// signature, binds the signer fp to the authenticated peer, checks
     /// expiry/replay/args, and derives the effective role from its own
     /// replicated `users` table. Optional for back-compat with rc.≤11 peers.
@@ -2752,10 +2808,10 @@ pub async fn exec_peer(
     .await
 }
 
-/// Same as [`exec`] but on behalf of a local operator. Mints an Ed25519-signed
-/// [`caller_token`] from `caller` so the recipient can verify origin + derive
-/// the role from its own replicated `users` table. `caller_role` is also set
-/// (advisory) for back-compat with rc.≤11 recipients that predate the token.
+/// Same as [`exec`] but on behalf of a local operator. Mints a caller token
+/// bound to the dialled member (`DIAL_PEER`) so the recipient can verify
+/// origin and derive the role from its own replicated `users` table.
+/// `caller_role` is also set (advisory) for rc.≤11 recipients.
 #[allow(clippy::disallowed_types)]
 pub async fn exec_as(
     host: &str,
@@ -2764,29 +2820,62 @@ pub async fn exec_as(
     caller: Option<contract::CallerIdentity>,
     correlation_id: Option<String>,
 ) -> Result<MeshExecResult> {
-    let pki = pki_dir();
-    let (caller_role, caller_token, ca_proof) = match caller {
-        Some(id) => {
-            let token = caller_token::mint(&pki, &id, tool, &args, caller_token::DEFAULT_TTL_SECS)?;
-            let nonce = serde_json::from_str::<caller_token::CallerToken>(&token.payload)?.nonce;
-            let proof = exec::ca_holder_proof(&pki, crate::host_identity::machine_id(), &nonce);
-            (Some(id.role), Some(token), proof)
-        }
-        None => (None, None, None),
+    let Some(id) = caller else {
+        return call_typed(
+            host,
+            MESH_EXEC_METHOD,
+            Some(MeshExecParams {
+                tool: tool.to_string(),
+                args,
+                caller_role: None,
+                caller_token: None,
+                ca_proof: None,
+                correlation_id,
+            }),
+            Duration::from_secs(120),
+        )
+        .await;
     };
-    call_typed(
-        host,
-        MESH_EXEC_METHOD,
-        Some(MeshExecParams {
-            tool: tool.to_string(),
-            args,
-            caller_role,
-            caller_token,
-            ca_proof,
-            correlation_id,
-        }),
-        Duration::from_secs(120),
-    )
+    let pki = pki_dir();
+    let receiver = DIAL_PEER
+        .try_with(Clone::clone)
+        .context("mesh/exec on behalf of a user needs the target member's id")?;
+    clock_skew::with_clock_retry(&receiver, |now| {
+        let minted = caller_token::mint(
+            &pki,
+            &id,
+            tool,
+            &args,
+            crate::host_identity::machine_id(),
+            &receiver,
+            now,
+            caller_token::DEFAULT_TTL_SECS,
+        );
+        let params = minted.and_then(|token| {
+            let nonce = token
+                .binding
+                .as_ref()
+                .map(|b| b.nonce.clone())
+                .context("caller token is not bound")?;
+            Ok(MeshExecParams {
+                tool: tool.to_string(),
+                args: args.clone(),
+                caller_role: Some(id.role.clone()),
+                ca_proof: exec::ca_holder_proof(&pki, crate::host_identity::machine_id(), &nonce),
+                caller_token: Some(token),
+                correlation_id: correlation_id.clone(),
+            })
+        });
+        async move {
+            call_typed(
+                host,
+                MESH_EXEC_METHOD,
+                Some(params?),
+                Duration::from_secs(120),
+            )
+            .await
+        }
+    })
     .await
 }
 
@@ -3313,6 +3402,7 @@ mod mesh_tests {
             version: "0.0.4".into(),
             hostname: "abc123".into(),
             camel_wire: false,
+            bound_envelopes: false,
             addressing: None,
         };
         let v = serde_json::to_value(&r).unwrap();
@@ -3352,6 +3442,7 @@ mod mesh_tests {
             version: "0.0.4".into(),
             hostname: "h".into(),
             camel_wire: false,
+            bound_envelopes: false,
             addressing: Some(HostAddressingSnapshot {
                 display_name: "host-g".into(),
                 channels: vec![AddressChannel {
@@ -5175,13 +5266,14 @@ mod handler_dispatch_tests {
     fn two_tier_promotion_grants_are_single_use_and_die_on_demotion() {
         let dir = tempfile::tempdir().unwrap();
         let conn = ::db::open_unencrypted(&dir.path().join("orca.db")).unwrap();
+        let (n1, n2) = (utils::id::new(), utils::id::new());
         let consume = |nonce: &str, issued: i64, now: i64| {
-            db::mesh::consume_promotion_grant(&conn, nonce, issued, issued + 600, now)
+            db::mesh::consume_promotion_grant(&conn, "relay", nonce, issued, issued + 600, now)
         };
-        consume("n1", 100, 200).unwrap();
+        consume(&n1, 100, 200).unwrap();
         assert!(db::mesh::get_secure(&conn).unwrap());
         assert!(
-            consume("n1", 100, 300).is_err(),
+            consume(&n1, 100, 300).is_err(),
             "a replayed grant is refused"
         );
         db::mesh::set_secure(&conn, false).unwrap();
@@ -5193,15 +5285,15 @@ mod handler_dispatch_tests {
             )
             .unwrap();
         assert!(
-            consume("n2", demoted_at, demoted_at + 1).is_err(),
+            consume(&n2, demoted_at, demoted_at + 1).is_err(),
             "a grant issued at or before the last demotion is refused"
         );
         assert!(
-            consume("n3", demoted_at + 1, demoted_at + 599).is_err(),
+            consume(&utils::id::new(), demoted_at + 1, demoted_at + 599).is_err(),
             "a grant consumed within one grant lifetime of the demotion is refused"
         );
         assert!(!db::mesh::get_secure(&conn).unwrap());
-        consume("n4", demoted_at + 600, demoted_at + 600).unwrap();
+        consume(&utils::id::new(), demoted_at + 600, demoted_at + 600).unwrap();
         assert!(db::mesh::get_secure(&conn).unwrap());
     }
 

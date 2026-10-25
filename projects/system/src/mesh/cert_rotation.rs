@@ -411,22 +411,29 @@ async fn refresh_via_peer_mtls(policy: DialPolicy) -> Result<()> {
         csr_server_pem: csr_server,
     };
     let fetch = |c: Candidate| {
-        let params = utils::pki::sign_bound_envelope(
-            &signing,
-            &body,
-            "mesh/refresh-cert",
-            &host,
-            &c.peer_id,
-            &utils::id::new(),
-            utils::time::now().unix_seconds(),
-            REFRESH_ENVELOPE_TTL_SECS,
-        )
-        .and_then(|envelope| {
-            let mut params = serde_json::to_value(&body)?;
-            params["envelope"] = serde_json::to_value(&envelope)?;
-            Ok(params)
-        });
-        async move { call_refresh(&c.addr, c.port, params?).await }
+        let (signing, body, host) = (&signing, &body, &host);
+        async move {
+            crate::mesh::clock_skew::with_clock_retry(&c.peer_id, |now| {
+                let params = utils::pki::sign_bound_envelope(
+                    signing,
+                    body,
+                    "mesh/refresh-cert",
+                    host,
+                    &c.peer_id,
+                    &utils::id::new(),
+                    now,
+                    REFRESH_ENVELOPE_TTL_SECS,
+                )
+                .and_then(|envelope| {
+                    let mut params = serde_json::to_value(body)?;
+                    params["envelope"] = serde_json::to_value(&envelope)?;
+                    Ok(params)
+                });
+                let c = c.clone();
+                async move { call_refresh(&c.addr, c.port, params?).await }
+            })
+            .await
+        }
     };
     let install = |client: &str, server: &str| {
         utils::pki::install_refreshed_peer_certs(
@@ -489,28 +496,34 @@ async fn refresh_via_peer_bootstrap(policy: DialPolicy) -> Result<()> {
     };
 
     let fetch = |c: Candidate| {
-        let params = utils::pki::sign_bound_envelope(
-            &signing,
-            &body,
-            "mesh/refresh-cert-bootstrap",
-            &host,
-            &c.peer_id,
-            &utils::id::new(),
-            utils::time::now().unix_seconds(),
-            REFRESH_ENVELOPE_TTL_SECS,
-        )
-        .and_then(|env| Ok(serde_json::to_value(&env)?));
+        let (signing, body, host) = (&signing, &body, &host);
         async move {
-            let params = params?;
-            let v = crate::mesh::cli::dial_bootstrap_pub(
-                &c.addr,
-                c.port,
-                c.pinned_fp.as_deref().unwrap_or_default(),
-                "mesh/refresh-cert-bootstrap",
-                params,
-            )
-            .await?;
-            leaf_pair(&v)
+            crate::mesh::clock_skew::with_clock_retry(&c.peer_id, |now| {
+                let params = utils::pki::sign_bound_envelope(
+                    signing,
+                    body,
+                    "mesh/refresh-cert-bootstrap",
+                    host,
+                    &c.peer_id,
+                    &utils::id::new(),
+                    now,
+                    REFRESH_ENVELOPE_TTL_SECS,
+                )
+                .and_then(|env| Ok(serde_json::to_value(&env)?));
+                let c = c.clone();
+                async move {
+                    let v = crate::mesh::cli::dial_bootstrap_pub(
+                        &c.addr,
+                        c.port,
+                        c.pinned_fp.as_deref().unwrap_or_default(),
+                        "mesh/refresh-cert-bootstrap",
+                        params?,
+                    )
+                    .await?;
+                    leaf_pair(&v)
+                }
+            })
+            .await
         }
     };
     let install = |client: &str, server: &str| {
@@ -1224,18 +1237,25 @@ mod tests {
         });
     }
 
-    #[test]
-    #[serial_test::serial(env)]
-    fn mtls_refused_then_bootstrap_refresh_for_another_signer_is_refused() {
-        let _env = crate::test_env::snapshot();
+    struct Fallback {
+        refreshed: Result<()>,
+        rogue_client: String,
+        client: String,
+    }
+
+    /// Refresh with a client leaf from a foreign CA, so the mTLS path is
+    /// refused and the bootstrap fallback runs against a signer served by this
+    /// process as `serve_as`. `signer_offset` is this host's stale estimate of
+    /// the signer's clock, in seconds.
+    fn mtls_refused_then_bootstrap(serve_as: Option<&str>, signer_offset: i64) -> Fallback {
         let dir = tempfile::tempdir().unwrap();
-        with_home_db(dir.path(), async {
-            crate::host_identity::init(dir.path()).unwrap();
+        let serve_as = serve_as.map(str::to_string);
+        let home = dir.path().to_path_buf();
+        with_home_db(dir.path(), async move {
+            crate::host_identity::init(&home).unwrap();
             let own = crate::host_identity::machine_id().to_string();
             let pki = pki_dir();
             utils::pki::init_mesh_ca(&pki, &own).unwrap();
-            // A still-valid client leaf from a foreign CA: refresh takes the mTLS
-            // path, and the signer's handshake rejects it.
             let rogue = tempfile::tempdir().unwrap();
             utils::pki::init_mesh_ca(rogue.path(), &own).unwrap();
             for path in [
@@ -1248,34 +1268,24 @@ mod tests {
             let rogue_client =
                 std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
 
-            // This process is both the renewing host and the signer, so the
-            // signer's view of us (own row, our bootstrap fp) and the candidate
-            // row we dial share one DB and one bootstrap key.
             let key = utils::pki::load_or_init_bootstrap_key(&pki).unwrap();
             let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
             let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
+            let signer = utils::id::new();
             let conn = db::open_default().unwrap();
-            pdb::upsert_peer(
-                &conn,
-                &utils::id::new(),
-                "signer",
-                "127.0.0.1",
-                port,
-                Some(&fp),
-                "",
-            )
-            .unwrap();
+            pdb::upsert_peer(&conn, &signer, "signer", "127.0.0.1", port, Some(&fp), "").unwrap();
             pdb::upsert_peer(&conn, &own, "me", "127.0.0.1", port, Some(&fp), "").unwrap();
-            // The signer resolves the envelope's fp to the most-recently-seen row.
             conn.execute(
                 "UPDATE mesh_peers SET last_seen_at = last_seen_at + 100 WHERE peer_id = ?",
                 [&own],
             )
             .unwrap();
             drop(conn);
+            crate::mesh::clock_skew::assume(&signer, signer_offset);
 
+            let serve_as = serve_as.unwrap_or_else(|| signer.clone());
             let server = async {
                 loop {
                     let (tcp, peer) = listener.accept().await.unwrap();
@@ -1289,10 +1299,11 @@ mod tests {
                         .unwrap_or_default()
                         .to_string();
                     if utils::mesh_compat::accepts_bootstrap_sni(&sni) {
-                        crate::mesh::handle_mesh_bootstrap_connection(tls, peer)
-                            .await
-                            .unwrap();
-                        return;
+                        crate::mesh::bootstrap::handle_mesh_bootstrap_connection_as(
+                            tls, peer, &serve_as,
+                        )
+                        .await
+                        .unwrap();
                     }
                 }
             };
@@ -1300,16 +1311,50 @@ mod tests {
                 canonical_port: port,
                 exchange_timeout: Duration::from_secs(10),
             };
-            let (refreshed, ()) = tokio::time::timeout(Duration::from_secs(30), async {
-                tokio::join!(refresh_via_peer(policy), server)
+            let refreshed = tokio::time::timeout(Duration::from_secs(30), async {
+                tokio::select! {
+                    r = refresh_via_peer(policy) => r,
+                    () = server => unreachable!(),
+                }
             })
             .await
             .expect("refresh exchange finished");
-            let err = format!("{:#}", refreshed.unwrap_err());
-            assert!(err.contains("another receiver"), "got: {err}");
-            let client = std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
-            assert_eq!(client, rogue_client);
-        });
+            Fallback {
+                refreshed,
+                rogue_client,
+                client: std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap(),
+            }
+        })
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn mtls_refused_then_bootstrap_refresh_installs_certs_from_the_signer() {
+        let _env = crate::test_env::snapshot();
+        let out = mtls_refused_then_bootstrap(None, 0);
+        out.refreshed.unwrap();
+        assert_ne!(out.client, out.rogue_client);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_refresh_with_a_clock_five_minutes_off_still_refreshes() {
+        let _env = crate::test_env::snapshot();
+        for offset in [-300, 300] {
+            let out = mtls_refused_then_bootstrap(None, offset);
+            out.refreshed.unwrap();
+            assert_ne!(out.client, out.rogue_client, "offset {offset}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn mtls_refused_then_bootstrap_refresh_for_another_signer_is_refused() {
+        let _env = crate::test_env::snapshot();
+        let out = mtls_refused_then_bootstrap(Some(&utils::id::new()), 0);
+        let err = format!("{:#}", out.refreshed.unwrap_err());
+        assert!(err.contains("another receiver"), "got: {err}");
+        assert_eq!(out.client, out.rogue_client);
     }
 
     fn raise_stale_notification() {

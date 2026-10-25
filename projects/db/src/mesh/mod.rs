@@ -11,7 +11,9 @@ use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
 pub mod peerdb;
+pub mod registry;
 pub use peerdb::*;
+pub use registry::*;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PeerSummary {

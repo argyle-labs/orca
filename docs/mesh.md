@@ -146,22 +146,73 @@ Every credential-changing mesh message is a bound envelope
 (`utils::pki::BoundEnvelope`): a signature over a length-prefixed encoding of
 the method, sender, receiver, nonce, expiry (at most 5 minutes) and the
 SHA-256 of the payload. The receiver checks every field and records the nonce
-in `mesh_seen_nonces`, which survives restarts, prunes expired entries and
-refuses new nonces beyond 10 minutes or 100,000 entries.
+in `mesh_seen_nonces`, which survives restarts and holds only UUID nonces that
+expire within 15 minutes. Entries are pruned 5 minutes after they expire.
+Running counters cap the store at 100,000 nonces in total and 10,000 per
+sender. `mesh/exec` caller tokens may use at most 80,000, which leaves room for
+credential methods. A caller-token nonce is recorded only after the user and
+role checks pass, so a refused token does not use up store space.
 
 | Path | Signed by | Receiver binding |
 |---|---|---|
-| `mesh/push-ca-key`, `mesh/push-ca-state` | mesh CA key | receiver id |
-| `mesh/replicate-push` | sender's pinned bootstrap key | receiver id |
+| `mesh/push-ca-key` | mesh CA key | receiver id + the promotion grant nonce the receiver consumed |
+| `mesh/push-ca-state` | mesh CA key | receiver id |
+| `mesh/replicate-push` | sender's pinned bootstrap key (active members only) | receiver id |
 | `mesh/replicate-export` | exporter's pinned bootstrap key | requester id + the requester's nonce |
 | `mesh/refresh-cert`, `mesh/refresh-cert-bootstrap` | requester's pinned bootstrap key | signer id |
-| `mesh/exec` caller tokens | caller's pinned bootstrap key | tool + args; nonce persisted |
+| `mesh/exec` caller tokens | caller's pinned bootstrap key | target id; payload carries user, tool and args hash |
 
-Rollout: senders keep the plain payload signature, so daemons from before
-bound envelopes still accept their messages. Updated daemons refuse every
-unbound envelope, so an old daemon cannot replicate to, export to, or refresh
-certificates from an updated one until it is updated too. Leaf certs have a
-7-day refresh margin, which covers a fleet rollout.
+A clock-based refusal carries the receiver's time (`[receiver_time=…]`). The
+sender records the offset for that member and signs again once using the
+receiver's clock, so a member whose clock is minutes off can still refresh
+its certificates, push CA material, and run `mesh/exec`.
+
+Rollout: `mesh/ping` reports `bound_envelopes: true`. A member that
+advertises support, or has sent a bound envelope, is marked in
+`mesh_peers.bound_envelopes`, and from then on its unbound envelopes are
+refused. Unbound envelopes from members that have never advertised support
+are accepted until a CA holder runs
+`orca system mesh update --action require_bound`. That switch is refused
+while any active member has not yet advertised support. Once on, it is a
+CA-signed, replicated, one-way policy, and every unbound envelope is refused.
+
+### Secure registry
+
+`mesh_secure_registry` is a replicated, append-only list of CA-signed grants
+and revocations. Readers verify each row against the current or previous mesh
+CA and ignore any row that fails. A replicated copy can never change a row's
+signed fields.
+
+- `promote` records a grant. A secure CA holder that the registry does not
+  list yet (a founder, or a holder from before the registry) registers itself
+  at startup.
+- `orca system mesh tier update --action demote --id <member>` (run on a CA
+  holder) records a revocation. The member does not need to take part. When
+  it sees its own revocation, it demotes itself and purges its CA key.
+- `orca mesh ca rotate` and the CA key push after a promotion go only to
+  members that hold a grant with no revocation under the same or a newer CA,
+  and that also prove the claim right then. For a rotation, the member must
+  sign a fresh nonce with the outgoing CA key. For a key push, it must have
+  consumed that promotion's grant.
+- A revoked member can still sign with the CA key it kept, so it could forge
+  a new grant for itself. To stop that, a revocation blocks every grant signed
+  under the same CA, and only rotation lifts it. Rotation re-signs the grants
+  still in force under the new CA, which the revoked member never receives.
+  To promote a revoked member again, rotate the CA first.
+
+### Recovering a locked-out member
+
+If the mesh refuses a member (for example, it lost its bootstrap key, or a
+binding change shut it out):
+
+1. On a CA holder, run `orca system mesh delete --action forget --id <member>`.
+2. On the same holder, run `orca system mesh update --action join_token`.
+3. On the locked-out member, run
+   `orca system mesh update --action rejoin --addr <holder> --token <token>`.
+
+`rejoin` is local-only. It checks the token, drops this member's local mesh
+membership, and joins again through the holder. Joining clears the forget
+tombstone.
 
 `system.mesh.tier.update` (`promote`, `demote`) is super-admin,
 sensitive and local-only: it needs a verified second factor (the owner's local

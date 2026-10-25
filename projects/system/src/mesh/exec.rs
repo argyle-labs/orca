@@ -753,7 +753,8 @@ pub(crate) fn verify_ca_push<'a, T: serde::Serialize>(
         anyhow::bail!("{method} refused: the push carries no CA-possession proof");
     };
     anyhow::ensure!(
-        auth.expires_at - now <= CA_PUSH_TTL_SECS + utils::pki::BOUND_ENVELOPE_SKEW_SECS,
+        auth.expires_at > now
+            && auth.expires_at - now <= CA_PUSH_TTL_SECS + utils::pki::BOUND_ENVELOPE_SKEW_SECS,
         "{method} refused: the CA-possession proof is expired or not yet valid"
     );
     let ca_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(pki))
@@ -879,6 +880,12 @@ async fn purge_insecure_ca_keys_once() -> bool {
     let Ok(conn) = db::open_default() else {
         return true;
     };
+    let own_id = crate::host_identity::machine_id();
+    if let Err(e) = crate::mesh::trust_registry::apply_own_revocation(&conn, &pki, own_id)
+        .and_then(|_| crate::mesh::trust_registry::ensure_self_registered(&conn, &pki, own_id))
+    {
+        tracing::warn!("[mesh] secure registry: {e:#}");
+    }
     if !crate::mesh::ca_keys_need_purge(&pki, &conn).unwrap_or(true) {
         return false;
     }
@@ -904,6 +911,15 @@ fn promotion_message(target: &str, g: &crate::mesh::PromotionGrant) -> Vec<u8> {
 pub async fn promote(target: &str, caller: Option<contract::CallerIdentity>) -> Result<bool> {
     let now = utils::time::now().unix_seconds();
     let secure = get_secure()?;
+    db::pool::with_pooled_or_open(|conn| {
+        let pki = pki_dir();
+        crate::mesh::trust_registry::ensure_self_registered(
+            conn,
+            &pki,
+            crate::host_identity::machine_id(),
+        )?;
+        crate::mesh::trust_registry::ensure_grantable(conn, &pki, target)
+    })?;
     let grant = issue_promotion_grant(
         &pki_dir(),
         secure,
@@ -921,13 +937,18 @@ pub async fn promote(target: &str, caller: Option<contract::CallerIdentity>) -> 
     )
     .await?;
     let out: crate::mesh::MeshSettingsOutput = serde_json::from_value(dispatch.result)?;
-    if out.secure
-        && let Some(peer) = db::pool::with_pooled_or_open(pdb::list_peers)?
+    if out.secure {
+        db::pool::with_pooled_or_open(|conn| {
+            crate::mesh::trust_registry::grant(conn, &pki_dir(), target)
+        })?;
+        if let Some(peer) = db::pool::with_pooled_or_open(pdb::list_peers)?
             .into_iter()
             .find(|p| p.peer_id == target)
-        && let Err(e) = crate::mesh::cli::push_ca_key_to_promoted_member(&peer).await
-    {
-        tracing::warn!("CA-key replication to promoted member {target}: {e:#}");
+            && let Err(e) =
+                crate::mesh::cli::push_ca_key_to_promoted_member(&peer, &grant.nonce).await
+        {
+            tracing::warn!("CA-key replication to promoted member {target}: {e:#}");
+        }
     }
     Ok(out.secure)
 }
@@ -945,9 +966,40 @@ pub async fn accept_promotion(
         now,
     )?;
     db::pool::with_pooled_or_open(|conn| {
-        pdb::consume_promotion_grant(conn, &grant.nonce, grant.issued_at, grant.expires_at, now)
+        pdb::consume_promotion_grant(
+            conn,
+            relaying_peer.unwrap_or_default(),
+            &grant.nonce,
+            grant.issued_at,
+            grant.expires_at,
+            now,
+        )
     })?;
     Ok(true)
+}
+
+/// Revoke member `target`'s secure grant in the registry. Run on a secure
+/// member holding the mesh CA key; needs nothing from `target`, which is
+/// excluded from CA rotations and key pushes from then on.
+pub fn revoke_member(target: &str) -> Result<bool> {
+    let pki = pki_dir();
+    anyhow::ensure!(
+        get_secure()? && utils::pki::has_mesh_ca_key(&pki),
+        "only a secure member holding the mesh CA key can demote another member"
+    );
+    anyhow::ensure!(
+        target != crate::host_identity::machine_id(),
+        "demote this member without `id`"
+    );
+    db::pool::with_pooled_or_open(|conn| {
+        crate::mesh::trust_registry::ensure_self_registered(
+            conn,
+            &pki,
+            crate::host_identity::machine_id(),
+        )?;
+        crate::mesh::trust_registry::revoke(conn, &pki, target)
+    })?;
+    Ok(false)
 }
 
 pub(crate) fn issue_promotion_grant(

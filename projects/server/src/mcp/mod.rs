@@ -78,7 +78,7 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
 /// operator must supply a valid admin token — so it does NOT violate the
 /// "local DB access does not imply admin" rule that bars a `first_admin`
 /// fallback. Without it, remote peer-dispatch over MCP cannot mint a signed
-/// CallerToken and every admin mesh op refuses (see the mesh-admin-auth gap).
+/// caller token and every admin mesh op refuses (see the mesh-admin-auth gap).
 fn resolve_token_operator() -> Option<contract::CallerIdentity> {
     let token = std::env::var("ORCA_TOKEN")
         .ok()
