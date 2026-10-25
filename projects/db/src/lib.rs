@@ -1258,6 +1258,13 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             expires_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS mesh_seen_nonces (
+            nonce      TEXT PRIMARY KEY,
+            expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mesh_seen_nonces_expires_at
+            ON mesh_seen_nonces (expires_at);
+
         CREATE TABLE IF NOT EXISTS mesh_demotion (
             id         INTEGER PRIMARY KEY CHECK (id = 1),
             demoted_at INTEGER NOT NULL

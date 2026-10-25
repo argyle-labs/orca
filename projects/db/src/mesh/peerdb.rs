@@ -940,21 +940,40 @@ pub fn is_active_member(conn: &Connection, peer_id: &str) -> Result<bool> {
         && !is_peer_forgotten(conn, peer_id)?)
 }
 
+pub const MESH_NONCE_HORIZON_SECS: i64 = 600;
+pub const MESH_NONCE_CAP: i64 = 100_000;
+
+/// Record a single-use mesh nonce until `expires_at`. Returns false for a
+/// replay. Expired nonces are pruned first; a nonce valid beyond
+/// [`MESH_NONCE_HORIZON_SECS`] or a store already at [`MESH_NONCE_CAP`] is
+/// refused, so the store stays bounded.
 pub fn record_mesh_nonce(
     conn: &Connection,
     nonce: &str,
     expires_at: i64,
     now: i64,
 ) -> Result<bool> {
-    conn.execute(
-        "DELETE FROM mesh_promotion_nonces WHERE expires_at <= ?1",
+    anyhow::ensure!(
+        expires_at > now && expires_at - now <= MESH_NONCE_HORIZON_SECS,
+        "mesh nonce expiry is outside the replay window"
+    );
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM mesh_seen_nonces WHERE expires_at <= ?1",
         params![now],
     )?;
-    Ok(conn.execute(
-        "INSERT INTO mesh_promotion_nonces (nonce, expires_at) VALUES (?1, ?2)
+    let held: i64 = tx.query_row("SELECT COUNT(*) FROM mesh_seen_nonces", [], |r| r.get(0))?;
+    anyhow::ensure!(
+        held < MESH_NONCE_CAP,
+        "mesh nonce store is full; refusing until entries expire"
+    );
+    let inserted = tx.execute(
+        "INSERT INTO mesh_seen_nonces (nonce, expires_at) VALUES (?1, ?2)
          ON CONFLICT(nonce) DO NOTHING",
         params![nonce, expires_at],
-    )? == 1)
+    )?;
+    tx.commit()?;
+    Ok(inserted == 1)
 }
 
 pub fn is_peer_forgotten(conn: &Connection, peer_id: &str) -> Result<bool> {
@@ -1510,6 +1529,48 @@ mod tests {
         let peers = list_peers(&c).unwrap();
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].peer_id, REAL);
+    }
+
+    #[test]
+    fn a_mesh_nonce_is_single_use_across_reopen() {
+        let (d, c) = test_conn();
+        assert!(record_mesh_nonce(&c, "n1", 160, 100).unwrap());
+        assert!(!record_mesh_nonce(&c, "n1", 160, 100).unwrap());
+        drop(c);
+        let c = db::open_unencrypted(&d.path().join("orca.db")).unwrap();
+        assert!(!record_mesh_nonce(&c, "n1", 160, 110).unwrap());
+    }
+
+    #[test]
+    fn expired_mesh_nonces_are_pruned() {
+        let (_d, c) = test_conn();
+        assert!(record_mesh_nonce(&c, "old", 150, 100).unwrap());
+        assert!(record_mesh_nonce(&c, "new", 400, 200).unwrap());
+        let held: i64 = c
+            .query_row("SELECT COUNT(*) FROM mesh_seen_nonces", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(held, 1);
+    }
+
+    #[test]
+    fn a_mesh_nonce_outside_the_window_is_refused() {
+        let (_d, c) = test_conn();
+        assert!(record_mesh_nonce(&c, "past", 100, 100).is_err());
+        assert!(record_mesh_nonce(&c, "far", 100 + MESH_NONCE_HORIZON_SECS + 1, 100).is_err());
+    }
+
+    #[test]
+    fn a_full_mesh_nonce_store_refuses_new_nonces() {
+        let (_d, c) = test_conn();
+        c.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+             INSERT INTO mesh_seen_nonces (nonce, expires_at) SELECT 'x' || i, 500 FROM n",
+            params![MESH_NONCE_CAP],
+        )
+        .unwrap();
+        let err = record_mesh_nonce(&c, "one-more", 500, 100).unwrap_err();
+        assert!(err.to_string().contains("full"), "{err}");
+        assert!(record_mesh_nonce(&c, "after-expiry", 1_000, 600).unwrap());
     }
 
     #[test]

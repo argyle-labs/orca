@@ -2230,7 +2230,7 @@ pub mod caller_token;
 pub mod cert_rotation;
 pub mod dialer;
 pub mod dispatcher;
-mod listener;
+pub(crate) mod listener;
 pub mod mdns;
 pub mod mesh_listener;
 pub mod peer_info;
@@ -2792,11 +2792,11 @@ pub async fn exec_as(
 
 /// Pull a peer's signed bundle of all shared-state entities. The returned
 /// envelope is verified + merged by [`replication_sync`]; this fn just dials.
-pub async fn fetch_replicate_bundle(host: &str) -> Result<utils::pki::SignedEnvelope> {
+pub async fn fetch_replicate_bundle(host: &str, nonce: &str) -> Result<utils::pki::SignedEnvelope> {
     call_typed(
         host,
         MESH_REPLICATE_EXPORT_METHOD,
-        None::<()>,
+        Some(serde_json::json!({ "nonce": nonce })),
         Duration::from_secs(30),
     )
     .await

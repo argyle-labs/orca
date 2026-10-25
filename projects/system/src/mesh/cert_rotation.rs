@@ -404,9 +404,29 @@ async fn refresh_via_peer_mtls(policy: DialPolicy) -> Result<()> {
 
     let pki_d = pki_dir();
     let (csr_client, key_client, csr_server, key_server) = utils::pki::build_refresh_csrs(&host)?;
+    let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
+    let body = crate::mesh::listener::RefreshCsrs {
+        joiner_hostname: host.clone(),
+        csr_client_pem: csr_client,
+        csr_server_pem: csr_server,
+    };
     let fetch = |c: Candidate| {
-        let (host, csr_client, csr_server) = (&host, &csr_client, &csr_server);
-        async move { call_refresh(&c.addr, c.port, host, csr_client, csr_server).await }
+        let params = utils::pki::sign_bound_envelope(
+            &signing,
+            &body,
+            "mesh/refresh-cert",
+            &host,
+            &c.peer_id,
+            &utils::id::new(),
+            utils::time::now().unix_seconds(),
+            REFRESH_ENVELOPE_TTL_SECS,
+        )
+        .and_then(|envelope| {
+            let mut params = serde_json::to_value(&body)?;
+            params["envelope"] = serde_json::to_value(&envelope)?;
+            Ok(params)
+        });
+        async move { call_refresh(&c.addr, c.port, params?).await }
     };
     let install = |client: &str, server: &str| {
         utils::pki::install_refreshed_peer_certs(
@@ -462,26 +482,26 @@ async fn refresh_via_peer_bootstrap(policy: DialPolicy) -> Result<()> {
     let pki_d = pki_dir();
     let (csr_client, key_client, csr_server, key_server) = utils::pki::build_refresh_csrs(&host)?;
     let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
-
-    #[derive(serde::Serialize)]
-    struct RefreshCertBootstrapBody<'a> {
-        joiner_hostname: &'a str,
-        csr_client_pem: &'a str,
-        csr_server_pem: &'a str,
-    }
-    let env = utils::pki::sign_envelope(
-        &signing,
-        &RefreshCertBootstrapBody {
-            joiner_hostname: &host,
-            csr_client_pem: &csr_client,
-            csr_server_pem: &csr_server,
-        },
-    )?;
-    let params = serde_json::to_value(&env)?;
+    let body = crate::mesh::listener::RefreshCsrs {
+        joiner_hostname: host.clone(),
+        csr_client_pem: csr_client,
+        csr_server_pem: csr_server,
+    };
 
     let fetch = |c: Candidate| {
-        let params = params.clone();
+        let params = utils::pki::sign_bound_envelope(
+            &signing,
+            &body,
+            "mesh/refresh-cert-bootstrap",
+            &host,
+            &c.peer_id,
+            &utils::id::new(),
+            utils::time::now().unix_seconds(),
+            REFRESH_ENVELOPE_TTL_SECS,
+        )
+        .and_then(|env| Ok(serde_json::to_value(&env)?));
         async move {
+            let params = params?;
             let v = crate::mesh::cli::dial_bootstrap_pub(
                 &c.addr,
                 c.port,
@@ -510,12 +530,12 @@ async fn refresh_via_peer_bootstrap(policy: DialPolicy) -> Result<()> {
     Ok(())
 }
 
+const REFRESH_ENVELOPE_TTL_SECS: i64 = 120;
+
 async fn call_refresh(
     host: &str,
     port: u16,
-    joiner_hostname: &str,
-    csr_client_pem: &str,
-    csr_server_pem: &str,
+    params: serde_json::Value,
 ) -> Result<(String, String)> {
     let pki_d = pki_dir();
     let bundle = utils::pki::load_mesh_client(&pki_d)?;
@@ -534,11 +554,6 @@ async fn call_refresh(
     let sni = ServerName::try_from(utils::pki::MESH_SERVER_SAN)?.to_owned();
     let mut tls = connector.connect(sni, tcp).await?;
 
-    let params = serde_json::json!({
-        "joiner_hostname": joiner_hostname,
-        "csr_client_pem": csr_client_pem,
-        "csr_server_pem": csr_server_pem,
-    });
     write_frame(
         &mut tls,
         &serde_json::to_vec(&Request::new(1, "mesh/refresh-cert", Some(params)))?,
@@ -1211,7 +1226,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn mtls_refused_then_bootstrap_signs_and_installs() {
+    fn mtls_refused_then_bootstrap_refresh_for_another_signer_is_refused() {
         let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
@@ -1290,16 +1305,10 @@ mod tests {
             })
             .await
             .expect("refresh exchange finished");
-            refreshed.unwrap();
-
+            let err = format!("{:#}", refreshed.unwrap_err());
+            assert!(err.contains("another receiver"), "got: {err}");
             let client = std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
-            assert_ne!(client, rogue_client);
-            assert_eq!(utils::pki::cert_summary(&client).unwrap().cn, own);
-            let server = std::fs::read_to_string(utils::pki::mesh_server_cert_path(&pki)).unwrap();
-            assert_eq!(
-                utils::pki::cert_summary(&server).unwrap().cn,
-                "orca-mesh-server"
-            );
+            assert_eq!(client, rogue_client);
         });
     }
 

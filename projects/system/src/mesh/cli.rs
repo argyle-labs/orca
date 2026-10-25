@@ -657,26 +657,6 @@ pub fn cmd_mesh_list() -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Default, serde::Deserialize)]
-struct PeerCaStatus {
-    #[serde(default)]
-    has_key: bool,
-    #[serde(default)]
-    secure: bool,
-}
-
-async fn peer_ca_status(peer: &pdb::PeerRow) -> Result<PeerCaStatus> {
-    let resp = call_peer(
-        &peer.peer_id,
-        &peer.peer_addr,
-        peer.peer_port,
-        "mesh/has-ca-key",
-        serde_json::json!({}),
-    )
-    .await?;
-    Ok(serde_json::from_value(resp)?)
-}
-
 pub(crate) async fn peer_ca_holder_reply(
     peer: &pdb::PeerRow,
     nonce: &str,
@@ -692,7 +672,21 @@ pub(crate) async fn peer_ca_holder_reply(
     Ok(serde_json::from_value(reply)?)
 }
 
-async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
+async fn peer_holds_ca(peer: &pdb::PeerRow, ca_cert_pem: &str) -> Result<bool> {
+    let nonce = utils::id::new();
+    let reply = peer_ca_holder_reply(peer, &nonce).await?;
+    Ok(crate::mesh::exec::proves_ca_with(
+        ca_cert_pem,
+        &peer.peer_id,
+        &nonce,
+        reply.proof.as_deref(),
+    ))
+}
+
+/// Push the CA key to `peer`, the member this host just promoted. Never fans
+/// out: who receives the key is decided by the promotion, not by any claim
+/// the receiver makes.
+async fn push_ca_key_to_promoted(peer: &pdb::PeerRow) -> Result<()> {
     let pki_d = pki_dir();
     if !utils::pki::has_mesh_ca_key(&pki_d) {
         return Ok(());
@@ -701,12 +695,8 @@ async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
         println!("  not pushing the CA key: this member is insecure");
         return Ok(());
     }
-    let status = peer_ca_status(peer).await?;
-    if status.has_key {
-        return Ok(());
-    }
-    if !status.secure {
-        println!("  not pushing the CA key: {} is insecure", peer.peer_id);
+    let ca_cert = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))?;
+    if peer_holds_ca(peer, &ca_cert).await? {
         return Ok(());
     }
     let (cert_pem, key_pem) = utils::pki::export_mesh_ca_keypair(&pki_d)?;
@@ -854,7 +844,10 @@ async fn push_ca_state(
     payload: &crate::mesh::listener::CaStatePayload,
     signer_key_pem: &str,
 ) -> Result<bool> {
-    if !peer_ca_status(peer).await?.secure {
+    let Some(previous_cert) = payload.previous_cert_pem.as_deref() else {
+        return Ok(false);
+    };
+    if !peer_holds_ca(peer, previous_cert).await? {
         return Ok(false);
     }
     let auth = crate::mesh::exec::ca_push_auth(
@@ -984,8 +977,8 @@ pub async fn dial_bootstrap_pub(
     dial_bootstrap(host, port, pinned_fp, method, params).await
 }
 
-pub async fn replicate_ca_key_if_needed_pub(peer: &pdb::PeerRow) -> Result<()> {
-    replicate_ca_key_if_needed(peer).await
+pub async fn push_ca_key_to_promoted_member(peer: &pdb::PeerRow) -> Result<()> {
+    push_ca_key_to_promoted(peer).await
 }
 
 async fn call_mesh_method(
@@ -2392,7 +2385,7 @@ mod tests {
                 last_seen_at: 0,
                 departed_at: None,
             };
-            let err = replicate_ca_key_if_needed(&peer).await.unwrap_err();
+            let err = push_ca_key_to_promoted(&peer).await.unwrap_err();
             assert!(
                 format!("{err:#}").contains("answered as system system-y"),
                 "got: {err:#}"
@@ -2428,7 +2421,7 @@ mod tests {
 
     #[serial_test::serial(env)]
     #[tokio::test]
-    async fn replicate_ca_key_if_needed_pub_is_a_no_op_without_a_ca_key() {
+    async fn push_ca_key_to_promoted_is_a_no_op_without_a_ca_key() {
         let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = set_home(home.path());
@@ -2442,7 +2435,7 @@ mod tests {
             last_seen_at: 0,
             departed_at: None,
         };
-        replicate_ca_key_if_needed_pub(&peer).await.unwrap();
+        push_ca_key_to_promoted_member(&peer).await.unwrap();
     }
 
     // ── dial_bootstrap_pub — dead-port connect failure ────────────────────────

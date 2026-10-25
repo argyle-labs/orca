@@ -41,7 +41,6 @@ const MESH_PUSH_CA_STATE_METHOD: &str = "mesh/push-ca-state";
 #[derive(Debug, Serialize)]
 struct HasCaKeyResult {
     has_key: bool,
-    secure: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     proof: Option<String>,
 }
@@ -67,8 +66,15 @@ pub(crate) struct PushCaKeyParams {
 #[derive(Debug, Deserialize)]
 struct RefreshCertParams {
     joiner_hostname: String,
-    csr_client_pem: String,
-    csr_server_pem: String,
+    #[serde(default)]
+    envelope: Option<utils::pki::SignedEnvelope>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct RefreshCsrs {
+    pub(crate) joiner_hostname: String,
+    pub(crate) csr_client_pem: String,
+    pub(crate) csr_server_pem: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -193,7 +199,7 @@ async fn dispatch(request: Request, peer_cn: &str) -> Response {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, exec_error_object(&e)),
         },
-        MESH_REPLICATE_EXPORT_METHOD => match handle_replicate_export() {
+        MESH_REPLICATE_EXPORT_METHOD => match handle_replicate_export(peer_cn, request) {
             Ok(env) => value_response(id, &env),
             Err(e) => Response::err(id, peer_facing_error(&method, &e)),
         },
@@ -229,15 +235,7 @@ async fn dispatch(request: Request, peer_cn: &str) -> Response {
                     )
                 })
                 .flatten();
-            let secure = db::pool::with_pooled_or_open(db::mesh::get_secure).unwrap_or(false);
-            value_response(
-                id,
-                &HasCaKeyResult {
-                    has_key,
-                    secure,
-                    proof,
-                },
-            )
+            value_response(id, &HasCaKeyResult { has_key, proof })
         }
         MESH_PUSH_CA_KEY_METHOD => match handle_push_ca_key(peer_cn, request) {
             Ok(()) => Response::ok(id, Value::Null),
@@ -629,7 +627,12 @@ fn authorize_role_gated(
         "mesh/exec refused: caller token signer fp does not match peer {peer_cn}'s pinned key"
     );
 
-    crate::mesh::caller_token::check_replay(&verified.token.nonce, verified.token.expires_at, now)?;
+    crate::mesh::caller_token::check_replay(
+        conn,
+        &verified.token.nonce,
+        verified.token.expires_at,
+        now,
+    )?;
 
     let user =
         identities::users::find_by_id(conn, &verified.token.caller_user_id)?.ok_or_else(|| {
@@ -816,9 +819,27 @@ fn handle_replicate_roots() -> Result<ReplicateRootsResult> {
     Ok(ReplicateRootsResult { roots })
 }
 
-fn handle_replicate_export() -> Result<utils::pki::SignedEnvelope> {
+#[derive(Debug, Deserialize)]
+struct ReplicateExportParams {
+    nonce: String,
+}
+
+fn handle_replicate_export(peer_cn: &str, request: Request) -> Result<utils::pki::SignedEnvelope> {
+    let params: ReplicateExportParams = match request.params {
+        Some(v) => serde_json::from_value(v).context("parse mesh/replicate-export params")?,
+        None => refuse!("mesh/replicate-export requires a request nonce"),
+    };
+    refuse_unless!(
+        valid_ca_holder_nonce(&params.nonce),
+        "mesh/replicate-export refused: invalid request nonce"
+    );
     let entities = db::pool::with_pooled_or_open(db::replicate::export_all)?;
-    crate::mesh::transport::sign_bundle(entities)
+    crate::mesh::transport::sign_bundle(
+        entities,
+        MESH_REPLICATE_EXPORT_METHOD,
+        peer_cn,
+        &params.nonce,
+    )
 }
 
 /// Handle `mesh/replicate-push`: caller (the writer) sent us a signed bundle.
@@ -839,7 +860,25 @@ fn handle_replicate_push(peer_cn: &str, request: Request) -> Result<ReplicatePus
                 "mesh/replicate-push refused: peer {peer_cn} has no pinned bootstrap fp"
             ))
         })?;
-    let entities = crate::mesh::transport::verify_envelope(&envelope, &pinned_fp)?;
+    let now = utils::time::now().unix_seconds();
+    let (entities, binding) = crate::mesh::transport::verify_bundle(
+        &envelope,
+        &pinned_fp,
+        MESH_REPLICATE_PUSH_METHOD,
+        peer_cn,
+        crate::host_identity::machine_id(),
+        now,
+    )
+    .map_err(|e| PeerRefusal(format!("mesh/replicate-push refused: {e:#}")))?;
+    refuse_unless!(
+        db::pool::with_pooled_or_open(|conn| pdb::record_mesh_nonce(
+            conn,
+            &binding.nonce,
+            binding.expires_at,
+            now
+        ))?,
+        "mesh/replicate-push refused: bundle was already delivered (replay)"
+    );
     let merged = db::replicate_engine::merge_into_local(peer_cn, entities)?;
     if merged > 0 {
         tracing::info!("[replicate.push.recv] merged {merged} row(s) from {peer_cn}");
@@ -981,18 +1020,34 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
         active,
         "refresh refused: {peer_cn} is not a known active mesh peer"
     );
+    let Some(envelope) = params.envelope.as_ref() else {
+        refuse!("refresh refused: the request envelope is not bound to a receiver and nonce");
+    };
+    let csrs: RefreshCsrs = db::pool::with_pooled_or_open(|conn| {
+        admit_bound_from_member(
+            conn,
+            envelope,
+            MESH_REFRESH_CERT_METHOD,
+            peer_cn,
+            utils::time::now().unix_seconds(),
+        )
+    })?;
+    refuse_unless!(
+        csrs.joiner_hostname == peer_cn,
+        "refresh refused: signed joiner_hostname does not match cert CN ({peer_cn})"
+    );
 
     let pki_d = pki_dir();
     let (client_cert_pem, ca_cert_pem) = utils::pki::sign_peer_csr(
         &pki_d,
-        &params.csr_client_pem,
-        &params.joiner_hostname,
+        &csrs.csr_client_pem,
+        &csrs.joiner_hostname,
         PeerRole::Client,
     )?;
     let (server_cert_pem, _) = utils::pki::sign_peer_csr(
         &pki_d,
-        &params.csr_server_pem,
-        &params.joiner_hostname,
+        &csrs.csr_server_pem,
+        &csrs.joiner_hostname,
         PeerRole::Server,
     )?;
     Ok(RefreshCertResult {
@@ -1000,6 +1055,35 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
         server_cert_pem,
         ca_cert_pem,
     })
+}
+
+/// Verify `envelope` is bound from `peer_cn` to this host for `method`, signed
+/// by `peer_cn`'s pinned bootstrap key, and record its nonce.
+fn admit_bound_from_member<T: serde::de::DeserializeOwned>(
+    conn: &rusqlite::Connection,
+    envelope: &utils::pki::SignedEnvelope,
+    method: &str,
+    peer_cn: &str,
+    now: i64,
+) -> Result<T> {
+    let (body, verifying, binding) = utils::pki::verify_bound_envelope::<T>(
+        envelope,
+        method,
+        peer_cn,
+        crate::host_identity::machine_id(),
+        now,
+    )
+    .map_err(|e| PeerRefusal(format!("{method} refused: {e:#}")))?;
+    let pinned = pdb::pinned_pubkey_fp(conn, peer_cn)?;
+    refuse_unless!(
+        pinned.as_deref() == Some(utils::pki::bootstrap_pubkey_fingerprint(&verifying).as_str()),
+        "{method} refused: envelope is not signed by {peer_cn}'s pinned bootstrap key"
+    );
+    refuse_unless!(
+        pdb::record_mesh_nonce(conn, &binding.nonce, binding.expires_at, now)?,
+        "{method} refused: envelope was already delivered (replay)"
+    );
+    Ok(body)
 }
 
 fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
@@ -1369,6 +1453,7 @@ mod tests {
             payload: "not-canonical-json".into(),
             signer_pubkey_b64: "!!!not-base64!!!".into(),
             signature_b64: "!!!not-base64!!!".into(),
+            binding: None,
         };
         let err = authorize_role_gated(
             &conn,
@@ -2035,6 +2120,7 @@ mod tests {
                 payload: "{}".into(),
                 signer_pubkey_b64: "AA==".into(),
                 signature_b64: "AA==".into(),
+                binding: None,
             };
             let err = handle_replicate_push(
                 "peer-nopin",
@@ -2249,15 +2335,16 @@ mod tests {
         db::with_thread_db_path(&dir.path().join("refresh-ok.db"), || {
             utils::pki::init_mesh_ca(&pki_dir(), "24647a14a251e863cdf8dcee692f2915").unwrap();
             let cn = utils::id::new();
-            let conn = db::open_default().unwrap();
-            pdb::upsert_peer(&conn, &cn, "hr", "127.0.0.1", 1, Some("fp-r"), "").unwrap();
-            drop(conn);
-
-            let res = handle_refresh_cert(
+            crate::host_identity::init(&pki_dir()).ok();
+            let key = member_key(&cn);
+            let params = bound_refresh(
                 &cn,
-                req_with_params(MESH_REFRESH_CERT_METHOD, refresh_params(&cn)),
-            )
-            .unwrap();
+                &key,
+                crate::host_identity::machine_id(),
+                utils::time::now().unix_seconds(),
+            );
+            let res = handle_refresh_cert(&cn, req_with_params(MESH_REFRESH_CERT_METHOD, params))
+                .unwrap();
             assert_eq!(
                 utils::pki::cert_summary(&res.client_cert_pem).unwrap().cn,
                 cn
@@ -2829,6 +2916,335 @@ mod tests {
             );
             assert!(!utils::pki::has_mesh_ca_key(&pki));
         });
+    }
+
+    fn member_key(cn: &str) -> ed25519_dalek::SigningKey {
+        let key = ed25519_dalek::SigningKey::from_bytes(&utils::hash::sha256(cn.as_bytes()));
+        let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+        let conn = db::open_default().unwrap();
+        pdb::upsert_peer(&conn, cn, "hm", "127.0.0.1", 1, Some(&fp), "").unwrap();
+        key
+    }
+
+    fn bound_bundle(
+        key: &ed25519_dalek::SigningKey,
+        sender: &str,
+        receiver: &str,
+        now: i64,
+    ) -> utils::pki::SignedEnvelope {
+        let body = super::super::ReplicateBundle {
+            peer_id: sender.to_string(),
+            issued_at: now,
+            entities: Default::default(),
+        };
+        utils::pki::sign_bound_envelope(
+            key,
+            &body,
+            MESH_REPLICATE_PUSH_METHOD,
+            sender,
+            receiver,
+            &utils::id::new(),
+            now,
+            60,
+        )
+        .unwrap()
+    }
+
+    fn push_bundle(cn: &str, env: &utils::pki::SignedEnvelope) -> String {
+        match handle_replicate_push(
+            cn,
+            req_with_params(
+                MESH_REPLICATE_PUSH_METHOD,
+                serde_json::to_value(env).unwrap(),
+            ),
+        ) {
+            Ok(_) => "accepted".into(),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    #[test]
+    fn a_bound_replicate_push_is_merged_once() {
+        with_db(async {
+            let cn = utils::id::new();
+            let key = member_key(&cn);
+            let env = bound_bundle(
+                &key,
+                &cn,
+                crate::host_identity::machine_id(),
+                utils::time::now().unix_seconds(),
+            );
+            assert_eq!(push_bundle(&cn, &env), "accepted");
+            let again = push_bundle(&cn, &env);
+            assert!(again.contains("replay"), "{again}");
+        });
+    }
+
+    #[test]
+    fn a_replicate_push_for_another_receiver_expired_tampered_or_unbound_is_refused() {
+        with_db(async {
+            let cn = utils::id::new();
+            let key = member_key(&cn);
+            let me = crate::host_identity::machine_id();
+            let now = utils::time::now().unix_seconds();
+            let other = push_bundle(&cn, &bound_bundle(&key, &cn, &utils::id::new(), now));
+            assert!(other.contains("another receiver"), "{other}");
+            let expired = push_bundle(&cn, &bound_bundle(&key, &cn, me, now - 3_600));
+            assert!(expired.contains("expired"), "{expired}");
+            let mut tampered = bound_bundle(&key, &cn, me, now);
+            tampered.payload = tampered.payload.replacen("{", "{\"x\":1,", 1);
+            let tampered = push_bundle(&cn, &tampered);
+            assert!(tampered.contains("did not verify"), "{tampered}");
+            let mut unbound = bound_bundle(&key, &cn, me, now);
+            unbound.binding = None;
+            let unbound = push_bundle(&cn, &unbound);
+            assert!(unbound.contains("not bound"), "{unbound}");
+        });
+    }
+
+    #[test]
+    fn a_replicate_export_is_bound_to_the_requester_and_its_nonce() {
+        with_db(async {
+            let requester = utils::id::new();
+            let nonce = utils::id::new();
+            let env = handle_replicate_export(
+                &requester,
+                req_with_params(
+                    MESH_REPLICATE_EXPORT_METHOD,
+                    serde_json::json!({ "nonce": nonce }),
+                ),
+            )
+            .unwrap();
+            let me = crate::host_identity::machine_id().to_string();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(
+                &utils::pki::load_or_init_bootstrap_key(&pki_dir())
+                    .unwrap()
+                    .verifying_key(),
+            );
+            let now = utils::time::now().unix_seconds();
+            crate::mesh::transport::verify_export(&env, &fp, &me, &requester, &nonce, now).unwrap();
+            let err = crate::mesh::transport::verify_export(
+                &env,
+                &fp,
+                &me,
+                &utils::id::new(),
+                &nonce,
+                now,
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("another receiver"), "{err:#}");
+            let err = crate::mesh::transport::verify_export(
+                &env,
+                &fp,
+                &me,
+                &requester,
+                &utils::id::new(),
+                now,
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("nonce"), "{err:#}");
+            let err = crate::mesh::transport::verify_export(
+                &env,
+                &fp,
+                &me,
+                &requester,
+                &nonce,
+                now + 3_600,
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("expired"), "{err:#}");
+        });
+    }
+
+    fn bound_refresh(cn: &str, key: &ed25519_dalek::SigningKey, receiver: &str, now: i64) -> Value {
+        let body = refresh_params(cn);
+        let env = utils::pki::sign_bound_envelope(
+            key,
+            &body,
+            MESH_REFRESH_CERT_METHOD,
+            cn,
+            receiver,
+            &utils::id::new(),
+            now,
+            60,
+        )
+        .unwrap();
+        let mut v = body;
+        v["envelope"] = serde_json::to_value(&env).unwrap();
+        v
+    }
+
+    fn refresh(cn: &str, params: Value) -> String {
+        match handle_refresh_cert(cn, req_with_params(MESH_REFRESH_CERT_METHOD, params)) {
+            Ok(_) => "accepted".into(),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_bound_refresh_cert_is_signed_once() {
+        in_ca_home("bound-refresh.db", || {
+            utils::pki::init_mesh_ca(&pki_dir(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+            crate::host_identity::init(&pki_dir()).ok();
+            let cn = utils::id::new();
+            let key = member_key(&cn);
+            let params = bound_refresh(
+                &cn,
+                &key,
+                crate::host_identity::machine_id(),
+                utils::time::now().unix_seconds(),
+            );
+            assert_eq!(refresh(&cn, params.clone()), "accepted");
+            let again = refresh(&cn, params);
+            assert!(again.contains("replay"), "{again}");
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_refresh_cert_for_another_receiver_expired_tampered_or_unbound_is_refused() {
+        in_ca_home("bound-refresh-refused.db", || {
+            utils::pki::init_mesh_ca(&pki_dir(), "24647a14a251e863cdf8dcee692f2915").unwrap();
+            crate::host_identity::init(&pki_dir()).ok();
+            let cn = utils::id::new();
+            let key = member_key(&cn);
+            let me = crate::host_identity::machine_id();
+            let now = utils::time::now().unix_seconds();
+            let other = refresh(&cn, bound_refresh(&cn, &key, &utils::id::new(), now));
+            assert!(other.contains("another receiver"), "{other}");
+            let expired = refresh(&cn, bound_refresh(&cn, &key, me, now - 3_600));
+            assert!(expired.contains("expired"), "{expired}");
+            let mut tampered = bound_refresh(&cn, &key, me, now);
+            tampered["envelope"]["binding"]["expires_at"] = serde_json::json!(now + 61);
+            let tampered = refresh(&cn, tampered);
+            assert!(tampered.contains("did not verify"), "{tampered}");
+            let unbound = refresh(&cn, refresh_params(&cn));
+            assert!(unbound.contains("not bound"), "{unbound}");
+            let stranger = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+            let wrong_key = refresh(&cn, bound_refresh(&cn, &stranger, me, now));
+            assert!(wrong_key.contains("pinned"), "{wrong_key}");
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_ca_proof_for_another_receiver_is_refused() {
+        in_ca_home("other-receiver.db", || {
+            let f = ca_fixture();
+            let pki = pin_ca(&f.new_cert);
+            let cn = utils::id::new();
+            member_peer(&cn);
+            let p = key_payload(&f.new_cert, &f.new_key);
+            let auth = crate::mesh::exec::ca_push_auth(
+                &f.new_key,
+                MESH_PUSH_CA_KEY_METHOD,
+                &utils::id::new(),
+                &cn,
+                &p,
+                utils::time::now().unix_seconds(),
+            )
+            .unwrap();
+            let err = handle_push_ca_key(
+                &cn,
+                req_with_params(MESH_PUSH_CA_KEY_METHOD, with_auth(&p, &auth)),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("did not verify"),
+                "got: {err:#}"
+            );
+            assert!(!utils::pki::has_mesh_ca_key(&pki));
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_ca_key_proof_replayed_against_push_ca_state_is_refused() {
+        in_ca_home("cross-method.db", || {
+            let f = ca_fixture();
+            let pki = pin_ca(&f.old_cert);
+            let cn = utils::id::new();
+            member_peer(&cn);
+            let state = state_payload(&f);
+            let key_proof = crate::mesh::exec::ca_push_auth(
+                &f.old_key,
+                MESH_PUSH_CA_KEY_METHOD,
+                crate::host_identity::machine_id(),
+                &cn,
+                &state,
+                utils::time::now().unix_seconds(),
+            )
+            .unwrap();
+            let err = handle_push_ca_state(
+                &cn,
+                req_with_params(MESH_PUSH_CA_STATE_METHOD, with_auth(&state, &key_proof)),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("did not verify"),
+                "got: {err:#}"
+            );
+            assert_eq!(pinned_ca(&pki), f.old_cert);
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_ca_proof_valid_beyond_the_push_window_is_refused() {
+        in_ca_home("far-future.db", || {
+            let f = ca_fixture();
+            let pki = pin_ca(&f.new_cert);
+            let cn = utils::id::new();
+            member_peer(&cn);
+            let p = key_payload(&f.new_cert, &f.new_key);
+            let auth = crate::mesh::exec::ca_push_auth(
+                &f.new_key,
+                MESH_PUSH_CA_KEY_METHOD,
+                crate::host_identity::machine_id(),
+                &cn,
+                &p,
+                utils::time::now().unix_seconds() + 60,
+            )
+            .unwrap();
+            let err = handle_push_ca_key(
+                &cn,
+                req_with_params(MESH_PUSH_CA_KEY_METHOD, with_auth(&p, &auth)),
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("expired"), "got: {err:#}");
+            assert!(!utils::pki::has_mesh_ca_key(&pki));
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_ca_push_from_a_departed_member_is_refused() {
+        in_ca_home("departed.db", || {
+            let f = ca_fixture();
+            let pki = pin_ca(&f.new_cert);
+            let cn = utils::id::new();
+            member_peer(&cn);
+            pdb::mark_peer_departed(&db::open_default().unwrap(), &cn).unwrap();
+            let params = signed_key_push(&cn, &f.new_cert, &f.new_key);
+            let err = handle_push_ca_key(&cn, req_with_params(MESH_PUSH_CA_KEY_METHOD, params))
+                .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("not a verified member"),
+                "got: {err:#}"
+            );
+            assert!(!utils::pki::has_mesh_ca_key(&pki));
+        });
+    }
+
+    #[test]
+    fn has_ca_key_does_not_report_a_tier() {
+        let r = serde_json::to_string(&HasCaKeyResult {
+            has_key: false,
+            proof: None,
+        })
+        .unwrap();
+        assert!(!r.contains("secure"), "{r}");
     }
 
     #[serial_test::serial(env)]

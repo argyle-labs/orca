@@ -489,6 +489,24 @@ fn handle_refresh_cert_bootstrap(env: &SignedEnvelope) -> Result<RefreshCertBoot
         peer.peer_id,
         body.joiner_hostname
     );
+    let binding = env.binding.as_ref().ok_or_else(|| {
+        PeerRefusal("refresh refused: envelope is not bound to a receiver and nonce".into())
+    })?;
+    let now = utils::time::now().unix_seconds();
+    binding
+        .verify(
+            &signer_vk,
+            MESH_REFRESH_CERT_BOOTSTRAP_METHOD,
+            &peer.peer_id,
+            crate::host_identity::machine_id(),
+            env.payload.as_bytes(),
+            now,
+        )
+        .map_err(|e| PeerRefusal(format!("refresh refused: {e:#}")))?;
+    refuse_unless!(
+        pdb::record_mesh_nonce(&conn, &binding.nonce, binding.expires_at, now)?,
+        "refresh refused: envelope was already delivered (replay)"
+    );
 
     let (client_cert_pem, ca_cert_pem) = utils::pki::sign_peer_csr(
         &pki_d,
@@ -1131,6 +1149,7 @@ mod tests {
             payload: "{}".into(),
             signer_pubkey_b64: String::new(),
             signature_b64: String::new(),
+            binding: None,
         };
         let params = serde_json::to_value(&env).unwrap();
         let req = Request::new(1u64, "mesh/does-not-exist", Some(params));
@@ -1151,6 +1170,7 @@ mod tests {
             payload: "{}".into(),
             signer_pubkey_b64: String::new(),
             signature_b64: String::new(),
+            binding: None,
         };
         serde_json::to_value(&env).unwrap()
     }
@@ -2030,7 +2050,17 @@ mod tests {
                 "csr_client_pem": csr_client,
                 "csr_server_pem": csr_server,
             });
-            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let env = utils::pki::sign_bound_envelope(
+                &key,
+                &body,
+                MESH_REFRESH_CERT_BOOTSTRAP_METHOD,
+                JOINER_UUID,
+                crate::host_identity::machine_id(),
+                &utils::id::new(),
+                utils::time::now().unix_seconds(),
+                60,
+            )
+            .unwrap();
             let db_file = tempfile::NamedTempFile::new().unwrap();
             rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
                 let conn = db::open_default().unwrap();
@@ -2053,6 +2083,153 @@ mod tests {
                 assert!(res.ca_cert_pem.contains("BEGIN CERTIFICATE"));
             }));
         });
+    }
+
+    fn bound_bootstrap_refresh(
+        key: &ed25519_dalek::SigningKey,
+        receiver: &str,
+        now: i64,
+    ) -> SignedEnvelope {
+        let (csr_client, _) = utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Client).unwrap();
+        let (csr_server, _) = utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Server).unwrap();
+        let body = serde_json::json!({
+            "joiner_hostname": JOINER_UUID,
+            "csr_client_pem": csr_client,
+            "csr_server_pem": csr_server,
+        });
+        utils::pki::sign_bound_envelope(
+            key,
+            &body,
+            MESH_REFRESH_CERT_BOOTSTRAP_METHOD,
+            JOINER_UUID,
+            receiver,
+            &utils::id::new(),
+            now,
+            60,
+        )
+        .unwrap()
+    }
+
+    fn bootstrap_refresh_case(
+        env: impl FnOnce(&ed25519_dalek::SigningKey) -> Vec<SignedEnvelope>,
+    ) -> Vec<Result<RefreshCertBootstrapResult>> {
+        run_with_home(true, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let envs = env(&key);
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                let conn = db::open_default().unwrap();
+                pdb::upsert_peer(
+                    &conn,
+                    JOINER_UUID,
+                    "Joiner",
+                    "10.0.8.7",
+                    12002,
+                    Some(&fp),
+                    "",
+                )
+                .unwrap();
+                envs.iter().map(handle_refresh_cert_bootstrap).collect()
+            }))
+        })
+    }
+
+    fn err_text(r: &Result<RefreshCertBootstrapResult>) -> String {
+        match r {
+            Ok(_) => "accepted".into(),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn bootstrap_refresh_bound_to_this_host_is_signed_once() {
+        let _env = crate::test_env::snapshot();
+        let out = bootstrap_refresh_case(|key| {
+            let env = bound_bootstrap_refresh(
+                key,
+                crate::host_identity::machine_id(),
+                utils::time::now().unix_seconds(),
+            );
+            vec![env.clone(), env]
+        });
+        assert!(out[0].is_ok(), "{}", err_text(&out[0]));
+        assert!(
+            err_text(&out[1]).contains("replay"),
+            "{}",
+            err_text(&out[1])
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn bootstrap_refresh_for_another_receiver_is_refused() {
+        let _env = crate::test_env::snapshot();
+        let out = bootstrap_refresh_case(|key| {
+            vec![bound_bootstrap_refresh(
+                key,
+                &utils::id::new(),
+                utils::time::now().unix_seconds(),
+            )]
+        });
+        assert!(
+            err_text(&out[0]).contains("another receiver"),
+            "{}",
+            err_text(&out[0])
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn an_expired_bootstrap_refresh_is_refused() {
+        let _env = crate::test_env::snapshot();
+        let out = bootstrap_refresh_case(|key| {
+            vec![bound_bootstrap_refresh(
+                key,
+                crate::host_identity::machine_id(),
+                utils::time::now().unix_seconds() - 3_600,
+            )]
+        });
+        assert!(
+            err_text(&out[0]).contains("expired"),
+            "{}",
+            err_text(&out[0])
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_tampered_or_unbound_bootstrap_refresh_is_refused() {
+        let _env = crate::test_env::snapshot();
+        let out = bootstrap_refresh_case(|key| {
+            let mut tampered = bound_bootstrap_refresh(
+                key,
+                crate::host_identity::machine_id(),
+                utils::time::now().unix_seconds(),
+            );
+            let mut b = tampered.binding.clone().unwrap();
+            b.expires_at += 1;
+            tampered.binding = Some(b);
+            let mut unbound = bound_bootstrap_refresh(
+                key,
+                crate::host_identity::machine_id(),
+                utils::time::now().unix_seconds(),
+            );
+            unbound.binding = None;
+            vec![tampered, unbound]
+        });
+        assert!(
+            err_text(&out[0]).contains("did not verify"),
+            "{}",
+            err_text(&out[0])
+        );
+        assert!(
+            err_text(&out[1]).contains("not bound"),
+            "{}",
+            err_text(&out[1])
+        );
     }
 
     #[test]

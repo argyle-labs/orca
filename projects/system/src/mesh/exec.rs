@@ -712,38 +712,13 @@ pub(crate) fn proves_ca_possession(
     nonce: &str,
     proof: Option<&str>,
 ) -> bool {
-    let (Some(proof), Ok(ca_pem)) = (
-        proof,
-        std::fs::read_to_string(utils::pki::mesh_ca_cert_path(pki)),
-    ) else {
-        return false;
-    };
-    !nonce.is_empty()
-        && utils::pki::verify_mesh_ca_signature(&ca_pem, &ca_holder_message(binding, nonce), proof)
-            .is_ok()
+    std::fs::read_to_string(utils::pki::mesh_ca_cert_path(pki))
+        .is_ok_and(|ca_pem| proves_ca_with(&ca_pem, binding, nonce, proof))
 }
 
 pub(crate) const CA_PUSH_TTL_SECS: i64 = 120;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CaPushAuth {
-    pub(crate) nonce: String,
-    pub(crate) expires_at: i64,
-    pub(crate) proof: String,
-}
-
-fn ca_push_binding<T: serde::Serialize>(
-    method: &str,
-    receiver: &str,
-    sender: &str,
-    expires_at: i64,
-    payload: &T,
-) -> Result<String> {
-    let hash = utils::hash::sha256_hex(&serde_json::to_vec(payload)?);
-    Ok(format!(
-        "push:{method}:{receiver}:{sender}:{expires_at}:{hash}"
-    ))
-}
+pub(crate) type CaPushAuth = utils::pki::BoundEnvelope;
 
 pub(crate) fn ca_push_auth<T: serde::Serialize>(
     ca_key_pem: &str,
@@ -753,15 +728,16 @@ pub(crate) fn ca_push_auth<T: serde::Serialize>(
     payload: &T,
     now: i64,
 ) -> Result<CaPushAuth> {
-    let nonce = utils::id::new();
-    let expires_at = now + CA_PUSH_TTL_SECS;
-    let binding = ca_push_binding(method, receiver, sender, expires_at, payload)?;
-    let proof = utils::pki::sign_with_ca_key_pem(ca_key_pem, &ca_holder_message(&binding, &nonce))?;
-    Ok(CaPushAuth {
-        nonce,
-        expires_at,
-        proof,
-    })
+    let signing = utils::pki::signing_key_from_pem(ca_key_pem)?;
+    Ok(utils::pki::BoundEnvelope::sign(
+        &signing,
+        method,
+        sender,
+        receiver,
+        &utils::id::new(),
+        now + CA_PUSH_TTL_SECS,
+        &serde_json::to_vec(payload)?,
+    ))
 }
 
 pub(crate) fn verify_ca_push<'a, T: serde::Serialize>(
@@ -777,19 +753,24 @@ pub(crate) fn verify_ca_push<'a, T: serde::Serialize>(
         anyhow::bail!("{method} refused: the push carries no CA-possession proof");
     };
     anyhow::ensure!(
-        uuid::Uuid::try_parse(&auth.nonce).is_ok(),
-        "{method} refused: the CA-possession proof nonce is invalid"
-    );
-    anyhow::ensure!(
-        auth.expires_at > now
-            && auth.expires_at - now <= CA_PUSH_TTL_SECS + PROMOTION_CLOCK_SKEW_SECS,
+        auth.expires_at - now <= CA_PUSH_TTL_SECS + utils::pki::BOUND_ENVELOPE_SKEW_SECS,
         "{method} refused: the CA-possession proof is expired or not yet valid"
     );
-    let binding = ca_push_binding(method, receiver, sender, auth.expires_at, payload)?;
-    anyhow::ensure!(
-        proves_ca_possession(pki, &binding, &auth.nonce, Some(&auth.proof)),
-        "{method} refused: the CA-possession proof did not verify against this host's mesh CA"
-    );
+    let ca_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(pki))
+        .context("read this host's mesh CA cert")?;
+    auth.verify(
+        &utils::pki::mesh_ca_verifying_key(&ca_pem)?,
+        method,
+        sender,
+        receiver,
+        &serde_json::to_vec(payload)?,
+        now,
+    )
+    .with_context(|| {
+        format!(
+            "{method} refused: the CA-possession proof did not verify against this host's mesh CA"
+        )
+    })?;
     Ok(auth)
 }
 
@@ -807,6 +788,24 @@ async fn another_ca_holder() -> bool {
         }
     }
     false
+}
+
+pub(crate) fn proves_ca_with(
+    ca_cert_pem: &str,
+    binding: &str,
+    nonce: &str,
+    proof: Option<&str>,
+) -> bool {
+    let Some(proof) = proof else {
+        return false;
+    };
+    !nonce.is_empty()
+        && utils::pki::verify_mesh_ca_signature(
+            ca_cert_pem,
+            &ca_holder_message(binding, nonce),
+            proof,
+        )
+        .is_ok()
 }
 
 pub(crate) fn reply_proves_ca_possession(
@@ -833,12 +832,14 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    if on || !utils::pki::has_mesh_ca_key(pki) {
-        db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, on))?;
-        if !on {
-            utils::pki::remove_mesh_ca_keys(pki)?;
-        }
-        return Ok(on);
+    anyhow::ensure!(
+        !on,
+        "a member becomes secure only by accepting a CA-signed promotion grant"
+    );
+    if !utils::pki::has_mesh_ca_key(pki) {
+        db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, false))?;
+        utils::pki::remove_mesh_ca_keys(pki)?;
+        return Ok(false);
     }
     let refused = || {
         anyhow::anyhow!(
@@ -924,7 +925,7 @@ pub async fn promote(target: &str, caller: Option<contract::CallerIdentity>) -> 
         && let Some(peer) = db::pool::with_pooled_or_open(pdb::list_peers)?
             .into_iter()
             .find(|p| p.peer_id == target)
-        && let Err(e) = crate::mesh::cli::replicate_ca_key_if_needed_pub(&peer).await
+        && let Err(e) = crate::mesh::cli::push_ca_key_to_promoted_member(&peer).await
     {
         tracing::warn!("CA-key replication to promoted member {target}: {e:#}");
     }
@@ -2050,7 +2051,7 @@ mod tests {
 
     #[serial_test::serial(env)]
     #[tokio::test]
-    async fn secure_round_trips_through_db() {
+    async fn secure_is_never_self_granted() {
         let _env = crate::test_env::snapshot();
         let home = tempfile::tempdir().unwrap();
         let _home = crate::mesh::pin_home(home.path());
@@ -2058,8 +2059,10 @@ mod tests {
         db::with_db_path(tmp.path().to_path_buf(), async move {
             // Default is false on a fresh, migrated db.
             assert!(!get_secure().unwrap());
-            assert!(set_secure(true).await.unwrap());
-            assert!(get_secure().unwrap());
+            let err = set_secure(true).await.unwrap_err();
+            assert!(err.to_string().contains("promotion grant"), "{err}");
+            assert!(!get_secure().unwrap());
+            db::pool::with_pooled_or_open(|c| pdb::set_secure(c, true)).unwrap();
             assert!(!set_secure(false).await.unwrap());
             assert!(!get_secure().unwrap());
         })
@@ -2085,6 +2088,29 @@ mod tests {
             );
         })
         .await;
+    }
+
+    #[test]
+    fn a_peer_claiming_secure_without_a_ca_proof_is_not_a_ca_target() {
+        let pki = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(pki.path(), "holder").unwrap();
+        let ca = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(pki.path())).unwrap();
+        let nonce = utils::id::new();
+        let claim: CaHolderReply =
+            serde_json::from_str(r#"{"has_key":true,"secure":true}"#).unwrap();
+        assert!(!proves_ca_with(
+            &ca,
+            "peer-x",
+            &nonce,
+            claim.proof.as_deref()
+        ));
+        let other = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(other.path(), "other").unwrap();
+        let forged = ca_holder_proof(other.path(), "peer-x", &nonce);
+        assert!(!proves_ca_with(&ca, "peer-x", &nonce, forged.as_deref()));
+        let real = ca_holder_proof(pki.path(), "peer-x", &nonce);
+        assert!(proves_ca_with(&ca, "peer-x", &nonce, real.as_deref()));
+        assert!(!proves_ca_with(&ca, "peer-y", &nonce, real.as_deref()));
     }
 
     // ── reject_legacy_peer_cn ─────────────────────────────────────────────────
@@ -2448,7 +2474,7 @@ mod tests {
             let expected = env!("ORCA_VERSION");
             assert_eq!(out.version, expected);
             // Flip the db flag; status() must now surface true.
-            set_secure(true).await.unwrap();
+            db::pool::with_pooled_or_open(|c| pdb::set_secure(c, true)).unwrap();
             assert!(
                 status().unwrap().secure,
                 "status() must layer the db secure flag on top of cert_status"

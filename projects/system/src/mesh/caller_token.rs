@@ -160,34 +160,16 @@ pub fn verify(
     Ok(Verified { token, signer_fp })
 }
 
-/// In-memory replay guard for caller-token nonces. Tokens are short-lived
-/// (`DEFAULT_TTL_SECS`), so a process-local cache is sufficient: a captured
-/// token can only be replayed within its expiry window, and a daemon restart
-/// drops the cache only after every cached token would already have expired.
-mod replay {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    // nonce → expiry (unix seconds). Pruned opportunistically on each insert.
-    static SEEN: Mutex<Option<HashMap<String, i64>>> = Mutex::new(None);
-
-    /// Record an unseen `nonce` (valid until `expires_at`). Returns true if it
-    /// was new; false if the nonce was already used (i.e. a replay).
-    pub fn record_unseen(nonce: &str, expires_at: i64, now: i64) -> bool {
-        let mut guard = SEEN.lock().unwrap();
-        let map = guard.get_or_insert_with(HashMap::new);
-        map.retain(|_, exp| *exp > now);
-        if map.contains_key(nonce) {
-            return false;
-        }
-        map.insert(nonce.to_string(), expires_at);
-        true
-    }
-}
-
-/// Reject a token whose nonce has already been seen within its validity window.
-pub fn check_replay(nonce: &str, expires_at: i64, now: i64) -> Result<()> {
-    if !replay::record_unseen(nonce, expires_at, now) {
+/// Reject a token whose nonce has already been seen within its validity
+/// window. Nonces persist in the mesh nonce store, so a restart does not
+/// reopen replay.
+pub fn check_replay(
+    conn: &rusqlite::Connection,
+    nonce: &str,
+    expires_at: i64,
+    now: i64,
+) -> Result<()> {
+    if !db::mesh::record_mesh_nonce(conn, nonce, expires_at, now)? {
         anyhow::bail!("caller token nonce {nonce} was already used (replay rejected)");
     }
     Ok(())
@@ -202,24 +184,29 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
+    fn replay_db() -> (tempfile::TempDir, rusqlite::Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open_unencrypted(&dir.path().join("orca.db")).unwrap();
+        (dir, conn)
+    }
+
     #[test]
-    fn replay_guard_rejects_second_use() {
-        let nonce = format!("nonce-{}", utils::id::new());
-        // First use within validity → accepted.
-        check_replay(&nonce, 1000, 0).unwrap();
-        // Same nonce again → rejected as a replay.
-        let err = check_replay(&nonce, 1000, 0).unwrap_err();
+    fn a_caller_token_nonce_stays_spent_across_a_restart() {
+        let (dir, conn) = replay_db();
+        let nonce = utils::id::new();
+        check_replay(&conn, &nonce, 160, 100).unwrap();
+        drop(conn);
+        let restarted = db::open_unencrypted(&dir.path().join("orca.db")).unwrap();
+        let err = check_replay(&restarted, &nonce, 160, 110).unwrap_err();
         assert!(err.to_string().contains("replay rejected"), "{err}");
     }
 
     #[test]
     fn replay_guard_forgets_expired_nonces() {
-        let nonce = format!("nonce-{}", utils::id::new());
-        check_replay(&nonce, 100, 0).unwrap();
-        // Once `now` passes the expiry, the nonce is pruned and may reappear
-        // (a fresh token with the same nonce is implausible, but this proves
-        // the cache doesn't grow without bound).
-        check_replay(&nonce, 300, 200).unwrap();
+        let (_dir, conn) = replay_db();
+        let nonce = utils::id::new();
+        check_replay(&conn, &nonce, 160, 100).unwrap();
+        check_replay(&conn, &nonce, 400, 200).unwrap();
     }
 
     fn ident() -> CallerIdentity {

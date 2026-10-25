@@ -4815,6 +4815,7 @@ dependencies = [
  "clap",
  "colored",
  "crossterm",
+ "ed25519-dalek",
  "futures",
  "glob",
  "if-addrs 0.14.0",

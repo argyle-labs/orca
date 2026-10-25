@@ -135,6 +135,34 @@ holding the CA key cannot be demoted.
 A CA state push must also be a rotation chained from the receiver's current
 CA; it is signed with that current CA key.
 
+The CA key goes only to the member a `promote` just granted. CA state goes
+only to members that sign a fresh nonce with the current CA key. A member's
+own claim to be secure never decides who receives key material, and a member
+becomes secure only by accepting a CA-signed promotion grant.
+
+### Bound envelopes
+
+Every credential-changing mesh message is a bound envelope
+(`utils::pki::BoundEnvelope`): a signature over a length-prefixed encoding of
+the method, sender, receiver, nonce, expiry (at most 5 minutes) and the
+SHA-256 of the payload. The receiver checks every field and records the nonce
+in `mesh_seen_nonces`, which survives restarts, prunes expired entries and
+refuses new nonces beyond 10 minutes or 100,000 entries.
+
+| Path | Signed by | Receiver binding |
+|---|---|---|
+| `mesh/push-ca-key`, `mesh/push-ca-state` | mesh CA key | receiver id |
+| `mesh/replicate-push` | sender's pinned bootstrap key | receiver id |
+| `mesh/replicate-export` | exporter's pinned bootstrap key | requester id + the requester's nonce |
+| `mesh/refresh-cert`, `mesh/refresh-cert-bootstrap` | requester's pinned bootstrap key | signer id |
+| `mesh/exec` caller tokens | caller's pinned bootstrap key | tool + args; nonce persisted |
+
+Rollout: senders keep the plain payload signature, so daemons from before
+bound envelopes still accept their messages. Updated daemons refuse every
+unbound envelope, so an old daemon cannot replicate to, export to, or refresh
+certificates from an updated one until it is updated too. Leaf certs have a
+7-day refresh margin, which covers a fleet rollout.
+
 `system.mesh.tier.update` (`promote`, `demote`) is super-admin,
 sensitive and local-only: it needs a verified second factor (the owner's local
 CLI is exempt), an admin is refused, and a remote peer can never drive it over
