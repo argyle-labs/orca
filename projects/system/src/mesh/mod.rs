@@ -5280,6 +5280,23 @@ mod handler_dispatch_tests {
         assert!(!utils::pki::has_mesh_ca_key(pki.path()));
     }
 
+    #[tokio::test]
+    async fn two_tier_promote_refuses_a_relaying_peer_promoting_itself() {
+        const TARGET: &str = "019e7105-0000-7000-8000-0000000abc10";
+        let mut ctx = empty_ctx();
+        ctx.register_service(RelayingPeer(TARGET.into()));
+        let Err(err) = mesh_update(
+            serde_json::from_value(serde_json::json!({ "action": "promote", "id": TARGET }))
+                .unwrap(),
+            &ctx,
+        )
+        .await
+        else {
+            panic!("a self-relayed promotion must be refused");
+        };
+        assert!(err.to_string().contains("its own promotion"), "got: {err}");
+    }
+
     #[serial_test::serial(env)]
     #[tokio::test]
     async fn mesh_update_settings_reads_then_writes_secure() {

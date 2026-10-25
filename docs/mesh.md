@@ -150,7 +150,11 @@ key cannot be demoted. `promote`, `trust`, and demotion (`settings` with
 `secure=false`) are local-only: a remote peer can never drive them over
 `mesh/exec`. A grant's issue time tolerates 30 s of clock skew, and a member
 refuses any grant consumed within one grant lifetime (10 min) of its last
-demotion. Rotating the mesh CA
+demotion.
+
+A `mesh/exec` caller token signed by a peer that is not mutually secure with
+the recipient acts with at most the `user` role, whatever role the named user
+holds. Rotating the mesh CA
 invalidates every grant still in flight, since grants are verified against the
 current CA cert; re-run `promote` after a rotation.
 `orca system join --action init` makes the first host secure.

@@ -275,9 +275,17 @@ fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
     let pki = pki_dir();
     utils::pki::import_mesh_ca_keypair(&pki, &params.cert_pem, &params.key_pem)
         .context(PeerRefusal("mesh/push-ca-key refused".into()))?;
-    if !db::pool::with_pooled_or_open(db::mesh::get_secure)? {
-        utils::pki::remove_mesh_ca_keys(&pki)?;
-        refuse!("mesh/push-ca-key refused: this member was demoted while the CA key arrived");
+    drop_ca_keys_if_demoted(
+        &pki,
+        db::pool::with_pooled_or_open(db::mesh::get_secure)?,
+        MESH_PUSH_CA_KEY_METHOD,
+    )
+}
+
+fn drop_ca_keys_if_demoted(pki: &std::path::Path, secure: bool, method: &str) -> Result<()> {
+    if !secure {
+        utils::pki::remove_mesh_ca_keys(pki)?;
+        refuse!("{method} refused: this member was demoted while the CA key arrived");
     }
     Ok(())
 }
@@ -571,6 +579,11 @@ fn authorize_role_gated(
             ))
         })?;
     let role = effective_role(&user.role, &verified.token.role);
+    let role = if pdb::is_mutual_secure(pdb::get_trust(conn, peer_cn)?) {
+        role
+    } else {
+        effective_role(role, "user")
+    };
     refuse_unless!(
         role_satisfies(role, required_role),
         "mesh/exec refused: tool '{tool}' requires role '{required_role}' but user {} acts with \
@@ -795,11 +808,11 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
             params.previous_key_pem.as_deref(),
         )?;
         pdb::set_ca_previous_expires_at(conn, params.previous_expires_at)?;
-        if !db::mesh::get_secure(conn)? {
-            utils::pki::remove_mesh_ca_keys(&pki_d)?;
-            refuse!("mesh/push-ca-state refused: this member was demoted while the CA key arrived");
-        }
-        Ok(())
+        drop_ca_keys_if_demoted(
+            &pki_d,
+            db::mesh::get_secure(conn)?,
+            MESH_PUSH_CA_STATE_METHOD,
+        )
     })
 }
 
@@ -1581,6 +1594,78 @@ mod tests {
             msg.contains("mesh CA key") || msg.contains("requires params"),
             "got: {msg}"
         );
+    }
+
+    #[test]
+    fn two_tier_ca_key_written_after_a_demotion_is_deleted() {
+        let pki = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(pki.path(), "founder").unwrap();
+        drop_ca_keys_if_demoted(pki.path(), true, MESH_PUSH_CA_KEY_METHOD).unwrap();
+        assert!(utils::pki::has_mesh_ca_key(pki.path()));
+        let err = drop_ca_keys_if_demoted(pki.path(), false, MESH_PUSH_CA_KEY_METHOD).unwrap_err();
+        assert!(err.to_string().contains("demoted"), "got: {err}");
+        assert!(!utils::pki::has_mesh_ca_key(pki.path()));
+    }
+
+    #[test]
+    fn two_tier_forged_admin_token_from_a_non_mutually_secure_peer_acts_as_user() {
+        with_db(async {
+            let conn = db::open_default().unwrap();
+            let signer = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(signer.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            const PEER: &str = "019e7105-0000-7000-8000-0000000abc0f";
+            pdb::upsert_peer(&conn, PEER, "hf", "127.0.0.1", 1, Some(&fp), "").unwrap();
+            identities::users::insert(&conn, "u-admin", "root", "h", "admin", "t0").unwrap();
+            let forged = contract::CallerIdentity {
+                user_id: "u-admin".into(),
+                username: "root".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            };
+            let args = serde_json::json!({});
+            let now = utils::time::now().unix_seconds();
+            let mint = |tool: &str| {
+                crate::mesh::caller_token::mint(signer.path(), &forged, tool, &args, 60).unwrap()
+            };
+            let env = mint("system.update.create");
+            let err = authorize_role_gated(
+                &conn,
+                PEER,
+                "system.update.create",
+                &args,
+                "admin",
+                Some(&env),
+                now,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("role 'user'"), "got: {err}");
+            let env = mint("system.update.list");
+            let caller = authorize_role_gated(
+                &conn,
+                PEER,
+                "system.update.list",
+                &args,
+                "user",
+                Some(&env),
+                now,
+            )
+            .unwrap();
+            assert_eq!(caller.role, "user");
+            pdb::set_trust(&conn, PEER, Some(true), Some(true)).unwrap();
+            let env = mint("system.update.create");
+            let caller = authorize_role_gated(
+                &conn,
+                PEER,
+                "system.update.create",
+                &args,
+                "admin",
+                Some(&env),
+                now,
+            )
+            .unwrap();
+            assert_eq!(caller.role, "admin");
+        });
     }
 
     #[test]
