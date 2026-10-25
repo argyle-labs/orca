@@ -733,7 +733,10 @@ async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
         .get("has_key")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    if i_have_key && !peer_has_key {
+    let i_am_secure = db::pool::with_pooled_or_open(db::mesh::get_secure)?;
+    if i_have_key && !peer_has_key && !i_am_secure {
+        println!("  not pushing the CA key: this member is insecure");
+    } else if i_have_key && !peer_has_key {
         let (cert_pem, key_pem) = utils::pki::export_mesh_ca_keypair(&pki_d)?;
         call_peer(
             &peer.peer_id,
@@ -838,7 +841,10 @@ pub async fn cmd_mesh_ca_rotate(overlap_days: i64) -> Result<()> {
         overlap_days
     );
 
-    // Replicate to every mutual-secure peer that has the CA key.
+    if !db::mesh::get_secure(&conn)? {
+        println!("  not replicating CA state: this member is insecure");
+        return Ok(());
+    }
     let cur_cert = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))?;
     let cur_key = std::fs::read_to_string(utils::pki::mesh_ca_key_path(&pki_d))?;
     let prev_cert = std::fs::read_to_string(utils::pki::mesh_ca_previous_cert_path(&pki_d))?;

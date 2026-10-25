@@ -141,6 +141,12 @@ with the mesh CA key, and the target verifies that signature against its own
 copy of the mesh CA cert before switching to secure. Local trust of a peer
 (including the automatic trust of the inviter on join) confers no promotion
 rights. Leaving the mesh removes the tier entirely.
+
+Only a secure member ever holds the mesh CA private key: it replicates only
+between two secure members, and demoting a member deletes its copy. Grant
+timestamps tolerate 30 s of clock skew between members. Rotating the mesh CA
+invalidates every grant still in flight, since grants are verified against the
+current CA cert; re-run `promote` after a rotation.
 `orca system join --action init` makes the first host secure.
 
 ## Leaving the mesh

@@ -1264,6 +1264,7 @@ pub fn consume_promotion_grant(
     issued_at: i64,
     expires_at: i64,
     now: i64,
+    clock_skew_secs: i64,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute(
@@ -1277,7 +1278,7 @@ pub fn consume_promotion_grant(
             |r| r.get(0),
         )
         .optional()?;
-    if demoted_at.is_some_and(|d| issued_at <= d) {
+    if demoted_at.is_some_and(|d| issued_at <= d + clock_skew_secs) {
         anyhow::bail!(
             "promotion to secure refused: the grant predates this member's last demotion"
         );

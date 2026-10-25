@@ -2470,9 +2470,8 @@ pub fn reconcile_mesh_leaf_identity(
             .context("migrate mesh leaf: re-issue server cert")?;
         utils::pki::reissue_mesh_client_cert(pki_dir, expected_cn)
             .context("migrate mesh leaf: re-issue client cert")?;
-        // Founder identity: keep self marked secure. Membership rows are left
-        // exactly as they were — this is the whole point of migrate-not-wipe.
-        db::mesh::set_secure(conn, true)?;
+        // Membership rows and the tier are left exactly as they were — this is
+        // the whole point of migrate-not-wipe.
         tracing::info!(
             "[mesh] mesh leaf migrated in place under CN {expected_cn:?}; \
              mesh membership + peer trust preserved (no re-pair needed)."
@@ -5144,12 +5143,21 @@ mod handler_dispatch_tests {
             exec::verify_promotion_grant(mesh.path(), own, Some(relay), Some(g), at).is_ok()
         };
 
-        assert!(exec::issue_promotion_grant(insecure.path(), TARGET, now).is_err());
+        const OWN: &str = "019e7105-0000-7000-8000-0000000abc0b";
+        assert!(exec::issue_promotion_grant(insecure.path(), true, OWN, TARGET, now).is_err());
+        assert!(
+            exec::issue_promotion_grant(mesh.path(), false, OWN, TARGET, now).is_err(),
+            "an insecure CA-key holder cannot issue a grant"
+        );
+        assert!(
+            exec::issue_promotion_grant(mesh.path(), true, OWN, OWN, now).is_err(),
+            "a member cannot promote itself"
+        );
         assert!(
             exec::verify_promotion_grant(mesh.path(), TARGET, Some(RELAY), None, now).is_err(),
             "a locally trusted relaying peer without a grant cannot promote"
         );
-        let grant = exec::issue_promotion_grant(mesh.path(), TARGET, now).unwrap();
+        let grant = exec::issue_promotion_grant(mesh.path(), true, OWN, TARGET, now).unwrap();
         assert!(verify(TARGET, RELAY, &grant, now));
         assert!(
             !verify(RELAY, TARGET, &grant, now),
@@ -5166,7 +5174,7 @@ mod handler_dispatch_tests {
         let mut tampered = grant.clone();
         tampered.nonce = "other".into();
         assert!(!verify(TARGET, RELAY, &tampered, now), "nonce is signed");
-        let forged = exec::issue_promotion_grant(rogue.path(), TARGET, now).unwrap();
+        let forged = exec::issue_promotion_grant(rogue.path(), true, OWN, TARGET, now).unwrap();
         assert!(
             !verify(TARGET, RELAY, &forged, now),
             "a grant from another CA is refused"
@@ -5177,10 +5185,13 @@ mod handler_dispatch_tests {
     fn two_tier_promotion_grants_are_single_use_and_die_on_demotion() {
         let dir = tempfile::tempdir().unwrap();
         let conn = ::db::open_unencrypted(&dir.path().join("orca.db")).unwrap();
-        db::mesh::consume_promotion_grant(&conn, "n1", 100, 700, 200).unwrap();
+        let consume = |nonce: &str, issued: i64, now: i64| {
+            db::mesh::consume_promotion_grant(&conn, nonce, issued, issued + 600, now, 30)
+        };
+        consume("n1", 100, 200).unwrap();
         assert!(db::mesh::get_secure(&conn).unwrap());
         assert!(
-            db::mesh::consume_promotion_grant(&conn, "n1", 100, 700, 300).is_err(),
+            consume("n1", 100, 300).is_err(),
             "a replayed grant is refused"
         );
         db::mesh::set_secure(&conn, false).unwrap();
@@ -5192,26 +5203,26 @@ mod handler_dispatch_tests {
             )
             .unwrap();
         assert!(
-            db::mesh::consume_promotion_grant(
-                &conn,
-                "n2",
-                demoted_at,
-                demoted_at + 600,
-                demoted_at
-            )
-            .is_err(),
-            "a grant issued before the last demotion is refused"
+            consume("n2", demoted_at + 30, demoted_at + 30).is_err(),
+            "a grant issued before the last demotion (within clock skew) is refused"
         );
         assert!(!db::mesh::get_secure(&conn).unwrap());
-        db::mesh::consume_promotion_grant(
-            &conn,
-            "n3",
-            demoted_at + 1,
-            demoted_at + 601,
-            demoted_at + 1,
-        )
-        .unwrap();
+        consume("n3", demoted_at + 31, demoted_at + 31).unwrap();
         assert!(db::mesh::get_secure(&conn).unwrap());
+    }
+
+    #[tokio::test]
+    async fn two_tier_demotion_removes_the_mesh_ca_key() {
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pki = tempfile::tempdir().unwrap();
+            utils::pki::init_mesh_ca(pki.path(), "founder").unwrap();
+            assert!(utils::pki::has_mesh_ca_key(pki.path()));
+            exec::set_secure_at(pki.path(), false).await.unwrap();
+            assert!(!utils::pki::has_mesh_ca_key(pki.path()));
+            assert!(utils::pki::mesh_ca_cert_path(pki.path()).exists());
+        })
+        .await;
     }
 
     #[tokio::test]

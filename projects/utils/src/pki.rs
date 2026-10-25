@@ -936,6 +936,18 @@ pub fn drop_mesh_ca_previous(pki_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn remove_mesh_ca_keys(pki_dir: &Path) -> Result<()> {
+    for p in [
+        mesh_ca_key_path(pki_dir),
+        mesh_ca_previous_key_path(pki_dir),
+    ] {
+        if p.exists() {
+            std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Install both CA slots from a peer (CA replication that's two-slot-aware).
 /// `previous_*` may be None when the source mesh has never rotated. Both
 /// slots are verified before write (cert+key match).

@@ -772,6 +772,13 @@ pub fn get_secure() -> Result<bool> {
 }
 
 pub async fn set_secure(on: bool) -> Result<bool> {
+    set_secure_at(&pki_dir(), on).await
+}
+
+pub(crate) async fn set_secure_at(pki: &std::path::Path, on: bool) -> Result<bool> {
+    if !on {
+        utils::pki::remove_mesh_ca_keys(pki)?;
+    }
     db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, on))?;
     Ok(on)
 }
@@ -788,10 +795,14 @@ fn promotion_message(target: &str, g: &crate::mesh::PromotionGrant) -> Vec<u8> {
 
 pub async fn promote(target: &str, caller: Option<contract::CallerIdentity>) -> Result<bool> {
     let now = utils::time::now().unix_seconds();
-    let grant = issue_promotion_grant(&pki_dir(), target, now)?;
-    if target == crate::host_identity::machine_id() {
-        return accept_promotion(None, Some(&grant)).await;
-    }
+    let secure = get_secure()?;
+    let grant = issue_promotion_grant(
+        &pki_dir(),
+        secure,
+        crate::host_identity::machine_id(),
+        target,
+        now,
+    )?;
     #[allow(clippy::disallowed_types)]
     let dispatch = exec(
         target,
@@ -818,18 +829,32 @@ pub async fn accept_promotion(
         now,
     )?;
     db::pool::with_pooled_or_open(|conn| {
-        pdb::consume_promotion_grant(conn, &grant.nonce, grant.issued_at, grant.expires_at, now)
+        pdb::consume_promotion_grant(
+            conn,
+            &grant.nonce,
+            grant.issued_at,
+            grant.expires_at,
+            now,
+            PROMOTION_CLOCK_SKEW_SECS,
+        )
     })?;
     Ok(true)
 }
 
+pub(crate) const PROMOTION_CLOCK_SKEW_SECS: i64 = 30;
+
 pub(crate) fn issue_promotion_grant(
     pki: &std::path::Path,
+    issuer_secure: bool,
+    own_id: &str,
     target: &str,
     now: i64,
 ) -> Result<crate::mesh::PromotionGrant> {
-    if !utils::pki::has_mesh_ca_key(pki) {
+    if !issuer_secure || !utils::pki::has_mesh_ca_key(pki) {
         anyhow::bail!("only a secure member holding the mesh CA key can promote a member");
+    }
+    if target == own_id {
+        anyhow::bail!("a member cannot promote itself to secure");
     }
     let mut grant = crate::mesh::PromotionGrant {
         signature: String::new(),
@@ -857,7 +882,7 @@ pub(crate) fn verify_promotion_grant<'a>(
              `orca system mesh update --action promote --id <this-member>`"
         );
     };
-    if grant.issued_at > now
+    if grant.issued_at > now + PROMOTION_CLOCK_SKEW_SECS
         || grant.expires_at <= now
         || grant.expires_at != grant.issued_at + PROMOTION_GRANT_TTL_SECS
         || grant.nonce.is_empty()

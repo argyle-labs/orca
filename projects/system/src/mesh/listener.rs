@@ -262,10 +262,16 @@ fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
         Some(v) => serde_json::from_value(v).context("parse mesh/push-ca-key params")?,
         None => refuse!("mesh/push-ca-key requires params"),
     };
-    let t = db::pool::with_pooled_or_open(|conn| pdb::get_trust(conn, peer_cn))?;
+    let (t, secure) = db::pool::with_pooled_or_open(|conn| {
+        Ok((pdb::get_trust(conn, peer_cn)?, db::mesh::get_secure(conn)?))
+    })?;
     if !pdb::is_mutual_secure(t) {
         refuse!("mesh/push-ca-key refused: peer {peer_cn} is not mutually secure with this host");
     }
+    refuse_unless!(
+        secure,
+        "mesh/push-ca-key refused: this member is insecure and never holds the mesh CA key"
+    );
     utils::pki::import_mesh_ca_keypair(&pki_dir(), &params.cert_pem, &params.key_pem)
         .context(PeerRefusal("mesh/push-ca-key refused".into()))
 }
@@ -754,6 +760,10 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
                 "mesh/push-ca-state refused: peer {peer_cn} is not mutually secure with this host"
             );
         }
+        refuse_unless!(
+            db::mesh::get_secure(conn)?,
+            "mesh/push-ca-state refused: this member is insecure and never holds the mesh CA key"
+        );
         let pki_d = pki_dir();
         let local_current = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
             .context("mesh/push-ca-state: read local mesh CA cert")?;
@@ -1678,6 +1688,40 @@ mod tests {
     }
 
     #[test]
+    fn two_tier_insecure_member_never_receives_the_mesh_ca_key() {
+        with_db(async {
+            let conn = db::open_default().unwrap();
+            pdb::upsert_peer(
+                &conn,
+                "019e7105-0000-7000-8000-0000000abc0c",
+                "hc",
+                "127.0.0.1",
+                1,
+                Some("fp-t"),
+                "",
+            )
+            .unwrap();
+            pdb::set_trust(
+                &conn,
+                "019e7105-0000-7000-8000-0000000abc0c",
+                Some(true),
+                Some(true),
+            )
+            .unwrap();
+            pdb::set_secure(&conn, false).unwrap();
+            let err = handle_push_ca_key(
+                "019e7105-0000-7000-8000-0000000abc0c",
+                req_with_params(
+                    MESH_PUSH_CA_KEY_METHOD,
+                    serde_json::json!({ "cert_pem": "c", "key_pem": "k" }),
+                ),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("insecure"), "got: {err}");
+        });
+    }
+
+    #[test]
     fn push_ca_state_refused_for_non_mutual_secure_peer() {
         with_db(async {
             let err = handle_push_ca_state(
@@ -2275,6 +2319,7 @@ mod tests {
         let conn = db::open_default().unwrap();
         pdb::upsert_peer(&conn, cn, "hc", "127.0.0.1", 1, Some("fp-c"), "").unwrap();
         pdb::set_trust(&conn, cn, Some(true), Some(true)).unwrap();
+        pdb::set_secure(&conn, true).unwrap();
     }
 
     #[serial_test::serial(env)]
