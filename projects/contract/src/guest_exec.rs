@@ -275,14 +275,24 @@ pub fn deregister_provider(name: &str) -> bool {
 pub async fn exec(provider_name: &str, guest: GuestRef, req: ExecRequest) -> Result<ExecOutput> {
     let p = provider(provider_name)
         .ok_or_else(|| anyhow::anyhow!("no guest_exec provider named '{provider_name}'"))?;
-    p.exec(guest, req).await
+    targeted(provider_name, p.exec(guest, req)).await
 }
 
 /// Route a `write_file` to the named provider.
 pub async fn write_file(provider_name: &str, guest: GuestRef, req: WriteFileRequest) -> Result<()> {
     let p = provider(provider_name)
         .ok_or_else(|| anyhow::anyhow!("no guest_exec provider named '{provider_name}'"))?;
-    p.write_file(guest, req).await
+    targeted(provider_name, p.write_file(guest, req)).await
+}
+
+#[cfg(feature = "in-process")]
+async fn targeted<T>(provider_name: &str, f: BoxFuture<'_, Result<T>>) -> Result<T> {
+    crate::invocation_scope::targeting("guest_exec", provider_name, f).await
+}
+
+#[cfg(not(feature = "in-process"))]
+async fn targeted<T>(_provider_name: &str, f: BoxFuture<'_, Result<T>>) -> Result<T> {
+    f.await
 }
 
 // ── Wire args ───────────────────────────────────────────────────────────────
@@ -575,5 +585,52 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn routed_calls_target_their_provider() {
+        use crate::invocation_scope::VerbCaller;
+        use crate::invocation_scope::testing::{core_verb, verb as core_verb_of};
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let thunk: InvokeThunk = Arc::new(move |_op: &str, _args, call| {
+            record.lock().unwrap().push(call.map(|c| c.targeted()));
+            Err(serde_json::json!("refused"))
+        });
+        register_from_def("guest-exec-target".into(), thunk).unwrap();
+        let verb = core_verb_of(
+            VerbCaller {
+                user_id: "u".into(),
+                username: "u".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            },
+            "admin",
+            false,
+            false,
+            false,
+            false,
+        );
+        let guest = || GuestRef {
+            scope: None,
+            node: None,
+            id: "100".into(),
+        };
+        core_verb(verb, async {
+            assert!(
+                exec("guest-exec-target", guest(), ExecRequest::default())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                write_file("guest-exec-target", guest(), WriteFileRequest::default())
+                    .await
+                    .is_err()
+            );
+        })
+        .await;
+        assert_eq!(*seen.lock().unwrap(), vec![Some(true), Some(true)]);
+        assert!(deregister_provider("guest-exec-target"));
     }
 }
