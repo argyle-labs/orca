@@ -247,8 +247,11 @@ pub async fn put_secret(name: &str, value: &str) -> anyhow::Result<String> {
     }
     let row = secret_record(name)?;
     match row.backend.as_str() {
-        "inline" => db::pool::Db::process().write(|c| secrets::put_inline_value(c, name, value))?,
-        _ => contract::secrets_backend::put(&row.backend, &row.ref_path, value).await?,
+        "inline" => db::pool::Db::process().tx(|c| secrets::put_inline_value(c, name, value))?,
+        _ => {
+            db::pool::Db::process().read(secrets::ensure_write_allowed)?;
+            contract::secrets_backend::put(&row.backend, &row.ref_path, value).await?
+        }
     }
     Ok(row.backend)
 }
@@ -256,8 +259,11 @@ pub async fn put_secret(name: &str, value: &str) -> anyhow::Result<String> {
 pub async fn restore_secret(name: &str) -> anyhow::Result<String> {
     let row = secret_record(name)?;
     match row.backend.as_str() {
-        "inline" => db::pool::Db::process().write(|c| secrets::restore_inline_value(c, name))?,
-        _ => contract::secrets_backend::restore_previous(&row.backend, &row.ref_path).await?,
+        "inline" => db::pool::Db::process().tx(|c| secrets::restore_inline_value(c, name))?,
+        _ => {
+            db::pool::Db::process().read(secrets::ensure_write_allowed)?;
+            contract::secrets_backend::restore_previous(&row.backend, &row.ref_path).await?
+        }
     }
     Ok(row.backend)
 }
@@ -348,7 +354,7 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
         "inline" => String::new(),
         _ => args.ref_path.clone().unwrap(),
     };
-    let created = db::pool::Db::process().write(|conn| {
+    let created = db::pool::Db::process().tx(|conn| {
         let created = secrets::upsert(
             conn,
             &args.name,
@@ -373,7 +379,13 @@ async fn write_secret(args: SecretWriteArgs) -> anyhow::Result<SecretMutationRep
 /// 'inline' backend, `value` is required; for external backends, `ref_path` is
 /// required (e.g. 'op://Vault/Item/field'). Write the secret on a remote system
 /// with the top-level `--peer <h>` flag.
-#[orca_tool(domain = "secrets", verb = "upsert", cli = manual, data_mutation = false)]
+#[orca_tool(
+    domain = "secrets",
+    verb = "upsert",
+    cli = manual,
+    role = "super-admin",
+    data_mutation = false
+)]
 async fn secret_upsert(
     args: SecretWriteArgs,
     _ctx: &contract::ToolCtx,
@@ -384,7 +396,13 @@ async fn secret_upsert(
 /// [SENSITIVE] [MUTATES STATE] Write a new value for an existing secret through
 /// its backend, keeping the replaced value restorable with `secrets restore`.
 /// Fails cleanly when the backend reports write as unavailable.
-#[orca_tool(domain = "secrets", verb = "put", cli = manual, role = "admin", data_mutation = false)]
+#[orca_tool(
+    domain = "secrets",
+    verb = "put",
+    cli = manual,
+    role = "super-admin",
+    data_mutation = false
+)]
 async fn secret_put(
     args: SecretPutArgs,
     _ctx: &contract::ToolCtx,
@@ -405,7 +423,7 @@ async fn secret_put(
 #[orca_tool(
     domain = "secrets",
     verb = "restore",
-    role = "admin",
+    role = "super-admin",
     data_mutation = false
 )]
 async fn secret_restore(
@@ -687,17 +705,17 @@ mod tests {
     }
 
     #[test]
-    fn every_secrets_verb_is_admin_only() {
+    fn secrets_verbs_require_admin_and_writes_super_admin() {
         use contract::OrcaToolDef;
         assert_eq!(<SecretList as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretDetail as OrcaToolDef>::REQUIRED_ROLE, "admin");
-        assert_eq!(<SecretUpsert as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretDelete as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretGrantCreate as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretGrantDelete as OrcaToolDef>::REQUIRED_ROLE, "admin");
         assert_eq!(<SecretGrantList as OrcaToolDef>::REQUIRED_ROLE, "admin");
-        assert_eq!(<SecretPut as OrcaToolDef>::REQUIRED_ROLE, "admin");
-        assert_eq!(<SecretRestore as OrcaToolDef>::REQUIRED_ROLE, "admin");
+        assert_eq!(<SecretUpsert as OrcaToolDef>::REQUIRED_ROLE, "super-admin");
+        assert_eq!(<SecretPut as OrcaToolDef>::REQUIRED_ROLE, "super-admin");
+        assert_eq!(<SecretRestore as OrcaToolDef>::REQUIRED_ROLE, "super-admin");
         assert_eq!(<SecretBackendList as OrcaToolDef>::REQUIRED_ROLE, "admin");
         const { assert!(<SecretPut as OrcaToolDef>::EXECUTE_GATED) };
         const { assert!(<SecretRestore as OrcaToolDef>::EXECUTE_GATED) };
@@ -903,6 +921,14 @@ mod tests {
             assert_eq!(get_secret("s").await.unwrap().1.expose_secret(), "two");
             restore_secret("s").await.unwrap();
             assert_eq!(get_secret("s").await.unwrap().1.expose_secret(), "one");
+            assert!(restore_secret("s").await.is_err());
+            assert_eq!(get_secret("s").await.unwrap().1.expose_secret(), "one");
+            put_secret("s", "two").await.unwrap();
+            write_secret(inline_args(Some("three"), false))
+                .await
+                .expect("re-upsert inline");
+            assert!(restore_secret("s").await.is_err());
+            assert_eq!(get_secret("s").await.unwrap().1.expose_secret(), "three");
             assert!(put_secret("s", "").await.is_err());
 
             let writable = write_backend(BackendCapabilities::writable());
@@ -946,6 +972,21 @@ mod tests {
                     .put
                     .is_available()
             );
+
+            db::pool::Db::process()
+                .write(|c| {
+                    c.execute(
+                        "INSERT INTO mesh_self (id, self_secure, set_at) VALUES (1, 0, 0)",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(put_secret("w", "blocked").await.is_err());
+            assert!(restore_secret("w").await.is_err());
+            assert!(put_secret("s", "blocked").await.is_err());
+            assert_eq!(writable.puts.lock().unwrap().len(), 1);
+            assert_eq!(writable.restores.lock().unwrap().len(), 1);
 
             contract::secrets_backend::deregister_provider("auth-test-writable");
             contract::secrets_backend::deregister_provider("auth-test-readonly");

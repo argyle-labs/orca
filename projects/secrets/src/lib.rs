@@ -69,7 +69,7 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<SecretRecord>> {
 /// mesh but is not flagged secure (mesh_self.self_secure = 0). Hosts that
 /// have never run `orca system join` (no mesh_self row) bypass
 /// the gate so non-mesh workflows still work.
-fn ensure_self_secure(conn: &Connection) -> Result<()> {
+pub fn ensure_write_allowed(conn: &Connection) -> Result<()> {
     use rusqlite::OptionalExtension;
     let v: Option<i64> = conn
         .query_row("SELECT self_secure FROM mesh_self WHERE id = 1", [], |r| {
@@ -94,7 +94,7 @@ pub fn upsert(
     ref_path: &str,
     description: Option<&str>,
 ) -> Result<bool> {
-    ensure_self_secure(conn)?;
+    ensure_write_allowed(conn)?;
     let existed = conn
         .query_row(
             "SELECT 1 FROM secrets WHERE name = ?1",
@@ -114,6 +114,7 @@ pub fn upsert(
              updated_at  = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
         rusqlite::params![name, backend, ref_path, description],
     )?;
+    settings::delete(conn, &previous_key(name))?;
     Ok(!existed)
 }
 
@@ -136,7 +137,7 @@ pub fn delete(conn: &Connection, name: &str) -> Result<bool> {
             // Best-effort: ignore "not present" since the metadata is the
             // source of truth for whether the secret existed.
             let _ = settings::secret_delete(conn, name)?;
-            let _ = settings::delete(conn, &format!("{PREVIOUS_PREFIX}{name}"))?;
+            let _ = settings::delete(conn, &previous_key(name))?;
         }
     }
     Ok(removed)
@@ -151,31 +152,33 @@ pub fn read_inline_value(conn: &Connection, name: &str) -> Result<Option<String>
 /// Store the inline value for `name`. The metadata row should already exist
 /// (caller `upsert`s first).
 pub fn write_inline_value(conn: &Connection, name: &str, value: &str) -> Result<()> {
-    ensure_self_secure(conn)?;
+    ensure_write_allowed(conn)?;
     settings::secret_set(conn, name, value)
 }
 
 const PREVIOUS_PREFIX: &str = "secrets_previous.";
 
+fn previous_key(name: &str) -> String {
+    format!("{PREVIOUS_PREFIX}{name}")
+}
+
 pub fn put_inline_value(conn: &Connection, name: &str, value: &str) -> Result<()> {
-    ensure_self_secure(conn)?;
-    if let Some(old) = read_inline_value(conn, name)? {
-        settings::set(conn, &format!("{PREVIOUS_PREFIX}{name}"), &old)?;
+    ensure_write_allowed(conn)?;
+    match read_inline_value(conn, name)? {
+        Some(old) => settings::set(conn, &previous_key(name), &old)?,
+        None => {
+            settings::delete(conn, &previous_key(name))?;
+        }
     }
     settings::secret_set(conn, name, value)
 }
 
 pub fn restore_inline_value(conn: &Connection, name: &str) -> Result<()> {
-    ensure_self_secure(conn)?;
-    let key = format!("{PREVIOUS_PREFIX}{name}");
+    ensure_write_allowed(conn)?;
+    let key = previous_key(name);
     let previous = settings::get(conn, &key)?
         .ok_or_else(|| anyhow::anyhow!("inline secret '{name}' has no previous value"))?;
-    match read_inline_value(conn, name)? {
-        Some(current) => settings::set(conn, &key, &current)?,
-        None => {
-            settings::delete(conn, &key)?;
-        }
-    }
+    settings::delete(conn, &key)?;
     settings::secret_set(conn, name, &previous)
 }
 
@@ -506,7 +509,7 @@ mod tests {
     use db::testing::test_conn;
 
     #[test]
-    fn put_keeps_previous_and_restore_swaps_it_back() {
+    fn restore_applies_previous_once_then_fails() {
         let conn = test_conn();
         upsert(&conn, "app.pw", "inline", "", None).unwrap();
         write_inline_value(&conn, "app.pw", "one").unwrap();
@@ -520,16 +523,54 @@ mod tests {
             read_inline_value(&conn, "app.pw").unwrap().as_deref(),
             Some("one")
         );
-        restore_inline_value(&conn, "app.pw").unwrap();
+        let err = restore_inline_value(&conn, "app.pw").unwrap_err();
+        assert!(err.to_string().contains("no previous value"), "{err}");
+        assert_eq!(
+            read_inline_value(&conn, "app.pw").unwrap().as_deref(),
+            Some("one")
+        );
+        put_inline_value(&conn, "app.pw", "three").unwrap();
+        assert!(delete(&conn, "app.pw").unwrap());
+        assert!(
+            settings::get(&conn, &previous_key("app.pw"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn upsert_clears_the_previous_value() {
+        let conn = test_conn();
+        upsert(&conn, "app.pw", "inline", "", None).unwrap();
+        write_inline_value(&conn, "app.pw", "one").unwrap();
+        put_inline_value(&conn, "app.pw", "two").unwrap();
+        upsert(&conn, "app.pw", "inline", "", None).unwrap();
+        assert!(
+            settings::get(&conn, &previous_key("app.pw"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(restore_inline_value(&conn, "app.pw").is_err());
+    }
+
+    #[test]
+    fn writes_are_refused_on_a_non_secure_mesh_member() {
+        let conn = test_conn();
+        upsert(&conn, "app.pw", "inline", "", None).unwrap();
+        write_inline_value(&conn, "app.pw", "one").unwrap();
+        put_inline_value(&conn, "app.pw", "two").unwrap();
+        conn.execute(
+            "INSERT INTO mesh_self (id, self_secure, set_at) VALUES (1, 0, 0)",
+            [],
+        )
+        .unwrap();
+        assert!(ensure_write_allowed(&conn).is_err());
+        assert!(put_inline_value(&conn, "app.pw", "x").is_err());
+        assert!(restore_inline_value(&conn, "app.pw").is_err());
+        assert!(upsert(&conn, "app.pw", "inline", "", None).is_err());
         assert_eq!(
             read_inline_value(&conn, "app.pw").unwrap().as_deref(),
             Some("two")
-        );
-        assert!(delete(&conn, "app.pw").unwrap());
-        assert!(
-            settings::get(&conn, "secrets_previous.app.pw")
-                .unwrap()
-                .is_none()
         );
     }
 

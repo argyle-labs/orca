@@ -665,18 +665,48 @@ async fn mcp_tools_call_secrets_detail_refuses_read_token() {
 }
 
 #[tokio::test]
+async fn admin_token_cannot_write_secrets() {
+    let env = with_isolated_env();
+    let token = mint_admin_token(&env);
+    for (tool, args) in [
+        (
+            "secrets.upsert",
+            serde_json::json!({ "name": "s", "value": "v", "execute": true }),
+        ),
+        (
+            "secrets.put",
+            serde_json::json!({ "name": "s", "value": "v", "execute": true }),
+        ),
+        (
+            "secrets.restore",
+            serde_json::json!({ "name": "s", "execute": true }),
+        ),
+    ] {
+        let (status, bytes) = oneshot_raw(
+            env.router(),
+            "POST",
+            &format!("/api/v1/{tool}"),
+            Some(&token),
+            Some(args),
+        )
+        .await;
+        let text = String::from_utf8_lossy(&bytes);
+        assert_eq!(status, StatusCode::FORBIDDEN, "{tool}: {text}");
+    }
+}
+
+#[tokio::test]
 async fn admin_token_reads_secret_value() {
     let env = with_isolated_env();
     let token = mint_admin_token(&env);
-    let (status, body) = oneshot_json(
-        env.router(),
-        "POST",
-        "/api/v1/secrets.upsert",
-        Some(&token),
-        Some(serde_json::json!({ "name": "s", "value": "v", "execute": true })),
+    let conn = db::open_default().unwrap();
+    conn.execute(
+        "INSERT INTO secrets (name, backend, ref_path, created_at, updated_at)
+         VALUES ('s', 'inline', '', '', '')",
+        [],
     )
-    .await;
-    assert_eq!(status, StatusCode::OK, "upsert: {body}");
+    .unwrap();
+    db::settings::secret_set(&conn, "s", "v").unwrap();
     let (status, body) = oneshot_json(
         env.router(),
         "POST",

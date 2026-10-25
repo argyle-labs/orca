@@ -495,12 +495,12 @@ impl Parse for ToolAttr {
                 "role" => {
                     let s = lit_str(&nv.value)?;
                     match s.value().as_str() {
-                        "any" | "read" | "admin" => {}
+                        "any" | "read" | "admin" | "super-admin" => {}
                         other => {
                             return Err(syn::Error::new_spanned(
                                 &nv.value,
                                 format!(
-                                    "role must be \"any\", \"read\", or \"admin\", got {other:?}"
+                                    "role must be \"any\", \"read\", \"admin\", or \"super-admin\", got {other:?}"
                                 ),
                             ));
                         }
@@ -1732,6 +1732,12 @@ mod tests {
             .err()
             .expect("expected parse error");
         assert!(err.to_string().contains("remote_ok"));
+    }
+
+    #[test]
+    fn tool_attr_accepts_super_admin_role() {
+        let attr = parse_attr(quote!(domain = "x", verb = "y", role = "super-admin")).unwrap();
+        assert_eq!(attr.role.unwrap().value(), "super-admin");
     }
 
     #[test]

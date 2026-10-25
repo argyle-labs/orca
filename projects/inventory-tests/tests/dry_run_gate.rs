@@ -123,12 +123,12 @@ const ALLOWED_DATA_MUTATIONS: &[&str] = &[
 /// A verb that applies changes must be restricted in WHO may call it — its
 /// default execute and its dry run alike.
 #[test]
-fn every_gated_verb_is_admin_only() {
+fn every_gated_verb_is_at_least_admin() {
     for name in dispatch::execute_gated_names() {
-        assert_eq!(
-            dispatch::required_role(name),
-            Some("admin"),
-            "{name} is execute_gated but not role=admin — mutation without authorization"
+        let role = dispatch::required_role(name).unwrap_or("any");
+        assert!(
+            dispatch::tool_roles::role_rank(role) >= dispatch::tool_roles::role_rank("admin"),
+            "{name} is execute_gated but requires `{role}` — mutation without authorization"
         );
     }
 }

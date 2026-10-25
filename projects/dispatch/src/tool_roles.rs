@@ -294,6 +294,13 @@ mod tests {
     }
 
     #[test]
+    fn super_admin_requirement_refuses_admin() {
+        assert!(satisfies("super-admin", "super-admin"));
+        assert!(!satisfies("admin", "super-admin"));
+        assert!(!satisfies("member", "super-admin"));
+    }
+
+    #[test]
     fn satisfies_admin_requirement_passes_admin_and_super_admin() {
         assert!(satisfies("admin", "admin"));
         assert!(satisfies("super-admin", "admin"));

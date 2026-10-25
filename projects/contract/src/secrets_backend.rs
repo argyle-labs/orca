@@ -307,10 +307,12 @@ impl SecretsBackend for SecretsBackendProxy {
 
     async fn capabilities(&self) -> BackendCapabilities {
         match self.call(CAPABILITIES_OP, serde_json::json!({})).await {
-            Ok(out) => {
-                serde_json::from_value(out).unwrap_or_else(|_| BackendCapabilities::read_only())
-            }
-            Err(_) => BackendCapabilities::read_only(),
+            Ok(out) => serde_json::from_value(out).unwrap_or_else(|e| {
+                BackendCapabilities::write_unavailable(format!(
+                    "invalid capabilities response: {e}"
+                ))
+            }),
+            Err(e) => BackendCapabilities::write_unavailable(format!("{e:#}")),
         }
     }
 
@@ -478,6 +480,49 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_without_write_ops_reports_unavailable_with_reason() {
+        let invoke: InvokeThunk = Arc::new(|op, _args, _call| match op {
+            RESOLVE_OP => Ok(serde_json::json!("v")),
+            other => Err(serde_json::json!(format!("no tool '{other}'"))),
+        });
+        let proxy = SecretsBackendProxy {
+            name: "contract-test-proxy".into(),
+            invoke,
+        };
+        let caps = proxy.capabilities().await;
+        assert_eq!(caps.resolve, Capability::Available);
+        match &caps.put {
+            Capability::Unavailable { reason } => {
+                assert!(reason.contains("no tool 'capabilities'"), "{reason}")
+            }
+            other => panic!("expected unavailable, got {other:?}"),
+        }
+        assert!(matches!(caps.restore, Capability::Unavailable { .. }));
+
+        let bad: InvokeThunk = Arc::new(|_op, _args, _call| Ok(serde_json::json!(42)));
+        let proxy = SecretsBackendProxy {
+            name: "contract-test-proxy-bad".into(),
+            invoke: bad,
+        };
+        match proxy.capabilities().await.put {
+            Capability::Unavailable { reason } => {
+                assert!(reason.contains("invalid capabilities response"), "{reason}")
+            }
+            other => panic!("expected unavailable, got {other:?}"),
+        }
+
+        register_from_def(
+            "contract-test-proxy-reg".into(),
+            Arc::new(|op, _a, _c| Err(serde_json::json!(format!("no tool '{op}'")))),
+        )
+        .unwrap();
+        let err = put("contract-test-proxy-reg", "r", "x").await.unwrap_err();
+        assert!(err.to_string().contains("write unavailable"), "{err}");
+        assert!(deregister_provider("contract-test-proxy-reg"));
     }
 
     #[test]
