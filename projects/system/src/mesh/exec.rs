@@ -501,6 +501,18 @@ pub async fn exec(
     caller: Option<contract::CallerIdentity>,
     correlation_id: Option<String>,
 ) -> Result<MeshExecDispatch> {
+    exec_with(peer, tool, args, caller, correlation_id, true).await
+}
+
+#[allow(clippy::disallowed_types)]
+pub async fn exec_with(
+    peer: &str,
+    tool: &str,
+    args: serde_json::Value,
+    caller: Option<contract::CallerIdentity>,
+    correlation_id: Option<String>,
+    attach_ca_proof: bool,
+) -> Result<MeshExecDispatch> {
     // "local" / "localhost" → loopback round-trip via the same /api/v1
     // path peers use. Lets the same code path validate the allowlist
     // without leaving the host.
@@ -534,7 +546,10 @@ pub async fn exec(
         let args = args.clone();
         let caller = caller.clone();
         let correlation_id = correlation_id.clone();
-        async move { crate::mesh::exec_as(&addr, &tool, args, caller, correlation_id).await }
+        async move {
+            crate::mesh::exec_as_with(&addr, &tool, args, caller, correlation_id, attach_ca_proof)
+                .await
+        }
     })
     .await?;
     Ok(MeshExecDispatch {
@@ -704,6 +719,10 @@ pub(crate) fn ca_holder_proof(pki: &std::path::Path, binding: &str, nonce: &str)
         return None;
     }
     utils::pki::sign_with_mesh_ca(pki, &ca_holder_message(binding, nonce)).ok()
+}
+
+pub(crate) fn outbound_ca_proof(pki: &std::path::Path, nonce: &str) -> Option<String> {
+    ca_holder_proof(pki, crate::host_identity::machine_id(), nonce)
 }
 
 pub(crate) fn proves_ca_possession(

@@ -1515,7 +1515,7 @@ pub struct PluginServeAssetOutput {
 /// Serve a plugin release asset from GitHub on behalf of a peer that lacks the
 /// `github_token` secret. Fetches the asset for the requested `target` using
 /// the holder's own token, then returns the verified bytes base64-encoded.
-#[orca_tool(domain = "plugin", verb = "serve_asset")]
+#[orca_tool(domain = "plugin", verb = "serve_asset", remote_admin = true)]
 async fn plugin_serve_asset(
     args: PluginServeAssetArgs,
     _ctx: &ToolCtx,

@@ -214,7 +214,7 @@ pub struct FetchReleaseAssetOutput {
 /// `github_token` secret. Resolves the token locally, downloads the asset
 /// for the requested `target`, verifies sha256 against the release
 /// checksum blob, and returns the bytes base64-encoded.
-#[orca_tool(domain = "system", verb = "serve_release")]
+#[orca_tool(domain = "system", verb = "serve_release", remote_admin = true)]
 async fn system_serve_release(
     args: FetchReleaseAssetArgs,
     _ctx: &contract::ToolCtx,

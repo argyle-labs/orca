@@ -197,6 +197,7 @@ pub trait ErasedTool: Send + Sync {
     fn reaches(&self) -> &'static [&'static str];
     fn tool_calls(&self) -> &'static [&'static str];
     fn tool_callable(&self) -> bool;
+    fn remote_admin(&self) -> bool;
     /// JSON Schema for this tool's Args — used for MCP tools/list, CLI flag generation,
     /// OpenAPI request body, and TS `.d.ts` emission.
     fn input_schema(&self) -> Value;
@@ -253,6 +254,10 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
 
     fn tool_callable(&self) -> bool {
         T::TOOL_CALLABLE
+    }
+
+    fn remote_admin(&self) -> bool {
+        T::REMOTE_ADMIN
     }
 
     fn dry_run_neutralizes(&self) -> bool {

@@ -245,7 +245,7 @@ pub struct FsDeleteOutput {
 
 /// List filesystem resources. No args → registered roots + global ignore
 /// patterns. With `path` (and optional `root`) → directory contents at that path.
-#[orca_tool(domain = "files", verb = "list", role = "read")]
+#[orca_tool(domain = "files", verb = "list", role = "read", remote_admin = true)]
 async fn fs_list(args: FsListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsListOutput> {
     let mut out = FsListOutput::default();
     if args.root.is_none() && args.path.is_empty() {
@@ -268,7 +268,7 @@ async fn fs_list(args: FsListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<Fs
 }
 
 /// Recursive directory tree. Compacted by default; pass `raw=true` for the unmodified filesystem layout.
-#[orca_tool(domain = "files", verb = "tree", role = "read")]
+#[orca_tool(domain = "files", verb = "tree", role = "read", remote_admin = true)]
 async fn fs_tree(args: FsTreeArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsTreeOutput> {
     Ok(FsTreeOutput {
         nodes: crate::tree(
@@ -306,7 +306,7 @@ async fn fs_search(args: FsSearchArgs, ctx: &contract::ToolCtx) -> anyhow::Resul
 }
 
 /// Metadata for a single path — kind (file/dir), byte size, existence flag.
-#[orca_tool(domain = "files", verb = "stat", role = "read")]
+#[orca_tool(domain = "files", verb = "stat", role = "read", remote_admin = true)]
 async fn fs_stat(args: FsStatArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsStatOutput> {
     crate::stat(&ctx.config, args.root.as_deref(), &args.path).await
 }

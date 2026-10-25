@@ -426,7 +426,12 @@ pub fn audit_root(root: &Path, host: String) -> PrivilegeAudit {
 /// targets and sole grants. Pure filesystem read: `audit` is a read-shaped verb,
 /// so it is neither gated nor a mutation. `role = "read"` because the grant list
 /// maps out which accounts can become root.
-#[orca_tool(domain = "identity.privilege", verb = "audit", role = "read")]
+#[orca_tool(
+    domain = "identity.privilege",
+    verb = "audit",
+    role = "read",
+    remote_admin = true
+)]
 async fn identity_privilege_audit(
     args: IdentityPrivilegeAuditArgs,
     _ctx: &contract::ToolCtx,

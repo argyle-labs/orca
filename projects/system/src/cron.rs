@@ -850,7 +850,12 @@ pub struct SystemCronListOutput {
 }
 
 /// Read a user's crontab on this host.
-#[orca_tool(domain = "system.cron", verb = "list", role = "admin")]
+#[orca_tool(
+    domain = "system.cron",
+    verb = "list",
+    role = "admin",
+    remote_admin = true
+)]
 async fn system_cron_list(
     args: SystemCronListArgs,
     _ctx: &contract::ToolCtx,
@@ -996,7 +1001,12 @@ fn plan_against(
 
 /// Preview a crontab edit: the before/after text and diff, plus the
 /// `expectedCurrent` hash to hand to `system.cron.update`. Changes nothing.
-#[orca_tool(domain = "system.cron", verb = "diff", role = "admin")]
+#[orca_tool(
+    domain = "system.cron",
+    verb = "diff",
+    role = "admin",
+    remote_admin = true
+)]
 async fn system_cron_diff(
     args: CronEditArgs,
     _ctx: &contract::ToolCtx,

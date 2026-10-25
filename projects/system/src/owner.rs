@@ -50,7 +50,7 @@ pub async fn ask_owner<T: contract::OrcaToolDef>(
             owner,
             T::NAME,
             args,
-            ctx.caller(),
+            ctx.relay_caller(),
             ctx.correlation_id().map(str::to_string),
         ),
     )
@@ -121,7 +121,7 @@ pub async fn tell_owner<T: contract::OrcaToolDef>(
             owner,
             T::NAME,
             args,
-            ctx.caller(),
+            ctx.relay_caller(),
             ctx.correlation_id().map(str::to_string),
         ),
     )

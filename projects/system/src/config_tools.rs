@@ -227,7 +227,14 @@ async fn config_set(
     if args.noun == "schedule"
         && let Some(caller) = verified
     {
-        crate::scheduler::record_owner(&conn, &owner, &args.name, &args.json, caller)?;
+        crate::scheduler::record_owner(
+            &conn,
+            &owner,
+            &args.name,
+            &args.json,
+            caller,
+            crate::mesh::custody_cleared(ctx),
+        )?;
     }
     let row = db::config_store::get(&conn, &args.noun, &args.name)?
         .ok_or_else(|| anyhow::anyhow!("row vanished after write"))?
@@ -410,6 +417,48 @@ mod tests {
             let conn = db::open_default().unwrap();
             let owner = db::schedule_owners::get(&conn, "nightly").unwrap().unwrap();
             assert_eq!((owner.user_id.as_str(), owner.role.as_str()), ("u", "user"));
+        });
+    }
+
+    #[test]
+    fn a_custody_schedule_saved_over_the_mesh_without_a_ca_proof_never_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::host_identity::init(dir.path()).ok();
+        db::with_thread_db_path(&dir.path().join("cfg.db"), || {
+            let conn = db::open_default().unwrap();
+            identities::users::insert(&conn, "u", "u", "x", "admin", "2026-01-01T00:00:00Z")
+                .unwrap();
+            drop(conn);
+            let save = |name: &str, ctx: &contract::ToolCtx| {
+                run(config_set(
+                    ConfigSetArgs {
+                        noun: "schedule".into(),
+                        name: name.into(),
+                        json: r#"{"job":"system.update","cron":"@hourly"}"#.into(),
+                        host: None,
+                    },
+                    ctx,
+                ))
+                .unwrap();
+                let conn = db::open_default().unwrap();
+                db::config_store::get(&conn, "schedule", name)
+                    .unwrap()
+                    .unwrap()
+            };
+            let mut forged = test_ctx(dir.path());
+            forged.set_verified_caller(Some(caller("admin")));
+            forged.register_service(crate::mesh::RelayingPeer("peer-a".into()));
+            let row = save("forged", &forged);
+            assert!(
+                crate::scheduler::ownerless_reason(&row)
+                    .unwrap_or_default()
+                    .contains("CA proof"),
+                "a forged admin's custody job must not run"
+            );
+
+            let mut local = test_ctx(dir.path());
+            local.set_verified_caller(Some(caller("admin")));
+            assert!(crate::scheduler::ownerless_reason(&save("local", &local)).is_none());
         });
     }
 }

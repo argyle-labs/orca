@@ -76,6 +76,7 @@ pub fn record_owner(
     name: &str,
     json: &str,
     caller: &contract::CallerIdentity,
+    custody_cleared: bool,
 ) -> Result<()> {
     db::schedule_owners::set(
         conn,
@@ -84,6 +85,7 @@ pub fn record_owner(
             user_id: caller.user_id.clone(),
             role: caller.role.clone(),
             row_sha256: db::schedule_owners::digest(host_owner, name, json),
+            custody_cleared,
         },
     )
 }
@@ -97,6 +99,14 @@ fn job_caller(row: &db::config_store::ConfigRow) -> Result<contract::CallerIdent
             && owner.row_sha256
                 == db::schedule_owners::digest(&row.host_owner, &row.name, &row.json),
         "schedule was changed outside a local save; re-save it to run as yourself"
+    );
+    let job = serde_json::from_str::<ScheduleRow>(&row.json)
+        .map(|r| r.job)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        owner.custody_cleared || !dispatch::tool_roles::is_custody(&job),
+        "schedule job '{job}' is a custody tool saved over the mesh without a CA proof; re-save \
+         it locally"
     );
     let user = identities::users::find_by_id(&conn, &owner.user_id)?
         .with_context(|| format!("schedule owner '{}' no longer exists", owner.user_id))?;
@@ -281,7 +291,7 @@ mod tests {
             role: role.into(),
             can_mutate: true,
         };
-        record_owner(conn, "h", "nightly", json, &caller).unwrap();
+        record_owner(conn, "h", "nightly", json, &caller, true).unwrap();
         db::config_store::get(conn, "schedule", "nightly")
             .unwrap()
             .unwrap()

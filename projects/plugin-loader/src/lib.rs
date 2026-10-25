@@ -1376,6 +1376,7 @@ fn surface_tools(
                     local_only: op.policy.local_only,
                     read_unconfirmed: false,
                     tool_callable: false,
+                    remote_admin: false,
                 },
             ));
         }
@@ -1442,6 +1443,7 @@ fn install_tool_policies(software: &str, tools: &HashMap<String, ToolDef>) {
             )
             .local_only(d.local_only)
             .tool_callable(d.tool_callable)
+            .remote_admin(d.remote_admin)
             .dry_run_aware(d.dry_run_aware),
         )
     }));
@@ -3239,6 +3241,7 @@ mod loader_tests {
                     reaches: Vec::new(),
                     tool_calls: Vec::new(),
                     tool_callable: None,
+                    remote_admin: None,
                 },
                 plugin_proto::ToolDef {
                     name: "loaderfakeplugin.fetch".into(),
@@ -3253,6 +3256,7 @@ mod loader_tests {
                     reaches: Vec::new(),
                     tool_calls: Vec::new(),
                     tool_callable: None,
+                    remote_admin: None,
                 },
             ],
             backends: vec![

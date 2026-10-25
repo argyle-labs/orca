@@ -81,6 +81,8 @@ pub struct ToolDef {
     pub tool_calls: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_callable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_admin: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -386,6 +388,7 @@ mod tests {
                 reaches: vec!["proxmox.vm_stop".into()],
                 tool_calls: Vec::new(),
                 tool_callable: None,
+                remote_admin: None,
             }],
             backends: vec![json!({
                 "domain": "host_facts",

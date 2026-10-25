@@ -496,7 +496,7 @@ fn parse_change(s: &str) -> anyhow::Result<PathChange> {
 /// fails with `Error opening input: No such file or directory` even though the
 /// bytes are right there. A server that cannot rescan is skipped, and one that is
 /// unreachable is a row in `results`, never a failed call.
-#[orca_tool(domain = "media.unit", verb = "rescan")]
+#[orca_tool(domain = "media.unit", verb = "rescan", remote_admin = true)]
 async fn media_unit_rescan(
     args: MediaUnitRescanArgs,
     _ctx: &contract::ToolCtx,

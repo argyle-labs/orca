@@ -359,7 +359,12 @@ pub struct BackendsCheckArgs {}
 /// Availability is dynamic, so this reflects live state at call time, not
 /// stored configuration.
 // `role = "read"`: the result names every configured backend endpoint.
-#[orca_tool(domain = "model", verb = "backends_check", role = "read")]
+#[orca_tool(
+    domain = "model",
+    verb = "backends_check",
+    role = "read",
+    remote_admin = true
+)]
 async fn model_backends_check(
     _args: BackendsCheckArgs,
     ctx: &contract::ToolCtx,

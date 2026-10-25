@@ -14,6 +14,7 @@ pub struct ScheduleOwner {
     pub user_id: String,
     pub role: String,
     pub row_sha256: String,
+    pub custody_cleared: bool,
 }
 
 pub fn digest(host_owner: &str, name: &str, json: &str) -> String {
@@ -22,12 +23,20 @@ pub fn digest(host_owner: &str, name: &str, json: &str) -> String {
 
 pub fn set(conn: &Connection, owner: &ScheduleOwner) -> Result<()> {
     conn.execute(
-        "INSERT INTO schedule_owners (name, user_id, role, row_sha256) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO schedule_owners (name, user_id, role, row_sha256, custody_cleared)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(name) DO UPDATE SET
-             user_id    = excluded.user_id,
-             role       = excluded.role,
-             row_sha256 = excluded.row_sha256",
-        params![owner.name, owner.user_id, owner.role, owner.row_sha256],
+             user_id         = excluded.user_id,
+             role            = excluded.role,
+             row_sha256      = excluded.row_sha256,
+             custody_cleared = excluded.custody_cleared",
+        params![
+            owner.name,
+            owner.user_id,
+            owner.role,
+            owner.row_sha256,
+            owner.custody_cleared
+        ],
     )?;
     Ok(())
 }
@@ -35,7 +44,8 @@ pub fn set(conn: &Connection, owner: &ScheduleOwner) -> Result<()> {
 pub fn get(conn: &Connection, name: &str) -> Result<Option<ScheduleOwner>> {
     Ok(conn
         .query_row(
-            "SELECT name, user_id, role, row_sha256 FROM schedule_owners WHERE name = ?1",
+            "SELECT name, user_id, role, row_sha256, custody_cleared FROM schedule_owners
+             WHERE name = ?1",
             params![name],
             |r| {
                 Ok(ScheduleOwner {
@@ -43,6 +53,7 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<ScheduleOwner>> {
                     user_id: r.get(1)?,
                     role: r.get(2)?,
                     row_sha256: r.get(3)?,
+                    custody_cleared: r.get(4)?,
                 })
             },
         )
@@ -67,6 +78,7 @@ mod tests {
             user_id: "u".into(),
             role: "admin".into(),
             row_sha256: digest("h", "nightly", "{}"),
+            custody_cleared: true,
         };
         set(&conn, &owner).unwrap();
         assert_eq!(get(&conn, "nightly").unwrap(), Some(owner));

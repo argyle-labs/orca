@@ -1170,7 +1170,7 @@ pub struct StorageExportsOutput {
 /// rather than failing the whole call. Empty until a backend implements
 /// `list_exports` (nfs reading `/etc/exports` / `showmount -e`, unraid reading
 /// share config).
-#[orca_tool(domain = "storage", verb = "exports")]
+#[orca_tool(domain = "storage", verb = "exports", remote_admin = true)]
 async fn storage_exports(
     args: StorageExportsArgs,
     _ctx: &contract::ToolCtx,
@@ -2069,7 +2069,7 @@ async fn authoritative_foreign_views(
     let Ok(svc) = ctx.service::<Arc<dyn contract::RemoteExec>>() else {
         return out;
     };
-    let caller = ctx.caller();
+    let caller = ctx.relay_caller();
     let corr = ctx.correlation_id().map(str::to_string);
     let mut set = tokio::task::JoinSet::new();
     for host in foreign_hosts {

@@ -229,14 +229,13 @@ refuses any grant consumed within one grant lifetime (10 min) of its last
 demotion.
 
 A `mesh/exec` caller token acts with the lower of the named user's role and
-the token's role. Custody tools (`dispatch::tool_roles::is_custody`) are the
-exception: tier and grant delivery, secret-value reads and grants, PKI issue,
-and anything that installs or runs code on the recipient (`system.update`,
-`plugin.update`, `plugin.create`, `guest.exec`, `files.update`, and any
-`*.install`, `*.upgrade`, `*.engine_update` or `*.exec`). A call to one of
-these acts with at most the `user` role unless the signing peer proves it holds
-the mesh CA key by signing the token nonce with it. A `plugin.create
---action invoke` call is judged by the tool it invokes.
+the token's role. Every role-gated tool is a custody tool unless it is marked
+`remote_admin = true` in `#[orca_tool]` or in its plugin manifest entry. A
+custody call is refused unless the signing peer proves it holds the mesh CA key
+by signing the token nonce with it. A host relaying a mesh call onward forwards
+the verified caller and never attaches its own proof. A schedule saved over the
+mesh without a proof never runs a custody job, and `schedule.create` refuses to
+run one for a mesh caller without a proof.
 
 A demotion or the post-startup
 CA-key purge counts another member as a CA holder only when it signs a fresh

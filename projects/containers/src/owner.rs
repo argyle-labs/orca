@@ -102,7 +102,7 @@ async fn containers_on(
             peer,
             <crate::ContainersList as contract::OrcaToolDef>::NAME,
             args,
-            ctx.caller(),
+            ctx.relay_caller(),
             ctx.correlation_id().map(str::to_string),
         ),
     )

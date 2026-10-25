@@ -145,7 +145,7 @@ async fn config_source_status(
 /// its live noun schema (Draft 2020-12), and diff against the live config store.
 /// Returns `{to_add, to_change, to_delete, schema_invalid}`. Mutates NOTHING —
 /// deletes are reported, never executed.
-#[orca_tool(domain = "config.source", verb = "diff")]
+#[orca_tool(domain = "config.source", verb = "diff", remote_admin = true)]
 async fn config_source_diff(
     args: DiffArgs,
     _ctx: &contract::ToolCtx,
