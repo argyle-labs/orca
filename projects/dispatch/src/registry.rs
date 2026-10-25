@@ -561,11 +561,16 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
         // Same rule as an ambient-peer forward: nothing proves the target
         // honours `dryRun`, so only an execute-gated tool may dry-run remotely.
         if crate::erased::dry_run_requested(&args)? && !crate::tool_roles::plugin_dry_run_ok(name) {
-            return Err(contract::OrcaError::invalid(format!(
-                "{name}: a dry run can't be verified on system {system}; run it without dryRun"
-            ))
-            .with_code("args.invalid")
-            .into());
+            let msg = if dynamic_owns(name) {
+                format!("{name} does not support dryRun")
+            } else {
+                format!(
+                    "{name}: a dry run can't be verified on system {system}; run it without dryRun"
+                )
+            };
+            return Err(contract::OrcaError::invalid(msg)
+                .with_code("args.invalid")
+                .into());
         }
         return forward_to_peer(&system, name, args, ctx).await;
     }
@@ -2289,6 +2294,25 @@ mod tests {
         .unwrap_err();
         let oe = find_orca_error(&err).unwrap_or_else(|| panic!("{err}"));
         assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{oe}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_system_id_dry_run_of_a_loaded_unaware_tool_names_the_tool() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        let err = dispatch(
+            FAKE_PLUGIN_TOOL,
+            json!({ "systemId": REMOTE_ID, "dryRun": true }),
+            &roster_ctx(),
+        )
+        .await
+        .unwrap_err();
+        let oe = find_orca_error(&err).unwrap_or_else(|| panic!("{err}"));
+        assert_eq!(
+            oe.message,
+            format!("{FAKE_PLUGIN_TOOL} does not support dryRun")
+        );
     }
 
     #[tokio::test]
