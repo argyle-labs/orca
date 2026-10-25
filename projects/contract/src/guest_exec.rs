@@ -595,10 +595,20 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let record = seen.clone();
         let thunk: InvokeThunk = Arc::new(move |_op: &str, _args, call| {
-            record.lock().unwrap().push(call.map(|c| c.targeted()));
+            record.lock().unwrap().push(call.map(|c| {
+                let verb = c.verb().unwrap();
+                (c.targeted(), verb.role(), verb.caller().role.clone())
+            }));
             Err(serde_json::json!("refused"))
         });
         register_from_def("guest-exec-target".into(), thunk).unwrap();
+        struct Deregister;
+        impl Drop for Deregister {
+            fn drop(&mut self) {
+                deregister_provider("guest-exec-target");
+            }
+        }
+        let _deregister = Deregister;
         let verb = core_verb_of(
             VerbCaller {
                 user_id: "u".into(),
@@ -606,7 +616,7 @@ mod tests {
                 role: "admin".into(),
                 can_mutate: true,
             },
-            "admin",
+            "user",
             false,
             false,
             false,
@@ -630,7 +640,7 @@ mod tests {
             );
         })
         .await;
-        assert_eq!(*seen.lock().unwrap(), vec![Some(true), Some(true)]);
-        assert!(deregister_provider("guest-exec-target"));
+        let received = Some((true, "user", "admin".to_string()));
+        assert_eq!(*seen.lock().unwrap(), vec![received.clone(), received]);
     }
 }
