@@ -778,26 +778,25 @@ pub async fn set_secure(on: bool) -> Result<bool> {
 
 pub(crate) const PROMOTION_GRANT_TTL_SECS: i64 = 600;
 
-fn promotion_message(target: &str, expires_at: i64) -> Vec<u8> {
-    format!("orca-mesh-promote:{target}:{expires_at}").into_bytes()
+fn promotion_message(target: &str, g: &crate::mesh::PromotionGrant) -> Vec<u8> {
+    format!(
+        "orca-mesh-promote:{target}:{}:{}:{}",
+        g.issued_at, g.expires_at, g.nonce
+    )
+    .into_bytes()
 }
 
 pub async fn promote(target: &str, caller: Option<contract::CallerIdentity>) -> Result<bool> {
     let now = utils::time::now().unix_seconds();
-    let (grant, expires_at) = issue_promotion_grant(&pki_dir(), target, now)?;
+    let grant = issue_promotion_grant(&pki_dir(), target, now)?;
     if target == crate::host_identity::machine_id() {
-        return accept_promotion(None, Some(&grant), Some(expires_at)).await;
+        return accept_promotion(None, Some(&grant)).await;
     }
     #[allow(clippy::disallowed_types)]
     let dispatch = exec(
         target,
         "system.mesh.update",
-        serde_json::json!({
-            "action": "settings",
-            "secure": true,
-            "grant": grant,
-            "grantExpiresAt": expires_at,
-        }),
+        serde_json::json!({ "action": "settings", "secure": true, "grant": grant }),
         caller,
         None,
     )
@@ -808,57 +807,72 @@ pub async fn promote(target: &str, caller: Option<contract::CallerIdentity>) -> 
 
 pub async fn accept_promotion(
     relaying_peer: Option<&str>,
-    grant: Option<&str>,
-    expires_at: Option<i64>,
+    grant: Option<&crate::mesh::PromotionGrant>,
 ) -> Result<bool> {
-    verify_promotion_grant(
+    let now = utils::time::now().unix_seconds();
+    let grant = verify_promotion_grant(
         &pki_dir(),
         crate::host_identity::machine_id(),
         relaying_peer,
         grant,
-        expires_at,
-        utils::time::now().unix_seconds(),
+        now,
     )?;
-    set_secure(true).await
+    db::pool::with_pooled_or_open(|conn| {
+        pdb::consume_promotion_grant(conn, &grant.nonce, grant.issued_at, grant.expires_at, now)
+    })?;
+    Ok(true)
 }
 
 pub(crate) fn issue_promotion_grant(
     pki: &std::path::Path,
     target: &str,
     now: i64,
-) -> Result<(String, i64)> {
+) -> Result<crate::mesh::PromotionGrant> {
     if !utils::pki::has_mesh_ca_key(pki) {
         anyhow::bail!("only a secure member holding the mesh CA key can promote a member");
     }
-    let expires_at = now + PROMOTION_GRANT_TTL_SECS;
-    let grant = utils::pki::sign_with_mesh_ca(pki, &promotion_message(target, expires_at))?;
-    Ok((grant, expires_at))
+    let mut grant = crate::mesh::PromotionGrant {
+        signature: String::new(),
+        issued_at: now,
+        expires_at: now + PROMOTION_GRANT_TTL_SECS,
+        nonce: utils::id::new(),
+    };
+    grant.signature = utils::pki::sign_with_mesh_ca(pki, &promotion_message(target, &grant))?;
+    Ok(grant)
 }
 
-pub(crate) fn verify_promotion_grant(
+pub(crate) fn verify_promotion_grant<'a>(
     pki: &std::path::Path,
     own_id: &str,
     relaying_peer: Option<&str>,
-    grant: Option<&str>,
-    expires_at: Option<i64>,
+    grant: Option<&'a crate::mesh::PromotionGrant>,
     now: i64,
-) -> Result<()> {
+) -> Result<&'a crate::mesh::PromotionGrant> {
     if relaying_peer == Some(own_id) {
         anyhow::bail!("promotion to secure refused: a member cannot relay its own promotion");
     }
-    let (Some(grant), Some(expires_at)) = (grant, expires_at) else {
+    let Some(grant) = grant else {
         anyhow::bail!(
             "a member cannot promote itself to secure; a secure member must run \
              `orca system mesh update --action promote --id <this-member>`"
         );
     };
-    if expires_at <= now || expires_at > now + PROMOTION_GRANT_TTL_SECS {
+    if grant.issued_at > now
+        || grant.expires_at <= now
+        || grant.expires_at != grant.issued_at + PROMOTION_GRANT_TTL_SECS
+        || grant.nonce.is_empty()
+    {
         anyhow::bail!("promotion to secure refused: the grant is expired or not yet valid");
     }
     let ca_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(pki))
         .context("promotion to secure refused: this member has no mesh CA cert")?;
-    utils::pki::verify_mesh_ca_signature(&ca_pem, &promotion_message(own_id, expires_at), grant)
-        .context("promotion to secure refused: the grant is not signed by the mesh CA")
+    utils::pki::verify_mesh_ca_signature(
+        &ca_pem,
+        &promotion_message(own_id, grant),
+        &grant.signature,
+    )
+    .context("promotion to secure refused: the grant is not signed by the mesh CA")?;
+    Ok(grant)
 }
 
 /// Build the local-host row for `system.list`. Uses the in-process lifecycle

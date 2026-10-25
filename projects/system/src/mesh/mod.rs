@@ -1303,12 +1303,9 @@ pub struct MeshUpdateArgs {
     /// mesh-CA-signed `grant` (see `promote`); `None` reads the current tier.
     #[arg(long)]
     pub secure: Option<bool>,
-    /// (settings) Mesh-CA signature authorising promotion of this member.
+    /// (settings) Single-use mesh-CA-signed grant authorising promotion.
     #[arg(skip)]
-    pub grant: Option<String>,
-    /// (settings) Unix seconds at which `grant` expires.
-    #[arg(skip)]
-    pub grant_expires_at: Option<i64>,
+    pub grant: Option<PromotionGrant>,
     /// (trust/recover/unpin/cancel_offer) Target system.
     // Aliases: pre-rename daemons send `peer_id` over the mesh.
     #[arg(long)]
@@ -1330,6 +1327,17 @@ pub struct MeshUpdateArgs {
 
 #[derive(Clone, Debug)]
 pub struct RelayingPeer(pub String);
+
+/// Single-use promotion grant signed by the mesh CA over
+/// `<target>:<issued_at>:<expires_at>:<nonce>`.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PromotionGrant {
+    pub signature: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+    pub nonce: String,
+}
 
 /// Result of `system.mesh.update action=settings`.
 #[derive::camel_aliases]
@@ -1759,8 +1767,7 @@ async fn mesh_update(
                     let relaying = ctx.service::<RelayingPeer>().ok();
                     exec::accept_promotion(
                         relaying.as_ref().map(|p| p.0.as_str()),
-                        args.grant.as_deref(),
-                        args.grant_expires_at,
+                        args.grant.as_ref(),
                     )
                     .await?
                 }
@@ -5133,76 +5140,78 @@ mod handler_dispatch_tests {
         let rogue = tempfile::tempdir().unwrap();
         utils::pki::init_mesh_ca(rogue.path(), "rogue").unwrap();
         let insecure = tempfile::tempdir().unwrap();
+        let verify = |own: &str, relay: &str, g: &PromotionGrant, at: i64| {
+            exec::verify_promotion_grant(mesh.path(), own, Some(relay), Some(g), at).is_ok()
+        };
 
         assert!(exec::issue_promotion_grant(insecure.path(), TARGET, now).is_err());
         assert!(
-            exec::verify_promotion_grant(mesh.path(), TARGET, Some(RELAY), None, None, now)
-                .is_err(),
+            exec::verify_promotion_grant(mesh.path(), TARGET, Some(RELAY), None, now).is_err(),
             "a locally trusted relaying peer without a grant cannot promote"
         );
-
-        let (grant, exp) = exec::issue_promotion_grant(mesh.path(), TARGET, now).unwrap();
+        let grant = exec::issue_promotion_grant(mesh.path(), TARGET, now).unwrap();
+        assert!(verify(TARGET, RELAY, &grant, now));
         assert!(
-            exec::verify_promotion_grant(
-                mesh.path(),
-                TARGET,
-                Some(RELAY),
-                Some(&grant),
-                Some(exp),
-                now
-            )
-            .is_ok()
-        );
-        assert!(
-            exec::verify_promotion_grant(
-                mesh.path(),
-                RELAY,
-                Some(TARGET),
-                Some(&grant),
-                Some(exp),
-                now
-            )
-            .is_err(),
+            !verify(RELAY, TARGET, &grant, now),
             "a grant names exactly one member"
         );
         assert!(
-            exec::verify_promotion_grant(
-                mesh.path(),
-                TARGET,
-                Some(RELAY),
-                Some(&grant),
-                Some(exp),
-                exp
-            )
-            .is_err(),
+            !verify(TARGET, RELAY, &grant, grant.expires_at),
             "expired grant"
         );
         assert!(
-            exec::verify_promotion_grant(
-                mesh.path(),
-                TARGET,
-                Some(TARGET),
-                Some(&grant),
-                Some(exp),
-                now
-            )
-            .is_err(),
-            "a member cannot relay its own promotion"
+            !verify(TARGET, TARGET, &grant, now),
+            "self-relayed promotion"
         );
-
-        let (forged, fexp) = exec::issue_promotion_grant(rogue.path(), TARGET, now).unwrap();
+        let mut tampered = grant.clone();
+        tampered.nonce = "other".into();
+        assert!(!verify(TARGET, RELAY, &tampered, now), "nonce is signed");
+        let forged = exec::issue_promotion_grant(rogue.path(), TARGET, now).unwrap();
         assert!(
-            exec::verify_promotion_grant(
-                mesh.path(),
-                TARGET,
-                Some(RELAY),
-                Some(&forged),
-                Some(fexp),
-                now
-            )
-            .is_err(),
+            !verify(TARGET, RELAY, &forged, now),
             "a grant from another CA is refused"
         );
+    }
+
+    #[test]
+    fn two_tier_promotion_grants_are_single_use_and_die_on_demotion() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = ::db::open_unencrypted(&dir.path().join("orca.db")).unwrap();
+        db::mesh::consume_promotion_grant(&conn, "n1", 100, 700, 200).unwrap();
+        assert!(db::mesh::get_secure(&conn).unwrap());
+        assert!(
+            db::mesh::consume_promotion_grant(&conn, "n1", 100, 700, 300).is_err(),
+            "a replayed grant is refused"
+        );
+        db::mesh::set_secure(&conn, false).unwrap();
+        let demoted_at: i64 = conn
+            .query_row(
+                "SELECT demoted_at FROM mesh_demotion WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            db::mesh::consume_promotion_grant(
+                &conn,
+                "n2",
+                demoted_at,
+                demoted_at + 600,
+                demoted_at
+            )
+            .is_err(),
+            "a grant issued before the last demotion is refused"
+        );
+        assert!(!db::mesh::get_secure(&conn).unwrap());
+        db::mesh::consume_promotion_grant(
+            &conn,
+            "n3",
+            demoted_at + 1,
+            demoted_at + 601,
+            demoted_at + 1,
+        )
+        .unwrap();
+        assert!(db::mesh::get_secure(&conn).unwrap());
     }
 
     #[tokio::test]

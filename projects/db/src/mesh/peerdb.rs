@@ -1241,11 +1241,61 @@ pub fn is_mutual_secure(t: TrustState) -> bool {
 
 pub fn set_secure(conn: &Connection, secure: bool) -> Result<()> {
     let now = now_secs();
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO mesh_self (id, secure, set_at) VALUES (1, ?, ?)
          ON CONFLICT(id) DO UPDATE SET secure = excluded.secure, set_at = excluded.set_at",
         params![secure as i64, now],
     )?;
+    if !secure {
+        tx.execute(
+            "INSERT INTO mesh_demotion (id, demoted_at) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET demoted_at = excluded.demoted_at",
+            params![now],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn consume_promotion_grant(
+    conn: &Connection,
+    nonce: &str,
+    issued_at: i64,
+    expires_at: i64,
+    now: i64,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM mesh_promotion_nonces WHERE expires_at <= ?1",
+        params![now],
+    )?;
+    let demoted_at: Option<i64> = tx
+        .query_row(
+            "SELECT demoted_at FROM mesh_demotion WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if demoted_at.is_some_and(|d| issued_at <= d) {
+        anyhow::bail!(
+            "promotion to secure refused: the grant predates this member's last demotion"
+        );
+    }
+    let inserted = tx.execute(
+        "INSERT INTO mesh_promotion_nonces (nonce, expires_at) VALUES (?1, ?2)
+         ON CONFLICT(nonce) DO NOTHING",
+        params![nonce, expires_at],
+    )?;
+    if inserted == 0 {
+        anyhow::bail!("promotion to secure refused: the grant was already used");
+    }
+    tx.execute(
+        "INSERT INTO mesh_self (id, secure, set_at) VALUES (1, 1, ?1)
+         ON CONFLICT(id) DO UPDATE SET secure = 1, set_at = excluded.set_at",
+        params![now],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 

@@ -1260,6 +1260,16 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             set_at       INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS mesh_promotion_nonces (
+            nonce      TEXT PRIMARY KEY,
+            expires_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS mesh_demotion (
+            id         INTEGER PRIMARY KEY CHECK (id = 1),
+            demoted_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS mesh_self (
             id                       INTEGER PRIMARY KEY CHECK (id = 1),
             secure              INTEGER NOT NULL DEFAULT 0,
