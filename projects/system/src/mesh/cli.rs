@@ -226,6 +226,7 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
 
     let conn = db::open_default()?;
     pdb::set_secure(&conn, false)?;
+    utils::pki::remove_mesh_ca_keys(&pki_d)?;
     pdb::set_mesh_id(&conn, &r.mesh_id)?;
     pdb::upsert_peer(
         &conn,
@@ -718,9 +719,7 @@ pub async fn cmd_mesh_trust(peer_id: &str, on: bool) -> Result<()> {
     Ok(())
 }
 
-async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
-    let pki_d = pki_dir();
-    let i_have_key = utils::pki::has_mesh_ca_key(&pki_d);
+pub async fn peer_has_ca_key(peer: &pdb::PeerRow) -> Result<bool> {
     let resp = call_peer(
         &peer.peer_id,
         &peer.peer_addr,
@@ -729,10 +728,16 @@ async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
         serde_json::json!({}),
     )
     .await?;
-    let peer_has_key = resp
+    Ok(resp
         .get("has_key")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or(false))
+}
+
+async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
+    let pki_d = pki_dir();
+    let i_have_key = utils::pki::has_mesh_ca_key(&pki_d);
+    let peer_has_key = peer_has_ca_key(peer).await?;
     let i_am_secure = db::pool::with_pooled_or_open(db::mesh::get_secure)?;
     if i_have_key && !peer_has_key && !i_am_secure {
         println!("  not pushing the CA key: this member is insecure");

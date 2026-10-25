@@ -150,6 +150,7 @@ pub async fn accept(code: &str) -> Result<MeshAcceptOutput> {
 
     db::pool::with_pooled_or_open(|conn| {
         pdb::set_secure(conn, false)?;
+        utils::pki::remove_mesh_ca_keys(&pki_d)?;
         pdb::set_mesh_id(conn, &r.mesh_id)?;
         pdb::upsert_peer(
             conn,
@@ -256,47 +257,6 @@ pub async fn trust(peer_id: &str, on: bool) -> Result<MeshTrustOutput> {
         peer_secure: new.peer_secure,
         mutual: new.local_secure && new.peer_secure,
         notify_result,
-    })
-}
-
-pub async fn push_trust(
-    peer_id: &str,
-    on: bool,
-    caller: Option<contract::CallerIdentity>,
-) -> Result<MeshTrustOutput> {
-    // Our own peer_id as the remote knows us.
-    let own_id = crate::host_identity::machine_id().to_string();
-    // Execute system.mesh.update --action trust on the remote host, making THEM set their
-    // local_secure for us. `push: false` prevents recursion. The caller is the
-    // local admin who invoked `system.mesh.update --action trust` — the recipient authorizes the
-    // mutating handshake against that admin's replicated users row (zero-trust:
-    // no synthetic/asserted identity).
-    #[allow(clippy::disallowed_types)] // exec is the wire-level dispatch boundary
-    let dispatch = exec(
-        peer_id,
-        "system.mesh.update",
-        serde_json::json!({ "action": "trust", "peer_id": own_id, "on": on, "push": false }),
-        caller,
-        None,
-    )
-    .await?;
-    let remote: MeshTrustOutput = serde_json::from_value(dispatch.result)?;
-    // remote.local_secure = they now trust us (= our peer_secure for this peer).
-    // Our own local_secure for them is unchanged — read it from DB.
-    let our_local_secure = db::pool::with_pooled_or_open(|conn| {
-        Ok(pdb::list_peers(conn)?
-            .into_iter()
-            .find(|p| p.peer_id == peer_id)
-            .map(|p| p.local_secure)
-            .unwrap_or(false))
-    })?;
-    let peer_secure = remote.local_secure;
-    Ok(MeshTrustOutput {
-        peer_id: peer_id.to_string(),
-        local_secure: our_local_secure,
-        peer_secure,
-        mutual: our_local_secure && peer_secure,
-        notify_result: remote.notify_result,
     })
 }
 
@@ -772,18 +732,40 @@ pub fn get_secure() -> Result<bool> {
 }
 
 pub async fn set_secure(on: bool) -> Result<bool> {
-    set_secure_at(&pki_dir(), on).await
+    let pki = pki_dir();
+    let another_holder = on || !utils::pki::has_mesh_ca_key(&pki) || another_ca_holder().await;
+    set_secure_at(&pki, on, another_holder)
 }
 
-pub(crate) async fn set_secure_at(pki: &std::path::Path, on: bool) -> Result<bool> {
+async fn another_ca_holder() -> bool {
+    let Ok(peers) = db::pool::with_pooled_or_open(pdb::list_peers) else {
+        return false;
+    };
+    for p in peers.iter().filter(|p| p.local_secure && p.peer_secure) {
+        if crate::mesh::cli::peer_has_ca_key(p).await.unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn set_secure_at(pki: &std::path::Path, on: bool, another_holder: bool) -> Result<bool> {
+    if !on && utils::pki::has_mesh_ca_key(pki) && !another_holder {
+        anyhow::bail!(
+            "demotion refused: this is the last secure member holding the mesh CA key; \
+             promote another member first"
+        );
+    }
+    db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, on))?;
     if !on {
         utils::pki::remove_mesh_ca_keys(pki)?;
     }
-    db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, on))?;
     Ok(on)
 }
 
 pub(crate) const PROMOTION_GRANT_TTL_SECS: i64 = 600;
+
+pub(crate) const PROMOTION_CLOCK_SKEW_SECS: i64 = 30;
 
 fn promotion_message(target: &str, g: &crate::mesh::PromotionGrant) -> Vec<u8> {
     format!(
@@ -829,19 +811,10 @@ pub async fn accept_promotion(
         now,
     )?;
     db::pool::with_pooled_or_open(|conn| {
-        pdb::consume_promotion_grant(
-            conn,
-            &grant.nonce,
-            grant.issued_at,
-            grant.expires_at,
-            now,
-            PROMOTION_CLOCK_SKEW_SECS,
-        )
+        pdb::consume_promotion_grant(conn, &grant.nonce, grant.issued_at, grant.expires_at, now)
     })?;
     Ok(true)
 }
-
-pub(crate) const PROMOTION_CLOCK_SKEW_SECS: i64 = 30;
 
 pub(crate) fn issue_promotion_grant(
     pki: &std::path::Path,
@@ -1949,8 +1922,12 @@ mod tests {
         .await;
     }
 
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn secure_round_trips_through_db() {
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::mesh::pin_home(home.path());
         let tmp = tmp_db();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             // Default is false on a fresh, migrated db.
@@ -2618,30 +2595,6 @@ mod tests {
             // the target itself are excluded.
             assert_eq!(out.notified.len(), 1, "only the live member is notified");
             assert_eq!(out.notified[0].peer_id, live);
-        })
-        .await;
-    }
-
-    // ── push_trust: fails at the remote-exec resolution guard ─────────────────
-
-    #[tokio::test]
-    async fn push_trust_unknown_peer_errors_at_remote_resolution() {
-        ensure_host_identity();
-        let tmp = tmp_db();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            // push_trust drives `exec` against the named peer to make THEM set
-            // their local_secure for us. With an empty peer table the inner
-            // exec resolves nothing and bails before any dial — the error is
-            // surfaced, not swallowed.
-            let err = match push_trust("nope", true, None).await {
-                Ok(_) => panic!("expected push_trust to fail for unknown peer"),
-                Err(e) => e,
-            };
-            assert!(
-                err.to_string()
-                    .contains("no active paired peer matches 'nope'"),
-                "got: {err}"
-            );
         })
         .await;
     }

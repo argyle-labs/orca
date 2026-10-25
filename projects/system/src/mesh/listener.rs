@@ -272,8 +272,14 @@ fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
         secure,
         "mesh/push-ca-key refused: this member is insecure and never holds the mesh CA key"
     );
-    utils::pki::import_mesh_ca_keypair(&pki_dir(), &params.cert_pem, &params.key_pem)
-        .context(PeerRefusal("mesh/push-ca-key refused".into()))
+    let pki = pki_dir();
+    utils::pki::import_mesh_ca_keypair(&pki, &params.cert_pem, &params.key_pem)
+        .context(PeerRefusal("mesh/push-ca-key refused".into()))?;
+    if !db::pool::with_pooled_or_open(db::mesh::get_secure)? {
+        utils::pki::remove_mesh_ca_keys(&pki)?;
+        refuse!("mesh/push-ca-key refused: this member was demoted while the CA key arrived");
+    }
+    Ok(())
 }
 
 fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
@@ -468,10 +474,13 @@ fn remote_role_gate(
 /// stay local-origin only. Pure over `(tool, args)` so it's unit-testable.
 fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
     let action = args.get("action").and_then(|v| v.as_str());
-    let forbidden = matches!(
-        (tool, action),
-        ("system.mesh.update", Some("recover")) | ("system.mesh.delete", Some("leave"))
-    );
+    let demote = args.get("secure") == Some(&Value::Bool(false));
+    let forbidden =
+        matches!(
+            (tool, action),
+            ("system.mesh.update", Some("recover" | "promote" | "trust"))
+                | ("system.mesh.delete", Some("leave"))
+        ) || (tool == "system.mesh.update" && matches!(action, None | Some("settings")) && demote);
     refuse_unless!(
         !forbidden,
         "mesh/exec refused: '{tool}' action '{}' is local-only and cannot be invoked by a remote peer",
@@ -786,6 +795,10 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
             params.previous_key_pem.as_deref(),
         )?;
         pdb::set_ca_previous_expires_at(conn, params.previous_expires_at)?;
+        if !db::mesh::get_secure(conn)? {
+            utils::pki::remove_mesh_ca_keys(&pki_d)?;
+            refuse!("mesh/push-ca-state refused: this member was demoted while the CA key arrived");
+        }
         Ok(())
     })
 }
@@ -1108,6 +1121,30 @@ mod tests {
         let args = serde_json::json!({ "action": "leave" });
         let err = reject_remote_local_only_action("system.mesh.delete", &args).unwrap_err();
         assert!(err.to_string().contains("leave"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn two_tier_remote_promote_trust_and_demote_are_local_only() {
+        for args in [
+            serde_json::json!({ "action": "promote", "id": "019e7105-0000-7000-8000-0000000abc0d" }),
+            serde_json::json!({ "action": "trust", "id": "019e7105-0000-7000-8000-0000000abc0d", "on": true }),
+            serde_json::json!({ "action": "settings", "secure": false }),
+            serde_json::json!({ "secure": false }),
+        ] {
+            let params = serde_json::json!({ "tool": "system.mesh.update", "args": args });
+            let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("local-only"), "{args}: {err}");
+        }
+    }
+
+    #[test]
+    fn two_tier_remote_grant_delivery_stays_remote_dispatchable() {
+        let args = serde_json::json!({ "action": "settings", "secure": true });
+        assert!(reject_remote_local_only_action("system.mesh.update", &args).is_ok());
+        let read = serde_json::json!({ "action": "settings" });
+        assert!(reject_remote_local_only_action("system.mesh.update", &read).is_ok());
     }
 
     #[test]

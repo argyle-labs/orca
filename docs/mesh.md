@@ -143,8 +143,14 @@ copy of the mesh CA cert before switching to secure. Local trust of a peer
 rights. Leaving the mesh removes the tier entirely.
 
 Only a secure member ever holds the mesh CA private key: it replicates only
-between two secure members, and demoting a member deletes its copy. Grant
-timestamps tolerate 30 s of clock skew between members. Rotating the mesh CA
+between two secure members, and demoting a member deletes its copy. An
+insecure member found holding the key at startup deletes it, unless no
+mutually secure peer exists to hold it. The last secure member holding the CA
+key cannot be demoted. `promote`, `trust`, and demotion (`settings` with
+`secure=false`) are local-only: a remote peer can never drive them over
+`mesh/exec`. A grant's issue time tolerates 30 s of clock skew, and a member
+refuses any grant consumed within one grant lifetime (10 min) of its last
+demotion. Rotating the mesh CA
 invalidates every grant still in flight, since grants are verified against the
 current CA cert; re-run `promote` after a rotation.
 `orca system join --action init` makes the first host secure.

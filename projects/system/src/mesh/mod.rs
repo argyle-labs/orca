@@ -1314,9 +1314,6 @@ pub struct MeshUpdateArgs {
     /// (trust) New trust value.
     #[arg(long, action = clap::ArgAction::Set)]
     pub on: Option<bool>,
-    /// (trust) Execute on the remote peer so THEY trust US.
-    #[arg(long)]
-    pub push: bool,
     /// (sync) Optional source-peer filter (hostname / peer_id / addr).
     #[arg(long)]
     pub peer: Option<String>,
@@ -1744,8 +1741,8 @@ async fn mesh_create(
 /// [MUTATES STATE] Mutate mesh membership state on this host (or a `--peer` target). `action`
 /// selects the operation:
 ///   - `settings`     — read/set this member's tier (`secure`). Default.
-///   - `trust`        — set trust for a paired peer (needs `id` + `on`;
-///     `push` flips THEIR trust of us over mTLS).
+///   - `trust`        — set this host's trust for a paired peer (needs `id` +
+///     `on`). LOCAL-ONLY.
 ///   - `sync`         — force a one-shot replication tick (optional `peer`
 ///     source filter).
 ///   - `recover`      — clear a stale `departed_at` flag on THIS host (needs
@@ -1755,6 +1752,7 @@ async fn mesh_create(
 ///     is accepted again with a cert that carries no identity name.
 ///   - `join_token`   — issue a single-use, short-lived join token.
 ///   - `promote`      — promote member `id` to secure (mesh-CA-signed grant).
+///     LOCAL-ONLY, as is `settings` with `secure=false`.
 #[orca_tool(domain = "system.mesh", verb = "update", role = "admin")]
 async fn mesh_update(
     args: MeshUpdateArgs,
@@ -1783,12 +1781,7 @@ async fn mesh_update(
             let on = args
                 .on
                 .ok_or_else(|| anyhow::anyhow!("system.mesh.update action=trust requires `on`"))?;
-            let out = if args.push {
-                exec::push_trust(&peer_id, on, ctx.caller()).await?
-            } else {
-                exec::trust(&peer_id, on).await?
-            };
-            Ok(MeshUpdateOutput::Trust(out))
+            Ok(MeshUpdateOutput::Trust(exec::trust(&peer_id, on).await?))
         }
         MeshUpdateAction::Sync => {
             let reports = db::replicate_engine::sync_now(args.peer.as_deref()).await?;
@@ -1843,6 +1836,12 @@ async fn mesh_update(
             let target = args.id.ok_or_else(|| {
                 anyhow::anyhow!("system.mesh.update action=promote requires `id`")
             })?;
+            if ctx
+                .service::<RelayingPeer>()
+                .is_ok_and(|p| p.0 == target.as_str())
+            {
+                anyhow::bail!("a member cannot relay its own promotion to secure");
+            }
             let secure = exec::promote(target.as_str(), ctx.caller()).await?;
             Ok(MeshUpdateOutput::Settings(MeshSettingsOutput { secure }))
         }
@@ -2544,11 +2543,34 @@ pub fn reconcile_mesh_leaf_identity(
 pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     let expected = crate::host_identity::machine_id().to_string();
     let conn = ::db::open_default()?;
+    purge_ca_keys_if_insecure(pki_dir, &conn)?;
     let outcome = reconcile_mesh_leaf_identity(pki_dir, &expected, &conn)?;
     Ok(!matches!(
         outcome,
         LeafReconcileOutcome::AlreadyCurrent | LeafReconcileOutcome::NotEnrolled
     ))
+}
+
+pub(crate) fn purge_ca_keys_if_insecure(
+    pki_dir: &std::path::Path,
+    conn: &rusqlite::Connection,
+) -> Result<bool> {
+    if db::mesh::get_secure(conn)? || !utils::pki::has_mesh_ca_key(pki_dir) {
+        return Ok(false);
+    }
+    let holders = db::mesh::list_peers(conn)?
+        .iter()
+        .filter(|p| p.local_secure && p.peer_secure)
+        .count();
+    if holders == 0 {
+        tracing::warn!(
+            "[mesh] insecure member holds the mesh CA key with no mutually secure peer; \
+             keeping it so the mesh CA is not lost — promote a member, then demote this one"
+        );
+        return Ok(false);
+    }
+    utils::pki::remove_mesh_ca_keys(pki_dir)?;
+    Ok(true)
 }
 
 /// Dial `host` over mTLS with SNI=mesh.orca.local, send a `mesh/ping`, and
@@ -4365,16 +4387,16 @@ mod added_coverage {
 
     #[test]
     fn mesh_update_args_deserializes_camel_case_secure() {
-        let a: MeshUpdateArgs =
-            serde_json::from_str(r#"{"action":"trust","peerId":"019f0000-0000-7000-8000-000000000000","on":true,"push":true}"#)
-                .unwrap();
+        let a: MeshUpdateArgs = serde_json::from_str(
+            r#"{"action":"trust","peerId":"019f0000-0000-7000-8000-000000000000","on":true}"#,
+        )
+        .unwrap();
         assert_eq!(a.action, MeshUpdateAction::Trust);
         assert_eq!(
             a.id.as_deref(),
             Some("019f0000-0000-7000-8000-000000000000")
         );
         assert_eq!(a.on, Some(true));
-        assert!(a.push);
     }
 
     #[test]
@@ -5186,7 +5208,7 @@ mod handler_dispatch_tests {
         let dir = tempfile::tempdir().unwrap();
         let conn = ::db::open_unencrypted(&dir.path().join("orca.db")).unwrap();
         let consume = |nonce: &str, issued: i64, now: i64| {
-            db::mesh::consume_promotion_grant(&conn, nonce, issued, issued + 600, now, 30)
+            db::mesh::consume_promotion_grant(&conn, nonce, issued, issued + 600, now)
         };
         consume("n1", 100, 200).unwrap();
         assert!(db::mesh::get_secure(&conn).unwrap());
@@ -5203,11 +5225,15 @@ mod handler_dispatch_tests {
             )
             .unwrap();
         assert!(
-            consume("n2", demoted_at + 30, demoted_at + 30).is_err(),
-            "a grant issued before the last demotion (within clock skew) is refused"
+            consume("n2", demoted_at, demoted_at + 1).is_err(),
+            "a grant issued at or before the last demotion is refused"
+        );
+        assert!(
+            consume("n3", demoted_at + 1, demoted_at + 599).is_err(),
+            "a grant consumed within one grant lifetime of the demotion is refused"
         );
         assert!(!db::mesh::get_secure(&conn).unwrap());
-        consume("n3", demoted_at + 31, demoted_at + 31).unwrap();
+        consume("n4", demoted_at + 600, demoted_at + 600).unwrap();
         assert!(db::mesh::get_secure(&conn).unwrap());
     }
 
@@ -5218,15 +5244,48 @@ mod handler_dispatch_tests {
             let pki = tempfile::tempdir().unwrap();
             utils::pki::init_mesh_ca(pki.path(), "founder").unwrap();
             assert!(utils::pki::has_mesh_ca_key(pki.path()));
-            exec::set_secure_at(pki.path(), false).await.unwrap();
+            db::pool::with_pooled_or_open(|c| db::mesh::set_secure(c, true)).unwrap();
+            assert!(
+                exec::set_secure_at(pki.path(), false, false).is_err(),
+                "the last secure CA holder cannot be demoted"
+            );
+            assert!(utils::pki::has_mesh_ca_key(pki.path()));
+            assert!(exec::get_secure().unwrap());
+            exec::set_secure_at(pki.path(), false, true).unwrap();
+            assert!(!exec::get_secure().unwrap());
             assert!(!utils::pki::has_mesh_ca_key(pki.path()));
             assert!(utils::pki::mesh_ca_cert_path(pki.path()).exists());
         })
         .await;
     }
 
+    #[test]
+    fn two_tier_startup_purges_an_insecure_members_ca_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = ::db::open_unencrypted(&dir.path().join("orca.db")).unwrap();
+        let pki = tempfile::tempdir().unwrap();
+        utils::pki::init_mesh_ca(pki.path(), "founder").unwrap();
+        db::mesh::set_secure(&conn, true).unwrap();
+        assert!(!purge_ca_keys_if_insecure(pki.path(), &conn).unwrap());
+        db::mesh::set_secure(&conn, false).unwrap();
+        assert!(!purge_ca_keys_if_insecure(pki.path(), &conn).unwrap());
+        assert!(
+            utils::pki::has_mesh_ca_key(pki.path()),
+            "kept while no mutually secure peer could hold the CA"
+        );
+        const PEER: &str = "019e7105-0000-7000-8000-0000000abc0e";
+        db::mesh::upsert_peer(&conn, PEER, "hp", "127.0.0.1", 1, Some("fp-p"), "").unwrap();
+        db::mesh::set_trust(&conn, PEER, Some(true), Some(true)).unwrap();
+        assert!(purge_ca_keys_if_insecure(pki.path(), &conn).unwrap());
+        assert!(!utils::pki::has_mesh_ca_key(pki.path()));
+    }
+
+    #[serial_test::serial(env)]
     #[tokio::test]
     async fn mesh_update_settings_reads_then_writes_secure() {
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::mesh::pin_home(home.path());
         let tmp = tmp_db();
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
