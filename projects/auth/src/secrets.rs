@@ -268,7 +268,10 @@ async fn lock_secret(name: &str) -> anyhow::Result<SecretWriteGuard> {
     let local = lock.lock_owned().await;
     let file = match utils::home::orca_home() {
         Some(home) => {
-            let path = home.join("locks").join(format!("secret-{name}.lock"));
+            let path = home.join("locks").join(format!(
+                "secret-{}.lock",
+                utils::hash::sha256_hex(name.as_bytes())
+            ));
             Some(
                 tokio::task::spawn_blocking(move || -> anyhow::Result<std::fs::File> {
                     if let Some(dir) = path.parent() {
@@ -816,6 +819,22 @@ mod tests {
             ref_path: None,
             description: None,
         }
+    }
+
+    #[tokio::test]
+    async fn lock_file_path_never_escapes_the_locks_dir() {
+        let home = utils::home::orca_home().expect("orca home");
+        for name in ["../escape-x", "a/b", "w"] {
+            let guard = lock_secret(name).await.expect("lock");
+            let expected = home.join("locks").join(format!(
+                "secret-{}.lock",
+                utils::hash::sha256_hex(name.as_bytes())
+            ));
+            assert!(expected.is_file(), "{name}: {}", expected.display());
+            drop(guard);
+        }
+        assert!(!home.join("escape-x.lock").exists());
+        assert!(!home.join("locks").join("secret-a").exists());
     }
 
     #[test]
