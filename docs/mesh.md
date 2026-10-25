@@ -16,8 +16,8 @@ leave, and the security model.
 | See incoming pairing offers on this host | `orca system list --pending` |
 | Accept an offer | `orca system join --action accept <6-char-code>` |
 | List mesh members | `orca system list` |
-| Promote a peer to mutually-trusted | `orca system mesh update --action trust --id <system-id> --on true` |
-| Promote a member to secure (run on a secure member) | `orca system mesh update --action promote --id <system-id>` |
+| Promote a peer to mutually-trusted | `orca system mesh tier update --action trust --id <system-id> --on true` |
+| Promote a member to secure (run on a secure member) | `orca system mesh tier update --action promote --id <system-id>` |
 | Verify a peer end-to-end | `orca system health --id <system-id>` |
 | Show cert expiry / rotation status | `orca system certs list` |
 | Rotate the mesh CA (with overlap) | `orca system mesh update --action recover [--overlap-days 14]` |
@@ -77,7 +77,7 @@ After this:
   (`orca system list` shows the inviter's `id`).
 * `orca system list` on both hosts shows the other.
 * The joiner is **insecure** until a secure member promotes it with
-  `orca system mesh update --action promote --id <joiner-id>`.
+  `orca system mesh tier update --action promote --id <joiner-id>`.
 
 ### Manual fallback (no mDNS)
 
@@ -105,10 +105,10 @@ flag each other secure:
 
 ```
 # On hotel (foxtrot's id from `orca system list`):
-orca system mesh update --action trust --id 019f9f7b-2222-7e40-9e30-4987d8d12dcb --on true
+orca system mesh tier update --action trust --id 019f9f7b-2222-7e40-9e30-4987d8d12dcb --on true
 
 # On foxtrot (hotel's id):
-orca system mesh update --action trust --id 019f9f7b-1176-7e40-9e30-4987d8d12dcb --on true
+orca system mesh tier update --action trust --id 019f9f7b-1176-7e40-9e30-4987d8d12dcb --on true
 ```
 
 The moment both bits are true, the host that already has the mesh CA
@@ -116,15 +116,15 @@ private key pushes it to the peer via `mesh/push-ca-key` over the existing
 mTLS channel. From that point, the newly-trusted host can extend its own
 offers (`can_invite=1` in its mDNS advertisement).
 
-`orca system mesh update --action trust --id <system-id> --on false` reverses the local flag and notifies the
+`orca system mesh tier update --action trust --id <system-id> --on false` reverses the local flag and notifies the
 peer; mutual-trust falls back to false on both sides.
 
 ## Secrets tiers (secure / insecure)
 
 ```
-orca system mesh update --action promote --id <system-id>   # on a secure member holding the mesh CA key
-orca system mesh update --action settings --secure false                     # demote this member
-orca system mesh update --action settings                                    # current tier
+orca system mesh tier update --action promote --id <system-id>   # on a secure member holding the mesh CA key
+orca system mesh tier update --action demote                     # demote this member
+orca system mesh update --action settings                        # current tier
 ```
 
 * **insecure** (default for every joiner): stores and resolves only its own
@@ -146,9 +146,14 @@ Only a secure member ever holds the mesh CA private key: it replicates only
 between two secure members, and demoting a member deletes its copy. An
 insecure member found holding the key at startup deletes it, unless no
 mutually secure peer exists to hold it. The last secure member holding the CA
-key cannot be demoted. `promote`, `trust`, and demotion (`settings` with
-`secure=false`) are local-only: a remote peer can never drive them over
-`mesh/exec`. A grant's issue time tolerates 30 s of clock skew, and a member
+key cannot be demoted.
+
+`system.mesh.tier.update` (`trust`, `promote`, `demote`) is super-admin,
+sensitive and local-only: it needs a verified second factor (the owner's local
+CLI is exempt), an admin is refused, and a remote peer can never drive it over
+`mesh/exec`. The target of a `promote` receives its grant through
+`system.mesh.update --action settings --secure true`, which is an admin,
+remote-callable verb. A grant's issue time tolerates 30 s of clock skew, and a member
 refuses any grant consumed within one grant lifetime (10 min) of its last
 demotion.
 
@@ -357,7 +362,7 @@ Almost always a clock skew issue — the certs have `not_before` set to
 the inviter's wall time. NTP should keep this aligned. Confirm with
 `date -u` on both hosts.
 
-**`system mesh update --action trust` reports "notify-trust dial failed".**
+**`system mesh tier update --action trust` reports "notify-trust dial failed".**
 The trust bit is set locally regardless. Peer will pick up the update
 the next time it succeeds in dialing this host, or when the user re-runs
 retry the trust call after the network heals.

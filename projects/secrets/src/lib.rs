@@ -78,7 +78,7 @@ pub fn ensure_write_allowed(conn: &Connection, name: &str) -> Result<()> {
         Some(_) => anyhow::bail!(
             "secret '{name}' is not owned by this member: an insecure member holds only \
              secrets for plugins installed on it; promote it to secure from a secure member \
-             (`orca system mesh update --action promote --id <this-member>`) \
+             (`orca system mesh tier update --action promote --id <this-member>`) \
              to hold other members' secrets"
         ),
     }

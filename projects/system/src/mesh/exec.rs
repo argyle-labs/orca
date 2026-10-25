@@ -950,7 +950,7 @@ pub(crate) fn verify_promotion_grant<'a>(
     let Some(grant) = grant else {
         anyhow::bail!(
             "a member cannot promote itself to secure; a secure member must run \
-             `orca system mesh update --action promote --id <this-member>`"
+             `orca system mesh tier update --action promote --id <this-member>`"
         );
     };
     if grant.issued_at > now + PROMOTION_CLOCK_SKEW_SECS

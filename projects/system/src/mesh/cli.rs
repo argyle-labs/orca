@@ -262,7 +262,7 @@ pub async fn cmd_mesh_accept(code: &str) -> Result<()> {
     .await
     {
         tracing::warn!(
-            "mesh/notify-trust to {}:{} after accept failed: {e:#} — inviter will see peer_secure=false until next manual `orca system peer update <peer> true`",
+            "mesh/notify-trust to {}:{} after accept failed: {e:#} — inviter will see peer_secure=false until next manual `orca system mesh tier update --action trust --id <inviter-id> --on true`",
             offer.peer_addr,
             offer.peer_port
         );

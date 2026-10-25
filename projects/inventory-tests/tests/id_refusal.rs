@@ -62,7 +62,8 @@ async fn a_hostname_or_blank_sent_as_an_id_is_refused() {
         std::env::set_var("ORCA_DB_PATH", home.path().join("orca.db"));
     }
     let cfg = std::sync::Arc::new(contract::config::Config::load().expect("config"));
-    let ctx = contract::ToolCtx::new(cfg);
+    let mut ctx = contract::ToolCtx::new(cfg);
+    ctx.set_second_factor(true);
 
     let props = uuid_id_props();
     assert!(

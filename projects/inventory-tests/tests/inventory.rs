@@ -141,7 +141,7 @@ fn mesh_tools_present_in_inventory_slice() {
         "mesh.create should be gone (folded into system.join): {names:?}"
     );
     // mesh.update / mesh.delete dissolve into the mesh-membership sub-domain
-    // `system.mesh.*` (settings/trust/sync/recover/cancel_offer on update;
+    // `system.mesh.*` (settings/sync/recover/cancel_offer on update;
     // kick/leave/forget on delete). `system.update` stays daemon self-update.
     assert!(names.contains(&"system.mesh.update"), "{names:?}");
     assert!(names.contains(&"system.mesh.delete"), "{names:?}");

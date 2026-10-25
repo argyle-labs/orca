@@ -514,8 +514,7 @@ fn reject_remote_local_only_action(tool: &str, args: &Value) -> Result<()> {
     let forbidden =
         matches!(
             (tool, action),
-            ("system.mesh.update", Some("recover" | "promote" | "trust"))
-                | ("system.mesh.delete", Some("leave"))
+            ("system.mesh.update", Some("recover")) | ("system.mesh.delete", Some("leave"))
         ) || (tool == "system.mesh.update" && matches!(action, None | Some("settings")) && demote);
     refuse_unless!(
         !forbidden,
@@ -1184,10 +1183,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_tier_remote_promote_trust_and_demote_are_local_only() {
+    async fn two_tier_remote_demote_is_local_only() {
         for args in [
-            serde_json::json!({ "action": "promote", "id": "019e7105-0000-7000-8000-0000000abc0d" }),
-            serde_json::json!({ "action": "trust", "id": "019e7105-0000-7000-8000-0000000abc0d", "on": true }),
             serde_json::json!({ "action": "settings", "secure": false }),
             serde_json::json!({ "secure": false }),
         ] {

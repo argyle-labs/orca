@@ -110,7 +110,11 @@ const SNAKE_CASE_ORIGINS: &[(&str, &str)] = &[
     ),
     (
         "system.mesh.update output",
-        "a previous-release `push_trust` decodes `MeshTrustOutput`",
+        "`sync` carries the replication engine's peer reports, whose wire form stays snake_case",
+    ),
+    (
+        "system.mesh.tier.update output",
+        "carries `MeshTrustOutput`, whose mesh wire form stays snake_case",
     ),
     (
         "system.health output",
@@ -366,7 +370,7 @@ const RC11_DECODED_OUTPUTS: &[(&str, &str)] = &[
     ),
     (
         "system.mesh.update",
-        "`push_trust` decodes the peer's `MeshTrustOutput`; a failure half-applies trust",
+        "`promote` decodes the target's `MeshSettingsOutput`; a failure strands the grant",
     ),
     (
         "system.update",
