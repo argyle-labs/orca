@@ -740,7 +740,7 @@ async fn forward_to_peer(peer: &str, name: &str, mut args: Value, ctx: &ToolCtx)
             peer,
             name,
             args,
-            ctx.caller(),
+            ctx.relay_caller(),
             ctx.correlation_id().map(str::to_string),
         )
         .await?;

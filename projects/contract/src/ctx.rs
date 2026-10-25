@@ -101,9 +101,12 @@ impl ToolCtx {
     }
 
     pub fn relay_caller(&self) -> Option<crate::CallerIdentity> {
-        self.verified_caller
-            .clone()
-            .or_else(|| self.local_transport.then(|| self.auth.clone()).flatten())
+        self.verified_caller.clone().or_else(|| {
+            self.service::<crate::mesh_relay::RelayingPeer>()
+                .is_err()
+                .then(|| self.auth.clone())
+                .flatten()
+        })
     }
 
     /// Set the target peer in-place. Called by the CLI dispatcher when

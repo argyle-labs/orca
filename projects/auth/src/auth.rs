@@ -291,7 +291,7 @@ async fn auth_token_create(
     // requests resolve to a real user (S4 of [[project-remote-exec-full-fix]]).
     // The bootstrap path (first token, no auth yet) has no caller → user_id
     // is NULL and that token authenticates only locally.
-    let caller_user_id = ctx.caller().map(|c| c.user_id);
+    let caller_user_id = ctx.relay_caller().map(|c| c.user_id);
     let conn = db::open_default()?;
     crate::api_tokens::insert(
         &conn,

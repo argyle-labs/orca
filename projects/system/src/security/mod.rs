@@ -180,12 +180,7 @@ pub struct SecurityFindingsDetailArgs {
 }
 
 /// One security finding by unit, scanner, CVE/check id and package.
-#[orca_tool(
-    domain = "security.findings",
-    verb = "detail",
-    role = "admin",
-    remote_admin = true
-)]
+#[orca_tool(domain = "security.findings", verb = "detail", role = "admin")]
 async fn security_findings_detail(
     args: SecurityFindingsDetailArgs,
     _ctx: &contract::ToolCtx,

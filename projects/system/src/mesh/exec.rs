@@ -2136,6 +2136,23 @@ mod tests {
         .await;
     }
 
+    #[serial_test::serial(env)]
+    #[tokio::test]
+    async fn a_demoted_host_cannot_produce_a_ca_holder_proof() {
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::mesh::pin_home(home.path());
+        let tmp = tmp_db();
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let pki = pki_dir();
+            utils::pki::init_mesh_ca(&pki, "founder").unwrap();
+            assert!(ca_holder_proof(&pki, "me", "n").is_some());
+            set_secure_at(&pki, false, || async { true }).await.unwrap();
+            assert!(ca_holder_proof(&pki, "me", "n").is_none());
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn ping_unknown_peer_returns_no_such_peer_without_dialing() {
         let tmp = tmp_db();

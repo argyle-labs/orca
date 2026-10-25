@@ -776,8 +776,7 @@ pub struct BackupCheckOutput {
     domain = "backup",
     verb = "check",
     data_mutation = true,
-    role = "admin",
-    remote_admin = true
+    role = "admin"
 )]
 async fn backup_check(_args: BackupCheckArgs, ctx: &ToolCtx) -> anyhow::Result<BackupCheckOutput> {
     let collisions = refresh_and_check_collisions(ctx).await?;

@@ -461,4 +461,46 @@ mod tests {
             assert!(crate::scheduler::ownerless_reason(&save("local", &local)).is_none());
         });
     }
+
+    #[test]
+    fn a_cleared_schedule_edited_over_the_mesh_without_a_ca_proof_never_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::host_identity::init(dir.path()).ok();
+        db::with_thread_db_path(&dir.path().join("cfg.db"), || {
+            let conn = db::open_default().unwrap();
+            identities::users::insert(&conn, "u", "u", "x", "admin", "2026-01-01T00:00:00Z")
+                .unwrap();
+            drop(conn);
+            let save = |json: &str, ctx: &contract::ToolCtx| {
+                run(config_set(
+                    ConfigSetArgs {
+                        noun: "schedule".into(),
+                        name: "nightly".into(),
+                        json: json.into(),
+                        host: None,
+                    },
+                    ctx,
+                ))
+                .unwrap();
+                let conn = db::open_default().unwrap();
+                db::config_store::get(&conn, "schedule", "nightly")
+                    .unwrap()
+                    .unwrap()
+            };
+            let mut local = test_ctx(dir.path());
+            local.set_verified_caller(Some(caller("admin")));
+            let cleared = save(r#"{"job":"system.update","cron":"@daily"}"#, &local);
+            assert!(crate::scheduler::ownerless_reason(&cleared).is_none());
+
+            let mut forged = test_ctx(dir.path());
+            forged.set_verified_caller(Some(caller("admin")));
+            forged.register_service(crate::mesh::RelayingPeer("peer-a".into()));
+            let edited = save(r#"{"job":"system.update","cron":"@hourly"}"#, &forged);
+            assert!(
+                crate::scheduler::ownerless_reason(&edited)
+                    .unwrap_or_default()
+                    .contains("CA proof")
+            );
+        });
+    }
 }

@@ -749,7 +749,7 @@ async fn exec_detail_at(
             peer,
             <ContainerDetail as contract::OrcaToolDef>::NAME,
             payload,
-            ctx.caller(),
+            ctx.relay_caller(),
             ctx.correlation_id().map(str::to_string),
         )
         .await?;
@@ -818,6 +818,65 @@ async fn container_create(
 
 #[cfg(test)]
 mod tests {
+    struct Recording(std::sync::Mutex<Vec<Option<String>>>);
+
+    #[async_trait::async_trait]
+    impl contract::RemoteExec for Recording {
+        #[allow(clippy::disallowed_types)]
+        async fn exec(
+            &self,
+            _peer: &str,
+            _tool: &str,
+            _args: serde_json::Value,
+            caller: Option<contract::CallerIdentity>,
+            _correlation_id: Option<String>,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.0.lock().unwrap().push(caller.map(|c| c.username));
+            anyhow::bail!("recorded")
+        }
+    }
+
+    fn relayed_ctx(rec: std::sync::Arc<Recording>) -> contract::ToolCtx {
+        let host = contract::CallerIdentity {
+            user_id: "u-host".into(),
+            username: "host_admin".into(),
+            role: "admin".into(),
+            can_mutate: true,
+        };
+        let mut ctx = contract::ToolCtx::new(std::sync::Arc::new(
+            contract::config::Config::load().unwrap(),
+        ))
+        .with_auth(host);
+        ctx.set_verified_caller(Some(contract::CallerIdentity {
+            user_id: "u-alice".into(),
+            username: "alice".into(),
+            role: "member".into(),
+            can_mutate: false,
+        }));
+        ctx.register_service::<std::sync::Arc<dyn contract::RemoteExec>>(rec);
+        ctx
+    }
+
+    #[tokio::test]
+    async fn container_relays_forward_the_verified_caller_not_the_host_operator() {
+        let rec = std::sync::Arc::new(Recording(Default::default()));
+        let ctx = relayed_ctx(rec.clone());
+        let detail: ContainerDetailArgs =
+            serde_json::from_value(serde_json::json!({ "id": "c1" })).unwrap();
+        assert!(exec_detail_at("peer-a", detail, &ctx).await.is_err());
+        let update: crate::reconciler::ContainerUpdateArgs =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(
+            crate::reconciler::tell_owner_update("peer-a", &update, &ctx)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            *rec.0.lock().unwrap(),
+            vec![Some("alice".to_string()), Some("alice".to_string())]
+        );
+    }
+
     use super::*;
     use derive::orca_async;
 

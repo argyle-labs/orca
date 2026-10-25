@@ -68,7 +68,7 @@ where
             peer,
             D::NAME,
             payload,
-            ctx.caller(),
+            ctx.relay_caller(),
             ctx.correlation_id().map(str::to_string),
         )
         .await?;
@@ -274,5 +274,66 @@ mod tests {
             "the error must name the system: {:?}",
             out.system_errors
         );
+    }
+
+    struct Recording(Mutex<Vec<Option<String>>>);
+
+    #[async_trait::async_trait]
+    impl RemoteExec for Recording {
+        #[allow(clippy::disallowed_types)]
+        async fn exec(
+            &self,
+            _peer: &str,
+            _tool: &str,
+            _args: serde_json::Value,
+            caller: Option<crate::CallerIdentity>,
+            _correlation_id: Option<String>,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.0.lock().unwrap().push(caller.map(|c| c.username));
+            Ok(serde_json::Value::Null)
+        }
+    }
+
+    struct Probe;
+
+    impl crate::OrcaToolDef for Probe {
+        const NAME: &'static str = "probe.detail";
+        const DESCRIPTION: &'static str = "";
+        type Args = ();
+        type Output = ();
+    }
+
+    #[tokio::test]
+    async fn exec_at_forwards_the_verified_caller_not_the_host_operator() {
+        let rec = Arc::new(Recording(Mutex::new(Vec::new())));
+        let mut ctx = ToolCtx::new(cfg()).with_auth(crate::CallerIdentity {
+            user_id: "u-host".into(),
+            username: "host_admin".into(),
+            role: "admin".into(),
+            can_mutate: true,
+        });
+        ctx.set_verified_caller(Some(crate::CallerIdentity {
+            user_id: "u-alice".into(),
+            username: "alice".into(),
+            role: "member".into(),
+            can_mutate: false,
+        }));
+        ctx.register_service::<Arc<dyn RemoteExec>>(rec.clone());
+        exec_at::<Probe>("peer-a", &(), &ctx).await.unwrap();
+        assert_eq!(*rec.0.lock().unwrap(), vec![Some("alice".to_string())]);
+
+        let bare = {
+            let mut c = ToolCtx::new(cfg()).with_auth(crate::CallerIdentity {
+                user_id: "u-host".into(),
+                username: "host_admin".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            });
+            c.register_service::<Arc<dyn RemoteExec>>(rec.clone());
+            c.register_service(crate::mesh_relay::RelayingPeer("peer-b".into()));
+            c
+        };
+        exec_at::<Probe>("peer-a", &(), &bare).await.unwrap();
+        assert_eq!(rec.0.lock().unwrap().last(), Some(&None));
     }
 }

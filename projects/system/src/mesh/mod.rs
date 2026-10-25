@@ -1350,15 +1350,7 @@ pub struct MeshUpdateArgs {
     pub token: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-pub struct RelayingPeer(pub String);
-
-#[derive(Clone, Debug)]
-pub struct CaProven;
-
-pub fn custody_cleared(ctx: &contract::ToolCtx) -> bool {
-    ctx.service::<RelayingPeer>().is_err() || ctx.service::<CaProven>().is_ok()
-}
+pub use contract::mesh_relay::{CaProven, RelayingPeer, custody_cleared};
 
 /// Single-use promotion grant signed by the mesh CA over
 /// `<target>:<issued_at>:<expires_at>:<nonce>`.

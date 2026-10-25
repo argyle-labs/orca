@@ -54,6 +54,7 @@ orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 testing = []
 
 [dev-dependencies]
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
 db = { workspace = true, default-features = true, features = ["test-util"] }

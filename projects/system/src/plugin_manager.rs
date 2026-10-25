@@ -163,6 +163,14 @@ fn find_catalog_entry(
         })
 }
 
+fn catalog_repo_url(catalog: &[CatalogEntry], name: &str) -> Result<String> {
+    catalog
+        .iter()
+        .find(|e| e.name == name)
+        .map(|e| e.repo_url.clone())
+        .ok_or_else(|| anyhow::anyhow!("plugin '{name}' is not in this host's plugin catalog"))
+}
+
 // ── Install dir ──────────────────────────────────────────────────────────────
 
 /// Absolute path to the plugin install dir, `orca_home()/plugins/`. `None` only
@@ -1477,8 +1485,7 @@ pub struct PluginServeAssetArgs {
     /// Plugin name (also its `target_software` and release-asset prefix).
     #[arg(long)]
     pub name: String,
-    /// The plugin repo web URL (catalog `repoUrl`), e.g.
-    /// `https://github.com/argyle-labs/sonarr`.
+    /// Ignored: the holder resolves the repo from its own catalog by `name`.
     #[arg(long)]
     pub repo_url: String,
     /// Rust target triple of the REQUESTER (e.g. `x86_64-unknown-linux-musl`).
@@ -1520,9 +1527,10 @@ async fn plugin_serve_asset(
     args: PluginServeAssetArgs,
     _ctx: &ToolCtx,
 ) -> Result<PluginServeAssetOutput> {
+    let repo_url = catalog_repo_url(&catalog_resolved().await, &args.name)?;
     let fetched = crate::plugin_fetch::fetch_for_target(
         &args.name,
-        &args.repo_url,
+        &repo_url,
         args.version.as_deref(),
         args.prerelease,
         &args.target,
@@ -3168,6 +3176,44 @@ mod tests {
         assert!(find_catalog_entry(vec![entry("other", "available")], "nut", false).is_none());
         assert!(find_catalog_entry(Vec::new(), "nut", false).is_some());
         assert!(find_catalog_entry(Vec::new(), "../nut", true).is_none());
+    }
+
+    #[test]
+    fn serve_asset_repo_comes_from_the_catalog_by_name() {
+        let catalog = vec![entry("sonarr", "available")];
+        assert_eq!(
+            catalog_repo_url(&catalog, "sonarr").unwrap(),
+            "https://github.com/argyle-labs/sonarr"
+        );
+        assert!(catalog_repo_url(&catalog, "evil").is_err());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn serve_asset_ignores_a_caller_supplied_repo() {
+        let _env = crate::test_env::snapshot();
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = guard_ctx(&tmp);
+        seed_catalog(vec![entry("sonarr", "available")]);
+        let Err(err) = plugin_serve_asset(
+            PluginServeAssetArgs {
+                name: "evil".into(),
+                repo_url: "https://attacker.example/evil".into(),
+                target: "x86_64-unknown-linux-musl".into(),
+                version: None,
+                prerelease: false,
+            },
+            &ctx,
+        )
+        .await
+        else {
+            panic!("serve_asset fetched a repo outside the catalog");
+        };
+        assert!(
+            err.to_string()
+                .contains("not in this host's plugin catalog"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
