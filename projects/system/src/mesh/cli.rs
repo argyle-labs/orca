@@ -734,6 +734,21 @@ pub async fn peer_has_ca_key(peer: &pdb::PeerRow) -> Result<bool> {
         .unwrap_or(false))
 }
 
+pub(crate) async fn peer_ca_holder_reply(
+    peer: &pdb::PeerRow,
+    nonce: &str,
+) -> Result<crate::mesh::exec::CaHolderReply> {
+    let reply = call_peer(
+        &peer.peer_id,
+        &peer.peer_addr,
+        peer.peer_port,
+        "mesh/has-ca-key",
+        serde_json::json!({ "nonce": nonce }),
+    )
+    .await?;
+    Ok(serde_json::from_value(reply)?)
+}
+
 async fn replicate_ca_key_if_needed(peer: &pdb::PeerRow) -> Result<()> {
     let pki_d = pki_dir();
     let i_have_key = utils::pki::has_mesh_ca_key(&pki_d);

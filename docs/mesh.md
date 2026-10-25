@@ -152,9 +152,16 @@ key cannot be demoted. `promote`, `trust`, and demotion (`settings` with
 refuses any grant consumed within one grant lifetime (10 min) of its last
 demotion.
 
-A `mesh/exec` caller token signed by a peer that is not mutually secure with
-the recipient acts with at most the `user` role, whatever role the named user
-holds. Rotating the mesh CA
+A `mesh/exec` caller token acts with at most the `user` role, whatever role
+the named user holds, unless the signing peer is mutually trusted with the
+recipient AND proves it is a secure member by signing the token nonce with the
+mesh CA key.
+
+`promote` requires mutual trust between the two members to be set first
+(`trust --on true` run locally on each side). A demotion or the post-startup
+CA-key purge counts another member as a CA holder only when it signs a fresh
+nonce with the mesh CA key; a bare "has key" reply is not enough. A grant must
+be relayed by the secure member that issued it. Rotating the mesh CA
 invalidates every grant still in flight, since grants are verified against the
 current CA cert; re-run `promote` after a rotation.
 `orca system join --action init` makes the first host secure.

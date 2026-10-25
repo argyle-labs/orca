@@ -2543,7 +2543,6 @@ pub fn reconcile_mesh_leaf_identity(
 pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     let expected = crate::host_identity::machine_id().to_string();
     let conn = ::db::open_default()?;
-    purge_ca_keys_if_insecure(pki_dir, &conn)?;
     let outcome = reconcile_mesh_leaf_identity(pki_dir, &expected, &conn)?;
     Ok(!matches!(
         outcome,
@@ -2551,20 +2550,24 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     ))
 }
 
-pub(crate) fn purge_ca_keys_if_insecure(
+pub(crate) fn ca_keys_need_purge(
     pki_dir: &std::path::Path,
     conn: &rusqlite::Connection,
 ) -> Result<bool> {
-    if db::mesh::get_secure(conn)? || !utils::pki::has_mesh_ca_key(pki_dir) {
+    Ok(!db::mesh::get_secure(conn)? && utils::pki::has_mesh_ca_key(pki_dir))
+}
+
+pub(crate) fn purge_ca_keys_if_insecure(
+    pki_dir: &std::path::Path,
+    conn: &rusqlite::Connection,
+    holder_proved: bool,
+) -> Result<bool> {
+    if !ca_keys_need_purge(pki_dir, conn)? {
         return Ok(false);
     }
-    let holders = db::mesh::list_peers(conn)?
-        .iter()
-        .filter(|p| p.local_secure && p.peer_secure)
-        .count();
-    if holders == 0 {
+    if !holder_proved {
         tracing::warn!(
-            "[mesh] insecure member holds the mesh CA key with no mutually secure peer; \
+            "[mesh] insecure member holds the mesh CA key and no peer proved it holds one; \
              keeping it so the mesh CA is not lost — promote a member, then demote this one"
         );
         return Ok(false);
@@ -2668,6 +2671,8 @@ mod exec_wire {
         pub caller_role: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub caller_token: Option<utils::pki::SignedEnvelope>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ca_proof: Option<String>,
         /// End-to-end trace id stamped by the originating REST/SDK request
         /// (or synthesized by the daemon middleware). The recipient sets it
         /// on its per-request ctx + tracing span so a single browser action
@@ -2736,13 +2741,15 @@ pub async fn exec_as(
     caller: Option<contract::CallerIdentity>,
     correlation_id: Option<String>,
 ) -> Result<MeshExecResult> {
-    let (caller_role, caller_token) = match caller {
+    let pki = pki_dir();
+    let (caller_role, caller_token, ca_proof) = match caller {
         Some(id) => {
-            let token =
-                caller_token::mint(&pki_dir(), &id, tool, &args, caller_token::DEFAULT_TTL_SECS)?;
-            (Some(id.role), Some(token))
+            let token = caller_token::mint(&pki, &id, tool, &args, caller_token::DEFAULT_TTL_SECS)?;
+            let nonce = serde_json::from_str::<caller_token::CallerToken>(&token.payload)?.nonce;
+            let proof = exec::ca_holder_proof(&pki, crate::host_identity::machine_id(), &nonce);
+            (Some(id.role), Some(token), proof)
         }
-        None => (None, None),
+        None => (None, None, None),
     };
     call_typed(
         host,
@@ -2752,6 +2759,7 @@ pub async fn exec_as(
             args,
             caller_role,
             caller_token,
+            ca_proof,
             correlation_id,
         }),
         Duration::from_secs(120),
@@ -5246,12 +5254,30 @@ mod handler_dispatch_tests {
             assert!(utils::pki::has_mesh_ca_key(pki.path()));
             db::pool::with_pooled_or_open(|c| db::mesh::set_secure(c, true)).unwrap();
             assert!(
-                exec::set_secure_at(pki.path(), false, false).is_err(),
+                exec::set_secure_at(pki.path(), false, || async { false })
+                    .await
+                    .is_err(),
                 "the last secure CA holder cannot be demoted"
             );
             assert!(utils::pki::has_mesh_ca_key(pki.path()));
             assert!(exec::get_secure().unwrap());
-            exec::set_secure_at(pki.path(), false, true).unwrap();
+            let calls = std::cell::Cell::new(0);
+            let vanishing = || {
+                calls.set(calls.get() + 1);
+                let first = calls.get() == 1;
+                async move { first }
+            };
+            assert!(
+                exec::set_secure_at(pki.path(), false, vanishing)
+                    .await
+                    .is_err(),
+                "a holder that vanishes mid-demotion rolls the tier back"
+            );
+            assert!(exec::get_secure().unwrap());
+            assert!(utils::pki::has_mesh_ca_key(pki.path()));
+            exec::set_secure_at(pki.path(), false, || async { true })
+                .await
+                .unwrap();
             assert!(!exec::get_secure().unwrap());
             assert!(!utils::pki::has_mesh_ca_key(pki.path()));
             assert!(utils::pki::mesh_ca_cert_path(pki.path()).exists());
@@ -5266,17 +5292,14 @@ mod handler_dispatch_tests {
         let pki = tempfile::tempdir().unwrap();
         utils::pki::init_mesh_ca(pki.path(), "founder").unwrap();
         db::mesh::set_secure(&conn, true).unwrap();
-        assert!(!purge_ca_keys_if_insecure(pki.path(), &conn).unwrap());
+        assert!(!purge_ca_keys_if_insecure(pki.path(), &conn, true).unwrap());
         db::mesh::set_secure(&conn, false).unwrap();
-        assert!(!purge_ca_keys_if_insecure(pki.path(), &conn).unwrap());
+        assert!(!purge_ca_keys_if_insecure(pki.path(), &conn, false).unwrap());
         assert!(
             utils::pki::has_mesh_ca_key(pki.path()),
-            "kept while no mutually secure peer could hold the CA"
+            "kept until a peer proves it holds the CA"
         );
-        const PEER: &str = "019e7105-0000-7000-8000-0000000abc0e";
-        db::mesh::upsert_peer(&conn, PEER, "hp", "127.0.0.1", 1, Some("fp-p"), "").unwrap();
-        db::mesh::set_trust(&conn, PEER, Some(true), Some(true)).unwrap();
-        assert!(purge_ca_keys_if_insecure(pki.path(), &conn).unwrap());
+        assert!(purge_ca_keys_if_insecure(pki.path(), &conn, true).unwrap());
         assert!(!utils::pki::has_mesh_ca_key(pki.path()));
     }
 

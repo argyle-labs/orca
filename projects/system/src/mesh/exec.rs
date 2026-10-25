@@ -732,35 +732,113 @@ pub fn get_secure() -> Result<bool> {
 }
 
 pub async fn set_secure(on: bool) -> Result<bool> {
-    let pki = pki_dir();
-    let another_holder = on || !utils::pki::has_mesh_ca_key(&pki) || another_ca_holder().await;
-    set_secure_at(&pki, on, another_holder)
+    set_secure_at(&pki_dir(), on, another_ca_holder).await
+}
+
+pub(crate) fn ca_holder_message(binding: &str, nonce: &str) -> Vec<u8> {
+    format!("orca-mesh-ca-holder:{binding}:{nonce}").into_bytes()
+}
+
+pub(crate) fn ca_holder_proof(pki: &std::path::Path, binding: &str, nonce: &str) -> Option<String> {
+    if nonce.is_empty() || !get_secure().unwrap_or(false) || !utils::pki::has_mesh_ca_key(pki) {
+        return None;
+    }
+    utils::pki::sign_with_mesh_ca(pki, &ca_holder_message(binding, nonce)).ok()
+}
+
+pub(crate) fn proves_ca_possession(
+    pki: &std::path::Path,
+    binding: &str,
+    nonce: &str,
+    proof: Option<&str>,
+) -> bool {
+    let (Some(proof), Ok(ca_pem)) = (
+        proof,
+        std::fs::read_to_string(utils::pki::mesh_ca_cert_path(pki)),
+    ) else {
+        return false;
+    };
+    !nonce.is_empty()
+        && utils::pki::verify_mesh_ca_signature(&ca_pem, &ca_holder_message(binding, nonce), proof)
+            .is_ok()
 }
 
 async fn another_ca_holder() -> bool {
+    let pki = pki_dir();
     let Ok(peers) = db::pool::with_pooled_or_open(pdb::list_peers) else {
         return false;
     };
     for p in peers.iter().filter(|p| p.local_secure && p.peer_secure) {
-        if crate::mesh::cli::peer_has_ca_key(p).await.unwrap_or(false) {
+        let nonce = utils::id::new();
+        if let Ok(reply) = crate::mesh::cli::peer_ca_holder_reply(p, &nonce).await
+            && reply_proves_ca_possession(&pki, &p.peer_id, &nonce, &reply)
+        {
             return true;
         }
     }
     false
 }
 
-pub(crate) fn set_secure_at(pki: &std::path::Path, on: bool, another_holder: bool) -> Result<bool> {
-    if !on && utils::pki::has_mesh_ca_key(pki) && !another_holder {
-        anyhow::bail!(
+pub(crate) fn reply_proves_ca_possession(
+    pki: &std::path::Path,
+    peer_id: &str,
+    nonce: &str,
+    reply: &CaHolderReply,
+) -> bool {
+    proves_ca_possession(pki, peer_id, nonce, reply.proof.as_deref())
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct CaHolderReply {
+    #[serde(default)]
+    pub(crate) proof: Option<String>,
+}
+
+pub(crate) async fn set_secure_at<F, Fut>(
+    pki: &std::path::Path,
+    on: bool,
+    mut another_holder: F,
+) -> Result<bool>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    if on || !utils::pki::has_mesh_ca_key(pki) {
+        db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, on))?;
+        if !on {
+            utils::pki::remove_mesh_ca_keys(pki)?;
+        }
+        return Ok(on);
+    }
+    let refused = || {
+        anyhow::anyhow!(
             "demotion refused: this is the last secure member holding the mesh CA key; \
              promote another member first"
-        );
+        )
+    };
+    if !another_holder().await {
+        return Err(refused());
     }
-    db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, on))?;
-    if !on {
-        utils::pki::remove_mesh_ca_keys(pki)?;
+    db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, false))?;
+    if !another_holder().await {
+        db::pool::with_pooled_or_open(|conn| pdb::set_secure(conn, true))?;
+        return Err(refused());
     }
-    Ok(on)
+    utils::pki::remove_mesh_ca_keys(pki)?;
+    Ok(false)
+}
+
+pub async fn purge_insecure_ca_keys() {
+    let pki = pki_dir();
+    let Ok(conn) = db::open_default() else {
+        return;
+    };
+    if crate::mesh::ca_keys_need_purge(&pki, &conn).unwrap_or(false) {
+        let proved = another_ca_holder().await;
+        if let Err(e) = crate::mesh::purge_ca_keys_if_insecure(&pki, &conn, proved) {
+            tracing::warn!("[mesh] insecure CA key purge failed: {e:#}");
+        }
+    }
 }
 
 pub(crate) const PROMOTION_GRANT_TTL_SECS: i64 = 600;
@@ -846,7 +924,10 @@ pub(crate) fn verify_promotion_grant<'a>(
     grant: Option<&'a crate::mesh::PromotionGrant>,
     now: i64,
 ) -> Result<&'a crate::mesh::PromotionGrant> {
-    if relaying_peer == Some(own_id) {
+    let Some(relaying_peer) = relaying_peer else {
+        anyhow::bail!("promotion to secure refused: a grant must be relayed by the secure member");
+    };
+    if relaying_peer == own_id {
         anyhow::bail!("promotion to secure refused: a member cannot relay its own promotion");
     }
     let Some(grant) = grant else {
