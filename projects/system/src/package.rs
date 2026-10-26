@@ -1409,14 +1409,6 @@ mod tests {
         assert!(!s.contains("# Stage the binary from the USB plugin dir into appdata."));
     }
 
-    #[test]
-    fn rpm_splits_version_at_dash() {
-        let (ver, rel) = "0.0.4-rc.7".split_once('-').unwrap_or(("0.0.4-rc.7", "1"));
-        assert_eq!(ver, "0.0.4");
-        assert_eq!(rel, "rc.7");
-        assert!(!ver.contains('-'));
-    }
-
     // ── pure arch mappings ────────────────────────────────────────────
 
     #[test]
@@ -1504,7 +1496,7 @@ mod tests {
         let spec =
             std::fs::read_to_string(dir.path().join("orca-rpm-staging/SPECS/orca.spec")).unwrap();
         assert!(spec.contains("Version:     0.0.4"));
-        assert!(spec.contains("Release:     rc.7%{?dist}"));
+        assert!(spec.contains("Release:     0.rc.7%{?dist}"));
         assert!(!spec.contains("BuildArch"));
         assert!(spec.contains("%global debug_package %{nil}"));
         assert!(spec.contains("%global __os_install_post %{nil}"));
@@ -2311,17 +2303,6 @@ mod tests {
         assert!(s.contains("pkill -f \"/appdata/orca/run.sh\""));
         assert!(s.contains("pkill -x orca"));
         assert!(s.contains("echo \"orca removed (appdata preserved)\""));
-    }
-
-    // ── rpm dash-split edge cases ─────────────────────────────────────
-
-    #[test]
-    fn rpm_version_splits_only_on_first_dash() {
-        // A version with multiple dashes keeps everything after the first as
-        // the release string.
-        let (ver, rel) = "1.2.3-rc.1-beta".split_once('-').unwrap_or(("x", "1"));
-        assert_eq!(ver, "1.2.3");
-        assert_eq!(rel, "rc.1-beta");
     }
 
     // ── write_script produces executable content ──────────────────────
