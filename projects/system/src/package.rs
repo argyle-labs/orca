@@ -1258,11 +1258,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pkgbuild_version_replaces_dash() {
+    fn pkgbuild_version_is_normalised() {
         let dir = tempfile::tempdir().unwrap();
         build_pkgbuild("0.0.4-rc.7", "x86_64", dir.path()).unwrap();
         let s = std::fs::read_to_string(dir.path().join("PKGBUILD")).unwrap();
-        assert!(s.contains("pkgver=0.0.4.rc.7"), "pkgver must use dots");
+        assert!(
+            s.contains("pkgver=0.0.4rc7"),
+            "pkgver sorts before the release"
+        );
         assert!(
             !s.contains("pkgver=0.0.4-rc.7"),
             "pkgver must not contain dashes"
@@ -1526,7 +1529,7 @@ mod tests {
     // ── apk build ─────────────────────────────────────────────────────
 
     #[test]
-    fn apk_build_writes_apkbuild_with_underscored_version_and_checksum() {
+    fn apk_build_writes_apkbuild_with_suffixed_version_and_checksum() {
         if utils::path::which("abuild").is_some() {
             return;
         }
@@ -1536,8 +1539,8 @@ mod tests {
         let apkbuild =
             std::fs::read_to_string(dir.path().join("orca-apk-staging/APKBUILD")).unwrap();
         assert!(
-            apkbuild.contains("pkgver=0.0.4_rc.7"),
-            "dashes → underscores"
+            apkbuild.contains("pkgver=0.0.4_rc7"),
+            "pre-release uses the apk _rcN suffix"
         );
         assert!(apkbuild.contains("arch=\"aarch64\""));
         let expected = sha512_hex(&bin).unwrap();
