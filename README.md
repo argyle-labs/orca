@@ -81,10 +81,11 @@ enables the user-systemd session (pass `--admin-pubkey "<ssh key>"`). The
 channel marker (`stable` / `rc`) is written to `~/.orca/channel` and drives
 `orca update`.
 
-The daemon itself never runs as root. Root work goes through a scoped sudoers
-grant for the root-owned helper `/usr/local/libexec/orca/orca`. If that helper
-is missing, privileged ops fail outright; run `sudo orca identity privilege
-repair`. Every privileged call has a timeout, `ORCA_PRIVILEGED_REFUSE` disables
+The daemon itself never runs as root. On Linux, root work goes through a scoped
+sudoers grant for the root-owned helper `/usr/local/libexec/orca/orca`. If that
+helper is missing, privileged ops fail outright; run `sudo orca identity
+privilege repair`. Privileged ops are Linux-only; on macOS they fail with a
+clear error. Every privileged call has a timeout, `ORCA_PRIVILEGED_REFUSE` disables
 them all, and test builds can never reach them. See
 [the install runbook](docs/install-runbook.md#privileged-helper).
 

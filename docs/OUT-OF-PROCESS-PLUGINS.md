@@ -173,8 +173,9 @@ it calls `plugin_toolkit::privileged::apply(plugin, op, payload)`, which runs
 supervisor only when that helper is installed (`sudo orca identity privilege
 repair` installs it). The call goes through orca's one privileged seam
 (`utils::privileged`), so it gets the same guarantees as core: the program must
-be an absolute, root-owned path that no group or other user can write, the
-caller waits at most 31 minutes, and it refuses when `ORCA_PRIVILEGED_REFUSE` is
+be an absolute, root-owned real file (no symlinks) whose parent directories no
+group or other user can write, it is Linux-only, the caller waits at most 31
+minutes (SIGTERM, then SIGKILL after 10 s), and it refuses when `ORCA_PRIVILEGED_REFUSE` is
 set or inside a test harness. The toolkit's `lxc_exec`/`lxc_push` helpers and
 the `pct`/`docker` restarts in `mount_recover` follow the same rules. In tests,
 inject a fake with `utils::privileged::testing::with_exec` instead of running

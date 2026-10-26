@@ -192,7 +192,7 @@ fn home_dir_of(user: &str) -> Result<String> {
 }
 
 fn chown_recursive(path: &std::path::Path, user: &str) -> Result<()> {
-    let status = Command::new("chown")
+    let status = utils::privileged::host_command_sync("chown")?
         .args(["-R", user])
         .arg(path)
         .status()?;
@@ -287,12 +287,13 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     println!("{} wrote {}", "✓".green(), plist_path);
 
     // Remove any existing registration before bootstrapping; ignore failure when not loaded
-    _ = Command::new("launchctl")
-        .args(["bootout", &domain, &plist_path])
-        .stderr(std::process::Stdio::null())
-        .status();
+    _ = utils::privileged::host_command_sync("launchctl").map(|mut c| {
+        c.args(["bootout", &domain, &plist_path])
+            .stderr(std::process::Stdio::null())
+            .status()
+    });
 
-    let status = Command::new("launchctl")
+    let status = utils::privileged::host_command_sync("launchctl")?
         .args(["bootstrap", &domain, &plist_path])
         .status()?;
 
@@ -318,9 +319,8 @@ pub(crate) fn uninstall_service() -> Result<()> {
     let domain = format!("gui/{uid}");
     let plist_path = format!("{home}/Library/LaunchAgents/{APP_PLIST_LABEL}.plist");
 
-    _ = Command::new("launchctl")
-        .args(["bootout", &domain, &plist_path])
-        .status();
+    _ = utils::privileged::host_command_sync("launchctl")
+        .map(|mut c| c.args(["bootout", &domain, &plist_path]).status());
 
     if std::path::Path::new(&plist_path).exists() {
         std::fs::remove_file(&plist_path)?;
@@ -818,7 +818,7 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
     let path = format!("{SYSTEM_UNIT_DIR}/{APP_SYSTEMD_SERVICE}.service");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
-    let chown = Command::new("chown")
+    let chown = utils::privileged::host_command_sync("chown")?
         .args(["-R", &format!("{user}:{user}"), &logs_dir])
         .status()
         .with_context(|| format!("invoking chown on {logs_dir}"))?;
@@ -845,7 +845,7 @@ fn install_openrc(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
     let path = format!("/etc/init.d/{APP_NAME}");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
-    let chown = Command::new("chown")
+    let chown = utils::privileged::host_command_sync("chown")?
         .args(["-R", &format!("{user}:{user}"), &logs_dir])
         .status()
         .with_context(|| format!("invoking chown on {logs_dir}"))?;
@@ -926,9 +926,10 @@ fn install_unraid(binary: &str, _port: u16, user: &str, _home: &str) -> Result<(
     let appdata_dir = "/mnt/user/appdata/orca";
     let appdata_bin_dir = format!("{appdata_dir}/bin");
     std::fs::create_dir_all(&appdata_bin_dir)?;
-    _ = Command::new("chown")
-        .args(["-R", &format!("{user}:{user}"), appdata_dir])
-        .status();
+    _ = utils::privileged::host_command_sync("chown").map(|mut c| {
+        c.args(["-R", &format!("{user}:{user}"), appdata_dir])
+            .status()
+    });
 
     let persist_bin = format!("{appdata_bin_dir}/orca");
     let already_persisted = std::fs::canonicalize(binary)
@@ -940,9 +941,8 @@ fn install_unraid(binary: &str, _port: u16, user: &str, _home: &str) -> Result<(
         std::fs::copy(binary, &persist_bin)?;
     }
     std::fs::set_permissions(&persist_bin, std::fs::Permissions::from_mode(0o755))?;
-    _ = Command::new("chown")
-        .args([&format!("{user}:{user}"), &persist_bin])
-        .status();
+    _ = utils::privileged::host_command_sync("chown")
+        .map(|mut c| c.args([&format!("{user}:{user}"), &persist_bin]).status());
     println!("{} wrote {}", "✓".green(), persist_bin);
 
     // Ensure the USB plugin dir exists so `plugin install` has a stable

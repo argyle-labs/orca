@@ -105,37 +105,60 @@ goes through one seam, `utils::privileged`, which runs
 The **sudoers allowlist is the real boundary**: it names that one binary and
 those subcommands, nothing else. The checks below only make mistakes fail loud.
 
+- **Linux only.** Privileged ops exist only on Linux. On macOS (and any other
+  OS) every privileged op fails with "… is Linux-only"; orca installs no helper
+  and no sudoers grant there, and `orca identity privilege repair` reports that
+  the drop-in is only managed on Linux.
 - **The helper must be installed.** If `/usr/local/libexec/orca/orca` is
   missing, every privileged op fails with an error naming it. orca never falls
   back to the running binary. Fix: `sudo orca identity privilege repair`.
-- **The helper must be trusted.** The seam elevates only an absolute path
-  that is a real file (not a symlink), and that file and every parent directory
-  must be owned by root and not writable by group or other. `sudo` itself comes
-  from a fixed list (`/usr/bin/sudo`, `/bin/sudo`, `/usr/local/bin/sudo`), never
-  from `PATH`.
-- **Every call has a timeout.** When it fires, the error names the op and the
-  limit. The caller's limit is always longer than the root side's limit for the
-  same op:
+- **The helper must be trusted.** The seam elevates only an absolute path that
+  is a real file, not a symlink, and that file and every parent directory must
+  be owned by root and not writable by group or other. `repair`, the sudoers
+  drift check and the seam all use the same check, so they cannot disagree.
+  `sudo` itself comes from a fixed list (`/usr/bin/sudo`, `/bin/sudo`,
+  `/usr/local/bin/sudo`), never from `PATH`, and must pass the same check.
+- **Unraid** ships `sudo`. Its root filesystem lives in RAM and is rebuilt at
+  every boot, so orca keeps the helper and the drop-in on the
+  flash drive (`/boot/config/plugins/orca/`) and reinstalls both at boot from a
+  marked block in `/boot/config/go`; `repair` rewrites all three.
+- **Every call has a timeout, on both sides.** The root helper stops itself at
+  its own limit; the caller waits a little longer. If the caller's limit fires,
+  it sends SIGTERM (which sudo relays to the helper), waits 10 s, then sends
+  SIGKILL, and the error names the op and the limit. Tests enforce that every
+  root limit is shorter than its caller limit.
 
-  | Op | Limit |
-  |---|---|
-  | `storage-apply` | 5 min |
-  | `cron-apply` | 45 s |
-  | `lxc-exec` | 5 min 30 s (5 min in the guest + 30 s grace) |
-  | `lxc-push` | 10 min |
-  | `plugin-apply` | 31 min (the root side gives the plugin 30 min) |
-  | `plugin-trust-signed` | 30 s |
-  | `unit-migrate` | 2 min |
-  | plugin-loader helper calls | 5 min |
+  | Op | Root side | Caller |
+  |---|---|---|
+  | `storage-apply` | 4 min 30 s | 5 min |
+  | `cron-apply` | 40 s | 45 s |
+  | `lxc-exec` | 5 min | 5 min 30 s |
+  | `lxc-push` | 9 min | 10 min |
+  | `plugin-apply` | 30 min | 31 min |
+  | `plugin-trust-signed` | 25 s | 30 s |
+  | `unit-migrate` | 100 s | 2 min |
+  | plugin-loader helper calls | (per op above) | 5 min |
 
-- **Kill switch.** Setting `ORCA_PRIVILEGED_REFUSE` (any value) makes the seam
-  refuse every privileged op and every host-mutating command (`pct`, `docker`,
-  `umount`). orca's CI sets it.
+- **Kill switch.** Setting `ORCA_PRIVILEGED_REFUSE` (any value) makes orca
+  refuse, without spawning anything:
+  - every privileged op above;
+  - `pct` (`lxc-exec`, `lxc-push` and its symlink probe, mount diagnostics,
+    the toolkit's LXC consumer sweep: list, config, start, reboot, in-guest probe);
+  - `docker` (image prune, the runner-wedge `ps`/`kill`, the capability probe,
+    the schema view's `docker exec`, the toolkit's consumer sweep: `ps`,
+    `inspect`, in-container probe, restart, start, state);
+  - `umount` (forced unmount of a stale mount);
+  - `chown` (service install log dirs, Unraid appdata, the service user's
+    `.ssh`);
+  - `launchctl` (macOS agent install and uninstall).
+
+  orca's CI sets it.
 - **Test harnesses never touch the host.** If `CARGO_TARGET_TMPDIR`, `NEXTEST`
   or `NEXTEST_RUN_ID` is set, or the running binary is a cargo test binary under
-  `target/**/deps/`, the seam refuses and the error names the variable or path.
-  The generated systemd units (`UnsetEnvironment=`) and the launchd agent
-  (`/usr/bin/env -u …`) clear those variables so a daemon never inherits them.
+  `target/**/deps/`, everything the kill switch covers is refused and the error
+  names the variable or path. The generated systemd units
+  (`UnsetEnvironment=`) and the launchd agent (`/usr/bin/env -u …`) clear those
+  variables so a daemon never inherits them.
 - **`test-scope` never ships.** A binary built with the `orca-utils`
   `test-scope` feature refuses to start outside a test harness, an optimized
   build with it fails to compile, and CI and release run

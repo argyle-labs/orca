@@ -209,7 +209,7 @@ fn install_autofs_sudoers(user: &str) -> Result<()> {
 
     refresh_privileged_copy()?;
     let (binary, is_proxmox, cron) = sudoers_inputs()?;
-    check_binary_trust(std::path::Path::new(&binary), owner_mode)?;
+    check_binary_trust(std::path::Path::new(&binary))?;
     let contents = sudoers_contents(user, &binary, is_proxmox, cron);
     install_sudoers_drop_in(&contents)?;
 
@@ -387,35 +387,16 @@ fn require_service_user(user: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", test))]
-fn check_binary_trust(
-    binary: &std::path::Path,
-    meta: impl Fn(&std::path::Path) -> std::io::Result<(u32, u32)>,
-) -> Result<()> {
-    for p in binary.ancestors() {
-        if p.as_os_str().is_empty() {
-            continue;
-        }
-        let (uid, mode) = meta(p).map_err(|e| anyhow::anyhow!("stat {}: {e}", p.display()))?;
-        if uid != 0 || mode & 0o022 != 0 {
-            anyhow::bail!(
-                "refusing a NOPASSWD grant on {}: {} is owned by uid {uid} with mode {:o}, \
-                 so a non-root user could replace it; run `sudo orca identity privilege repair` \
-                 to install the root-owned copy at {}",
-                binary.display(),
-                p.display(),
-                mode & 0o7777,
-                utils::path::PRIVILEGED_BIN
-            );
-        }
-    }
-    Ok(())
-}
-
 #[cfg(target_os = "linux")]
-fn owner_mode(p: &std::path::Path) -> std::io::Result<(u32, u32)> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(p).map(|m| (m.uid(), m.mode()))
+fn check_binary_trust(binary: &std::path::Path) -> Result<()> {
+    utils::privileged::check_trusted(binary).map_err(|e| {
+        anyhow::anyhow!(
+            "refusing a NOPASSWD grant on {}: {e}, so a non-root user could replace it; \
+             run `sudo orca identity privilege repair` to install the root-owned copy at {}",
+            binary.display(),
+            utils::path::PRIVILEGED_BIN
+        )
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -547,7 +528,7 @@ pub(crate) fn sudoers_repair(user: Option<String>, execute: bool) -> Result<Sudo
         anyhow::bail!("must be root to write /etc/sudoers.d");
     }
     refresh_privileged_copy()?;
-    check_binary_trust(std::path::Path::new(&binary), owner_mode)?;
+    check_binary_trust(std::path::Path::new(&binary))?;
     if !plan.up_to_date {
         install_sudoers_drop_in(&plan.rendered)?;
     }
@@ -588,7 +569,7 @@ pub(crate) fn sudoers_drift() -> Vec<SudoersCheck> {
     };
     let mut checks = Vec::new();
     if let Some(granted) = sudoers_granted_binary(&current)
-        && let Err(e) = check_binary_trust(std::path::Path::new(&granted), owner_mode)
+        && let Err(e) = check_binary_trust(std::path::Path::new(&granted))
     {
         checks.push(SudoersCheck::UnsafeBinary {
             user: user.clone(),
@@ -976,7 +957,7 @@ fn install_ssh_key(user: &str, home_dir: &str, pubkey: &str) -> Result<()> {
 
     #[cfg(target_os = "linux")]
     if !user.is_empty() && is_root() {
-        let chown = Command::new("chown")
+        let chown = utils::privileged::host_command_sync("chown")?
             .args(["-R", user])
             .arg(&ssh_dir)
             .status()
@@ -1135,56 +1116,6 @@ mod sudoers_tests {
         }
     }
 
-    fn fake_meta(
-        bad: &'static str,
-        uid: u32,
-        mode: u32,
-    ) -> impl Fn(&std::path::Path) -> std::io::Result<(u32, u32)> {
-        move |p| {
-            if p == std::path::Path::new(bad) {
-                Ok((uid, mode))
-            } else {
-                Ok((0, 0o755))
-            }
-        }
-    }
-
-    #[test]
-    fn binary_trust_requires_root_owned_non_writable_chain() {
-        let bin = std::path::Path::new("/usr/local/bin/orca");
-        assert!(check_binary_trust(bin, fake_meta("/none", 0, 0)).is_ok());
-        let e = check_binary_trust(bin, fake_meta("/usr/local/bin/orca", 1000, 0o755))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            e.contains("/usr/local/bin/orca is owned by uid 1000"),
-            "{e}"
-        );
-        assert!(check_binary_trust(bin, fake_meta("/usr/local", 0, 0o775)).is_err());
-        assert!(check_binary_trust(bin, fake_meta("/", 0, 0o757)).is_err());
-        assert!(check_binary_trust(bin, fake_meta("/usr", 0, 0o1755)).is_ok());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn binary_trust_reads_real_ownership() {
-        use std::os::unix::fs::MetadataExt;
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("orca");
-        std::fs::write(&bin, "").unwrap();
-        let real = |p: &std::path::Path| std::fs::metadata(p).map(|m| (m.uid(), m.mode()));
-        let owned_by_root = std::fs::metadata(&bin).unwrap().uid() == 0;
-        assert_eq!(
-            check_binary_trust(&bin, real).is_ok(),
-            owned_by_root && {
-                dir.path().ancestors().all(|a| {
-                    a.as_os_str().is_empty()
-                        || std::fs::metadata(a).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0)
-                })
-            }
-        );
-    }
-
     #[test]
     fn a_current_drop_in_plans_no_repair() {
         let c = sudoers_contents("orca", "/usr/local/bin/orca", false, false);
@@ -1301,16 +1232,11 @@ mod sudoers_tests {
     }
 
     #[test]
-    fn grants_name_the_privileged_copy_which_passes_binary_trust() {
+    fn grants_name_the_privileged_copy() {
         let c = sudoers_contents("orca", utils::path::PRIVILEGED_BIN, false, false);
         assert_eq!(
             sudoers_granted_binary(&c).as_deref(),
             Some(utils::path::PRIVILEGED_BIN)
-        );
-        let root_dirs = |_: &std::path::Path| Ok((0, 0o755));
-        assert!(
-            check_binary_trust(std::path::Path::new(utils::path::PRIVILEGED_BIN), root_dirs)
-                .is_ok()
         );
     }
 

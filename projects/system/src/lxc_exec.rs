@@ -523,16 +523,16 @@ pub async fn execute_privileged_lxc(op: LxcExecOp) -> LxcExecResult {
     if let Err(e) = validate(&op) {
         return LxcExecResult::refused(e);
     }
-    if let Err(e) = utils::privileged::refuse_host_mutation("pct") {
-        return LxcExecResult::refused(e.to_string());
-    }
+    let mut cmd = match utils::privileged::host_command("pct") {
+        Ok(c) => c,
+        Err(e) => return LxcExecResult::refused(e.to_string()),
+    };
 
     // `pct exec <vmid> -- <argv...>` — the `--` terminates pct's own option
     // parsing so an argv starting with `-` is passed through to the container.
     let mut pct_argv: Vec<String> = vec!["exec".to_string(), op.vmid.to_string(), "--".to_string()];
     pct_argv.extend(op.argv.iter().cloned());
 
-    let mut cmd = Command::new("pct");
     cmd.args(&pct_argv);
     run_capped(cmd, "pct exec", exec_timeout(&op), LXC_EXEC_OUTPUT_CAP).await
 }
@@ -730,7 +730,10 @@ pub async fn run_privileged_lxc_push(op: &LxcPushOp) -> LxcPushResult {
 }
 
 async fn guest_path_is_symlink(vmid: u32, path: &str) -> bool {
-    let probe = Command::new("pct")
+    let Ok(mut cmd) = utils::privileged::host_command("pct") else {
+        return true;
+    };
+    let probe = cmd
         .args([
             "exec",
             &vmid.to_string(),
@@ -767,9 +770,10 @@ pub async fn execute_privileged_lxc_push(op: LxcPushOp) -> LxcPushResult {
             op.contents.len()
         ));
     }
-    if let Err(e) = utils::privileged::refuse_host_mutation("pct") {
-        return LxcPushResult::refused(e.to_string());
-    }
+    let mut push = match utils::privileged::host_command("pct") {
+        Ok(c) => c,
+        Err(e) => return LxcPushResult::refused(e.to_string()),
+    };
 
     if guest_path_is_symlink(op.vmid, &op.path).await {
         return LxcPushResult::refused(format!(
@@ -833,7 +837,7 @@ pub async fn execute_privileged_lxc_push(op: LxcPushOp) -> LxcPushResult {
             }
         }
 
-        let child = Command::new("pct")
+        let child = push
             .args(&argv)
             .kill_on_drop(true)
             .stdin(std::process::Stdio::null())

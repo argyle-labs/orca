@@ -43,7 +43,7 @@ const CRONTAB_TIMEOUT: Duration = Duration::from_secs(30);
 /// One budget for a whole op (read, install, read-back, rollback), shorter
 /// than [`HELPER_TIMEOUT`] so the helper always answers before the bridge
 /// gives up on it.
-const OP_DEADLINE: Duration = Duration::from_secs(40);
+const OP_DEADLINE: Duration = utils::privileged::ROOT_CRON_APPLY_TIMEOUT;
 const HELPER_TIMEOUT: Duration = utils::privileged::CRON_APPLY_TIMEOUT;
 /// Raw `crontab`/helper stderr kept in an error.
 const STDERR_SNIPPET_BYTES: usize = 512;

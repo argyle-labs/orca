@@ -1035,6 +1035,9 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
 }
 
 async fn cmd_admin(action: AdminAction) -> Result<()> {
+    if let Some((operation, limit)) = root_deadline(&action) {
+        utils::privileged::arm_root_deadline(operation, limit);
+    }
     match action {
         AdminAction::ResetPassword {
             username,
@@ -1050,6 +1053,19 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::PluginTrustSigned => cmd_admin_plugin_trust_signed(),
         AdminAction::ListUsers => cmd_admin_list_users(),
         AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
+    }
+}
+
+fn root_deadline(action: &AdminAction) -> Option<(&'static str, std::time::Duration)> {
+    use utils::privileged as p;
+    match action {
+        AdminAction::StorageApply => Some(("storage-apply", p::ROOT_STORAGE_APPLY_TIMEOUT)),
+        AdminAction::LxcPush => Some(("lxc-push", p::ROOT_LXC_PUSH_TIMEOUT)),
+        AdminAction::PluginTrustSigned => {
+            Some(("plugin-trust-signed", p::ROOT_PLUGIN_TRUST_TIMEOUT))
+        }
+        AdminAction::UnitMigrate => Some(("unit-migrate", p::ROOT_UNIT_MIGRATE_TIMEOUT)),
+        _ => None,
     }
 }
 
