@@ -646,6 +646,7 @@ fn migrate_legacy_unit(
             if elevate(utils::privileged::PrivilegedCall::helper(
                 "unit-migrate",
                 Vec::new(),
+                utils::privileged::UNIT_MIGRATE_TIMEOUT,
             )) {
                 return Ok(true);
             }

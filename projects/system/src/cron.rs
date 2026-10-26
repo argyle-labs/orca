@@ -44,7 +44,7 @@ const CRONTAB_TIMEOUT: Duration = Duration::from_secs(30);
 /// than [`HELPER_TIMEOUT`] so the helper always answers before the bridge
 /// gives up on it.
 const OP_DEADLINE: Duration = Duration::from_secs(40);
-const HELPER_TIMEOUT: Duration = Duration::from_secs(45);
+const HELPER_TIMEOUT: Duration = utils::privileged::CRON_APPLY_TIMEOUT;
 /// Raw `crontab`/helper stderr kept in an error.
 const STDERR_SNIPPET_BYTES: usize = 512;
 const TERM_GRACE: Duration = Duration::from_secs(3);
@@ -332,8 +332,7 @@ async fn run_privileged_cron(op: &CronOp) -> CronOpResult {
         Ok(v) => v,
         Err(e) => return CronOpResult::refused(format!("serialize op: {e}")),
     };
-    let call = utils::privileged::PrivilegedCall::helper("cron-apply", payload)
-        .with_timeout(HELPER_TIMEOUT);
+    let call = utils::privileged::PrivilegedCall::helper("cron-apply", payload, HELPER_TIMEOUT);
     match utils::privileged::run(call).await {
         Ok(out) if out.success => serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
             CronOpResult::refused(format!(

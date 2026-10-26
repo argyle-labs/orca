@@ -42,6 +42,7 @@ async fn via_orca(orca_bin: &str, payload: &str) -> anyhow::Result<LxcPushResult
     let out = utils::privileged::run(utils::privileged::PrivilegedCall::new(
         [orca_bin, "admin", "lxc-push"],
         payload,
+        utils::privileged::LXC_PUSH_HELPER_TIMEOUT,
     ))
     .await
     .map_err(|e| anyhow::anyhow!("spawn `sudo {orca_bin} admin lxc-push`: {e}"))?;

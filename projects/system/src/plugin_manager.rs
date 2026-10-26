@@ -308,8 +308,11 @@ fn save_signature(dir: &Path, software: &str, minisig: Option<&str>) -> Result<(
 /// signature as root. Installing is the trust decision, so no admin step.
 #[cfg(unix)]
 async fn request_trust(software: &str) -> Result<()> {
-    let call = utils::privileged::PrivilegedCall::helper("plugin-trust-signed", software)
-        .with_timeout(std::time::Duration::from_secs(30));
+    let call = utils::privileged::PrivilegedCall::helper(
+        "plugin-trust-signed",
+        software,
+        utils::privileged::PLUGIN_TRUST_TIMEOUT,
+    );
     let out = utils::privileged::run(call)
         .await
         .context("plugin-trust-signed")?;

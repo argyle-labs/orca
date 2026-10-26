@@ -26,16 +26,11 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::process::Command;
 
-/// In-container work can be slow (`apt-get update && install`), but must stay
-/// bounded so a hung `pct exec` never piles up in D-state and starves the host
-/// watchdog. Five minutes covers a package upgrade with margin.
-const LXC_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
+use utils::privileged::{LXC_EXEC_HELPER_GRACE, LXC_EXEC_TIMEOUT};
 
 const LXC_UPDATE_TIMEOUT: Duration = Duration::from_secs(3600);
 
 pub const LXC_EXEC_OUTPUT_CAP: usize = 1024 * 1024;
-
-const LXC_EXEC_HELPER_GRACE: Duration = Duration::from_secs(30);
 
 /// Commands the seam permits as `argv[0]`, bare or under `COMMAND_DIRS`. Scoped
 /// to the deployment-lifecycle verbs (package upgrade + service restart + a
@@ -498,7 +493,7 @@ pub async fn run_privileged_lxc(op: &LxcExecOp) -> LxcExecResult {
         Err(e) => return LxcExecResult::refused(format!("serialize op: {e}")),
     };
     let limit = exec_timeout(op) + LXC_EXEC_HELPER_GRACE;
-    let call = utils::privileged::PrivilegedCall::helper("lxc-exec", payload).with_timeout(limit);
+    let call = utils::privileged::PrivilegedCall::helper("lxc-exec", payload, limit);
     match utils::privileged::run(call).await {
         Ok(out) if out.success => serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
             LxcExecResult::refused(format!(
@@ -713,7 +708,11 @@ pub async fn run_privileged_lxc_push(op: &LxcPushOp) -> LxcPushResult {
         Ok(v) => v,
         Err(e) => return LxcPushResult::refused(format!("serialize op: {e}")),
     };
-    let call = utils::privileged::PrivilegedCall::helper("lxc-push", payload);
+    let call = utils::privileged::PrivilegedCall::helper(
+        "lxc-push",
+        payload,
+        utils::privileged::LXC_PUSH_HELPER_TIMEOUT,
+    );
     match utils::privileged::run(call).await {
         Ok(out) if out.success => serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
             LxcPushResult::refused(format!(

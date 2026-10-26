@@ -90,6 +90,7 @@ async fn via_orca(orca_bin: &str, payload: &str) -> anyhow::Result<LxcExecResult
     let out = utils::privileged::run(utils::privileged::PrivilegedCall::new(
         [orca_bin, "admin", "lxc-exec"],
         payload,
+        utils::privileged::LXC_EXEC_HELPER_TIMEOUT,
     ))
     .await
     .map_err(|e| anyhow::anyhow!("spawn `sudo {orca_bin} admin lxc-exec`: {e}"))?;
@@ -134,6 +135,7 @@ async fn via_direct_pct(vmid: u32, argv: &[&str]) -> anyhow::Result<LxcExecResul
             .into_iter()
             .chain(argv.iter().copied()),
         Vec::new(),
+        utils::privileged::LXC_EXEC_HELPER_TIMEOUT,
     ))
     .await
     .map_err(|e| anyhow::anyhow!("spawn `sudo pct exec`: {e}"))?;

@@ -6,7 +6,7 @@ use std::time::Duration;
 pub struct PrivilegedCall {
     pub argv: Vec<String>,
     pub stdin: Vec<u8>,
-    pub timeout: Option<Duration>,
+    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -24,8 +24,21 @@ pub trait PrivilegedExec: Send + Sync {
     fn exec(&self, call: PrivilegedCall) -> PrivilegedFuture;
 }
 
+pub const STORAGE_APPLY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub const CRON_APPLY_TIMEOUT: Duration = Duration::from_secs(45);
+/// Bounded so a hung `pct exec` never piles up in D-state and starves the host watchdog.
+pub const LXC_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
+pub const LXC_EXEC_HELPER_GRACE: Duration = Duration::from_secs(30);
+pub const LXC_EXEC_HELPER_TIMEOUT: Duration =
+    Duration::from_secs(LXC_EXEC_TIMEOUT.as_secs() + LXC_EXEC_HELPER_GRACE.as_secs());
+pub const LXC_PUSH_HELPER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub const PLUGIN_TRUST_TIMEOUT: Duration = Duration::from_secs(30);
+pub const PLUGIN_APPLY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+pub const PLUGIN_HELPER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub const UNIT_MIGRATE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+
 impl PrivilegedCall {
-    pub fn new<I, S>(argv: I, stdin: impl Into<Vec<u8>>) -> Self
+    pub fn new<I, S>(argv: I, stdin: impl Into<Vec<u8>>, timeout: Duration) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -33,17 +46,25 @@ impl PrivilegedCall {
         Self {
             argv: argv.into_iter().map(Into::into).collect(),
             stdin: stdin.into(),
-            timeout: None,
+            timeout,
         }
     }
 
-    pub fn helper(subcommand: &str, stdin: impl Into<Vec<u8>>) -> Self {
-        Self::new([crate::path::PRIVILEGED_BIN, "admin", subcommand], stdin)
+    pub fn helper(subcommand: &str, stdin: impl Into<Vec<u8>>, timeout: Duration) -> Self {
+        Self::new(
+            [crate::path::PRIVILEGED_BIN, "admin", subcommand],
+            stdin,
+            timeout,
+        )
     }
 
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
+    fn operation(&self) -> String {
+        match self.argv.as_slice() {
+            [bin, rest @ ..] if bin == crate::path::PRIVILEGED_BIN && !rest.is_empty() => {
+                rest.join(" ")
+            }
+            argv => argv.join(" "),
+        }
     }
 }
 
@@ -57,6 +78,18 @@ const HARNESS_ENVS: [&str; 4] = [
 ];
 
 pub async fn run(call: PrivilegedCall) -> std::io::Result<PrivilegedOutput> {
+    let limit = call.timeout;
+    let operation = call.operation();
+    match tokio::time::timeout(limit, dispatch(call)).await {
+        Ok(out) => out,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("privileged `{operation}` did not finish within {limit:?}"),
+        )),
+    }
+}
+
+async fn dispatch(call: PrivilegedCall) -> std::io::Result<PrivilegedOutput> {
     #[cfg(any(test, feature = "test-scope"))]
     {
         testing::dispatch(call).await
@@ -186,17 +219,7 @@ async fn spawn_sudo(call: PrivilegedCall) -> std::io::Result<PrivilegedOutput> {
         stdin.write_all(&call.stdin).await?;
         stdin.shutdown().await?;
     }
-    let out = match call.timeout {
-        Some(t) => tokio::time::timeout(t, child.wait_with_output())
-            .await
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("privileged helper did not finish within {}s", t.as_secs()),
-                )
-            })??,
-        None => child.wait_with_output().await?,
-    };
+    let out = child.wait_with_output().await?;
     Ok(PrivilegedOutput {
         success: out.status.success(),
         code: out.status.code(),
@@ -274,16 +297,24 @@ mod tests {
 
     #[tokio::test]
     async fn run_without_a_fake_refuses_and_never_spawns_sudo() {
-        let err = run(PrivilegedCall::new(["/bin/true"], Vec::new()))
-            .await
-            .unwrap_err();
+        let err = run(PrivilegedCall::new(
+            ["/bin/true"],
+            Vec::new(),
+            STORAGE_APPLY_TIMEOUT,
+        ))
+        .await
+        .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[tokio::test]
     async fn the_real_sudo_executor_is_a_hard_error_in_test_builds() {
         let err = Sudo
-            .exec(PrivilegedCall::new(["/bin/true"], Vec::new()))
+            .exec(PrivilegedCall::new(
+                ["/bin/true"],
+                Vec::new(),
+                STORAGE_APPLY_TIMEOUT,
+            ))
             .await
             .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
@@ -339,6 +370,37 @@ mod tests {
         assert!(trusted_program(std::path::Path::new("/bin/sh")).is_ok());
     }
 
+    struct Sleeper;
+
+    impl PrivilegedExec for Sleeper {
+        fn exec(&self, _call: PrivilegedCall) -> PrivilegedFuture {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(PrivilegedOutput::default())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_seam_enforces_the_call_timeout_and_names_the_operation() {
+        let started = std::time::Instant::now();
+        let err = with_exec(
+            std::sync::Arc::new(Sleeper),
+            run(PrivilegedCall::helper(
+                "storage-apply",
+                Vec::new(),
+                Duration::from_millis(50),
+            )),
+        )
+        .await
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        let msg = err.to_string();
+        assert!(msg.contains("admin storage-apply"), "{msg}");
+        assert!(msg.contains("within 50ms"), "{msg}");
+    }
+
     #[tokio::test]
     async fn a_scoped_fake_records_the_call() {
         let rec = Recorder::new(PrivilegedOutput {
@@ -348,14 +410,22 @@ mod tests {
         });
         let out = with_exec(
             rec.clone(),
-            run(PrivilegedCall::new(["orca", "admin", "x"], b"in".to_vec())),
+            run(PrivilegedCall::new(
+                ["orca", "admin", "x"],
+                b"in".to_vec(),
+                STORAGE_APPLY_TIMEOUT,
+            )),
         )
         .await
         .unwrap();
         assert_eq!(out.stdout, b"ok");
         assert_eq!(
             rec.calls(),
-            vec![PrivilegedCall::new(["orca", "admin", "x"], b"in".to_vec())]
+            vec![PrivilegedCall::new(
+                ["orca", "admin", "x"],
+                b"in".to_vec(),
+                STORAGE_APPLY_TIMEOUT
+            )]
         );
     }
 }

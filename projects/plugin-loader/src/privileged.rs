@@ -42,14 +42,18 @@ pub fn handle_privileged(
 }
 
 async fn run_helper(helper: &'static str, payload: Vec<u8>) -> Result<HelperOutput> {
-    let out = utils::privileged::run(utils::privileged::PrivilegedCall::helper(helper, payload))
-        .await
-        .map_err(|e| {
-            anyhow!(
-                "run `sudo -n {} admin {helper}`: {e}",
-                utils::path::PRIVILEGED_BIN
-            )
-        })?;
+    let out = utils::privileged::run(utils::privileged::PrivilegedCall::helper(
+        helper,
+        payload,
+        utils::privileged::PLUGIN_HELPER_TIMEOUT,
+    ))
+    .await
+    .map_err(|e| {
+        anyhow!(
+            "run `sudo -n {} admin {helper}`: {e}",
+            utils::path::PRIVILEGED_BIN
+        )
+    })?;
     Ok(HelperOutput {
         success: out.success,
         code: out.code,

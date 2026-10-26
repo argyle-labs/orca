@@ -105,6 +105,7 @@ pub async fn apply<P: Serialize>(plugin: &str, op: &str, payload: Option<&P>) ->
     let out = utils::privileged::run(utils::privileged::PrivilegedCall::new(
         [orca_bin.as_str(), "admin", "plugin-apply"],
         input,
+        utils::privileged::PLUGIN_APPLY_TIMEOUT,
     ))
     .await
     .with_context(|| format!("run `sudo -n {orca_bin} admin plugin-apply`"))?;
