@@ -53,6 +53,7 @@ path = "bin/uniffi-bindgen.rs"
 # direct UniFFI call (see project_mobile_as_standalone_orca.md).
 auth     = { workspace = true }
 system   = { workspace = true }
+utils    = { workspace = true }
 agents   = { workspace = true, default-features = true }
 plugins  = { workspace = true }
 dispatch = { workspace = true, default-features = true }

@@ -203,9 +203,8 @@ pub fn is_newer_full(a: &str, b: &str) -> bool {
 /// "Is `latest` strictly newer than `current` for update-available purposes?"
 ///
 /// Wraps [`is_newer_full`] with one extra step: a dev-build suffix on
-/// `current` (see `build.rs::resolve_version` — `-dev+g<sha>` plus optional
-/// trailing `.dirty`) is stripped so a dirty/uncommitted build of `rc.14`
-/// is not reported as "older than" the released `rc.14`. Without this,
+/// `current` (`-dev+g<sha>`, plus the trailing `.dirty` older peers still
+/// report) is stripped so a dev build of `rc.14` is not reported as "older than" the released `rc.14`. Without this,
 /// list-view (`system.list` row) and detail-view (`system.update`) drift —
 /// one would show no update and the other would falsely show an update on
 /// the same peer.
@@ -383,7 +382,7 @@ mod tests {
 
     #[test]
     fn is_update_available_dirty_current_matches_clean_latest() {
-        // build.rs format: <pkg>-dev+g<sha>[.dirty] — same release as v0.0.14
+        // <pkg>-dev+g<sha>, plus `.dirty` from older peers — same release as v0.0.14
         assert!(!is_update_available("0.0.14-dev+g9409864.dirty", "v0.0.14"));
         assert!(!is_update_available("0.0.14-dev+g9409864", "0.0.14"));
     }

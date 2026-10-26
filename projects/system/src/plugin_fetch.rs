@@ -35,7 +35,6 @@ use crate::update;
 
 /// GitHub REST API version pin (same as `update.rs`).
 const GITHUB_API_VERSION: &str = "2022-11-28";
-const ORCA_VERSION: &str = env!("ORCA_VERSION");
 
 #[derive(Deserialize)]
 struct Release {
@@ -268,7 +267,10 @@ async fn download_public(client: &utils::http::Client, url: &str) -> Result<Vec<
     let resp = client
         .get(url.to_string())
         .header("Accept", "application/octet-stream")
-        .header("User-Agent", format!("orca/{ORCA_VERSION}"))
+        .header(
+            "User-Agent",
+            format!("orca/{}", utils::build_info::version()),
+        )
         .max_body(MAX_ASSET_BYTES)
         .timeout(std::time::Duration::from_secs(300))
         .send_bytes()
@@ -311,7 +313,7 @@ async fn resolve_release(
 ) -> Result<Release> {
     let api = repo_api_base(repo_url)
         .with_context(|| format!("catalog repoUrl is not a github.com URL: {repo_url}"))?;
-    let ua = format!("orca/{ORCA_VERSION}");
+    let ua = format!("orca/{}", utils::build_info::version());
     let get = |url: String| {
         let mut r = client
             .get(url)
@@ -913,7 +915,7 @@ mod tests {
                 .and(path("/asset.bin"))
                 .and(header(
                     "User-Agent",
-                    format!("orca/{ORCA_VERSION}").as_str(),
+                    format!("orca/{}", utils::build_info::version()).as_str(),
                 ))
                 .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec()))
                 .mount(&server)
