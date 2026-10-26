@@ -375,11 +375,9 @@ async fn refresh_via_peer(policy: DialPolicy) -> Result<()> {
     }
 }
 
-/// Every other non-departed peer is a candidate. `local_secure`/`peer_secure`
-/// are secrets-tier trust flags that say nothing about CA custody, so they
-/// only order candidates; the signer (`listener::handle_refresh_cert`)
-/// enforces CA custody and CN identity. `local_secure` peers go first as the
-/// likeliest key holders, then most-recently-seen.
+/// Every other non-departed member is a candidate, most-recently-seen first;
+/// the signer (`listener::handle_refresh_cert`) enforces CA custody and CN
+/// identity.
 async fn refresh_via_peer_mtls(policy: DialPolicy) -> Result<()> {
     let host = crate::host_identity::machine_id().to_string();
     let mut plans: Vec<(pdb::PeerRow, Vec<String>)> = db::pool::with_pooled_or_open(|conn| {
@@ -398,7 +396,7 @@ async fn refresh_via_peer_mtls(policy: DialPolicy) -> Result<()> {
     if plans.is_empty() {
         anyhow::bail!("no peers available to sign a refresh");
     }
-    plans.sort_by_key(|(p, _)| (!p.local_secure, Reverse(p.last_seen_at)));
+    plans.sort_by_key(|(p, _)| Reverse(p.last_seen_at));
     let candidates: Vec<Candidate> = plans
         .iter()
         .flat_map(|(p, targets)| peer_candidates(p, targets, policy.canonical_port))
@@ -406,9 +404,36 @@ async fn refresh_via_peer_mtls(policy: DialPolicy) -> Result<()> {
 
     let pki_d = pki_dir();
     let (csr_client, key_client, csr_server, key_server) = utils::pki::build_refresh_csrs(&host)?;
+    let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
+    let body = crate::mesh::listener::RefreshCsrs {
+        joiner_hostname: host.clone(),
+        csr_client_pem: csr_client,
+        csr_server_pem: csr_server,
+    };
     let fetch = |c: Candidate| {
-        let (host, csr_client, csr_server) = (&host, &csr_client, &csr_server);
-        async move { call_refresh(&c.addr, c.port, host, csr_client, csr_server).await }
+        let (signing, body, host) = (&signing, &body, &host);
+        async move {
+            crate::mesh::clock_skew::with_clock_retry(&c.peer_id, |now| {
+                let params = utils::pki::sign_bound_envelope(
+                    signing,
+                    body,
+                    "mesh/refresh-cert",
+                    host,
+                    &c.peer_id,
+                    &utils::id::new(),
+                    now,
+                    REFRESH_ENVELOPE_TTL_SECS,
+                )
+                .and_then(|envelope| {
+                    let mut params = serde_json::to_value(body)?;
+                    params["envelope"] = serde_json::to_value(&envelope)?;
+                    Ok(params)
+                });
+                let c = c.clone();
+                async move { call_refresh(&c.addr, c.port, params?).await }
+            })
+            .await
+        }
     };
     let install = |client: &str, server: &str| {
         utils::pki::install_refreshed_peer_certs(
@@ -435,15 +460,10 @@ async fn refresh_via_peer_mtls(policy: DialPolicy) -> Result<()> {
 /// dialer so a peer with a stale legacy addr is still reached.
 async fn refresh_via_peer_bootstrap(policy: DialPolicy) -> Result<()> {
     let host = crate::host_identity::machine_id().to_string();
-    // Any non-departed peer with a pinned bootstrap fp is a candidate. We do
-    // NOT require mutual-secure here: a host whose leaf expired has usually
-    // already had its `peer_secure` flag drop across the fleet (peers stop
-    // trusting an unreachable member), so gating on mutual-secure would
-    // exclude the exact recovery case. The signer authorizes us server-side
-    // (known non-departed peer + matching bootstrap fp) and only a CA-key
-    // holder can actually sign — non-holders just return an error and we move
-    // on. Order `local_secure` first (most likely a CA-key holder we trust),
-    // then most-recently-seen.
+    // Any non-departed member with a pinned bootstrap fp is a candidate. The
+    // signer authorizes us server-side (known non-departed peer + matching
+    // bootstrap fp) and only a CA-key holder can actually sign — non-holders
+    // just return an error and we move on.
     let mut plans: Vec<(pdb::PeerRow, Vec<String>)> = db::pool::with_pooled_or_open(|conn| {
         let peers = pdb::list_peers(conn)?;
         Ok(peers
@@ -460,7 +480,7 @@ async fn refresh_via_peer_bootstrap(policy: DialPolicy) -> Result<()> {
     if plans.is_empty() {
         anyhow::bail!("no peers with a pinned bootstrap fp available to sign a refresh");
     }
-    plans.sort_by_key(|(p, _)| (!p.local_secure, Reverse(p.last_seen_at)));
+    plans.sort_by_key(|(p, _)| Reverse(p.last_seen_at));
     let candidates: Vec<Candidate> = plans
         .iter()
         .flat_map(|(p, targets)| peer_candidates(p, targets, policy.canonical_port))
@@ -469,35 +489,41 @@ async fn refresh_via_peer_bootstrap(policy: DialPolicy) -> Result<()> {
     let pki_d = pki_dir();
     let (csr_client, key_client, csr_server, key_server) = utils::pki::build_refresh_csrs(&host)?;
     let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
-
-    #[derive(serde::Serialize)]
-    struct RefreshCertBootstrapBody<'a> {
-        joiner_hostname: &'a str,
-        csr_client_pem: &'a str,
-        csr_server_pem: &'a str,
-    }
-    let env = utils::pki::sign_envelope(
-        &signing,
-        &RefreshCertBootstrapBody {
-            joiner_hostname: &host,
-            csr_client_pem: &csr_client,
-            csr_server_pem: &csr_server,
-        },
-    )?;
-    let params = serde_json::to_value(&env)?;
+    let body = crate::mesh::listener::RefreshCsrs {
+        joiner_hostname: host.clone(),
+        csr_client_pem: csr_client,
+        csr_server_pem: csr_server,
+    };
 
     let fetch = |c: Candidate| {
-        let params = params.clone();
+        let (signing, body, host) = (&signing, &body, &host);
         async move {
-            let v = crate::mesh::cli::dial_bootstrap_pub(
-                &c.addr,
-                c.port,
-                c.pinned_fp.as_deref().unwrap_or_default(),
-                "mesh/refresh-cert-bootstrap",
-                params,
-            )
-            .await?;
-            leaf_pair(&v)
+            crate::mesh::clock_skew::with_clock_retry(&c.peer_id, |now| {
+                let params = utils::pki::sign_bound_envelope(
+                    signing,
+                    body,
+                    "mesh/refresh-cert-bootstrap",
+                    host,
+                    &c.peer_id,
+                    &utils::id::new(),
+                    now,
+                    REFRESH_ENVELOPE_TTL_SECS,
+                )
+                .and_then(|env| Ok(serde_json::to_value(&env)?));
+                let c = c.clone();
+                async move {
+                    let v = crate::mesh::cli::dial_bootstrap_pub(
+                        &c.addr,
+                        c.port,
+                        c.pinned_fp.as_deref().unwrap_or_default(),
+                        "mesh/refresh-cert-bootstrap",
+                        params?,
+                    )
+                    .await?;
+                    leaf_pair(&v)
+                }
+            })
+            .await
         }
     };
     let install = |client: &str, server: &str| {
@@ -517,12 +543,12 @@ async fn refresh_via_peer_bootstrap(policy: DialPolicy) -> Result<()> {
     Ok(())
 }
 
+const REFRESH_ENVELOPE_TTL_SECS: i64 = 120;
+
 async fn call_refresh(
     host: &str,
     port: u16,
-    joiner_hostname: &str,
-    csr_client_pem: &str,
-    csr_server_pem: &str,
+    params: serde_json::Value,
 ) -> Result<(String, String)> {
     let pki_d = pki_dir();
     let bundle = utils::pki::load_mesh_client(&pki_d)?;
@@ -541,11 +567,6 @@ async fn call_refresh(
     let sni = ServerName::try_from(utils::pki::MESH_SERVER_SAN)?.to_owned();
     let mut tls = connector.connect(sni, tcp).await?;
 
-    let params = serde_json::json!({
-        "joiner_hostname": joiner_hostname,
-        "csr_client_pem": csr_client_pem,
-        "csr_server_pem": csr_server_pem,
-    });
     write_frame(
         &mut tls,
         &serde_json::to_vec(&Request::new(1, "mesh/refresh-cert", Some(params)))?,
@@ -675,13 +696,12 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn refresh_via_peer_mtls_tries_peers_without_trust_flags() {
+    fn refresh_via_peer_mtls_tries_every_member() {
         let _env = crate::test_env::snapshot();
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
-            // No set_trust: neither secure flag is set, yet the peer must still
-            // be a candidate. Reaching the candidate loop (not the "no peers"
+            // Reaching the candidate loop (not the "no peers"
             // bail) proves candidacy only; no dial happens, since this host
             // has no mesh client bundle to dial with.
             let conn = db::open_default().unwrap();
@@ -798,7 +818,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         with_home_db(dir.path(), async {
             crate::host_identity::init(dir.path()).unwrap();
-            // Seed one non-departed mutual-secure peer at an unroutable target.
+            // Seed one non-departed member at an unroutable target.
             // mtls path builds CSRs, sorts candidates, dials, and exhausts the
             // loop against the dead peer.
             let conn = db::open_default().unwrap();
@@ -813,7 +833,6 @@ mod tests {
                 "",
             )
             .unwrap();
-            pdb::set_trust(&conn, &peer_id, Some(true), Some(true)).unwrap();
             drop(conn);
             let err = refresh_via_peer_mtls(test_policy()).await.unwrap_err();
             assert!(
@@ -1086,8 +1105,6 @@ mod tests {
             first_seen_at: 0,
             last_seen_at: 0,
             departed_at: None,
-            local_secure: false,
-            peer_secure: false,
         }
     }
 
@@ -1220,18 +1237,25 @@ mod tests {
         });
     }
 
-    #[test]
-    #[serial_test::serial(env)]
-    fn mtls_refused_then_bootstrap_signs_and_installs() {
-        let _env = crate::test_env::snapshot();
+    struct Fallback {
+        refreshed: Result<()>,
+        rogue_client: String,
+        client: String,
+    }
+
+    /// Refresh with a client leaf from a foreign CA, so the mTLS path is
+    /// refused and the bootstrap fallback runs against a signer served by this
+    /// process as `serve_as`. `signer_offset` is this host's stale estimate of
+    /// the signer's clock, in seconds.
+    fn mtls_refused_then_bootstrap(serve_as: Option<&str>, signer_offset: i64) -> Fallback {
         let dir = tempfile::tempdir().unwrap();
-        with_home_db(dir.path(), async {
-            crate::host_identity::init(dir.path()).unwrap();
+        let serve_as = serve_as.map(str::to_string);
+        let home = dir.path().to_path_buf();
+        with_home_db(dir.path(), async move {
+            crate::host_identity::init(&home).unwrap();
             let own = crate::host_identity::machine_id().to_string();
             let pki = pki_dir();
             utils::pki::init_mesh_ca(&pki, &own).unwrap();
-            // A still-valid client leaf from a foreign CA: refresh takes the mTLS
-            // path, and the signer's handshake rejects it.
             let rogue = tempfile::tempdir().unwrap();
             utils::pki::init_mesh_ca(rogue.path(), &own).unwrap();
             for path in [
@@ -1244,34 +1268,24 @@ mod tests {
             let rogue_client =
                 std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
 
-            // This process is both the renewing host and the signer, so the
-            // signer's view of us (own row, our bootstrap fp) and the candidate
-            // row we dial share one DB and one bootstrap key.
             let key = utils::pki::load_or_init_bootstrap_key(&pki).unwrap();
             let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
             let acceptor = crate::mesh::mesh_listener::build_acceptor(&pki).unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
+            let signer = utils::id::new();
             let conn = db::open_default().unwrap();
-            pdb::upsert_peer(
-                &conn,
-                &utils::id::new(),
-                "signer",
-                "127.0.0.1",
-                port,
-                Some(&fp),
-                "",
-            )
-            .unwrap();
+            pdb::upsert_peer(&conn, &signer, "signer", "127.0.0.1", port, Some(&fp), "").unwrap();
             pdb::upsert_peer(&conn, &own, "me", "127.0.0.1", port, Some(&fp), "").unwrap();
-            // The signer resolves the envelope's fp to the most-recently-seen row.
             conn.execute(
                 "UPDATE mesh_peers SET last_seen_at = last_seen_at + 100 WHERE peer_id = ?",
                 [&own],
             )
             .unwrap();
             drop(conn);
+            crate::mesh::clock_skew::assume(&signer, signer_offset);
 
+            let serve_as = serve_as.unwrap_or_else(|| signer.clone());
             let server = async {
                 loop {
                     let (tcp, peer) = listener.accept().await.unwrap();
@@ -1285,10 +1299,11 @@ mod tests {
                         .unwrap_or_default()
                         .to_string();
                     if utils::mesh_compat::accepts_bootstrap_sni(&sni) {
-                        crate::mesh::handle_mesh_bootstrap_connection(tls, peer)
-                            .await
-                            .unwrap();
-                        return;
+                        crate::mesh::bootstrap::handle_mesh_bootstrap_connection_as(
+                            tls, peer, &serve_as,
+                        )
+                        .await
+                        .unwrap();
                     }
                 }
             };
@@ -1296,22 +1311,50 @@ mod tests {
                 canonical_port: port,
                 exchange_timeout: Duration::from_secs(10),
             };
-            let (refreshed, ()) = tokio::time::timeout(Duration::from_secs(30), async {
-                tokio::join!(refresh_via_peer(policy), server)
+            let refreshed = tokio::time::timeout(Duration::from_secs(30), async {
+                tokio::select! {
+                    r = refresh_via_peer(policy) => r,
+                    () = server => unreachable!(),
+                }
             })
             .await
             .expect("refresh exchange finished");
-            refreshed.unwrap();
+            Fallback {
+                refreshed,
+                rogue_client,
+                client: std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap(),
+            }
+        })
+    }
 
-            let client = std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki)).unwrap();
-            assert_ne!(client, rogue_client);
-            assert_eq!(utils::pki::cert_summary(&client).unwrap().cn, own);
-            let server = std::fs::read_to_string(utils::pki::mesh_server_cert_path(&pki)).unwrap();
-            assert_eq!(
-                utils::pki::cert_summary(&server).unwrap().cn,
-                "orca-mesh-server"
-            );
-        });
+    #[test]
+    #[serial_test::serial(env)]
+    fn mtls_refused_then_bootstrap_refresh_installs_certs_from_the_signer() {
+        let _env = crate::test_env::snapshot();
+        let out = mtls_refused_then_bootstrap(None, 0);
+        out.refreshed.unwrap();
+        assert_ne!(out.client, out.rogue_client);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_refresh_with_a_clock_five_minutes_off_still_refreshes() {
+        let _env = crate::test_env::snapshot();
+        for offset in [-300, 300] {
+            let out = mtls_refused_then_bootstrap(None, offset);
+            out.refreshed.unwrap();
+            assert_ne!(out.client, out.rogue_client, "offset {offset}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn mtls_refused_then_bootstrap_refresh_for_another_signer_is_refused() {
+        let _env = crate::test_env::snapshot();
+        let out = mtls_refused_then_bootstrap(Some(&utils::id::new()), 0);
+        let err = format!("{:#}", out.refreshed.unwrap_err());
+        assert!(err.contains("another receiver"), "got: {err}");
+        assert_eq!(out.client, out.rogue_client);
     }
 
     fn raise_stale_notification() {

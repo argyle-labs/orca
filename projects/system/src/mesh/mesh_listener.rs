@@ -136,7 +136,7 @@ async fn serve(
                         return;
                     }
                 };
-                if let Err(e) = crate::mesh::handle_mesh_connection(tls, peer_cn, peer).await {
+                if let Err(e) = crate::mesh::handle_mesh_connection(tls, peer_cn).await {
                     warn!("[mesh] {peer} connection error: {e:#}");
                 }
                 return;
@@ -610,6 +610,32 @@ mod tests {
             rejected.is_err(),
             "a cert not signed by the mesh CA must be rejected"
         );
+    }
+
+    #[test]
+    fn verifier_rejects_an_expired_mesh_issued_cert() {
+        install_provider();
+        let pki = tempfile::tempdir().expect("tempdir");
+        utils::pki::init_mesh_ca(pki.path(), "test-host").expect("init mesh ca");
+        let verifier = HotReloadClientVerifier::new(pki.path()).expect("verifier");
+        let client_pem =
+            std::fs::read_to_string(utils::pki::mesh_client_cert_path(pki.path())).expect("read");
+        let client_der = certs(&mut client_pem.as_bytes())
+            .next()
+            .expect("one cert")
+            .expect("der");
+        let days = utils::pki::cert_days_remaining(&client_pem).expect("days");
+        let after_expiry =
+            rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+                (utils::time::now().unix_seconds() + (days + 2) * 86_400) as u64,
+            ));
+        let rejected = rustls::server::danger::ClientCertVerifier::verify_client_cert(
+            &verifier,
+            &client_der,
+            &[],
+            after_expiry,
+        );
+        assert!(rejected.is_err(), "an expired mesh cert must be rejected");
     }
 
     /// The verifier advertises the static policy the accept loop relies on:

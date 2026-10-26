@@ -144,10 +144,24 @@ pub fn merge_bundle(conn: &Connection, bundle: BTreeMap<String, Value>) -> Resul
     // avoided on every in-sync tick.
     if total > 0 || deleted > 0 {
         invalidate_all_roots();
+        for hook in inventory::iter::<MergeHook> {
+            if let Err(e) = (hook.run)(conn) {
+                tracing::warn!("[replicate] post-merge hook '{}' failed: {e:#}", hook.name);
+            }
+        }
     }
 
     Ok(total)
 }
+
+/// Runs after a merge changed local rows, so a domain can react to replicated
+/// state (e.g. a revocation of this host) without waiting for a restart.
+pub struct MergeHook {
+    pub name: &'static str,
+    pub run: fn(&Connection) -> Result<()>,
+}
+
+inventory::collect!(MergeHook);
 
 // ── Write-notify channel — feeds push-on-write fanout in the mesh crate ──
 //

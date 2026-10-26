@@ -242,16 +242,8 @@ enum MeshAction {
     /// and block until the joiner accepts (or the offer expires). Wraps
     /// `orca mesh offer` + the wait the operator would otherwise do manually.
     Pair { addr: String },
-    /// List known peers and their trust state.
+    /// List known peers.
     List,
-    /// Mark a peer as locally trusted (or untrust). Triggers CA-key
-    /// replication when both sides have flagged each other secure.
-    Trust {
-        /// Peer ID (e.g. `peer.host-g`).
-        peer_id: String,
-        #[arg(value_parser = ["on", "off"])]
-        state: String,
-    },
     /// Show days-remaining + rotation status for every cert on this host.
     CertStatus,
     /// Rotate the mesh CA. Both old (`previous`) and new (`current`) CAs are
@@ -623,9 +615,6 @@ async fn main() -> Result<()> {
             MeshAction::Offer { addr } => system::mesh::cli::cmd_mesh_offer(&addr).await,
             MeshAction::Pair { addr } => system::mesh::cli::cmd_mesh_pair(&addr).await,
             MeshAction::List => system::mesh::cli::cmd_mesh_list(),
-            MeshAction::Trust { peer_id, state } => {
-                system::mesh::cli::cmd_mesh_trust(&peer_id, state == "on").await
-            }
             MeshAction::CertStatus => system::mesh::cli::cmd_mesh_cert_status(),
             MeshAction::CaRotate { overlap_days } => {
                 system::mesh::cli::cmd_mesh_ca_rotate(overlap_days).await

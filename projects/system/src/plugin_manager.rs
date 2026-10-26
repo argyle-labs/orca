@@ -1460,7 +1460,7 @@ async fn plugin_update(args: PluginUpdateArgs, ctx: &ToolCtx) -> Result<PluginUp
 // ── plugin.serve_asset — delegate-on-miss holder side ────────────────────────
 //
 // Peer-dispatchable. A host whose `github_token` secret is empty calls this on
-// a paired secure peer that DOES hold a token; the holder fetches the plugin
+// a paired member that DOES hold a token; the holder fetches the plugin
 // release asset from GitHub **for the caller's target triple**, verifies the
 // sha256, and returns the bytes base64-encoded for the JSON-only wire
 // transport. The token never leaves the holder. Mirrors
@@ -1537,7 +1537,7 @@ async fn plugin_serve_asset(
 }
 
 /// Delegate-on-miss (caller side): when this host has no `github_token`, ask a
-/// paired secure peer that holds one to fetch the plugin asset for OUR triple.
+/// paired member that holds one to fetch the plugin asset for OUR triple.
 /// Returns the verified [`crate::plugin_fetch::FetchedPlugin`] as if fetched
 /// locally, or an error aggregating every candidate peer's failure.
 async fn delegate_plugin_fetch(
@@ -1553,20 +1553,13 @@ async fn delegate_plugin_fetch(
     }
 
     let conn = db::open_default().context("open orca.db for peer enumeration")?;
-    let present: Vec<db::mesh::peerdb::PeerRow> = db::mesh::peerdb::list_peers(&conn)
+    let candidates: Vec<db::mesh::peerdb::PeerRow> = db::mesh::peerdb::list_peers(&conn)
         .context("list paired peers")?
         .into_iter()
         .filter(|p| p.departed_at.is_none())
         .collect();
-    let candidates: Vec<&db::mesh::peerdb::PeerRow> =
-        present.iter().filter(|p| p.peer_secure).collect();
     if candidates.is_empty() {
-        let insecure: Vec<(String, String)> = present
-            .iter()
-            .filter(|p| !p.peer_secure)
-            .map(|p| (p.peer_id.clone(), p.peer_hostname.clone()))
-            .collect();
-        bail!(crate::commands::no_secure_peer_message(&insecure));
+        bail!(crate::commands::no_peer_message());
     }
 
     // Surface a clear error if no transport is registered, rather than letting
@@ -3426,9 +3419,8 @@ mod tests {
     async fn delegate_plugin_fetch_bails_when_no_paired_peers() {
         let _env = crate::test_env::snapshot();
         // With a fresh temp ORCA_HOME the peer db is empty, so delegate-on-miss
-        // has no secure peer (and no peers at all) to relay the fetch to. It must
-        // fail with the actionable "no paired peers at all" guidance rather than
-        // attempting any RemoteExec dispatch.
+        // has no member to relay the fetch to and must fail with actionable
+        // guidance rather than attempting any RemoteExec dispatch.
         let tmp = tempfile::tempdir().unwrap();
         let ctx = guard_ctx(&tmp);
         db::with_db_path(tmp.path().join("orca.db"), async {
@@ -3438,11 +3430,7 @@ mod tests {
                 Err(e) => e,
             };
             let msg = format!("{err:#}");
-            assert!(
-                msg.contains("no paired secure peer available")
-                    && msg.contains("no paired peers at all"),
-                "unexpected: {msg}"
-            );
+            assert!(msg.contains("no paired mesh member"), "unexpected: {msg}");
         })
         .await;
     }
@@ -3477,54 +3465,10 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(env)]
-    async fn delegate_plugin_fetch_lists_insecure_candidates_when_none_secure() {
-        let _env = crate::test_env::snapshot();
-        // A paired but NOT-secure peer is present. Delegate-on-miss has no secure
-        // candidate to relay to, so it must bail with the "Trust a candidate peer"
-        // guidance that names the insecure peer — the branch distinct from the
-        // no-peers-at-all message.
-        let tmp = tempfile::tempdir().unwrap();
-        let ctx = guard_ctx(&tmp);
-        db::with_db_path(tmp.path().join("orca.db"), async {
-            let peer_id = utils::id::new();
-            {
-                let conn = db::open_default().expect("open pinned orca.db");
-                db::mesh::peerdb::upsert_peer(
-                    &conn,
-                    &peer_id,
-                    "insecure-host",
-                    "10.0.0.9",
-                    9443,
-                    None,
-                    "",
-                )
-                .expect("upsert insecure peer");
-            }
-
-            let entry = entry("sonarr", "available");
-            let err = match delegate_plugin_fetch(&entry, None, false, false, &ctx).await {
-                Ok(_) => panic!("expected delegate fetch to fail with no secure peer"),
-                Err(e) => e,
-            };
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains("Trust a candidate peer") && msg.contains("insecure-host"),
-                "unexpected: {msg}"
-            );
-            assert!(
-                !msg.contains("no paired peers at all"),
-                "with an insecure peer present it must not claim zero peers: {msg}"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(env)]
     async fn delegate_plugin_fetch_bails_when_no_remote_exec_transport() {
         let _env = crate::test_env::snapshot();
-        // A paired SECURE peer exists, so it survives the candidate filter and
-        // delegate-on-miss gets past both the no-peers and no-secure-peer guards.
+        // A paired member exists, so delegate-on-miss gets past the no-member
+        // guard.
         // The guard_ctx has no RemoteExec service registered, so the function must
         // bail at the transport check — before any per-peer wire dispatch — rather
         // than letting the macro-emitted peer_dispatch fail opaquely per peer.
@@ -3539,15 +3483,13 @@ mod tests {
                 db::mesh::peerdb::upsert_peer(
                     &conn,
                     &peer_id,
-                    "secure-host",
+                    "member-host",
                     "10.0.0.11",
                     9443,
                     None,
                     "",
                 )
                 .expect("upsert peer");
-                db::mesh::peerdb::set_trust(&conn, &peer_id, Some(true), Some(true))
-                    .expect("mark peer secure");
             }
 
             let entry = entry("sonarr", "available");
@@ -3558,11 +3500,7 @@ mod tests {
             let msg = format!("{err:#}");
             assert!(
                 msg.contains("no RemoteExec transport"),
-                "a secure peer with no transport must bail at the transport check: {msg}"
-            );
-            assert!(
-                !msg.contains("no paired secure peer"),
-                "a secure peer is present, so it must pass the secure-peer guard: {msg}"
+                "a member with no transport must bail at the transport check: {msg}"
             );
         })
         .await;

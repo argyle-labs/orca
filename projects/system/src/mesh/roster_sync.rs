@@ -386,8 +386,6 @@ mod tests {
             first_seen_at: 0,
             last_seen_at: 0,
             departed_at: if departed { Some(1) } else { None },
-            local_secure: true,
-            peer_secure: true,
         }
     }
 
@@ -398,8 +396,7 @@ mod tests {
             addr: "10.0.0.1".into(),
             port: 12002,
             last_seen_at: 0,
-            local_secure: false,
-            peer_secure: false,
+            trust_wire: Default::default(),
             status: status.into(),
             routes: Default::default(),
             local,

@@ -1729,11 +1729,13 @@ pub fn verify_bootstrap_attestation(
 }
 
 pub fn sign_with_mesh_ca(pki_dir: &Path, message: &[u8]) -> Result<String> {
-    use ed25519_dalek::Signer;
-    use ed25519_dalek::pkcs8::DecodePrivateKey;
     let key_pem = read_pki_file(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
-    let signing =
-        ed25519_dalek::SigningKey::from_pkcs8_pem(&key_pem).context("parse mesh CA key PEM")?;
+    sign_with_ca_key_pem(&key_pem, message)
+}
+
+pub fn sign_with_ca_key_pem(key_pem: &str, message: &[u8]) -> Result<String> {
+    use ed25519_dalek::Signer;
+    let signing = signing_key_from_pem(key_pem).context("parse mesh CA key PEM")?;
     Ok(crate::encoding::base64_encode(
         &signing.sign(message).to_bytes(),
     ))
@@ -1745,6 +1747,17 @@ pub fn verify_mesh_ca_signature(
     signature_b64: &str,
 ) -> Result<()> {
     use ed25519_dalek::Verifier;
+    let vk = mesh_ca_verifying_key(ca_cert_pem)?;
+    let sig_bytes = crate::encoding::base64_decode(signature_b64).context("decode signature")?;
+    let sig_arr: [u8; 64] = sig_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?;
+    vk.verify(message, &ed25519_dalek::Signature::from_bytes(&sig_arr))
+        .context("mesh CA signature did not verify")
+}
+
+pub fn mesh_ca_verifying_key(ca_cert_pem: &str) -> Result<ed25519_dalek::VerifyingKey> {
     let der = first_cert_der(ca_cert_pem)?;
     let (_, parsed) =
         x509_parser::parse_x509_certificate(der.as_ref()).context("parse mesh CA cert")?;
@@ -1755,14 +1768,7 @@ pub fn verify_mesh_ca_signature(
         .as_ref()
         .try_into()
         .map_err(|_| anyhow::anyhow!("mesh CA key is not Ed25519"))?;
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).context("parse mesh CA pubkey")?;
-    let sig_bytes = crate::encoding::base64_decode(signature_b64).context("decode signature")?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?;
-    vk.verify(message, &ed25519_dalek::Signature::from_bytes(&sig_arr))
-        .context("mesh CA signature did not verify")
+    ed25519_dalek::VerifyingKey::from_bytes(&pk).context("parse mesh CA pubkey")
 }
 
 #[derive(Debug)]
@@ -1923,6 +1929,204 @@ pub struct SignedEnvelope {
     pub signer_pubkey_b64: String,
     /// Ed25519 signature (64 raw bytes), base64 standard.
     pub signature_b64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<BoundEnvelope>,
+}
+
+pub const BOUND_ENVELOPE_MAX_TTL_SECS: i64 = 300;
+pub const BOUND_ENVELOPE_SKEW_SECS: i64 = 30;
+
+/// Binds a signed payload to one method, sender, receiver and nonce until
+/// `expires_at`, so it cannot be tampered with, redirected or replayed. The
+/// signature covers a length-prefixed encoding of every field.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BoundEnvelope {
+    pub method: String,
+    pub sender: String,
+    pub receiver: String,
+    pub nonce: String,
+    pub expires_at: i64,
+    pub payload_sha256: String,
+    pub signature_b64: String,
+}
+
+impl BoundEnvelope {
+    pub fn sign(
+        signing: &ed25519_dalek::SigningKey,
+        method: &str,
+        sender: &str,
+        receiver: &str,
+        nonce: &str,
+        expires_at: i64,
+        payload: &[u8],
+    ) -> Self {
+        use ed25519_dalek::Signer;
+        let mut b = Self {
+            method: method.to_string(),
+            sender: sender.to_string(),
+            receiver: receiver.to_string(),
+            nonce: nonce.to_string(),
+            expires_at,
+            payload_sha256: crate::hash::sha256_hex(payload),
+            signature_b64: String::new(),
+        };
+        b.signature_b64 = crate::encoding::base64_encode(&signing.sign(&b.canonical()).to_bytes());
+        b
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify(
+        &self,
+        verifying: &ed25519_dalek::VerifyingKey,
+        method: &str,
+        sender: &str,
+        receiver: &str,
+        payload: &[u8],
+        now: i64,
+    ) -> Result<()> {
+        use ed25519_dalek::Verifier;
+        anyhow::ensure!(
+            self.method == method,
+            "bound envelope is for another method"
+        );
+        anyhow::ensure!(
+            self.sender == sender,
+            "bound envelope is from another sender"
+        );
+        anyhow::ensure!(
+            self.receiver == receiver,
+            "bound envelope is for another receiver"
+        );
+        anyhow::ensure!(
+            uuid::Uuid::try_parse(&self.nonce).is_ok(),
+            "bound envelope nonce is invalid"
+        );
+        anyhow::ensure!(
+            self.expires_at > now
+                && self.expires_at - now <= BOUND_ENVELOPE_MAX_TTL_SECS + BOUND_ENVELOPE_SKEW_SECS,
+            "bound envelope is expired or not yet valid"
+        );
+        anyhow::ensure!(
+            self.payload_sha256 == crate::hash::sha256_hex(payload),
+            "bound envelope payload does not match its hash"
+        );
+        let sig_bytes =
+            crate::encoding::base64_decode(&self.signature_b64).context("decode signature")?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?;
+        verifying
+            .verify(
+                &self.canonical(),
+                &ed25519_dalek::Signature::from_bytes(&sig_arr),
+            )
+            .context("bound envelope signature did not verify")
+    }
+
+    fn canonical(&self) -> Vec<u8> {
+        canonical_fields(&[
+            "orca-bound-envelope-v1",
+            &self.method,
+            &self.sender,
+            &self.receiver,
+            &self.nonce,
+            &self.expires_at.to_string(),
+            &self.payload_sha256,
+        ])
+    }
+}
+
+/// Length-prefixed (u32 big-endian) concatenation of `fields`; no field can
+/// shift a boundary.
+pub fn canonical_fields(fields: &[&str]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for field in fields {
+        out.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        out.extend_from_slice(field.as_bytes());
+    }
+    out
+}
+
+/// Sign a mesh-CA record (registry entry, policy) over its canonical fields.
+pub fn sign_ca_record(ca_key_pem: &str, fields: &[&str]) -> Result<String> {
+    sign_with_ca_key_pem(ca_key_pem, &canonical_fields(fields))
+}
+
+pub fn verify_ca_record(ca_cert_pem: &str, fields: &[&str], signature_b64: &str) -> Result<()> {
+    verify_mesh_ca_signature(ca_cert_pem, &canonical_fields(fields), signature_b64)
+}
+
+const RECEIVER_TIME_TAG: &str = "[receiver_time=";
+
+/// Tag a refusal with the receiver's clock so the sender can retry with the
+/// measured offset.
+pub fn with_receiver_time(message: &str, now: i64) -> String {
+    format!("{message} {RECEIVER_TIME_TAG}{now}]")
+}
+
+pub fn receiver_time_in(message: &str) -> Option<i64> {
+    let start = message.rfind(RECEIVER_TIME_TAG)? + RECEIVER_TIME_TAG.len();
+    let rest = &message[start..];
+    rest[..rest.find(']')?].parse().ok()
+}
+
+/// Sign `body` with `signing` and bind it to `method`/`sender`/`receiver`/
+/// `nonce` for `ttl_secs`. The plain signature over the payload is kept so
+/// daemons that predate bindings can still verify it.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_bound_envelope<T: serde::Serialize>(
+    signing: &ed25519_dalek::SigningKey,
+    body: &T,
+    method: &str,
+    sender: &str,
+    receiver: &str,
+    nonce: &str,
+    now: i64,
+    ttl_secs: i64,
+) -> Result<SignedEnvelope> {
+    let mut env = sign_envelope(signing, body)?;
+    env.binding = Some(BoundEnvelope::sign(
+        signing,
+        method,
+        sender,
+        receiver,
+        nonce,
+        now + ttl_secs,
+        env.payload.as_bytes(),
+    ));
+    Ok(env)
+}
+
+/// Verify a bound envelope: payload signature, binding to `method`/`sender`/
+/// `receiver`, expiry and payload hash. An envelope without a binding is
+/// refused. The caller records the returned nonce to refuse replays.
+pub fn verify_bound_envelope<'a, T: serde::de::DeserializeOwned>(
+    env: &'a SignedEnvelope,
+    method: &str,
+    sender: &str,
+    receiver: &str,
+    now: i64,
+) -> Result<(T, ed25519_dalek::VerifyingKey, &'a BoundEnvelope)> {
+    let (body, verifying) = verify_envelope::<T>(env)?;
+    let binding = env
+        .binding
+        .as_ref()
+        .context("envelope is not bound to a receiver and nonce")?;
+    binding.verify(
+        &verifying,
+        method,
+        sender,
+        receiver,
+        env.payload.as_bytes(),
+        now,
+    )?;
+    Ok((body, verifying, binding))
+}
+
+pub fn signing_key_from_pem(key_pem: &str) -> Result<ed25519_dalek::SigningKey> {
+    use ed25519_dalek::pkcs8::DecodePrivateKey;
+    ed25519_dalek::SigningKey::from_pkcs8_pem(key_pem).context("parse Ed25519 key PEM")
 }
 
 /// Sign `body` with the host's bootstrap key. Caller is expected to keep
@@ -1940,6 +2144,7 @@ pub fn sign_envelope<T: serde::Serialize>(
         payload,
         signer_pubkey_b64: crate::encoding::base64_encode(signing.verifying_key().as_bytes()),
         signature_b64: crate::encoding::base64_encode(&sig.to_bytes()),
+        binding: None,
     })
 }
 
@@ -2118,6 +2323,112 @@ pub fn read_pki_file(path: impl AsRef<Path>) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const BOUND_NOW: i64 = 1_800_000_000;
+    const BOUND_NONCE: &str = "019f0000-0000-7000-8000-000000000001";
+
+    fn bound_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    fn bound(body: &str) -> SignedEnvelope {
+        sign_bound_envelope(
+            &bound_key(),
+            &body,
+            "m/x",
+            "alice",
+            "bob",
+            BOUND_NONCE,
+            BOUND_NOW,
+            60,
+        )
+        .unwrap()
+    }
+
+    fn check(env: &SignedEnvelope, method: &str, receiver: &str, now: i64) -> Result<String> {
+        verify_bound_envelope::<String>(env, method, "alice", receiver, now).map(|(b, _, _)| b)
+    }
+
+    #[test]
+    fn a_bound_envelope_verifies_for_its_binding() {
+        let env = bound("hi");
+        assert_eq!(check(&env, "m/x", "bob", BOUND_NOW).unwrap(), "hi");
+        let old: (String, _) = verify_envelope(&env).unwrap();
+        assert_eq!(old.0, "hi");
+    }
+
+    #[test]
+    fn a_bound_envelope_refuses_a_wrong_receiver_method_or_sender() {
+        let env = bound("hi");
+        assert!(check(&env, "m/x", "carol", BOUND_NOW).is_err());
+        assert!(check(&env, "m/y", "bob", BOUND_NOW).is_err());
+        assert!(verify_bound_envelope::<String>(&env, "m/x", "mallory", "bob", BOUND_NOW).is_err());
+    }
+
+    #[test]
+    fn a_bound_envelope_refuses_expiry_and_far_future() {
+        let env = bound("hi");
+        assert!(check(&env, "m/x", "bob", BOUND_NOW + 61).is_err());
+        let far = sign_bound_envelope(
+            &bound_key(),
+            &"hi",
+            "m/x",
+            "alice",
+            "bob",
+            BOUND_NONCE,
+            BOUND_NOW,
+            BOUND_ENVELOPE_MAX_TTL_SECS * 2,
+        )
+        .unwrap();
+        assert!(check(&far, "m/x", "bob", BOUND_NOW).is_err());
+    }
+
+    #[test]
+    fn a_bound_envelope_refuses_a_tampered_payload_or_binding() {
+        let mut env = bound("hi");
+        env.payload = "\"ho\"".into();
+        assert!(check(&env, "m/x", "bob", BOUND_NOW).is_err());
+        let mut env = bound("hi");
+        env.binding.as_mut().unwrap().receiver = "carol".into();
+        assert!(check(&env, "m/x", "carol", BOUND_NOW).is_err());
+        let mut env = bound("hi");
+        env.binding.as_mut().unwrap().expires_at += 1;
+        assert!(check(&env, "m/x", "bob", BOUND_NOW).is_err());
+    }
+
+    #[test]
+    fn an_unbound_envelope_is_refused() {
+        let env = sign_envelope(&bound_key(), &"hi").unwrap();
+        let err = check(&env, "m/x", "bob", BOUND_NOW).unwrap_err();
+        assert!(err.to_string().contains("not bound"), "{err}");
+    }
+
+    #[test]
+    fn receiver_time_round_trips_through_a_refusal() {
+        let msg = with_receiver_time("refused: expired", 1_800_000_123);
+        assert_eq!(
+            receiver_time_in(&format!("rpc: {msg}")),
+            Some(1_800_000_123)
+        );
+        assert_eq!(receiver_time_in("refused"), None);
+    }
+
+    #[test]
+    fn a_ca_record_verifies_only_for_its_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "h").unwrap();
+        let (cert, key) = export_mesh_ca_keypair(dir.path()).unwrap();
+        let sig = sign_ca_record(&key, &["registry", "m1", "granted", "5"]).unwrap();
+        verify_ca_record(&cert, &["registry", "m1", "granted", "5"], &sig).unwrap();
+        assert!(verify_ca_record(&cert, &["registry", "m1", "revoked", "5"], &sig).is_err());
+    }
+
+    #[test]
+    fn bound_encoding_is_unambiguous_across_field_boundaries() {
+        let a = BoundEnvelope::sign(&bound_key(), "a:b", "c", "d", BOUND_NONCE, 1, b"p");
+        let b = BoundEnvelope::sign(&bound_key(), "a", "b:c", "d", BOUND_NONCE, 1, b"p");
+        assert_ne!(a.canonical(), b.canonical());
+    }
 
     #[cfg(unix)]
     #[test]
