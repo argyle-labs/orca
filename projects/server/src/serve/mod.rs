@@ -215,7 +215,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // daemons so a remote probe can tell apply-but-no-restart apart from
     // apply-and-restarted.
     if let Some((target, age)) = system::update::read_pending_restart() {
-        let running = env!("CARGO_PKG_VERSION");
+        let running = env!("ORCA_VERSION");
         if target.trim_start_matches('v') == running {
             tracing::info!("[update] restart verified: now running v{running}");
             system::update::clear_pending_restart();
@@ -308,7 +308,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 port,
                 mode: DaemonMode::Dev,
                 binary: binary.clone(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
+                version: env!("ORCA_VERSION").to_string(),
                 started_at: utils::time::now(),
             }) {
                 tracing::warn!("failed to initialize dev state: {e}");
@@ -368,7 +368,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         port,
         mode: DaemonMode::Daemon,
         binary,
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: env!("ORCA_VERSION").to_string(),
         started_at: utils::time::now(),
     }) {
         tracing::warn!("failed to write initial daemon state: {e}");
@@ -594,7 +594,7 @@ async fn ping_handler() -> axum::Json<Health> {
 /// — but from the running binary, so a stale bridge never lags a self-update.
 async fn mcp_catalog_handler() -> impl axum::response::IntoResponse {
     axum::Json(serde_json::json!({
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": env!("ORCA_VERSION"),
         "tools": crate::mcp::core_tool_catalog(),
     }))
 }
@@ -2225,7 +2225,7 @@ mod tests {
             .await
             .unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
-        let version = env!("CARGO_PKG_VERSION");
+        let version = env!("ORCA_VERSION");
         assert!(
             body.contains(&format!(r#""version":"{version}""#)),
             "version field missing/mismatched: {body}"

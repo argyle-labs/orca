@@ -127,7 +127,7 @@ impl OrcaAppKit {
 
     /// Build identity used in `About` screens / crash reports.
     pub fn version(&self) -> String {
-        env!("CARGO_PKG_VERSION").to_string()
+        utils::build_info::version().to_string()
     }
 
     /// Tear down the runtime explicitly. Native UIs may also rely on `Drop`
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn version_matches_crate_pkg_version() {
         let kit = OrcaAppKit::init(cfg(), |_| {}).unwrap();
-        assert_eq!(kit.version(), env!("CARGO_PKG_VERSION"));
+        assert_eq!(kit.version(), utils::build_info::version());
     }
 
     #[test]

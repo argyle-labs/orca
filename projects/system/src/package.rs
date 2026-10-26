@@ -16,8 +16,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 #[derive(clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PackageFormat {
@@ -115,22 +113,38 @@ async fn system_build(args: PackageBuildArgs, _ctx: &ToolCtx) -> Result<PackageB
     std::fs::create_dir_all(&args.out_dir)?;
 
     match &format {
-        PackageFormat::Deb => build_deb(&binary, VERSION, &arch, &args.maintainer, &args.out_dir)?,
-        PackageFormat::Rpm => build_rpm(&binary, VERSION, &arch, &args.maintainer, &args.out_dir)?,
-        PackageFormat::Apk => build_apk(&binary, VERSION, &arch, &args.out_dir)?,
-        PackageFormat::Pkgbuild => build_pkgbuild(VERSION, &arch, &args.out_dir)?,
+        PackageFormat::Deb => build_deb(
+            &binary,
+            utils::build_info::version(),
+            &arch,
+            &args.maintainer,
+            &args.out_dir,
+        )?,
+        PackageFormat::Rpm => build_rpm(
+            &binary,
+            utils::build_info::version(),
+            &arch,
+            &args.maintainer,
+            &args.out_dir,
+        )?,
+        PackageFormat::Apk => {
+            build_apk(&binary, utils::build_info::version(), &arch, &args.out_dir)?
+        }
+        PackageFormat::Pkgbuild => {
+            build_pkgbuild(utils::build_info::version(), &arch, &args.out_dir)?
+        }
         PackageFormat::Pkg => build_pkg(
             &binary,
-            VERSION,
+            utils::build_info::version(),
             &arch,
             args.codesign_identity.as_deref(),
             args.pkg_sign_identity.as_deref(),
             &args.out_dir,
         )?,
-        PackageFormat::Homebrew => build_homebrew(VERSION, &args.out_dir)?,
+        PackageFormat::Homebrew => build_homebrew(utils::build_info::version(), &args.out_dir)?,
         PackageFormat::Plg => build_plg(
             &binary,
-            VERSION,
+            utils::build_info::version(),
             &arch,
             args.plg_url.as_deref(),
             args.plg_binary_url.as_deref(),
@@ -140,7 +154,7 @@ async fn system_build(args: PackageBuildArgs, _ctx: &ToolCtx) -> Result<PackageB
 
     Ok(PackageBuildOutput {
         format,
-        version: VERSION.to_string(),
+        version: utils::build_info::version().to_string(),
         arch,
         out_dir: args.out_dir,
     })
@@ -1609,7 +1623,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.format, PackageFormat::Homebrew);
-        assert_eq!(out.version, VERSION);
+        assert_eq!(out.version, utils::build_info::version());
         assert_eq!(out.arch, "x86_64");
         assert!(dir.path().join("orca.rb").exists());
     }
@@ -2290,7 +2304,7 @@ mod tests {
         let res = system_build(args, &build_pkg_ctx()).await.unwrap();
         assert_eq!(res.format, PackageFormat::Homebrew);
         assert_eq!(res.arch, "x86_64");
-        assert_eq!(res.version, VERSION);
+        assert_eq!(res.version, utils::build_info::version());
         assert_eq!(res.out_dir, out);
         assert!(out.join("orca.rb").exists(), "formula written to out_dir");
     }
@@ -2384,7 +2398,9 @@ mod tests {
         assert_eq!(res.format, PackageFormat::Deb);
         assert_eq!(res.arch, "x86_64");
         // Either a real .deb (dpkg-deb present) or the staged tree (absent).
-        let built = out.join(format!("orca_{VERSION}_amd64.deb")).exists()
+        let built = out
+            .join(format!("orca_{}_amd64.deb", utils::build_info::version()))
+            .exists()
             || out.join("orca-deb-staging").exists();
         assert!(built, "deb build produced neither package nor staging");
     }
@@ -2463,7 +2479,9 @@ mod tests {
         assert_eq!(res.format, PackageFormat::Pkg);
         assert_eq!(res.arch, "x86_64");
         // pkgbuild present → real installer; absent → kept staging tree.
-        let built = out.join(format!("orca_{VERSION}_x86_64.pkg")).exists()
+        let built = out
+            .join(format!("orca_{}_x86_64.pkg", utils::build_info::version()))
+            .exists()
             || out.join("orca-pkg-staging").exists();
         assert!(built, "pkg build produced neither installer nor staging");
     }

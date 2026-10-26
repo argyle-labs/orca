@@ -723,7 +723,7 @@ pub fn status() -> Result<MeshCertStatusOutput> {
 pub fn cert_status() -> Result<MeshCertStatusOutput> {
     Ok(utils::pki::mesh_cert_status(
         &pki_dir(),
-        crate::build_info::version(),
+        utils::build_info::version(),
     ))
 }
 
@@ -1023,7 +1023,7 @@ async fn local_peer_row() -> MeshPeerDto {
         reachable: Some(true),
         latency_ms: Some(0),
         probe_error: None,
-        version: Some(crate::build_info::version().into()),
+        version: Some(utils::build_info::version().into()),
         target: Some(
             option_env!("ORCA_BUILD_TARGET")
                 .unwrap_or("unknown-target")
@@ -2421,7 +2421,7 @@ mod tests {
         // cert_status only reads PKI files (absent on a test host → all cert
         // infos None) and hard-codes secure=false; it never touches the db.
         let out = cert_status().unwrap();
-        let expected = crate::build_info::version();
+        let expected = utils::build_info::version();
         assert_eq!(out.version, expected, "version must be the compiled value");
         assert!(
             !out.secure,
@@ -2439,7 +2439,7 @@ mod tests {
             // flag and overrides it. Default db → false.
             let out = status().unwrap();
             assert!(!out.secure, "fresh db defaults secure=false");
-            let expected = crate::build_info::version();
+            let expected = utils::build_info::version();
             assert_eq!(out.version, expected);
             // Flip the db flag; status() must now surface true.
             set_secure(true).await.unwrap();
@@ -2470,7 +2470,7 @@ mod tests {
             assert_eq!(me.latency_ms, Some(0));
             assert_eq!(me.port, db::ports::mesh_port());
             // Version is the compiled build version, never masked.
-            let expected = crate::build_info::version();
+            let expected = utils::build_info::version();
             assert_eq!(me.version.as_deref(), Some(expected));
             // No addressing rows on a fresh db → addr falls back to loopback,
             // but the row is still present (locality is a flag, not a mask).

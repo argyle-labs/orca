@@ -239,7 +239,7 @@ pub async fn discover_from(
     previous: &[CatalogEntry],
 ) -> Result<Discovery> {
     let client = utils::http::Client::new();
-    let ua = format!("orca/{}", crate::build_info::version());
+    let ua = format!("orca/{}", utils::build_info::version());
     let get = |url: String| {
         let mut r = client
             .get(url)

@@ -137,7 +137,7 @@ pub struct SystemStatusReport {
     pub mcp: McpStatus,
 
     // ── Runtime (formerly system.runtime.detail) ────────────────────────────
-    /// Orca version from `CARGO_PKG_VERSION` at build time.
+    /// Orca version from `utils::build_info::version()`.
     pub version: String,
     /// Build target triple of this binary (e.g. `aarch64-apple-darwin`).
     pub target: String,
@@ -230,7 +230,7 @@ pub struct SystemDetailArgs {
 pub struct HealthReport {
     /// True when the orca daemon is running on this host.
     pub healthy: bool,
-    /// orca version from `CARGO_PKG_VERSION` at build time.
+    /// Orca version from `utils::build_info::version()`.
     pub version: String,
     /// Operator-visible host name (display_name channel, falling back to OS
     /// hostname).
@@ -507,7 +507,7 @@ fn collect_health(ctx: &contract::ToolCtx) -> anyhow::Result<HealthReport> {
         .unwrap_or_default();
     Ok(HealthReport {
         healthy: daemon.running,
-        version: crate::build_info::version().into(),
+        version: utils::build_info::version().into(),
         display_name,
         machine_id,
         daemon,
@@ -598,7 +598,7 @@ async fn system_summary(ctx: &contract::ToolCtx) -> anyhow::Result<SystemStatusR
         agents: report.agents,
         pki: report.pki,
         mcp: report.mcp,
-        version: crate::build_info::version().into(),
+        version: utils::build_info::version().into(),
         target: env!("ORCA_BUILD_TARGET").into(),
         frontend,
         mode,

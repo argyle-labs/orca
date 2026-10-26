@@ -147,7 +147,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         MESH_PING_METHOD => {
             let result = MeshPingResult {
                 peer_id: peer_cn.to_string(),
-                version: crate::build_info::version().to_string(),
+                version: utils::build_info::version().to_string(),
                 hostname: crate::host_identity::hostname().to_string(),
                 camel_wire: true,
                 addressing: build_addressing_snapshot(),

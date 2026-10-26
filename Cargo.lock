@@ -4019,6 +4019,7 @@ dependencies = [
  "orca-dispatch",
  "orca-plugins",
  "orca-system",
+ "orca-utils",
  "orca-workspace-hack",
  "tokio",
  "uniffi",

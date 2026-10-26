@@ -14,7 +14,6 @@
 
 pub mod autofs;
 pub mod backup;
-pub mod build_info;
 pub mod capability;
 pub mod capability_tools;
 pub mod ci_runner;

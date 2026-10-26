@@ -958,7 +958,7 @@ fn parse_capability(s: &str) -> Result<StorageCapability, StorageError> {
              orca {orca} does not implement, which normally means it was built \
              against a newer orca than this host runs. Install a plugin release built \
              for this orca, or update orca first (#605).",
-            orca = env!("CARGO_PKG_VERSION")
+            orca = utils::build_info::version()
         ))),
     }
 }
@@ -1771,7 +1771,7 @@ mod tests {
             "names the capability: {msg}"
         );
         assert!(
-            msg.contains(env!("CARGO_PKG_VERSION")),
+            msg.contains(utils::build_info::version()),
             "names the orca this host runs, so the mismatch is visible: {msg}"
         );
         assert!(

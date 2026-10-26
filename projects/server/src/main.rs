@@ -28,7 +28,7 @@ use system::hook::{self as hook_cmd, HookAction};
 #[command(
     name = "orca",
     about = "Unified REST/MCP/CLI tool to manage a fleet of machines from a single pane of glass",
-    version
+    version = env!("ORCA_VERSION")
 )]
 struct Cli {
     /// Project context to load. Omit for general session.
@@ -379,7 +379,7 @@ fn daemon_log_path() -> Option<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    system::build_info::set_version(env!("ORCA_VERSION"));
+    utils::build_info::set_version(env!("ORCA_VERSION"));
     // Unified logging: JSON-line output, EnvFilter from `ORCA_LOG`, a
     // ScrubWriter that redacts well-known sensitive patterns (PVE API
     // tokens, Authorization headers, JSON secret fields) before they
@@ -1365,8 +1365,17 @@ fn cmd_admin_reset_password(username: &str, revoke_sessions: bool) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
     use contract::config::{Config, Model, Ports};
     use std::path::PathBuf;
+
+    #[test]
+    fn cli_version_is_the_stamped_orca_version() {
+        assert_eq!(
+            Cli::command().render_version(),
+            format!("orca {}\n", env!("ORCA_VERSION"))
+        );
+    }
 
     #[test]
     fn plugin_trust_signed_takes_no_arguments() {

@@ -269,7 +269,7 @@ async fn download_public(client: &utils::http::Client, url: &str) -> Result<Vec<
         .header("Accept", "application/octet-stream")
         .header(
             "User-Agent",
-            format!("orca/{}", crate::build_info::version()),
+            format!("orca/{}", utils::build_info::version()),
         )
         .max_body(MAX_ASSET_BYTES)
         .timeout(std::time::Duration::from_secs(300))
@@ -313,7 +313,7 @@ async fn resolve_release(
 ) -> Result<Release> {
     let api = repo_api_base(repo_url)
         .with_context(|| format!("catalog repoUrl is not a github.com URL: {repo_url}"))?;
-    let ua = format!("orca/{}", crate::build_info::version());
+    let ua = format!("orca/{}", utils::build_info::version());
     let get = |url: String| {
         let mut r = client
             .get(url)
@@ -915,7 +915,7 @@ mod tests {
                 .and(path("/asset.bin"))
                 .and(header(
                     "User-Agent",
-                    format!("orca/{}", crate::build_info::version()).as_str(),
+                    format!("orca/{}", utils::build_info::version()).as_str(),
                 ))
                 .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec()))
                 .mount(&server)

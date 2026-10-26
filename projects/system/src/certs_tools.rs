@@ -28,7 +28,7 @@ async fn system_certs_list(
 ) -> anyhow::Result<utils::pki::MeshCertStatus> {
     let pki_dir =
         contract::config::paths::pki_dir().unwrap_or_else(|_| ctx.config.app_dir.join("pki"));
-    let mut out = utils::pki::mesh_cert_status(&pki_dir, crate::build_info::version());
+    let mut out = utils::pki::mesh_cert_status(&pki_dir, utils::build_info::version());
     out.secure = db::pool::with_pooled_or_open(db::mesh::get_secure).unwrap_or(false);
     Ok(out)
 }

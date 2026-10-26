@@ -680,7 +680,7 @@ pub async fn fleet_update(
     // emitting one blamed-peer row per host for a purely local fault (#618).
     if targets.iter().any(|t| !t.is_local)
         && let Some(refusal) =
-            controller_dial_readiness(&crate::mesh::pki_dir(), crate::build_info::version())
+            controller_dial_readiness(&crate::mesh::pki_dir(), utils::build_info::version())
     {
         out.errors.push(refusal);
         persist(&out, record.as_deref());
@@ -763,7 +763,7 @@ pub async fn fleet_update(
         .iter()
         .filter_map(|r| r.applied.as_deref())
         .collect();
-    if let Some(note) = gate_skew_note(crate::build_info::version(), &applied) {
+    if let Some(note) = gate_skew_note(utils::build_info::version(), &applied) {
         tracing::info!("{note}");
         out.notes.push(note);
     }

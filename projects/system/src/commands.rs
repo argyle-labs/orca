@@ -230,7 +230,7 @@ async fn system_serve_release(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        && req.trim_start_matches('v') == crate::build_info::version()
+        && req.trim_start_matches('v') == utils::build_info::version()
         && args.target == build_target()
     {
         let path = current_binary_path()?;
@@ -240,7 +240,7 @@ async fn system_serve_release(
         return Ok(FetchReleaseAssetOutput {
             asset_b64: utils::encoding::base64_encode(&bytes),
             sha256,
-            version: crate::build_info::version().to_string(),
+            version: utils::build_info::version().to_string(),
         });
     }
 
@@ -1093,7 +1093,7 @@ async fn run_system_update(
     // against the latest *stable* release and report a phantom "downgrade
     // available". Only two channels exist now: stable and beta.
     let stored = read_channel_marker().unwrap_or(Channel::Stable);
-    let implied = Channel::from_version(crate::build_info::version());
+    let implied = Channel::from_version(utils::build_info::version());
     let ch_marker = if stored == Channel::Beta || implied == Channel::Beta {
         Channel::Beta
     } else {
@@ -1245,7 +1245,7 @@ async fn run_system_update(
     let available_versions = page_slice(&full_versions, page, per_page);
     let update_available = latest
         .as_deref()
-        .map(|l| crate::update_state::is_update_available(crate::build_info::version(), l));
+        .map(|l| crate::update_state::is_update_available(utils::build_info::version(), l));
 
     // Dry-run surfacing: when the caller did NOT ask to apply (no `--execute`,
     // no `--version`) but an update is available, tell them exactly what
@@ -1257,7 +1257,7 @@ async fn run_system_update(
     {
         notes.push(format!(
             "dry-run: update available {} → {l} (pass --execute to apply)",
-            crate::build_info::version()
+            utils::build_info::version()
         ));
     }
 
@@ -1288,7 +1288,7 @@ async fn run_system_update(
     let (fetch_blocked, fetch_blocked_reason) = fetch_capability();
 
     Ok(SystemUpdateOutput {
-        current_version: crate::build_info::version().to_string(),
+        current_version: utils::build_info::version().to_string(),
         channel: ch_marker.as_marker().to_string(),
         channels: Channel::all()
             .iter()
@@ -1550,7 +1550,7 @@ async fn find_release_by_tag(
     };
     let url = format!("{api}/releases/tags/{v_tag}");
     let client = utils::http::Client::new();
-    let user_agent = format!("{APP_NAME}/{}", crate::build_info::version());
+    let user_agent = format!("{APP_NAME}/{}", utils::build_info::version());
     let req = client
         .get(url)
         .header("Accept", "application/vnd.github+json")
@@ -2765,7 +2765,7 @@ mod tests {
         // the base64 asset decodes, and that the reported sha256 matches the
         // hash of the decoded bytes (the caller re-verifies before swapping).
         let args = FetchReleaseAssetArgs {
-            version: Some(crate::build_info::version().to_string()),
+            version: Some(utils::build_info::version().to_string()),
             target: build_target().to_string(),
             channel: None,
         };
@@ -2773,7 +2773,7 @@ mod tests {
         let out = system_serve_release(args, &ctx)
             .await
             .expect("fast path serves own binary");
-        assert_eq!(out.version, crate::build_info::version());
+        assert_eq!(out.version, utils::build_info::version());
         assert!(!out.asset_b64.is_empty());
         let bytes = utils::encoding::base64_decode(&out.asset_b64).expect("valid base64");
         assert!(!bytes.is_empty(), "own binary must have content");
@@ -2785,7 +2785,7 @@ mod tests {
         // A leading `v` on the requested version is trimmed before the
         // version comparison, so `vX.Y.Z` still hits the fast path.
         let args = FetchReleaseAssetArgs {
-            version: Some(format!("v{}", crate::build_info::version())),
+            version: Some(format!("v{}", utils::build_info::version())),
             target: build_target().to_string(),
             channel: None,
         };
@@ -2793,7 +2793,7 @@ mod tests {
         let out = system_serve_release(args, &ctx)
             .await
             .expect("v-prefixed current version still hits fast path");
-        assert_eq!(out.version, crate::build_info::version());
+        assert_eq!(out.version, utils::build_info::version());
         assert_eq!(
             utils::hash::sha256_hex(&utils::encoding::base64_decode(&out.asset_b64).unwrap()),
             out.sha256
