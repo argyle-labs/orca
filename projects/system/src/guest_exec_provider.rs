@@ -227,7 +227,7 @@ pub struct GuestExecArgs {
 /// stdout/stderr/exit code. Routes to the LXC seam or the VM guest-agent backend
 /// by the guest's kind. Admin-only and side-effecting — mirrors the `orca admin
 /// lxc-exec` privilege boundary.
-#[orca_tool(domain = "guest", verb = "exec", role = "admin", tool_callable = true)]
+#[orca_tool(domain = "guest", verb = "exec", role = "admin")]
 async fn guest_exec_run(args: GuestExecArgs, ctx: &ToolCtx) -> Result<ExecOutput> {
     let provider = provider_for(&args.id).await;
     if let Some(node) = remote_node(
