@@ -309,11 +309,11 @@ pub async fn handle_jsonrpc(
             // the stdio child prefers the daemon's reported version (a long-lived
             // bridge outlives self-updates) and falls back to compiled-in.
             let version = if in_daemon {
-                env!("CARGO_PKG_VERSION").to_string()
+                utils::build_info::version().to_string()
             } else {
                 daemon_version()
                     .await
-                    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+                    .unwrap_or_else(|| utils::build_info::version().to_string())
             };
             reply(
                 id,
@@ -1471,7 +1471,7 @@ mod tests {
         assert_eq!(resp["result"]["serverInfo"]["name"], "orca");
         assert_eq!(
             resp["result"]["serverInfo"]["version"],
-            env!("CARGO_PKG_VERSION")
+            utils::build_info::version()
         );
         assert_eq!(resp["result"]["capabilities"]["tools"]["listChanged"], true);
     }

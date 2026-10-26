@@ -3507,7 +3507,7 @@ mod mesh_tests {
     }
 
     /// The camelCase-wire gate reads the `camel_wire` marker, never the
-    /// version string, so a dev build ("-dev+g…", ".dirty") is judged by what
+    /// version string, so a dev build ("-dev+g…", or ".dirty" from older peers) is judged by what
     /// it reports rather than ranked as an old release.
     #[test]
     fn ping_camel_wire_marker_is_independent_of_version_format() {

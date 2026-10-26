@@ -43,11 +43,6 @@ const HEALTH_GATE_POLL: Duration = Duration::from_secs(5);
 /// Sentinel peer reference for the local daemon: `exec::exec` treats it as
 /// a loopback round-trip through the same allowlist path a peer would use.
 const LOCAL_PEER: &str = "local";
-/// This controller's running version. Reported by the gate-skew note (#623) and
-/// used for the readiness probe's cert status, which takes its version from the
-/// caller rather than reading a crate-local `CARGO_PKG_VERSION`.
-const CONTROLLER_VERSION: &str = env!("ORCA_VERSION");
-
 /// Where a fan-out writes its run record. One file per run, under the orca
 /// home's `logs/`. `None` when no home is resolvable (nothing to persist to).
 fn run_record_path(started: &utils::time::Timestamp) -> Option<std::path::PathBuf> {
@@ -685,7 +680,7 @@ pub async fn fleet_update(
     // emitting one blamed-peer row per host for a purely local fault (#618).
     if targets.iter().any(|t| !t.is_local)
         && let Some(refusal) =
-            controller_dial_readiness(&crate::mesh::pki_dir(), CONTROLLER_VERSION)
+            controller_dial_readiness(&crate::mesh::pki_dir(), utils::build_info::version())
     {
         out.errors.push(refusal);
         persist(&out, record.as_deref());
@@ -768,7 +763,7 @@ pub async fn fleet_update(
         .iter()
         .filter_map(|r| r.applied.as_deref())
         .collect();
-    if let Some(note) = gate_skew_note(CONTROLLER_VERSION, &applied) {
+    if let Some(note) = gate_skew_note(utils::build_info::version(), &applied) {
         tracing::info!("{note}");
         out.notes.push(note);
     }
