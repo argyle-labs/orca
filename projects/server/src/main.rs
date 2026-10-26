@@ -1035,10 +1035,25 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
 }
 
 async fn cmd_admin(action: AdminAction) -> Result<()> {
-    if let Some((operation, limit)) = root_deadline(&action) {
-        utils::privileged::arm_root_deadline(operation, limit);
-    }
-    match action {
+    // Held for the rest of this function: dropping it (on ANY return path,
+    // including success) cancels the watchdog, so a helper that finishes
+    // within its own limit is never force-exited after the fact (N2).
+    let _deadline = root_deadline(&action)
+        .map(|(operation, limit)| utils::privileged::arm_root_deadline(operation, limit));
+    // Every op the daemon reaches through `utils::privileged::run` (never the
+    // CLI-only admin commands below), so `run_child` on the other end of the
+    // `sudo` pipe can tell a genuine finish from a kill mid-flight (N1).
+    let is_privileged_op = matches!(
+        action,
+        AdminAction::StorageApply
+            | AdminAction::LxcExec
+            | AdminAction::LxcPush
+            | AdminAction::CronApply
+            | AdminAction::UnitMigrate
+            | AdminAction::PluginApply
+            | AdminAction::PluginTrustSigned
+    );
+    let result = match action {
         AdminAction::ResetPassword {
             username,
             revoke_sessions,
@@ -1053,7 +1068,11 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::PluginTrustSigned => cmd_admin_plugin_trust_signed(),
         AdminAction::ListUsers => cmd_admin_list_users(),
         AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
+    };
+    if is_privileged_op {
+        let _marked = utils::privileged::mark_done();
     }
+    result
 }
 
 fn root_deadline(action: &AdminAction) -> Option<(&'static str, std::time::Duration)> {

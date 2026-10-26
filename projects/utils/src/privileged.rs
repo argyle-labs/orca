@@ -24,36 +24,94 @@ pub trait PrivilegedExec: Send + Sync {
     fn exec(&self, call: PrivilegedCall) -> PrivilegedFuture;
 }
 
-pub const STORAGE_APPLY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-pub const CRON_APPLY_TIMEOUT: Duration = Duration::from_secs(45);
 /// Bounded so a hung `pct exec` never piles up in D-state and starves the host watchdog.
 pub const LXC_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
 pub const LXC_EXEC_HELPER_GRACE: Duration = Duration::from_secs(30);
 pub const LXC_EXEC_HELPER_TIMEOUT: Duration =
     Duration::from_secs(LXC_EXEC_TIMEOUT.as_secs() + LXC_EXEC_HELPER_GRACE.as_secs());
-pub const LXC_PUSH_HELPER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-pub const PLUGIN_TRUST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const PLUGIN_OP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Outlasts the root side's [`PLUGIN_OP_TIMEOUT`] so the caller never kills a run root still allows.
 pub const PLUGIN_APPLY_TIMEOUT: Duration = Duration::from_secs(PLUGIN_OP_TIMEOUT.as_secs() + 60);
 pub const PLUGIN_HELPER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-pub const UNIT_MIGRATE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 
-pub const ROOT_STORAGE_APPLY_TIMEOUT: Duration = Duration::from_secs(4 * 60 + 30);
-pub const ROOT_CRON_APPLY_TIMEOUT: Duration = Duration::from_secs(40);
-pub const ROOT_LXC_PUSH_TIMEOUT: Duration = Duration::from_secs(9 * 60);
-pub const ROOT_PLUGIN_TRUST_TIMEOUT: Duration = Duration::from_secs(25);
-pub const ROOT_UNIT_MIGRATE_TIMEOUT: Duration = Duration::from_secs(100);
+/// Declares a (root-side, caller-side) timeout pair in one place and folds it
+/// into [`TIMEOUT_PAIRS`] at the same time, so a new pair can never be added
+/// to one without the other — unlike `LXC_EXEC_HELPER_TIMEOUT`/`PLUGIN_APPLY_TIMEOUT`
+/// above, whose root<caller relationship is enforced structurally by their own
+/// definitions, every pair declared here is two independently chosen numbers
+/// that only a test can police. See `every_root_timeout_is_declared_through_the_macro`
+/// and `caller_timeouts_outlast_the_root_side_limits`.
+macro_rules! privileged_timeouts {
+    ($( $root:ident / $caller:ident => $op:literal, root = $root_v:expr, caller = $caller_v:expr; )+) => {
+        $(
+            pub const $root: Duration = $root_v;
+            pub const $caller: Duration = $caller_v;
+        )+
+        pub const TIMEOUT_PAIRS: &[(&str, Duration, Duration)] = &[
+            $( ($op, $root, $caller), )+
+        ];
+    };
+}
+
+privileged_timeouts! {
+    ROOT_STORAGE_APPLY_TIMEOUT / STORAGE_APPLY_TIMEOUT =>
+        "storage-apply", root = Duration::from_secs(4 * 60 + 30), caller = Duration::from_secs(5 * 60);
+    ROOT_CRON_APPLY_TIMEOUT / CRON_APPLY_TIMEOUT =>
+        "cron-apply", root = Duration::from_secs(40), caller = Duration::from_secs(45);
+    ROOT_LXC_PUSH_TIMEOUT / LXC_PUSH_HELPER_TIMEOUT =>
+        "lxc-push", root = Duration::from_secs(9 * 60), caller = Duration::from_secs(10 * 60);
+    ROOT_PLUGIN_TRUST_TIMEOUT / PLUGIN_TRUST_TIMEOUT =>
+        "plugin-trust-signed", root = Duration::from_secs(25), caller = Duration::from_secs(30);
+    ROOT_UNIT_MIGRATE_TIMEOUT / UNIT_MIGRATE_TIMEOUT =>
+        "unit-migrate", root = Duration::from_secs(100), caller = Duration::from_secs(2 * 60);
+}
 
 /// How long a timed-out helper gets after SIGTERM (which sudo relays) before SIGKILL.
 pub const TERM_GRACE: Duration = Duration::from_secs(10);
 
-pub fn arm_root_deadline(operation: &'static str, limit: Duration) {
+/// Cancels the root-side watchdog ([`arm_root_deadline`]) when dropped, so a
+/// helper that finishes within its own limit is never force-exited afterward
+/// by a watchdog thread that doesn't know the work already succeeded.
+pub struct RootDeadlineGuard {
+    _cancel: std::sync::mpsc::Sender<()>,
+}
+
+pub fn arm_root_deadline(operation: &'static str, limit: Duration) -> RootDeadlineGuard {
+    arm_root_deadline_with(operation, limit, || std::process::exit(124))
+}
+
+fn arm_root_deadline_with(
+    operation: &'static str,
+    limit: Duration,
+    on_expired: impl FnOnce() + Send + 'static,
+) -> RootDeadlineGuard {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
-        std::thread::sleep(limit);
-        eprintln!("orca admin {operation}: exceeded its root-side limit of {limit:?}; exiting");
-        std::process::exit(124);
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(limit) {
+            eprintln!("orca admin {operation}: exceeded its root-side limit of {limit:?}; exiting");
+            on_expired();
+        }
     });
+    RootDeadlineGuard { _cancel: tx }
+}
+
+/// Last byte a privileged helper writes to stdout, right after it has
+/// produced its real result and before the process begins teardown. Lets the
+/// caller (`run_child`) tell "the op genuinely finished right at the deadline"
+/// apart from "the op was still working when we killed it" — a distinction a
+/// bare process exit status can't make, since SIGTERM and natural completion
+/// can race at the same instant. Stripped from `PrivilegedOutput::stdout`
+/// before it ever reaches a caller, so the wire format callers parse
+/// (`serde_json::from_slice`) never sees it.
+const DONE_MARKER: u8 = 0x04;
+
+/// Called by every `orca admin <op>` handler right after it has produced its
+/// result, so [`run_child`] can tell a genuine finish from a kill mid-flight.
+pub fn mark_done() -> std::io::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    out.write_all(&[DONE_MARKER])?;
+    out.flush()
 }
 
 fn timed_out(operation: &str, limit: Duration) -> std::io::Error {
@@ -303,7 +361,7 @@ async fn spawn_sudo(call: PrivilegedCall) -> std::io::Result<PrivilegedOutput> {
 
 #[cfg(not(any(test, feature = "test-scope")))]
 async fn spawn_sudo(call: PrivilegedCall) -> std::io::Result<PrivilegedOutput> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     let mut child = tokio::process::Command::new(sudo_binary(&SUDO_PATHS)?)
         .arg("-n")
@@ -317,6 +375,25 @@ async fn spawn_sudo(call: PrivilegedCall) -> std::io::Result<PrivilegedOutput> {
         stdin.write_all(&call.stdin).await?;
         stdin.shutdown().await?;
     }
+    run_child(child, call.timeout, &call.operation()).await
+}
+
+/// Drains `child`'s stdout/stderr and races its exit against `timeout`. Never
+/// gated by `cfg(test)` so the race-handling logic below (the actual thing
+/// [`PrivilegedExec::exec`] implementations are trusted to get right) is
+/// exercised by ordinary `cargo test`, not compiled away by it — `spawn_sudo`
+/// is the only piece that's test-gated, for resolving the trusted sudo path.
+/// A plain `--features test-scope` build with no `cfg(test)` has no caller
+/// (the mock `spawn_sudo` above never calls it, and `mod tests` isn't
+/// compiled), so it's allowed dead in exactly that combination.
+#[cfg_attr(all(feature = "test-scope", not(test)), allow(dead_code))]
+async fn run_child(
+    mut child: tokio::process::Child,
+    timeout: Duration,
+    operation: &str,
+) -> std::io::Result<PrivilegedOutput> {
+    use tokio::io::AsyncReadExt;
+
     let mut out_pipe = child.stdout.take();
     let mut err_pipe = child.stderr.take();
     let stdout = tokio::spawn(async move {
@@ -333,32 +410,85 @@ async fn spawn_sudo(call: PrivilegedCall) -> std::io::Result<PrivilegedOutput> {
         }
         buf
     });
-    let status = match tokio::time::timeout(call.timeout, child.wait()).await {
+
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(status) => status?,
-        Err(_) => {
-            terminate(&mut child, TERM_GRACE).await;
-            return Err(timed_out(&call.operation(), call.timeout));
-        }
+        // The timer and the child's real exit can become ready in the same
+        // instant — `tokio::time::timeout` then picks a branch essentially at
+        // random, so `Err` here does NOT mean the child is still running.
+        // `try_wait` catches the case where it had, in fact, already exited.
+        Err(_) => match child.try_wait()? {
+            Some(status) => status,
+            None => {
+                // Reaps the child one way or another (SIGTERM, then SIGKILL
+                // after TERM_GRACE) — its exit status is ignored for the
+                // marker case below: a process killed by a signal always
+                // reports `success() == false`, even when it had already
+                // written its real result and marker and was merely slow to
+                // actually exit.
+                let _reaped = terminate(&mut child, TERM_GRACE).await?;
+                let mut out_so_far = stdout.await.unwrap_or_default();
+                // The helper writes `DONE_MARKER` only after producing its
+                // real result, so finding it means the op genuinely finished
+                // right at the deadline and was killed only on its way out —
+                // not mid-operation. Report that as success, not a timeout.
+                if out_so_far.last() == Some(&DONE_MARKER) {
+                    out_so_far.pop();
+                    return Ok(PrivilegedOutput {
+                        success: true,
+                        code: None,
+                        status: "completed before being reaped".into(),
+                        stdout: out_so_far,
+                        stderr: stderr.await.unwrap_or_default(),
+                    });
+                }
+                return Err(timed_out(operation, timeout));
+            }
+        },
     };
-    Ok(PrivilegedOutput {
+    Ok(finish(
+        status,
+        stdout.await.unwrap_or_default(),
+        stderr.await.unwrap_or_default(),
+    ))
+}
+
+#[cfg_attr(all(feature = "test-scope", not(test)), allow(dead_code))]
+fn finish(
+    status: std::process::ExitStatus,
+    mut stdout: Vec<u8>,
+    stderr: Vec<u8>,
+) -> PrivilegedOutput {
+    if stdout.last() == Some(&DONE_MARKER) {
+        stdout.pop();
+    }
+    PrivilegedOutput {
         success: status.success(),
         code: status.code(),
         status: status.to_string(),
-        stdout: stdout.await.unwrap_or_default(),
-        stderr: stderr.await.unwrap_or_default(),
-    })
+        stdout,
+        stderr,
+    }
 }
 
-pub async fn terminate(child: &mut tokio::process::Child, grace: Duration) {
+/// SIGTERMs `child` (sudo relays it to the real helper) and waits up to
+/// `grace` for it to exit on its own before SIGKILLing it. Always reaps the
+/// child and returns its real exit status — the caller decides what that
+/// status means (e.g. by checking [`DONE_MARKER`]).
+pub async fn terminate(
+    child: &mut tokio::process::Child,
+    grace: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
     #[cfg(unix)]
     if let Some(pid) = child.id().and_then(|p| libc::pid_t::try_from(p).ok()) {
         // SAFETY: kill(2) on our own child's pid has no memory-safety preconditions.
         unsafe { libc::kill(pid, libc::SIGTERM) };
-        if tokio::time::timeout(grace, child.wait()).await.is_ok() {
-            return;
+        if let Ok(status) = tokio::time::timeout(grace, child.wait()).await {
+            return status;
         }
     }
-    let _killed = child.kill().await;
+    child.kill().await?;
+    child.wait().await
 }
 
 #[cfg(any(test, feature = "test-scope"))]
@@ -605,18 +735,38 @@ mod tests {
 
     #[test]
     fn caller_timeouts_outlast_the_root_side_limits() {
+        for (op, root, caller) in TIMEOUT_PAIRS.iter().copied() {
+            assert!(
+                root < caller,
+                "{op}: root {root:?} must be shorter than caller {caller:?}"
+            );
+        }
         for (root, caller) in [
             (PLUGIN_OP_TIMEOUT, PLUGIN_APPLY_TIMEOUT),
             (LXC_EXEC_TIMEOUT, LXC_EXEC_HELPER_TIMEOUT),
-            (ROOT_STORAGE_APPLY_TIMEOUT, STORAGE_APPLY_TIMEOUT),
-            (ROOT_CRON_APPLY_TIMEOUT, CRON_APPLY_TIMEOUT),
-            (ROOT_LXC_PUSH_TIMEOUT, LXC_PUSH_HELPER_TIMEOUT),
-            (ROOT_PLUGIN_TRUST_TIMEOUT, PLUGIN_TRUST_TIMEOUT),
-            (ROOT_UNIT_MIGRATE_TIMEOUT, UNIT_MIGRATE_TIMEOUT),
         ] {
             assert!(
                 root < caller,
                 "root {root:?} must be shorter than caller {caller:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_root_timeout_is_declared_through_the_macro_not_bare() {
+        // `privileged_timeouts!` is the only place a `ROOT_*_TIMEOUT` may be
+        // declared — it folds every pair into `TIMEOUT_PAIRS` by construction,
+        // so `caller_timeouts_outlast_the_root_side_limits` can't miss one. A
+        // bare `pub const ROOT_...` added outside the macro would skip that
+        // check silently; this scan catches it.
+        let src = include_str!("privileged.rs");
+        for line in src.lines() {
+            let line = line.trim();
+            assert!(
+                !line.starts_with("pub const ROOT_"),
+                "found a bare `{line}` outside privileged_timeouts!; every \
+                 ROOT_*_TIMEOUT must be declared through that macro so it is \
+                 paired with a caller timeout and checked"
             );
         }
     }
@@ -630,8 +780,7 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        terminate(&mut child, Duration::from_secs(5)).await;
-        let status = child.wait().await.unwrap();
+        let status = terminate(&mut child, Duration::from_secs(5)).await.unwrap();
         assert_eq!(status.signal(), Some(libc::SIGTERM));
 
         let mut stubborn = tokio::process::Command::new("sh")
@@ -643,10 +792,89 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
         let started = std::time::Instant::now();
-        terminate(&mut stubborn, Duration::from_millis(300)).await;
-        let status = stubborn.wait().await.unwrap();
+        let status = terminate(&mut stubborn, Duration::from_millis(300))
+            .await
+            .unwrap();
         assert_eq!(status.signal(), Some(libc::SIGKILL));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    fn piped_child(script: &str) -> tokio::process::Child {
+        tokio::process::Command::new("sh")
+            .args(["-c", script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_child_that_finishes_in_time_is_reported_as_success() {
+        let child = piped_child("printf ok");
+        let out = run_child(child, Duration::from_secs(5), "test-op")
+            .await
+            .unwrap();
+        assert!(out.success);
+        assert_eq!(out.stdout, b"ok");
+    }
+
+    /// The exact race N1 guards against: the op finishes and writes its
+    /// `DONE_MARKER` right as the caller's deadline elapses, then the process
+    /// is slow to actually exit afterward. Deterministic (no timing margin to
+    /// get unlucky on): the marker arrives well before the timeout fires, and
+    /// the process is only reaped afterward, by `terminate`, exercising the
+    /// exact path the fix adds — checking the marker even after a kill.
+    #[tokio::test]
+    async fn a_child_that_wrote_its_done_marker_before_being_terminated_is_success() {
+        let script = format!("printf ok; printf '\\{:03o}'; sleep 5", DONE_MARKER);
+        let child = piped_child(&script);
+        let out = run_child(child, Duration::from_millis(50), "test-op")
+            .await
+            .unwrap();
+        assert!(out.success, "{out:?}");
+        assert_eq!(out.stdout, b"ok");
+    }
+
+    #[tokio::test]
+    async fn a_child_killed_before_writing_its_done_marker_is_a_real_timeout() {
+        let child = piped_child("sleep 5");
+        let err = run_child(child, Duration::from_millis(50), "test-op")
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(err.to_string().contains("test-op"), "{err}");
+    }
+
+    #[test]
+    fn dropping_the_guard_before_the_deadline_cancels_the_watchdog() {
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let f = fired.clone();
+        {
+            let _guard = arm_root_deadline_with("test-op", Duration::from_millis(60), move || {
+                f.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            // Dropped here, well before the deadline — simulating a helper
+            // that finished its real work in time.
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !fired.load(std::sync::atomic::Ordering::SeqCst),
+            "a successful completion must never be force-exited after the fact"
+        );
+    }
+
+    #[test]
+    fn an_unfinished_op_past_its_deadline_fires_the_watchdog() {
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let f = fired.clone();
+        let guard = arm_root_deadline_with("test-op", Duration::from_millis(20), move || {
+            f.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
+        drop(guard);
     }
 
     #[cfg(not(target_os = "linux"))]

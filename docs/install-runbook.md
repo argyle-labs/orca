@@ -118,9 +118,11 @@ those subcommands, nothing else. The checks below only make mistakes fail loud.
   drift check and the seam all use the same check, so they cannot disagree.
   `sudo` itself comes from a fixed list (`/usr/bin/sudo`, `/bin/sudo`,
   `/usr/local/bin/sudo`), never from `PATH`, and must pass the same check.
-- **Unraid** ships `sudo`. Its root filesystem lives in RAM and is rebuilt at
-  every boot, so orca keeps the helper and the drop-in on the
-  flash drive (`/boot/config/plugins/orca/`) and reinstalls both at boot from a
+- **Unraid** ships `sudo` at `/usr/bin/sudo` (confirmed live on willow, the
+  fleet's Unraid host — the first path in the fixed list above). Its root
+  filesystem lives in RAM and is rebuilt at every boot, so orca keeps the
+  helper and the drop-in on the flash drive
+  (`/boot/config/plugins/orca/`) and reinstalls both at boot from a
   marked block in `/boot/config/go`; `repair` rewrites all three.
 - **Every call has a timeout, on both sides.** The root helper stops itself at
   its own limit; the caller waits a little longer. If the caller's limit fires,
