@@ -91,7 +91,26 @@ pub fn handle(
     let factory = CTX_FACTORY
         .get()
         .ok_or_else(|| anyhow!("tool.call unavailable: this host has no tool context"))?;
-    let (tool, args, ctx) = prepare(args, principal, inv, factory()?)?;
+    run(args, principal, inv, factory()?)
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn handle_with(
+    args: Value,
+    principal: &str,
+    inv: Option<&spec::surfaces::Invocation>,
+    ctx: ToolCtx,
+) -> Result<Value> {
+    run(args, principal, inv, ctx)
+}
+
+fn run(
+    args: Value,
+    principal: &str,
+    inv: Option<&spec::surfaces::Invocation>,
+    ctx: ToolCtx,
+) -> Result<Value> {
+    let (tool, args, ctx) = prepare(args, principal, inv, ctx)?;
     let inv = inv.ok_or_else(|| anyhow!("tool.call: no invocation"))?;
     consume_budget(inv)?;
     let _permits = acquire(principal, &inv.caller().user_id, ACQUIRE_WAIT)?;
@@ -99,7 +118,7 @@ pub fn handle(
     let result = crate::capability::run_on_cap_runtime(async move {
         dispatch::dispatch(&tool, args, &ctx).await
     })?;
-    result.map_err(|e| {
+    result.map(utils::scrub::redact_result).map_err(|e| {
         let full = format!("{e:#}");
         tracing::warn!(plugin = %principal, tool = %name, error = %full, "tool.call failed");
         anyhow!("{}", utils::scrub::scrub_line(&full))
@@ -195,6 +214,7 @@ pub(crate) fn prepare(
     ctx.set_caller(Some(caller));
     ctx.set_unbound_role(None);
     ctx.set_second_factor(false);
+    ctx.set_owner_cli(false);
     ctx.set_local_transport(false);
     ctx.set_peer(None);
     ctx.set_correlation_id(correlation_id);
@@ -332,6 +352,23 @@ mod tests {
         assert_eq!(who.role, "admin");
         assert_eq!(ctx.caller().unwrap().username, "alice");
         assert_eq!(ctx.call_chain(), ["mylar3".to_string()]);
+    }
+
+    #[test]
+    fn a_supplied_ctx_cannot_carry_owner_cli_or_second_factor() {
+        install_roles();
+        let mut supplied = ctx();
+        supplied.set_owner_cli(true);
+        supplied.set_second_factor(true);
+        let (_, _, ctx) = prepare(
+            call("tcall.detail", json!({})),
+            "mylar3",
+            Some(&executing()),
+            supplied,
+        )
+        .unwrap();
+        assert!(!ctx.owner_cli());
+        assert!(!ctx.second_factor());
     }
 
     #[test]

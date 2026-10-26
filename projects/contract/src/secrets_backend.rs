@@ -483,7 +483,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(!err.contains("hunter2-secret"), "{err}");
-        assert!(err.contains(utils::scrub::REDACTED_TEXT), "{err}");
+        assert!(err.contains(utils::scrub::REDACTED), "{err}");
     }
 
     #[tokio::test]

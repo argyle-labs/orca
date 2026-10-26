@@ -1,6 +1,7 @@
 #[cfg(feature = "reactor")]
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerbCaller {
@@ -18,6 +19,8 @@ pub struct CoreVerb {
     dry_run: bool,
     local: bool,
     second_factor: bool,
+    call_chain: Vec<String>,
+    call_budget: Option<Arc<AtomicUsize>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +64,15 @@ impl CoreVerbKey {
         CoreVerb::new(caller, role, execute_gated, dry_run, local, second_factor)
     }
 
+    pub fn chained(
+        &self,
+        verb: CoreVerb,
+        call_chain: Vec<String>,
+        call_budget: Option<Arc<AtomicUsize>>,
+    ) -> CoreVerb {
+        verb.with_call(call_chain, call_budget)
+    }
+
     #[cfg(feature = "reactor")]
     pub async fn scope<F: Future>(&self, verb: CoreVerb, f: F) -> F::Output {
         CORE_VERB.scope(verb, f).await
@@ -94,7 +106,23 @@ impl CoreVerb {
             dry_run,
             local,
             second_factor,
+            call_chain: Vec::new(),
+            call_budget: None,
         }
+    }
+
+    fn with_call(mut self, call_chain: Vec<String>, call_budget: Option<Arc<AtomicUsize>>) -> Self {
+        self.call_chain = call_chain;
+        self.call_budget = call_budget;
+        self
+    }
+
+    pub fn call_chain(&self) -> &[String] {
+        &self.call_chain
+    }
+
+    pub fn call_budget(&self) -> Option<&Arc<AtomicUsize>> {
+        self.call_budget.as_ref()
     }
 
     pub fn caller(&self) -> &VerbCaller {
@@ -223,6 +251,16 @@ pub fn capture(_domain: &str, _name: &str) -> Option<BackendCall> {
 pub mod testing {
     use super::{CORE_VERB, CoreVerb, TARGET, VerbCaller, backend_key};
     use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    pub fn chained(
+        verb: CoreVerb,
+        call_chain: Vec<String>,
+        call_budget: Option<Arc<AtomicUsize>>,
+    ) -> CoreVerb {
+        verb.with_call(call_chain, call_budget)
+    }
 
     pub fn verb(
         caller: VerbCaller,

@@ -155,8 +155,8 @@ fn output_from(res: LxcExecResult) -> ExecOutput {
         stdout: res.stdout,
         stderr: res.stderr,
         timed_out: false,
-        stdout_truncated: false,
-        stderr_truncated: false,
+        stdout_truncated: res.stdout_truncated,
+        stderr_truncated: res.stderr_truncated,
     }
 }
 
@@ -251,6 +251,90 @@ async fn guest_exec_run(args: GuestExecArgs, ctx: &ToolCtx) -> Result<ExecOutput
         ..Default::default()
     };
     contract::guest_exec::exec(provider, guest, req).await
+}
+
+const PACKAGE_SOURCES: &[&[&str]] = &[
+    &["cat", "/etc/os-release"],
+    &["cat", "/var/lib/dpkg/status"],
+    &["cat", "/lib/apk/db/installed"],
+    &["rpm", "-qa", "--qf", crate::lxc_exec::RPM_QA_FORMAT],
+];
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GuestReadPackagesArgs {
+    /// Target guest id (a Proxmox vmid — LXC or VM).
+    #[arg(long)]
+    pub id: String,
+    /// PVE endpoint the guest lives in. Only the VM/guest-agent backend needs it.
+    #[arg(long)]
+    pub scope: Option<String>,
+    /// PVE node within the scope. Only the VM/guest-agent backend needs it.
+    #[arg(long)]
+    pub node: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GuestPackagesOutput {
+    pub os_release: Option<String>,
+    pub dpkg_status: Option<String>,
+    pub apk_installed: Option<String>,
+    pub rpm_packages: Option<String>,
+    pub truncated: bool,
+}
+
+/// Read a guest's OS release and installed-package databases through a fixed command set.
+#[orca_tool(
+    domain = "guest",
+    verb = "read_packages",
+    role = "admin",
+    execute_gated = false,
+    tool_callable = true
+)]
+async fn guest_read_packages(
+    args: GuestReadPackagesArgs,
+    _ctx: &ToolCtx,
+) -> Result<GuestPackagesOutput> {
+    let provider = provider_for(&args.id).await;
+    let scope = resolve_scope(&args.id, args.scope).await;
+    let guest = GuestRef {
+        scope,
+        node: args.node,
+        id: args.id,
+    };
+    let mut found = Vec::with_capacity(PACKAGE_SOURCES.len());
+    let mut truncated = false;
+    for argv in PACKAGE_SOURCES {
+        let req = ExecRequest {
+            command: argv.iter().map(|a| a.to_string()).collect(),
+            ..Default::default()
+        };
+        let out = contract::guest_exec::exec(provider, guest.clone(), req).await?;
+        if out.timed_out || out.exit_code.is_none() {
+            bail!(
+                "reading `{}` in guest {} {}",
+                argv.join(" "),
+                guest.id,
+                if out.timed_out {
+                    "timed out"
+                } else {
+                    "was killed before exiting"
+                }
+            );
+        }
+        truncated |= out.exit_code == Some(0) && out.stdout_truncated;
+        found.push((out.exit_code == Some(0)).then_some(out.stdout));
+    }
+    let mut found = found.into_iter();
+    let mut next = || found.next().flatten();
+    Ok(GuestPackagesOutput {
+        os_release: next(),
+        dpkg_status: next(),
+        apk_installed: next(),
+        rpm_packages: next(),
+        truncated,
+    })
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -356,8 +440,213 @@ pub fn register_builtin_providers() {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn hermetic_ctx() -> ToolCtx {
+        plugin_toolkit::tool_manifest::minimal_ctx()
+    }
+
+    fn plugin_parent(role: &str, args: serde_json::Value) -> spec::surfaces::Invocation {
+        let mut c = hermetic_ctx();
+        c.set_verified_caller(Some(contract::CallerIdentity {
+            user_id: format!("u-{role}"),
+            username: role.into(),
+            role: role.into(),
+            can_mutate: false,
+        }));
+        spec::surfaces::Invocation::from_ctx(&c)
+            .unwrap()
+            .for_plugin_invoke(true, role, &[], &args)
+            .with_tool_calls(&["guest.read_packages".to_string(), "guest.exec".to_string()])
+    }
+
+    fn call(tool: &str, inv: &spec::surfaces::Invocation) -> Result<serde_json::Value> {
+        dispatch::init().expect("core-verb key claimable in this test process");
+        plugin_loader::tool_call::handle_with(
+            json!({ "tool": tool, "args": { "id": "100" } }),
+            "security",
+            Some(inv),
+            hermetic_ctx(),
+        )
+    }
+
+    #[derive(Clone, Copy)]
+    enum Fault {
+        None,
+        Truncated,
+        TimedOut,
+        Signalled,
+    }
+
+    struct FakeGuest(Fault);
+
+    struct RegistryGuard(Option<Arc<dyn GuestExec>>);
+
+    impl RegistryGuard {
+        fn install(fault: Fault) -> Self {
+            let prior = contract::guest_exec::provider(PROVIDER_NAME);
+            register_provider(Arc::new(FakeGuest(fault)));
+            Self(prior)
+        }
+    }
+
+    impl Drop for RegistryGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(prior) => register_provider(prior),
+                None => _ = contract::guest_exec::deregister_provider(PROVIDER_NAME),
+            }
+        }
+    }
+
+    impl GuestExec for FakeGuest {
+        fn name(&self) -> &str {
+            PROVIDER_NAME
+        }
+
+        fn exec(&self, _guest: GuestRef, req: ExecRequest) -> BoxFuture<'_, Result<ExecOutput>> {
+            let fault = self.0;
+            let (code, stdout) = match req.command.join(" ").as_str() {
+                "cat /etc/os-release" => (0, "ID=debian\n"),
+                "cat /var/lib/dpkg/status" => (0, "Package: openssl\nVersion: 3.0.15\n"),
+                cmd if cmd.starts_with("rpm -qa") => (0, "https://u:hunter2@example"),
+                _ => (1, ""),
+            };
+            let is_dpkg = req.command.join(" ") == "cat /var/lib/dpkg/status";
+            Box::pin(async move {
+                let mut out = ExecOutput {
+                    exit_code: Some(code),
+                    stdout: stdout.to_string(),
+                    ..Default::default()
+                };
+                match fault {
+                    Fault::Truncated if is_dpkg => out.stdout_truncated = true,
+                    Fault::TimedOut if is_dpkg => {
+                        out.exit_code = None;
+                        out.timed_out = true;
+                    }
+                    Fault::Signalled if is_dpkg => {
+                        out.exit_code = None;
+                        out.signal = Some(9);
+                    }
+                    _ => {}
+                }
+                Ok(out)
+            })
+        }
+
+        fn write_file(
+            &self,
+            _guest: GuestRef,
+            _req: WriteFileRequest,
+        ) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { bail!("read-only fake") })
+        }
+    }
+
+    #[test]
+    fn guest_exec_is_not_reachable_through_a_plugin() {
+        assert!(!dispatch::tool_roles::is_tool_callable("guest.exec"));
+        let err = call(
+            "guest.exec",
+            &plugin_parent("admin", json!({ "execute": true })),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not marked tool_callable"), "{err}");
+    }
+
+    #[test]
+    fn read_packages_is_tool_callable_at_admin_role() {
+        assert!(dispatch::tool_roles::is_tool_callable(
+            "guest.read_packages"
+        ));
+        assert_eq!(
+            dispatch::tool_roles::known_role("guest.read_packages"),
+            Some("admin")
+        );
+    }
+
+    #[test]
+    fn a_system_invocation_cannot_read_packages_through_a_plugin() {
+        let err = plugin_loader::tool_call::handle_with(
+            json!({ "tool": "guest.read_packages", "args": { "id": "100" } }),
+            "security",
+            Some(&spec::surfaces::Invocation::system()),
+            hermetic_ctx(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no authenticated caller"), "{err}");
+    }
+
+    #[test]
+    fn an_unconfirmed_admin_parent_is_refused_because_read_packages_has_no_dry_run() {
+        let err = call("guest.read_packages", &plugin_parent("admin", json!({})))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not support dryRun"), "{err}");
+    }
+
+    #[test]
+    #[serial_test::serial(guest_exec_registry)]
+    fn a_confirmed_admin_parent_reads_packages_with_secrets_scrubbed() {
+        let _registry = RegistryGuard::install(Fault::None);
+        let out = call(
+            "guest.read_packages",
+            &plugin_parent("admin", json!({ "execute": true })),
+        )
+        .unwrap();
+        assert_eq!(out["dpkgStatus"], "Package: openssl\nVersion: 3.0.15\n");
+        assert!(out["apkInstalled"].is_null(), "{out}");
+        assert_eq!(out["rpmPackages"], utils::scrub::REDACTED);
+        assert_eq!(out["osRelease"], "ID=debian\n");
+        assert_eq!(out["truncated"], false);
+    }
+
+    fn read_packages_with(fault: Fault) -> Result<serde_json::Value> {
+        let _registry = RegistryGuard::install(fault);
+        call(
+            "guest.read_packages",
+            &plugin_parent("admin", json!({ "execute": true })),
+        )
+    }
+
+    #[test]
+    #[serial_test::serial(guest_exec_registry)]
+    fn a_truncated_source_is_flagged() {
+        let out = read_packages_with(Fault::Truncated).unwrap();
+        assert_eq!(out["truncated"], true, "{out}");
+    }
+
+    #[test]
+    #[serial_test::serial(guest_exec_registry)]
+    fn a_timed_out_source_is_an_error_not_an_absent_package_db() {
+        let err = read_packages_with(Fault::TimedOut).unwrap_err().to_string();
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[test]
+    #[serial_test::serial(guest_exec_registry)]
+    fn a_signal_killed_source_is_an_error_not_an_absent_package_db() {
+        let err = read_packages_with(Fault::Signalled)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("killed"), "{err}");
+    }
+
+    #[test]
+    fn the_seam_result_carries_its_truncation_flags() {
+        let out = output_from(LxcExecResult {
+            stdout_truncated: true,
+            stderr_truncated: true,
+            ..Default::default()
+        });
+        assert!(out.stdout_truncated && out.stderr_truncated);
+    }
 
     // A duplicate registry name does not error — `register_provider` REPLACES by
     // name, so colliding with the plugin's `"proxmox"` VM backend silently swaps

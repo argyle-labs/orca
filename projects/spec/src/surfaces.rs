@@ -212,9 +212,15 @@ impl Invocation {
             reaches: Vec::new(),
             system: false,
             execute_gated: verb.execute_gated(),
-            call_chain: Vec::new(),
+            call_chain: verb.call_chain().to_vec(),
             tool_calls: Vec::new(),
-            call_budget: Default::default(),
+            call_budget: match verb.call_budget() {
+                Some(budget) => budget.clone(),
+                None if !verb.call_chain().is_empty() => {
+                    std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX / 2))
+                }
+                None => Default::default(),
+            },
         };
         if targeted {
             inv.with_reaches(reaches)
@@ -1597,5 +1603,40 @@ mod tests {
             root.call_budget().load(std::sync::atomic::Ordering::SeqCst),
             0
         );
+    }
+
+    #[test]
+    fn a_backend_hop_carries_the_chain_and_the_used_budget() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let verb = |chain: Vec<String>, budget: Option<std::sync::Arc<AtomicUsize>>| {
+            let v = contract::invocation_scope::testing::verb(
+                contract::invocation_scope::VerbCaller {
+                    user_id: "u".into(),
+                    username: "u".into(),
+                    role: "admin".into(),
+                    can_mutate: true,
+                },
+                "admin",
+                true,
+                false,
+                false,
+                false,
+            );
+            contract::invocation_scope::testing::chained(v, chain, budget)
+        };
+        let budget = std::sync::Arc::new(AtomicUsize::new(5));
+        let hop = Invocation::for_backend(
+            &verb(vec!["a".into(), "b".into()], Some(budget.clone())),
+            true,
+            &[],
+        );
+        assert_eq!(hop.call_chain(), ["a".to_string(), "b".to_string()]);
+        assert_eq!(hop.call_budget().load(Ordering::SeqCst), 5);
+        hop.call_budget().fetch_add(1, Ordering::SeqCst);
+        assert_eq!(budget.load(Ordering::SeqCst), 6);
+
+        let root = Invocation::for_backend(&verb(Vec::new(), None), true, &[]);
+        assert!(root.call_chain().is_empty());
+        assert_eq!(root.call_budget().load(Ordering::SeqCst), 0);
     }
 }

@@ -220,8 +220,11 @@ async fn mesh_topology_view(ctx: &contract::ToolCtx) -> Result<MeshTopologyOutpu
 /// replaces the retired naive `mesh.topology`, which projected each reporter's
 /// claims verbatim (double-counting cluster guests). A system is reached locally
 /// or over its route; "where" is resolved internally, never selected by the
-/// caller.
-#[orca_tool(domain = "system", verb = "topology")]
+/// caller. The tree includes every node's routes and endpoint host IPs;
+/// provider labels whose name or value looks secret are returned as
+/// `<redacted>`. Plugins may call it through `tool.call` on behalf of the
+/// invoking user.
+#[orca_tool(domain = "system", verb = "topology", tool_callable = true)]
 async fn system_topology(
     _args: SystemTopologyArgs,
     ctx: &contract::ToolCtx,
@@ -311,6 +314,15 @@ fn canonicalize_instances(instances: &[MeshInstance]) -> Vec<MeshInstance> {
             && let Some(p) = sys.parent_peer_id.as_mut()
         {
             *p = canonical_peer_id(p).to_string();
+        }
+        if let Some(sys) = c.system.as_mut() {
+            for claim in &mut sys.claims {
+                for (k, v) in claim.labels.iter_mut() {
+                    if plugin_toolkit::scrub::is_secret(k, v) {
+                        *v = plugin_toolkit::scrub::REDACTED.to_string();
+                    }
+                }
+            }
         }
         if seen.insert(c.peer_id.clone()) {
             out.push(c);
@@ -1211,6 +1223,44 @@ mod tests {
             ..Default::default()
         });
         i
+    }
+
+    #[test]
+    fn topology_is_tool_callable() {
+        assert!(dispatch::tool_roles::is_tool_callable("system.topology"));
+    }
+
+    #[test]
+    fn claim_labels_with_secret_names_or_values_are_redacted() {
+        let mut host = with_claim_endpoint(
+            inst("host", "local", "freyr"),
+            "container",
+            "abc123",
+            "app",
+            8080,
+        );
+        host.system.as_mut().unwrap().claims[0].labels = BTreeMap::from([
+            ("app".to_string(), "media".to_string()),
+            (
+                "traefik.http.middlewares.a.basicauth.users".to_string(),
+                "admin:$apr1$hash".to_string(),
+            ),
+            (
+                "notify.url".to_string(),
+                "https://discord.com/api/webhooks/1/abc".to_string(),
+            ),
+        ]);
+        let (roots, _, claims) = build_forest(&[host], &[]);
+        let peer_labels = &roots[0].system.as_ref().unwrap().claims[0].labels;
+        let node_labels = &claims["host"][0].labels;
+        for labels in [peer_labels, node_labels] {
+            assert_eq!(labels["app"], "media");
+            assert_eq!(
+                labels["traefik.http.middlewares.a.basicauth.users"],
+                plugin_toolkit::scrub::REDACTED
+            );
+            assert_eq!(labels["notify.url"], plugin_toolkit::scrub::REDACTED);
+        }
     }
 
     fn reg(role: &str, host: &str, port: u16) -> contract::service_identity::ServiceRegistration {

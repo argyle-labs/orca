@@ -32,5 +32,8 @@ clap        = { workspace = true }
 tracing     = { workspace = true }
 orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
+[dev-dependencies]
+dispatch = { workspace = true }
+
 [lints]
 workspace = true

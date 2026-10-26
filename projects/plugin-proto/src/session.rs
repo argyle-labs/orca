@@ -373,6 +373,7 @@ mod tests {
                 tool: "echo".into(),
                 args: json!({"a": 1}),
                 caller: None,
+                call_chain: Vec::new(),
             },
         )
         .unwrap();
@@ -392,6 +393,7 @@ mod tests {
                 tool: "with_cap".into(),
                 args: Value::Null,
                 caller: None,
+                call_chain: Vec::new(),
             },
         )
         .unwrap();

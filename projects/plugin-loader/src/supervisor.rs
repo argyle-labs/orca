@@ -204,6 +204,7 @@ pub fn invoke_on<S: Read + Write>(
             caller: inv
                 .filter(|i| !i.is_system())
                 .map(|i| crate::wire_caller(i.caller())),
+            call_chain: inv.map(|i| i.call_chain().to_vec()).unwrap_or_default(),
         },
     )
     .with_context(|| format!("sending Invoke for '{tool}'"))?;

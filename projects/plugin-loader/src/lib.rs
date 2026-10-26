@@ -806,15 +806,24 @@ fn make_backend_invoke(
     backing: Backing,
     invoke_prefix: String,
     reaches: Vec<String>,
+    tool_calls: Vec<String>,
 ) -> BackendInvoke {
     Arc::new(move |op: &str, args: sj::Value, call| {
         let tool = format!("{invoke_prefix}.{op}");
-        let inv = backend_invocation(call.as_ref(), &reaches);
+        let inv =
+            with_declared_tool_calls(backend_invocation(call.as_ref(), &reaches), &tool_calls);
         // Domain registries call this thunk directly, often from async code, so
         // this layer keeps it off the async worker itself.
         utils::reactor::off_async_worker(|| backing.invoke(&tool, args, inv))
             .map_err(|e| sj::Value::String(format!("{e:#}")))
     })
+}
+
+fn with_declared_tool_calls(
+    inv: Option<spec::surfaces::Invocation>,
+    tool_calls: &[String],
+) -> Option<spec::surfaces::Invocation> {
+    inv.map(|inv| inv.with_tool_calls(tool_calls))
 }
 
 fn backend_invocation(
@@ -850,6 +859,7 @@ fn register_backends(
             backing.clone(),
             def.invoke_prefix.clone(),
             def.reaches.clone(),
+            def.tool_calls.clone(),
         )
     })
 }
@@ -972,11 +982,22 @@ pub fn write_tool_call_pins(exe: &Path, pins: &ToolCallPins) -> Result<()> {
     promote_tool_call_pins(exe).inspect_err(|_| discard_staged_tool_call_pins(exe))
 }
 
-fn declared_tool_calls(tools: &HashMap<String, ToolDef>) -> ToolCallPins {
+fn declared_tool_calls(tools: &HashMap<String, ToolDef>, backends: &[BackendDef]) -> ToolCallPins {
     tools
         .values()
         .filter(|d| !d.tool_calls.is_empty())
         .map(|d| (d.name.clone(), d.tool_calls.iter().cloned().collect()))
+        .chain(
+            backends
+                .iter()
+                .filter(|d| !d.tool_calls.is_empty())
+                .map(|d| {
+                    (
+                        d.invoke_prefix.clone(),
+                        d.tool_calls.iter().cloned().collect(),
+                    )
+                }),
+        )
         .collect()
 }
 
@@ -1060,8 +1081,8 @@ fn spawn_plugin_with(
         .collect::<std::result::Result<_, _>>()
         .with_context(|| format!("plugin '{software}' returned an invalid backends list"))?;
     check_reaches(&software, &tools, &surfaces)?;
-    check_tool_calls(&software, &tools)?;
-    let tool_calls = declared_tool_calls(&tools);
+    check_tool_calls(&software, &tools, &backend_defs)?;
+    let tool_calls = declared_tool_calls(&tools, &backend_defs);
     if let Some(pins) = pins {
         check_tool_call_pins(&software, &tool_calls, pins)?;
     }
@@ -1232,14 +1253,36 @@ fn check_reaches(
     Ok(())
 }
 
-fn check_tool_calls(software: &str, tools: &HashMap<String, ToolDef>) -> Result<()> {
-    for def in tools.values() {
-        for entry in &def.tool_calls {
+fn check_tool_calls(
+    software: &str,
+    tools: &HashMap<String, ToolDef>,
+    backends: &[BackendDef],
+) -> Result<()> {
+    let declared = tools
+        .values()
+        .map(|d| (d.name.as_str(), &d.tool_calls))
+        .chain(
+            backends
+                .iter()
+                .map(|d| (d.invoke_prefix.as_str(), &d.tool_calls)),
+        );
+    let mut pinned_backends = std::collections::HashSet::new();
+    for def in backends.iter().filter(|d| !d.tool_calls.is_empty()) {
+        if tools.values().any(|t| t.name == def.invoke_prefix)
+            || !pinned_backends.insert(def.invoke_prefix.as_str())
+        {
+            anyhow::bail!(
+                "plugin '{software}' backend invoke_prefix '{}' collides with another tool or backend declaring tool_calls",
+                def.invoke_prefix
+            );
+        }
+    }
+    for (name, tool_calls) in declared {
+        for entry in tool_calls {
             let stem = entry.strip_suffix(".*").unwrap_or(entry);
             if stem.trim().is_empty() || stem.contains('*') {
                 anyhow::bail!(
-                    "plugin '{software}' tool '{}' declares tool_calls entry '{entry}'; use a tool name or a `prefix.*` glob",
-                    def.name
+                    "plugin '{software}' tool '{name}' declares tool_calls entry '{entry}'; use a tool name or a `prefix.*` glob"
                 );
             }
         }
@@ -1920,6 +1963,84 @@ mod surface_tests {
     }
 
     #[cfg(unix)]
+    fn security_backend(tool_calls: &[&str]) -> BackendDef {
+        BackendDef {
+            domain: "security".into(),
+            name: "os-pkg".into(),
+            invoke_prefix: "security.__backend.os-pkg".into(),
+            tool_calls: tool_calls.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn backend_tool_calls_are_pinned_under_the_invoke_prefix() {
+        let pins = declared_tool_calls(
+            &HashMap::new(),
+            &[
+                security_backend(&["system.topology", "guest.*"]),
+                security_backend(&[]),
+            ],
+        );
+        assert_eq!(pins.len(), 1);
+        let entries = &pins["security.__backend.os-pkg"];
+        assert!(entries.contains("system.topology") && entries.contains("guest.*"));
+        assert!(check_tool_call_pins("p", &pins, &pins).is_ok());
+        let err = check_tool_call_pins("p", &pins, &ToolCallPins::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("security.__backend.os-pkg"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_backend_tool_calls_entry_is_refused() {
+        let ok = [security_backend(&["guest.read_packages", "docker.*"])];
+        assert!(check_tool_calls("p", &HashMap::new(), &ok).is_ok());
+        for bad in ["*", "a.*.b", ".*", ""] {
+            let defs = [security_backend(&[bad])];
+            assert!(
+                check_tool_calls("p", &HashMap::new(), &defs).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn colliding_tool_call_pin_keys_are_refused() {
+        let ok = [security_backend(&["guest.*"]), security_backend(&[])];
+        assert!(check_tool_calls("p", &HashMap::new(), &ok).is_ok());
+
+        let shared = [
+            security_backend(&["guest.*"]),
+            security_backend(&["docker.*"]),
+        ];
+        let err = check_tool_calls("p", &HashMap::new(), &shared)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("collides"), "{err}");
+
+        let def: ToolDef = sj::from_value(sj::json!({
+            "name": "security.__backend.os-pkg",
+            "description": "",
+            "input_schema": {},
+            "output_schema": {},
+        }))
+        .unwrap();
+        let tools = HashMap::from([(def.name.clone(), def)]);
+        let err = check_tool_calls("p", &tools, &[security_backend(&["guest.*"])])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("collides"), "{err}");
+    }
+
+    #[test]
+    fn backend_invocations_carry_the_declared_tool_calls() {
+        let calls = vec!["guest.read_packages".to_string()];
+        let inv = with_declared_tool_calls(Some(spec::surfaces::Invocation::system()), &calls);
+        assert_eq!(inv.unwrap().tool_calls(), calls.as_slice());
+        assert!(with_declared_tool_calls(None, &calls).is_none());
+    }
+
     #[test]
     fn backend_api_call_runs_under_the_core_verb_invocation() {
         use contract::invocation_scope::testing::{sync_core_verb, sync_targeting};
