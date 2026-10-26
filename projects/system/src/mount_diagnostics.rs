@@ -227,10 +227,9 @@ const PCT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Run `pct` and capture stdout, or fail. Non-zero exit is a failure: partial
 /// output from a failed command is not a config.
 async fn pct(args: &[&str]) -> Result<String> {
-    utils::privileged::refuse_host_mutation("pct")?;
     let out = tokio::time::timeout(
         PCT_TIMEOUT,
-        tokio::process::Command::new("pct")
+        utils::privileged::host_command("pct")?
             .args(args)
             .kill_on_drop(true)
             .stdin(std::process::Stdio::null())

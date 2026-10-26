@@ -33,7 +33,9 @@ pub const LXC_EXEC_HELPER_TIMEOUT: Duration =
     Duration::from_secs(LXC_EXEC_TIMEOUT.as_secs() + LXC_EXEC_HELPER_GRACE.as_secs());
 pub const LXC_PUSH_HELPER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub const PLUGIN_TRUST_TIMEOUT: Duration = Duration::from_secs(30);
-pub const PLUGIN_APPLY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+pub const PLUGIN_OP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Outlasts the root side's [`PLUGIN_OP_TIMEOUT`] so the caller never kills a run root still allows.
+pub const PLUGIN_APPLY_TIMEOUT: Duration = Duration::from_secs(PLUGIN_OP_TIMEOUT.as_secs() + 60);
 pub const PLUGIN_HELPER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub const UNIT_MIGRATE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 
@@ -70,12 +72,9 @@ impl PrivilegedCall {
 
 pub const REFUSE_ENV: &str = "ORCA_PRIVILEGED_REFUSE";
 
-const HARNESS_ENVS: [&str; 4] = [
-    "CARGO_TARGET_TMPDIR",
-    "RUST_TEST_THREADS",
-    "NEXTEST",
-    "NEXTEST_RUN_ID",
-];
+pub const HARNESS_ENVS: [&str; 3] = ["CARGO_TARGET_TMPDIR", "NEXTEST", "NEXTEST_RUN_ID"];
+
+const SUDO_PATHS: [&str; 3] = ["/usr/bin/sudo", "/bin/sudo", "/usr/local/bin/sudo"];
 
 pub async fn run(call: PrivilegedCall) -> std::io::Result<PrivilegedOutput> {
     let limit = call.timeout;
@@ -101,8 +100,25 @@ async fn dispatch(call: PrivilegedCall) -> std::io::Result<PrivilegedOutput> {
 }
 
 pub fn under_test_harness() -> bool {
-    HARNESS_ENVS.iter().any(|k| std::env::var_os(k).is_some())
-        || std::env::current_exe().is_ok_and(|p| is_cargo_deps_binary(&p))
+    harness_reason().is_some()
+}
+
+fn harness_reason() -> Option<String> {
+    harness_reason_from(
+        |k| std::env::var_os(k).is_some(),
+        std::env::current_exe().ok().as_deref(),
+    )
+}
+
+fn harness_reason_from(
+    env_set: impl Fn(&str) -> bool,
+    exe: Option<&std::path::Path>,
+) -> Option<String> {
+    if let Some(k) = HARNESS_ENVS.iter().find(|k| env_set(k)) {
+        return Some(format!("{k} is set"));
+    }
+    exe.filter(|p| is_cargo_deps_binary(p))
+        .map(|p| format!("{} is a cargo test binary", p.display()))
 }
 
 pub fn ensure_shippable() -> std::io::Result<()> {
@@ -134,10 +150,8 @@ pub fn refuse_host_mutation(program: &str) -> std::io::Result<()> {
         Some("this is a test build".to_string())
     } else if std::env::var_os(REFUSE_ENV).is_some() {
         Some(format!("{REFUSE_ENV} is set"))
-    } else if under_test_harness() {
-        Some("the process is a test harness".to_string())
     } else {
-        None
+        harness_reason()
     };
     match reason {
         Some(r) => Err(std::io::Error::new(
@@ -146,6 +160,13 @@ pub fn refuse_host_mutation(program: &str) -> std::io::Result<()> {
         )),
         None => Ok(()),
     }
+}
+
+pub fn host_command(program: &str) -> std::io::Result<tokio::process::Command> {
+    refuse_host_mutation(program)?;
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.kill_on_drop(true);
+    Ok(cmd)
 }
 
 fn refuse_elevation(call: &PrivilegedCall) -> std::io::Result<()> {
@@ -164,22 +185,42 @@ fn refuse_elevation(call: &PrivilegedCall) -> std::io::Result<()> {
 
 fn trusted_program(p: &std::path::Path) -> Result<(), String> {
     if !p.is_absolute() {
-        return Err("not an absolute path".into());
+        return Err(format!("{} is not an absolute path", p.display()));
     }
-    let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if meta.uid() != 0 {
-            return Err("not owned by root".into());
+    for path in p.ancestors() {
+        let meta =
+            std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!("{} is a symlink", path.display()));
         }
-        if meta.mode() & 0o022 != 0 {
-            return Err("writable by group or other".into());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if meta.uid() != 0 {
+                return Err(format!("{} is not owned by root", path.display()));
+            }
+            if meta.mode() & 0o022 != 0 {
+                return Err(format!("{} is writable by group or other", path.display()));
+            }
         }
     }
-    #[cfg(not(unix))]
-    let _ = meta;
     Ok(())
+}
+
+fn sudo_binary(candidates: &[&str]) -> std::io::Result<std::path::PathBuf> {
+    let sudo = candidates
+        .iter()
+        .map(std::path::Path::new)
+        .find(|p| p.is_file())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no sudo found at any of {}", candidates.join(", ")),
+            )
+        })?;
+    trusted_program(sudo)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e))?;
+    Ok(sudo.to_path_buf())
 }
 
 pub struct Sudo;
@@ -195,6 +236,7 @@ impl PrivilegedExec for Sudo {
 
 #[cfg(any(test, feature = "test-scope"))]
 async fn spawn_sudo(call: PrivilegedCall) -> std::io::Result<PrivilegedOutput> {
+    sudo_binary(&SUDO_PATHS)?;
     Err(testing::refused(&call))
 }
 
@@ -202,12 +244,7 @@ async fn spawn_sudo(call: PrivilegedCall) -> std::io::Result<PrivilegedOutput> {
 async fn spawn_sudo(call: PrivilegedCall) -> std::io::Result<PrivilegedOutput> {
     use tokio::io::AsyncWriteExt;
 
-    let sudo = if std::path::Path::new("/usr/bin/sudo").is_file() {
-        "/usr/bin/sudo"
-    } else {
-        "sudo"
-    };
-    let mut child = tokio::process::Command::new(sudo)
+    let mut child = tokio::process::Command::new(sudo_binary(&SUDO_PATHS)?)
         .arg("-n")
         .args(&call.argv)
         .stdin(std::process::Stdio::piped())
@@ -356,18 +393,97 @@ mod tests {
     }
 
     #[test]
-    fn only_absolute_root_owned_unwritable_programs_are_trusted() {
-        assert!(trusted_program(std::path::Path::new("orca")).is_err());
+    fn only_absolute_root_owned_unwritable_real_paths_are_trusted() {
+        let err = trusted_program(std::path::Path::new("orca")).unwrap_err();
+        assert!(err.contains("orca is not an absolute path"), "{err}");
         assert!(trusted_program(std::path::Path::new("/nonexistent/orca")).is_err());
-        let f = tempfile::NamedTempFile::new().unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o757)).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("orca");
+            std::fs::write(&bin, b"").unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o757)).unwrap();
+            let err = trusted_program(&bin).unwrap_err();
+            assert!(err.contains(&bin.display().to_string()), "{err}");
+
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(
+                trusted_program(&bin).is_err(),
+                "a writable ancestor is untrusted"
+            );
+
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink("/usr/bin/env", &link).unwrap();
+            let err = trusted_program(&link).unwrap_err();
+            assert!(
+                err.contains("is a symlink") || err.contains("writable"),
+                "{err}"
+            );
+
+            assert!(trusted_program(std::path::Path::new("/usr/bin/env")).is_ok());
         }
-        assert!(trusted_program(f.path()).is_err());
-        #[cfg(unix)]
-        assert!(trusted_program(std::path::Path::new("/bin/sh")).is_ok());
+    }
+
+    #[test]
+    fn a_symlink_target_is_rejected_even_under_a_trusted_dir() {
+        let found = std::fs::read_dir("/usr/bin")
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()));
+        if let Some(link) = found {
+            let err = trusted_program(&link).unwrap_err();
+            assert!(err.contains("is a symlink"), "{err}");
+        }
+    }
+
+    #[test]
+    fn sudo_is_only_taken_from_the_fixed_list() {
+        let err = sudo_binary(&["/nonexistent/sudo", "/also/missing/sudo"]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("/nonexistent/sudo"), "{err}");
+        assert!(
+            SUDO_PATHS
+                .iter()
+                .all(|p| std::path::Path::new(p).is_absolute())
+        );
+    }
+
+    #[test]
+    fn the_harness_reason_names_the_env_var_or_binary() {
+        let none = |_: &str| false;
+        assert_eq!(
+            harness_reason_from(|k| k == "NEXTEST_RUN_ID", None).as_deref(),
+            Some("NEXTEST_RUN_ID is set")
+        );
+        assert_eq!(
+            harness_reason_from(|k| k == "RUST_TEST_THREADS", None),
+            None
+        );
+        let exe = std::path::Path::new("/w/target/debug/deps/t-1");
+        assert_eq!(
+            harness_reason_from(none, Some(exe)).as_deref(),
+            Some("/w/target/debug/deps/t-1 is a cargo test binary")
+        );
+        assert_eq!(
+            harness_reason_from(none, Some(std::path::Path::new("/usr/local/bin/orca"))),
+            None
+        );
+    }
+
+    #[test]
+    fn caller_timeouts_outlast_the_root_side_limits() {
+        assert!(PLUGIN_APPLY_TIMEOUT > PLUGIN_OP_TIMEOUT);
+        assert!(LXC_EXEC_HELPER_TIMEOUT > LXC_EXEC_TIMEOUT);
+    }
+
+    #[test]
+    fn host_command_is_the_refusing_seam_for_host_mutation() {
+        let err = host_command("docker").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("`docker`"), "{err}");
     }
 
     struct Sleeper;

@@ -17,7 +17,6 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use hosts::host_capabilities::{CapabilityState, HostCapability};
 use std::time::Duration;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 /// Outcome of one probe. `Absent` carries the operator-visible reason
@@ -221,9 +220,12 @@ impl CapabilityProbe for DockerProbe {
     }
 
     async fn probe(&self) -> ProbeResult {
-        let fut = Command::new("docker")
-            .args(["version", "--format", "{{.Server.Version}}"])
-            .output();
+        let fut = async {
+            utils::privileged::host_command("docker")?
+                .args(["version", "--format", "{{.Server.Version}}"])
+                .output()
+                .await
+        };
         let out = match timeout(Duration::from_secs(3), fut).await {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => {
@@ -282,6 +284,19 @@ mod tests {
         let r = DockerProbe.probe().await;
         match r {
             ProbeResult::Available { .. } | ProbeResult::Absent { .. } => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn the_docker_probe_never_spawns_under_test() {
+        match DockerProbe.probe().await {
+            ProbeResult::Absent { reason } => {
+                assert!(
+                    reason.contains("refusing to run host-mutating `docker`"),
+                    "{reason}"
+                )
+            }
+            other => panic!("expected Absent, got {other:?}"),
         }
     }
 }

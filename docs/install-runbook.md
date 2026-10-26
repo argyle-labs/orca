@@ -96,6 +96,51 @@ ssh "orca@$HOST" '~/.local/bin/orca --version'
 ssh "orca@$HOST" '~/.local/bin/orca system detail'   # version, uptime, pending_restart
 ```
 
+### Privileged helper
+
+The daemon never runs as root. Root work (`storage-apply`, `cron-apply`,
+`lxc-exec`, `lxc-push`, `plugin-apply`, `plugin-trust-signed`, `unit-migrate`)
+goes through one seam, `utils::privileged`, which runs
+`sudo -n /usr/local/libexec/orca/orca admin <op>` with the op as JSON on stdin.
+The **sudoers allowlist is the real boundary**: it names that one binary and
+those subcommands, nothing else. The checks below only make mistakes fail loud.
+
+- **The helper must be installed.** If `/usr/local/libexec/orca/orca` is
+  missing, every privileged op fails with an error naming it. orca never falls
+  back to the running binary. Fix: `sudo orca identity privilege repair`.
+- **The helper must be trusted.** The seam elevates only an absolute path
+  that is a real file (not a symlink), and that file and every parent directory
+  must be owned by root and not writable by group or other. `sudo` itself comes
+  from a fixed list (`/usr/bin/sudo`, `/bin/sudo`, `/usr/local/bin/sudo`), never
+  from `PATH`.
+- **Every call has a timeout.** When it fires, the error names the op and the
+  limit. The caller's limit is always longer than the root side's limit for the
+  same op:
+
+  | Op | Limit |
+  |---|---|
+  | `storage-apply` | 5 min |
+  | `cron-apply` | 45 s |
+  | `lxc-exec` | 5 min 30 s (5 min in the guest + 30 s grace) |
+  | `lxc-push` | 10 min |
+  | `plugin-apply` | 31 min (the root side gives the plugin 30 min) |
+  | `plugin-trust-signed` | 30 s |
+  | `unit-migrate` | 2 min |
+  | plugin-loader helper calls | 5 min |
+
+- **Kill switch.** Setting `ORCA_PRIVILEGED_REFUSE` (any value) makes the seam
+  refuse every privileged op and every host-mutating command (`pct`, `docker`,
+  `umount`). orca's CI sets it.
+- **Test harnesses never touch the host.** If `CARGO_TARGET_TMPDIR`, `NEXTEST`
+  or `NEXTEST_RUN_ID` is set, or the running binary is a cargo test binary under
+  `target/**/deps/`, the seam refuses and the error names the variable or path.
+  The generated systemd units (`UnsetEnvironment=`) and the launchd agent
+  (`/usr/bin/env -u …`) clear those variables so a daemon never inherits them.
+- **`test-scope` never ships.** A binary built with the `orca-utils`
+  `test-scope` feature refuses to start outside a test harness, an optimized
+  build with it fails to compile, and CI and release run
+  `scripts/check-no-test-scope.sh` against every binary crate.
+
 ---
 
 ## Step 2 — Join the mesh

@@ -226,20 +226,12 @@ fn resolve_binary() -> Result<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn install_service(binary: &str, port: u16) -> Result<()> {
-    let home = std::env::var("HOME")?;
-    let uid = launchd_uid()?;
-    let domain = format!("gui/{uid}");
-    let agents_dir = format!("{home}/Library/LaunchAgents");
-    std::fs::create_dir_all(&agents_dir)?;
-    let plist_path = format!("{agents_dir}/{APP_PLIST_LABEL}.plist");
-    let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
-    std::fs::create_dir_all(&logs_dir)?;
-    // Supervisor capture only — the structured log is the subscriber's
-    // rotated tee (`daemon.jsonl`). See APP_DAEMON_STDERR_FILE.
-    let daemon_log = format!("{logs_dir}/{APP_DAEMON_STDERR_FILE}");
-
-    let plist = format!(
+fn render_plist(binary: &str, port: u16, home: &str, daemon_log: &str) -> String {
+    let unset: String = utils::privileged::HARNESS_ENVS
+        .iter()
+        .map(|k| format!("        <string>-u</string>\n        <string>{k}</string>\n"))
+        .collect();
+    format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -248,7 +240,8 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     <string>{APP_PLIST_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{binary}</string>
+        <string>/usr/bin/env</string>
+{unset}        <string>{binary}</string>
         <string>daemon</string>
         <string>--port</string>
         <string>{port}</string>
@@ -271,7 +264,24 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
 </dict>
 </plist>
 "#
-    );
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn install_service(binary: &str, port: u16) -> Result<()> {
+    let home = std::env::var("HOME")?;
+    let uid = launchd_uid()?;
+    let domain = format!("gui/{uid}");
+    let agents_dir = format!("{home}/Library/LaunchAgents");
+    std::fs::create_dir_all(&agents_dir)?;
+    let plist_path = format!("{agents_dir}/{APP_PLIST_LABEL}.plist");
+    let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
+    std::fs::create_dir_all(&logs_dir)?;
+    // Supervisor capture only — the structured log is the subscriber's
+    // rotated tee (`daemon.jsonl`). See APP_DAEMON_STDERR_FILE.
+    let daemon_log = format!("{logs_dir}/{APP_DAEMON_STDERR_FILE}");
+
+    let plist = render_plist(binary, port, &home, &daemon_log);
 
     std::fs::write(&plist_path, &plist)?;
     println!("{} wrote {}", "✓".green(), plist_path);
@@ -362,11 +372,12 @@ fn canonical_path(path: &str) -> String {
 
 #[cfg(target_os = "linux")]
 fn render_user_unit(binary: &str, port: u16, home: &str, daemon_log: &str) -> String {
+    let unset = utils::privileged::HARNESS_ENVS.join(" ");
     format!(
         "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target {APP_SYSTEMD_SERVICE_LEGACY}.service\n\
          Conflicts={APP_SYSTEMD_SERVICE_LEGACY}.service\n\n\
          [Service]\nExecStart={binary} daemon --port {port}\n\
-         Environment=HOME={home}\nRestart=always\nRestartSec=5\n\
+         Environment=HOME={home}\nUnsetEnvironment={unset}\nRestart=always\nRestartSec=5\n\
          StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
          [Install]\nWantedBy=default.target\n"
     )
@@ -374,11 +385,12 @@ fn render_user_unit(binary: &str, port: u16, home: &str, daemon_log: &str) -> St
 
 #[cfg(target_os = "linux")]
 fn render_system_unit(binary: &str, port: u16, user: &str, home: &str, daemon_log: &str) -> String {
+    let unset = utils::privileged::HARNESS_ENVS.join(" ");
     format!(
         "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target {APP_SYSTEMD_SERVICE_LEGACY}.service\n\
          Conflicts={APP_SYSTEMD_SERVICE_LEGACY}.service\n\n\
          [Service]\nType=simple\nUser={user}\n\
-         Environment=HOME={home}\nExecStart={binary} daemon --port {port}\n\
+         Environment=HOME={home}\nUnsetEnvironment={unset}\nExecStart={binary} daemon --port {port}\n\
          Restart=always\nRestartSec=5\n\
          StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
          [Install]\nWantedBy=multi-user.target\n"
@@ -1145,6 +1157,43 @@ mod tests {
         )
         .unwrap();
         assert!(!refused);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rendered_units_clear_the_test_harness_env() {
+        let system =
+            render_system_unit("/usr/local/bin/orca", 12001, "orca", "/var/lib/orca", "/l");
+        for unit in [daemon_unit(), system] {
+            assert!(
+                unit.contains("UnsetEnvironment=CARGO_TARGET_TMPDIR NEXTEST NEXTEST_RUN_ID\n"),
+                "{unit}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_launchd_plist_clears_the_test_harness_env() {
+        let plist = render_plist("/usr/local/bin/orca", 12001, "/Users/u", "/l");
+        let args = plist
+            .split("<key>ProgramArguments</key>")
+            .nth(1)
+            .and_then(|r| r.split("</array>").next())
+            .unwrap();
+        assert!(args.contains("<string>/usr/bin/env</string>"), "{args}");
+        for k in utils::privileged::HARNESS_ENVS {
+            assert!(
+                args.contains(&format!(
+                    "<string>-u</string>\n        <string>{k}</string>"
+                )),
+                "{args}"
+            );
+        }
+        assert!(
+            args.contains("<string>/usr/local/bin/orca</string>"),
+            "{args}"
+        );
     }
 
     #[cfg(target_os = "linux")]

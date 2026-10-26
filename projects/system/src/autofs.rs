@@ -1400,7 +1400,8 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
 /// inside the helper. A non-zero exit (e.g. "not mounted") surfaces as an error
 /// the caller collects but does not treat as fatal.
 async fn force_unmount(target: &str) -> Result<(), String> {
-    let out = Command::new("umount")
+    let out = utils::privileged::host_command("umount")
+        .map_err(|e| e.to_string())?
         .args(["-lf", "--", target])
         .output()
         .await
@@ -2983,5 +2984,14 @@ mod tests {
         // holds so ownership can never become the weaker of the two surfaces.
         assert!(!is_allowed_share_path("/etc"));
         assert!(!is_allowed_share_path("/mnt/user"));
+    }
+
+    #[tokio::test]
+    async fn force_unmount_never_spawns_umount_under_test() {
+        let err = force_unmount("/orca/not/mounted/xyz").await.unwrap_err();
+        assert!(
+            err.contains("refusing to run host-mutating `umount`"),
+            "{err}"
+        );
     }
 }
