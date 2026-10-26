@@ -98,6 +98,18 @@ fn scope_from_unit(unit: Option<&contract::unit::UnitId>, given: Option<&str>) -
     unit.and_then(|u| u.manager_scope().1.map(str::to_string))
 }
 
+fn short_host(name: &str) -> &str {
+    name.split('.').next().unwrap_or(name)
+}
+
+fn remote_node<'a>(provider: &str, node: Option<&'a str>, local: &str) -> Option<&'a str> {
+    node.filter(|n| {
+        provider == PROVIDER_NAME
+            && !n.is_empty()
+            && !short_host(n).eq_ignore_ascii_case(short_host(local))
+    })
+}
+
 /// Route a guest id to the guest-exec provider that can actually reach it.
 async fn provider_for(id: &str) -> &'static str {
     provider_for_kind(kind_of(id).await.as_deref())
@@ -205,7 +217,8 @@ pub struct GuestExecArgs {
     /// PVE endpoint the guest lives in. Only the VM/guest-agent backend needs it.
     #[arg(long)]
     pub scope: Option<String>,
-    /// PVE node within the scope. Only the VM/guest-agent backend needs it.
+    /// PVE node within the scope. For an LXC, the orca member of that name runs
+    /// the request; omitted, this host does.
     #[arg(long)]
     pub node: Option<String>,
 }
@@ -214,9 +227,18 @@ pub struct GuestExecArgs {
 /// stdout/stderr/exit code. Routes to the LXC seam or the VM guest-agent backend
 /// by the guest's kind. Admin-only and side-effecting — mirrors the `orca admin
 /// lxc-exec` privilege boundary.
-#[orca_tool(domain = "guest", verb = "exec", role = "admin")]
-async fn guest_exec_run(args: GuestExecArgs, _ctx: &ToolCtx) -> Result<ExecOutput> {
+#[orca_tool(domain = "guest", verb = "exec", role = "admin", tool_callable = true)]
+async fn guest_exec_run(args: GuestExecArgs, ctx: &ToolCtx) -> Result<ExecOutput> {
     let provider = provider_for(&args.id).await;
+    if let Some(node) = remote_node(
+        provider,
+        args.node.as_deref(),
+        crate::host_identity::hostname(),
+    ) {
+        let node = node.to_string();
+        let local = GuestExecArgs { node: None, ..args };
+        return dispatch::cli::exec_remote::<GuestExecRun>(&node, local, ctx).await;
+    }
     let scope = resolve_scope(&args.id, args.scope).await;
     let guest = GuestRef {
         scope,
@@ -254,7 +276,8 @@ pub struct GuestWriteFileArgs {
     /// PVE endpoint the guest lives in. Only the VM/guest-agent backend needs it.
     #[arg(long)]
     pub scope: Option<String>,
-    /// PVE node within the scope. Only the VM/guest-agent backend needs it.
+    /// PVE node within the scope. For an LXC, the orca member of that name runs
+    /// the request; omitted, this host does.
     #[arg(long)]
     pub node: Option<String>,
     /// Push the bytes even if they do not parse as the format `path`'s extension
@@ -287,10 +310,24 @@ fn check_contents_parse(path: &str, contents: &[u8], allow_unparseable: bool) ->
 /// [MUTATES STATE] Write a file into a guest — the confined `pct push` seam for an LXC, the
 /// guest-agent `file-write` for a VM. Admin-only and side-effecting — mirrors the
 /// `orca admin lxc-push` privilege boundary; the payload never rides argv.
-#[orca_tool(domain = "guest", verb = "write_file", role = "admin")]
-async fn guest_write_file(args: GuestWriteFileArgs, _ctx: &ToolCtx) -> Result<()> {
+#[orca_tool(
+    domain = "guest",
+    verb = "write_file",
+    role = "admin",
+    tool_callable = true
+)]
+async fn guest_write_file(args: GuestWriteFileArgs, ctx: &ToolCtx) -> Result<()> {
     check_contents_parse(&args.path, args.contents.as_bytes(), args.allow_unparseable)?;
     let provider = provider_for(&args.id).await;
+    if let Some(node) = remote_node(
+        provider,
+        args.node.as_deref(),
+        crate::host_identity::hostname(),
+    ) {
+        let node = node.to_string();
+        let local = GuestWriteFileArgs { node: None, ..args };
+        return dispatch::cli::exec_remote::<GuestWriteFile>(&node, local, ctx).await;
+    }
     // Same addressing rule as `guest.exec`: the id is the address, orca finds
     // the endpoint.
     let scope = resolve_scope(&args.id, args.scope).await;
@@ -459,6 +496,34 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn an_lxc_on_another_node_is_forwarded_to_that_member() {
+        assert_eq!(
+            remote_node(PROVIDER_NAME, Some("thor"), "loki"),
+            Some("thor")
+        );
+        assert_eq!(
+            remote_node(PROVIDER_NAME, Some("thor"), "loki.example.lan"),
+            Some("thor")
+        );
+    }
+
+    #[test]
+    fn an_lxc_on_this_node_runs_locally() {
+        assert_eq!(remote_node(PROVIDER_NAME, Some("thor"), "thor"), None);
+        assert_eq!(
+            remote_node(PROVIDER_NAME, Some("Thor"), "thor.example.lan"),
+            None
+        );
+        assert_eq!(remote_node(PROVIDER_NAME, None, "thor"), None);
+        assert_eq!(remote_node(PROVIDER_NAME, Some(""), "thor"), None);
+    }
+
+    #[test]
+    fn the_vm_backend_keeps_node_as_a_pve_locator() {
+        assert_eq!(remote_node("proxmox", Some("thor"), "loki"), None);
     }
 
     fn unit(manager: &str) -> contract::unit::UnitId {
