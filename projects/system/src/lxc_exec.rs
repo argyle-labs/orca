@@ -623,7 +623,11 @@ impl LxcPushResult {
 
 const PUSH_ALLOWED_PREFIXES: &[&str] = &["/etc/", "/opt/", "/srv/", "/var/lib/"];
 
-const PUSH_ALLOWED_FILES: &[&str] = &["/.pxarexclude"];
+const PUSH_ALLOWED_FILES: &[&str] = &[
+    "/.pxarexclude",
+    "/run/orca-update-backup.json",
+    "/run/systemd/system/orca-guest-update.service",
+];
 
 const PUSH_DENIED_PREFIXES: &[&str] = &[
     "/etc/passwd",
@@ -1189,6 +1193,8 @@ mod tests {
         assert!(validate_push_path("/etc/inittab").is_ok());
         assert!(validate_push_path("/.pxarexclude").is_ok());
         assert!(validate_push_path("/var/lib/app/config.yml").is_ok());
+        assert!(validate_push_path("/run/orca-update-backup.json").is_ok());
+        assert!(validate_push_path("/run/systemd/system/orca-guest-update.service").is_ok());
         for path in [
             "/usr/local/bin/apt-get",
             "/usr/bin/systemctl",
@@ -1205,6 +1211,8 @@ mod tests {
             "/etc/apt/apt.conf.d/99evil",
             "/etc/profile.d/evil.sh",
             "/etc/ssh/sshd_config",
+            "/run/systemd/system/evil.service",
+            "/run/orca-update-backup.json.d/x",
         ] {
             assert!(validate_push_path(path).is_err(), "{path}");
         }
