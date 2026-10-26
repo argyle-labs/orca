@@ -35,21 +35,18 @@ fn watch_git_head(repo: &Path) {
         return;
     };
     let head = git_dir.join("HEAD");
-    println!("cargo:rerun-if-changed={}", head.display());
+    let mut watched = vec![head.clone()];
     if let Ok(contents) = fs::read_to_string(&head)
         && let Some(reference) = contents.trim().strip_prefix("ref:")
     {
         let reference = reference.trim();
-        let loose = [git_dir.join(reference), common_dir.join(reference)]
-            .into_iter()
-            .find(|p| p.exists())
-            .unwrap_or_else(|| common_dir.join(reference));
-        println!("cargo:rerun-if-changed={}", loose.display());
+        watched.push(git_dir.join(reference));
+        watched.push(common_dir.join(reference));
     }
-    println!(
-        "cargo:rerun-if-changed={}",
-        common_dir.join("packed-refs").display()
-    );
+    watched.push(common_dir.join("packed-refs"));
+    for path in watched.iter().filter(|p| p.exists()) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 }
 
 fn resolve_version() -> String {
@@ -59,17 +56,6 @@ fn resolve_version() -> String {
         return v.trim().trim_start_matches('v').to_string();
     }
     let cargo_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
-
-    let exact_tag = Command::new("git")
-        .args(["describe", "--tags", "--exact-match"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-
-    if let Some(tag) = exact_tag {
-        return tag.strip_prefix('v').unwrap_or(&tag).to_string();
-    }
 
     let sha = Command::new("git")
         .args(["rev-parse", "--short=7", "HEAD"])

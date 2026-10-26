@@ -437,6 +437,7 @@ debug = "line-tables-only"
 # macOS default already, but pin it: keep dSYM out of the executable so
 # relinking doesn't have to splice debuginfo back into the binary.
 split-debuginfo = "unpacked"
+# sccache caches deps only; workspace crates keep incremental state in target/.
 incremental = true
 
 # Strip debug info from every external dependency. Our packages keep

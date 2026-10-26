@@ -135,6 +135,10 @@ alone** — peer-consuming logic that used to reach into a mesh-store is elevate
 here rather than depended on downward. Home of the deferred anti-entropy /
 gossip backstop idea (see Messaging).
 
+`system` reads the running version at runtime via `system::build_info::version()`.
+Any binary that links `system` must call `system::build_info::set_version(env!("ORCA_VERSION"))`
+first in `main`; otherwise it reports `CARGO_PKG_VERSION`.
+
 ### `configs`  🔌 seam  *(⟵ `config_store` + `config-source`)*
 Declarative configuration: a per-noun **schema registry** + **reconcile**
 (status / diff / apply / pull / push / sync) over **multiple config sources the

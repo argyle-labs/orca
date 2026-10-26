@@ -727,15 +727,14 @@ pub(crate) fn write_pending_restart_marker(target: &str) {
 /// Whether this process is a **dev** build/state. Dev is a STATE, not an
 /// update channel — a dev build tracks a local/HEAD stream and reports its
 /// channel as `stable`. Signalled by (in priority) the `ORCA_DEV` env var, a
-/// `-dev+` / `+unknown` compiled version, or the persisted `DaemonMode::Dev`.
+/// `-dev+` compiled version, or the persisted `DaemonMode::Dev`.
 /// The update path uses this to avoid pulling a GitHub release over a dev
 /// build (unless the operator gives an explicit `--version`).
 pub fn is_dev() -> bool {
     let env_flag = std::env::var("ORCA_DEV")
         .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(false);
-    let dev_build = crate::build_info::version().contains("-dev")
-        || crate::build_info::version().contains("+unknown");
+    let dev_build = crate::build_info::version().contains("-dev");
     let dev_mode = utils::state::read()
         .ok()
         .flatten()

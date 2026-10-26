@@ -21,7 +21,8 @@ Read-only probes:
 
 - `system_update(id=<id>)` — omit all other args. Reports `current_version`,
   `channel`, `pinned_to`, `update_available`, `pending_restart`. A
-  `-dev+g<hash>` version means a hand-built binary, not a release.
+  `-dev+g<hash>` version means a local build, not a release; only release
+  builds (CI / `release-lib.sh`) carry a clean release version.
 - `system.certs.list`, addressed to the host's id — leaf/CA cert days-remaining
   and the `secure` tier for that host. A leaf at `0` days is the cert-expiry
   deadlock (mesh handshakes fail; see [self-heal](#appendix-cert-expiry-deadlock)).

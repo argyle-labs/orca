@@ -665,8 +665,8 @@ pub struct SystemUpdateOutput {
     /// success.
     pub pending_restart: Option<PendingRestart>,
     /// True when `latest` is strictly newer than `current_version` under
-    /// semver, ignoring dev-build suffixes (`-dev+g<sha>` and trailing
-    /// `.dirty`). Computed server-side so REST/MCP/CLI callers and the
+    /// semver, ignoring dev-build suffixes (`-dev+g<sha>`, and the trailing
+    /// `.dirty` older peers still report). Computed server-side so REST/MCP/CLI callers and the
     /// web UI all agree without re-implementing the comparator. `None`
     /// when either side is missing or unparseable.
     pub update_available: Option<bool>,
