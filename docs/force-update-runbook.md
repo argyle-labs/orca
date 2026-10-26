@@ -21,7 +21,7 @@ Read-only probes:
 
 - `system_update(id=<id>)` — omit all other args. Reports `current_version`,
   `channel`, `pinned_to`, `update_available`, `pending_restart`. A
-  `-dev+<hash>.dirty` version means a hand-built binary, not a release.
+  `-dev+g<hash>` version means a hand-built binary, not a release.
 - `system.certs.list`, addressed to the host's id — leaf/CA cert days-remaining
   and the `secure` tier for that host. A leaf at `0` days is the cert-expiry
   deadlock (mesh handshakes fail; see [self-heal](#appendix-cert-expiry-deadlock)).
@@ -42,7 +42,7 @@ installs, and restarts. Verify: re-probe → `current_version == latest`,
 
 ## Level 2 — Force a specific version (dirty / dev / pinned / stuck)
 
-Symptom: host is on a `…-dev+…dirty` build, is pinned, or `update_available` is
+Symptom: host is on a `…-dev+g…` build, is pinned, or `update_available` is
 `false` while running the wrong version.
 
 ```
