@@ -144,6 +144,19 @@ cargo run -p orca-server -- serve --dev   # backend only, no peacock web UI / HM
 cargo run -p orca-server -- mcp-serve     # MCP stdio server (simulate Claude Code)
 ```
 
+Dev builds are incremental: sccache caches dependency crates only, while
+workspace crates reuse incremental state in `target/`. Reclaim space from a
+single crate with `cargo clean -p <crate>`. CI builds with `CARGO_INCREMENTAL=0`.
+
+Version stamping: only `orca-server`'s `build.rs` stamps `ORCA_VERSION`. A
+release build (`ORCA_RELEASE_VERSION` set by CI / `scripts/release-lib.sh`)
+reports the release; every local build reports `<pkg>-dev+g<sha>`, even at a
+tag. Rebuilds trigger on HEAD/ref changes only, never on the git index.
+`orca openapi emit` writes the version without the `-dev+g<sha>` suffix so the
+committed spec does not change per commit. `orca package build` normalises the
+version per format (deb `0.2.1~rc.21`, rpm release `0.rc.21`, apk `0.2.1_rc21`,
+pkgbuild `0.2.1rc21`).
+
 The daemon is installed as a launchd (macOS) / systemd (Linux) service via
 `orca system install` (run by `make deploy`); `orca system delete` removes it.
 On port handoff the dev process parks the running daemon (SIGUSR1) and reclaims

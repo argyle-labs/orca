@@ -90,7 +90,7 @@ impl ServiceCapability {
              orca {orca} does not implement, which normally means it was built \
              against a newer orca than this host runs. Install a plugin release built \
              for this orca, or update orca first (#605).",
-                orca = env!("CARGO_PKG_VERSION")
+                orca = utils::build_info::version()
             ))),
         }
     }
