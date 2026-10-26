@@ -165,15 +165,6 @@ pub fn parse_proc_uid(status: &str) -> Option<u32> {
         .ok()
 }
 
-/// Home directory for `uid` from `/etc/passwd` content.
-pub fn home_for_uid(passwd: &str, uid: u32) -> Option<PathBuf> {
-    passwd.lines().find_map(|line| {
-        let f: Vec<&str> = line.split(':').collect();
-        // name:passwd:uid:gid:gecos:home:shell
-        (f.len() >= 6 && f[2].parse::<u32>().ok()? == uid).then(|| PathBuf::from(f[5]))
-    })
-}
-
 /// Home directory of the user actually running act_runner on this host.
 ///
 /// Not the orca daemon's `$HOME`, which is a different user: on the fleet the
@@ -181,7 +172,7 @@ pub fn home_for_uid(passwd: &str, uid: u32) -> Option<PathBuf> {
 /// orca's home would resolve the default cache path to a directory that was
 /// never supposed to exist and report a healthy runner as broken.
 ///
-/// `/proc/<pid>/status` and `/etc/passwd` are both world-readable, so this
+/// `/proc/<pid>/status` and the user database are both world-readable, so this
 /// works unprivileged even though the cache directory itself may not be.
 #[cfg(target_os = "linux")]
 pub fn runner_home() -> Option<PathBuf> {
@@ -196,8 +187,7 @@ pub fn runner_home() -> Option<PathBuf> {
         }
         let status = std::fs::read_to_string(pid_dir.join("status")).ok()?;
         let uid = parse_proc_uid(&status)?;
-        let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
-        return home_for_uid(&passwd, uid);
+        return utils::user::home_for_uid(uid).ok();
     }
     None
 }
@@ -383,24 +373,13 @@ mod tests {
     }
 
     #[test]
-    fn the_runner_uid_and_home_come_from_the_files_the_os_already_publishes() {
-        // Real shapes: /proc/<pid>/status and /etc/passwd, both world-readable,
-        // which is what lets an unprivileged orca resolve root's home.
+    fn the_runner_uid_comes_from_proc_status() {
         assert_eq!(
             parse_proc_uid("Name:\tact_runner\nUid:\t0\t0\t0\t0\n"),
             Some(0)
         );
         assert_eq!(parse_proc_uid("Uid:\t1000\t1000\t1000\t1000"), Some(1000));
         assert_eq!(parse_proc_uid("Name:\tx\n"), None);
-
-        let passwd =
-            "root:x:0:0:root:/root:/bin/sh\norca:x:1001:1001::/var/lib/orca:/sbin/nologin\n";
-        assert_eq!(home_for_uid(passwd, 0), Some(PathBuf::from("/root")));
-        assert_eq!(
-            home_for_uid(passwd, 1001),
-            Some(PathBuf::from("/var/lib/orca"))
-        );
-        assert_eq!(home_for_uid(passwd, 4242), None);
     }
 
     #[test]
