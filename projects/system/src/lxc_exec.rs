@@ -44,6 +44,7 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "apt",
     "dpkg",
     "dpkg-query",
+    "rpm",
     "systemctl",
     "true", // no-op used by capability preflights
     // Read-only diagnostics for in-guest monitoring (disk usage, file/log peeks).
@@ -351,6 +352,24 @@ fn check_dpkg_query(args: &[String]) -> Result<(), String> {
     }
 }
 
+pub const RPM_QA_FORMAT: &str = "%{NAME}\t%{EPOCH}:%{VERSION}-%{RELEASE}\n";
+
+fn check_rpm(args: &[String]) -> Result<(), String> {
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["-qa"] => Ok(()),
+        ["-qa", "--qf", format] if *format == RPM_QA_FORMAT => Ok(()),
+        _ => Err(format!(
+            "refused rpm {}: only `rpm -qa` (optionally with the package-list --qf) is allowed",
+            args.join(" ")
+        )),
+    }
+}
+
 fn check_systemctl(args: &[String]) -> Result<(), String> {
     let mut subcommand = false;
     for arg in args {
@@ -410,6 +429,7 @@ pub fn validate(op: &LxcExecOp) -> Result<(), String> {
         "apt-get" | "apt" => check_apt(cmd, args),
         "dpkg" => check_dpkg(args),
         "dpkg-query" => check_dpkg_query(args),
+        "rpm" => check_rpm(args),
         "systemctl" => check_systemctl(args),
         "cat" | "head" | "tail" => check_read(cmd, args),
         _ => Ok(()),
@@ -1047,6 +1067,18 @@ mod tests {
         assert!(check(&["dpkg", "-i", "/tmp/evil.deb"]).is_err());
         assert!(check(&["dpkg", "jellyfin"]).is_err());
         assert!(check(&["dpkg-query", "--admindir=/tmp/x", "-W"]).is_err());
+    }
+
+    #[test]
+    fn rpm_is_limited_to_listing_installed_packages() {
+        assert!(check(&["rpm", "-qa"]).is_ok());
+        assert!(check(&["/usr/bin/rpm", "-qa"]).is_ok());
+        assert!(check(&["rpm"]).is_err());
+        assert!(check(&["rpm", "-i", "/tmp/evil.rpm"]).is_err());
+        assert!(check(&["rpm", "-qa", "--qf", RPM_QA_FORMAT]).is_ok());
+        assert!(check(&["rpm", "-qa", "--qf", "%{NAME}"]).is_err());
+        assert!(check(&["rpm", "-qa", "--dbpath", "/tmp/x"]).is_err());
+        assert!(check(&["rpm", "--eval", "%(id)"]).is_err());
     }
 
     #[test]

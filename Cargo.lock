@@ -4336,6 +4336,7 @@ dependencies = [
  "clap",
  "orca-contract",
  "orca-derive",
+ "orca-dispatch",
  "orca-plugin-toolkit",
  "orca-system",
  "orca-workspace-hack",

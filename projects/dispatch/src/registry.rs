@@ -541,7 +541,7 @@ fn core_verb(
     let execute_gated = find(name).is_some_and(|t| t.execute_gated())
         || crate::tool_roles::plugin_execute_gated(name);
     let dry_run = ctx.dry_run() || crate::erased::dry_run_requested(args).unwrap_or(true);
-    Some(key.verb(
+    let verb = key.verb(
         contract::invocation_scope::VerbCaller {
             user_id: caller.user_id.clone(),
             username: caller.username.clone(),
@@ -553,7 +553,8 @@ fn core_verb(
         dry_run,
         ctx.local_transport(),
         ctx.second_factor(),
-    ))
+    );
+    Some(key.chained(verb, ctx.call_chain().to_vec(), ctx.call_budget().cloned()))
 }
 
 async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Value> {

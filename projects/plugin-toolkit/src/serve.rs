@@ -308,9 +308,10 @@ fn serve_session<S: Read + Write + 'static>(
                 tool,
                 args,
                 caller,
+                call_chain,
             } => {
                 let beating = heartbeat.as_ref().map(Heartbeat::busy);
-                let ctx = invoke_ctx(&base_ctx, caller);
+                let ctx = invoke_ctx(&base_ctx, caller, call_chain);
                 let sink = cap_sink(&stream, &cap_id);
                 let stream_sink = cap_stream_sink(&stream, &cap_id);
                 let result = with_cap_sink(sink, || {
@@ -486,7 +487,7 @@ impl Drop for Heartbeat {
 
 /// The ctx one `Invoke` runs under: the stub base plus the identity the daemon
 /// verified for this request, so `ctx.caller()` answers for the real caller.
-fn invoke_ctx(base: &ToolCtx, caller: Option<VerifiedCaller>) -> ToolCtx {
+fn invoke_ctx(base: &ToolCtx, caller: Option<VerifiedCaller>, call_chain: Vec<String>) -> ToolCtx {
     let caller = caller.map(|c| CallerIdentity {
         user_id: c.user_id,
         username: c.username,
@@ -496,6 +497,7 @@ fn invoke_ctx(base: &ToolCtx, caller: Option<VerifiedCaller>) -> ToolCtx {
     let mut ctx = base.clone();
     ctx.set_caller(caller.clone());
     ctx.set_verified_caller(caller);
+    ctx.set_call_chain(call_chain);
     ctx
 }
 
@@ -680,6 +682,7 @@ mod tests {
                 tool: "test.__be.start".into(),
                 args: json!({"unit": "vm/100"}),
                 caller: None,
+                call_chain: Vec::new(),
             },
         )
         .unwrap();
@@ -736,6 +739,7 @@ mod tests {
                 tool: "test.nope".into(),
                 args: json!({}),
                 caller: None,
+                call_chain: Vec::new(),
             },
         )
         .unwrap();
@@ -784,6 +788,7 @@ mod tests {
                 tool: "test.__be.stop".into(),
                 args: json!({}),
                 caller: None,
+                call_chain: Vec::new(),
             },
         )
         .unwrap();
@@ -809,7 +814,7 @@ mod tests {
     #[test]
     fn invoke_ctx_carries_the_frame_caller_and_nothing_else() {
         let base = minimal_ctx();
-        assert!(invoke_ctx(&base, None).caller().is_none());
+        assert!(invoke_ctx(&base, None, Vec::new()).caller().is_none());
         let ctx = invoke_ctx(
             &base,
             Some(VerifiedCaller {
@@ -818,7 +823,10 @@ mod tests {
                 role: "admin".into(),
                 can_mutate: true,
             }),
+            vec!["security".into()],
         );
+        assert_eq!(ctx.call_chain(), ["security".to_string()]);
+        assert!(base.call_chain().is_empty());
         let c = ctx.caller().expect("caller set from the frame");
         assert_eq!((c.username.as_str(), c.role.as_str()), ("alice", "admin"));
         assert!(c.can_mutate);

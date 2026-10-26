@@ -179,6 +179,8 @@ pub enum Frame {
         args: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller: Option<VerifiedCaller>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        call_chain: Vec<String>,
     },
     /// plugin → orca: result of an [`Frame::Invoke`] with the matching `id`.
     Result {
@@ -421,6 +423,7 @@ mod tests {
             tool: "proxmox.get_facts".into(),
             args: json!({"node": "frigg"}),
             caller: None,
+            call_chain: Vec::new(),
         });
         roundtrip(&Frame::Invoke {
             id: 43,
@@ -432,6 +435,7 @@ mod tests {
                 role: "admin".into(),
                 can_mutate: true,
             }),
+            call_chain: Vec::new(),
         });
         roundtrip(&Frame::Result {
             id: 42,
@@ -470,6 +474,7 @@ mod tests {
             tool: "t.x".into(),
             args: json!({}),
             caller: None,
+            call_chain: Vec::new(),
         })
         .unwrap();
         assert!(body.get("caller").is_none(), "{body}");
@@ -486,6 +491,7 @@ mod tests {
                 tool: "t.x".into(),
                 args: json!({"a": 1}),
                 caller: None,
+                call_chain: Vec::new(),
             }
         );
     }
@@ -509,6 +515,7 @@ mod tests {
                 role: "member".into(),
                 can_mutate: false,
             }),
+            call_chain: Vec::new(),
         })
         .unwrap();
         let OldFrame::Invoke { id, tool, args } = serde_json::from_slice(&bytes).unwrap();

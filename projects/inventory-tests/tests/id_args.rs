@@ -61,6 +61,7 @@ const NATURAL_KEY_IDS: &[(&str, &str, &str)] = &[
     ),
     ("guest.exec", "id", "Proxmox vmid"),
     ("guest.write_file", "id", "Proxmox vmid"),
+    ("guest.read_packages", "id", "Proxmox vmid"),
     (
         "media.unit.detail",
         "id",

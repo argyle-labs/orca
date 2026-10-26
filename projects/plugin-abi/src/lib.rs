@@ -157,6 +157,8 @@ pub struct BackendDef {
     pub data_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reaches: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<String>,
 }
 
 /// A typed, per-runtime provisioning profile a deploy target advertises: the

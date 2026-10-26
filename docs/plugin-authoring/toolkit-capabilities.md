@@ -42,6 +42,56 @@ to stay compatible.)
 > calling domain — it is gated by operator auth, not by plugin identity. The
 > confinement above applies only to the plugin-initiated capability channel.
 
+### Calling core tools (`tool.call`)
+
+A plugin calls another tool through `tool.call` **as the user who invoked it** —
+never as itself. The target must be marked `tool_callable`, declared in the
+plugin's `tool_calls`, and allowed for that user's role. A parent invocation that
+was not execute-confirmed forces the child into `dryRun`, so a tool without
+dry-run support refuses.
+
+Every successful result is passed through `utils::scrub::redact_result` before it
+reaches the plugin (errors through `scrub_line`). One vocabulary, `is_sensitive_key`,
+decides which names are secret, and one marker, `***`, replaces what it hides:
+
+- Key rule: a string value under a sensitive key (`token`, `secret`, `password`,
+  `passwd`, `pwd`, `passphrase`, `apiKey`, `credential`, `privateKey`, `authorization`,
+  `bearer`, or the whole key `key`, `value`, `auth`, `pin`, `otp`, `cookie`, `salt`,
+  `seed`, or the word `pass`, `pw`, `cred`, `creds`, `jwt`, `hmac` between `_.-`
+  separators) is replaced, including strings nested in objects and arrays under it.
+  Numbers, booleans, null, and the shape of arrays and objects are kept; names such
+  as `hasKey`, `claims`, `author`, and `bypass` are not secret.
+- URI rule: a string value that is a URI carrying userinfo, a webhook/ntfy URL, a
+  URL with a token-like path segment or a secret-named query parameter, or a path
+  under `/run/secrets/` or `/var/run/secrets/` is replaced whole.
+- Text rule: every other string goes through `redact_text`, which rewrites only the
+  secret span of `"key": "value"` pairs, `NAME=value` (quoted values and spaces
+  around `=` included), `--flag value`, `key: value`, `Authorization` / `X-Api-Key` /
+  `PVEAPIToken` headers, URI userinfo (`scheme://user:pass@host` and bare
+  `user:pass@host`), webhook URLs, and well-known token shapes (GitHub `ghp_` and
+  `github_pat_`, `sk-`, AWS `AKIA`/`ASIA`, Slack `xox*`, JWT `eyJ...`). PEM private
+  key blocks are replaced line by line across lines.
+
+Plugins reuse the same rules through `plugin_toolkit::scrub` (`is_sensitive_key`,
+`is_secret_value`, `is_secret`, `redact_text`, `scrub_line`).
+
+A plugin that serves only domain backends (for example a security scanner) declares
+its set with `Plugin::tool_calls(&["system.topology", ...])`; it applies to every
+backend the plugin registers and is pinned at install like a tool's `tool_calls`.
+
+The called tool sees the chain of plugins that led to it in `ctx.call_chain()`
+(empty for a direct call), so it can return less to a plugin than to a direct
+admin caller.
+
+Tools a security scanner reaches this way:
+
+| Tool | Role | Returns |
+|---|---|---|
+| `system.topology` | any | the fleet tree, including routes and host IPs; provider labels with secret names or values are redacted |
+| `guest.read_packages` | admin | `/etc/os-release`, `/var/lib/dpkg/status`, `/lib/apk/db/installed` and `rpm -qa` (name and epoch:version-release) from one guest; a missing source is `null`, and `truncated` flags a source cut at the output cap |
+
+`guest.exec` is not reachable through `tool.call`.
+
 ## Exposed toolkit tools & macros
 
 The gateway is one import: `use plugin_toolkit::prelude::*;`. What it gives you:

@@ -58,6 +58,14 @@ pub struct Plugin {
     dispatchers: Vec<Dispatcher>,
     schema_json: String,
     api_surfaces: Vec<(String, &'static [u8])>,
+    tool_calls: Vec<String>,
+}
+
+fn with_tool_calls(mut defs: Vec<BackendDef>, tool_calls: &[String]) -> Vec<BackendDef> {
+    for def in &mut defs {
+        def.tool_calls = tool_calls.to_vec();
+    }
+    defs
 }
 
 impl Plugin {
@@ -73,6 +81,7 @@ impl Plugin {
             dispatchers: Vec::new(),
             schema_json: crate::backend_def::EMPTY_SCHEMAS.to_string(),
             api_surfaces: Vec::new(),
+            tool_calls: Vec::new(),
         }
     }
 
@@ -607,6 +616,12 @@ impl Plugin {
         self
     }
 
+    #[must_use]
+    pub fn tool_calls(mut self, entries: &[&str]) -> Self {
+        self.tool_calls = entries.iter().map(|e| e.to_string()).collect();
+        self
+    }
+
     /// Serve until orca shuts the plugin down. Composes every facet's dispatcher
     /// into the single [`PluginSpec::backend_dispatch`] (first match wins; a miss
     /// falls through to `#[orca_tool]` dispatch) and serializes all facet defs
@@ -629,7 +644,10 @@ impl Plugin {
             name: self.name,
             version: self.version,
             prefixes: self.prefixes,
-            backends_json: crate::backend_def::backends_json(self.defs),
+            backends_json: crate::backend_def::backends_json(with_tool_calls(
+                self.defs,
+                &self.tool_calls,
+            )),
             schema_json: self.schema_json,
             backend_dispatch,
             api_surfaces: self.api_surfaces,
@@ -657,7 +675,10 @@ impl Plugin {
             name: self.name,
             version: self.version,
             prefixes: self.prefixes,
-            backends_json: crate::backend_def::backends_json(self.defs),
+            backends_json: crate::backend_def::backends_json(with_tool_calls(
+                self.defs,
+                &self.tool_calls,
+            )),
             schema_json: self.schema_json,
             backend_dispatch,
             api_surfaces: self.api_surfaces,
@@ -802,5 +823,30 @@ mod tests {
         assert_eq!(out["complete"], true);
         assert!(dispatch("security.__backend.other.scan", serde_json::json!({})).is_none());
         assert!(dispatch("security.__backend.trivyx.scan", serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn tool_calls_apply_to_backends_added_after_them() {
+        let spec = Plugin::named("security")
+            .tool_calls(&["guest.read_packages"])
+            .security(DemoScanner)
+            .into_spec();
+        let defs: Vec<BackendDef> = serde_json::from_str(&spec.backends_json).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].tool_calls, ["guest.read_packages"]);
+    }
+
+    #[test]
+    fn tool_calls_are_declared_on_every_backend_def() {
+        let spec = Plugin::named("security")
+            .security(DemoScanner)
+            .security(DemoScanner)
+            .tool_calls(&["system.topology", "guest.read_packages"])
+            .into_spec();
+        let defs: Vec<BackendDef> = serde_json::from_str(&spec.backends_json).unwrap();
+        assert_eq!(defs.len(), 2);
+        for d in &defs {
+            assert_eq!(d.tool_calls, ["system.topology", "guest.read_packages"]);
+        }
     }
 }
