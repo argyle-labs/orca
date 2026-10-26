@@ -43,10 +43,6 @@ const HEALTH_GATE_POLL: Duration = Duration::from_secs(5);
 /// Sentinel peer reference for the local daemon: `exec::exec` treats it as
 /// a loopback round-trip through the same allowlist path a peer would use.
 const LOCAL_PEER: &str = "local";
-/// This controller's running version. Reported by the gate-skew note (#623) and
-/// used for the readiness probe's cert status, which takes its version from the
-/// caller rather than reading a crate-local `CARGO_PKG_VERSION`.
-
 /// Where a fan-out writes its run record. One file per run, under the orca
 /// home's `logs/`. `None` when no home is resolvable (nothing to persist to).
 fn run_record_path(started: &utils::time::Timestamp) -> Option<std::path::PathBuf> {

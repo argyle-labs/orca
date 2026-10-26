@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 static VERSION: OnceLock<&'static str> = OnceLock::new();
 
 pub fn set_version(version: &'static str) {
-    let _ = VERSION.set(version);
+    VERSION.set(version).ok();
 }
 
 pub fn version() -> &'static str {
