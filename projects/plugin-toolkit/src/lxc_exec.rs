@@ -18,8 +18,6 @@
 //! The wire shape (`{vmid, argv}` in, [`LxcExecResult`] out) mirrors
 //! `system::lxc_exec` on the orca side; keep the two in sync.
 
-use tokio::io::AsyncWriteExt;
-
 /// Env var (set by the plugin supervisor) naming the orca binary that launched
 /// this plugin. Mirrors `plugin_loader::supervisor::ORCA_BIN_ENV`.
 pub const ORCA_BIN_ENV: &str = "ORCA_BIN";
@@ -89,29 +87,16 @@ pub async fn lxc_exec(vmid: u32, argv: &[&str]) -> anyhow::Result<LxcExecResult>
 /// Normal path: `sudo -n <orca> admin lxc-exec`, op piped on stdin, result JSON
 /// parsed from stdout.
 async fn via_orca(orca_bin: &str, payload: &str) -> anyhow::Result<LxcExecResult> {
-    let mut child = tokio::process::Command::new("sudo")
-        .arg("-n")
-        .arg(orca_bin)
-        .args(["admin", "lxc-exec"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("spawn `sudo {orca_bin} admin lxc-exec`: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(payload.as_bytes()).await.ok();
-        stdin.shutdown().await.ok();
-    }
-
-    let out = child
-        .wait_with_output()
-        .await
-        .map_err(|e| anyhow::anyhow!("wait lxc-exec helper: {e}"))?;
+    let out = utils::privileged::run(utils::privileged::PrivilegedCall::new(
+        [orca_bin, "admin", "lxc-exec"],
+        payload,
+        utils::privileged::LXC_EXEC_HELPER_TIMEOUT,
+    ))
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn `sudo {orca_bin} admin lxc-exec`: {e}"))?;
     helper_result(
-        out.status.success(),
-        out.status.code(),
+        out.success,
+        out.code,
         &out.stdout,
         &String::from_utf8_lossy(&out.stderr),
     )
@@ -144,21 +129,19 @@ fn helper_result(
 
 /// Fallback for run-without-orca: `sudo -n pct exec <vmid> -- <argv>` directly.
 async fn via_direct_pct(vmid: u32, argv: &[&str]) -> anyhow::Result<LxcExecResult> {
-    let mut cmd = tokio::process::Command::new("sudo");
-    cmd.arg("-n")
-        .arg("pct")
-        .arg("exec")
-        .arg(vmid.to_string())
-        .arg("--")
-        .args(argv)
-        .kill_on_drop(true);
-    let out = cmd
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("spawn `sudo pct exec`: {e}"))?;
+    let vmid = vmid.to_string();
+    let out = utils::privileged::run(utils::privileged::PrivilegedCall::new(
+        ["/usr/sbin/pct", "exec", vmid.as_str(), "--"]
+            .into_iter()
+            .chain(argv.iter().copied()),
+        Vec::new(),
+        utils::privileged::LXC_EXEC_HELPER_TIMEOUT,
+    ))
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn `sudo pct exec`: {e}"))?;
     Ok(LxcExecResult {
-        success: out.status.success(),
-        exit_code: out.status.code(),
+        success: out.success,
+        exit_code: out.code,
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         error: String::new(),

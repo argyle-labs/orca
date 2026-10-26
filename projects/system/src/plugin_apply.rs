@@ -41,7 +41,7 @@ pub const PRIVILEGED_FLAG: &str = "--privileged-op";
 
 /// Long enough for the slowest known op (copying a docker volume into
 /// appdata), short enough that a wedged plugin cannot hold root forever.
-pub const PLUGIN_APPLY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub const PLUGIN_APPLY_TIMEOUT: Duration = utils::privileged::PLUGIN_OP_TIMEOUT;
 
 /// The only `PATH` a privileged plugin sees.
 pub const SAFE_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";

@@ -169,7 +169,18 @@ shared orca-owned reactor (`plugin_toolkit::reactor`).
 A plugin runs as the unprivileged service user. For root work on its own host
 it calls `plugin_toolkit::privileged::apply(plugin, op, payload)`, which runs
 `sudo -n $ORCA_BIN admin plugin-apply` with `{plugin, op, payload}` on stdin.
-As root, orca:
+`$ORCA_BIN` is the root-owned helper `/usr/local/libexec/orca/orca`, set by the
+supervisor only when that helper is installed (`sudo orca identity privilege
+repair` installs it). The call goes through orca's one privileged seam
+(`utils::privileged`), so it gets the same guarantees as core: the program must
+be an absolute, root-owned real file (no symlinks) whose parent directories no
+group or other user can write, it is Linux-only, the caller waits at most 31
+minutes (SIGTERM, then SIGKILL after 10 s), and it refuses when `ORCA_PRIVILEGED_REFUSE` is
+set or inside a test harness. The toolkit's `lxc_exec`/`lxc_push` helpers and
+the `pct`/`docker` restarts in `mount_recover` follow the same rules. In tests,
+inject a fake with `utils::privileged::testing::with_exec` instead of running
+sudo; a plugin's own test suite needs the latest toolkit for these guards. The
+sudoers grant stays the real boundary. As root, orca:
 
 1. resolves `plugin` only as a bare name in `<orca home>/plugins/` (the orca
    home of the user who ran sudo, from passwd);

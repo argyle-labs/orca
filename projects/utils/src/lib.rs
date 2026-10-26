@@ -83,11 +83,15 @@ pub mod git;
 pub mod http;
 pub mod invocation_scope;
 
+pub const TEST_SCOPE: bool = cfg!(feature = "test-scope");
+
 #[cfg(all(feature = "test-scope", not(debug_assertions)))]
 compile_error!("orca-utils `test-scope` is test-only and must not reach an optimized build");
 /// X.509 + key generation. Gated by the `pki` feature.
 #[cfg(feature = "pki")]
 pub mod pki;
+#[cfg(feature = "reactor")]
+pub mod privileged;
 #[cfg(feature = "reactor")]
 pub mod reactor;
 /// Cron scheduling. Gated by the `schedule` feature; hides the cron lib (and,

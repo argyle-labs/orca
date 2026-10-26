@@ -934,9 +934,12 @@ async fn runner_cache_tick() -> anyhow::Result<()> {
     // Prune dangling docker images (best-effort) only where docker is present.
     // NEVER `-a` — only untagged/dangling layers, bounded by a timeout.
     if crate::capability::is_available("docker") {
-        let fut = tokio::process::Command::new("docker")
-            .args(["image", "prune", "-f", "--filter", "dangling=true"])
-            .output();
+        let fut = async {
+            utils::privileged::host_command("docker")?
+                .args(["image", "prune", "-f", "--filter", "dangling=true"])
+                .output()
+                .await
+        };
         match tokio::time::timeout(Duration::from_secs(30), fut).await {
             Ok(Ok(o)) if o.status.success() => {}
             Ok(Ok(o)) => tracing::debug!(
@@ -1345,7 +1348,12 @@ async fn observe_wedge_candidates(cfg: &WedgeConfig) -> Vec<WedgeObserved> {
 /// Run a bounded, unprivileged `docker` command, returning stdout (empty on any
 /// failure/timeout). Never panics.
 async fn docker_output(args: &[&str]) -> String {
-    let fut = tokio::process::Command::new("docker").args(args).output();
+    let fut = async {
+        utils::privileged::host_command("docker")?
+            .args(args)
+            .output()
+            .await
+    };
     match tokio::time::timeout(Duration::from_secs(15), fut).await {
         Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
         Ok(Ok(o)) => {
@@ -1370,9 +1378,12 @@ async fn docker_output(args: &[&str]) -> String {
 
 /// `docker kill <id>` (bounded). Returns whether the kill succeeded.
 async fn docker_kill(id: &str) -> bool {
-    let fut = tokio::process::Command::new("docker")
-        .args(["kill", id])
-        .output();
+    let fut = async {
+        utils::privileged::host_command("docker")?
+            .args(["kill", id])
+            .output()
+            .await
+    };
     match tokio::time::timeout(Duration::from_secs(15), fut).await {
         Ok(Ok(o)) if o.status.success() => {
             tracing::warn!("[maintenance] runner_wedge: killed wedged container {id}");
@@ -1843,5 +1854,11 @@ mod tests {
         for v in ["0", "false", "no", "off", "", "maybe"] {
             assert!(!is_truthy(v), "{v} should be falsey");
         }
+    }
+
+    #[tokio::test]
+    async fn docker_runs_through_the_refusing_host_command_seam() {
+        assert!(!docker_kill("orca-test-container").await);
+        assert!(docker_output(&["ps"]).await.is_empty());
     }
 }

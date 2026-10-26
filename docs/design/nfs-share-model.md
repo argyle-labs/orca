@@ -104,7 +104,7 @@ Replace autofs entirely.
   or adopted after verifying the live source is a desired network source;
   binds and foreign mounts are never released.
 - **Native mount**, root side only. The existing privilege boundary stays:
-  unprivileged daemon plans, `sudo -n orca admin storage-apply` executes. The
+  unprivileged daemon plans, `sudo -n /usr/local/libexec/orca/orca admin storage-apply` executes. The
   root helper's action changes from "write auto.orca + restart autofs" to
   `mount` / `umount`.
   - Mechanism: exec the host's native `mount`/`umount`

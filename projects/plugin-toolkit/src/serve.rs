@@ -174,6 +174,7 @@ fn surface_reply(surfaces: &[(String, &'static [u8])], id: u64, name: &str) -> F
 /// Connect the orca-provided socket and serve until shutdown. A plugin's
 /// `main()` calls this and returns its result.
 pub fn serve(spec: PluginSpec) -> Result<()> {
+    utils::privileged::ensure_shippable()?;
     check_shared_endpoint_providers(&spec.name)?;
     #[cfg(feature = "in-process")]
     crate::dispatch::init()?;

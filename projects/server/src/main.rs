@@ -372,6 +372,7 @@ fn daemon_log_path() -> Option<String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     utils::build_info::set_version(env!("ORCA_VERSION"));
+    utils::privileged::ensure_shippable()?;
     // Unified logging: JSON-line output, EnvFilter from `ORCA_LOG`, a
     // ScrubWriter that redacts well-known sensitive patterns (PVE API
     // tokens, Authorization headers, JSON secret fields) before they
@@ -1034,7 +1035,25 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
 }
 
 async fn cmd_admin(action: AdminAction) -> Result<()> {
-    match action {
+    // Held for the rest of this function: dropping it (on ANY return path,
+    // including success) cancels the watchdog, so a helper that finishes
+    // within its own limit is never force-exited after the fact (N2).
+    let _deadline = root_deadline(&action)
+        .map(|(operation, limit)| utils::privileged::arm_root_deadline(operation, limit));
+    // Every op the daemon reaches through `utils::privileged::run` (never the
+    // CLI-only admin commands below), so `run_child` on the other end of the
+    // `sudo` pipe can tell a genuine finish from a kill mid-flight (N1).
+    let is_privileged_op = matches!(
+        action,
+        AdminAction::StorageApply
+            | AdminAction::LxcExec
+            | AdminAction::LxcPush
+            | AdminAction::CronApply
+            | AdminAction::UnitMigrate
+            | AdminAction::PluginApply
+            | AdminAction::PluginTrustSigned
+    );
+    let result = match action {
         AdminAction::ResetPassword {
             username,
             revoke_sessions,
@@ -1049,6 +1068,23 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::PluginTrustSigned => cmd_admin_plugin_trust_signed(),
         AdminAction::ListUsers => cmd_admin_list_users(),
         AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
+    };
+    if is_privileged_op {
+        let _marked = utils::privileged::mark_done();
+    }
+    result
+}
+
+fn root_deadline(action: &AdminAction) -> Option<(&'static str, std::time::Duration)> {
+    use utils::privileged as p;
+    match action {
+        AdminAction::StorageApply => Some(("storage-apply", p::ROOT_STORAGE_APPLY_TIMEOUT)),
+        AdminAction::LxcPush => Some(("lxc-push", p::ROOT_LXC_PUSH_TIMEOUT)),
+        AdminAction::PluginTrustSigned => {
+            Some(("plugin-trust-signed", p::ROOT_PLUGIN_TRUST_TIMEOUT))
+        }
+        AdminAction::UnitMigrate => Some(("unit-migrate", p::ROOT_UNIT_MIGRATE_TIMEOUT)),
+        _ => None,
     }
 }
 

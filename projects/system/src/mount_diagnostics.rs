@@ -229,7 +229,7 @@ const PCT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 async fn pct(args: &[&str]) -> Result<String> {
     let out = tokio::time::timeout(
         PCT_TIMEOUT,
-        tokio::process::Command::new("pct")
+        utils::privileged::host_command("pct")?
             .args(args)
             .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
@@ -308,6 +308,16 @@ pub fn register() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pct_is_never_spawned_under_test() {
+        let err = pct(&["list"]).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("refusing to run host-mutating `pct`"),
+            "{err}"
+        );
+    }
 
     /// The shape that motivated this, as `pct config 113` renders it. The
     /// transcode mount is the one that matters; the others are here so the

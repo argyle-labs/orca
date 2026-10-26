@@ -286,7 +286,7 @@ async fn query_database_docker(cfg: &DbConfig, container: &str) -> anyhow::Resul
         let mut args = base_args.clone();
         args.extend(["-e".into(), sql]);
         async move {
-            let out = tokio::process::Command::new("docker")
+            let out = utils::privileged::host_command("docker")?
                 .args(&args)
                 .output()
                 .await?;

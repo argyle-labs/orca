@@ -25,6 +25,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   # Cheap KDF for test builds only; release binaries ignore it.
   ORCA_TEST_FAST_KDF: "1"
+  ORCA_PRIVILEGED_REFUSE: "1"
 
 jobs:
   build:

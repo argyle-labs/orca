@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Shipped builds must never enable utils' `test-scope` feature: it exposes
-# keyless constructors for core-verb and daemon invocation scopes.
+# keyless constructors for core-verb and daemon invocation scopes and swaps the
+# privileged-exec seam for test fakes. Checked for every binary crate.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 found=0
-for pkg in orca-server orca-plugin-toolkit; do
+bins="$(cargo metadata --locked --no-deps --format-version 1 \
+  | jq -r '.packages[] | select(any(.targets[]; .kind | index("bin"))) | .name')"
+[ -n "$bins" ] || { echo "check-no-test-scope: found no binary crates" >&2; exit 1; }
+for pkg in $bins orca-plugin-toolkit; do
   if cargo tree --locked -p "$pkg" -e normal,build,features --prefix none | grep -q 'feature "test-scope"'; then
     echo "check-no-test-scope: $pkg enables orca-utils/test-scope in a non-dev build" >&2
     found=1

@@ -766,7 +766,7 @@ const DOCKER_BIND_FORMAT: &str = "{{range .Mounts}}{{if eq .Type \"bind\"}}{{$.I
 impl ContainerRuntime for DockerCli {
     async fn binds_under(&self, watch: &[String]) -> Result<Vec<ConsumerBind>, RecoverError> {
         // Running container ids first, then inspect their bind mounts.
-        let stdout = Command::new("docker")
+        let stdout = Command::host("docker")?
             .arg("ps")
             .arg("--no-trunc")
             .arg("--format")
@@ -787,7 +787,7 @@ impl ContainerRuntime for DockerCli {
             return Ok(Vec::new());
         }
         // `Command::arg` consumes `self` (builder), so fold the ids in.
-        let mut inspect = Command::new("docker")
+        let mut inspect = Command::host("docker")?
             .arg("inspect")
             .arg("--format")
             .arg(DOCKER_BIND_FORMAT);
@@ -811,7 +811,7 @@ impl ContainerRuntime for DockerCli {
         path: &str,
         timeout: Duration,
     ) -> Result<ConsumerProbe, RecoverError> {
-        let fut = Command::new("docker")
+        let fut = Command::host("docker")?
             .arg("exec")
             .arg(id)
             .arg("stat")
@@ -837,7 +837,7 @@ impl ContainerRuntime for DockerCli {
     }
 
     async fn restart(&self, id: &str) -> Result<(), RecoverError> {
-        Command::new("docker")
+        Command::host("docker")?
             .arg("restart")
             .arg(id)
             .run_checked()
@@ -855,7 +855,7 @@ impl ContainerRuntime for DockerCli {
     }
 
     async fn state(&self, id: &str) -> Result<Option<ConsumerState>, RecoverError> {
-        let out = Command::new("docker")
+        let out = Command::host("docker")?
             .arg("inspect")
             .arg("--format")
             .arg(DOCKER_STATE_FORMAT)
@@ -877,7 +877,7 @@ impl ContainerRuntime for DockerCli {
     }
 
     async fn start(&self, id: &str) -> Result<(), RecoverError> {
-        Command::new("docker")
+        Command::host("docker")?
             .arg("start")
             .arg(id)
             .run_checked()
@@ -961,7 +961,7 @@ pub struct PctCli;
 /// `pct list` → typed guest rows. A `pct` failure is a hard `Err` (the caller
 /// records it), mirroring `DockerCli::binds_under`.
 async fn pct_list() -> Result<Vec<PctGuest>, RecoverError> {
-    let stdout = Command::new("pct")
+    let stdout = Command::host("pct")?
         .arg("list")
         .run_checked()
         .await
@@ -975,7 +975,7 @@ async fn pct_list() -> Result<Vec<PctGuest>, RecoverError> {
 
 /// `pct config <vmid>` → raw config text.
 async fn pct_config(vmid: &str) -> Result<String, RecoverError> {
-    let stdout = Command::new("pct")
+    let stdout = Command::host("pct")?
         .arg("config")
         .arg(vmid)
         .run_checked()
@@ -990,7 +990,7 @@ async fn pct_config(vmid: &str) -> Result<String, RecoverError> {
 
 /// `pct start <vmid>`.
 async fn pct_start(vmid: &str) -> Result<(), RecoverError> {
-    Command::new("pct")
+    Command::host("pct")?
         .arg("start")
         .arg(vmid)
         .run_checked()
@@ -1022,7 +1022,7 @@ impl ContainerRuntime for PctCli {
         path: &str,
         timeout: Duration,
     ) -> Result<ConsumerProbe, RecoverError> {
-        let fut = Command::new("pct")
+        let fut = Command::host("pct")?
             .arg("exec")
             .arg(id)
             .arg("--")
@@ -1049,7 +1049,7 @@ impl ContainerRuntime for PctCli {
     }
 
     async fn restart(&self, id: &str) -> Result<(), RecoverError> {
-        Command::new("pct")
+        Command::host("pct")?
             .arg("reboot")
             .arg(id)
             .run_checked()
@@ -1883,5 +1883,20 @@ mod tests {
         );
         assert_eq!(parse_docker_state(""), None);
         assert_eq!(parse_docker_state("exited\n"), None);
+    }
+
+    #[tokio::test]
+    async fn runtime_mutations_never_spawn_under_test() {
+        for err in [
+            PctCli.restart("113").await.unwrap_err(),
+            pct_start("113").await.unwrap_err(),
+            DockerCli.restart("c").await.unwrap_err(),
+            DockerCli.start("c").await.unwrap_err(),
+        ] {
+            assert!(
+                matches!(&err, RecoverError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+                "{err}"
+            );
+        }
     }
 }

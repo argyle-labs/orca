@@ -192,7 +192,7 @@ fn home_dir_of(user: &str) -> Result<String> {
 }
 
 fn chown_recursive(path: &std::path::Path, user: &str) -> Result<()> {
-    let status = Command::new("chown")
+    let status = utils::privileged::host_command_sync("chown")?
         .args(["-R", user])
         .arg(path)
         .status()?;
@@ -226,20 +226,12 @@ fn resolve_binary() -> Result<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn install_service(binary: &str, port: u16) -> Result<()> {
-    let home = std::env::var("HOME")?;
-    let uid = launchd_uid()?;
-    let domain = format!("gui/{uid}");
-    let agents_dir = format!("{home}/Library/LaunchAgents");
-    std::fs::create_dir_all(&agents_dir)?;
-    let plist_path = format!("{agents_dir}/{APP_PLIST_LABEL}.plist");
-    let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
-    std::fs::create_dir_all(&logs_dir)?;
-    // Supervisor capture only — the structured log is the subscriber's
-    // rotated tee (`daemon.jsonl`). See APP_DAEMON_STDERR_FILE.
-    let daemon_log = format!("{logs_dir}/{APP_DAEMON_STDERR_FILE}");
-
-    let plist = format!(
+fn render_plist(binary: &str, port: u16, home: &str, daemon_log: &str) -> String {
+    let unset: String = utils::privileged::HARNESS_ENVS
+        .iter()
+        .map(|k| format!("        <string>-u</string>\n        <string>{k}</string>\n"))
+        .collect();
+    format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -248,7 +240,8 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     <string>{APP_PLIST_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{binary}</string>
+        <string>/usr/bin/env</string>
+{unset}        <string>{binary}</string>
         <string>daemon</string>
         <string>--port</string>
         <string>{port}</string>
@@ -271,18 +264,36 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
 </dict>
 </plist>
 "#
-    );
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn install_service(binary: &str, port: u16) -> Result<()> {
+    let home = std::env::var("HOME")?;
+    let uid = launchd_uid()?;
+    let domain = format!("gui/{uid}");
+    let agents_dir = format!("{home}/Library/LaunchAgents");
+    std::fs::create_dir_all(&agents_dir)?;
+    let plist_path = format!("{agents_dir}/{APP_PLIST_LABEL}.plist");
+    let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
+    std::fs::create_dir_all(&logs_dir)?;
+    // Supervisor capture only — the structured log is the subscriber's
+    // rotated tee (`daemon.jsonl`). See APP_DAEMON_STDERR_FILE.
+    let daemon_log = format!("{logs_dir}/{APP_DAEMON_STDERR_FILE}");
+
+    let plist = render_plist(binary, port, &home, &daemon_log);
 
     std::fs::write(&plist_path, &plist)?;
     println!("{} wrote {}", "✓".green(), plist_path);
 
     // Remove any existing registration before bootstrapping; ignore failure when not loaded
-    _ = Command::new("launchctl")
-        .args(["bootout", &domain, &plist_path])
-        .stderr(std::process::Stdio::null())
-        .status();
+    _ = utils::privileged::host_command_sync("launchctl").map(|mut c| {
+        c.args(["bootout", &domain, &plist_path])
+            .stderr(std::process::Stdio::null())
+            .status()
+    });
 
-    let status = Command::new("launchctl")
+    let status = utils::privileged::host_command_sync("launchctl")?
         .args(["bootstrap", &domain, &plist_path])
         .status()?;
 
@@ -308,9 +319,8 @@ pub(crate) fn uninstall_service() -> Result<()> {
     let domain = format!("gui/{uid}");
     let plist_path = format!("{home}/Library/LaunchAgents/{APP_PLIST_LABEL}.plist");
 
-    _ = Command::new("launchctl")
-        .args(["bootout", &domain, &plist_path])
-        .status();
+    _ = utils::privileged::host_command_sync("launchctl")
+        .map(|mut c| c.args(["bootout", &domain, &plist_path]).status());
 
     if std::path::Path::new(&plist_path).exists() {
         std::fs::remove_file(&plist_path)?;
@@ -362,11 +372,12 @@ fn canonical_path(path: &str) -> String {
 
 #[cfg(target_os = "linux")]
 fn render_user_unit(binary: &str, port: u16, home: &str, daemon_log: &str) -> String {
+    let unset = utils::privileged::HARNESS_ENVS.join(" ");
     format!(
         "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target {APP_SYSTEMD_SERVICE_LEGACY}.service\n\
          Conflicts={APP_SYSTEMD_SERVICE_LEGACY}.service\n\n\
          [Service]\nExecStart={binary} daemon --port {port}\n\
-         Environment=HOME={home}\nRestart=always\nRestartSec=5\n\
+         Environment=HOME={home}\nUnsetEnvironment={unset}\nRestart=always\nRestartSec=5\n\
          StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
          [Install]\nWantedBy=default.target\n"
     )
@@ -374,11 +385,12 @@ fn render_user_unit(binary: &str, port: u16, home: &str, daemon_log: &str) -> St
 
 #[cfg(target_os = "linux")]
 fn render_system_unit(binary: &str, port: u16, user: &str, home: &str, daemon_log: &str) -> String {
+    let unset = utils::privileged::HARNESS_ENVS.join(" ");
     format!(
         "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target {APP_SYSTEMD_SERVICE_LEGACY}.service\n\
          Conflicts={APP_SYSTEMD_SERVICE_LEGACY}.service\n\n\
          [Service]\nType=simple\nUser={user}\n\
-         Environment=HOME={home}\nExecStart={binary} daemon --port {port}\n\
+         Environment=HOME={home}\nUnsetEnvironment={unset}\nExecStart={binary} daemon --port {port}\n\
          Restart=always\nRestartSec=5\n\
          StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
          [Install]\nWantedBy=multi-user.target\n"
@@ -636,30 +648,27 @@ fn migrate_legacy_unit(
     home: &str,
     root: bool,
     run: &mut dyn FnMut(&[String]) -> bool,
+    elevate: &mut dyn FnMut(utils::privileged::PrivilegedCall) -> bool,
 ) -> Result<bool> {
     match legacy_scope_from_cgroup(cgroup) {
         None => Ok(false),
         Some(true) => migrate_unit_dir(&format!("{home}/.config/systemd/user"), true, run),
         Some(false) if root => migrate_unit_dir(SYSTEM_UNIT_DIR, false, run),
         Some(false) => {
-            let exe = utils::path::privileged_exe()?;
-            let exe = exe.to_string_lossy();
-            if run(&unit_migrate_command(&exe)) {
+            if elevate(utils::privileged::PrivilegedCall::helper(
+                "unit-migrate",
+                Vec::new(),
+                utils::privileged::UNIT_MIGRATE_TIMEOUT,
+            )) {
                 return Ok(true);
             }
             tracing::warn!(
-                "running under legacy system unit {APP_SYSTEMD_SERVICE_LEGACY}.service and `sudo -n {exe} admin unit-migrate` is not granted; run `sudo orca identity privilege repair`"
+                "running under legacy system unit {APP_SYSTEMD_SERVICE_LEGACY}.service and `sudo -n {} admin unit-migrate` is not granted; run `sudo orca identity privilege repair`",
+                utils::path::PRIVILEGED_BIN
             );
             Ok(false)
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn unit_migrate_command(exe: &str) -> Vec<String> {
-    ["sudo", "-n", exe, "admin", "unit-migrate"]
-        .map(String::from)
-        .to_vec()
 }
 
 #[cfg(target_os = "linux")]
@@ -682,12 +691,31 @@ pub fn admin_unit_migrate() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+fn elevate(call: utils::privileged::PrivilegedCall) -> bool {
+    match utils::reactor::block_on(utils::privileged::run(call)) {
+        Ok(out) if out.success => true,
+        Ok(out) => {
+            tracing::warn!(
+                "unit-migrate helper exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!("unit-migrate helper: {e}");
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub fn migrate_legacy_unit_on_startup() {
     let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
     let home = std::env::var("HOME")
         .map(|h| canonical_path(&h))
         .unwrap_or_default();
-    match migrate_legacy_unit(&cgroup, &home, is_root(), &mut run_command) {
+    match migrate_legacy_unit(&cgroup, &home, is_root(), &mut run_command, &mut elevate) {
         Ok(true) => tracing::info!(
             "handed {APP_SYSTEMD_SERVICE_LEGACY}.service -> {APP_SYSTEMD_SERVICE}.service switch to systemd"
         ),
@@ -790,7 +818,7 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
     let path = format!("{SYSTEM_UNIT_DIR}/{APP_SYSTEMD_SERVICE}.service");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
-    let chown = Command::new("chown")
+    let chown = utils::privileged::host_command_sync("chown")?
         .args(["-R", &format!("{user}:{user}"), &logs_dir])
         .status()
         .with_context(|| format!("invoking chown on {logs_dir}"))?;
@@ -817,7 +845,7 @@ fn install_openrc(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
     let path = format!("/etc/init.d/{APP_NAME}");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
-    let chown = Command::new("chown")
+    let chown = utils::privileged::host_command_sync("chown")?
         .args(["-R", &format!("{user}:{user}"), &logs_dir])
         .status()
         .with_context(|| format!("invoking chown on {logs_dir}"))?;
@@ -898,9 +926,10 @@ fn install_unraid(binary: &str, _port: u16, user: &str, _home: &str) -> Result<(
     let appdata_dir = "/mnt/user/appdata/orca";
     let appdata_bin_dir = format!("{appdata_dir}/bin");
     std::fs::create_dir_all(&appdata_bin_dir)?;
-    _ = Command::new("chown")
-        .args(["-R", &format!("{user}:{user}"), appdata_dir])
-        .status();
+    _ = utils::privileged::host_command_sync("chown").map(|mut c| {
+        c.args(["-R", &format!("{user}:{user}"), appdata_dir])
+            .status()
+    });
 
     let persist_bin = format!("{appdata_bin_dir}/orca");
     let already_persisted = std::fs::canonicalize(binary)
@@ -912,9 +941,8 @@ fn install_unraid(binary: &str, _port: u16, user: &str, _home: &str) -> Result<(
         std::fs::copy(binary, &persist_bin)?;
     }
     std::fs::set_permissions(&persist_bin, std::fs::Permissions::from_mode(0o755))?;
-    _ = Command::new("chown")
-        .args([&format!("{user}:{user}"), &persist_bin])
-        .status();
+    _ = utils::privileged::host_command_sync("chown")
+        .map(|mut c| c.args([&format!("{user}:{user}"), &persist_bin]).status());
     println!("{} wrote {}", "✓".green(), persist_bin);
 
     // Ensure the USB plugin dir exists so `plugin install` has a stable
@@ -1084,6 +1112,7 @@ mod tests {
                 ran.push(argv.join(" "));
                 true
             },
+            &mut |_| panic!("a user unit never elevates"),
         )
         .unwrap();
         assert!(migrated);
@@ -1098,27 +1127,73 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn non_root_system_migration_goes_through_the_sudo_grant() {
-        let mut ran = Vec::new();
+        use utils::privileged::PrivilegedExec;
+        use utils::privileged::testing::Recorder;
+        let rec = Recorder::new(utils::privileged::PrivilegedOutput {
+            success: true,
+            ..Default::default()
+        });
         let migrated = migrate_legacy_unit(
             "0::/system.slice/orca.service\n",
             "/x",
             false,
-            &mut |argv| {
-                ran.push(argv.to_vec());
-                true
-            },
+            &mut |_| panic!("no direct command for a system unit"),
+            &mut |call| utils::reactor::block_on(rec.exec(call)).unwrap().success,
         )
         .unwrap();
         assert!(migrated);
-        assert_eq!(ran.len(), 1);
-        assert_eq!(&ran[0][..2], ["sudo", "-n"]);
-        assert_eq!(&ran[0][3..], ["admin", "unit-migrate"]);
-        let refused =
-            migrate_legacy_unit("0::/system.slice/orca.service\n", "/x", false, &mut |_| {
-                false
-            })
-            .unwrap();
+        let calls = rec.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].argv,
+            [utils::path::PRIVILEGED_BIN, "admin", "unit-migrate"]
+        );
+        let refused = migrate_legacy_unit(
+            "0::/system.slice/orca.service\n",
+            "/x",
+            false,
+            &mut |_| panic!("no direct command for a system unit"),
+            &mut |_| false,
+        )
+        .unwrap();
         assert!(!refused);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rendered_units_clear_the_test_harness_env() {
+        let system =
+            render_system_unit("/usr/local/bin/orca", 12001, "orca", "/var/lib/orca", "/l");
+        for unit in [daemon_unit(), system] {
+            assert!(
+                unit.contains("UnsetEnvironment=CARGO_TARGET_TMPDIR NEXTEST NEXTEST_RUN_ID\n"),
+                "{unit}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_launchd_plist_clears_the_test_harness_env() {
+        let plist = render_plist("/usr/local/bin/orca", 12001, "/Users/u", "/l");
+        let args = plist
+            .split("<key>ProgramArguments</key>")
+            .nth(1)
+            .and_then(|r| r.split("</array>").next())
+            .unwrap();
+        assert!(args.contains("<string>/usr/bin/env</string>"), "{args}");
+        for k in utils::privileged::HARNESS_ENVS {
+            assert!(
+                args.contains(&format!(
+                    "<string>-u</string>\n        <string>{k}</string>"
+                )),
+                "{args}"
+            );
+        }
+        assert!(
+            args.contains("<string>/usr/local/bin/orca</string>"),
+            "{args}"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1191,6 +1266,7 @@ mod tests {
             home.path().to_str().unwrap(),
             false,
             &mut |_| panic!("no systemctl for a foreign unit"),
+            &mut |_| panic!("a foreign unit never elevates"),
         )
         .unwrap();
         assert!(!migrated);

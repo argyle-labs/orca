@@ -152,6 +152,7 @@ orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 [dev-dependencies]
 tempfile   = { workspace = true }
 tower      = { workspace = true }
+utils      = { workspace = true, features = ["test-scope"] }
 serde_json = { workspace = true }
 db = { workspace = true, default-features = true }
 # Force-link the registry tool crates so integration tests walk the real,

@@ -83,6 +83,11 @@ impl Command {
         }
     }
 
+    pub fn host(program: &str) -> std::io::Result<Self> {
+        utils::privileged::refuse_host_mutation(program)?;
+        Ok(Self::new(program))
+    }
+
     /// Start the child in its own process group so a timeout in
     /// [`status_within`](Command::status_within) / [`output_within`](Command::output_within)
     /// SIGKILLs the whole group, grandchildren included. Unix only; elsewhere
