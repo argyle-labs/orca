@@ -14,6 +14,7 @@
 /// Atomic file writes (temp + fsync + rename). orca-owned; lives in the leaf so
 /// even `utils::state` can use it.
 pub mod atomic;
+pub mod build_info;
 /// Base64 encode/decode (standard + url-safe). orca-owned; the base64 lib is
 /// hidden.
 pub mod encoding;
@@ -102,6 +103,8 @@ pub mod shutdown;
 /// Daemon state file. Gated by the `state` feature (pulls `contract` + tokio).
 #[cfg(feature = "state")]
 pub mod state;
+#[cfg(all(unix, feature = "user"))]
+pub mod user;
 /// YAML deserialization. Gated by the `yaml` feature; the YAML lib is hidden.
 #[cfg(feature = "yaml")]
 pub mod yaml;

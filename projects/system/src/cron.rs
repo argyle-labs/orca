@@ -143,49 +143,6 @@ pub fn validate_user(user: &str) -> Result<(), String> {
     }
 }
 
-/// uid of `name` via `getpwnam_r` (honours NSS, unlike parsing `/etc/passwd`).
-#[cfg(unix)]
-pub fn lookup_uid(name: &str) -> Option<u32> {
-    let cname = std::ffi::CString::new(name).ok()?;
-    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut buf = vec![0 as libc::c_char; 16 * 1024];
-    let mut result: *mut libc::passwd = std::ptr::null_mut();
-    // SAFETY: every pointer is valid for the call; `result` aliases `pwd` on success.
-    let rc = unsafe {
-        libc::getpwnam_r(
-            cname.as_ptr(),
-            &mut pwd,
-            buf.as_mut_ptr(),
-            buf.len(),
-            &mut result,
-        )
-    };
-    (rc == 0 && !result.is_null()).then_some(pwd.pw_uid)
-}
-
-/// Login name of the effective uid this process runs as.
-#[cfg(unix)]
-pub fn current_user() -> Option<String> {
-    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut buf = vec![0 as libc::c_char; 16 * 1024];
-    let mut result: *mut libc::passwd = std::ptr::null_mut();
-    // SAFETY: as in `lookup_uid`; `pw_name` points into `buf`, read before it drops.
-    let rc = unsafe {
-        libc::getpwuid_r(
-            libc::geteuid(),
-            &mut pwd,
-            buf.as_mut_ptr(),
-            buf.len(),
-            &mut result,
-        )
-    };
-    if rc != 0 || result.is_null() {
-        return None;
-    }
-    let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) };
-    name.to_str().ok().map(str::to_string)
-}
-
 /// Logins in the allow-list text: one per line, `#` comments and blanks ignored.
 pub fn parse_allowlist(text: &str) -> Vec<String> {
     text.lines()
@@ -226,6 +183,12 @@ pub fn target_uid(user: &str, uid: Option<u32>) -> Result<u32, String> {
 
 /// The direct (no-sudo) path is for an unprivileged daemon's own crontab; a
 /// daemon running as root goes nowhere near it.
+#[cfg(unix)]
+fn resolve_target_uid(user: &str) -> Result<u32, String> {
+    let uid = utils::user::uid_for_name(user).map_err(|e| e.to_string())?;
+    target_uid(user, uid)
+}
+
 pub fn direct_path_allowed(euid: u32) -> Result<(), String> {
     if euid == 0 {
         return Err(
@@ -344,12 +307,17 @@ pub async fn run_cron(op: &CronOp) -> CronOpResult {
     }
     #[cfg(unix)]
     {
-        if let Err(e) = target_uid(op.user(), lookup_uid(op.user())) {
+        if let Err(e) = resolve_target_uid(op.user()) {
             return CronOpResult::refused(e);
         }
-        if current_user().as_deref() == Some(op.user()) {
-            // SAFETY: geteuid has no preconditions.
-            if let Err(e) = direct_path_allowed(unsafe { libc::geteuid() }) {
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        let me = match utils::user::name_for_uid(euid) {
+            Ok(me) => me,
+            Err(e) => return CronOpResult::refused(e.to_string()),
+        };
+        if me.as_deref() == Some(op.user()) {
+            if let Err(e) = direct_path_allowed(euid) {
                 return CronOpResult::refused(e);
             }
             return apply_op(None, op).await;
@@ -417,7 +385,7 @@ pub async fn execute_privileged_cron(op: CronOp) -> CronOpResult {
     }
     #[cfg(unix)]
     {
-        let uid = match target_uid(&user, lookup_uid(&user)) {
+        let uid = match resolve_target_uid(&user) {
             Ok(uid) => uid,
             Err(e) => return CronOpResult::refused(e),
         };
@@ -1318,8 +1286,8 @@ MAILTO=\"\"
     #[cfg(unix)]
     #[test]
     fn root_and_unknown_users_are_refused_on_every_path() {
-        assert!(target_uid("root", lookup_uid("root")).is_err());
-        assert!(target_uid("no-such-user-x", lookup_uid("no-such-user-x")).is_err());
+        assert!(resolve_target_uid("root").is_err());
+        assert!(resolve_target_uid("no-such-user-x").is_err());
     }
 
     #[test]

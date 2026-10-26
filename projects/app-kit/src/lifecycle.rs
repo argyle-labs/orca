@@ -125,9 +125,11 @@ impl OrcaAppKit {
         }))
     }
 
-    /// Build identity used in `About` screens / crash reports.
+    /// Build identity used in `About` screens / crash reports. Embedders must
+    /// call `utils::build_info::set_version` first in `main`, or this reports
+    /// the workspace crate version.
     pub fn version(&self) -> String {
-        env!("CARGO_PKG_VERSION").to_string()
+        utils::build_info::version().to_string()
     }
 
     /// Tear down the runtime explicitly. Native UIs may also rely on `Drop`
@@ -175,9 +177,9 @@ mod tests {
     }
 
     #[test]
-    fn version_matches_crate_pkg_version() {
+    fn version_is_the_build_info_version() {
         let kit = OrcaAppKit::init(cfg(), |_| {}).unwrap();
-        assert_eq!(kit.version(), env!("CARGO_PKG_VERSION"));
+        assert_eq!(kit.version(), utils::build_info::version());
     }
 
     #[test]

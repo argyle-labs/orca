@@ -757,14 +757,7 @@ pub struct MeshCertStatus {
 /// Read the mesh cert material under `pki_dir` and summarize expiry + role.
 /// Pure filesystem read — `secure` is left `false`; the caller sets it
 /// from the DB policy.
-/// `version` is supplied by the CALLER, never read here.
-///
-/// `utils` has no `build.rs`, so its `ORCA_VERSION` is unset and this function
-/// used to fall back to `utils`' own `CARGO_PKG_VERSION`. On a release build
-/// that string happens to equal the daemon's, which is why it went unnoticed;
-/// on a DEV build the daemon is `…-dev+g<sha>` and cert status silently
-/// reported the plain version instead. A version is a property of the running
-/// daemon, so only a crate that knows the daemon's version may supply it.
+/// `version` is supplied by the caller (normally `build_info::version()`).
 pub fn mesh_cert_status(pki_dir: &Path, version: &str) -> MeshCertStatus {
     let parse = |path: PathBuf| -> Option<CertInfo> {
         let pem = read_pki_file(&path).ok()?;

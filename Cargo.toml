@@ -383,8 +383,7 @@ codegen-units = 16
 strip = "debuginfo"
 
 # Same profile used by `make build`, `make deploy`, RC builds, and stable
-# builds. RC builds change LTO through the environment, which changes every
-# artifact hash, so RC and stable artifacts do not share a warm cache.
+# builds. Nothing overrides LTO; Linux cross builds lower codegen-units to 4.
 
 # ── Hot-path crate overrides (release) ──────────────────────────────────────
 # Bump the crates every request touches to -O3. Workspace default stays at -O2
@@ -438,10 +437,8 @@ debug = "line-tables-only"
 # macOS default already, but pin it: keep dSYM out of the executable so
 # relinking doesn't have to splice debuginfo back into the binary.
 split-debuginfo = "unpacked"
-# sccache (rustc-wrapper in .cargo/config.toml) is the caching layer.
-# Incremental + sccache double-stores artifacts and fills target/ unboundedly.
-# Disabling incremental lets sccache work correctly and keeps target/ lean.
-incremental = false
+# sccache caches deps only; workspace crates keep incremental state in target/.
+incremental = true
 
 # Strip debug info from every external dependency. Our packages keep
 # line-tables-only (above) for usable backtraces; deps compiled once and
@@ -453,6 +450,8 @@ debug = 0
 # Proc-macro crates run AT compile time — optimizing them speeds up every
 # incremental build even after sccache has them cached, because the proc-macro
 # binary still re-executes on each compile that uses it.
+[profile.dev.package.orca-derive]
+opt-level = 2
 [profile.dev.package.syn]
 opt-level = 2
 [profile.dev.package.proc-macro2]
