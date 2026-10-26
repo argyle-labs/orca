@@ -142,7 +142,12 @@ pub struct SecurityFindingsListArgs {
 
 /// Security findings recorded on this system, open by default, highest
 /// severity first.
-#[orca_tool(domain = "security.findings", verb = "list", role = "admin")]
+#[orca_tool(
+    domain = "security.findings",
+    verb = "list",
+    role = "admin",
+    remote_admin = true
+)]
 async fn security_findings_list(
     args: SecurityFindingsListArgs,
     _ctx: &contract::ToolCtx,

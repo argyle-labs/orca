@@ -247,7 +247,12 @@ async fn schedule_status(
 
 /// List this host's schedules that the scheduler refuses to run for want of a
 /// valid local owner. Re-save each one to take ownership; nothing is assigned.
-#[orca_tool(domain = "schedule.owner", verb = "list", role = "admin")]
+#[orca_tool(
+    domain = "schedule.owner",
+    verb = "list",
+    role = "admin",
+    remote_admin = true
+)]
 async fn schedule_owner_list(
     _args: ScheduleOwnerListArgs,
     _ctx: &contract::ToolCtx,
@@ -288,6 +293,11 @@ async fn schedule_run(
 
     let parsed: native_support::ScheduleRow = serde_json::from_str(&row.json)
         .map_err(|e| anyhow::anyhow!("malformed schedule row: {e}"))?;
+    anyhow::ensure!(
+        crate::mesh::custody_cleared(ctx) || !dispatch::tool_roles::is_custody(&parsed.job),
+        "schedule job '{}' is a custody tool; a mesh caller must present a CA proof",
+        parsed.job
+    );
 
     // Dispatch the scheduled job through the shared inventory. The free-fn
     // dispatcher walks `inventory::iter::<ToolRegistration>` directly — no
@@ -314,6 +324,8 @@ async fn schedule_run(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn schedule_tools_register_from_db_crate() {
         let names = dispatch::names();
@@ -321,5 +333,43 @@ mod tests {
         assert!(names.contains(&"schedule.detail"), "got: {names:?}");
         assert!(names.contains(&"schedule.create"), "got: {names:?}");
         assert!(names.contains(&"schedule.owner.list"), "got: {names:?}");
+    }
+
+    #[test]
+    fn schedule_run_over_the_mesh_refuses_a_custody_job_without_a_ca_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::host_identity::init(dir.path()).ok();
+        db::with_thread_db_path(&dir.path().join("sched.db"), || {
+            let conn = db::open_default().unwrap();
+            db::config_store::set(
+                &conn,
+                "h",
+                "h",
+                "schedule",
+                "nightly",
+                r#"{"job":"x.custody_job","cron":"@hourly"}"#,
+                "u",
+            )
+            .unwrap();
+            drop(conn);
+            let mut ctx = contract::ToolCtx::new(std::sync::Arc::new(
+                contract::config::Config::load().unwrap(),
+            ));
+            ctx.register_service(crate::mesh::RelayingPeer("peer-a".into()));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let Err(err) = rt.block_on(schedule_run(
+                ScheduleRunArgs {
+                    name: "nightly".into(),
+                    action: ScheduleCreateAction::Run,
+                },
+                &ctx,
+            )) else {
+                panic!("a custody job ran for a mesh caller without a CA proof");
+            };
+            assert!(err.to_string().contains("CA proof"), "got: {err}");
+        });
     }
 }

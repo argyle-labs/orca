@@ -1544,7 +1544,7 @@ async fn container_update(
 /// that is precisely how an action aimed at one host lands on another. The
 /// error says the call did not complete; it does NOT say nothing happened,
 /// because a lost reply and an undelivered call look identical from here.
-async fn tell_owner_update(
+pub(crate) async fn tell_owner_update(
     peer: &str,
     args: &ContainerUpdateArgs,
     ctx: &contract::ToolCtx,
@@ -1561,7 +1561,7 @@ async fn tell_owner_update(
             peer,
             <ContainerUpdate as contract::OrcaToolDef>::NAME,
             payload,
-            ctx.caller(),
+            ctx.relay_caller(),
             ctx.correlation_id().map(str::to_string),
         )
         .await

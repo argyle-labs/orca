@@ -658,14 +658,18 @@ fn authorize_role_gated(
                 verified.claims.caller_user_id
             ))
         })?;
+    refuse_unless!(
+        !dispatch::tool_roles::is_custody(custody_target(tool, args))
+            || crate::mesh::exec::proves_ca_possession(
+                &pki_dir(),
+                peer_cn,
+                &verified.nonce,
+                ca_proof,
+            ),
+        "mesh/exec refused: '{tool}' is not marked remote_admin and peer {peer_cn} presented no \
+         valid mesh CA proof"
+    );
     let role = effective_role(&user.role, &verified.claims.role);
-    let role = if !dispatch::tool_roles::is_custody(custody_target(tool, args))
-        || crate::mesh::exec::proves_ca_possession(&pki_dir(), peer_cn, &verified.nonce, ca_proof)
-    {
-        role
-    } else {
-        effective_role(role, "user")
-    };
     refuse_unless!(
         role_satisfies(role, required_role),
         "mesh/exec refused: tool '{tool}' requires role '{required_role}' but user {} acts with \
@@ -812,12 +816,14 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<MeshExecResult> 
         None
     };
 
-    let result = crate::mesh::dispatcher::dispatch(
+    let ca_proven = caller.is_some() && dispatch::tool_roles::is_custody(&params.tool);
+    let result = crate::mesh::dispatcher::dispatch_proven(
         &params.tool,
         params.args.clone(),
         params.correlation_id.clone(),
         caller,
         peer_cn,
+        ca_proven,
     )
     .await
     .map_err(|e| relayed_tool_error(&params.tool, e))?;
@@ -1284,7 +1290,7 @@ mod tests {
     #[test]
     fn remote_ok_gate_admin_role_needs_auth() {
         // Reachable + role-gated → a verified caller token is required.
-        assert!(remote_ok_gate("system.update.create", true, "admin").unwrap());
+        assert!(remote_ok_gate("schedule.owner.list", true, "admin").unwrap());
     }
 
     #[test]
@@ -1502,7 +1508,7 @@ mod tests {
         let err = authorize_role_gated(
             &conn,
             "peer-a",
-            "system.update.create",
+            "schedule.owner.list",
             &serde_json::json!({}),
             "admin",
             Presented {
@@ -1613,6 +1619,7 @@ mod tests {
     /// Callers the fake plugin saw, by username (`None` = no caller).
     static SEEN_CALLERS: std::sync::Mutex<Vec<Option<String>>> = std::sync::Mutex::new(Vec::new());
     static SEEN_TRANSPORT: std::sync::Mutex<Vec<(bool, bool)>> = std::sync::Mutex::new(Vec::new());
+    static SEEN_PROOFS: std::sync::Mutex<Vec<bool>> = std::sync::Mutex::new(Vec::new());
 
     /// Load a fake plugin owning two tools whose manifest declared `admin` and
     /// `any`, recording the caller each invoke carries.
@@ -1630,6 +1637,10 @@ mod tests {
                             .lock()
                             .unwrap()
                             .push((ctx.local_transport(), ctx.second_factor()));
+                        SEEN_PROOFS.lock().unwrap().push(
+                            ctx.service::<std::sync::Arc<dyn contract::RemoteExec>>()
+                                .is_ok_and(|r| r.attaches_ca_proof()),
+                        );
                         Ok(serde_json::json!({ "ran": name }))
                     })
                 }),
@@ -1845,19 +1856,19 @@ mod tests {
     #[test]
     fn a_refused_caller_token_does_not_spend_its_nonce() {
         with_role_gate_fixture("admin", |conn, mint, _| {
-            let env = mint("system.update.create");
+            let env = mint("schedule.owner.list");
             conn.execute("DELETE FROM users WHERE id = 'u-admin'", [])
                 .unwrap();
             let err =
-                authorize_as_peer(conn, "system.update.create", "admin", &env, None).unwrap_err();
+                authorize_as_peer(conn, "schedule.owner.list", "admin", &env, None).unwrap_err();
             assert!(err.to_string().contains("replicated users"), "{err}");
             identities::users::insert(conn, "u-admin", "root", "h", "admin", "t0").unwrap();
-            let err = authorize_as_peer(conn, "system.update.create", "super-admin", &env, None)
+            let err = authorize_as_peer(conn, "schedule.owner.list", "super-admin", &env, None)
                 .unwrap_err();
             assert!(err.to_string().contains("requires role"), "{err}");
-            authorize_as_peer(conn, "system.update.create", "admin", &env, None).unwrap();
+            authorize_as_peer(conn, "schedule.owner.list", "admin", &env, None).unwrap();
             let err =
-                authorize_as_peer(conn, "system.update.create", "admin", &env, None).unwrap_err();
+                authorize_as_peer(conn, "schedule.owner.list", "admin", &env, None).unwrap_err();
             assert!(format!("{err:#}").contains("replay"), "{err:#}");
         });
     }
@@ -1885,11 +1896,11 @@ mod tests {
 
     #[serial_test::serial(env)]
     #[test]
-    fn an_ordinary_admin_tool_from_a_non_secure_peer_acts_as_admin() {
+    fn a_remote_admin_safe_tool_runs_as_admin_without_a_ca_proof() {
         with_role_gate_fixture("admin", |conn, mint, _| {
-            let env = mint("system.update.create");
+            let env = mint("schedule.owner.list");
             assert_eq!(
-                authorize_as_peer(conn, "system.update.create", "admin", &env, None)
+                authorize_as_peer(conn, "schedule.owner.list", "admin", &env, None)
                     .unwrap()
                     .role,
                 "admin"
@@ -1899,45 +1910,34 @@ mod tests {
 
     #[serial_test::serial(env)]
     #[test]
-    fn an_admin_token_for_a_member_row_is_refused_an_admin_tool() {
-        with_role_gate_fixture("member", |conn, mint, proof_for| {
-            let env = mint("system.update.create");
-            let proof = proof_for(&env);
-            let err = authorize_as_peer(conn, "system.update.create", "admin", &env, Some(&proof))
-                .unwrap_err();
+    fn an_admin_token_for_a_member_row_is_refused_a_remote_admin_safe_tool() {
+        with_role_gate_fixture("member", |conn, mint, _| {
+            let env = mint("schedule.owner.list");
+            let err =
+                authorize_as_peer(conn, "schedule.owner.list", "admin", &env, None).unwrap_err();
             assert!(err.to_string().contains("role 'member'"), "got: {err}");
         });
     }
 
-    fn assert_custody_needs_a_ca_proof(tool: &'static str) {
+    fn assert_custody_refused_without_a_ca_proof(tool: &'static str, required: &'static str) {
         with_role_gate_fixture("admin", move |conn, mint, proof_for| {
-            let env = mint(tool);
-            let err = authorize_as_peer(conn, tool, "admin", &env, None).unwrap_err();
-            assert!(
-                err.to_string().contains("role 'user'"),
-                "{tool} no proof: {err}"
-            );
-            let env = mint(tool);
-            let err = authorize_as_peer(conn, tool, "admin", &env, Some("bogus")).unwrap_err();
-            assert!(
-                err.to_string().contains("role 'user'"),
-                "{tool} bad proof: {err}"
-            );
-            let env = mint(tool);
+            let refused = |proof: Option<&str>, why: &str| {
+                let env = mint(tool);
+                let err = authorize_as_peer(conn, tool, required, &env, proof).unwrap_err();
+                assert!(err.to_string().contains("CA proof"), "{tool} {why}: {err}");
+            };
+            refused(None, "no proof");
+            refused(Some("bogus"), "bad proof");
             let other = utils::pki::sign_with_mesh_ca(
                 &pki_dir(),
                 &crate::mesh::exec::ca_holder_message("someone-else", "n"),
             )
             .unwrap();
-            let err = authorize_as_peer(conn, tool, "admin", &env, Some(&other)).unwrap_err();
-            assert!(
-                err.to_string().contains("role 'user'"),
-                "{tool} foreign proof: {err}"
-            );
+            refused(Some(&other), "foreign proof");
             let env = mint(tool);
             let proof = proof_for(&env);
             assert_eq!(
-                authorize_as_peer(conn, tool, "admin", &env, Some(&proof))
+                authorize_as_peer(conn, tool, required, &env, Some(&proof))
                     .unwrap()
                     .role,
                 "admin",
@@ -1948,38 +1948,189 @@ mod tests {
 
     #[serial_test::serial(env)]
     #[test]
-    fn a_remote_system_update_needs_a_ca_proof_even_for_an_admin() {
-        assert_custody_needs_a_ca_proof("system.update");
+    fn a_remote_system_update_is_refused_without_a_ca_proof() {
+        assert_custody_refused_without_a_ca_proof("system.update", "admin");
     }
 
     #[serial_test::serial(env)]
     #[test]
-    fn a_remote_plugin_update_needs_a_ca_proof_even_for_an_admin() {
-        assert_custody_needs_a_ca_proof("plugin.update");
+    fn a_remote_plugin_update_is_refused_without_a_ca_proof() {
+        assert_custody_refused_without_a_ca_proof("plugin.update", "admin");
     }
 
     #[serial_test::serial(env)]
     #[test]
-    fn a_remote_plugin_engine_update_needs_a_ca_proof_even_for_an_admin() {
-        assert_custody_needs_a_ca_proof("docker.engine_update");
+    fn a_cross_machine_secret_read_is_refused_without_a_ca_proof() {
+        assert_custody_refused_without_a_ca_proof("secrets.detail", "admin");
     }
 
     #[serial_test::serial(env)]
     #[test]
-    fn a_cross_machine_secret_read_needs_a_ca_proof() {
-        assert_custody_needs_a_ca_proof("secrets.detail");
+    fn schedule_create_run_is_refused_without_a_ca_proof() {
+        assert_custody_refused_without_a_ca_proof("schedule.create", "admin");
     }
 
+    #[serial_test::serial(env)]
     #[test]
-    fn plugin_create_invoke_is_judged_by_its_inner_tool_for_custody() {
-        let invoke = serde_json::json!({ "action": "invoke", "tool": "secrets.detail" });
-        assert_eq!(custody_target("plugin.create", &invoke), "secrets.detail");
-        let other = serde_json::json!({ "action": "install", "tool": "secrets.detail" });
-        assert_eq!(custody_target("plugin.create", &other), "plugin.create");
-        assert_eq!(
-            custody_target("system.update.create", &invoke),
-            "system.update.create"
-        );
+    fn real_deploy_and_container_tools_are_refused_without_a_ca_proof() {
+        for tool in [
+            "service.create",
+            "lxc.push",
+            "container.create",
+            "config.upsert",
+        ] {
+            assert_custody_refused_without_a_ca_proof(tool, "admin");
+        }
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn suffix_variants_of_install_verbs_are_refused_without_a_ca_proof() {
+        for tool in [
+            "docker.engine_update_v2",
+            "ntfy.upgrade_now",
+            "x.reinstall",
+            "plugin.update.batch",
+        ] {
+            assert_custody_refused_without_a_ca_proof(tool, "admin");
+        }
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn an_unmarked_plugin_tool_with_a_user_role_is_refused_without_a_ca_proof() {
+        const TOOL: &str = "listener_test_plugin.user_tool";
+        dispatch::tool_roles::install_plugin_tools([(
+            TOOL.to_string(),
+            dispatch::tool_roles::PluginToolPolicy {
+                role: "user",
+                ..dispatch::tool_roles::PluginToolPolicy::from_manifest(TOOL, None, None, None)
+            },
+        )]);
+        assert_custody_refused_without_a_ca_proof(TOOL, "user");
+        dispatch::tool_roles::remove_plugin_tools([TOOL]);
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_plugin_marked_remote_admin_runs_without_a_ca_proof() {
+        const TOOL: &str = "listener_test_plugin.safe_tool";
+        dispatch::tool_roles::install_plugin_tools([(
+            TOOL.to_string(),
+            dispatch::tool_roles::PluginToolPolicy::from_manifest(TOOL, Some("admin"), None, None)
+                .remote_admin(Some(true)),
+        )]);
+        with_role_gate_fixture("admin", |conn, mint, _| {
+            let env = mint(TOOL);
+            assert_eq!(
+                authorize_as_peer(conn, TOOL, "admin", &env, None)
+                    .unwrap()
+                    .role,
+                "admin"
+            );
+        });
+        dispatch::tool_roles::remove_plugin_tools([TOOL]);
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn plugin_create_invoke_end_to_end_is_refused_without_a_ca_proof() {
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::mesh::pin_home(home.path());
+        with_db(async {
+            install_fake_plugin();
+            dispatch::remote_ok::install(dispatch::local_only_names());
+            let conn = db::open_default().unwrap();
+            utils::pki::init_mesh_ca(&pki_dir(), "founder").unwrap();
+            let signer = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(signer.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            pdb::upsert_peer(&conn, ROLE_PEER, "hf", "127.0.0.1", 1, Some(&fp), "").unwrap();
+            identities::users::insert(&conn, "u-admin", "root", "h", "admin", "t0").unwrap();
+            drop(conn);
+            let caller = contract::CallerIdentity {
+                user_id: "u-admin".into(),
+                username: "root".into(),
+                role: "admin".into(),
+                can_mutate: true,
+            };
+            let args =
+                serde_json::json!({ "action": "invoke", "tool": PLUGIN_ANY_TOOL, "args": {} });
+            let token = crate::mesh::caller_token::mint(
+                signer.path(),
+                &caller,
+                "plugin.create",
+                &args,
+                ROLE_PEER,
+                crate::host_identity::machine_id(),
+                utils::time::now().unix_seconds(),
+                60,
+            )
+            .unwrap();
+            let params = serde_json::json!({
+                "tool": "plugin.create",
+                "args": args,
+                "caller_token": token,
+            });
+            let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), ROLE_PEER)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("CA proof"), "got: {err}");
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn secrets_detail_is_refused_on_an_insecure_member_even_with_a_ca_proof() {
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::mesh::pin_home(home.path());
+        with_db(async {
+            let conn = db::open_default().unwrap();
+            pdb::set_secure(&conn, false).unwrap();
+            drop(conn);
+            let params = serde_json::json!({ "tool": "secrets.detail", "args": { "name": "s" } });
+            let err = handle_exec(req_with_params(MESH_EXEC_METHOD, params), ROLE_PEER)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("insecure member"), "got: {err}");
+        });
+    }
+
+    #[serial_test::serial(env)]
+    #[test]
+    fn a_mesh_relayed_call_never_carries_this_hosts_ca_proof() {
+        let _env = crate::test_env::snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::mesh::pin_home(home.path());
+        crate::host_identity::init(home.path()).ok();
+        utils::pki::init_mesh_ca(&pki_dir(), "founder").unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let _g = crate::mesh::dispatcher::test_guard().await;
+            install_fake_plugin();
+            crate::mesh::dispatcher::reset_for_tests();
+            let mut host = (*crate::mesh::dispatcher::tests::make_ctx()).clone();
+            host.register_service::<std::sync::Arc<dyn contract::RemoteExec>>(std::sync::Arc::new(
+                crate::mesh::MeshRemoteExec,
+            ));
+            assert!(contract::RemoteExec::attaches_ca_proof(
+                &crate::mesh::MeshRemoteExec
+            ));
+            assert!(crate::mesh::exec::outbound_ca_proof(&pki_dir(), "n").is_some());
+            crate::mesh::dispatcher::install(std::sync::Arc::new(host));
+            SEEN_PROOFS.lock().unwrap().clear();
+            let params = serde_json::json!({ "tool": PLUGIN_ANY_TOOL, "args": {} });
+            handle_exec(req_with_params(MESH_EXEC_METHOD, params), "peer-a")
+                .await
+                .unwrap();
+            assert_eq!(*SEEN_PROOFS.lock().unwrap(), vec![false]);
+            crate::mesh::dispatcher::reset_for_tests();
+        });
     }
 
     #[serial_test::serial(env)]
@@ -2045,7 +2196,7 @@ mod tests {
             let (token, proof) = params();
             assert!(proof.is_none());
             let err = authorize(&token, proof.as_deref()).unwrap_err();
-            assert!(err.to_string().contains("role 'user'"), "no key: {err}");
+            assert!(err.to_string().contains("CA proof"), "no key: {err}");
         });
     }
 
@@ -2093,7 +2244,7 @@ mod tests {
         let err = authorize_role_gated(
             &conn,
             "peer-a",
-            "system.update.create",
+            "schedule.owner.list",
             &serde_json::json!({}),
             "admin",
             Presented::default(),
@@ -2102,7 +2253,7 @@ mod tests {
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no signed caller"), "got: {msg}");
-        assert!(msg.contains("system.update.create"), "got: {msg}");
+        assert!(msg.contains("schedule.owner.list"), "got: {msg}");
     }
 
     // Drive `body` on a current-thread runtime with an ephemeral DB pointed at a
@@ -3633,7 +3784,7 @@ mod tests {
             "any"
         );
         assert_eq!(
-            remote_role_gate("system.update.create", Some("admin"), true).unwrap(),
+            remote_role_gate("schedule.owner.list", Some("admin"), true).unwrap(),
             "admin"
         );
     }

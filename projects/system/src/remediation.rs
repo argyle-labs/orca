@@ -108,7 +108,7 @@ pub struct RemediationGetOutput {
 
 /// Report this host's self-heal remediation policy. Defaults to `notify` when
 /// the operator has not set one.
-#[orca_tool(domain = "system", verb = "remediation.get")]
+#[orca_tool(domain = "system", verb = "remediation.get", remote_admin = true)]
 async fn remediation_get(
     _args: RemediationGetArgs,
     _ctx: &contract::ToolCtx,

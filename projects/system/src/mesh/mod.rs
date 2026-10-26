@@ -1350,8 +1350,7 @@ pub struct MeshUpdateArgs {
     pub token: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-pub struct RelayingPeer(pub String);
+pub use contract::mesh_relay::{CaProven, RelayingPeer, custody_cleared};
 
 /// Single-use promotion grant signed by the mesh CA over
 /// `<target>:<issued_at>:<expires_at>:<nonce>`.
@@ -1474,6 +1473,10 @@ impl contract::RemoteExec for MeshRemoteExec {
             .result)
     }
 
+    fn attaches_ca_proof(&self) -> bool {
+        true
+    }
+
     async fn peers(&self) -> anyhow::Result<Vec<contract::PeerRef>> {
         // Trait method (RemoteExec): the roster, projected to the minimum a
         // domain crate needs to find a resource's owner. Built on
@@ -1496,6 +1499,35 @@ impl contract::RemoteExec for MeshRemoteExec {
         // update without waiting out the TTL.
         crate::mesh::peer_info::peer_detail(peer, true).await?;
         Ok(())
+    }
+}
+
+pub struct RelayedMeshRemoteExec;
+
+#[async_trait::async_trait]
+impl contract::RemoteExec for RelayedMeshRemoteExec {
+    #[allow(clippy::disallowed_types)]
+    async fn exec(
+        &self,
+        peer: &str,
+        tool: &str,
+        args: serde_json::Value,
+        caller: Option<contract::CallerIdentity>,
+        correlation_id: Option<String>,
+    ) -> anyhow::Result<serde_json::Value> {
+        Ok(
+            exec::exec_with(peer, tool, args, caller, correlation_id, false)
+                .await?
+                .result,
+        )
+    }
+
+    async fn peers(&self) -> anyhow::Result<Vec<contract::PeerRef>> {
+        contract::RemoteExec::peers(&MeshRemoteExec).await
+    }
+
+    async fn refresh_peer_runtime(&self, peer: &str) -> anyhow::Result<()> {
+        contract::RemoteExec::refresh_peer_runtime(&MeshRemoteExec, peer).await
     }
 }
 
@@ -1912,7 +1944,7 @@ async fn mesh_tier_update(
             {
                 anyhow::bail!("a member cannot relay its own promotion to secure");
             }
-            let secure = exec::promote(target.as_str(), ctx.caller()).await?;
+            let secure = exec::promote(target.as_str(), ctx.relay_caller()).await?;
             Ok(MeshTierOutput::Settings(MeshSettingsOutput { secure }))
         }
         MeshTierAction::Demote => Ok(MeshTierOutput::Settings(MeshSettingsOutput {
@@ -2831,6 +2863,20 @@ pub async fn exec_as(
     caller: Option<contract::CallerIdentity>,
     correlation_id: Option<String>,
 ) -> Result<MeshExecResult> {
+    exec_as_with(host, tool, args, caller, correlation_id, true).await
+}
+
+/// Same as [`exec_as`] but lets a relay withhold its own CA proof
+/// (`attach_ca_proof = false`) when forwarding a call it didn't originate.
+#[allow(clippy::disallowed_types)]
+pub async fn exec_as_with(
+    host: &str,
+    tool: &str,
+    args: serde_json::Value,
+    caller: Option<contract::CallerIdentity>,
+    correlation_id: Option<String>,
+    attach_ca_proof: bool,
+) -> Result<MeshExecResult> {
     let Some(id) = caller else {
         return call_typed(
             host,
@@ -2872,7 +2918,9 @@ pub async fn exec_as(
                 tool: tool.to_string(),
                 args: args.clone(),
                 caller_role: Some(id.role.clone()),
-                ca_proof: exec::ca_holder_proof(&pki, crate::host_identity::machine_id(), &nonce),
+                ca_proof: attach_ca_proof
+                    .then(|| exec::outbound_ca_proof(&pki, &nonce))
+                    .flatten(),
                 caller_token: Some(token),
                 correlation_id: correlation_id.clone(),
             })

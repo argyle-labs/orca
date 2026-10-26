@@ -1082,6 +1082,7 @@ fn spawn_plugin_with(
         .with_context(|| format!("plugin '{software}' returned an invalid backends list"))?;
     check_reaches(&software, &tools, &surfaces)?;
     check_tool_calls(&software, &tools, &backend_defs)?;
+    check_remote_admin(&software, &tools)?;
     let tool_calls = declared_tool_calls(&tools, &backend_defs);
     if let Some(pins) = pins {
         check_tool_call_pins(&software, &tool_calls, pins)?;
@@ -1376,6 +1377,7 @@ fn surface_tools(
                     local_only: op.policy.local_only,
                     read_unconfirmed: false,
                     tool_callable: false,
+                    remote_admin: false,
                 },
             ));
         }
@@ -1391,6 +1393,24 @@ fn register_surfaces(software: &str, surfaces: &[openapi::surface::ApiSurface]) 
                 "plugin '{software}' api surface '{}'",
                 surface.surface
             )));
+        }
+    }
+    Ok(())
+}
+
+fn check_remote_admin(software: &str, tools: &HashMap<String, ToolDef>) -> Result<()> {
+    for d in tools.values().filter(|d| d.remote_admin == Some(true)) {
+        let read_role = matches!(d.role.as_deref(), Some("any" | "read"));
+        if !read_role
+            || d.data_mutation == Some(true)
+            || d.execute_gated == Some(true)
+            || d.dry_run_aware
+        {
+            bail!(
+                "plugin '{software}' tool '{}' is marked remote_admin but mutates or needs a role \
+                 above read",
+                d.name
+            );
         }
     }
     Ok(())
@@ -1442,6 +1462,7 @@ fn install_tool_policies(software: &str, tools: &HashMap<String, ToolDef>) {
             )
             .local_only(d.local_only)
             .tool_callable(d.tool_callable)
+            .remote_admin(d.remote_admin)
             .dry_run_aware(d.dry_run_aware),
         )
     }));
@@ -2234,6 +2255,35 @@ mod extra_domain_tests {
         assert!(dispatch::tool_roles::plugin_dry_run_aware(name));
         assert_eq!(dispatch::tool_roles::known_role(name), Some("admin"));
         dispatch::tool_roles::remove_plugin_tools([name]);
+    }
+
+    #[test]
+    fn a_mutating_tool_marked_remote_admin_is_refused_at_install() {
+        let def = |extra: sj::Value| -> ToolDef {
+            let mut v = sj::json!({
+                "name": "policyprobe.thing",
+                "description": "",
+                "input_schema": { "type": "object" },
+                "output_schema": { "type": "object" },
+                "remote_admin": true,
+            });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            sj::from_value(v).unwrap()
+        };
+        let check =
+            |d: ToolDef| check_remote_admin("policyprobe", &HashMap::from([(d.name.clone(), d)]));
+        for bad in [
+            sj::json!({ "role": "admin" }),
+            sj::json!({}),
+            sj::json!({ "role": "read", "data_mutation": true }),
+            sj::json!({ "role": "read", "execute_gated": true }),
+            sj::json!({ "role": "any", "dry_run_aware": true }),
+        ] {
+            assert!(check(def(bad.clone())).is_err(), "{bad}");
+        }
+        assert!(check(def(sj::json!({ "role": "read" }))).is_ok());
     }
 
     #[test]
@@ -3239,6 +3289,7 @@ mod loader_tests {
                     reaches: Vec::new(),
                     tool_calls: Vec::new(),
                     tool_callable: None,
+                    remote_admin: None,
                 },
                 plugin_proto::ToolDef {
                     name: "loaderfakeplugin.fetch".into(),
@@ -3253,6 +3304,7 @@ mod loader_tests {
                     reaches: Vec::new(),
                     tool_calls: Vec::new(),
                     tool_callable: None,
+                    remote_admin: None,
                 },
             ],
             backends: vec![

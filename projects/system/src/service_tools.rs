@@ -371,7 +371,13 @@ pub struct DeployListOutput {
 }
 
 /// Every registered deploy target, addressed by its stable UUID.
-#[orca_tool(domain = "deploy", verb = "list", role = "read", tool_callable = true)]
+#[orca_tool(
+    domain = "deploy",
+    verb = "list",
+    role = "read",
+    tool_callable = true,
+    remote_admin = true
+)]
 async fn deploy_list(
     _args: DeployListArgs,
     _ctx: &contract::ToolCtx,

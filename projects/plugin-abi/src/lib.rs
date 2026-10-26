@@ -61,6 +61,8 @@ pub struct ToolDef {
     pub tool_calls: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_callable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_admin: Option<bool>,
 }
 
 /// JSON shape of a single domain backend a plugin contributes, in the plugin's

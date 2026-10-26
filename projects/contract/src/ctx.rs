@@ -100,6 +100,15 @@ impl ToolCtx {
         self.verified_caller.as_ref()
     }
 
+    pub fn relay_caller(&self) -> Option<crate::CallerIdentity> {
+        self.verified_caller.clone().or_else(|| {
+            self.service::<crate::mesh_relay::RelayingPeer>()
+                .is_err()
+                .then(|| self.auth.clone())
+                .flatten()
+        })
+    }
+
     /// Set the target peer in-place. Called by the CLI dispatcher when
     /// `--peer <h>` is present (and by REST/MCP middleware on equivalent
     /// per-request inputs) before the tool's `OrcaTool::run` fires.

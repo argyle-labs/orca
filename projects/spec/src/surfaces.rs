@@ -84,6 +84,7 @@ pub struct Invocation {
     call_chain: Vec<String>,
     tool_calls: Vec<String>,
     call_budget: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    relay: Option<contract::mesh_relay::RelayState>,
 }
 
 const SYSTEM_ROLE: &str = "read";
@@ -112,6 +113,7 @@ impl Invocation {
                 }
                 None => Default::default(),
             },
+            relay: contract::mesh_relay::RelayState::capture(ctx),
         })
     }
 
@@ -133,6 +135,7 @@ impl Invocation {
             call_chain: Vec::new(),
             tool_calls: Vec::new(),
             call_budget: Default::default(),
+            relay: None,
         }
     }
 
@@ -158,6 +161,10 @@ impl Invocation {
 
     pub fn tool_calls(&self) -> &[String] {
         &self.tool_calls
+    }
+
+    pub fn relay(&self) -> Option<&contract::mesh_relay::RelayState> {
+        self.relay.as_ref()
     }
 
     pub fn with_tool_calls(mut self, tool_calls: &[String]) -> Self {
@@ -221,6 +228,7 @@ impl Invocation {
                 }
                 None => Default::default(),
             },
+            relay: None,
         };
         if targeted {
             inv.with_reaches(reaches)

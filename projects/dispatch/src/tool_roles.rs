@@ -26,6 +26,7 @@ pub struct PluginToolPolicy {
     /// also declaring `data_mutation: false`; mesh refuses it without a caller.
     pub read_unconfirmed: bool,
     pub tool_callable: bool,
+    pub remote_admin: bool,
 }
 
 impl PluginToolPolicy {
@@ -55,6 +56,7 @@ impl PluginToolPolicy {
                 && execute_gated == Some(false)
                 && data_mutation != Some(false),
             tool_callable: false,
+            remote_admin: false,
         }
     }
 
@@ -67,6 +69,11 @@ impl PluginToolPolicy {
 
     pub fn tool_callable(mut self, tool_callable: Option<bool>) -> Self {
         self.tool_callable = tool_callable.unwrap_or(false);
+        self
+    }
+
+    pub fn remote_admin(mut self, remote_admin: Option<bool>) -> Self {
+        self.remote_admin = remote_admin.unwrap_or(false);
         self
     }
 
@@ -202,31 +209,12 @@ fn fixed_surface_role(tool: &str) -> Option<&'static str> {
     )
 }
 
-const CUSTODY_TOOLS: &[&str] = &[
-    "system.mesh.tier.update",
-    "system.mesh.update",
-    "secrets.detail",
-    "secrets.grant.create",
-    "secrets.grant.delete",
-    "pki.create",
-    "system.update",
-    "system.install",
-    "system.build",
-    "plugin.create",
-    "plugin.update",
-    "guest.exec",
-    "guest.write_file",
-    "files.update",
-    "system.cron.update",
-];
-
-const CODE_INSTALLING_VERBS: &[&str] = &["install", "upgrade", "engine_update", "exec"];
+pub fn is_remote_admin_safe(tool: &str) -> bool {
+    crate::registry::remote_admin(tool) || plugin_policy(tool).is_some_and(|p| p.remote_admin)
+}
 
 pub fn is_custody(tool: &str) -> bool {
-    CUSTODY_TOOLS.contains(&tool)
-        || tool
-            .rsplit_once('.')
-            .is_some_and(|(_, verb)| CODE_INSTALLING_VERBS.contains(&verb))
+    !is_remote_admin_safe(tool)
 }
 
 /// Rank of a role in the tier order `read-only` < `user` < `admin` <

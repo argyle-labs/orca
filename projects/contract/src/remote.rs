@@ -88,6 +88,10 @@ pub trait RemoteExec: Send + Sync {
     async fn refresh_peer_runtime(&self, _peer: &str) -> Result<()> {
         Ok(())
     }
+
+    fn attaches_ca_proof(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

@@ -492,6 +492,7 @@ pub fn tool_manifest_json() -> String {
                 "reaches": t.reaches(),
                 "tool_calls": t.tool_calls(),
                 "tool_callable": t.tool_callable(),
+                "remote_admin": t.remote_admin(),
             })
         })
         .collect();
@@ -739,7 +740,7 @@ async fn forward_to_peer(peer: &str, name: &str, mut args: Value, ctx: &ToolCtx)
             peer,
             name,
             args,
-            ctx.caller(),
+            ctx.relay_caller(),
             ctx.correlation_id().map(str::to_string),
         )
         .await?;
@@ -995,6 +996,10 @@ pub fn required_role(name: &str) -> Option<&'static str> {
 
 pub(crate) fn tool_callable(name: &str) -> bool {
     find(name).is_some_and(|t| t.tool_callable())
+}
+
+pub(crate) fn remote_admin(name: &str) -> bool {
+    find(name).is_some_and(|t| t.remote_admin())
 }
 
 /// Names of every registered tool that is a data mutation (write against an

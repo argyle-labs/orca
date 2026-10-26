@@ -52,6 +52,17 @@ pub async fn dispatch(
     caller: Option<contract::CallerIdentity>,
     relaying_peer: &str,
 ) -> Result<Value> {
+    dispatch_proven(name, args, correlation_id, caller, relaying_peer, false).await
+}
+
+pub async fn dispatch_proven(
+    name: &str,
+    args: Value,
+    correlation_id: Option<String>,
+    caller: Option<contract::CallerIdentity>,
+    relaying_peer: &str,
+    ca_proven: bool,
+) -> Result<Value> {
     let ctx = {
         let guard = CTX.lock().expect("mesh dispatcher mutex poisoned");
         guard
@@ -69,6 +80,12 @@ pub async fn dispatch(
     }
     local.set_verified_caller(caller);
     local.register_service(crate::mesh::RelayingPeer(relaying_peer.to_string()));
+    if ca_proven {
+        local.register_service(crate::mesh::CaProven);
+    }
+    local.register_service::<Arc<dyn contract::RemoteExec>>(Arc::new(
+        crate::mesh::RelayedMeshRemoteExec,
+    ));
     dispatch::dispatch(name, args, &local).await
 }
 

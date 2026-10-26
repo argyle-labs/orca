@@ -170,6 +170,12 @@ pub(crate) fn prepare(
             call.tool
         );
     }
+    if inv.relay().is_some_and(|r| !r.ca_proven) && dispatch::tool_roles::is_custody(&call.tool) {
+        bail!(
+            "tool.call {} refused: a mesh call without a CA proof cannot reach a custody tool",
+            call.tool
+        );
+    }
     let Some(required) = dispatch::tool_roles::known_role(&call.tool) else {
         bail!("tool.call {} refused: unknown tool", call.tool);
     };
@@ -220,6 +226,9 @@ pub(crate) fn prepare(
     ctx.set_correlation_id(correlation_id);
     ctx.set_call_chain(chain);
     ctx.set_call_budget(Some(inv.call_budget().clone()));
+    if let Some(relay) = inv.relay() {
+        relay.apply(&mut ctx);
+    }
     Ok((call.tool, args, ctx))
 }
 
@@ -334,6 +343,101 @@ mod tests {
                 policy("secrets.detail", "admin", false),
             ]);
         });
+    }
+
+    struct NoProofRemote;
+
+    #[async_trait::async_trait]
+    impl contract::RemoteExec for NoProofRemote {
+        async fn exec(
+            &self,
+            _peer: &str,
+            _tool: &str,
+            _args: Value,
+            _caller: Option<contract::CallerIdentity>,
+            _correlation_id: Option<String>,
+        ) -> Result<Value> {
+            Ok(Value::Null)
+        }
+    }
+
+    fn relayed_inv(ca_proven: bool) -> spec::surfaces::Invocation {
+        let mut c = ctx();
+        c.set_verified_caller(Some(contract::CallerIdentity {
+            user_id: "u-alice".into(),
+            username: "alice".into(),
+            role: "admin".into(),
+            can_mutate: true,
+        }));
+        c.register_service(contract::mesh_relay::RelayingPeer("peer-a".into()));
+        if ca_proven {
+            c.register_service(contract::mesh_relay::CaProven);
+        }
+        c.register_service::<Arc<dyn contract::RemoteExec>>(Arc::new(NoProofRemote));
+        let args = json!({ "execute": true });
+        spec::surfaces::Invocation::from_ctx(&c)
+            .unwrap()
+            .for_plugin_invoke(true, "admin", &[], &args)
+            .with_tool_calls(&["service.create".to_string(), "tcall.safe".to_string()])
+    }
+
+    #[test]
+    fn a_mesh_relayed_tool_call_into_a_custody_tool_without_a_proof_is_refused() {
+        dispatch::tool_roles::install_plugin_tools([
+            (
+                "service.create".to_string(),
+                dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                    "service.create",
+                    Some("admin"),
+                    None,
+                    None,
+                )
+                .tool_callable(Some(true)),
+            ),
+            (
+                "tcall.safe".to_string(),
+                dispatch::tool_roles::PluginToolPolicy::from_manifest(
+                    "tcall.safe",
+                    Some("read"),
+                    Some(false),
+                    Some(false),
+                )
+                .tool_callable(Some(true))
+                .remote_admin(Some(true)),
+            ),
+        ]);
+        let err = refusal(prepare(
+            call("service.create", json!({ "action": "deploy" })),
+            "p",
+            Some(&relayed_inv(false)),
+            ctx(),
+        ));
+        assert!(err.contains("CA proof"), "{err}");
+
+        let (_, _, child) = prepare(
+            call("tcall.safe", json!({})),
+            "p",
+            Some(&relayed_inv(false)),
+            ctx(),
+        )
+        .unwrap();
+        assert!(!contract::mesh_relay::custody_cleared(&child));
+        assert!(
+            !child
+                .service::<Arc<dyn contract::RemoteExec>>()
+                .unwrap()
+                .attaches_ca_proof()
+        );
+
+        if let Err(e) = prepare(
+            call("service.create", json!({ "action": "deploy" })),
+            "p",
+            Some(&relayed_inv(true)),
+            ctx(),
+        ) {
+            panic!("a proven relay must reach the custody tool: {e:#}");
+        }
+        dispatch::tool_roles::remove_plugin_tools(["service.create", "tcall.safe"]);
     }
 
     #[test]

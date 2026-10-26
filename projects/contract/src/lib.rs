@@ -61,6 +61,7 @@ mod ctx;
 /// only: it spawns, and a thin plugin links no tokio.
 #[cfg(feature = "in-process")]
 pub mod fanout;
+pub mod mesh_relay;
 pub use utils::invocation_scope;
 pub mod owner;
 mod remote;

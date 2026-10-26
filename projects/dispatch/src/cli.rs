@@ -274,7 +274,7 @@ pub async fn exec_remote<T: contract::OrcaToolDef>(
             peer,
             T::NAME,
             args_value,
-            ctx.caller(),
+            ctx.relay_caller(),
             ctx.correlation_id().map(str::to_string),
         )
         .await?;
@@ -337,7 +337,7 @@ pub async fn exec_gated<T: contract::OrcaToolDef>(
                 peer,
                 T::NAME,
                 body,
-                ctx.caller(),
+                ctx.relay_caller(),
                 ctx.correlation_id().map(str::to_string),
             )
             .await;
@@ -1095,7 +1095,7 @@ async fn run_diag(name: &str, args: serde_json::Value, ctx: &ToolCtx) -> Result<
                 peer,
                 name,
                 args,
-                ctx.caller(),
+                ctx.relay_caller(),
                 ctx.correlation_id().map(str::to_string),
             )
             .await?

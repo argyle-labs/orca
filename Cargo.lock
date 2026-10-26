@@ -4094,6 +4094,7 @@ name = "orca-containers"
 version = "0.2.1-rc.21"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "orca-container-runtime",
  "orca-contract",
@@ -4529,6 +4530,7 @@ name = "orca-plugin-loader"
 version = "0.2.1-rc.21"
 dependencies = [
  "anyhow",
+ "async-trait",
  "futures",
  "libc",
  "orca-agents",

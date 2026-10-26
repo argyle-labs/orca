@@ -426,13 +426,21 @@ pub fn audit_root(root: &Path, host: String) -> PrivilegeAudit {
 /// targets and sole grants. Pure filesystem read: `audit` is a read-shaped verb,
 /// so it is neither gated nor a mutation. `role = "read"` because the grant list
 /// maps out which accounts can become root.
-#[orca_tool(domain = "identity.privilege", verb = "audit", role = "read")]
+#[orca_tool(
+    domain = "identity.privilege",
+    verb = "audit",
+    role = "read",
+    remote_admin = true
+)]
 async fn identity_privilege_audit(
     args: IdentityPrivilegeAuditArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PrivilegeAudit> {
-    let live = args.root.is_none();
-    let root = PathBuf::from(args.root.unwrap_or_else(|| "/".to_string()));
+    let root = args
+        .root
+        .filter(|_| ctx.service::<crate::mesh::RelayingPeer>().is_err());
+    let live = root.is_none();
+    let root = PathBuf::from(root.unwrap_or_else(|| "/".to_string()));
     let mut audit = audit_root(&root, crate::host_identity::hostname().to_string());
     if live {
         for check in crate::sysadmin::sudoers_drift() {
