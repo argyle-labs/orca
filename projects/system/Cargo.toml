@@ -82,6 +82,7 @@ libc = { workspace = true }
 rustix = { workspace = true }
 
 [dev-dependencies]
+spec = { workspace = true }
 utils = { workspace = true, features = ["test-scope"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

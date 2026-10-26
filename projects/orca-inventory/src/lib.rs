@@ -221,7 +221,7 @@ async fn mesh_topology_view(ctx: &contract::ToolCtx) -> Result<MeshTopologyOutpu
 /// claims verbatim (double-counting cluster guests). A system is reached locally
 /// or over its route; "where" is resolved internally, never selected by the
 /// caller.
-#[orca_tool(domain = "system", verb = "topology")]
+#[orca_tool(domain = "system", verb = "topology", tool_callable = true)]
 async fn system_topology(
     _args: SystemTopologyArgs,
     ctx: &contract::ToolCtx,

@@ -214,7 +214,7 @@ pub struct GuestExecArgs {
 /// stdout/stderr/exit code. Routes to the LXC seam or the VM guest-agent backend
 /// by the guest's kind. Admin-only and side-effecting — mirrors the `orca admin
 /// lxc-exec` privilege boundary.
-#[orca_tool(domain = "guest", verb = "exec", role = "admin")]
+#[orca_tool(domain = "guest", verb = "exec", role = "admin", tool_callable = true)]
 async fn guest_exec_run(args: GuestExecArgs, _ctx: &ToolCtx) -> Result<ExecOutput> {
     let provider = provider_for(&args.id).await;
     let scope = resolve_scope(&args.id, args.scope).await;
@@ -321,6 +321,37 @@ pub fn register_builtin_providers() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_user_role_caller_cannot_reach_guest_exec_through_a_plugin() {
+        assert!(dispatch::tool_roles::is_tool_callable("guest.exec"));
+        plugin_loader::tool_call::set_ctx_factory(Box::new(|| {
+            Ok(ToolCtx::new(std::sync::Arc::new(
+                contract::config::Config::load()?,
+            )))
+        }));
+        let mut c = ToolCtx::new(std::sync::Arc::new(
+            contract::config::Config::load().unwrap(),
+        ));
+        c.set_verified_caller(Some(contract::CallerIdentity {
+            user_id: "u-bob".into(),
+            username: "bob".into(),
+            role: "user".into(),
+            can_mutate: false,
+        }));
+        let inv = spec::surfaces::Invocation::from_ctx(&c)
+            .unwrap()
+            .for_plugin_invoke(true, "user", &[], &json!({ "execute": true }))
+            .with_tool_calls(&["guest.exec".to_string()]);
+        let err = plugin_loader::tool_call::handle(
+            json!({ "tool": "guest.exec", "args": { "id": "x", "argv": ["id"], "execute": true } }),
+            "security",
+            Some(&inv),
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "forbidden: requires role admin");
+    }
 
     // A duplicate registry name does not error — `register_provider` REPLACES by
     // name, so colliding with the plugin's `"proxmox"` VM backend silently swaps

@@ -4838,6 +4838,7 @@ dependencies = [
  "orca-plugin-loader",
  "orca-plugin-toolkit",
  "orca-secrets",
+ "orca-spec",
  "orca-utils",
  "orca-workspace-hack",
  "rand 0.10.2",
