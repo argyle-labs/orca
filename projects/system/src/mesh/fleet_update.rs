@@ -46,7 +46,6 @@ const LOCAL_PEER: &str = "local";
 /// This controller's running version. Reported by the gate-skew note (#623) and
 /// used for the readiness probe's cert status, which takes its version from the
 /// caller rather than reading a crate-local `CARGO_PKG_VERSION`.
-const CONTROLLER_VERSION: &str = env!("ORCA_VERSION");
 
 /// Where a fan-out writes its run record. One file per run, under the orca
 /// home's `logs/`. `None` when no home is resolvable (nothing to persist to).
@@ -685,7 +684,7 @@ pub async fn fleet_update(
     // emitting one blamed-peer row per host for a purely local fault (#618).
     if targets.iter().any(|t| !t.is_local)
         && let Some(refusal) =
-            controller_dial_readiness(&crate::mesh::pki_dir(), CONTROLLER_VERSION)
+            controller_dial_readiness(&crate::mesh::pki_dir(), crate::build_info::version())
     {
         out.errors.push(refusal);
         persist(&out, record.as_deref());
@@ -768,7 +767,7 @@ pub async fn fleet_update(
         .iter()
         .filter_map(|r| r.applied.as_deref())
         .collect();
-    if let Some(note) = gate_skew_note(CONTROLLER_VERSION, &applied) {
+    if let Some(note) = gate_skew_note(crate::build_info::version(), &applied) {
         tracing::info!("{note}");
         out.notes.push(note);
     }

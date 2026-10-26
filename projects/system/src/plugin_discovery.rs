@@ -11,7 +11,6 @@ use crate::update;
 pub const PLUGIN_ORG: &str = "argyle-labs";
 pub const PLUGIN_TOPIC: &str = "plugin";
 const GITHUB_API_VERSION: &str = "2022-11-28";
-const ORCA_VERSION: &str = env!("ORCA_VERSION");
 const PAGE_SIZE: usize = 50;
 const RELEASES_PER_REPO: usize = 10;
 const MAX_PAGES: usize = 20;
@@ -240,7 +239,7 @@ pub async fn discover_from(
     previous: &[CatalogEntry],
 ) -> Result<Discovery> {
     let client = utils::http::Client::new();
-    let ua = format!("orca/{ORCA_VERSION}");
+    let ua = format!("orca/{}", crate::build_info::version());
     let get = |url: String| {
         let mut r = client
             .get(url)

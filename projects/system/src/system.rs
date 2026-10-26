@@ -507,7 +507,7 @@ fn collect_health(ctx: &contract::ToolCtx) -> anyhow::Result<HealthReport> {
         .unwrap_or_default();
     Ok(HealthReport {
         healthy: daemon.running,
-        version: env!("ORCA_VERSION").into(),
+        version: crate::build_info::version().into(),
         display_name,
         machine_id,
         daemon,
@@ -598,7 +598,7 @@ async fn system_summary(ctx: &contract::ToolCtx) -> anyhow::Result<SystemStatusR
         agents: report.agents,
         pki: report.pki,
         mcp: report.mcp,
-        version: env!("ORCA_VERSION").into(),
+        version: crate::build_info::version().into(),
         target: env!("ORCA_BUILD_TARGET").into(),
         frontend,
         mode,

@@ -133,7 +133,6 @@ fn effective_token(token: &str) -> &str {
     if source_is_github() { token } else { "" }
 }
 
-const CURRENT_VERSION: &str = env!("ORCA_VERSION");
 const BUILD_TARGET: &str = env!("ORCA_BUILD_TARGET");
 
 /// Rust target triple this binary was compiled for. Exposed for the
@@ -213,7 +212,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     // send it (higher rate limit / private-repo readiness). Empty token →
     // unauthenticated request, not an error.
     let client = utils::http::Client::new();
-    let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
+    let user_agent = format!("{APP_NAME}/{}", crate::build_info::version());
     // Release source is configurable (default GitHub). A GitHub PAT is only
     // valid against GitHub, so drop it for any other origin (Gitea reads public).
     let token = effective_token(token);
@@ -276,7 +275,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     };
 
     let latest = release.tag_name.trim_start_matches('v');
-    if !is_newer_full(latest, CURRENT_VERSION) {
+    if !is_newer_full(latest, crate::build_info::version()) {
         return Ok(None);
     }
 
@@ -399,7 +398,7 @@ pub async fn list_versions(channel: &Channel, token: &str) -> Result<Vec<Version
     // Public repo → unauthenticated listing works; send the token only when we
     // have one. See the note in `check_for_update`.
     let client = utils::http::Client::new();
-    let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
+    let user_agent = format!("{APP_NAME}/{}", crate::build_info::version());
     let url = format!("{APP_REPO_API_URL}/releases?per_page=100");
     let releases: Vec<ReleaseMeta> = github_get(&client, url, token, &user_agent)
         .await
@@ -735,7 +734,8 @@ pub fn is_dev() -> bool {
     let env_flag = std::env::var("ORCA_DEV")
         .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(false);
-    let dev_build = CURRENT_VERSION.contains("-dev") || CURRENT_VERSION.contains("+unknown");
+    let dev_build = crate::build_info::version().contains("-dev")
+        || crate::build_info::version().contains("+unknown");
     let dev_mode = utils::state::read()
         .ok()
         .flatten()
@@ -955,7 +955,7 @@ pub async fn fetch_release_asset(
         format!("v{v_tag}")
     };
     let client = utils::http::Client::new();
-    let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
+    let user_agent = format!("{APP_NAME}/{}", crate::build_info::version());
     // Configurable release source (default GitHub); drop a GitHub-only PAT for
     // any other origin. `/releases/tags/{tag}` is served by both GitHub and Gitea.
     let token = effective_token(token);
@@ -1012,7 +1012,10 @@ pub async fn download_asset(
         .get(url)
         .header("Accept", "application/octet-stream")
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-        .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"));
+        .header(
+            "User-Agent",
+            format!("{APP_NAME}/{}", crate::build_info::version()),
+        );
     let req = if token.is_empty() {
         req
     } else {

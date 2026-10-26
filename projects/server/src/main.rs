@@ -379,6 +379,7 @@ fn daemon_log_path() -> Option<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    system::build_info::set_version(env!("ORCA_VERSION"));
     // Unified logging: JSON-line output, EnvFilter from `ORCA_LOG`, a
     // ScrubWriter that redacts well-known sensitive patterns (PVE API
     // tokens, Authorization headers, JSON secret fields) before they
