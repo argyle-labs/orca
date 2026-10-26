@@ -637,7 +637,8 @@ async fn main() -> Result<()> {
         },
         Some(Command::Openapi { action }) => match action {
             OpenapiAction::Emit => {
-                let spec = orca_spec_json();
+                let mut spec = orca_spec_json();
+                spec["info"]["version"] = utils::build_info::base_version().into();
                 println!("{}", serde_json::to_string_pretty(&spec)?);
                 Ok(())
             }

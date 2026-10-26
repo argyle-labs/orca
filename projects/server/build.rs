@@ -43,6 +43,7 @@ fn watch_git_head(repo: &Path) {
         watched.push(git_dir.join(reference));
         watched.push(common_dir.join(reference));
     }
+    watched.push(git_dir.join("logs").join("HEAD"));
     watched.push(common_dir.join("packed-refs"));
     for path in watched.iter().filter(|p| p.exists()) {
         println!("cargo:rerun-if-changed={}", path.display());

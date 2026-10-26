@@ -199,6 +199,58 @@ fn deb_arch(arch: &str) -> &str {
     }
 }
 
+pub fn package_version(format: &PackageFormat, version: &str) -> String {
+    let (core, sha) = match version.split_once("-dev+g") {
+        Some((core, sha)) => (core, Some(sha)),
+        None => (version, None),
+    };
+    let (base, pre) = match core.split_once('-') {
+        Some((base, pre)) => (base, Some(pre)),
+        None => (core, None),
+    };
+    match format {
+        PackageFormat::Deb => {
+            let mut v = base.to_string();
+            if let Some(pre) = pre {
+                v.push_str(&format!("~{pre}"));
+            }
+            if let Some(sha) = sha {
+                v.push_str(&format!("+g{sha}"));
+            }
+            v
+        }
+        PackageFormat::Rpm => {
+            let mut release = match pre {
+                Some(pre) => format!("0.{}", pre.replace('-', ".")),
+                None => "1".to_string(),
+            };
+            if let Some(sha) = sha {
+                release.push_str(&format!(".g{sha}"));
+            }
+            format!("{base}-{release}")
+        }
+        PackageFormat::Apk => match pre {
+            Some(pre) => {
+                let (tag, num): (String, String) =
+                    pre.chars().partition(|c| c.is_ascii_alphabetic());
+                format!("{base}_{tag}{num}", num = num.trim_matches('.'))
+            }
+            None => base.to_string(),
+        },
+        PackageFormat::Pkgbuild => {
+            let mut v = base.to_string();
+            if let Some(pre) = pre {
+                v.push_str(&pre.replace(['-', '.'], ""));
+            }
+            if let Some(sha) = sha {
+                v.push_str(&format!(".r0.g{sha}"));
+            }
+            v
+        }
+        PackageFormat::Pkg | PackageFormat::Homebrew | PackageFormat::Plg => version.to_string(),
+    }
+}
+
 fn build_deb(
     binary: &Path,
     version: &str,
@@ -206,6 +258,7 @@ fn build_deb(
     maintainer: &str,
     out_dir: &Path,
 ) -> Result<()> {
+    let version = package_version(&PackageFormat::Deb, version);
     let deb_arch = deb_arch(arch);
 
     let staging = out_dir.join(".orca-deb-staging");
@@ -288,8 +341,8 @@ fn build_rpm(
     maintainer: &str,
     out_dir: &Path,
 ) -> Result<()> {
-    // RPM version strings cannot contain dashes.
-    let (rpm_ver, rpm_rel) = version.split_once('-').unwrap_or((version, "1"));
+    let version = package_version(&PackageFormat::Rpm, version);
+    let (rpm_ver, rpm_rel) = version.split_once('-').unwrap_or((&version, "1"));
 
     let staging = out_dir.join(".orca-rpm-staging");
     if staging.exists() {
@@ -379,7 +432,7 @@ fn build_rpm(
 // ── .apk (Alpine) ─────────────────────────────────────────────────────────────
 
 fn build_apk(binary: &Path, version: &str, arch: &str, out_dir: &Path) -> Result<()> {
-    let apk_ver = version.replace('-', "_");
+    let apk_ver = package_version(&PackageFormat::Apk, version);
     let checksum = sha512_hex(binary)?;
 
     let staging = out_dir.join("orca-apk-staging");
@@ -443,8 +496,7 @@ fn aur_archs(arch: &str) -> &'static str {
 }
 
 fn build_pkgbuild(version: &str, arch: &str, out_dir: &Path) -> Result<()> {
-    // pkgver cannot contain dashes.
-    let pkgver = version.replace('-', ".");
+    let pkgver = package_version(&PackageFormat::Pkgbuild, version);
     let aur_archs = aur_archs(arch);
 
     std::fs::write(
@@ -1154,6 +1206,55 @@ fn find_file_ext(dir: &Path, ext: &str) -> Result<Option<PathBuf>> {
 
 #[cfg(test)]
 mod tests {
+
+    const RELEASE: &str = "0.2.1";
+    const RC: &str = "0.2.1-rc.21";
+    const DEV: &str = "0.2.1-rc.21-dev+gabc1234";
+
+    fn pv(format: PackageFormat, version: &str) -> String {
+        package_version(&format, version)
+    }
+
+    #[test]
+    fn deb_package_version_sorts_prerelease_before_release() {
+        assert_eq!(pv(PackageFormat::Deb, RELEASE), "0.2.1");
+        assert_eq!(pv(PackageFormat::Deb, RC), "0.2.1~rc.21");
+        assert_eq!(pv(PackageFormat::Deb, DEV), "0.2.1~rc.21+gabc1234");
+    }
+
+    #[test]
+    fn rpm_package_version_has_no_dash_in_release() {
+        assert_eq!(pv(PackageFormat::Rpm, RELEASE), "0.2.1-1");
+        assert_eq!(pv(PackageFormat::Rpm, RC), "0.2.1-0.rc.21");
+        assert_eq!(pv(PackageFormat::Rpm, DEV), "0.2.1-0.rc.21.gabc1234");
+        for v in [RELEASE, RC, DEV] {
+            let full = pv(PackageFormat::Rpm, v);
+            let (ver, rel) = full.split_once('-').unwrap();
+            assert!(!ver.contains('-') && !rel.contains('-'), "{full}");
+        }
+    }
+
+    #[test]
+    fn apk_package_version_uses_suffix_form() {
+        assert_eq!(pv(PackageFormat::Apk, RELEASE), "0.2.1");
+        assert_eq!(pv(PackageFormat::Apk, RC), "0.2.1_rc21");
+        assert_eq!(pv(PackageFormat::Apk, DEV), "0.2.1_rc21");
+        assert_eq!(pv(PackageFormat::Apk, "0.2.1-dev+gabc1234"), "0.2.1");
+    }
+
+    #[test]
+    fn pkgbuild_package_version_has_no_dash_or_plus() {
+        assert_eq!(pv(PackageFormat::Pkgbuild, RELEASE), "0.2.1");
+        assert_eq!(pv(PackageFormat::Pkgbuild, RC), "0.2.1rc21");
+        assert_eq!(pv(PackageFormat::Pkgbuild, DEV), "0.2.1rc21.r0.gabc1234");
+    }
+
+    #[test]
+    fn homebrew_package_version_is_the_release_tag() {
+        for v in [RELEASE, RC, DEV] {
+            assert_eq!(pv(PackageFormat::Homebrew, v), v);
+        }
+    }
     use super::*;
 
     #[test]
@@ -2399,7 +2500,10 @@ mod tests {
         assert_eq!(res.arch, "x86_64");
         // Either a real .deb (dpkg-deb present) or the staged tree (absent).
         let built = out
-            .join(format!("orca_{}_amd64.deb", utils::build_info::version()))
+            .join(format!(
+                "orca_{}_amd64.deb",
+                package_version(&PackageFormat::Deb, utils::build_info::version())
+            ))
             .exists()
             || out.join("orca-deb-staging").exists();
         assert!(built, "deb build produced neither package nor staging");

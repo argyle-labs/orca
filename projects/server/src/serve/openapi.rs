@@ -48,13 +48,13 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
 }
 
 pub(super) fn install_spec(mut spec: utoipa::openapi::OpenApi) {
-    spec.info.version = env!("ORCA_VERSION").to_string();
+    spec.info.version = utils::build_info::version().to_string();
     _ = SPEC.set(spec);
 }
 
 fn build_spec() -> utoipa::openapi::OpenApi {
     let (_, mut spec) = openapi_router().split_for_parts();
-    spec.info.version = env!("ORCA_VERSION").to_string();
+    spec.info.version = utils::build_info::version().to_string();
     spec
 }
 

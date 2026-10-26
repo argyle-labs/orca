@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn is_update_available_dirty_current_matches_clean_latest() {
-        // build.rs format: <pkg>-dev+g<sha>[.dirty] — same release as v0.0.14
+        // <pkg>-dev+g<sha>, plus `.dirty` from older peers — same release as v0.0.14
         assert!(!is_update_available("0.0.14-dev+g9409864.dirty", "v0.0.14"));
         assert!(!is_update_available("0.0.14-dev+g9409864", "0.0.14"));
     }

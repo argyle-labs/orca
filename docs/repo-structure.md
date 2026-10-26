@@ -152,6 +152,10 @@ Version stamping: only `orca-server`'s `build.rs` stamps `ORCA_VERSION`. A
 release build (`ORCA_RELEASE_VERSION` set by CI / `scripts/release-lib.sh`)
 reports the release; every local build reports `<pkg>-dev+g<sha>`, even at a
 tag. Rebuilds trigger on HEAD/ref changes only, never on the git index.
+`orca openapi emit` writes the version without the `-dev+g<sha>` suffix so the
+committed spec does not change per commit. `orca package build` normalises the
+version per format (deb `0.2.1~rc.21`, rpm release `0.rc.21`, apk `0.2.1_rc21`,
+pkgbuild `0.2.1rc21`).
 
 The daemon is installed as a launchd (macOS) / systemd (Linux) service via
 `orca system install` (run by `make deploy`); `orca system delete` removes it.

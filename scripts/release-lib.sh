@@ -318,9 +318,7 @@ write_cargo_version() {
   ( cd "$REPO_ROOT" && cargo metadata --locked --format-version=1 >/dev/null 2>&1 ) \
     || die "Cargo.lock is out of sync with Cargo.toml after bump — aborting release"
   # Bake the release version verbatim into the binary. build.rs reads this
-  # env var first; without it, build.rs falls back to `<cargo>-dev+g<sha>.dirty`
-  # because the working tree is dirty (Cargo.toml just changed) and the tag
-  # doesn't exist yet (created after the build). All subsequent cargo
+  # env var first; without it every build stamps `<cargo>-dev+g<sha>`. All subsequent cargo
   # invocations in this shell — local `make release rc` AND the CI composite
   # action that `source`s this lib — inherit it.
   export ORCA_RELEASE_VERSION="$new"
