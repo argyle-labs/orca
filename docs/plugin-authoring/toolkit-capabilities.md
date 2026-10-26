@@ -182,3 +182,18 @@ fn main() {
 `plugin-toolkit-build` rewrites generated crate paths to `::plugin_toolkit::*`,
 so the plugin never depends on `progenitor` / `graphql_client_codegen`, and the
 generated client issues requests through the `http.request` capability.
+
+## Host directory roots
+
+`plugin_toolkit::host_paths` validates host directories a plugin manages (stack
+roots, discovery roots, data roots) the same way in every plugin:
+
+- `validate_root(kind, root, allowed)` accepts `root` only when it is absolute,
+  has no `.`/`..`, is an existing directory whose canonical path is the path as
+  given (no symlinked component), and sits strictly inside one of `allowed`.
+  `allowed_parents(extra)` is `DEFAULT_ALLOWED_PARENTS` (`/opt`, `/srv`,
+  `/mnt`, `/home`, `/data`, `/media`) plus the plugin's own parents.
+- `valid_roots(kind, roots, allowed)` re-checks stored roots on read, returning
+  the ones that pass and the errors of the ones dropped.
+- `canonical_in_roots(dir, roots)` is the canonical `dir` when it is a
+  directory strictly inside one of `roots`.

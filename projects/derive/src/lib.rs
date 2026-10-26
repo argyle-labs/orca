@@ -656,6 +656,10 @@ struct ReplicateAttr {
     unique: Option<String>,
     protected: Vec<String>,
     peer_delete: Option<syn::Path>,
+    /// `fn(&Connection, &Self) -> bool`; a peer row it rejects is dropped.
+    verify: Option<syn::Path>,
+    /// Peers may add rows but never change or delete an existing one.
+    immutable: bool,
     /// Crate path the macro emits against. Defaults to `::plugin_toolkit`;
     /// domain crates pass `crate = ::macro_runtime` to anchor against the
     /// lower-level macro-runtime crate (breaks the Cargo cycle that would
@@ -683,6 +687,8 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
     let mut protected = Vec::new();
     let mut crate_path: Option<syn::Path> = None;
     let mut peer_delete = None;
+    let mut verify = None;
+    let mut immutable = false;
     for nv in items {
         let key = nv
             .path
@@ -695,6 +701,10 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
         }
         if key == "peer_delete" {
             peer_delete = Some(parse_path(&nv.value)?);
+            continue;
+        }
+        if key == "verify" {
+            verify = Some(parse_path(&nv.value)?);
             continue;
         }
         let val = match &nv.value {
@@ -713,6 +723,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
             "lww" => lww = Some(val),
             "pk" => pk = Some(val),
             "unique" => unique = Some(val),
+            "immutable" => immutable = val == "true",
             "peer_writable" => {
                 protected = val
                     .split(',')
@@ -737,6 +748,8 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
         unique,
         protected,
         peer_delete,
+        verify,
+        immutable,
         crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
     })
 }
@@ -803,11 +816,15 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
             ));
         }
     }
-    cfg.protected = field_names
-        .iter()
-        .filter(|f| **f != cfg.pk && **f != cfg.lww && !cfg.protected.contains(f))
-        .cloned()
-        .collect();
+    cfg.protected = if cfg.immutable {
+        Vec::new()
+    } else {
+        field_names
+            .iter()
+            .filter(|f| **f != cfg.pk && **f != cfg.lww && !cfg.protected.contains(f))
+            .cloned()
+            .collect()
+    };
 
     let table = &cfg.table;
     let pk = &cfg.pk;
@@ -839,6 +856,7 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
     // unique-conflict path we PRESERVE the local pk (never SET it) so FK
     // references stay intact, and we don't touch the unique column itself.
     let conflict_clause = match &cfg.unique {
+        None if cfg.immutable => format!("ON CONFLICT({pk}) DO NOTHING"),
         None => format!("ON CONFLICT({pk}) DO UPDATE SET {update_set}"),
         Some(unique) => {
             let update_set_unique = field_names
@@ -904,6 +922,8 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
         .collect();
     let peer_delete = if let Some(pred) = &cfg.peer_delete {
         quote! { ::std::option::Option::Some(#pred) }
+    } else if cfg.immutable {
+        quote! { ::std::option::Option::None }
     } else if cfg.protected.is_empty() {
         quote! { ::std::option::Option::Some(#crate_path::allow_peer_delete) }
     } else {
@@ -985,6 +1005,20 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
         }
     };
 
+    let verify_guard = match &cfg.verify {
+        None => quote! {},
+        Some(verify) => quote! {
+            if !#verify(conn, row) {
+                #crate_path::replicate_table::audit_reject(
+                    #table,
+                    &row.#pk_ident,
+                    "row failed verification",
+                );
+                continue;
+            }
+        },
+    };
+
     let expanded = quote! {
         const _: () = {
             // The replication bundle is a heterogeneous registry of entity rows,
@@ -1013,6 +1047,7 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                     let rows: ::std::vec::Vec<#ty> = #crate_path::serde_json::from_value(rows)?;
                     let mut merged = 0usize;
                     for row in &rows {
+                        #verify_guard
                         if let ::std::result::Result::Err(reason) =
                             #crate_path::replicate_table::check_incoming_lww(&row.#lww_ident)
                         {

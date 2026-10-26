@@ -59,6 +59,12 @@ pub mod core_tables;
 /// transport via [`capsink`]).
 #[cfg(feature = "descriptor")]
 pub mod descriptor;
+/// Async subprocess exec helpers for deploy-lifecycle tool surfaces
+/// (`tokio::process::Command`, internal). Runs on the shared reactor, so it is
+/// always available — a plugin reaches exec here without naming the runtime.
+/// Host directory roots a plugin may manage: allowlist validation with
+/// canonicalization and symlink refusal, and paths kept inside roots.
+pub mod host_paths;
 /// Opt-in plugin instrumentation: the jemalloc allocator substrate every plugin
 /// inherits (via the serve macros or the public [`instrument::bootstrap`] macro),
 /// the anti-leak [`instrument::PollInventory`]/[`instrument::PollDriver`]
@@ -72,9 +78,6 @@ pub mod instrument;
 /// `AsyncWriteExt`. Reactor-bound but always available — the reactor is the
 /// shared orca-owned surface (see [`reactor`]).
 pub mod io;
-/// Async subprocess exec helpers for deploy-lifecycle tool surfaces
-/// (`tokio::process::Command`, internal). Runs on the shared reactor, so it is
-/// always available — a plugin reaches exec here without naming the runtime.
 pub mod lifecycle;
 pub mod logging;
 pub mod lxc_exec;

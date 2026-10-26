@@ -1052,8 +1052,6 @@ async fn spawn_mesh_runtime(pki_dir: &std::path::Path) {
                     // rows that are provably the same identity (same address +
                     // same pinned key) into one canonical row. Runs every boot,
                     // so each host self-cleans as it rolls onto a new build.
-                    // Re-keyed duplicates converge later via the handshake path
-                    // (reconcile_addr_to_canonical).
                     match db::mesh::dedup_same_identity_rows(&conn) {
                         Ok(n) if n > 0 => {
                             info!("[mesh] boot reconcile retired {n} duplicate peer row(s)")

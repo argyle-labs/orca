@@ -31,6 +31,8 @@ use tokio::process::Command;
 /// watchdog. Five minutes covers a package upgrade with margin.
 const LXC_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
 
+const LXC_UPDATE_TIMEOUT: Duration = Duration::from_secs(3600);
+
 pub const LXC_EXEC_OUTPUT_CAP: usize = 1024 * 1024;
 
 const LXC_EXEC_HELPER_GRACE: Duration = Duration::from_secs(30);
@@ -54,6 +56,8 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "stat",
     "head",
     "tail",
+    "apk",
+    "update",
 ];
 
 /// A single privileged in-container exec: run `argv` inside LXC `vmid`. Both
@@ -256,6 +260,12 @@ const SYSTEMCTL_DENIED_LONG: &[&str] = &["--host", "--machine", "--root", "--ima
 
 const SYSTEMCTL_DENIED_SHORT: &[char] = &['H', 'M'];
 
+const APK_SUBCOMMANDS: &[&str] = &["update", "upgrade"];
+
+const APK_OPTIONS: &[&str] = &["-q", "--quiet", "--no-cache"];
+
+const COMMUNITY_UPDATER: &str = "/usr/bin/update";
+
 const SENSITIVE_PATHS: &[&str] = &[
     "/etc/shadow",
     "/etc/gshadow",
@@ -391,6 +401,45 @@ fn check_systemctl(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn check_apk(args: &[String]) -> Result<(), String> {
+    let mut subcommand = false;
+    for arg in args {
+        if is_option(arg) {
+            if !APK_OPTIONS.contains(&arg.as_str()) {
+                return refuse("apk", arg);
+            }
+        } else if subcommand || !APK_SUBCOMMANDS.contains(&arg.as_str()) {
+            return refuse("apk", arg);
+        } else {
+            subcommand = true;
+        }
+    }
+    if subcommand {
+        Ok(())
+    } else {
+        Err("refused apk: needs update or upgrade".to_string())
+    }
+}
+
+fn check_update(prog: &str, args: &[String]) -> Result<(), String> {
+    if prog != COMMUNITY_UPDATER {
+        return Err(format!(
+            "refused command '{prog}': the updater runs only as {COMMUNITY_UPDATER}"
+        ));
+    }
+    match args.first() {
+        Some(arg) => refuse("update", arg),
+        None => Ok(()),
+    }
+}
+
+fn exec_timeout(op: &LxcExecOp) -> Duration {
+    match op.argv.first().map(|p| resolve_command(p)) {
+        Some(Ok("apk" | "update")) => LXC_UPDATE_TIMEOUT,
+        _ => LXC_EXEC_TIMEOUT,
+    }
+}
+
 fn is_sensitive_path(path: &str) -> bool {
     path.split('/').any(|seg| seg == ".." || seg == ".ssh")
         || SENSITIVE_PATHS.iter().any(|p| {
@@ -432,6 +481,8 @@ pub fn validate(op: &LxcExecOp) -> Result<(), String> {
         "rpm" => check_rpm(args),
         "systemctl" => check_systemctl(args),
         "cat" | "head" | "tail" => check_read(cmd, args),
+        "apk" => check_apk(args),
+        "update" => check_update(prog, args),
         _ => Ok(()),
     }
 }
@@ -472,15 +523,12 @@ pub async fn run_privileged_lxc(op: &LxcExecOp) -> LxcExecResult {
         let _shut = stdin.shutdown().await;
     }
 
-    let waited = tokio::time::timeout(
-        LXC_EXEC_TIMEOUT + LXC_EXEC_HELPER_GRACE,
-        child.wait_with_output(),
-    )
-    .await;
+    let limit = exec_timeout(op) + LXC_EXEC_HELPER_GRACE;
+    let waited = tokio::time::timeout(limit, child.wait_with_output()).await;
     let Ok(waited) = waited else {
         return LxcExecResult::refused(format!(
             "lxc-exec helper did not finish within {}s",
-            (LXC_EXEC_TIMEOUT + LXC_EXEC_HELPER_GRACE).as_secs()
+            limit.as_secs()
         ));
     };
     match waited {
@@ -518,7 +566,7 @@ pub async fn execute_privileged_lxc(op: LxcExecOp) -> LxcExecResult {
 
     let mut cmd = Command::new("pct");
     cmd.args(&pct_argv);
-    run_capped(cmd, "pct exec", LXC_EXEC_TIMEOUT, LXC_EXEC_OUTPUT_CAP).await
+    run_capped(cmd, "pct exec", exec_timeout(&op), LXC_EXEC_OUTPUT_CAP).await
 }
 
 // ── File push (write_file) ────────────────────────────────────────────────────
@@ -595,7 +643,11 @@ impl LxcPushResult {
 
 const PUSH_ALLOWED_PREFIXES: &[&str] = &["/etc/", "/opt/", "/srv/", "/var/lib/"];
 
-const PUSH_ALLOWED_FILES: &[&str] = &["/.pxarexclude"];
+const PUSH_ALLOWED_FILES: &[&str] = &[
+    "/.pxarexclude",
+    "/run/orca-update-backup.json",
+    "/run/systemd/system/orca-guest-update.service",
+];
 
 const PUSH_DENIED_PREFIXES: &[&str] = &[
     "/etc/passwd",
@@ -1114,11 +1166,67 @@ mod tests {
     }
 
     #[test]
+    fn apk_allows_only_index_refresh_and_upgrade() {
+        for argv in [
+            &["apk", "update"][..],
+            &["apk", "upgrade"],
+            &["/sbin/apk", "update", "-q"],
+            &["apk", "-q", "--no-cache", "upgrade"],
+        ] {
+            assert!(check(argv).is_ok(), "{argv:?}: {:?}", check(argv));
+        }
+        for argv in [
+            &["apk"][..],
+            &["apk", "-q"],
+            &["apk", "add", "curl"],
+            &["apk", "del", "openrc"],
+            &["apk", "upgrade", "busybox"],
+            &["apk", "update", "upgrade"],
+            &["apk", "--root", "/tmp/x", "upgrade"],
+            &["apk", "--repository=http://evil/", "upgrade"],
+            &["apk", "-X", "http://evil/", "upgrade"],
+            &["apk", "--allow-untrusted", "upgrade"],
+            &["/tmp/apk", "update"],
+        ] {
+            assert!(check(argv).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn community_updater_runs_only_from_its_path_without_args() {
+        assert!(check(&["/usr/bin/update"]).is_ok());
+        assert!(check(&["update"]).is_err());
+        assert!(check(&["/bin/update"]).is_err());
+        assert!(check(&["/usr/sbin/update"]).is_err());
+        assert!(check(&["/usr/local/bin/update"]).is_err());
+        assert!(check(&["/usr/bin/update", "--force"]).is_err());
+    }
+
+    #[test]
+    fn updaters_get_the_long_timeout() {
+        let op = |argv: &[&str]| LxcExecOp {
+            vmid: 100,
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+        };
+        assert_eq!(exec_timeout(&op(&["apk", "upgrade"])), LXC_UPDATE_TIMEOUT);
+        assert_eq!(
+            exec_timeout(&op(&["/sbin/apk", "update"])),
+            LXC_UPDATE_TIMEOUT
+        );
+        assert_eq!(exec_timeout(&op(&["/usr/bin/update"])), LXC_UPDATE_TIMEOUT);
+        assert_eq!(exec_timeout(&op(&["apt-get", "update"])), LXC_EXEC_TIMEOUT);
+        assert_eq!(exec_timeout(&op(&["curl"])), LXC_EXEC_TIMEOUT);
+        assert_eq!(exec_timeout(&op(&[])), LXC_EXEC_TIMEOUT);
+    }
+
+    #[test]
     fn push_destinations_restricted() {
         assert!(validate_push_path("/etc/systemd/system/x.service.d/autologin.conf").is_ok());
         assert!(validate_push_path("/etc/inittab").is_ok());
         assert!(validate_push_path("/.pxarexclude").is_ok());
         assert!(validate_push_path("/var/lib/app/config.yml").is_ok());
+        assert!(validate_push_path("/run/orca-update-backup.json").is_ok());
+        assert!(validate_push_path("/run/systemd/system/orca-guest-update.service").is_ok());
         for path in [
             "/usr/local/bin/apt-get",
             "/usr/bin/systemctl",
@@ -1135,6 +1243,8 @@ mod tests {
             "/etc/apt/apt.conf.d/99evil",
             "/etc/profile.d/evil.sh",
             "/etc/ssh/sshd_config",
+            "/run/systemd/system/evil.service",
+            "/run/orca-update-backup.json.d/x",
         ] {
             assert!(validate_push_path(path).is_err(), "{path}");
         }

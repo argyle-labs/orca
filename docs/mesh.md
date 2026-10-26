@@ -1,10 +1,10 @@
 # The mesh
 
-The **mesh** is a small mutual-trust group of orca systems. Members can ping
-each other, replicate the mesh CA, federate state, and share secrets — only
-after both sides have explicitly opted into trust.
+The **mesh** is a small group of orca systems that trust each other because
+they are members. Members can ping each other, federate state, and share
+secrets; secure members also hold the mesh CA.
 
-This doc covers: what the mesh is, how to add a host, how trust works, how to
+This doc covers: what the mesh is, how to add a host, the secrets tiers, how to
 leave, and the security model.
 
 ## Quick reference
@@ -16,7 +16,6 @@ leave, and the security model.
 | See incoming pairing offers on this host | `orca system list --pending` |
 | Accept an offer | `orca system join --action accept <6-char-code>` |
 | List mesh members | `orca system list` |
-| Promote a peer to mutually-trusted | `orca system mesh tier update --action trust --id <system-id> --on true` |
 | Promote a member to secure (run on a secure member) | `orca system mesh tier update --action promote --id <system-id>` |
 | Verify a peer end-to-end | `orca system health --id <system-id>` |
 | Show cert expiry / rotation status | `orca system certs list` |
@@ -38,12 +37,10 @@ The mesh is one or more orca systems that have exchanged mesh-CA-signed client
 + server TLS certificates. Membership unlocks:
 
 * **mTLS peer-to-peer**: every mesh-internal call (e.g. `mesh/ping`,
-  `mesh/notify-trust`, federated tool calls) is mTLS-authenticated by the
-  shared mesh CA.
-* **Mutual-trust state**: each host tracks a per-peer `(local_secure,
-  peer_secure)` pair. When both bits are true, that peer is *mutually
-  trusted* and the mesh CA private key replicates to them — promoting them
-  from "member" to "inviter".
+  federated tool calls) is mTLS-authenticated by the shared mesh CA.
+* **Membership is trust**: a peer is trusted when its leaf cert chains to the
+  mesh CA, is unexpired, carries the CN pinned to that member, and the member
+  has not departed or been forgotten. There are no per-peer trust levels.
 * **Secrets tiers**: every member is `secure` or insecure. An insecure
   member holds only its own secrets (names under a plugin installed on it);
   a secure member may also hold other members'. Joiners start insecure.
@@ -97,28 +94,6 @@ default installs).
 > is on the roadmap. v1 supports cross-subnet pairing only via the manual
 > address path above.
 
-## Trust promotion
-
-After pairing, a peer is *known* but not yet *trusted*. To unlock
-CA-replication and the ability to invite further hosts, both sides must
-flag each other secure:
-
-```
-# On hotel (foxtrot's id from `orca system list`):
-orca system mesh tier update --action trust --id 019f9f7b-2222-7e40-9e30-4987d8d12dcb --on true
-
-# On foxtrot (hotel's id):
-orca system mesh tier update --action trust --id 019f9f7b-1176-7e40-9e30-4987d8d12dcb --on true
-```
-
-The moment both bits are true, the host that already has the mesh CA
-private key pushes it to the peer via `mesh/push-ca-key` over the existing
-mTLS channel. From that point, the newly-trusted host can extend its own
-offers (`can_invite=1` in its mDNS advertisement).
-
-`orca system mesh tier update --action trust --id <system-id> --on false` reverses the local flag and notifies the
-peer; mutual-trust falls back to false on both sides.
-
 ## Secrets tiers (secure / insecure)
 
 ```
@@ -138,17 +113,113 @@ orca system mesh update --action settings                        # current tier
 A member cannot promote itself. `promote` runs on a secure member holding the
 mesh CA key: it signs a short-lived grant (10 min) naming the target member
 with the mesh CA key, and the target verifies that signature against its own
-copy of the mesh CA cert before switching to secure. Local trust of a peer
-(including the automatic trust of the inviter on join) confers no promotion
-rights. Leaving the mesh removes the tier entirely.
+copy of the mesh CA cert before switching to secure. Membership alone confers
+no promotion rights. Leaving the mesh removes the tier entirely.
 
-Only a secure member ever holds the mesh CA private key: it replicates only
-between two secure members, and demoting a member deletes its copy. An
-insecure member found holding the key at startup deletes it, unless no
-mutually secure peer exists to hold it. The last secure member holding the CA
-key cannot be demoted.
+Only a secure member ever holds the mesh CA private key. After a promotion the
+promoter pushes the key to the new secure member, and demoting a member
+deletes its copy. An insecure member found holding the key at startup deletes
+it, unless no other member proves it holds the key. The last secure member
+holding the CA key cannot be demoted.
 
-`system.mesh.tier.update` (`trust`, `promote`, `demote`) is super-admin,
+`mesh/push-ca-key` and `mesh/push-ca-state` are accepted only when:
+
+* the sender is a verified member (known, not departed, not forgotten);
+* the receiver is secure;
+* the push carries a proof signed with the mesh CA key the receiver pins,
+  binding the method, the receiver, the sender, a 2-minute expiry, a nonce and
+  the SHA-256 of the payload, so a changed byte, a relay to another member or
+  a stale push is refused;
+* the nonce has not been seen before (replay).
+
+A CA state push must also be a rotation chained from the receiver's current
+CA; it is signed with that current CA key.
+
+The CA key goes only to the member a `promote` just granted. CA state goes
+only to members that sign a fresh nonce with the current CA key. A member's
+own claim to be secure never decides who receives key material, and a member
+becomes secure only by accepting a CA-signed promotion grant.
+
+### Bound envelopes
+
+Every credential-changing mesh message is a bound envelope
+(`utils::pki::BoundEnvelope`): a signature over a length-prefixed encoding of
+the method, sender, receiver, nonce, expiry (at most 5 minutes) and the
+SHA-256 of the payload. The receiver checks every field and records the nonce
+in `mesh_seen_nonces`, which survives restarts and holds only UUID nonces that
+expire within 15 minutes. Entries are pruned 5 minutes after they expire.
+Running counters cap the store at 100,000 nonces in total and 10,000 per
+sender. `mesh/exec` caller tokens may use at most 80,000, which leaves room for
+credential methods. A caller-token nonce is recorded only after the user and
+role checks pass, so a refused token does not use up store space.
+
+| Path | Signed by | Receiver binding |
+|---|---|---|
+| `mesh/push-ca-key` | mesh CA key | receiver id + the promotion grant nonce the receiver consumed |
+| `mesh/push-ca-state` | mesh CA key | receiver id |
+| `mesh/replicate-push` | sender's pinned bootstrap key (active members only) | receiver id |
+| `mesh/replicate-export` | exporter's pinned bootstrap key | requester id + the requester's nonce |
+| `mesh/refresh-cert`, `mesh/refresh-cert-bootstrap` | requester's pinned bootstrap key | signer id |
+| `mesh/exec` caller tokens | caller's pinned bootstrap key | target id; payload carries user, tool and args hash |
+
+A clock-based refusal carries the receiver's time (`[receiver_time=…]`). The
+sender records the offset for that member and signs again once using the
+receiver's clock, so a member whose clock is minutes off can still refresh
+its certificates, push CA material, and run `mesh/exec`.
+
+Rollout: `mesh/ping` reports `bound_envelopes: true`. A member that
+advertises support, or has sent a bound envelope, is marked in
+`mesh_peers.bound_envelopes`, and from then on its unbound envelopes are
+refused. Unbound envelopes from members that have never advertised support
+are accepted until a CA holder runs
+`orca system mesh update --action require_bound`. That switch is refused
+while any active member has not yet advertised support. Once on, it is a
+CA-signed, replicated, one-way policy, and every unbound envelope is refused.
+Until then, `system.list` still emits `local_secure`/`peer_secure` = true on
+joined rows for daemons that predate membership-as-trust; once the switch is
+on, it stops.
+
+### Secure registry
+
+`mesh_secure_registry` is a replicated, append-only list of CA-signed grants
+and revocations. `mesh_policy` (the require-bound switch) works the same way.
+Each row is verified against the current or previous mesh CA when it is
+merged from a peer (a row that fails is dropped) and again when it is read. A
+replicated copy can never change or delete an existing row.
+
+- `promote` records a grant. A secure CA holder that the registry does not
+  list yet (a founder, or a holder from before the registry) registers itself
+  at startup.
+- `orca system mesh tier update --action demote --id <member>` (run on a CA
+  holder) records a revocation. The member does not need to take part. As
+  soon as a merge brings in its own revocation, it demotes itself and purges
+  its CA key, with no restart needed.
+- `orca mesh ca rotate` and the CA key push after a promotion go only to
+  members that hold a grant with no revocation under the same or a newer CA,
+  and that also prove the claim right then. For a rotation, the member must
+  sign a fresh nonce with the outgoing CA key. For a key push, it must have
+  consumed that promotion's grant.
+- A revoked member can still sign with the CA key it kept, so it could forge
+  a new grant for itself. To stop that, a revocation blocks every grant signed
+  under the same CA, and only rotation lifts it. Rotation re-signs the grants
+  still in force under the new CA, which the revoked member never receives.
+  To promote a revoked member again, rotate the CA first.
+
+### Recovering a locked-out member
+
+If the mesh refuses a member (for example, it lost its bootstrap key, or a
+binding change shut it out):
+
+1. On a CA holder, run `orca system mesh delete --action forget --id <member>`.
+2. On the same holder, run `orca system mesh update --action join_token`.
+3. On the locked-out member, run
+   `orca system mesh update --action rejoin --addr <holder> --token <token>`.
+
+`rejoin` is local-only. It checks the token, drops this member's local mesh
+membership, and joins again through the holder. Joining clears the forget
+tombstone.
+
+`system.mesh.tier.update` (`promote`, `demote`) is super-admin,
 sensitive and local-only: it needs a verified second factor (the owner's local
 CLI is exempt), an admin is refused, and a remote peer can never drive it over
 `mesh/exec`. The target of a `promote` receives its grant through
@@ -157,13 +228,17 @@ remote-callable verb. A grant's issue time tolerates 30 s of clock skew, and a m
 refuses any grant consumed within one grant lifetime (10 min) of its last
 demotion.
 
-A `mesh/exec` caller token acts with at most the `user` role, whatever role
-the named user holds, unless the signing peer is mutually trusted with the
-recipient AND proves it is a secure member by signing the token nonce with the
-mesh CA key.
+A `mesh/exec` caller token acts with the lower of the named user's role and
+the token's role. Custody tools (`dispatch::tool_roles::is_custody`) are the
+exception: tier and grant delivery, secret-value reads and grants, PKI issue,
+and anything that installs or runs code on the recipient (`system.update`,
+`plugin.update`, `plugin.create`, `guest.exec`, `files.update`, and any
+`*.install`, `*.upgrade`, `*.engine_update` or `*.exec`). A call to one of
+these acts with at most the `user` role unless the signing peer proves it holds
+the mesh CA key by signing the token nonce with it. A `plugin.create
+--action invoke` call is judged by the tool it invokes.
 
-`promote` requires mutual trust between the two members to be set first
-(`trust --on true` run locally on each side). A demotion or the post-startup
+A demotion or the post-startup
 CA-key purge counts another member as a CA holder only when it signs a fresh
 nonce with the mesh CA key; a bare "has key" reply is not enough. A grant must
 be relayed by the secure member that issued it. Rotating the mesh CA
@@ -263,17 +338,6 @@ Compromise of any single one of these is not enough on its own:
 * Forged offer without the bootstrap private key → signature check fails.
 * Correct cert + signature but wrong code → server refuses to sign CSRs.
 
-### What `mutual_secure` unlocks
-
-Reaching mutual-trust with a peer:
-
-* Replicates the mesh CA private key to that peer (`mesh/push-ca-key`).
-* Lets that peer flip its mDNS advertisement to `can_invite=1` (when
-  combined with the `secure` tier), so it auto-offers to any new
-  unclaimed orca on its LAN.
-* Is the prerequisite for any federation primitive that handles
-  sensitive material across hosts.
-
 ### Caller identity on `mesh/exec`
 
 The recipient resolves a forwarded call's caller from the signed caller token
@@ -295,7 +359,7 @@ Peer certs are issued for **30 days**. A daily scheduler checks every cert
 on disk; if any has less than **7 days** remaining, it's reissued:
 
 * **Secure peers** (`has_mesh_ca_key`): self-sign locally. No network.
-* **Non-secure peers**: dial any mutually-trusted peer with the CA key,
+* **Non-secure peers**: dial any member with the CA key,
   call `mesh/refresh-cert` with fresh CSRs, install the returned certs.
 
 The TLS resolver reads cert+key from disk on every handshake, so rotation
@@ -320,8 +384,8 @@ This is a more deliberate operation. It:
    (`mesh/ca.previous.{cert,key}.pem`).
 2. Generates a fresh CA and writes it to the **current** slot.
 3. Re-issues this host's own peer certs under the new CA immediately.
-4. Replicates both slots + the overlap deadline to every mutually-secure
-   peer via `mesh/push-ca-state`.
+4. Replicates both slots + the overlap deadline to every secure member via
+   a signed `mesh/push-ca-state`.
 
 During the overlap window, both CAs are in every peer's trust store — old
 peer certs (signed by what's now `previous`) and new peer certs (signed
@@ -361,11 +425,6 @@ secure peer.
 Almost always a clock skew issue — the certs have `not_before` set to
 the inviter's wall time. NTP should keep this aligned. Confirm with
 `date -u` on both hosts.
-
-**`system mesh tier update --action trust` reports "notify-trust dial failed".**
-The trust bit is set locally regardless. Peer will pick up the update
-the next time it succeeds in dialing this host, or when the user re-runs
-retry the trust call after the network heals.
 
 **Wrong port?**
 mDNS TXT carries the actual port the peer is listening on; commands

@@ -1025,7 +1025,6 @@ mod tests {
             health: "up".to_string(),
             error: None,
             last_checked: Some(1_760_000_000),
-            secure: None,
             status: None,
             addresses: vec![],
             system: Some(sys),

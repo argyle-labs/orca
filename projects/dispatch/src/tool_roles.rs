@@ -202,6 +202,33 @@ fn fixed_surface_role(tool: &str) -> Option<&'static str> {
     )
 }
 
+const CUSTODY_TOOLS: &[&str] = &[
+    "system.mesh.tier.update",
+    "system.mesh.update",
+    "secrets.detail",
+    "secrets.grant.create",
+    "secrets.grant.delete",
+    "pki.create",
+    "system.update",
+    "system.install",
+    "system.build",
+    "plugin.create",
+    "plugin.update",
+    "guest.exec",
+    "guest.write_file",
+    "files.update",
+    "system.cron.update",
+];
+
+const CODE_INSTALLING_VERBS: &[&str] = &["install", "upgrade", "engine_update", "exec"];
+
+pub fn is_custody(tool: &str) -> bool {
+    CUSTODY_TOOLS.contains(&tool)
+        || tool
+            .rsplit_once('.')
+            .is_some_and(|(_, verb)| CODE_INSTALLING_VERBS.contains(&verb))
+}
+
 /// Rank of a role in the tier order `read-only` < `user` < `admin` <
 /// `super-admin`. `read` is `read-only` and `member` is `user`; `any` and
 /// unknown roles rank lowest.

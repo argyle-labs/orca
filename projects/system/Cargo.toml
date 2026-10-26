@@ -17,6 +17,7 @@ dispatch   = { workspace = true, default-features = true }
 plugin-loader = { workspace = true }
 contract  = { workspace = true }
 derive     = { workspace = true }
+inventory  = { workspace = true }
 schemars       = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
@@ -90,6 +91,7 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 serial_test = { workspace = true }
 wiremock = { workspace = true }
 rcgen = { workspace = true }
+ed25519-dalek = { workspace = true }
 db = { workspace = true, default-features = true, features = ["test-util"] }
 # A hook test drives libc fork/dup2/waitpid directly.
 libc = { workspace = true }

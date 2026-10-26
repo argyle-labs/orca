@@ -190,8 +190,18 @@ struct JoinConfirmResult {
 }
 
 pub async fn handle_mesh_bootstrap_connection(
+    tls: TlsStream<tokio::net::TcpStream>,
+    peer: std::net::SocketAddr,
+) -> Result<()> {
+    handle_mesh_bootstrap_connection_as(tls, peer, crate::host_identity::machine_id()).await
+}
+
+/// Serve one bootstrap request as the member `own_id`; envelopes bound to any
+/// other receiver are refused.
+pub(crate) async fn handle_mesh_bootstrap_connection_as(
     mut tls: TlsStream<tokio::net::TcpStream>,
     peer: std::net::SocketAddr,
+    own_id: &str,
 ) -> Result<()> {
     let frame_bytes = read_frame(&mut tls).await.context("read bootstrap frame")?;
     let msg: Message =
@@ -204,7 +214,7 @@ pub async fn handle_mesh_bootstrap_connection(
         }
     };
 
-    let response = dispatch(request, peer).await;
+    let response = dispatch(request, peer, own_id).await;
     let envelope = serde_json::to_vec(&response).context("serialize bootstrap response")?;
     write_frame(&mut tls, &envelope)
         .await
@@ -213,7 +223,7 @@ pub async fn handle_mesh_bootstrap_connection(
     Ok(())
 }
 
-async fn dispatch(request: Request, peer: std::net::SocketAddr) -> Response {
+async fn dispatch(request: Request, peer: std::net::SocketAddr, own_id: &str) -> Response {
     let id = request.id.clone();
     let method = request.method.as_str();
 
@@ -257,7 +267,7 @@ async fn dispatch(request: Request, peer: std::net::SocketAddr) -> Response {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, peer_facing_error(method, &e)),
         },
-        MESH_REFRESH_CERT_BOOTSTRAP_METHOD => match handle_refresh_cert_bootstrap(&env) {
+        MESH_REFRESH_CERT_BOOTSTRAP_METHOD => match handle_refresh_cert_bootstrap(&env, own_id) {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, peer_facing_error(method, &e)),
         },
@@ -371,11 +381,6 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
         Some(&signer_fp),
         &ca_cert_pem,
     )?;
-    // The inviter just chose to sign this joiner's CSR — that IS the local
-    // trust signal. Without this the trust flag stays false even after a
-    // successful pairing, which blocks every downstream mutual-trust gate
-    // (CA-key replication, secrets sync).
-    pdb::set_trust(&conn, &joiner_peer_id, Some(true), None)?;
     // Supersede any stale forget-tombstone for this joiner. `orca mesh join` re-admits
     // a host under its *stable* machine_id, but a prior `mesh-forget` wrote a
     // 30-day replicated delete-tombstone on that same id — so without this the
@@ -469,7 +474,10 @@ struct RefreshCertBootstrapResult {
 /// mesh member whose pinned bootstrap fp matches AND whose peer_id equals the
 /// claimed `joiner_hostname` (== machine_id). This ensures an unauthenticated
 /// bootstrap caller can only mint leaves for the identity it already owns.
-fn handle_refresh_cert_bootstrap(env: &SignedEnvelope) -> Result<RefreshCertBootstrapResult> {
+fn handle_refresh_cert_bootstrap(
+    env: &SignedEnvelope,
+    own_id: &str,
+) -> Result<RefreshCertBootstrapResult> {
     let pki_d = pki_dir();
     anyhow::ensure!(
         utils::pki::has_mesh_ca_key(&pki_d),
@@ -494,6 +502,42 @@ fn handle_refresh_cert_bootstrap(env: &SignedEnvelope) -> Result<RefreshCertBoot
         peer.peer_id,
         body.joiner_hostname
     );
+    match env.binding.as_ref() {
+        Some(binding) => {
+            let now = utils::time::now().unix_seconds();
+            binding
+                .verify(
+                    &signer_vk,
+                    MESH_REFRESH_CERT_BOOTSTRAP_METHOD,
+                    &peer.peer_id,
+                    own_id,
+                    env.payload.as_bytes(),
+                    now,
+                )
+                .map_err(|e| {
+                    PeerRefusal(utils::pki::with_receiver_time(
+                        &format!("refresh refused: {e:#}"),
+                        now,
+                    ))
+                })?;
+            refuse_unless!(
+                pdb::record_mesh_nonce(
+                    &conn,
+                    MESH_REFRESH_CERT_BOOTSTRAP_METHOD,
+                    &peer.peer_id,
+                    &binding.nonce,
+                    binding.expires_at,
+                    now
+                )?,
+                "refresh refused: envelope was already delivered (replay)"
+            );
+            pdb::mark_bound_envelopes(&conn, &peer.peer_id)?;
+        }
+        None => refuse_unless!(
+            crate::mesh::trust_registry::unbound_allowed(&conn, &pki_d, &peer.peer_id),
+            "refresh refused: envelope is not bound to a receiver and nonce"
+        ),
+    }
 
     let (client_cert_pem, ca_cert_pem) = utils::pki::sign_peer_csr(
         &pki_d,
@@ -875,7 +919,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_missing_params_is_internal_error() {
         let req = Request::new(1, MESH_OFFER_METHOD, None);
-        let resp = dispatch(req, test_peer()).await;
+        let resp = dispatch(req, test_peer(), "own-id").await;
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, -32603);
         assert!(
@@ -890,7 +934,7 @@ mod tests {
     async fn dispatch_unparseable_params_is_internal_error() {
         // A bare number is not a SignedEnvelope object.
         let req = Request::new(7, MESH_OFFER_METHOD, Some(Value::from(42)));
-        let resp = dispatch(req, test_peer()).await;
+        let resp = dispatch(req, test_peer(), "own-id").await;
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, -32603);
         assert!(
@@ -903,7 +947,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_unknown_method_is_method_not_found() {
         let req = Request::new("abc", "mesh/does-not-exist", Some(dummy_envelope_value()));
-        let resp = dispatch(req, test_peer()).await;
+        let resp = dispatch(req, test_peer(), "own-id").await;
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, -32601);
         assert!(
@@ -1111,7 +1155,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_rejects_missing_params() {
         let req = Request::new(1u64, MESH_OFFER_METHOD, None);
-        let resp = dispatch(req, test_peer()).await;
+        let resp = dispatch(req, test_peer(), "own-id").await;
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
         assert!(err.message.contains("requires signed params"));
@@ -1122,7 +1166,7 @@ mod tests {
         // An empty object is not a valid SignedEnvelope (missing fields).
         let params = serde_json::to_value(serde_json::Map::new()).unwrap();
         let req = Request::new(1u64, MESH_OFFER_METHOD, Some(params));
-        let resp = dispatch(req, test_peer()).await;
+        let resp = dispatch(req, test_peer(), "own-id").await;
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
         assert!(err.message.contains("malformed signed envelope"));
@@ -1136,10 +1180,11 @@ mod tests {
             payload: "{}".into(),
             signer_pubkey_b64: String::new(),
             signature_b64: String::new(),
+            binding: None,
         };
         let params = serde_json::to_value(&env).unwrap();
         let req = Request::new(1u64, "mesh/does-not-exist", Some(params));
-        let resp = dispatch(req, test_peer()).await;
+        let resp = dispatch(req, test_peer(), "own-id").await;
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32601);
         assert!(err.message.contains("not supported"));
@@ -1156,6 +1201,7 @@ mod tests {
             payload: "{}".into(),
             signer_pubkey_b64: String::new(),
             signature_b64: String::new(),
+            binding: None,
         };
         serde_json::to_value(&env).unwrap()
     }
@@ -1180,7 +1226,7 @@ mod tests {
             MESH_JOIN_CONFIRM_METHOD,
             Some(unverifiable_envelope_params()),
         );
-        let resp = dispatch(req, test_peer()).await;
+        let resp = dispatch(req, test_peer(), "own-id").await;
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
         assert_eq!(
@@ -1196,7 +1242,7 @@ mod tests {
             MESH_REQUEST_OFFER_METHOD,
             Some(unverifiable_envelope_params()),
         );
-        let resp = dispatch(req, test_peer()).await;
+        let resp = dispatch(req, test_peer(), "own-id").await;
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
         assert_eq!(
@@ -1215,7 +1261,7 @@ mod tests {
             MESH_REFRESH_CERT_BOOTSTRAP_METHOD,
             Some(unverifiable_envelope_params()),
         );
-        let resp = dispatch(req, test_peer()).await;
+        let resp = dispatch(req, test_peer(), "own-id").await;
         let err = resp.error.expect("error expected");
         assert_eq!(err.code, -32603);
         assert_eq!(
@@ -1549,7 +1595,7 @@ mod tests {
             let env = utils::pki::sign_envelope(&key, &body).unwrap();
             let params = serde_json::to_value(&env).unwrap();
             let req = Request::new(1u64, MESH_OFFER_METHOD, Some(params));
-            let resp = dispatch(req, test_peer()).await;
+            let resp = dispatch(req, test_peer(), "own-id").await;
             assert!(!resp.is_error(), "valid offer must succeed");
             let conn = db::open_default().unwrap();
             assert_eq!(pdb::list_pending_offers(&conn, "in").unwrap().len(), 1);
@@ -1817,7 +1863,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn handle_join_confirm_signs_csrs_trusts_peer_and_consumes_offer() {
+    fn handle_join_confirm_signs_csrs_pins_peer_and_consumes_offer() {
         let _env = crate::test_env::snapshot();
         run_with_home(true, |rt| {
             let dir = tempfile::tempdir().unwrap();
@@ -1867,14 +1913,13 @@ mod tests {
                 assert_eq!(res.inviter_peer_id, "inv-peer-id");
                 assert_eq!(res.mesh_id, "mesh-z");
 
-                // The joiner is now a trusted peer pinned to the signer fp…
+                // The joiner is now a member pinned to the signer fp…
                 let peers = pdb::list_peers(&conn).unwrap();
                 let p = peers
                     .iter()
                     .find(|p| p.peer_id == JOINER_UUID)
                     .expect("joiner peer row");
                 assert_eq!(p.pubkey_fp.as_deref(), Some(fp.as_str()));
-                assert!(p.local_secure, "signing the CSR sets local trust");
                 assert_eq!(p.peer_addr, "10.0.8.7");
                 // …and the pending offer has been consumed.
                 assert!(pdb::list_pending_offers(&conn, "out").unwrap().is_empty());
@@ -2036,7 +2081,17 @@ mod tests {
                 "csr_client_pem": csr_client,
                 "csr_server_pem": csr_server,
             });
-            let env = utils::pki::sign_envelope(&key, &body).unwrap();
+            let env = utils::pki::sign_bound_envelope(
+                &key,
+                &body,
+                MESH_REFRESH_CERT_BOOTSTRAP_METHOD,
+                JOINER_UUID,
+                crate::host_identity::machine_id(),
+                &utils::id::new(),
+                utils::time::now().unix_seconds(),
+                60,
+            )
+            .unwrap();
             let db_file = tempfile::NamedTempFile::new().unwrap();
             rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
                 let conn = db::open_default().unwrap();
@@ -2053,12 +2108,181 @@ mod tests {
                 )
                 .unwrap();
 
-                let res = handle_refresh_cert_bootstrap(&env).unwrap();
+                let res = handle_refresh_cert_bootstrap(&env, crate::host_identity::machine_id())
+                    .unwrap();
                 assert!(res.client_cert_pem.contains("BEGIN CERTIFICATE"));
                 assert!(res.server_cert_pem.contains("BEGIN CERTIFICATE"));
                 assert!(res.ca_cert_pem.contains("BEGIN CERTIFICATE"));
             }));
         });
+    }
+
+    fn bound_bootstrap_refresh(
+        key: &ed25519_dalek::SigningKey,
+        receiver: &str,
+        now: i64,
+    ) -> SignedEnvelope {
+        let (csr_client, _) = utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Client).unwrap();
+        let (csr_server, _) = utils::pki::build_peer_csr(JOINER_UUID, PeerRole::Server).unwrap();
+        let body = serde_json::json!({
+            "joiner_hostname": JOINER_UUID,
+            "csr_client_pem": csr_client,
+            "csr_server_pem": csr_server,
+        });
+        utils::pki::sign_bound_envelope(
+            key,
+            &body,
+            MESH_REFRESH_CERT_BOOTSTRAP_METHOD,
+            JOINER_UUID,
+            receiver,
+            &utils::id::new(),
+            now,
+            60,
+        )
+        .unwrap()
+    }
+
+    fn bootstrap_refresh_case(
+        env: impl FnOnce(&ed25519_dalek::SigningKey) -> Vec<SignedEnvelope>,
+    ) -> Vec<Result<RefreshCertBootstrapResult>> {
+        run_with_home(true, |rt| {
+            let dir = tempfile::tempdir().unwrap();
+            let key = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+            let fp = utils::pki::bootstrap_pubkey_fingerprint(&key.verifying_key());
+            let envs = env(&key);
+            let db_file = tempfile::NamedTempFile::new().unwrap();
+            rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
+                let conn = db::open_default().unwrap();
+                pdb::upsert_peer(
+                    &conn,
+                    JOINER_UUID,
+                    "Joiner",
+                    "10.0.8.7",
+                    12002,
+                    Some(&fp),
+                    "",
+                )
+                .unwrap();
+                envs.iter()
+                    .map(|e| handle_refresh_cert_bootstrap(e, crate::host_identity::machine_id()))
+                    .collect()
+            }))
+        })
+    }
+
+    fn err_text(r: &Result<RefreshCertBootstrapResult>) -> String {
+        match r {
+            Ok(_) => "accepted".into(),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn bootstrap_refresh_bound_to_this_host_is_signed_once() {
+        let _env = crate::test_env::snapshot();
+        let out = bootstrap_refresh_case(|key| {
+            let env = bound_bootstrap_refresh(
+                key,
+                crate::host_identity::machine_id(),
+                utils::time::now().unix_seconds(),
+            );
+            vec![env.clone(), env]
+        });
+        assert!(out[0].is_ok(), "{}", err_text(&out[0]));
+        assert!(
+            err_text(&out[1]).contains("replay"),
+            "{}",
+            err_text(&out[1])
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn bootstrap_refresh_for_another_receiver_is_refused() {
+        let _env = crate::test_env::snapshot();
+        let out = bootstrap_refresh_case(|key| {
+            vec![bound_bootstrap_refresh(
+                key,
+                &utils::id::new(),
+                utils::time::now().unix_seconds(),
+            )]
+        });
+        assert!(
+            err_text(&out[0]).contains("another receiver"),
+            "{}",
+            err_text(&out[0])
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn an_expired_bootstrap_refresh_is_refused() {
+        let _env = crate::test_env::snapshot();
+        let out = bootstrap_refresh_case(|key| {
+            vec![bound_bootstrap_refresh(
+                key,
+                crate::host_identity::machine_id(),
+                utils::time::now().unix_seconds() - 3_600,
+            )]
+        });
+        assert!(
+            err_text(&out[0]).contains("expired"),
+            "{}",
+            err_text(&out[0])
+        );
+        assert!(
+            utils::pki::receiver_time_in(&err_text(&out[0])).is_some(),
+            "{}",
+            err_text(&out[0])
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a_tampered_bootstrap_refresh_is_refused() {
+        let _env = crate::test_env::snapshot();
+        let out = bootstrap_refresh_case(|key| {
+            let mut tampered = bound_bootstrap_refresh(
+                key,
+                crate::host_identity::machine_id(),
+                utils::time::now().unix_seconds(),
+            );
+            let mut b = tampered.binding.clone().unwrap();
+            b.expires_at += 1;
+            tampered.binding = Some(b);
+            vec![tampered]
+        });
+        assert!(
+            err_text(&out[0]).contains("did not verify"),
+            "{}",
+            err_text(&out[0])
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn unbound_bootstrap_refresh_is_refused_once_the_member_has_sent_bound() {
+        let _env = crate::test_env::snapshot();
+        let out = bootstrap_refresh_case(|key| {
+            let bound = || {
+                bound_bootstrap_refresh(
+                    key,
+                    crate::host_identity::machine_id(),
+                    utils::time::now().unix_seconds(),
+                )
+            };
+            let mut unbound = bound();
+            unbound.binding = None;
+            vec![unbound.clone(), bound(), unbound]
+        });
+        assert!(out[0].is_ok(), "legacy member: {}", err_text(&out[0]));
+        assert!(out[1].is_ok(), "{}", err_text(&out[1]));
+        assert!(
+            err_text(&out[2]).contains("not bound"),
+            "{}",
+            err_text(&out[2])
+        );
     }
 
     #[test]
@@ -2076,7 +2300,8 @@ mod tests {
             let env = utils::pki::sign_envelope(&key, &body).unwrap();
             let db_file = tempfile::NamedTempFile::new().unwrap();
             rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
-                let err = handle_refresh_cert_bootstrap(&env).unwrap_err();
+                let err = handle_refresh_cert_bootstrap(&env, crate::host_identity::machine_id())
+                    .unwrap_err();
                 assert!(
                     format!("{err:#}").contains("does not have the mesh CA key"),
                     "got: {err:#}"
@@ -2107,7 +2332,8 @@ mod tests {
             let db_file = tempfile::NamedTempFile::new().unwrap();
             rt.block_on(db::with_db_path(db_file.path().to_path_buf(), async move {
                 // No peer rows at all → signer fp is unknown.
-                let err = handle_refresh_cert_bootstrap(&env).unwrap_err();
+                let err = handle_refresh_cert_bootstrap(&env, crate::host_identity::machine_id())
+                    .unwrap_err();
                 assert!(
                     format!("{err:#}").contains("is not a known active peer"),
                     "got: {err:#}"
@@ -2144,7 +2370,8 @@ mod tests {
                 // asks certs for → the CN-binding guard must fire.
                 pdb::upsert_peer(&conn, other_uuid, "Other", "10.0.8.7", 12002, Some(&fp), "")
                     .unwrap();
-                let err = handle_refresh_cert_bootstrap(&env).unwrap_err();
+                let err = handle_refresh_cert_bootstrap(&env, crate::host_identity::machine_id())
+                    .unwrap_err();
                 assert!(
                     format!("{err:#}").contains("does not match joiner_hostname"),
                     "got: {err:#}"

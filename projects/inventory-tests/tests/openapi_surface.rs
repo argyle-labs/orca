@@ -113,10 +113,6 @@ const SNAKE_CASE_ORIGINS: &[(&str, &str)] = &[
         "`sync` carries the replication engine's peer reports, whose wire form stays snake_case",
     ),
     (
-        "system.mesh.tier.update output",
-        "carries `MeshTrustOutput`, whose mesh wire form stays snake_case",
-    ),
-    (
         "system.health output",
         "carries `DaemonRuntimeStatus`, shared with `system.detail`",
     ),
