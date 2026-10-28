@@ -51,6 +51,9 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "stat",
     "head",
     "tail",
+    "du",
+    "find",
+    "ps",
     "apk",
     "update",
 ];
@@ -261,6 +264,29 @@ const APK_OPTIONS: &[&str] = &["-q", "--quiet", "--no-cache"];
 
 const COMMUNITY_UPDATER: &str = "/usr/bin/update";
 
+/// `find` primaries/options safe for read-only diagnostics. No action primary
+/// that executes, deletes, or writes (`-exec`, `-execdir`, `-ok`, `-okdir`,
+/// `-delete`, `-fprintf`, `-fprint`, `-fls`, `-printf`) is on this list —
+/// default-deny, extend only with more read-only primaries.
+const FIND_SAFE_OPTIONS: &[&str] = &[
+    "-maxdepth",
+    "-mindepth",
+    "-type",
+    "-name",
+    "-iname",
+    "-size",
+    "-mtime",
+    "-mmin",
+    "-newer",
+    "-print",
+    "-print0",
+    "-a",
+    "-o",
+    "-and",
+    "-or",
+    "-not",
+];
+
 const SENSITIVE_PATHS: &[&str] = &[
     "/etc/shadow",
     "/etc/gshadow",
@@ -416,6 +442,59 @@ fn check_apk(args: &[String]) -> Result<(), String> {
     }
 }
 
+fn check_find(args: &[String]) -> Result<(), String> {
+    const VALUE_OPTIONS: &[&str] = &[
+        "-maxdepth",
+        "-mindepth",
+        "-type",
+        "-name",
+        "-iname",
+        "-size",
+        "-mtime",
+        "-mmin",
+    ];
+    let mut expect_value = false;
+    let mut expect_path_value = false;
+    for arg in args {
+        if expect_value {
+            expect_value = false;
+            continue;
+        }
+        if expect_path_value {
+            expect_path_value = false;
+            if is_sensitive_path(arg) {
+                return Err(format!("refused find path '{arg}': sensitive"));
+            }
+            continue;
+        }
+        if arg == "(" || arg == ")" || arg == "!" {
+            continue;
+        }
+        if is_option(arg) {
+            let name = long_name(arg);
+            if name == "-newer" {
+                expect_path_value = true;
+                continue;
+            }
+            if VALUE_OPTIONS.contains(&name) {
+                expect_value = true;
+                continue;
+            }
+            if !FIND_SAFE_OPTIONS.contains(&name) {
+                return refuse("find", arg);
+            }
+            continue;
+        }
+        // Positional: a search-root path.
+        if !arg.starts_with('/') || is_sensitive_path(arg) {
+            return Err(format!(
+                "refused find path '{arg}': must be absolute and not sensitive"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn check_update(prog: &str, args: &[String]) -> Result<(), String> {
     if prog != COMMUNITY_UPDATER {
         return Err(format!(
@@ -475,7 +554,8 @@ pub fn validate(op: &LxcExecOp) -> Result<(), String> {
         "dpkg-query" => check_dpkg_query(args),
         "rpm" => check_rpm(args),
         "systemctl" => check_systemctl(args),
-        "cat" | "head" | "tail" => check_read(cmd, args),
+        "cat" | "head" | "tail" | "du" => check_read(cmd, args),
+        "find" => check_find(args),
         "apk" => check_apk(args),
         "update" => check_update(prog, args),
         _ => Ok(()),
@@ -960,7 +1040,7 @@ mod tests {
     #[test]
     fn allowlist_accepts_readonly_diagnostics() {
         // Read-only probes added to unblock in-guest disk/log monitoring.
-        for cmd in ["df", "cat", "ls", "stat", "head", "tail"] {
+        for cmd in ["df", "cat", "ls", "stat", "head", "tail", "du"] {
             assert!(
                 validate(&LxcExecOp {
                     vmid: 100,
@@ -970,6 +1050,14 @@ mod tests {
                 "{cmd} should be allowlisted"
             );
         }
+        assert!(
+            validate(&LxcExecOp {
+                vmid: 100,
+                argv: vec!["ps".into(), "-ef".into()],
+            })
+            .is_ok(),
+            "ps should be allowlisted"
+        );
         // A clearly-destructive command stays rejected.
         assert!(
             validate(&LxcExecOp {
@@ -978,6 +1066,86 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn find_accepts_safe_readonly_expressions() {
+        assert!(
+            validate(&LxcExecOp {
+                vmid: 100,
+                argv: vec![
+                    "find".into(),
+                    "/var/log".into(),
+                    "-maxdepth".into(),
+                    "2".into(),
+                    "-type".into(),
+                    "f".into(),
+                    "-size".into(),
+                    "+10M".into(),
+                    "-mtime".into(),
+                    "-1".into(),
+                    "-name".into(),
+                    "*.log".into(),
+                    "-print".into(),
+                ],
+            })
+            .is_ok()
+        );
+        assert!(
+            validate(&LxcExecOp {
+                vmid: 100,
+                argv: vec![
+                    "find".into(),
+                    "/var".into(),
+                    "-newer".into(),
+                    "/etc/hostname".into()
+                ],
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn find_rejects_exec_and_delete_and_sensitive_paths() {
+        let err = validate(&LxcExecOp {
+            vmid: 100,
+            argv: vec![
+                "find".into(),
+                "/tmp".into(),
+                "-exec".into(),
+                "rm".into(),
+                "{}".into(),
+                ";".into(),
+            ],
+        })
+        .unwrap_err();
+        assert!(err.contains("find"), "{err}");
+
+        let err = validate(&LxcExecOp {
+            vmid: 100,
+            argv: vec!["find".into(), "/tmp".into(), "-delete".into()],
+        })
+        .unwrap_err();
+        assert!(err.contains("find"), "{err}");
+
+        let err = validate(&LxcExecOp {
+            vmid: 100,
+            argv: vec!["find".into(), "/root".into(), "-name".into(), "*".into()],
+        })
+        .unwrap_err();
+        assert!(err.contains("sensitive"), "{err}");
+
+        let err = validate(&LxcExecOp {
+            vmid: 100,
+            argv: vec![
+                "find".into(),
+                "/tmp".into(),
+                "-newer".into(),
+                "/etc/shadow".into(),
+            ],
+        })
+        .unwrap_err();
+        assert!(err.contains("sensitive"), "{err}");
     }
 
     #[test]
