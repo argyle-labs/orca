@@ -169,24 +169,33 @@ pub fn set_email(conn: &Connection, id: &str, email: Option<&str>, now: &str) ->
     Ok(n > 0)
 }
 
-/// Role tiers assignable via admin tooling, `read-only < user < admin <
-/// super-admin` (see `dispatch::tool_roles::role_rank`, mirrored here since
-/// `identities` doesn't depend on `dispatch`). Excludes the legacy
-/// `admin`/`member` signup aliases as promotion targets — those are only
-/// ever written by `signup`, never reassigned.
+/// Mirrors `dispatch::tool_roles::role_rank`'s tiers — duplicated since
+/// `identities` doesn't depend on `dispatch`. Excludes the legacy
+/// `admin`/`member` signup-only aliases.
 pub const ASSIGNABLE_ROLES: &[&str] = &["read-only", "user", "admin", "super-admin"];
 
-/// Set a user's role. The only writer of `role` after `insert` — there is no
-/// REST/MCP path to self-promote: granting `super-admin` (which also needs a
-/// verified second factor, see `dispatch::tool_roles::second_factor_ok`) goes
-/// through `orca admin set-role`, which requires real shell access to a host
-/// already running as this user.
+/// The only writer of `role` after `insert` — reachable only via `orca admin
+/// set-role` (local shell access), never REST/MCP.
 pub fn set_role(conn: &Connection, id: &str, role: &str, now: &str) -> Result<bool> {
     anyhow::ensure!(
         ASSIGNABLE_ROLES.contains(&role),
         "unknown role '{role}': must be one of {}",
         ASSIGNABLE_ROLES.join(", ")
     );
+    if role != "super-admin" {
+        let demoting_a_super_admin = conn
+            .query_row(
+                "SELECT role = 'super-admin' FROM users WHERE id = ?1",
+                params![id],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        anyhow::ensure!(
+            !demoting_a_super_admin || count_super_admins(conn)? > 1,
+            "refusing to demote the last super-admin on this system"
+        );
+    }
     let n = conn.execute(
         "UPDATE users SET role = ?2, updated_at = ?3 WHERE id = ?1",
         params![id, role, now],
@@ -202,16 +211,32 @@ pub fn count(conn: &Connection) -> Result<i64> {
     Ok(n)
 }
 
+/// Counts `admin` and `super-admin` alike — both rank as admin-tier in
+/// `dispatch::tool_roles::role_rank`.
 pub fn count_admins(conn: &Connection) -> Result<i64> {
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| {
-        r.get(0)
-    })?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM users WHERE role IN ('admin','super-admin')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
+pub fn count_super_admins(conn: &Connection) -> Result<i64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM users WHERE role = 'super-admin'",
+        [],
+        |r| r.get(0),
+    )?;
     Ok(n)
 }
 
 fn peer_may_delete(conn: &Connection, username_lower: &str) -> bool {
     conn.query_row(
-        "SELECT role = 'admin' AND (SELECT COUNT(*) FROM users WHERE role = 'admin') <= 1
+        "SELECT (role IN ('admin','super-admin')
+                 AND (SELECT COUNT(*) FROM users WHERE role IN ('admin','super-admin')) <= 1)
+             OR (role = 'super-admin'
+                 AND (SELECT COUNT(*) FROM users WHERE role = 'super-admin') <= 1)
          FROM users WHERE username_lower = ?1",
         params![username_lower],
         |r| r.get::<_, bool>(0),
@@ -219,7 +244,7 @@ fn peer_may_delete(conn: &Connection, username_lower: &str) -> bool {
     .optional()
     .ok()
     .flatten()
-    .is_some_and(|last_admin| !last_admin)
+    .is_some_and(|last_of_a_tier| !last_of_a_tier)
 }
 
 pub fn delete_by_id(conn: &Connection, id: &str) -> Result<bool> {
@@ -267,7 +292,7 @@ pub fn first_admin(conn: &Connection) -> Result<Option<User>> {
     let r = conn
         .query_row(
             "SELECT id, username, role, created_at, password_updated_at, email
-             FROM users WHERE role = 'admin' ORDER BY created_at ASC LIMIT 1",
+             FROM users WHERE role IN ('admin','super-admin') ORDER BY created_at ASC LIMIT 1",
             [],
             row_user,
         )
@@ -578,6 +603,19 @@ mod tests {
         );
 
         assert!(!set_role(&conn, "no-such-id", "admin", "t3").unwrap());
+    }
+
+    #[test]
+    fn set_role_refuses_to_demote_the_last_super_admin() {
+        let conn = test_conn();
+        insert(&conn, "u1", "alice", "h", "super-admin", "t0").unwrap();
+        insert(&conn, "u2", "bob", "h", "admin", "t0").unwrap();
+
+        let err = set_role(&conn, "u1", "admin", "t1").unwrap_err();
+        assert!(err.to_string().contains("last super-admin"), "{err}");
+
+        assert!(set_role(&conn, "u2", "super-admin", "t2").unwrap());
+        assert!(set_role(&conn, "u1", "admin", "t3").unwrap());
     }
 
     #[test]

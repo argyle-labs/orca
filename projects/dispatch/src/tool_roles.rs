@@ -10,6 +10,7 @@ use std::sync::{OnceLock, RwLock};
 
 static ROLES: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
 static MUTATIONS: OnceLock<HashSet<&'static str>> = OnceLock::new();
+static SECOND_FACTOR: OnceLock<HashSet<&'static str>> = OnceLock::new();
 /// Plugin tools, installed at plugin load and removed at unload. The static
 /// tables are link-time and frozen; plugins come and go at runtime.
 static PLUGIN_TOOLS: RwLock<Option<HashMap<String, PluginToolPolicy>>> = RwLock::new(None);
@@ -163,6 +164,21 @@ pub fn is_data_mutation(tool: &str) -> bool {
         || crate::unit_surface::unit_policy(tool).is_some_and(|(_, m)| m)
 }
 
+/// Install the second-factor lookup. Idempotent — first call wins. Populated
+/// once at startup from `dispatch::second_factor_names`, sibling to
+/// [`install_mutations`].
+pub fn install_second_factor(names: impl IntoIterator<Item = &'static str>) {
+    let set: HashSet<&'static str> = names.into_iter().collect();
+    _ = SECOND_FACTOR.set(set);
+}
+
+/// True if `tool` requires a verified second factor, independent of its role.
+/// Only core `#[orca_tool]` tools can opt in today; plugin/unit/diagnostics/UPS
+/// tools always return `false` (none of those surfaces has a way to declare it).
+pub fn requires_fresh_second_factor(tool: &str) -> bool {
+    SECOND_FACTOR.get().is_some_and(|s| s.contains(tool))
+}
+
 /// Role required to invoke `tool` over an authenticated surface: the core
 /// table, then the role a loaded plugin declared for it, then the live unit
 /// surface (mutating unit ops are `admin`). Returns `"any"`
@@ -239,9 +255,8 @@ pub fn satisfies(caller_role: &str, required: &str) -> bool {
     (need > 0 || required == "any") && role_rank(caller_role) >= need
 }
 
-/// A `super-admin` requirement also demands a verified second factor.
-pub fn second_factor_ok(required: &str, second_factor: bool) -> bool {
-    required != "super-admin" || second_factor
+pub fn second_factor_ok(requires_second_factor: bool, second_factor: bool) -> bool {
+    !requires_second_factor || second_factor
 }
 
 /// Authorization decision for an authenticated surface caller, combining the
@@ -314,10 +329,10 @@ mod tests {
     }
 
     #[test]
-    fn super_admin_requirement_needs_a_second_factor() {
-        assert!(!second_factor_ok("super-admin", false));
-        assert!(second_factor_ok("super-admin", true));
-        assert!(second_factor_ok("admin", false));
+    fn second_factor_ok_is_independent_of_role() {
+        assert!(!second_factor_ok(true, false));
+        assert!(second_factor_ok(true, true));
+        assert!(second_factor_ok(false, false));
     }
 
     #[test]

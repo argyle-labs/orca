@@ -1113,7 +1113,7 @@ fn cmd_admin_prune_user(id: &str, force: bool) -> Result<()> {
         .context("lookup user")?
         .ok_or_else(|| anyhow::anyhow!("no such user id: {id}"))?;
 
-    if target.role == "admin"
+    if (target.role == "admin" || target.role == "super-admin")
         && identities::users::count_admins(&conn).context("count admins")? <= 1
         && !force
     {
@@ -1121,6 +1121,12 @@ fn cmd_admin_prune_user(id: &str, force: bool) -> Result<()> {
             "refusing to delete the last admin user without --force (a divergent \
              replicated admin will backfill from the mesh once the collision clears)"
         );
+    }
+    if target.role == "super-admin"
+        && identities::users::count_super_admins(&conn).context("count super-admins")? <= 1
+        && !force
+    {
+        anyhow::bail!("refusing to delete the last super-admin on this system without --force");
     }
 
     let deleted = identities::users::delete_by_id(&conn, id).context("delete user")?;

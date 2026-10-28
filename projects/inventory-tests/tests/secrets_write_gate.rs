@@ -15,25 +15,31 @@ fn ctx(role: &str, second_factor: bool) -> contract::ToolCtx {
 }
 
 #[tokio::test]
-async fn super_admin_without_a_second_factor_is_forbidden_on_secret_writes() {
-    for tool in [
-        "secrets.put",
-        "secrets.restore",
-        "secrets.upsert",
-        "secrets.delete",
-    ] {
-        let err = dispatch::dispatch(
-            tool,
+async fn super_admin_without_a_second_factor_passes_the_gate() {
+    // These tools don't opt into `second_factor = true` — there's no 2FA
+    // enrollment yet, so requiring it would lock every super-admin out.
+    for (tool, args) in [
+        (
+            "secrets.put",
             serde_json::json!({ "name": "orca-gate-probe", "value": "v", "dryRun": true }),
-            &ctx("super-admin", false),
-        )
-        .await
-        .expect_err("no second factor");
-        let oe = err
-            .downcast_ref::<contract::OrcaError>()
-            .unwrap_or_else(|| panic!("{tool}: {err:#}"));
-        assert_eq!(oe.kind, contract::ErrorKind::Forbidden, "{tool}: {err:#}");
-        assert!(err.to_string().contains("second factor"), "{tool}: {err:#}");
+        ),
+        (
+            "secrets.restore",
+            serde_json::json!({ "name": "orca-gate-probe", "dryRun": true }),
+        ),
+        (
+            "secrets.upsert",
+            serde_json::json!({ "name": "orca-gate-probe", "value": "v", "dryRun": true }),
+        ),
+        (
+            "secrets.delete",
+            serde_json::json!({ "name": "orca-gate-probe", "dryRun": true }),
+        ),
+    ] {
+        let out = dispatch::dispatch(tool, args, &ctx("super-admin", false))
+            .await
+            .expect(tool);
+        assert_eq!(out["dryRun"], serde_json::json!(true), "{tool}: {out}");
     }
 }
 

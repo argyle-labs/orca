@@ -23,19 +23,17 @@ fn tier_update_is_local_only_and_grant_delivery_is_not() {
 }
 
 #[tokio::test]
-async fn super_admin_without_a_second_factor_is_forbidden() {
-    let err = dispatch::dispatch(
+async fn super_admin_without_a_second_factor_passes_the_gate() {
+    // Doesn't opt into `second_factor = true` — no 2FA enrollment yet, so
+    // requiring it would lock every super-admin out.
+    let out = dispatch::dispatch(
         TOOL,
         serde_json::json!({ "action": "demote", "dryRun": true }),
         &ctx("super-admin", false),
     )
     .await
-    .expect_err("no second factor");
-    let oe = err
-        .downcast_ref::<contract::OrcaError>()
-        .unwrap_or_else(|| panic!("{err:#}"));
-    assert_eq!(oe.kind, contract::ErrorKind::Forbidden, "{err:#}");
-    assert!(err.to_string().contains("second factor"), "{err:#}");
+    .expect("plan");
+    assert_eq!(out["dryRun"], serde_json::json!(true), "{out}");
 }
 
 #[tokio::test]

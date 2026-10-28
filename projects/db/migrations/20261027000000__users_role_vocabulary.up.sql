@@ -1,8 +1,5 @@
--- users.role was CHECKed to ('admin','member') only — the baseline from before
--- the read-only|user|admin|super-admin vocabulary (see dispatch::tool_roles::
--- role_rank) existed. With no way to ever satisfy a `super-admin`-gated tool
--- (secrets.upsert/delete/put/restore), `orca admin set-role` had nowhere to
--- write. SQLite can't ALTER a CHECK constraint in place, so rebuild the table.
+-- Widens the role CHECK beyond ('admin','member'). SQLite can't ALTER a CHECK
+-- constraint in place, so rebuild the table.
 PRAGMA foreign_keys=OFF;
 
 CREATE TABLE users_new (
