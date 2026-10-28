@@ -169,6 +169,34 @@ pub fn set_email(conn: &Connection, id: &str, email: Option<&str>, now: &str) ->
     Ok(n > 0)
 }
 
+/// Role tiers assignable via admin tooling, `read-only < user < admin <
+/// super-admin` (see `dispatch::tool_roles::role_rank`, mirrored here since
+/// `identities` doesn't depend on `dispatch`). Excludes the legacy
+/// `admin`/`member` signup aliases as promotion targets — those are only
+/// ever written by `signup`, never reassigned.
+pub const ASSIGNABLE_ROLES: &[&str] = &["read-only", "user", "admin", "super-admin"];
+
+/// Set a user's role. The only writer of `role` after `insert` — there is no
+/// REST/MCP path to self-promote: granting `super-admin` (which also needs a
+/// verified second factor, see `dispatch::tool_roles::second_factor_ok`) goes
+/// through `orca admin set-role`, which requires real shell access to a host
+/// already running as this user.
+pub fn set_role(conn: &Connection, id: &str, role: &str, now: &str) -> Result<bool> {
+    anyhow::ensure!(
+        ASSIGNABLE_ROLES.contains(&role),
+        "unknown role '{role}': must be one of {}",
+        ASSIGNABLE_ROLES.join(", ")
+    );
+    let n = conn.execute(
+        "UPDATE users SET role = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, role, now],
+    )?;
+    if n > 0 {
+        db::replicate::notify_write("users");
+    }
+    Ok(n > 0)
+}
+
 pub fn count(conn: &Connection) -> Result<i64> {
     let n: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
     Ok(n)
@@ -528,6 +556,28 @@ mod tests {
         // Clearing back to NULL works.
         assert!(set_email(&conn, "u1", None, "t3").unwrap());
         assert_eq!(find_by_id(&conn, "u1").unwrap().unwrap().email, None);
+    }
+
+    #[test]
+    fn set_role_round_trips_and_rejects_unknown_roles() {
+        let conn = test_conn();
+        insert(&conn, "u1", "alice", "h", "admin", "t0").unwrap();
+
+        assert!(set_role(&conn, "u1", "super-admin", "t1").unwrap());
+        assert_eq!(
+            find_by_id(&conn, "u1").unwrap().unwrap().role,
+            "super-admin"
+        );
+
+        let err = set_role(&conn, "u1", "wizard", "t2").unwrap_err();
+        assert!(err.to_string().contains("unknown role"), "{err}");
+        // The rejected call never mutated the row.
+        assert_eq!(
+            find_by_id(&conn, "u1").unwrap().unwrap().role,
+            "super-admin"
+        );
+
+        assert!(!set_role(&conn, "no-such-id", "admin", "t3").unwrap());
     }
 
     #[test]

@@ -352,6 +352,14 @@ enum AdminAction {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
+    /// Set a user's role. Local-only. The only way to grant `super-admin` —
+    /// there is deliberately no REST/MCP path to self-promote.
+    SetRole {
+        /// The exact `users.id` to update (see `list-users`).
+        id: String,
+        /// One of `read-only`, `user`, `admin`, `super-admin`.
+        role: String,
+    },
 }
 
 /// Persistent tee path for the daemon's structured JSON log:
@@ -1068,6 +1076,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::PluginTrustSigned => cmd_admin_plugin_trust_signed(),
         AdminAction::ListUsers => cmd_admin_list_users(),
         AdminAction::PruneUser { id, force } => cmd_admin_prune_user(&id, force),
+        AdminAction::SetRole { id, role } => cmd_admin_set_role(&id, &role),
     };
     if is_privileged_op {
         let _marked = utils::privileged::mark_done();
@@ -1119,6 +1128,21 @@ fn cmd_admin_prune_user(id: &str, force: bool) -> Result<()> {
 
     println!(
         "pruned user {id} (username={}, role={})",
+        target.username, target.role
+    );
+    Ok(())
+}
+
+fn cmd_admin_set_role(id: &str, role: &str) -> Result<()> {
+    let conn = db::open_default().context("open orca.db")?;
+    let target = identities::users::find_by_id(&conn, id)
+        .context("lookup user")?
+        .ok_or_else(|| anyhow::anyhow!("no such user id: {id}"))?;
+    let now = utils::time::now_rfc3339();
+    let updated = identities::users::set_role(&conn, id, role, &now).context("set role")?;
+    anyhow::ensure!(updated, "user row vanished mid-operation");
+    println!(
+        "set role for {id} (username={}): {} -> {role}",
         target.username, target.role
     );
     Ok(())

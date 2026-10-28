@@ -1451,7 +1451,11 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             username            TEXT NOT NULL,
             username_lower      TEXT NOT NULL UNIQUE,
             password_hash       TEXT NOT NULL,
-            role                TEXT NOT NULL CHECK (role IN ('admin','member')),
+            -- read-only|read and user|member are the same rank (see
+            -- dispatch::tool_roles::role_rank); admin/member are the original
+            -- signup-only values, the rest assignable via `orca admin set-role`.
+            -- See 20261027000000__users_role_vocabulary.
+            role                TEXT NOT NULL CHECK (role IN ('admin','member','read-only','read','user','super-admin')),
             created_at          TEXT NOT NULL,
             password_updated_at TEXT NOT NULL,
             updated_at          TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z',
