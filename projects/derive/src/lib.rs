@@ -283,6 +283,8 @@ struct ToolAttr {
     /// requires `AuthIdentity::role == "admin"`. Set via
     /// `#[orca_tool(..., role = "admin")]`.
     role: Option<LitStr>,
+    /// `#[orca_tool(..., second_factor = true)]`. Independent of `role`.
+    second_factor: bool,
     /// Short human-friendly title shown in the API reference left nav
     /// (Scalar `summary` field). Doc comment is reserved for the full
     /// markdown description body. Set via `#[orca_tool(..., title = "...")]`;
@@ -314,6 +316,7 @@ impl Parse for ToolAttr {
         let mut tool_callable = false;
         let mut remote_admin = false;
         let mut role: Option<LitStr> = None;
+        let mut second_factor = false;
         let mut title: Option<LitStr> = None;
         let mut crate_path: Option<syn::Path> = None;
         for nv in items {
@@ -522,6 +525,19 @@ impl Parse for ToolAttr {
                     }
                     role = Some(s);
                 }
+                "second_factor" => {
+                    second_factor = match &nv.value {
+                        Expr::Lit(ExprLit {
+                            lit: Lit::Bool(b), ..
+                        }) => b.value,
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                "second_factor expects a bool literal",
+                            ));
+                        }
+                    };
+                }
                 "title" => {
                     title = Some(lit_str(&nv.value)?);
                 }
@@ -573,6 +589,7 @@ impl Parse for ToolAttr {
             tool_callable,
             remote_admin,
             role,
+            second_factor,
             title,
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
         })
@@ -1194,6 +1211,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let tool_calls = &attr.tool_calls;
     let tool_callable_lit = attr.tool_callable;
     let remote_admin_lit = attr.remote_admin;
+    let second_factor_lit = attr.second_factor;
     // REQUIRED_ROLE: explicit `role = "..."` wins; otherwise default-deny
     // derives from the verb — read-shaped verbs (`list`/`detail`/`search`) get
     // "any", anything else gets "admin". This closes C2 (default-deny on
@@ -1447,6 +1465,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             const TOOL_CALLABLE: bool = #tool_callable_lit;
             const REMOTE_ADMIN: bool = #remote_admin_lit;
             #role_const
+            const REQUIRES_SECOND_FACTOR: bool = #second_factor_lit;
             type Args = #args_ty;
             type Output = #output_ty;
             #neutralize_fn

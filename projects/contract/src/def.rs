@@ -27,6 +27,10 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     /// `dispatch::ToolWrapper::run_json` for every call whose ctx carries a
     /// caller. A call with no caller (an in-process owner path) is not gated.
     const REQUIRED_ROLE: &'static str = "any";
+    /// Requires a verified second factor. Independent of [`Self::REQUIRED_ROLE`]
+    /// — set per-tool via `#[orca_tool(..., second_factor = true)]`, not implied
+    /// by role tier. Default off.
+    const REQUIRES_SECOND_FACTOR: bool = false;
     /// Whether this tool is a **data mutation** — a write against an external
     /// managed system (a proxmox VM create, an unraid plugin install, …) as
     /// opposed to a control-plane admin op (auth, secrets, system, config).

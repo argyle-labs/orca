@@ -182,6 +182,8 @@ pub trait ErasedTool: Send + Sync {
     /// holding the `can_mutate` opt-in invoke it despite `required_role` being
     /// `"admin"`; control-plane admin tools leave this false.
     fn data_mutation(&self) -> bool;
+    /// Mirrors `OrcaToolDef::REQUIRES_SECOND_FACTOR`.
+    fn requires_second_factor(&self) -> bool;
     /// Whether this tool applies changes and can be previewed. Mirrors
     /// `OrcaToolDef::EXECUTE_GATED`: it executes by default, and with
     /// `dryRun: true` [`Self::run_json`] returns an `ExecutionPlan` without
@@ -234,6 +236,10 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
 
     fn data_mutation(&self) -> bool {
         T::DATA_MUTATION
+    }
+
+    fn requires_second_factor(&self) -> bool {
+        T::REQUIRES_SECOND_FACTOR
     }
 
     fn execute_gated(&self) -> bool {
@@ -305,7 +311,10 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
                 .into());
             }
             if !ctx.owner_cli()
-                && !crate::tool_roles::second_factor_ok(T::REQUIRED_ROLE, ctx.second_factor())
+                && !crate::tool_roles::second_factor_ok(
+                    T::REQUIRES_SECOND_FACTOR,
+                    ctx.second_factor(),
+                )
             {
                 return Err(contract::OrcaError::forbidden(format!(
                     "{} requires a verified second factor",

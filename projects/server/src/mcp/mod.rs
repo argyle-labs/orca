@@ -65,6 +65,7 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
             .chain(dispatch::diagnostics_surface::diagnostics_mutation_names())
             .chain(dispatch::ups_surface::ups_mutation_names()),
     );
+    dispatch::tool_roles::install_second_factor(dispatch::second_factor_names());
     match resolve_host_operator().or_else(resolve_token_operator) {
         Some(id) => ctx.with_auth(id),
         None => ctx,
@@ -1438,7 +1439,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stdio_tools_call_secrets_put_is_refused() {
+    async fn stdio_tools_call_secrets_put_passes_without_a_second_factor() {
+        // secrets.put doesn't opt into `second_factor = true` — no 2FA
+        // enrollment exists yet, so requiring it would lock every super-admin
+        // out. Role alone (asserted elsewhere) still gates it.
         use auth as _;
         ::model::ensure_crypto_provider();
         let cfg = Config::load().expect("config load");
@@ -1453,8 +1457,7 @@ mod tests {
         let resp = handle_jsonrpc(&req, &ctx, &pool, &mut reg, &cfg, false, None, false)
             .await
             .expect("tools/call must reply");
-        assert_eq!(resp["result"]["isError"], true, "{resp}");
-        assert!(resp.to_string().contains("second factor"), "{resp}");
+        assert_eq!(resp["result"]["isError"], false, "{resp}");
     }
 
     #[tokio::test]

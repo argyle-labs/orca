@@ -665,9 +665,11 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
 /// reach a plugin/unit/diagnostics/UPS body. A name with no local role is
 /// left to the peer forward, whose recipient authorizes it.
 fn authorize_fallback(name: &str, ctx: &ToolCtx) -> Result<()> {
-    if let Some(required) = crate::tool_roles::known_role(name)
-        && !ctx.owner_cli()
-        && !crate::tool_roles::second_factor_ok(required, ctx.second_factor())
+    if !ctx.owner_cli()
+        && !crate::tool_roles::second_factor_ok(
+            crate::tool_roles::requires_fresh_second_factor(name),
+            ctx.second_factor(),
+        )
     {
         return Err(contract::OrcaError::forbidden(format!(
             "{name} requires a verified second factor"
@@ -1011,6 +1013,18 @@ pub fn data_mutation_names() -> Vec<&'static str> {
         .ordered
         .iter()
         .filter(|t| t.data_mutation())
+        .map(|t| t.name())
+        .collect()
+}
+
+/// Names of every registered tool that requires a verified second factor.
+/// Used to install the process-global lookup `tool_roles::second_factor_ok`
+/// consults, sibling to [`data_mutation_names`].
+pub fn second_factor_names() -> Vec<&'static str> {
+    cache()
+        .ordered
+        .iter()
+        .filter(|t| t.requires_second_factor())
         .map(|t| t.name())
         .collect()
 }
