@@ -78,6 +78,10 @@ fn shared_mode_crud_is_provider_scoped_and_id_keyed() {
 
         let theirs = otherprov::endpoint_db::list().expect("other list");
         assert_eq!(theirs.len(), 1, "otherprov sees only its own row");
+        // otherprov has no token_id/insecure field — the minimal shared shape
+        // several real plugins use (e.g. plex). Declared non-secret fields must
+        // still round-trip through the config column for that shape.
+        assert_eq!(theirs[0].base_url, "https://elsewhere");
 
         // (c) get matches provider+name.
         assert!(testprov::endpoint_db::get("frigg").expect("get").is_some());
