@@ -1468,6 +1468,37 @@ fn install_tool_policies(software: &str, tools: &HashMap<String, ToolDef>) {
     }));
 }
 
+/// Mirror a plugin's declared tools into `orca.db`'s `plugin_tools` table —
+/// the only source `core_tool_catalog()` reads to bridge plugin tools into
+/// the MCP surface. `install_tool_policies` wires role/authz for CLI/REST/
+/// direct dispatch; this wires MCP visibility. An empty `tools` map clears
+/// the plugin's rows (used on unload). Best-effort: a DB failure here must
+/// not block the plugin from loading, since authz already went through.
+fn sync_tool_catalog(plugin_id: &str, tools: &HashMap<String, ToolDef>) {
+    let rows: Vec<(String, String, String, String)> = tools
+        .values()
+        .map(|d| {
+            let schema = serde_json::to_string(&d.input_schema).unwrap_or_else(|_| "{}".into());
+            let sensitivity = if d.data_mutation == Some(true) {
+                "sensitive"
+            } else {
+                "general"
+            };
+            (
+                d.name.clone(),
+                d.description.clone(),
+                schema,
+                sensitivity.to_string(),
+            )
+        })
+        .collect();
+    let result = db::open_default()
+        .and_then(|mut conn| db::plugin_tools::replace(&mut conn, plugin_id, &rows));
+    if let Err(e) = result {
+        tracing::warn!(plugin = %plugin_id, "failed to sync plugin tools into the MCP catalog: {e:#}");
+    }
+}
+
 /// The wire form of a request's verified identity.
 fn wire_caller(c: &contract::CallerIdentity) -> plugin_proto::VerifiedCaller {
     plugin_proto::VerifiedCaller {
@@ -1586,6 +1617,7 @@ fn detach_plugins(reg: &mut Registry, software: &str) -> Vec<LoadedPlugin> {
     }
     if !detached.is_empty() {
         spec::surfaces::deregister(software);
+        sync_tool_catalog(software, &HashMap::new());
     }
     rebuild_tool_index(reg);
     detached
@@ -1623,6 +1655,7 @@ fn attach_checked(
 
 fn attach_plugin(reg: &mut Registry, plugin: LoadedPlugin) {
     install_tool_policies(&plugin.software, &plugin.tools);
+    sync_tool_catalog(&plugin.software, &plugin.tools);
     dispatch::tool_roles::install_plugin_tools(plugin.surface_policies.iter().cloned());
     let idx = reg.plugins.len();
     for name in plugin.tools.keys() {
@@ -3378,6 +3411,18 @@ mod loader_tests {
         if std::env::var(supervisor::SOCKET_ENV).is_ok() {
             return;
         }
+        // attach_plugin/detach_plugins now sync into orca.db's plugin_tools
+        // table — isolate against an ephemeral file, never the live DB.
+        let dir = tempfile::tempdir().unwrap();
+        db::with_db_path(
+            dir.path().join("orca.db"),
+            spawn_plugin_loads_serves_and_unloads_inner(),
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    async fn spawn_plugin_loads_serves_and_unloads_inner() {
         let _g = FAKE_PLUGIN_LOCK.lock().await;
         // A prior aborted run could leave it loaded; start from a clean slate.
         unload_plugin("loaderfakeplugin");
@@ -3499,6 +3544,17 @@ mod loader_tests {
         if std::env::var(supervisor::SOCKET_ENV).is_ok() {
             return;
         }
+        // attach_plugin/detach_plugins now sync into orca.db's plugin_tools
+        // table — isolate against an ephemeral file, never the live DB.
+        let dir = tempfile::tempdir().unwrap();
+        db::with_thread_db_path(
+            &dir.path().join("orca.db"),
+            failed_reload_restores_the_previous_plugin_inner,
+        );
+    }
+
+    #[cfg(unix)]
+    fn failed_reload_restores_the_previous_plugin_inner() {
         let _g = FAKE_PLUGIN_LOCK.blocking_lock();
         unload_plugin("loaderfakeplugin");
         let exe = std::env::current_exe().expect("test binary path");
@@ -3556,6 +3612,17 @@ mod loader_tests {
         if std::env::var(supervisor::SOCKET_ENV).is_ok() {
             return;
         }
+        // attach_plugin/detach_plugins now sync into orca.db's plugin_tools
+        // table — isolate against an ephemeral file, never the live DB.
+        let dir = tempfile::tempdir().unwrap();
+        db::with_thread_db_path(
+            &dir.path().join("orca.db"),
+            unload_if_backed_by_spares_a_replacement_inner,
+        );
+    }
+
+    #[cfg(unix)]
+    fn unload_if_backed_by_spares_a_replacement_inner() {
         let _g = FAKE_PLUGIN_LOCK.blocking_lock();
         unload_plugin("loaderfakeplugin");
         let exe = std::env::current_exe().expect("test binary path");

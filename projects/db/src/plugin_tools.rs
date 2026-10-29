@@ -90,32 +90,37 @@ pub fn upsert(
     Ok(())
 }
 
-/// Replace the entire tool set for a plugin. The host invokes this when
-/// `orca/tools.declare` arrives — declarations are idempotent and replace
-/// the previously-known set, so any tool the plugin no longer declares is
-/// removed from the registry.
+/// Replace the entire tool set for a plugin. The loader invokes this on
+/// every install/load, with the plugin's manifest as the source of truth —
+/// declarations are idempotent and replace the previously-known set, so any
+/// tool the plugin no longer declares is removed from the registry. An empty
+/// `tools` slice clears the plugin's rows (used on unload).
 ///
-/// If any incoming tool's fq_name (`<namespace>.<name>`) is already owned by
-/// a *different* plugin_id, the whole batch is rejected with a
-/// `NamespaceCollision` error (see [`is_namespace_collision`]). The reject
-/// happens inside the transaction so the plugin's existing rows are
-/// preserved on failure.
+/// Each tool is named by its fully-qualified `<namespace>.<name>` — a single
+/// plugin can span multiple namespaces (e.g. a multi-domain backend), so the
+/// namespace is per-tool rather than a single value for the whole batch.
+///
+/// If any incoming tool's fq_name is already owned by a *different*
+/// plugin_id, the whole batch is rejected with a `NamespaceCollision` error
+/// (see [`is_namespace_collision`]). The reject happens inside the
+/// transaction so the plugin's existing rows are preserved on failure.
 pub fn replace(
     conn: &mut Connection,
     plugin_id: &str,
-    plugin_namespace: &str,
     tools: &[(String, String, String, String)],
 ) -> Result<()> {
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM plugin_tools WHERE plugin_id = ?1", [plugin_id])?;
-    for (name, description, schema, sensitivity) in tools {
+    for (fq_name, description, schema, sensitivity) in tools {
         if !matches!(sensitivity.as_str(), "general" | "sensitive") {
             anyhow::bail!("sensitivity must be 'general' or 'sensitive', got '{sensitivity}'");
         }
-        let fq = format!("{plugin_namespace}.{name}");
-        if let Some(owner) = collision_owner(&tx, &fq, plugin_id)? {
+        let Some((plugin_namespace, name)) = fq_name.split_once('.') else {
+            anyhow::bail!("plugin tool name '{fq_name}' must be '<namespace>.<name>'");
+        };
+        if let Some(owner) = collision_owner(&tx, fq_name, plugin_id)? {
             return Err(anyhow!(NamespaceCollision {
-                fq_name: fq,
+                fq_name: fq_name.clone(),
                 owner_plugin_id: owner,
             }));
         }
@@ -127,7 +132,7 @@ pub fn replace(
                 plugin_id,
                 plugin_namespace,
                 name,
-                fq,
+                fq_name,
                 description,
                 schema,
                 sensitivity
@@ -206,10 +211,10 @@ mod tests {
     use super::*;
     use crate::testing::test_conn;
 
-    fn tool(name: &str) -> (String, String, String, String) {
+    fn tool(fq_name: &str) -> (String, String, String, String) {
         (
-            name.to_string(),
-            format!("desc {name}"),
+            fq_name.to_string(),
+            format!("desc {fq_name}"),
             "{}".to_string(),
             "general".to_string(),
         )
@@ -218,7 +223,7 @@ mod tests {
     #[test]
     fn fq_name_uses_namespace_not_plugin_id() {
         let mut conn = test_conn();
-        replace(&mut conn, "sonarr-alpha", "arr", &[tool("list-shows")]).unwrap();
+        replace(&mut conn, "sonarr-alpha", &[tool("arr.list-shows")]).unwrap();
         let row = get(&conn, "arr.list-shows").unwrap().expect("found");
         assert_eq!(row.plugin_id, "sonarr-alpha");
         assert_eq!(row.plugin_namespace, "arr");
@@ -229,8 +234,8 @@ mod tests {
     #[test]
     fn two_plugins_share_namespace_with_distinct_tool_names() {
         let mut conn = test_conn();
-        replace(&mut conn, "sonarr-alpha", "arr", &[tool("shows")]).unwrap();
-        replace(&mut conn, "radarr-echo", "arr", &[tool("movies")]).unwrap();
+        replace(&mut conn, "sonarr-alpha", &[tool("arr.shows")]).unwrap();
+        replace(&mut conn, "radarr-echo", &[tool("arr.movies")]).unwrap();
         assert!(get(&conn, "arr.shows").unwrap().is_some());
         assert!(get(&conn, "arr.movies").unwrap().is_some());
     }
@@ -238,8 +243,8 @@ mod tests {
     #[test]
     fn collision_across_plugins_is_rejected() {
         let mut conn = test_conn();
-        replace(&mut conn, "sonarr-alpha", "arr", &[tool("list")]).unwrap();
-        let err = replace(&mut conn, "sonarr-echo", "arr", &[tool("list")])
+        replace(&mut conn, "sonarr-alpha", &[tool("arr.list")]).unwrap();
+        let err = replace(&mut conn, "sonarr-echo", &[tool("arr.list")])
             .expect_err("collision must reject");
         let (fq, owner) = is_namespace_collision(&err).expect("typed collision");
         assert_eq!(fq, "arr.list");
@@ -257,11 +262,10 @@ mod tests {
         replace(
             &mut conn,
             "sonarr-alpha",
-            "arr",
-            &[tool("list"), tool("get")],
+            &[tool("arr.list"), tool("arr.get")],
         )
         .unwrap();
-        replace(&mut conn, "sonarr-alpha", "arr", &[tool("list")]).unwrap();
+        replace(&mut conn, "sonarr-alpha", &[tool("arr.list")]).unwrap();
         let rows = list(&conn, "sonarr-alpha").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].fq_name, "arr.list");
@@ -270,9 +274,24 @@ mod tests {
     #[test]
     fn plugin_can_change_its_own_namespace() {
         let mut conn = test_conn();
-        replace(&mut conn, "p", "old", &[tool("t")]).unwrap();
-        replace(&mut conn, "p", "new", &[tool("t")]).unwrap();
+        replace(&mut conn, "p", &[tool("old.t")]).unwrap();
+        replace(&mut conn, "p", &[tool("new.t")]).unwrap();
         assert!(get(&conn, "old.t").unwrap().is_none());
         assert!(get(&conn, "new.t").unwrap().is_some());
+    }
+
+    #[test]
+    fn empty_batch_clears_the_plugin() {
+        let mut conn = test_conn();
+        replace(&mut conn, "p", &[tool("ns.t")]).unwrap();
+        replace(&mut conn, "p", &[]).unwrap();
+        assert!(list(&conn, "p").unwrap().is_empty());
+    }
+
+    #[test]
+    fn name_without_a_namespace_dot_is_rejected() {
+        let mut conn = test_conn();
+        let err = replace(&mut conn, "p", &[tool("noDot")]).expect_err("must reject");
+        assert!(err.to_string().contains("<namespace>.<name>"), "{err}");
     }
 }
