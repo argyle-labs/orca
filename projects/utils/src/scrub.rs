@@ -332,7 +332,7 @@ mod text {
                 r##"(?P<pre>"(?P<key>[A-Za-z0-9_.\-]+)"\s*:\s*")(?P<sec>(?:[^"\\]|\\.)*)(?P<post>")"##,
             ),
             keyed(
-                r##"(?P<pre>(?P<key>[A-Za-z_][A-Za-z0-9_.\-]*)[ \t]*=[ \t]*)(?P<sec>"[^"]*"|'[^']*'|[^\s"',;&]+)"##,
+                r##"(?P<pre>(?P<key>[A-Za-z_][A-Za-z0-9_.\-]*)[ \t]*=[ \t]*)(?P<sec>"[^"]*"|'[^']*'|(?:[^\s"',;&%]|%(?:[^2]|2[^6]))+)"##,
             ),
             keyed(
                 r##"(?m)(?P<pre>(?:^|[\s"'])--?(?P<key>[A-Za-z][A-Za-z0-9_.\-]*)[ \t]+)(?P<sec>"[^"]*"|'[^']*'|[^\s"',;\-][^\s"',;]*)"##,
@@ -768,6 +768,33 @@ mod tests {
         fn json_pair_values_with_escaped_quotes() {
             let out = assert_scrubbed(r#"{"token":"ab\"cd","n":1}"#, "cd");
             assert_eq!(out, r#"{"token":"***","n":1}"#);
+        }
+
+        #[test]
+        fn percent_encoded_ampersand_terminates_the_value() {
+            // A literal `&` stops the bare key=value match (the `[^...&]`
+            // exclusion), but its percent-encoded form `%26` is three plain
+            // characters to the regex — without also stopping at a bare `%`,
+            // the greedy value run swallows past it into the next field.
+            let out = assert_scrubbed("token=ab%2Fcd%3Def%26next=1", "cd");
+            assert!(!out.contains("ef"), "{out}");
+            assert!(out.contains("%26next=1"), "{out}");
+        }
+
+        #[test]
+        fn a_bare_percent_that_is_not_an_encoded_ampersand_does_not_truncate_the_value() {
+            // Only %26 (encoded `&`) should stop the match early; any other
+            // `%` — hex-looking or not — is part of the secret and must still
+            // be fully redacted.
+            for (line, leak) in [
+                ("password=P@ss%word!", "word!"),
+                ("token=50%offcoupon", "offcoupon"),
+                ("token=abc%z", "z"),
+                ("token=abc%2z", "2z"),
+            ] {
+                let out = assert_scrubbed(line, leak);
+                assert!(!out.contains('%'), "{out}");
+            }
         }
 
         #[test]
