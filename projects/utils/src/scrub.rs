@@ -332,7 +332,7 @@ mod text {
                 r##"(?P<pre>"(?P<key>[A-Za-z0-9_.\-]+)"\s*:\s*")(?P<sec>(?:[^"\\]|\\.)*)(?P<post>")"##,
             ),
             keyed(
-                r##"(?P<pre>(?P<key>[A-Za-z_][A-Za-z0-9_.\-]*)[ \t]*=[ \t]*)(?P<sec>"[^"]*"|'[^']*'|(?:[^\s"',;&%]|%(?:[013-9A-Fa-f][0-9A-Fa-f]|2[0-57-9A-Fa-f]))+)"##,
+                r##"(?P<pre>(?P<key>[A-Za-z_][A-Za-z0-9_.\-]*)[ \t]*=[ \t]*)(?P<sec>"[^"]*"|'[^']*'|(?:[^\s"',;&%]|%(?:[^2]|2[^6]))+)"##,
             ),
             keyed(
                 r##"(?m)(?P<pre>(?:^|[\s"'])--?(?P<key>[A-Za-z][A-Za-z0-9_.\-]*)[ \t]+)(?P<sec>"[^"]*"|'[^']*'|[^\s"',;\-][^\s"',;]*)"##,
@@ -779,6 +779,22 @@ mod tests {
             let out = assert_scrubbed("token=ab%2Fcd%3Def%26next=1", "cd");
             assert!(!out.contains("ef"), "{out}");
             assert!(out.contains("%26next=1"), "{out}");
+        }
+
+        #[test]
+        fn a_bare_percent_that_is_not_an_encoded_ampersand_does_not_truncate_the_value() {
+            // Only %26 (encoded `&`) should stop the match early; any other
+            // `%` — hex-looking or not — is part of the secret and must still
+            // be fully redacted.
+            for (line, leak) in [
+                ("password=P@ss%word!", "word!"),
+                ("token=50%offcoupon", "offcoupon"),
+                ("token=abc%z", "z"),
+                ("token=abc%2z", "2z"),
+            ] {
+                let out = assert_scrubbed(line, leak);
+                assert!(!out.contains('%'), "{out}");
+            }
         }
 
         #[test]
