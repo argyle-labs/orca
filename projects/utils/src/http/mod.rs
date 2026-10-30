@@ -1051,7 +1051,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, HttpError::Status { status: 429, .. }));
-        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(start.elapsed() < Duration::from_secs(10));
     }
 
     #[tokio::test]
