@@ -129,4 +129,10 @@ pub use backup::{
 pub mod guard;
 pub use guard::{GuardViolation, UnitFacts, UnitGuard, partition_violations};
 
+pub mod sync;
+pub use sync::{
+    SyncProvider, SyncProviderError, SyncReconcileArgs, SyncReconcileOutcome, SyncStatusArgs,
+    SyncStatusOutcome, SyncTargetError, SyncTargetHealth, SyncTargetSpec,
+};
+
 pub mod unit;
