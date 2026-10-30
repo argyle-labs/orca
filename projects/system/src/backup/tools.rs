@@ -563,6 +563,10 @@ pub struct BackupRunArgs {
     execute_gated = true
 )]
 async fn backup_run(args: BackupRunArgs, ctx: &ToolCtx) -> anyhow::Result<BackupRunOutput> {
+    let mut args = args;
+    if ctx.service::<crate::mesh::RelayingPeer>().is_ok() {
+        args.local_only = true;
+    }
     if !args.local_only {
         return backup_run_fleetwide(args, ctx).await;
     }
@@ -1753,6 +1757,7 @@ mod tests {
     use super::*;
     use contract::config::{Config, Model};
     use std::path::Path;
+    use std::sync::Mutex;
 
     fn ctx() -> ToolCtx {
         ToolCtx::new(Arc::new(Config {
@@ -3112,6 +3117,76 @@ mod tests {
         });
         target::deregister_target(tkind);
         provider::deregister_provider(pkind);
+    }
+
+    /// Records every `exec` call and reports one peer, so a test can assert
+    /// whether `backup.run` fanned out to the mesh or stayed single-host.
+    struct RecordingRemoteExec(Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl contract::RemoteExec for RecordingRemoteExec {
+        async fn peers(&self) -> anyhow::Result<Vec<contract::PeerRef>> {
+            Ok(vec![contract::PeerRef {
+                id: "peer-a".into(),
+                name: "peer-a".into(),
+                is_local: false,
+            }])
+        }
+
+        #[allow(clippy::disallowed_types)]
+        async fn exec(
+            &self,
+            peer: &str,
+            tool: &str,
+            _args: serde_json::Value,
+            _caller: Option<contract::CallerIdentity>,
+            _correlation_id: Option<String>,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.0.lock().unwrap().push(format!("{peer}:{tool}"));
+            serde_json::to_value(BackupRunOutput::default()).map_err(Into::into)
+        }
+    }
+
+    #[tokio::test]
+    async fn backup_run_already_routed_to_a_peer_does_not_refan_the_mesh() {
+        // A plain top-level call with no peer still fans out to the mesh.
+        let rec = Arc::new(RecordingRemoteExec(Mutex::new(Vec::new())));
+        let mut top_level = ctx();
+        top_level.register_service::<Arc<dyn contract::RemoteExec>>(rec.clone());
+        backup_run(
+            BackupRunArgs {
+                local_only: false,
+                kind: None,
+                instance: None,
+                all: true,
+            },
+            &top_level,
+        )
+        .await
+        .unwrap();
+        assert_eq!(*rec.0.lock().unwrap(), vec!["peer-a:backup.run"]);
+
+        // The same call, but having already arrived via the mesh (RelayingPeer
+        // set), must terminate here instead of re-broadcasting from peer-a.
+        rec.0.lock().unwrap().clear();
+        let mut relayed = ctx();
+        relayed.register_service::<Arc<dyn contract::RemoteExec>>(rec.clone());
+        relayed.register_service(crate::mesh::RelayingPeer("caller-host".into()));
+        backup_run(
+            BackupRunArgs {
+                local_only: false,
+                kind: None,
+                instance: None,
+                all: true,
+            },
+            &relayed,
+        )
+        .await
+        .unwrap();
+        assert!(
+            rec.0.lock().unwrap().is_empty(),
+            "a relayed call must not fan out again"
+        );
     }
 
     // ── backup.check tool body: a real fleet-wide collision is mapped out ──
