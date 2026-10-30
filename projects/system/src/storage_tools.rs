@@ -388,6 +388,8 @@ async fn storage_share_list(
             options: row.options.clone(),
             has_credential: row.credential.is_some(),
             replication: row.replication.clone(),
+            sync_targets: row.sync_targets.clone(),
+            fleet_export: row.fleet_export,
             routes: row.routes.clone(),
             enabled: row.enabled,
         })
@@ -424,6 +426,8 @@ fn share_entry(row: &crate::shares::EndpointRow) -> crate::shares::EndpointEntry
         options: row.options.clone(),
         has_credential: row.credential.is_some(),
         replication: row.replication.clone(),
+        sync_targets: row.sync_targets.clone(),
+        fleet_export: row.fleet_export,
         routes: row.routes.clone(),
         enabled: row.enabled,
     }
@@ -526,6 +530,11 @@ pub struct StorageShareUpdateArgs {
     /// gates this share's failover. Pass an empty string to clear it.
     #[arg(long)]
     pub replication: Option<String>,
+    /// JSON array of `SyncTargetSpec`. Pass an empty string to clear it.
+    #[arg(long)]
+    pub sync_targets: Option<String>,
+    #[arg(long)]
+    pub fleet_export: Option<bool>,
     /// Replace the reachable/failover route set. Repeatable: `--route kind=url`
     /// or a JSON object. Omit to leave routes unchanged.
     #[arg(
@@ -723,6 +732,20 @@ fn share_row_edit(args: &StorageShareUpdateArgs) -> anyhow::Result<StorageShareE
         // Empty string clears the ref; any other value sets it.
         row.replication = if v.is_empty() { None } else { Some(v) };
         applied.push("replication".to_string());
+    }
+    if let Some(v) = args.sync_targets.clone() {
+        row.sync_targets = if v.is_empty() {
+            "[]".to_string()
+        } else {
+            let targets: Vec<contract::SyncTargetSpec> = serde_json::from_str(&v)
+                .map_err(|e| anyhow::anyhow!("invalid syncTargets JSON: {e}"))?;
+            crate::shares::encode_sync_targets(&targets)
+        };
+        applied.push("sync_targets".to_string());
+    }
+    if let Some(v) = args.fleet_export {
+        row.fleet_export = v;
+        applied.push("fleet_export".to_string());
     }
     if !args.routes.is_empty() {
         row.routes = plugin_toolkit::route::Routes::from(args.routes.clone());
@@ -2766,6 +2789,8 @@ mod tests {
             options: "vers=4.2".into(),
             credential: None,
             replication: None,
+            sync_targets: "[]".to_string(),
+            fleet_export: false,
             routes: plugin_toolkit::route::Routes::from(routes),
             enabled: true,
         }
@@ -3804,6 +3829,8 @@ mod tests {
             options: "vers=4.2".into(),
             credential: None,
             replication: None,
+            sync_targets: "[]".to_string(),
+            fleet_export: false,
             routes: Default::default(),
             enabled: true,
         };
@@ -4172,6 +4199,8 @@ mod tests {
                 options: String::new(),
                 credential: None,
                 replication: None,
+                sync_targets: "[]".to_string(),
+                fleet_export: false,
                 routes: Default::default(),
                 enabled: true,
             };

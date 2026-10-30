@@ -3616,6 +3616,8 @@ mod tests {
             options: "vers=4.2".into(),
             credential: None,
             replication: None,
+            sync_targets: "[]".to_string(),
+            fleet_export: false,
             routes: plugin_toolkit::route::Routes::from(vec![route]),
             enabled,
         };
@@ -4091,6 +4093,8 @@ mod tests {
             options: String::new(),
             credential: None,
             replication: None,
+            sync_targets: "[]".to_string(),
+            fleet_export: false,
             routes: plugin_toolkit::route::Routes::from(vec![Route::new(
                 "local", "bind", path, None,
             )]),
@@ -4669,6 +4673,8 @@ mod tests {
                 options: "vers=4.2,soft".into(),
                 credential: Some("secret.cred-ref".to_string()),
                 replication: Some("rep-abc".to_string()),
+                sync_targets: "[]".to_string(),
+                fleet_export: false,
                 routes: plugin_toolkit::route::Routes::from(vec![enabled_route, held_route]),
                 enabled: true,
             };

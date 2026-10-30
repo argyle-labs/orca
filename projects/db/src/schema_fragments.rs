@@ -185,6 +185,11 @@ pub fn apply_fragments(conn: &Connection) -> Result<()> {
         retire_shares_options_rendered(conn)?;
         ensure_column(conn, "shares", "credential", "TEXT")
             .map_err(|e| anyhow::anyhow!("shares credential reconcile: {e}"))?;
+        // Additive: orca#339 slice 2.
+        ensure_column(conn, "shares", "sync_targets", "TEXT NOT NULL DEFAULT '[]'")
+            .map_err(|e| anyhow::anyhow!("shares sync_targets reconcile: {e}"))?;
+        ensure_column(conn, "shares", "fleet_export", "INTEGER NOT NULL DEFAULT 0")
+            .map_err(|e| anyhow::anyhow!("shares fleet_export reconcile: {e}"))?;
     }
     for table in ["shares", "managed_mounts"] {
         reconcile_legacy_credentials(conn, table)?;

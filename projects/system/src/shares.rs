@@ -21,6 +21,7 @@
 //! election). Each route folds a `host:/export` source to `value = host`,
 //! `path = "/export"`, `port` defaulting per fstype.
 
+use contract::SyncTargetSpec;
 use plugin_toolkit::endpoint_resource;
 
 /// A network share, defined once and replicated mesh-wide. `name` (the endpoint
@@ -65,4 +66,42 @@ pub struct Share {
     /// failing over to unreplicated/stale data is worse than holding. `None` ⇒ the
     /// share fails over freely (unchanged pre-gate behaviour).
     pub replication: Option<String>,
+    /// Opaque JSON-encoded `Vec<SyncTargetSpec>`; use [`parse_sync_targets`].
+    pub sync_targets: String,
+    pub fleet_export: bool,
+}
+
+/// Malformed/legacy data yields an empty list rather than failing the read.
+pub fn parse_sync_targets(raw: &str) -> Vec<SyncTargetSpec> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+pub fn encode_sync_targets(targets: &[SyncTargetSpec]) -> String {
+    serde_json::to_string(targets).unwrap_or_else(|_| "[]".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SyncTargetSpec, encode_sync_targets, parse_sync_targets};
+
+    #[test]
+    fn empty_string_parses_to_empty_list() {
+        assert!(parse_sync_targets("").is_empty());
+    }
+
+    #[test]
+    fn malformed_json_parses_to_empty_list_not_an_error() {
+        assert!(parse_sync_targets("not json").is_empty());
+    }
+
+    #[test]
+    fn round_trips_through_encode_and_parse() {
+        let targets = vec![SyncTargetSpec {
+            source: "/data/photos".to_string(),
+            target: "nas:/backup/photos".to_string(),
+            method: "syncthing".to_string(),
+        }];
+        let encoded = encode_sync_targets(&targets);
+        assert_eq!(parse_sync_targets(&encoded), targets);
+    }
 }
