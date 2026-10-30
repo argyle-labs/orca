@@ -1,18 +1,5 @@
-//! Generic `Sync` seam: "replicate source share → target(s)", method-agnostic
-//! (syncthing today; zfs-send / rsync later). Core owns the declared state and
-//! the reconcile/health contract; a provider implements one method.
-//!
-//! Surfaced 2026-08-27 repairing the willow→maple Gitea/PBS replication chain:
-//! it had looked configured for months while being silently useless (ignored
-//! paths, a crash-looping sync daemon, an unmounted source) because nothing
-//! declared what "replicated" meant or checked it. This seam exists so that
-//! state is declared and health-checked rather than hand-wired per host.
-//!
-//! This is the first of #339's deliverables — the trait/contract and provider
-//! registry only. The share-model extension, fleet share catalog wiring, and
-//! mount convergence are separate follow-on slices.
-
-#![allow(clippy::disallowed_types)]
+//! Method-agnostic `Sync` seam (orca#339 slice 1/5): replicate source →
+//! target(s), provider-pluggable (syncthing, zfs-send, rsync, ...).
 
 use std::sync::{Arc, LazyLock, RwLock};
 
@@ -22,8 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::BoxFuture;
 
-/// One declared replication: `source` share/path replicated to `target` by
-/// `method` (a registered [`SyncProvider`] name, e.g. `"syncthing"`).
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct SyncTargetSpec {
     pub source: String,
@@ -31,15 +16,11 @@ pub struct SyncTargetSpec {
     pub method: String,
 }
 
-/// Declared state for one provider's `reconcile`: every [`SyncTargetSpec`]
-/// whose `method` names it. The provider converges actual state to match.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
 pub struct SyncReconcileArgs {
     pub targets: Vec<SyncTargetSpec>,
 }
 
-/// Result of a `reconcile` call. `errors` is non-fatal per-target so one bad
-/// target doesn't block the rest from converging.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
 pub struct SyncReconcileOutcome {
     pub applied: Vec<SyncTargetSpec>,
@@ -52,14 +33,13 @@ pub struct SyncTargetError {
     pub message: String,
 }
 
-/// Filter for a `status` call. Empty = every target the provider knows about.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
 pub struct SyncStatusArgs {
+    /// `None` matches every target, not none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
 
-/// Health of one declared replication, as reported by its owning provider.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct SyncTargetHealth {
     pub target: SyncTargetSpec,
@@ -72,29 +52,27 @@ pub struct SyncTargetHealth {
     pub errors: Vec<String>,
 }
 
-// ── Provider registry ───────────────────────────────────────────────────────
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
+pub struct SyncStatusOutcome {
+    pub health: Vec<SyncTargetHealth>,
+    pub errors: Vec<SyncProviderError>,
+}
 
-/// A `Sync` method provider — one per replication method (syncthing today;
-/// zfs-send / rsync later). Registered into a process-global registry so the
-/// surface layer can fan `reconcile`/`status` out method-agnostically.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+pub struct SyncProviderError {
+    pub provider: String,
+    pub message: String,
+}
+
 pub trait SyncProvider: Send + Sync {
-    /// Provider/registry name (e.g. `"syncthing"`). Also the `method` value
-    /// in [`SyncTargetSpec`] that routes a target to this provider.
     fn name(&self) -> &str;
-
-    /// Converge actual state toward `args.targets`, all of which name this
-    /// provider as their `method`.
     fn reconcile(&self, args: SyncReconcileArgs) -> BoxFuture<'_, Result<SyncReconcileOutcome>>;
-
-    /// Report per-target health: completion%, lag, errors.
     fn status(&self, args: SyncStatusArgs) -> BoxFuture<'_, Result<Vec<SyncTargetHealth>>>;
 }
 
 static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn SyncProvider>>>> =
     LazyLock::new(|| RwLock::new(Vec::new()));
 
-/// Register a `Sync` provider. Re-registering the same `name()` replaces the
-/// existing entry so a dev rebuild / plugin reload doesn't duplicate it.
 pub fn register_provider(provider: Arc<dyn SyncProvider>) {
     let mut g = GLOBAL.write().expect("sync registry poisoned");
     let name = provider.name().to_string();
@@ -105,12 +83,10 @@ pub fn register_provider(provider: Arc<dyn SyncProvider>) {
     }
 }
 
-/// Snapshot of every registered provider.
 pub fn providers() -> Vec<Arc<dyn SyncProvider>> {
     GLOBAL.read().expect("sync registry poisoned").clone()
 }
 
-/// Deregister the provider named `name`, if present. Returns `true` if removed.
 pub fn deregister_provider(name: &str) -> bool {
     let mut g = GLOBAL.write().expect("sync registry poisoned");
     let before = g.len();
@@ -118,13 +94,6 @@ pub fn deregister_provider(name: &str) -> bool {
     before != g.len()
 }
 
-// ── Surface entry points ─────────────────────────────────────────────────────
-
-/// Fan `reconcile` across every registered provider, routing each
-/// [`SyncTargetSpec`] to the provider named by its `method`. A target whose
-/// method has no registered provider is reported as an error, not silently
-/// dropped; a provider that errors is skipped for the rest — one broken
-/// provider must not block every other method's reconcile.
 pub async fn reconcile(args: SyncReconcileArgs) -> SyncReconcileOutcome {
     let all = providers();
     let mut out = SyncReconcileOutcome::default();
@@ -170,14 +139,15 @@ pub async fn reconcile(args: SyncReconcileArgs) -> SyncReconcileOutcome {
     out
 }
 
-/// Fan `status` across every registered provider, concatenating results. A
-/// provider that errors is skipped — one broken provider must not blank the
-/// whole report.
-pub async fn status(args: SyncStatusArgs) -> Vec<SyncTargetHealth> {
-    let mut out = Vec::new();
+pub async fn status(args: SyncStatusArgs) -> SyncStatusOutcome {
+    let mut out = SyncStatusOutcome::default();
     for p in providers() {
-        if let Ok(mut health) = p.status(args.clone()).await {
-            out.append(&mut health);
+        match p.status(args.clone()).await {
+            Ok(mut health) => out.health.append(&mut health),
+            Err(e) => out.errors.push(SyncProviderError {
+                provider: p.name().to_string(),
+                message: e.to_string(),
+            }),
         }
     }
     out
@@ -217,7 +187,11 @@ mod tests {
         }
         fn status(&self, _args: SyncStatusArgs) -> BoxFuture<'_, Result<Vec<SyncTargetHealth>>> {
             let name = self.name.clone();
+            let fail = self.fail;
             Box::pin(async move {
+                if fail {
+                    anyhow::bail!("boom");
+                }
                 Ok(vec![SyncTargetHealth {
                     target: SyncTargetSpec {
                         source: "docs".into(),
@@ -352,7 +326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_concatenates_across_providers_and_skips_errors() {
+    async fn status_concatenates_healthy_providers() {
         register_provider(Arc::new(FakeProvider {
             name: "status-a".into(),
             reconciled: Arc::new(Mutex::new(vec![])),
@@ -365,11 +339,45 @@ mod tests {
         }));
 
         let out = status(SyncStatusArgs::default()).await;
-        let methods: Vec<&str> = out.iter().map(|h| h.target.method.as_str()).collect();
+        let methods: Vec<&str> = out
+            .health
+            .iter()
+            .map(|h| h.target.method.as_str())
+            .collect();
         assert!(methods.contains(&"status-a"));
         assert!(methods.contains(&"status-b"));
+        assert!(!out.errors.iter().any(|e| e.provider == "status-a"));
+        assert!(!out.errors.iter().any(|e| e.provider == "status-b"));
 
         assert!(deregister_provider("status-a"));
         assert!(deregister_provider("status-b"));
+    }
+
+    #[tokio::test]
+    async fn status_surfaces_a_failing_provider_as_an_error_not_a_silent_drop() {
+        register_provider(Arc::new(FakeProvider {
+            name: "status-fails".into(),
+            reconciled: Arc::new(Mutex::new(vec![])),
+            fail: true,
+        }));
+        register_provider(Arc::new(FakeProvider {
+            name: "status-ok".into(),
+            reconciled: Arc::new(Mutex::new(vec![])),
+            fail: false,
+        }));
+
+        let out = status(SyncStatusArgs::default()).await;
+
+        assert!(out.health.iter().any(|h| h.target.method == "status-ok"));
+        assert!(!out.health.iter().any(|h| h.target.method == "status-fails"));
+        let err = out
+            .errors
+            .iter()
+            .find(|e| e.provider == "status-fails")
+            .expect("failing provider surfaced as an error");
+        assert!(err.message.contains("boom"));
+
+        assert!(deregister_provider("status-fails"));
+        assert!(deregister_provider("status-ok"));
     }
 }

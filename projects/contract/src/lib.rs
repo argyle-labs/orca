@@ -131,8 +131,8 @@ pub use guard::{GuardViolation, UnitFacts, UnitGuard, partition_violations};
 
 pub mod sync;
 pub use sync::{
-    SyncProvider, SyncReconcileArgs, SyncReconcileOutcome, SyncStatusArgs, SyncTargetError,
-    SyncTargetHealth, SyncTargetSpec,
+    SyncProvider, SyncProviderError, SyncReconcileArgs, SyncReconcileOutcome, SyncStatusArgs,
+    SyncStatusOutcome, SyncTargetError, SyncTargetHealth, SyncTargetSpec,
 };
 
 pub mod unit;
