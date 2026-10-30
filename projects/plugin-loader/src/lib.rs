@@ -497,9 +497,7 @@ fn register_service_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
             Err(v) => Err(ServiceError::Transport(contract::render_invoke_error(&v))),
         }
     });
-    // Empty `backup_include` means the backend overrides backup/restore itself
-    // (or has none) — `None` opts the proxy out of the generic fallback rather
-    // than handing it a spec with nothing to tar.
+    // None (not Some(empty)) opts the proxy out of the generic fallback entirely.
     let backup_spec = (!def.backup_include.is_empty()).then(|| contract::backup::BackupSpec {
         include: def.backup_include.clone(),
         exclude: def.backup_exclude.clone(),
@@ -3198,12 +3196,6 @@ mod loader_tests {
         );
     }
 
-    /// A def's non-empty `backup_include` becomes the registered proxy's
-    /// `backup_spec`: when the thunk returns the plugin's scaffolded
-    /// "unimplemented" error, the proxy falls back to the generic host-side
-    /// tar/pbs path instead of surfacing that error — the root-cause fix this
-    /// bridge exists for (every out-of-process service plugin declaring
-    /// `data_paths` but compiled without `in-process`).
     #[tokio::test]
     async fn service_backend_def_backup_include_drives_the_generic_fallback() {
         use plugin_toolkit::service::{

@@ -208,10 +208,7 @@ impl ServiceError {
         ServiceError::Other(format!("`{op}` not yet implemented"))
     }
 
-    /// True if this error carries [`unimplemented`](Self::unimplemented)'s
-    /// message for `op` — including after crossing the subprocess wire, where
-    /// it is re-wrapped as `Transport` (the rendered plugin error string) by
-    /// the loader's thunk, so matching the variant alone would miss it.
+    // String match, not variant match: crossing the subprocess wire re-wraps this as `Transport`.
     #[cfg(feature = "in-process")]
     fn is_unimplemented_for(&self, op: &str) -> bool {
         self.to_string()
@@ -472,12 +469,7 @@ pub type InvokeThunk = Arc<
 
 /// Register a backend from a plugin's `BackendDef`, wiring its ops back through
 /// `invoke`. `default_port` is the `kind` string, `runtimes` the `runtime` CSV,
-/// both raw from the def. `backup_spec` is the def's self-reported
-/// `backup_include`/`backup_exclude` (`None` when the plugin declares neither,
-/// or implements backup itself): it drives the generic host-side tar/pbs
-/// fallback a thin plugin cannot run itself — see
-/// [`ServiceProxy::backup`](ServiceBackend::backup). Unknown values are
-/// rejected at load.
+/// both raw from the def. Unknown values are rejected at load.
 #[cfg(feature = "in-process")]
 pub fn register_from_def(
     name: String,
@@ -522,8 +514,6 @@ struct ServiceProxy {
     default_port: u16,
     endpoint: String,
     capabilities: Vec<ServiceCapability>,
-    /// The plugin's self-reported backup declaration, for the generic
-    /// host-side fallback — see [`ServiceBackend::backup`] on this type.
     backup_spec: Option<contract::backup::BackupSpec>,
     invoke: InvokeThunk,
 }
@@ -546,8 +536,6 @@ impl ServiceProxy {
             .map_err(|e| ServiceError::Other(format!("decode `{op}` result: {e}")))
     }
 
-    /// Whether the def advertised a non-empty `backup_spec` the generic
-    /// host-side fallback can actually tar.
     fn has_backup_spec(&self) -> bool {
         self.backup_spec
             .as_ref()
@@ -589,13 +577,6 @@ impl ServiceBackend for ServiceProxy {
         ))
     }
 
-    /// Tries the plugin's own `backup` first — a future app may implement a
-    /// real app-aware backup (e.g. a DB dump), which must still take priority.
-    /// Only when the plugin's reply is specifically its scaffolded
-    /// `unimplemented` default, and the def advertised a non-empty
-    /// `backup_spec`, does this fall back to the same generic host-side
-    /// tar/pbs path [`ServiceBackend::backup`]'s in-process default runs —
-    /// a thin plugin cannot run that itself (no `tokio::process`).
     fn backup<'a>(
         &'a self,
         instance: &'a str,
@@ -634,7 +615,6 @@ impl ServiceBackend for ServiceProxy {
         })
     }
 
-    /// Inverse of [`backup`](Self::backup) — see it for the fallback it serves.
     fn restore<'a>(
         &'a self,
         instance: &'a str,
@@ -941,11 +921,6 @@ pub fn select_method(method_name: Option<&str>, runtime: Runtime) -> Arc<dyn Bac
         .expect("tar backup method always registered")
 }
 
-/// The backend-identifying inputs [`generic_backup`]/[`generic_restore`] need,
-/// shared by [`ServiceBackend::backup`]/[`restore`](ServiceBackend::restore)'s
-/// in-process default and [`ServiceProxy`]'s own-implementation-first
-/// fallback. Bundled into one struct to keep both functions under clippy's
-/// argument-count lint.
 #[cfg(feature = "in-process")]
 struct BackupFallbackCtx<'a> {
     provider: &'a str,
@@ -954,12 +929,8 @@ struct BackupFallbackCtx<'a> {
     runtimes: &'a [Runtime],
 }
 
-/// The generic, runtime-agnostic backup shared by [`ServiceBackend::backup`]'s
-/// in-process default and [`ServiceProxy`]'s own-implementation-first fallback:
-/// tars `spec.include` (or `data_paths` when the spec carries none) inside the
-/// running instance. From the SPEC, not `data_paths` directly: the spec is
-/// where `exclude` lives, and building the context from the bare path list is
-/// what silently discarded it (#613).
+// Paths come from spec.include, not data_paths directly — exclude lives only on the
+// spec, and building from the bare path list silently dropped it once already (#613).
 #[cfg(feature = "in-process")]
 async fn generic_backup(
     ctx: BackupFallbackCtx<'_>,
@@ -988,7 +959,6 @@ async fn generic_backup(
         .await
 }
 
-/// Inverse of [`generic_backup`] — see it for the fallback it serves.
 #[cfg(feature = "in-process")]
 async fn generic_restore(
     ctx: BackupFallbackCtx<'_>,
@@ -2597,15 +2567,6 @@ mod tests {
         deregister_backend("proxy-err");
     }
 
-    // ── Generic backup/restore fallback (#613-adjacent root-cause fix) ────
-    // A thin plugin cannot link the subprocess backup machinery, so its own
-    // `backup`/`restore` default to `unimplemented`. `ServiceProxy` must
-    // substitute the same generic tar/pbs path the in-process trait default
-    // runs — but ONLY when the plugin's own op genuinely has no
-    // implementation, never when it succeeds (no double-backup).
-
-    /// A `BackupMethod` stub that never shells out, so the fallback test
-    /// exercises `ServiceProxy`'s dispatch logic without a real container.
     struct StubMethod;
     impl BackupMethod for StubMethod {
         fn name(&self) -> &str {
@@ -2640,8 +2601,6 @@ mod tests {
     #[tokio::test]
     async fn proxy_backup_falls_back_to_generic_tar_when_plugin_unimplemented() {
         register_method(Arc::new(StubMethod));
-        // Mirrors a thin plugin's compiled-out default: every op errors
-        // unimplemented, exactly as `dispatch_op` would surface it.
         let thunk: InvokeThunk =
             Arc::new(|op: &str, _args_json: String, _call| Err(ServiceError::unimplemented(op)));
 
@@ -2700,9 +2659,6 @@ mod tests {
     #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn proxy_backup_prefers_plugin_implementation_over_fallback() {
-        // The plugin's own op succeeds (a hypothetical DB-dump backup) — the
-        // fallback must never run, so the result is the plugin's own, not a
-        // generic tar path.
         let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String, _call| match op {
             "backup" => {
                 let a: BackupArgs = serde_json::from_str(&args_json).unwrap();
@@ -2743,9 +2699,6 @@ mod tests {
     #[cfg(feature = "in-process")]
     #[tokio::test]
     async fn proxy_backup_propagates_real_errors_without_falling_back() {
-        // A transport failure unrelated to "unimplemented" must surface as-is,
-        // even with a backup_spec present — the fallback is for the specific
-        // "plugin has no implementation" signal only.
         let thunk: InvokeThunk =
             Arc::new(|_, _, _call| Err(ServiceError::Transport("upstream boom".into())));
         register_from_def(

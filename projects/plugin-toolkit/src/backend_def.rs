@@ -152,10 +152,7 @@ pub fn service_backend_def(
         .iter()
         .map(|c| c.as_str().to_string())
         .collect();
-    // Self-report `backup_spec` (not `data_paths` directly — the spec is where
-    // `exclude` lives), so a thin plugin's advertised def carries what the
-    // host-side generic backup fallback needs, even though the plugin itself
-    // cannot link the subprocess backup machinery to do it.
+    // Via backup_spec, not data_paths directly — exclude lives only on the spec.
     let backup_spec = backend.backup_spec();
 
     crate::abi::BackendDef {
@@ -783,7 +780,6 @@ mod tests {
         assert_eq!(def.endpoint, "http://abs:13378");
         assert_eq!(def.capabilities, vec!["deploy", "status"]);
         assert_eq!(def.invoke_prefix, "abs.__service");
-        // MockService declares no data_paths, so the def's backup axes are empty.
         assert!(def.backup_include.is_empty());
 
         let json = backends_json(vec![service_backend_def(&MockService, "abs.__service")]);
