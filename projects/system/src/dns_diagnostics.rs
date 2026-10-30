@@ -34,10 +34,11 @@ const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 /// Internal gateway/resolver every managed host is expected to point at,
 /// sourced from `ORCA_DNS_EXPECTED_NAMESERVER` so the real address never ships
 /// in source (same convention as `hook::opnsense_patterns`'s
-/// `ORCA_ROUTER_GUARD_IP`). Falls back to a documentation placeholder so the
-/// provider still runs — and reports drift — in dev/test environments.
-fn expected_nameserver() -> String {
-    std::env::var("ORCA_DNS_EXPECTED_NAMESERVER").unwrap_or_else(|_| "10.0.0.1".to_string())
+/// `ORCA_ROUTER_GUARD_IP`). `None` when unset — the nameserver check is then
+/// skipped entirely, rather than compared against a placeholder that would
+/// never match any real host's actual resolver.
+fn expected_nameserver() -> Option<String> {
+    std::env::var("ORCA_DNS_EXPECTED_NAMESERVER").ok()
 }
 
 /// Internal search domain, sourced from `ORCA_DNS_EXPECTED_SEARCH_DOMAIN` so a
@@ -51,29 +52,42 @@ fn expected_search_domain() -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Drift {
     nameservers: Vec<String>,
+    /// Vacuously `true` when no nameserver is expected (env var unset), so it
+    /// never contributes a finding on its own.
     has_internal_nameserver: bool,
     has_internal_search: bool,
 }
 
-/// Parse `resolv.conf` text into its `nameserver`/`search` lines and judge
-/// whether it matches the internal convention.
+/// Parse `resolv.conf` text into its `nameserver`/`search` (or `domain`,
+/// resolver(5)'s single-entry synonym for `search`) lines and judge whether
+/// it matches the internal convention.
+///
+/// Only the last `search`/`domain` line counts, per resolver(5) — a later
+/// line overrides, not adds to, earlier ones. `expected_nameserver` of `None`
+/// skips the nameserver check entirely (treated as a match).
 ///
 /// Split from the provider so the judgement is unit-testable without a
 /// filesystem — the read is the untestable part, the comparison is not.
-fn parse(text: &str, expected_nameserver: &str, expected_search_domain: &str) -> Drift {
+fn parse(text: &str, expected_nameserver: Option<&str>, expected_search_domain: &str) -> Drift {
     let mut nameservers = Vec::new();
-    let mut search_domains = Vec::new();
+    let mut search_domains: Vec<String> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("nameserver") {
             if let Some(ns) = rest.split_whitespace().next() {
                 nameservers.push(ns.to_string());
             }
-        } else if let Some(rest) = line.strip_prefix("search") {
-            search_domains.extend(rest.split_whitespace().map(str::to_string));
+        } else if let Some(rest) = line
+            .strip_prefix("search")
+            .or_else(|| line.strip_prefix("domain"))
+        {
+            search_domains = rest.split_whitespace().map(str::to_string).collect();
         }
     }
-    let has_internal_nameserver = nameservers.iter().any(|ns| ns == expected_nameserver);
+    let has_internal_nameserver = match expected_nameserver {
+        Some(ns) => nameservers.iter().any(|n| n == ns),
+        None => true,
+    };
     let has_internal_search = search_domains.iter().any(|d| d == expected_search_domain);
     Drift {
         nameservers,
@@ -87,7 +101,7 @@ fn parse(text: &str, expected_nameserver: &str, expected_search_domain: &str) ->
 fn finding_for(
     drift: &Drift,
     hostname: &str,
-    expected_nameserver: &str,
+    expected_nameserver: Option<&str>,
     expected_search_domain: &str,
 ) -> Option<Finding> {
     if drift.has_internal_nameserver && drift.has_internal_search {
@@ -98,14 +112,10 @@ fn finding_for(
     } else {
         format!("nameserver(s) {}", drift.nameservers.join(", "))
     };
-    Some(Finding {
-        id: format!("dns-resolver-drift::{hostname}"),
-        provider: PROVIDER_NAME.to_string(),
-        severity: Severity::Warn,
-        title: format!("{hostname}: resolv.conf doesn't point at the internal resolver"),
-        detail: format!(
+    let detail = match expected_nameserver {
+        Some(ns) => format!(
             "{RESOLV_CONF_PATH} has {seen} and {} the '{expected_search_domain}' search \
-             domain, instead of 'nameserver {expected_nameserver}' + 'search \
+             domain, instead of 'nameserver {ns}' + 'search \
              {expected_search_domain}'. This host cannot resolve internal-only \
              *.{expected_search_domain} hostnames (e.g. gitea.{expected_search_domain}) — \
              the same drift that failed every plugin-update check on loki.",
@@ -115,6 +125,24 @@ fn finding_for(
                 "lacks"
             }
         ),
+        None => format!(
+            "{RESOLV_CONF_PATH} lacks the '{expected_search_domain}' search domain (no \
+             'search {expected_search_domain}' or 'domain {expected_search_domain}' line). \
+             This host cannot resolve internal-only *.{expected_search_domain} hostnames \
+             (e.g. gitea.{expected_search_domain}) — the same drift that failed every \
+             plugin-update check on loki."
+        ),
+    };
+    let title = match expected_nameserver {
+        Some(_) => format!("{hostname}: resolv.conf doesn't point at the internal resolver"),
+        None => format!("{hostname}: resolv.conf doesn't have the internal search domain"),
+    };
+    Some(Finding {
+        id: format!("dns-resolver-drift::{hostname}"),
+        provider: PROVIDER_NAME.to_string(),
+        severity: Severity::Warn,
+        title,
+        detail,
         repair: None,
     })
 }
@@ -134,11 +162,11 @@ impl DiagnosticsProvider for DnsDiagnostics {
                 .await
                 .map_err(|e| anyhow!("read {RESOLV_CONF_PATH}: {e}"))?;
             let (nameserver, search_domain) = (expected_nameserver(), expected_search_domain());
-            let drift = parse(&text, &nameserver, &search_domain);
+            let drift = parse(&text, nameserver.as_deref(), &search_domain);
             Ok(finding_for(
                 &drift,
                 crate::host_identity::hostname(),
-                &nameserver,
+                nameserver.as_deref(),
                 &search_domain,
             )
             .into_iter()
@@ -189,18 +217,35 @@ nameserver 8.8.8.8
 search scottkey.me
 ";
 
+    const DOMAIN_DIRECTIVE: &str = "\
+nameserver 10.0.0.1
+domain scottkey.me
+";
+
+    const LAST_SEARCH_LINE_WINS: &str = "\
+nameserver 10.0.0.1
+search example.com
+search scottkey.me
+";
+
+    const LATER_DOMAIN_OVERRIDES_EARLIER_SEARCH: &str = "\
+nameserver 10.0.0.1
+search scottkey.me
+domain example.com
+";
+
     #[test]
     fn matching_the_convention_reports_nothing() {
-        let drift = parse(GOOD, NS, DOMAIN);
+        let drift = parse(GOOD, Some(NS), DOMAIN);
         assert!(drift.has_internal_nameserver);
         assert!(drift.has_internal_search);
-        assert!(finding_for(&drift, "loki", NS, DOMAIN).is_none());
+        assert!(finding_for(&drift, "loki", Some(NS), DOMAIN).is_none());
     }
 
     #[test]
     fn public_resolvers_are_flagged() {
-        let drift = parse(PUBLIC_RESOLVERS, NS, DOMAIN);
-        let f = finding_for(&drift, "loki", NS, DOMAIN).expect("must report");
+        let drift = parse(PUBLIC_RESOLVERS, Some(NS), DOMAIN);
+        let f = finding_for(&drift, "loki", Some(NS), DOMAIN).expect("must report");
         assert_eq!(f.id, "dns-resolver-drift::loki");
         assert_eq!(f.severity, Severity::Warn);
         assert!(f.detail.contains("1.1.1.1"));
@@ -211,25 +256,65 @@ search scottkey.me
     fn internal_nameserver_without_search_domain_is_still_flagged() {
         // The nameserver alone is not enough — without the search domain,
         // bare internal hostnames like `gitea` still won't resolve.
-        let drift = parse(INTERNAL_NAMESERVER_NO_SEARCH, NS, DOMAIN);
+        let drift = parse(INTERNAL_NAMESERVER_NO_SEARCH, Some(NS), DOMAIN);
         assert!(drift.has_internal_nameserver);
         assert!(!drift.has_internal_search);
-        assert!(finding_for(&drift, "loki", NS, DOMAIN).is_some());
+        assert!(finding_for(&drift, "loki", Some(NS), DOMAIN).is_some());
     }
 
     #[test]
     fn internal_search_with_a_public_nameserver_is_still_flagged() {
-        let drift = parse(INTERNAL_SEARCH_PUBLIC_NAMESERVER, NS, DOMAIN);
+        let drift = parse(INTERNAL_SEARCH_PUBLIC_NAMESERVER, Some(NS), DOMAIN);
         assert!(!drift.has_internal_nameserver);
         assert!(drift.has_internal_search);
-        assert!(finding_for(&drift, "loki", NS, DOMAIN).is_some());
+        assert!(finding_for(&drift, "loki", Some(NS), DOMAIN).is_some());
     }
 
     #[test]
     fn an_empty_file_is_flagged_as_no_nameservers() {
-        let drift = parse("", NS, DOMAIN);
-        let f = finding_for(&drift, "loki", NS, DOMAIN).expect("must report");
+        let drift = parse("", Some(NS), DOMAIN);
+        let f = finding_for(&drift, "loki", Some(NS), DOMAIN).expect("must report");
         assert!(f.detail.contains("no nameservers at all"));
+    }
+
+    #[test]
+    fn nameserver_check_is_skipped_when_expectation_is_unset() {
+        // No ORCA_DNS_EXPECTED_NAMESERVER configured: a "wrong" nameserver
+        // present must not contribute a finding on its own.
+        let drift = parse(INTERNAL_SEARCH_PUBLIC_NAMESERVER, None, DOMAIN);
+        assert!(
+            drift.has_internal_nameserver,
+            "vacuously true with no expectation set"
+        );
+        assert!(drift.has_internal_search);
+        assert!(finding_for(&drift, "loki", None, DOMAIN).is_none());
+    }
+
+    #[test]
+    fn unset_nameserver_expectation_still_flags_a_bad_search_domain() {
+        let drift = parse(PUBLIC_RESOLVERS, None, DOMAIN);
+        assert!(drift.has_internal_nameserver);
+        assert!(!drift.has_internal_search);
+        let f = finding_for(&drift, "loki", None, DOMAIN).expect("must report");
+        assert!(f.detail.contains(DOMAIN));
+    }
+
+    #[test]
+    fn domain_directive_is_recognized_as_a_search_synonym() {
+        let drift = parse(DOMAIN_DIRECTIVE, Some(NS), DOMAIN);
+        assert!(drift.has_internal_search);
+    }
+
+    #[test]
+    fn only_the_last_search_line_takes_effect() {
+        let drift = parse(LAST_SEARCH_LINE_WINS, Some(NS), DOMAIN);
+        assert!(drift.has_internal_search);
+    }
+
+    #[test]
+    fn a_later_domain_line_overrides_an_earlier_search_line() {
+        let drift = parse(LATER_DOMAIN_OVERRIDES_EARLIER_SEARCH, Some(NS), DOMAIN);
+        assert!(!drift.has_internal_search);
     }
 
     #[tokio::test]
