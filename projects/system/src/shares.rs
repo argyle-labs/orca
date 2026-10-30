@@ -66,24 +66,16 @@ pub struct Share {
     /// failing over to unreplicated/stale data is worse than holding. `None` ⇒ the
     /// share fails over freely (unchanged pre-gate behaviour).
     pub replication: Option<String>,
-    /// JSON-encoded `Vec<SyncTargetSpec>` (the Sync seam, orca#339 slice 1) —
-    /// opaque to the macro/DB layer like `options`. Consume via
-    /// [`parse_sync_targets`] / [`encode_sync_targets`] — never parse ad hoc.
+    /// Opaque JSON-encoded `Vec<SyncTargetSpec>`; use [`parse_sync_targets`].
     pub sync_targets: String,
-    /// Whether this share is served out to the fleet (rendered as the
-    /// backend's export definition) rather than only mounted in.
     pub fleet_export: bool,
 }
 
-/// Parse a `Share`'s `sync_targets` column. The one place this JSON is
-/// decoded for reads — malformed/legacy data yields an empty list rather than
-/// failing the row read.
+/// Malformed/legacy data yields an empty list rather than failing the read.
 pub fn parse_sync_targets(raw: &str) -> Vec<SyncTargetSpec> {
     serde_json::from_str(raw).unwrap_or_default()
 }
 
-/// Encode targets for storage in the `sync_targets` column — the write-side
-/// counterpart of [`parse_sync_targets`].
 pub fn encode_sync_targets(targets: &[SyncTargetSpec]) -> String {
     serde_json::to_string(targets).unwrap_or_else(|_| "[]".to_string())
 }

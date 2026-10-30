@@ -530,11 +530,9 @@ pub struct StorageShareUpdateArgs {
     /// gates this share's failover. Pass an empty string to clear it.
     #[arg(long)]
     pub replication: Option<String>,
-    /// JSON array of `SyncTargetSpec` (the Sync seam). Pass an empty string
-    /// to clear it.
+    /// JSON array of `SyncTargetSpec`. Pass an empty string to clear it.
     #[arg(long)]
     pub sync_targets: Option<String>,
-    /// Whether this share is served out to the fleet.
     #[arg(long)]
     pub fleet_export: Option<bool>,
     /// Replace the reachable/failover route set. Repeatable: `--route kind=url`
