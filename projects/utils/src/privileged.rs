@@ -60,6 +60,8 @@ privileged_timeouts! {
         "cron-apply", root = Duration::from_secs(40), caller = Duration::from_secs(45);
     ROOT_LXC_PUSH_TIMEOUT / LXC_PUSH_HELPER_TIMEOUT =>
         "lxc-push", root = Duration::from_secs(9 * 60), caller = Duration::from_secs(10 * 60);
+    ROOT_LXC_DEV_PASSTHROUGH_TIMEOUT / LXC_DEV_PASSTHROUGH_HELPER_TIMEOUT =>
+        "lxc-dev-passthrough", root = Duration::from_secs(40), caller = Duration::from_secs(45);
     ROOT_PLUGIN_TRUST_TIMEOUT / PLUGIN_TRUST_TIMEOUT =>
         "plugin-trust-signed", root = Duration::from_secs(25), caller = Duration::from_secs(30);
     ROOT_UNIT_MIGRATE_TIMEOUT / UNIT_MIGRATE_TIMEOUT =>

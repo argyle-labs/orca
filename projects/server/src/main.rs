@@ -302,6 +302,13 @@ enum AdminAction {
     /// Invoked by the daemon via `sudo -n` — the privileged surface for
     /// `guest write_file`. Never exposed over REST/MCP/peer.
     LxcPush,
+    /// Privileged device passthrough for Proxmox LXC: reads a JSON
+    /// `LxcDevPassthroughOp` (`{vmid, dev_path}`) from stdin and runs
+    /// `pct set <vmid> -dev0 <dev_path>` as root, with `dev_path` checked
+    /// against a fixed allowlist. Invoked by the daemon via `sudo -n` — the
+    /// privileged surface for binding a host device into an LXC. Never exposed
+    /// over REST/MCP/peer.
+    LxcDevPassthrough,
     /// Privileged crontab access: reads a JSON `CronOp` (`read`, or a
     /// hash-checked `write` of one user's crontab) from stdin, capped in size,
     /// and runs `crontab -u <user> -l` / `crontab -u <user> -` as root. Only
@@ -1056,6 +1063,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::StorageApply
             | AdminAction::LxcExec
             | AdminAction::LxcPush
+            | AdminAction::LxcDevPassthrough
             | AdminAction::CronApply
             | AdminAction::UnitMigrate
             | AdminAction::PluginApply
@@ -1069,6 +1077,7 @@ async fn cmd_admin(action: AdminAction) -> Result<()> {
         AdminAction::StorageApply => cmd_admin_storage_apply().await,
         AdminAction::LxcExec => cmd_admin_lxc_exec().await,
         AdminAction::LxcPush => cmd_admin_lxc_push().await,
+        AdminAction::LxcDevPassthrough => cmd_admin_lxc_dev_passthrough().await,
         AdminAction::CronApply => cmd_admin_cron_apply().await,
         AdminAction::UnitMigrate => system::daemon::admin_unit_migrate(),
         AdminAction::PluginApply => cmd_admin_plugin_apply().await,
@@ -1089,6 +1098,9 @@ fn root_deadline(action: &AdminAction) -> Option<(&'static str, std::time::Durat
     match action {
         AdminAction::StorageApply => Some(("storage-apply", p::ROOT_STORAGE_APPLY_TIMEOUT)),
         AdminAction::LxcPush => Some(("lxc-push", p::ROOT_LXC_PUSH_TIMEOUT)),
+        AdminAction::LxcDevPassthrough => {
+            Some(("lxc-dev-passthrough", p::ROOT_LXC_DEV_PASSTHROUGH_TIMEOUT))
+        }
         AdminAction::PluginTrustSigned => {
             Some(("plugin-trust-signed", p::ROOT_PLUGIN_TRUST_TIMEOUT))
         }
@@ -1214,6 +1226,28 @@ async fn cmd_admin_lxc_push() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string(&result).context("serialize LxcPushResult")?
+    );
+    Ok(())
+}
+
+/// Read an `LxcDevPassthroughOp` (JSON) from stdin, bind the device into the
+/// container as root via `pct set`, and print the `LxcDevPassthroughResult`
+/// (JSON) to stdout. The daemon (as the `orca` user) invokes this via
+/// `sudo -n orca admin lxc-dev-passthrough`; the sudoers grant is scoped to
+/// exactly this command and only installed on Proxmox hosts. Device
+/// allowlisting happens in the executor — this just marshals stdin/stdout.
+async fn cmd_admin_lxc_dev_passthrough() -> Result<()> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("read LxcDevPassthroughOp from stdin")?;
+    let op: system::lxc_dev::LxcDevPassthroughOp =
+        serde_json::from_str(&buf).context("parse LxcDevPassthroughOp JSON")?;
+    let result = system::lxc_dev::execute_privileged_dev_passthrough(op).await;
+    println!(
+        "{}",
+        serde_json::to_string(&result).context("serialize LxcDevPassthroughResult")?
     );
     Ok(())
 }

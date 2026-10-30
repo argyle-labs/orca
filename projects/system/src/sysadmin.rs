@@ -227,7 +227,7 @@ fn install_autofs_sudoers(user: &str) -> Result<()> {
         "✓".green(),
         if cron { " + 'admin cron-apply'" } else { "" },
         if is_proxmox {
-            " + 'admin lxc-exec' + 'admin lxc-push'"
+            " + 'admin lxc-exec' + 'admin lxc-push' + 'admin lxc-dev-passthrough'"
         } else {
             ""
         }
@@ -640,7 +640,9 @@ fn sudoers_contents(user: &str, binary: &str, is_proxmox: bool, cron: bool) -> S
             "# Proxmox host: scoped in-container exec for LXC deployment updates.\n\
              {user} ALL=(root) NOPASSWD: {binary} admin lxc-exec\n\
              # Proxmox host: scoped file push (write_file) into a managed LXC.\n\
-             {user} ALL=(root) NOPASSWD: {binary} admin lxc-push\n"
+             {user} ALL=(root) NOPASSWD: {binary} admin lxc-push\n\
+             # Proxmox host: scoped LXC device passthrough (e.g. /dev/net/tun for a container's own Tailscale client).\n\
+             {user} ALL=(root) NOPASSWD: {binary} admin lxc-dev-passthrough\n"
         ));
     }
     contents
@@ -1024,9 +1026,11 @@ mod sudoers_tests {
         )));
         assert!(!c.contains("/var/lib/orca/.local/bin/orca"));
         assert!(!c.contains("lxc-exec"));
+        assert!(!c.contains("lxc-dev-passthrough"));
         let pve = sudoers_contents("orca", bin, true, true);
         assert!(pve.contains(&format!("{bin} admin lxc-exec\n")));
         assert!(pve.contains(&format!("{bin} admin lxc-push\n")));
+        assert!(pve.contains(&format!("{bin} admin lxc-dev-passthrough\n")));
         assert!(
             pve.lines()
                 .filter(|l| !l.starts_with('#'))
