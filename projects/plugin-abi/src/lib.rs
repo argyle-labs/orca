@@ -161,6 +161,17 @@ pub struct BackendDef {
     pub reaches: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<String>,
+    /// service-domain backup declaration: in-workload paths holding state the
+    /// generic, data-paths-driven backup tars (mirrors
+    /// `ServiceBackend::backup_spec`'s `include`). Plain `Vec<String>` rather
+    /// than the `contract::backup::BackupSpec` type itself, so this crate keeps
+    /// its serde+schemars-only isolation. Empty for domains that don't back up
+    /// this way, or whose backend overrides `backup`/`restore` itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backup_include: Vec<String>,
+    /// Sub-paths under `backup_include` to exclude (caches, logs, thumbnails).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backup_exclude: Vec<String>,
 }
 
 /// A typed, per-runtime provisioning profile a deploy target advertises: the

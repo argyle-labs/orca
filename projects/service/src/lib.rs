@@ -207,6 +207,16 @@ impl ServiceError {
     pub fn unimplemented(op: &str) -> Self {
         ServiceError::Other(format!("`{op}` not yet implemented"))
     }
+
+    /// True if this error carries [`unimplemented`](Self::unimplemented)'s
+    /// message for `op` — including after crossing the subprocess wire, where
+    /// it is re-wrapped as `Transport` (the rendered plugin error string) by
+    /// the loader's thunk, so matching the variant alone would miss it.
+    #[cfg(feature = "in-process")]
+    fn is_unimplemented_for(&self, op: &str) -> bool {
+        self.to_string()
+            .contains(&format!("`{op}` not yet implemented"))
+    }
 }
 
 // ── Adapter trait ────────────────────────────────────────────────────────────
@@ -309,30 +319,22 @@ pub trait ServiceBackend: Send + Sync {
         method_name: Option<&'a str>,
     ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
         let provider = self.provider().to_string();
-        // From the SPEC, not `data_paths()` directly: the spec is where
-        // `exclude` lives, and building the context from the bare path list
-        // is what silently discarded it (#613).
         let spec = self.backup_spec();
-        let paths = if spec.include.is_empty() {
-            self.data_paths()
-        } else {
-            spec.include.clone()
-        };
-        let runtime = runtime.or_else(|| self.runtimes().first().copied());
+        let data_paths = self.data_paths();
+        let runtimes = self.runtimes();
         Box::pin(async move {
-            let rt = runtime.ok_or_else(|| {
-                ServiceError::Other(format!("{provider}: no runtime to back up against"))
-            })?;
-            let method = select_method(method_name, rt);
-            method
-                .backup(BackupContext {
-                    runtime: rt,
-                    instance,
+            generic_backup(
+                BackupFallbackCtx {
                     provider: &provider,
-                    data_paths: &paths,
-                    exclude: &spec.exclude,
-                })
-                .await
+                    data_paths: &data_paths,
+                    spec: &spec,
+                    runtimes: &runtimes,
+                },
+                instance,
+                runtime,
+                method_name,
+            )
+            .await
         })
     }
 
@@ -360,29 +362,22 @@ pub trait ServiceBackend: Send + Sync {
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
         let provider = self.provider().to_string();
         let spec = self.backup_spec();
-        let paths = if spec.include.is_empty() {
-            self.data_paths()
-        } else {
-            spec.include.clone()
-        };
-        let runtime = runtime.or_else(|| self.runtimes().first().copied());
+        let data_paths = self.data_paths();
+        let runtimes = self.runtimes();
         Box::pin(async move {
-            let rt = runtime.ok_or_else(|| {
-                ServiceError::Other(format!("{provider}: no runtime to restore against"))
-            })?;
-            let method = select_method(method_name, rt);
-            method
-                .restore(
-                    BackupContext {
-                        runtime: rt,
-                        instance,
-                        provider: &provider,
-                        data_paths: &paths,
-                        exclude: &spec.exclude,
-                    },
-                    from,
-                )
-                .await
+            generic_restore(
+                BackupFallbackCtx {
+                    provider: &provider,
+                    data_paths: &data_paths,
+                    spec: &spec,
+                    runtimes: &runtimes,
+                },
+                instance,
+                runtime,
+                method_name,
+                from,
+            )
+            .await
         })
     }
 
@@ -477,7 +472,12 @@ pub type InvokeThunk = Arc<
 
 /// Register a backend from a plugin's `BackendDef`, wiring its ops back through
 /// `invoke`. `default_port` is the `kind` string, `runtimes` the `runtime` CSV,
-/// both raw from the def. Unknown values are rejected at load.
+/// both raw from the def. `backup_spec` is the def's self-reported
+/// `backup_include`/`backup_exclude` (`None` when the plugin declares neither,
+/// or implements backup itself): it drives the generic host-side tar/pbs
+/// fallback a thin plugin cannot run itself — see
+/// [`ServiceProxy::backup`](ServiceBackend::backup). Unknown values are
+/// rejected at load.
 #[cfg(feature = "in-process")]
 pub fn register_from_def(
     name: String,
@@ -485,6 +485,7 @@ pub fn register_from_def(
     runtimes_csv: &str,
     endpoint: String,
     capabilities: &[String],
+    backup_spec: Option<contract::backup::BackupSpec>,
     invoke: InvokeThunk,
 ) -> Result<(), ServiceError> {
     let default_port: u16 = default_port
@@ -505,6 +506,7 @@ pub fn register_from_def(
         default_port,
         endpoint,
         capabilities,
+        backup_spec,
         invoke,
     }));
     Ok(())
@@ -520,6 +522,9 @@ struct ServiceProxy {
     default_port: u16,
     endpoint: String,
     capabilities: Vec<ServiceCapability>,
+    /// The plugin's self-reported backup declaration, for the generic
+    /// host-side fallback — see [`ServiceBackend::backup`] on this type.
+    backup_spec: Option<contract::backup::BackupSpec>,
     invoke: InvokeThunk,
 }
 
@@ -539,6 +544,14 @@ impl ServiceProxy {
             .map_err(|e| ServiceError::Transport(format!("`{op}` proxy task failed: {e}")))??;
         serde_json::from_str(&out)
             .map_err(|e| ServiceError::Other(format!("decode `{op}` result: {e}")))
+    }
+
+    /// Whether the def advertised a non-empty `backup_spec` the generic
+    /// host-side fallback can actually tar.
+    fn has_backup_spec(&self) -> bool {
+        self.backup_spec
+            .as_ref()
+            .is_some_and(|s| !s.include.is_empty())
     }
 }
 
@@ -576,22 +589,52 @@ impl ServiceBackend for ServiceProxy {
         ))
     }
 
+    /// Tries the plugin's own `backup` first — a future app may implement a
+    /// real app-aware backup (e.g. a DB dump), which must still take priority.
+    /// Only when the plugin's reply is specifically its scaffolded
+    /// `unimplemented` default, and the def advertised a non-empty
+    /// `backup_spec`, does this fall back to the same generic host-side
+    /// tar/pbs path [`ServiceBackend::backup`]'s in-process default runs —
+    /// a thin plugin cannot run that itself (no `tokio::process`).
     fn backup<'a>(
         &'a self,
         instance: &'a str,
         runtime: Option<Runtime>,
         method_name: Option<&'a str>,
     ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
-        Box::pin(self.call(
-            "backup",
-            BackupArgs {
-                instance: instance.to_string(),
-                runtime,
-                method: method_name.map(str::to_string),
-            },
-        ))
+        Box::pin(async move {
+            let result = self
+                .call(
+                    "backup",
+                    BackupArgs {
+                        instance: instance.to_string(),
+                        runtime,
+                        method: method_name.map(str::to_string),
+                    },
+                )
+                .await;
+            match result {
+                Err(e) if e.is_unimplemented_for("backup") && self.has_backup_spec() => {
+                    let spec = self.backup_spec.as_ref().expect("has_backup_spec checked");
+                    generic_backup(
+                        BackupFallbackCtx {
+                            provider: &self.name,
+                            data_paths: &[],
+                            spec,
+                            runtimes: &self.runtimes,
+                        },
+                        instance,
+                        runtime,
+                        method_name,
+                    )
+                    .await
+                }
+                other => other,
+            }
+        })
     }
 
+    /// Inverse of [`backup`](Self::backup) — see it for the fallback it serves.
     fn restore<'a>(
         &'a self,
         instance: &'a str,
@@ -599,15 +642,38 @@ impl ServiceBackend for ServiceProxy {
         method_name: Option<&'a str>,
         from: &'a BackupArtifact,
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
-        Box::pin(self.call(
-            "restore",
-            RestoreArgs {
-                instance: instance.to_string(),
-                runtime,
-                method: method_name.map(str::to_string),
-                from: from.clone(),
-            },
-        ))
+        Box::pin(async move {
+            let result = self
+                .call(
+                    "restore",
+                    RestoreArgs {
+                        instance: instance.to_string(),
+                        runtime,
+                        method: method_name.map(str::to_string),
+                        from: from.clone(),
+                    },
+                )
+                .await;
+            match result {
+                Err(e) if e.is_unimplemented_for("restore") && self.has_backup_spec() => {
+                    let spec = self.backup_spec.as_ref().expect("has_backup_spec checked");
+                    generic_restore(
+                        BackupFallbackCtx {
+                            provider: &self.name,
+                            data_paths: &[],
+                            spec,
+                            runtimes: &self.runtimes,
+                        },
+                        instance,
+                        runtime,
+                        method_name,
+                        from,
+                    )
+                    .await
+                }
+                other => other,
+            }
+        })
     }
 
     fn configure<'a>(
@@ -873,6 +939,86 @@ pub fn select_method(method_name: Option<&str>, runtime: Runtime) -> Arc<dyn Bac
     backup_method(auto)
         .or_else(|| backup_method("tar"))
         .expect("tar backup method always registered")
+}
+
+/// The backend-identifying inputs [`generic_backup`]/[`generic_restore`] need,
+/// shared by [`ServiceBackend::backup`]/[`restore`](ServiceBackend::restore)'s
+/// in-process default and [`ServiceProxy`]'s own-implementation-first
+/// fallback. Bundled into one struct to keep both functions under clippy's
+/// argument-count lint.
+#[cfg(feature = "in-process")]
+struct BackupFallbackCtx<'a> {
+    provider: &'a str,
+    data_paths: &'a [String],
+    spec: &'a contract::backup::BackupSpec,
+    runtimes: &'a [Runtime],
+}
+
+/// The generic, runtime-agnostic backup shared by [`ServiceBackend::backup`]'s
+/// in-process default and [`ServiceProxy`]'s own-implementation-first fallback:
+/// tars `spec.include` (or `data_paths` when the spec carries none) inside the
+/// running instance. From the SPEC, not `data_paths` directly: the spec is
+/// where `exclude` lives, and building the context from the bare path list is
+/// what silently discarded it (#613).
+#[cfg(feature = "in-process")]
+async fn generic_backup(
+    ctx: BackupFallbackCtx<'_>,
+    instance: &str,
+    runtime: Option<Runtime>,
+    method_name: Option<&str>,
+) -> Result<BackupArtifact, ServiceError> {
+    let paths = if ctx.spec.include.is_empty() {
+        ctx.data_paths
+    } else {
+        &ctx.spec.include
+    };
+    let provider = ctx.provider;
+    let rt = runtime
+        .or_else(|| ctx.runtimes.first().copied())
+        .ok_or_else(|| ServiceError::Other(format!("{provider}: no runtime to back up against")))?;
+    let method = select_method(method_name, rt);
+    method
+        .backup(BackupContext {
+            runtime: rt,
+            instance,
+            provider,
+            data_paths: paths,
+            exclude: &ctx.spec.exclude,
+        })
+        .await
+}
+
+/// Inverse of [`generic_backup`] — see it for the fallback it serves.
+#[cfg(feature = "in-process")]
+async fn generic_restore(
+    ctx: BackupFallbackCtx<'_>,
+    instance: &str,
+    runtime: Option<Runtime>,
+    method_name: Option<&str>,
+    from: &BackupArtifact,
+) -> Result<(), ServiceError> {
+    let paths = if ctx.spec.include.is_empty() {
+        ctx.data_paths
+    } else {
+        &ctx.spec.include
+    };
+    let provider = ctx.provider;
+    let rt = runtime
+        .or_else(|| ctx.runtimes.first().copied())
+        .ok_or_else(|| ServiceError::Other(format!("{provider}: no runtime to restore against")))?;
+    let method = select_method(method_name, rt);
+    method
+        .restore(
+            BackupContext {
+                runtime: rt,
+                instance,
+                provider,
+                data_paths: paths,
+                exclude: &ctx.spec.exclude,
+            },
+            from,
+        )
+        .await
 }
 
 #[cfg(feature = "in-process")]
@@ -2066,6 +2212,7 @@ mod tests {
             "docker,lxc",
             "http://abs".into(),
             &["status".into(), "configure".into()],
+            None,
             thunk,
         )
         .expect("def registers");
@@ -2103,6 +2250,7 @@ mod tests {
                 "docker",
                 "e".into(),
                 &[],
+                None,
                 thunk.clone()
             )
             .is_err()
@@ -2115,6 +2263,7 @@ mod tests {
                 "docker,banana",
                 "e".into(),
                 &[],
+                None,
                 thunk.clone()
             )
             .is_err()
@@ -2127,6 +2276,7 @@ mod tests {
                 "docker",
                 "e".into(),
                 &["fly".into()],
+                None,
                 thunk
             )
             .is_err()
@@ -2144,6 +2294,7 @@ mod tests {
             "docker,,",
             "e".into(),
             &[],
+            None,
             thunk,
         )
         .expect("empty csv segments filtered");
@@ -2363,6 +2514,7 @@ mod tests {
             "docker",
             "http://x".into(),
             &["deploy".into(), "backup".into(), "restore".into()],
+            None,
             thunk,
         )
         .expect("def registers");
@@ -2406,6 +2558,7 @@ mod tests {
             "docker",
             String::new(),
             &["status".into()],
+            None,
             thunk,
         )
         .expect("def registers");
@@ -2431,6 +2584,7 @@ mod tests {
             "docker",
             String::new(),
             &["status".into()],
+            None,
             thunk,
         )
         .expect("def registers");
@@ -2441,6 +2595,178 @@ mod tests {
             .expect_err("thunk error");
         assert!(e.to_string().contains("upstream boom"), "{e}");
         deregister_backend("proxy-err");
+    }
+
+    // ── Generic backup/restore fallback (#613-adjacent root-cause fix) ────
+    // A thin plugin cannot link the subprocess backup machinery, so its own
+    // `backup`/`restore` default to `unimplemented`. `ServiceProxy` must
+    // substitute the same generic tar/pbs path the in-process trait default
+    // runs — but ONLY when the plugin's own op genuinely has no
+    // implementation, never when it succeeds (no double-backup).
+
+    /// A `BackupMethod` stub that never shells out, so the fallback test
+    /// exercises `ServiceProxy`'s dispatch logic without a real container.
+    struct StubMethod;
+    impl BackupMethod for StubMethod {
+        fn name(&self) -> &str {
+            "stub-fallback"
+        }
+        fn backup<'a>(
+            &'a self,
+            ctx: BackupContext<'a>,
+        ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
+            let instance = ctx.instance.to_string();
+            let data_paths = ctx.data_paths.to_vec();
+            Box::pin(async move {
+                Ok(BackupArtifact {
+                    service: "fallback".into(),
+                    instance,
+                    path: format!("/backups/{}.tar.gz", data_paths.join(",")),
+                    timestamp: "20260101-000000".into(),
+                    ..Default::default()
+                })
+            })
+        }
+        fn restore<'a>(
+            &'a self,
+            _ctx: BackupContext<'a>,
+            _from: &'a BackupArtifact,
+        ) -> BoxFuture<'a, Result<(), ServiceError>> {
+            Box::pin(async move { Ok(()) })
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_backup_falls_back_to_generic_tar_when_plugin_unimplemented() {
+        register_method(Arc::new(StubMethod));
+        // Mirrors a thin plugin's compiled-out default: every op errors
+        // unimplemented, exactly as `dispatch_op` would surface it.
+        let thunk: InvokeThunk =
+            Arc::new(|op: &str, _args_json: String, _call| Err(ServiceError::unimplemented(op)));
+
+        register_from_def(
+            "proxy-fallback".into(),
+            "80",
+            "docker",
+            "http://x".into(),
+            &["backup".into()],
+            Some(contract::backup::BackupSpec::paths(["/config".to_string()])),
+            thunk,
+        )
+        .expect("def registers");
+
+        let b = backend("proxy-fallback").expect("registered");
+        let art = b
+            .backup("main", Some(Runtime::Docker), Some("stub-fallback"))
+            .await
+            .expect("falls back to the generic backup path");
+        assert_eq!(art.service, "fallback");
+        assert!(art.path.contains("/config"), "{}", art.path);
+
+        deregister_backend("proxy-fallback");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_restore_falls_back_to_generic_tar_when_plugin_unimplemented() {
+        register_method(Arc::new(StubMethod));
+        let thunk: InvokeThunk =
+            Arc::new(|op: &str, _args_json: String, _call| Err(ServiceError::unimplemented(op)));
+
+        register_from_def(
+            "proxy-restore-fallback".into(),
+            "80",
+            "docker",
+            "http://x".into(),
+            &["restore".into()],
+            Some(contract::backup::BackupSpec::paths(["/config".to_string()])),
+            thunk,
+        )
+        .expect("def registers");
+
+        let b = backend("proxy-restore-fallback").expect("registered");
+        let from = BackupArtifact {
+            path: "/backups/config.tar.gz".into(),
+            ..Default::default()
+        };
+        b.restore("main", Some(Runtime::Docker), Some("stub-fallback"), &from)
+            .await
+            .expect("falls back to the generic restore path");
+
+        deregister_backend("proxy-restore-fallback");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_backup_prefers_plugin_implementation_over_fallback() {
+        // The plugin's own op succeeds (a hypothetical DB-dump backup) — the
+        // fallback must never run, so the result is the plugin's own, not a
+        // generic tar path.
+        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String, _call| match op {
+            "backup" => {
+                let a: BackupArgs = serde_json::from_str(&args_json).unwrap();
+                let art = BackupArtifact {
+                    service: "plugin-native".into(),
+                    instance: a.instance,
+                    path: "/db/dump.sql".into(),
+                    timestamp: "20260101-000000".into(),
+                    ..Default::default()
+                };
+                Ok(serde_json::to_string(&art).unwrap())
+            }
+            other => Err(ServiceError::Other(format!("unexpected {other}"))),
+        });
+
+        register_from_def(
+            "proxy-native-backup".into(),
+            "80",
+            "docker",
+            "http://x".into(),
+            &["backup".into()],
+            Some(contract::backup::BackupSpec::paths(["/config".to_string()])),
+            thunk,
+        )
+        .expect("def registers");
+
+        let b = backend("proxy-native-backup").expect("registered");
+        let art = b
+            .backup("main", None, None)
+            .await
+            .expect("plugin's own backup wins");
+        assert_eq!(art.service, "plugin-native");
+        assert_eq!(art.path, "/db/dump.sql");
+
+        deregister_backend("proxy-native-backup");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_backup_propagates_real_errors_without_falling_back() {
+        // A transport failure unrelated to "unimplemented" must surface as-is,
+        // even with a backup_spec present — the fallback is for the specific
+        // "plugin has no implementation" signal only.
+        let thunk: InvokeThunk =
+            Arc::new(|_, _, _call| Err(ServiceError::Transport("upstream boom".into())));
+        register_from_def(
+            "proxy-real-error".into(),
+            "80",
+            "docker",
+            "http://x".into(),
+            &["backup".into()],
+            Some(contract::backup::BackupSpec::paths(["/config".to_string()])),
+            thunk,
+        )
+        .expect("def registers");
+
+        let b = backend("proxy-real-error").expect("registered");
+        let e = b
+            .backup("main", None, None)
+            .await
+            .expect_err("real transport error is not swallowed by the fallback");
+        assert!(e.to_string().contains("upstream boom"), "{e}");
+
+        deregister_backend("proxy-real-error");
     }
 
     // ── PbsMethod file-backup guard ──────────────────────────────────────
