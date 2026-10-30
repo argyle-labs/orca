@@ -924,6 +924,11 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     // to every level check. Gated on the `proxmox` capability; a host with no
     // `pct` registers nothing rather than reporting an empty audit.
     system::mount_diagnostics::register();
+    // Core-owned DNS-resolver provider: reports hosts whose resolv.conf has
+    // drifted from the internal nameserver/search-domain convention, which
+    // breaks internal-only *.scottkey.me lookups (the loki incident). No
+    // capability gate: it only reads /etc/resolv.conf.
+    system::dns_diagnostics::register();
     // Default POSIX permissions provider so the share-permission introspection
     // capability works before any filesystem plugin loads; plugins may register
     // richer providers for their filesystem.

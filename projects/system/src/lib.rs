@@ -110,6 +110,10 @@ pub mod config_parse_diagnostics;
 pub mod capacity_diagnostics;
 pub mod mount_diagnostics;
 
+/// Core diagnostics provider reporting hosts whose `/etc/resolv.conf` has
+/// drifted from the internal nameserver/search-domain convention.
+pub mod dns_diagnostics;
+
 /// Plans guest timezone convergence (orca#570's durable half). Guest TZ does not
 /// inherit from the host and nothing owned it, so thor ran 3h off while healthy.
 pub mod timezone_converge;
