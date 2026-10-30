@@ -497,12 +497,19 @@ fn register_service_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<(
             Err(v) => Err(ServiceError::Transport(contract::render_invoke_error(&v))),
         }
     });
+    // None (not Some(empty)) opts the proxy out of the generic fallback entirely.
+    let backup_spec = (!def.backup_include.is_empty()).then(|| contract::backup::BackupSpec {
+        include: def.backup_include.clone(),
+        exclude: def.backup_exclude.clone(),
+        strategies: vec![contract::backup::BackupStrategy::Paths],
+    });
     service::register_from_def(
         def.name.clone(),
         &def.kind,    // default port
         &def.runtime, // modality CSV
         def.endpoint.clone(),
         &def.capabilities,
+        backup_spec,
         thunk,
     )
     .map_err(|e| anyhow!("register service backend '{}': {e}", def.name))
@@ -3187,6 +3194,69 @@ mod loader_tests {
             err.to_string().contains("loader-service-badport"),
             "error names the backend: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn service_backend_def_backup_include_drives_the_generic_fallback() {
+        use plugin_toolkit::service::{
+            self, BackupArtifact, BackupContext, BackupMethod, BoxFuture, Runtime, ServiceError,
+            register_method,
+        };
+
+        struct StubMethod;
+        impl BackupMethod for StubMethod {
+            fn name(&self) -> &str {
+                "loader-stub-fallback"
+            }
+            fn backup<'a>(
+                &'a self,
+                ctx: BackupContext<'a>,
+            ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
+                let instance = ctx.instance.to_string();
+                Box::pin(async move {
+                    Ok(BackupArtifact {
+                        service: "fallback".into(),
+                        instance,
+                        path: "/backups/fallback.tar.gz".into(),
+                        timestamp: "20260101-000000".into(),
+                        ..Default::default()
+                    })
+                })
+            }
+            fn restore<'a>(
+                &'a self,
+                _ctx: BackupContext<'a>,
+                _from: &'a BackupArtifact,
+            ) -> BoxFuture<'a, Result<(), ServiceError>> {
+                Box::pin(async move { Ok(()) })
+            }
+        }
+        register_method(Arc::new(StubMethod));
+
+        let name = "loader-service-backup-fallback";
+        let invoke: BackendInvoke = Arc::new(|op: &str, _args: sj::Value, _call| {
+            Err(sj::Value::String(format!("`{op}` not yet implemented")))
+        });
+        let def = BackendDef {
+            domain: "service".to_string(),
+            name: name.to_string(),
+            kind: "8080".to_string(),
+            runtime: "docker".to_string(),
+            capabilities: vec!["backup".to_string()],
+            invoke_prefix: name.to_string(),
+            backup_include: vec!["/config".to_string()],
+            ..Default::default()
+        };
+        register_service_backend(&def, invoke).expect("service register");
+
+        let backend = service::backend(name).expect("backend is registered");
+        let art = backend
+            .backup("main", Some(Runtime::Docker), Some("loader-stub-fallback"))
+            .await
+            .expect("falls back to the generic backup path");
+        assert_eq!(art.service, "fallback");
+
+        service::deregister_backend(name);
     }
 
     /// Driving a registered deploy-target backend through `DeployTarget::stop`

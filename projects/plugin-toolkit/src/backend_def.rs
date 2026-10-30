@@ -152,6 +152,8 @@ pub fn service_backend_def(
         .iter()
         .map(|c| c.as_str().to_string())
         .collect();
+    // Via backup_spec, not data_paths directly — exclude lives only on the spec.
+    let backup_spec = backend.backup_spec();
 
     crate::abi::BackendDef {
         domain: "service".to_string(),
@@ -161,6 +163,8 @@ pub fn service_backend_def(
         endpoint: backend.endpoint(),
         capabilities,
         invoke_prefix: invoke_prefix.to_string(),
+        backup_include: backup_spec.include,
+        backup_exclude: backup_spec.exclude,
         ..Default::default()
     }
 }
@@ -776,10 +780,35 @@ mod tests {
         assert_eq!(def.endpoint, "http://abs:13378");
         assert_eq!(def.capabilities, vec!["deploy", "status"]);
         assert_eq!(def.invoke_prefix, "abs.__service");
+        assert!(def.backup_include.is_empty());
 
         let json = backends_json(vec![service_backend_def(&MockService, "abs.__service")]);
         assert!(json.contains("\"domain\":\"service\""));
         assert!(json.contains("\"runtime\":\"docker,lxc\""));
+    }
+
+    struct MockServiceWithDataPaths;
+
+    impl ServiceBackend for MockServiceWithDataPaths {
+        fn provider(&self) -> &str {
+            "immich"
+        }
+        fn runtimes(&self) -> Vec<SvcRuntime> {
+            vec![SvcRuntime::Docker]
+        }
+        fn default_port(&self) -> u16 {
+            2283
+        }
+        fn data_paths(&self) -> Vec<String> {
+            vec!["/config".to_string()]
+        }
+    }
+
+    #[test]
+    fn service_backend_def_carries_backup_spec_from_data_paths() {
+        let def = service_backend_def(&MockServiceWithDataPaths, "immich.__service");
+        assert_eq!(def.backup_include, vec!["/config".to_string()]);
+        assert!(def.backup_exclude.is_empty());
     }
 
     #[test]

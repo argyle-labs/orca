@@ -161,6 +161,11 @@ pub struct BackendDef {
     pub reaches: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<String>,
+    /// Plain `Vec<String>` rather than `contract::backup::BackupSpec`, to keep this crate's serde+schemars-only isolation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backup_include: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backup_exclude: Vec<String>,
 }
 
 /// A typed, per-runtime provisioning profile a deploy target advertises: the

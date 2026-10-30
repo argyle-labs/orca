@@ -207,6 +207,13 @@ impl ServiceError {
     pub fn unimplemented(op: &str) -> Self {
         ServiceError::Other(format!("`{op}` not yet implemented"))
     }
+
+    // String match, not variant match: crossing the subprocess wire re-wraps this as `Transport`.
+    #[cfg(feature = "in-process")]
+    fn is_unimplemented_for(&self, op: &str) -> bool {
+        self.to_string()
+            .contains(&format!("`{op}` not yet implemented"))
+    }
 }
 
 // ── Adapter trait ────────────────────────────────────────────────────────────
@@ -309,30 +316,22 @@ pub trait ServiceBackend: Send + Sync {
         method_name: Option<&'a str>,
     ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
         let provider = self.provider().to_string();
-        // From the SPEC, not `data_paths()` directly: the spec is where
-        // `exclude` lives, and building the context from the bare path list
-        // is what silently discarded it (#613).
         let spec = self.backup_spec();
-        let paths = if spec.include.is_empty() {
-            self.data_paths()
-        } else {
-            spec.include.clone()
-        };
-        let runtime = runtime.or_else(|| self.runtimes().first().copied());
+        let data_paths = self.data_paths();
+        let runtimes = self.runtimes();
         Box::pin(async move {
-            let rt = runtime.ok_or_else(|| {
-                ServiceError::Other(format!("{provider}: no runtime to back up against"))
-            })?;
-            let method = select_method(method_name, rt);
-            method
-                .backup(BackupContext {
-                    runtime: rt,
-                    instance,
+            generic_backup(
+                BackupFallbackCtx {
                     provider: &provider,
-                    data_paths: &paths,
-                    exclude: &spec.exclude,
-                })
-                .await
+                    data_paths: &data_paths,
+                    spec: &spec,
+                    runtimes: &runtimes,
+                },
+                instance,
+                runtime,
+                method_name,
+            )
+            .await
         })
     }
 
@@ -360,29 +359,22 @@ pub trait ServiceBackend: Send + Sync {
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
         let provider = self.provider().to_string();
         let spec = self.backup_spec();
-        let paths = if spec.include.is_empty() {
-            self.data_paths()
-        } else {
-            spec.include.clone()
-        };
-        let runtime = runtime.or_else(|| self.runtimes().first().copied());
+        let data_paths = self.data_paths();
+        let runtimes = self.runtimes();
         Box::pin(async move {
-            let rt = runtime.ok_or_else(|| {
-                ServiceError::Other(format!("{provider}: no runtime to restore against"))
-            })?;
-            let method = select_method(method_name, rt);
-            method
-                .restore(
-                    BackupContext {
-                        runtime: rt,
-                        instance,
-                        provider: &provider,
-                        data_paths: &paths,
-                        exclude: &spec.exclude,
-                    },
-                    from,
-                )
-                .await
+            generic_restore(
+                BackupFallbackCtx {
+                    provider: &provider,
+                    data_paths: &data_paths,
+                    spec: &spec,
+                    runtimes: &runtimes,
+                },
+                instance,
+                runtime,
+                method_name,
+                from,
+            )
+            .await
         })
     }
 
@@ -485,6 +477,7 @@ pub fn register_from_def(
     runtimes_csv: &str,
     endpoint: String,
     capabilities: &[String],
+    backup_spec: Option<contract::backup::BackupSpec>,
     invoke: InvokeThunk,
 ) -> Result<(), ServiceError> {
     let default_port: u16 = default_port
@@ -505,6 +498,7 @@ pub fn register_from_def(
         default_port,
         endpoint,
         capabilities,
+        backup_spec,
         invoke,
     }));
     Ok(())
@@ -520,6 +514,7 @@ struct ServiceProxy {
     default_port: u16,
     endpoint: String,
     capabilities: Vec<ServiceCapability>,
+    backup_spec: Option<contract::backup::BackupSpec>,
     invoke: InvokeThunk,
 }
 
@@ -539,6 +534,12 @@ impl ServiceProxy {
             .map_err(|e| ServiceError::Transport(format!("`{op}` proxy task failed: {e}")))??;
         serde_json::from_str(&out)
             .map_err(|e| ServiceError::Other(format!("decode `{op}` result: {e}")))
+    }
+
+    fn has_backup_spec(&self) -> bool {
+        self.backup_spec
+            .as_ref()
+            .is_some_and(|s| !s.include.is_empty())
     }
 }
 
@@ -582,14 +583,36 @@ impl ServiceBackend for ServiceProxy {
         runtime: Option<Runtime>,
         method_name: Option<&'a str>,
     ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
-        Box::pin(self.call(
-            "backup",
-            BackupArgs {
-                instance: instance.to_string(),
-                runtime,
-                method: method_name.map(str::to_string),
-            },
-        ))
+        Box::pin(async move {
+            let result = self
+                .call(
+                    "backup",
+                    BackupArgs {
+                        instance: instance.to_string(),
+                        runtime,
+                        method: method_name.map(str::to_string),
+                    },
+                )
+                .await;
+            match result {
+                Err(e) if e.is_unimplemented_for("backup") && self.has_backup_spec() => {
+                    let spec = self.backup_spec.as_ref().expect("has_backup_spec checked");
+                    generic_backup(
+                        BackupFallbackCtx {
+                            provider: &self.name,
+                            data_paths: &[],
+                            spec,
+                            runtimes: &self.runtimes,
+                        },
+                        instance,
+                        runtime,
+                        method_name,
+                    )
+                    .await
+                }
+                other => other,
+            }
+        })
     }
 
     fn restore<'a>(
@@ -599,15 +622,38 @@ impl ServiceBackend for ServiceProxy {
         method_name: Option<&'a str>,
         from: &'a BackupArtifact,
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
-        Box::pin(self.call(
-            "restore",
-            RestoreArgs {
-                instance: instance.to_string(),
-                runtime,
-                method: method_name.map(str::to_string),
-                from: from.clone(),
-            },
-        ))
+        Box::pin(async move {
+            let result = self
+                .call(
+                    "restore",
+                    RestoreArgs {
+                        instance: instance.to_string(),
+                        runtime,
+                        method: method_name.map(str::to_string),
+                        from: from.clone(),
+                    },
+                )
+                .await;
+            match result {
+                Err(e) if e.is_unimplemented_for("restore") && self.has_backup_spec() => {
+                    let spec = self.backup_spec.as_ref().expect("has_backup_spec checked");
+                    generic_restore(
+                        BackupFallbackCtx {
+                            provider: &self.name,
+                            data_paths: &[],
+                            spec,
+                            runtimes: &self.runtimes,
+                        },
+                        instance,
+                        runtime,
+                        method_name,
+                        from,
+                    )
+                    .await
+                }
+                other => other,
+            }
+        })
     }
 
     fn configure<'a>(
@@ -873,6 +919,76 @@ pub fn select_method(method_name: Option<&str>, runtime: Runtime) -> Arc<dyn Bac
     backup_method(auto)
         .or_else(|| backup_method("tar"))
         .expect("tar backup method always registered")
+}
+
+#[cfg(feature = "in-process")]
+struct BackupFallbackCtx<'a> {
+    provider: &'a str,
+    data_paths: &'a [String],
+    spec: &'a contract::backup::BackupSpec,
+    runtimes: &'a [Runtime],
+}
+
+// Paths come from spec.include, not data_paths directly — exclude lives only on the
+// spec, and building from the bare path list silently dropped it once already (#613).
+#[cfg(feature = "in-process")]
+async fn generic_backup(
+    ctx: BackupFallbackCtx<'_>,
+    instance: &str,
+    runtime: Option<Runtime>,
+    method_name: Option<&str>,
+) -> Result<BackupArtifact, ServiceError> {
+    let paths = if ctx.spec.include.is_empty() {
+        ctx.data_paths
+    } else {
+        &ctx.spec.include
+    };
+    let provider = ctx.provider;
+    let rt = runtime
+        .or_else(|| ctx.runtimes.first().copied())
+        .ok_or_else(|| ServiceError::Other(format!("{provider}: no runtime to back up against")))?;
+    let method = select_method(method_name, rt);
+    method
+        .backup(BackupContext {
+            runtime: rt,
+            instance,
+            provider,
+            data_paths: paths,
+            exclude: &ctx.spec.exclude,
+        })
+        .await
+}
+
+#[cfg(feature = "in-process")]
+async fn generic_restore(
+    ctx: BackupFallbackCtx<'_>,
+    instance: &str,
+    runtime: Option<Runtime>,
+    method_name: Option<&str>,
+    from: &BackupArtifact,
+) -> Result<(), ServiceError> {
+    let paths = if ctx.spec.include.is_empty() {
+        ctx.data_paths
+    } else {
+        &ctx.spec.include
+    };
+    let provider = ctx.provider;
+    let rt = runtime
+        .or_else(|| ctx.runtimes.first().copied())
+        .ok_or_else(|| ServiceError::Other(format!("{provider}: no runtime to restore against")))?;
+    let method = select_method(method_name, rt);
+    method
+        .restore(
+            BackupContext {
+                runtime: rt,
+                instance,
+                provider,
+                data_paths: paths,
+                exclude: &ctx.spec.exclude,
+            },
+            from,
+        )
+        .await
 }
 
 #[cfg(feature = "in-process")]
@@ -2066,6 +2182,7 @@ mod tests {
             "docker,lxc",
             "http://abs".into(),
             &["status".into(), "configure".into()],
+            None,
             thunk,
         )
         .expect("def registers");
@@ -2103,6 +2220,7 @@ mod tests {
                 "docker",
                 "e".into(),
                 &[],
+                None,
                 thunk.clone()
             )
             .is_err()
@@ -2115,6 +2233,7 @@ mod tests {
                 "docker,banana",
                 "e".into(),
                 &[],
+                None,
                 thunk.clone()
             )
             .is_err()
@@ -2127,6 +2246,7 @@ mod tests {
                 "docker",
                 "e".into(),
                 &["fly".into()],
+                None,
                 thunk
             )
             .is_err()
@@ -2144,6 +2264,7 @@ mod tests {
             "docker,,",
             "e".into(),
             &[],
+            None,
             thunk,
         )
         .expect("empty csv segments filtered");
@@ -2363,6 +2484,7 @@ mod tests {
             "docker",
             "http://x".into(),
             &["deploy".into(), "backup".into(), "restore".into()],
+            None,
             thunk,
         )
         .expect("def registers");
@@ -2406,6 +2528,7 @@ mod tests {
             "docker",
             String::new(),
             &["status".into()],
+            None,
             thunk,
         )
         .expect("def registers");
@@ -2431,6 +2554,7 @@ mod tests {
             "docker",
             String::new(),
             &["status".into()],
+            None,
             thunk,
         )
         .expect("def registers");
@@ -2441,6 +2565,161 @@ mod tests {
             .expect_err("thunk error");
         assert!(e.to_string().contains("upstream boom"), "{e}");
         deregister_backend("proxy-err");
+    }
+
+    struct StubMethod;
+    impl BackupMethod for StubMethod {
+        fn name(&self) -> &str {
+            "stub-fallback"
+        }
+        fn backup<'a>(
+            &'a self,
+            ctx: BackupContext<'a>,
+        ) -> BoxFuture<'a, Result<BackupArtifact, ServiceError>> {
+            let instance = ctx.instance.to_string();
+            let data_paths = ctx.data_paths.to_vec();
+            Box::pin(async move {
+                Ok(BackupArtifact {
+                    service: "fallback".into(),
+                    instance,
+                    path: format!("/backups/{}.tar.gz", data_paths.join(",")),
+                    timestamp: "20260101-000000".into(),
+                    ..Default::default()
+                })
+            })
+        }
+        fn restore<'a>(
+            &'a self,
+            _ctx: BackupContext<'a>,
+            _from: &'a BackupArtifact,
+        ) -> BoxFuture<'a, Result<(), ServiceError>> {
+            Box::pin(async move { Ok(()) })
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_backup_falls_back_to_generic_tar_when_plugin_unimplemented() {
+        register_method(Arc::new(StubMethod));
+        let thunk: InvokeThunk =
+            Arc::new(|op: &str, _args_json: String, _call| Err(ServiceError::unimplemented(op)));
+
+        register_from_def(
+            "proxy-fallback".into(),
+            "80",
+            "docker",
+            "http://x".into(),
+            &["backup".into()],
+            Some(contract::backup::BackupSpec::paths(["/config".to_string()])),
+            thunk,
+        )
+        .expect("def registers");
+
+        let b = backend("proxy-fallback").expect("registered");
+        let art = b
+            .backup("main", Some(Runtime::Docker), Some("stub-fallback"))
+            .await
+            .expect("falls back to the generic backup path");
+        assert_eq!(art.service, "fallback");
+        assert!(art.path.contains("/config"), "{}", art.path);
+
+        deregister_backend("proxy-fallback");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_restore_falls_back_to_generic_tar_when_plugin_unimplemented() {
+        register_method(Arc::new(StubMethod));
+        let thunk: InvokeThunk =
+            Arc::new(|op: &str, _args_json: String, _call| Err(ServiceError::unimplemented(op)));
+
+        register_from_def(
+            "proxy-restore-fallback".into(),
+            "80",
+            "docker",
+            "http://x".into(),
+            &["restore".into()],
+            Some(contract::backup::BackupSpec::paths(["/config".to_string()])),
+            thunk,
+        )
+        .expect("def registers");
+
+        let b = backend("proxy-restore-fallback").expect("registered");
+        let from = BackupArtifact {
+            path: "/backups/config.tar.gz".into(),
+            ..Default::default()
+        };
+        b.restore("main", Some(Runtime::Docker), Some("stub-fallback"), &from)
+            .await
+            .expect("falls back to the generic restore path");
+
+        deregister_backend("proxy-restore-fallback");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_backup_prefers_plugin_implementation_over_fallback() {
+        let thunk: InvokeThunk = Arc::new(|op: &str, args_json: String, _call| match op {
+            "backup" => {
+                let a: BackupArgs = serde_json::from_str(&args_json).unwrap();
+                let art = BackupArtifact {
+                    service: "plugin-native".into(),
+                    instance: a.instance,
+                    path: "/db/dump.sql".into(),
+                    timestamp: "20260101-000000".into(),
+                    ..Default::default()
+                };
+                Ok(serde_json::to_string(&art).unwrap())
+            }
+            other => Err(ServiceError::Other(format!("unexpected {other}"))),
+        });
+
+        register_from_def(
+            "proxy-native-backup".into(),
+            "80",
+            "docker",
+            "http://x".into(),
+            &["backup".into()],
+            Some(contract::backup::BackupSpec::paths(["/config".to_string()])),
+            thunk,
+        )
+        .expect("def registers");
+
+        let b = backend("proxy-native-backup").expect("registered");
+        let art = b
+            .backup("main", None, None)
+            .await
+            .expect("plugin's own backup wins");
+        assert_eq!(art.service, "plugin-native");
+        assert_eq!(art.path, "/db/dump.sql");
+
+        deregister_backend("proxy-native-backup");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn proxy_backup_propagates_real_errors_without_falling_back() {
+        let thunk: InvokeThunk =
+            Arc::new(|_, _, _call| Err(ServiceError::Transport("upstream boom".into())));
+        register_from_def(
+            "proxy-real-error".into(),
+            "80",
+            "docker",
+            "http://x".into(),
+            &["backup".into()],
+            Some(contract::backup::BackupSpec::paths(["/config".to_string()])),
+            thunk,
+        )
+        .expect("def registers");
+
+        let b = backend("proxy-real-error").expect("registered");
+        let e = b
+            .backup("main", None, None)
+            .await
+            .expect_err("real transport error is not swallowed by the fallback");
+        assert!(e.to_string().contains("upstream boom"), "{e}");
+
+        deregister_backend("proxy-real-error");
     }
 
     // ── PbsMethod file-backup guard ──────────────────────────────────────
