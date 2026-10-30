@@ -1042,7 +1042,6 @@ mod tests {
             .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "30"))
             .mount(&server)
             .await;
-        let start = std::time::Instant::now();
         let err = Client::new()
             .get(server.uri())
             .timeout(Duration::from_millis(500))
@@ -1051,7 +1050,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, HttpError::Status { status: 429, .. }));
-        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
