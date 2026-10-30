@@ -23,6 +23,7 @@ pub mod fleet;
 pub mod guest_exec_provider;
 pub mod host;
 pub mod host_identity;
+pub mod lxc_dev;
 pub mod lxc_exec;
 pub mod managed_mounts;
 pub mod mcp_client_config;
