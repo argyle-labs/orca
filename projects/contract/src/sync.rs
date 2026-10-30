@@ -65,8 +65,11 @@ pub struct SyncProviderError {
 }
 
 pub trait SyncProvider: Send + Sync {
+    /// Must equal the `method` string clients send in [`SyncTargetSpec`].
     fn name(&self) -> &str;
     fn reconcile(&self, args: SyncReconcileArgs) -> BoxFuture<'_, Result<SyncReconcileOutcome>>;
+    /// The seam fans this out unfiltered; applying `args.source` is this
+    /// provider's own responsibility.
     fn status(&self, args: SyncStatusArgs) -> BoxFuture<'_, Result<Vec<SyncTargetHealth>>>;
 }
 
