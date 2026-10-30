@@ -1,18 +1,6 @@
-//! Top disk-space consumers under a path — the "which directories are huge"
-//! companion to [`crate::capacity_diagnostics`]'s "is this filesystem
-//! filling" trend. That provider answers *whether* a host is running out of
-//! room; this verb answers *what's using it*, without requiring SSH or
-//! `guest_exec` with raw `du`.
-//!
-//! Lists immediate children of a directory, each annotated with its total
-//! recursive size, sorted largest first — the same `du -d 1 | sort -rh`
-//! pattern useful for iterative drill-down: call again with the biggest
-//! child as the new `path` to go one level deeper.
-//!
-//! Symlinks are never followed (avoids cycles and double-counting across
-//! bind mounts). The scan is wall-clock bounded: a directory with millions
-//! of files or a slow network mount returns a `truncated` partial result
-//! instead of hanging indefinitely.
+//! `du -d 1 | sort -rh` as an orca verb, so diagnosing disk pressure never
+//! needs SSH/`guest_exec`. Companion to [`crate::capacity_diagnostics`],
+//! which judges *whether* a filesystem is filling, not *what's* filling it.
 
 use derive::orca_tool;
 use schemars::JsonSchema;
@@ -31,15 +19,11 @@ const MAX_MAX_SECS: u64 = 120;
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DiskUsageArgs {
-    /// Directory to break down. Defaults to the user's home directory.
+    /// Defaults to the home directory.
     #[arg(long)]
     pub path: Option<String>,
-    /// Max entries to return, sorted by size descending. Default 20,
-    /// clamped to [1, 200].
     #[arg(long)]
     pub limit: Option<usize>,
-    /// Scan time budget in seconds before returning a partial, truncated
-    /// result. Default 20, clamped to [1, 120].
     #[arg(long = "max-secs")]
     pub max_secs: Option<u64>,
 }
@@ -56,22 +40,14 @@ pub struct DiskUsageEntry {
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct DiskUsageOutput {
-    /// The resolved, canonicalized directory that was scanned.
     pub path: String,
-    /// Immediate children of `path`, sorted by total size descending.
     pub entries: Vec<DiskUsageEntry>,
-    /// Total capacity of the filesystem hosting `path`, when resolvable.
     pub filesystem_total_bytes: Option<u64>,
-    /// Free space on the filesystem hosting `path`, when resolvable.
     pub filesystem_available_bytes: Option<u64>,
-    /// True if the time budget was hit before every entry's size was fully
-    /// computed — sizes for affected entries are a lower bound, not exact.
+    /// Set when the time budget cut the scan short; affected sizes are a lower bound.
     pub truncated: bool,
 }
 
-/// Recursive size of `path`, never following symlinks. Best-effort: a
-/// permission-denied or vanished entry contributes 0 rather than erroring
-/// the whole scan. Stops early (marking `truncated`) once `deadline` passes.
 fn dir_size(path: &Path, deadline: Instant, truncated: &mut bool) -> u64 {
     if Instant::now() >= deadline {
         *truncated = true;
@@ -87,9 +63,7 @@ fn dir_size(path: &Path, deadline: Instant, truncated: &mut bool) -> u64 {
             *truncated = true;
             break;
         }
-        // `DirEntry::file_type` does not traverse a symlink target, so a
-        // symlinked entry reports as a symlink here — explicitly skip it
-        // rather than count or recurse into whatever it points at.
+        // file_type() doesn't follow symlinks; is_symlink() below catches them.
         let file_type = match entry.file_type() {
             Ok(t) => t,
             Err(_) => continue,
@@ -106,8 +80,6 @@ fn dir_size(path: &Path, deadline: Instant, truncated: &mut bool) -> u64 {
     total
 }
 
-/// Core scan, independent of the tool-call plumbing so it's directly
-/// unit-testable. `path` must already be resolved to a real directory.
 fn breakdown(path: &Path, limit: usize, max_secs: u64) -> (Vec<DiskUsageEntry>, bool) {
     let deadline = Instant::now() + Duration::from_secs(max_secs);
     let mut truncated = false;
@@ -146,9 +118,6 @@ fn breakdown(path: &Path, limit: usize, max_secs: u64) -> (Vec<DiskUsageEntry>, 
     (entries, truncated)
 }
 
-/// Top disk-space consumers directly under `path`: the `du -d 1 | sort -rh`
-/// pattern, one orca verb. Each entry's `bytes` is its full recursive size,
-/// so drilling in is `disk_usage --path <biggest entry's path>` again.
 #[orca_tool(domain = "system", verb = "disk_usage")]
 async fn system_disk_usage(
     args: DiskUsageArgs,
@@ -218,7 +187,6 @@ mod tests {
             Instant::now() + Duration::from_secs(5),
             &mut truncated,
         );
-        // Only "real" is counted once; the symlink to it contributes nothing.
         assert_eq!(size, 10_000);
     }
 
