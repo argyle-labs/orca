@@ -45,7 +45,7 @@ pub fn publish_host_status(event: HostStatusEvent) -> usize {
 /// Send `event` on `sender`, normalizing the "no subscribers" Err into 0.
 /// Extracted for testability — we can pass in a private sender to
 /// deterministically exercise the no-subscriber branch.
-fn publish_to(sender: &broadcast::Sender<HostStatusEvent>, event: HostStatusEvent) -> usize {
+fn publish_to<T>(sender: &broadcast::Sender<T>, event: T) -> usize {
     sender.send(event).unwrap_or(0)
 }
 
@@ -61,6 +61,35 @@ pub fn subscribe_host_status() -> broadcast::Receiver<HostStatusEvent> {
 /// count is 0 is never missed.
 pub fn host_status_subscriber_count() -> usize {
     host_status_bus().receiver_count()
+}
+
+/// One increment of a fleet-update roll's progress — a single new note or
+/// system row, narrated as it lands (see `persist` in `mesh::fleet_update`).
+#[derive(Debug, Clone)]
+pub struct FleetUpdateEvent {
+    /// JSON-serialized row or note — see `FleetUpdateOutput`/`system_progress_line`
+    /// in projects/dispatch/src/cli.rs for the existing shape being narrated today.
+    pub payload: String,
+}
+
+fn fleet_update_bus() -> &'static broadcast::Sender<FleetUpdateEvent> {
+    static BUS: OnceLock<broadcast::Sender<FleetUpdateEvent>> = OnceLock::new();
+    BUS.get_or_init(|| {
+        let (tx, _rx) = broadcast::channel(CAPACITY);
+        tx
+    })
+}
+
+/// Publish one fleet-update increment to all active subscribers. Returns the
+/// number of subscribers that received the event (0 is fine — fire-and-forget).
+pub fn publish_fleet_update(event: FleetUpdateEvent) -> usize {
+    publish_to(fleet_update_bus(), event)
+}
+
+/// Subscribe to fleet-update events. The returned receiver only sees events
+/// published AFTER subscription.
+pub fn subscribe_fleet_update() -> broadcast::Receiver<FleetUpdateEvent> {
+    fleet_update_bus().subscribe()
 }
 
 #[cfg(test)]
@@ -144,6 +173,53 @@ mod tests {
         if let Ok(Ok(ev)) = res {
             assert_ne!(
                 ev.peer_id, "test-late-peer",
+                "late subscriber should not see pre-subscription event"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_update_publish_never_panics_regardless_of_subscriber_count() {
+        let _ = publish_fleet_update(FleetUpdateEvent {
+            payload: "{}".into(),
+        });
+    }
+
+    #[tokio::test]
+    async fn fleet_update_two_subscribers_both_receive_published_event() {
+        let mut rx1 = subscribe_fleet_update();
+        let mut rx2 = subscribe_fleet_update();
+
+        let n = publish_fleet_update(FleetUpdateEvent {
+            payload: "test-fleet-roundtrip".into(),
+        });
+        assert!(n >= 2, "expected at least the two subscribers, got {n}");
+
+        async fn recv_for(rx: &mut broadcast::Receiver<FleetUpdateEvent>, want: &str) {
+            loop {
+                let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                    .await
+                    .expect("timed out waiting for event")
+                    .expect("recv ok");
+                if ev.payload == want {
+                    return;
+                }
+            }
+        }
+        recv_for(&mut rx1, "test-fleet-roundtrip").await;
+        recv_for(&mut rx2, "test-fleet-roundtrip").await;
+    }
+
+    #[tokio::test]
+    async fn fleet_update_late_subscriber_does_not_see_earlier_events() {
+        publish_fleet_update(FleetUpdateEvent {
+            payload: "test-fleet-late".into(),
+        });
+        let mut rx = subscribe_fleet_update();
+        let res = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
+        if let Ok(Ok(ev)) = res {
+            assert_ne!(
+                ev.payload, "test-fleet-late",
                 "late subscriber should not see pre-subscription event"
             );
         }

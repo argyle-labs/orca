@@ -31,6 +31,7 @@ use crate::commands::{SystemUpdateArgs, SystemUpdateResult};
 // Fleet result types live in `system` so the hook signature is expressible
 // there without `system` depending on `mesh`.
 pub use crate::fleet::{FleetPluginResult, FleetSystemResult, FleetUpdateOutput, UpdateRowStatus};
+use crate::mesh::subscribe::{self, FleetUpdateEvent};
 use crate::plugin_manager::{
     PluginListArgs, PluginLoadStatus, PluginUpdateArgs, PluginUpdateOutput,
 };
@@ -76,6 +77,41 @@ fn persist(out: &FleetUpdateOutput, path: Option<&std::path::Path>) {
         }
         Err(e) => tracing::warn!(error = %e, "fleet-update run record not serializable"),
     }
+}
+
+/// What's already been published to the bus, so each note/row goes out exactly
+/// once. Mirrors the "what's new since last call" counting `ProgressSeen` in
+/// `dispatch::cli` already does for the CLI's file-tailed progress narration —
+/// kept local here rather than reused cross-crate since that type is private.
+#[derive(Default)]
+struct FleetProgressSeen {
+    notes: usize,
+    systems: usize,
+    errors: usize,
+}
+
+/// Publish whatever notes/system rows/errors are new in `out` since the last
+/// call, one bus event per increment — matching the granularity `persist`
+/// already writes at (once per host, plus daemon-phase notes).
+fn publish_new_progress(out: &FleetUpdateOutput, seen: &mut FleetProgressSeen) {
+    for note in out.notes.iter().skip(seen.notes) {
+        subscribe::publish_fleet_update(FleetUpdateEvent {
+            payload: note.clone(),
+        });
+    }
+    seen.notes = seen.notes.max(out.notes.len());
+    for row in out.systems.iter().skip(seen.systems) {
+        if let Ok(payload) = serde_json::to_string(row) {
+            subscribe::publish_fleet_update(FleetUpdateEvent { payload });
+        }
+    }
+    seen.systems = seen.systems.max(out.systems.len());
+    for err in out.errors.iter().skip(seen.errors) {
+        subscribe::publish_fleet_update(FleetUpdateEvent {
+            payload: err.clone(),
+        });
+    }
+    seen.errors = seen.errors.max(out.errors.len());
 }
 
 /// How long a fleet lock stays valid without its holder finishing. A roll is
@@ -644,6 +680,7 @@ pub async fn fleet_update(
         dry_run: !execute,
         ..Default::default()
     };
+    let mut progress_seen = FleetProgressSeen::default();
 
     // Chosen before any work so the path can be reported even if the run dies.
     let record = run_record_path(&started);
@@ -661,6 +698,7 @@ pub async fn fleet_update(
             Err(refusal) => {
                 out.errors.push(refusal);
                 persist(&out, record.as_deref());
+                publish_new_progress(&out, &mut progress_seen);
                 return Ok(out);
             }
         }
@@ -673,6 +711,7 @@ pub async fn fleet_update(
         Err(e) => {
             out.errors.push(format!("enumerate fleet peers: {e:#}"));
             persist(&out, record.as_deref());
+            publish_new_progress(&out, &mut progress_seen);
             return Ok(out);
         }
     };
@@ -684,9 +723,11 @@ pub async fn fleet_update(
     {
         out.errors.push(refusal);
         persist(&out, record.as_deref());
+        publish_new_progress(&out, &mut progress_seen);
         return Ok(out);
     }
     persist(&out, record.as_deref());
+    publish_new_progress(&out, &mut progress_seen);
 
     // Resolve prerelease once: explicit flag OR this daemon's channel is beta.
     let prerelease = resolve_prerelease(
@@ -718,6 +759,7 @@ pub async fn fleet_update(
             out.errors.extend(plugins.errors);
         }
         persist(&out, record.as_deref());
+        publish_new_progress(&out, &mut progress_seen);
         return Ok(out);
     }
 
@@ -746,6 +788,7 @@ pub async fn fleet_update(
         note_system_progress(&row);
         out.systems.push(row);
         persist(&out, record.as_deref());
+        publish_new_progress(&out, &mut progress_seen);
     }
 
     // Blame the right side before going further: N connect-class failures with
@@ -782,6 +825,7 @@ pub async fn fleet_update(
         for t in &targets {
             run_plugins(t, true, prerelease, ctx, &mut out).await;
             persist(&out, record.as_deref());
+            publish_new_progress(&out, &mut progress_seen);
         }
     }
 
@@ -798,10 +842,12 @@ pub async fn fleet_update(
         tracing::info!("{note}");
         out.notes.push(note);
         persist(&out, record.as_deref());
+        publish_new_progress(&out, &mut progress_seen);
         let row = run_system(t, true, ctx).await;
         note_system_progress(&row);
         out.systems.push(row);
         persist(&out, record.as_deref());
+        publish_new_progress(&out, &mut progress_seen);
     }
 
     Ok(out)
