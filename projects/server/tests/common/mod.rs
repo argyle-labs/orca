@@ -134,6 +134,12 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// handlers (`bootstrap_status_handler`) and the auth middleware extract it;
 /// `oneshot` does not populate it the way `into_make_service_with_connect_info`
 /// would, so we insert it manually.
+///
+/// `allow(dead_code)`: this module compiles once per integration-test binary,
+/// and not every binary that pulls it in calls every helper — clippy's
+/// dead-code lint is per-binary, so an unused-here helper that another binary
+/// does use would otherwise fail `-D warnings` on whichever binary skips it.
+#[allow(dead_code)]
 pub async fn oneshot_json(
     router: Router,
     method: &str,
@@ -152,6 +158,7 @@ pub async fn oneshot_json(
 
 /// Like [`oneshot_json`] but returns the raw body bytes (for non-JSON routes
 /// such as `/docs`, and for asserting on error text).
+#[allow(dead_code)]
 pub async fn oneshot_raw(
     router: Router,
     method: &str,
