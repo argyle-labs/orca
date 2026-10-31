@@ -461,9 +461,35 @@ pub(crate) fn addresses_this_system(id: &str, ctx: &contract::ToolCtx) -> anyhow
     Ok(is_self(id, &collect_health(ctx)?))
 }
 
+/// A cached-skip row for `id`, if the route-health cache already knows this
+/// peer is unreachable — pulled out of [`probe_system`] so it's testable
+/// without a live dial or `ToolCtx`.
+fn cached_row_for(id: &SystemId, host: &str) -> Option<MeshHealthRow> {
+    let down = crate::mesh::route_health::known_down(&id.to_string())?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let down_secs = now_ms.saturating_sub(down.down_since_ms) / 1000;
+    Some(MeshHealthRow {
+        host: host.to_string(),
+        id: id.to_string(),
+        health: None,
+        error: Some(format!(
+            "not probed: known unreachable for {down_secs}s as of the last heartbeat \
+             (route_health cache, {} consecutive failures); live dial skipped",
+            down.consecutive_failures
+        )),
+    })
+}
+
 /// Ask one remote system for its own health, as a row that can never fail the
-/// surrounding sweep.
+/// surrounding sweep. Consults the route-health heartbeat cache first so an
+/// already-known-down peer never costs a fresh connect timeout.
 async fn probe_system(id: &SystemId, host: &str, ctx: &contract::ToolCtx) -> MeshHealthRow {
+    if let Some(row) = cached_row_for(id, host) {
+        return row;
+    }
     let args = SystemHealthArgs {
         id: Some(id.clone()),
     };
@@ -824,6 +850,24 @@ mod tests {
             db_path: dir.join("system-test.db"),
             ports: Default::default(),
         }))
+    }
+
+    #[test]
+    fn cached_row_for_is_none_when_the_peer_is_not_known_down() {
+        let id: SystemId = "00000000-0000-0000-0000-00000000c0de".parse().unwrap();
+        assert!(cached_row_for(&id, "nowhere").is_none());
+    }
+
+    #[test]
+    fn cached_row_for_reports_a_cached_skip_without_a_live_dial() {
+        let id: SystemId = "00000000-0000-0000-0000-00000000dead".parse().unwrap();
+        crate::mesh::route_health::record_failure(&id.to_string(), "10.0.0.1");
+        let row = cached_row_for(&id, "dead-host").expect("expected a cached-skip row");
+        assert_eq!(row.host, "dead-host");
+        assert!(row.health.is_none());
+        let err = row.error.expect("expected a cached-skip error message");
+        assert!(err.contains("not probed"));
+        assert!(err.contains("route_health cache"));
     }
 
     #[tokio::test]
