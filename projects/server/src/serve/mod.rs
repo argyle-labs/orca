@@ -1752,6 +1752,50 @@ async fn proxy_ws(mut browser: axum::extract::ws::WebSocket, path: String, ws_or
     _ = browser.close().await;
 }
 
+/// Push fleet-update progress to a subscribed browser as it happens.
+///
+/// Slice proving the subscribe pattern end to end for one topic (see
+/// `system::mesh::subscribe`): no backfill, no polling — one WS text frame per
+/// bus event. `RecvError::Lagged` means the client's view now has a gap, not
+/// just a skip, so it gets an explicit frame rather than silent catch-up.
+async fn fleet_update_ws_handler(
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> axum::response::Response {
+    ws.on_upgrade(fleet_update_ws)
+}
+
+async fn fleet_update_ws(mut socket: axum::extract::ws::WebSocket) {
+    use axum::extract::ws::Message;
+    use futures_util::SinkExt;
+    use tokio::sync::broadcast::error::RecvError;
+
+    let mut rx = system::mesh::subscribe::subscribe_fleet_update();
+    loop {
+        let event = tokio::select! {
+            ev = rx.recv() => ev,
+            incoming = socket.recv() => match incoming {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                _ => continue,
+            },
+        };
+        match event {
+            Ok(ev) => {
+                if socket.send(Message::Text(ev.payload.into())).await.is_err() {
+                    break;
+                }
+            }
+            Err(RecvError::Lagged(n)) => {
+                let note = serde_json::json!({"gap": true, "dropped": n}).to_string();
+                if socket.send(Message::Text(note.into())).await.is_err() {
+                    break;
+                }
+            }
+            Err(RecvError::Closed) => break,
+        }
+    }
+    _ = socket.close().await;
+}
+
 /// Build the axum `Router` — exposed so integration tests can call it directly.
 pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     use std::sync::Arc;
@@ -1811,6 +1855,10 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // instead of the fragile stdio bridge. Behind require_auth (like
         // /api/mcp/catalog); the tools/call path re-applies per-tool RBAC.
         .route("/api/mcp", post(mcp_jsonrpc_handler))
+        // Browser-facing push for fleet-update progress (one topic, proving the
+        // subscribe pattern end to end — see `system::mesh::subscribe`). Auth
+        // gated like every other `/api/*` route below, via `require_auth`.
+        .route("/api/subscribe/fleet-update", get(fleet_update_ws_handler))
         .route("/docs", get(docs_handler))
         .route("/docs/auth.js", get(docs_auth_js_handler))
         // Open probe: lets the browser TokenGate decide which UI to show

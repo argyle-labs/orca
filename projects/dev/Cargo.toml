@@ -19,6 +19,13 @@ schemars   = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 tokio      = { workspace = true }
+# `orca dev subscribe-tui` — DEV-ONLY terminal client for the fleet-update WS
+# endpoint. ratatui/crossterm/tokio-tungstenite are already workspace deps
+# (same versions `system::logs_tui` and the server's dev WS proxy already use).
+ratatui    = { workspace = true }
+crossterm  = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
 orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
