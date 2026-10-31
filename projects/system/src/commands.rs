@@ -293,9 +293,11 @@ fn page_slice<T: Clone>(full: &[T], page: usize, per_page: usize) -> Vec<T> {
         .collect()
 }
 
-/// Args for [`system_update`]. Every field is optional; omit-all = read-only
-/// state probe (returns current_version / channel / channels / pinned_to /
-/// available_versions + pagination).
+/// Args for [`system_update`]. Every field is optional; omit-all APPLIES the
+/// channel-latest update fleet-wide (every joined system, then every
+/// installed plugin on every one) — fire by default, `dryRun`/`--dry-run` is
+/// the opt-in preview (returns current_version / channel / channels /
+/// pinned_to / available_versions + pagination without changing anything).
 ///
 /// One tool, many surfaces:
 ///   - orca binary: `channel`, `version` (one-shot, no pin), `dev_source`, `clear_dev_source`
@@ -366,8 +368,8 @@ pub struct SystemUpdateArgs {
     /// which is what pushes the cheapest, safest form of the call past an MCP
     /// client's idle timeout (#626).
     ///
-    /// Read-only by nature, but accepted with `--execute` too, where it means
-    /// "roll the daemons, leave plugins alone".
+    /// Still applies by default — this just means "roll the daemons, leave
+    /// plugins alone" instead of skipping the plugin phase's read.
     #[serde(default)]
     #[arg(long)]
     pub daemons_only: bool,
@@ -395,11 +397,12 @@ pub struct SystemUpdateArgs {
     #[arg(long)]
     pub version: Option<String>,
 
-    /// Actually apply the channel-latest update. Updates are DRY RUN by default:
-    /// a bare `orca system update` probes current→latest and reports whether an
-    /// update is available WITHOUT applying it. Pass `--execute` to apply. An
-    /// explicit `--version` already implies apply (a deliberate operator action)
-    /// and does not need this flag; `dryRun: true` overrides both.
+    /// Legacy no-op on a daemon built after the fire-by-default flip: updates
+    /// apply by default now, and `dryRun`/`--dry-run` is the opt-in preview —
+    /// this flag no longer gates anything here. Kept so a request built for an
+    /// older daemon's pre-flip gate (which still requires it to apply) still
+    /// works there, and the fleet fan-out still spells it explicitly on every
+    /// per-host leg for that same reason.
     #[serde(default)]
     #[arg(long)]
     pub execute: bool,
@@ -672,9 +675,9 @@ pub struct SystemUpdateOutput {
     pub update_available: Option<bool>,
     /// True when this host structurally cannot obtain a release asset: it holds
     /// no local `github_token` and has no paired member to delegate the fetch to
-    /// (#652). Reported on a DRY RUN so an operator sees "this host cannot
-    /// update" before committing to `--execute`, instead of discovering it
-    /// per-host mid-fan-out.
+    /// (#652). Reported on a DRY RUN preview so an operator sees "this host
+    /// cannot update" before committing to a real run, instead of discovering
+    /// it per-host mid-fan-out.
     ///
     /// `None` from a peer too old to compute it — absence is "unknown", never
     /// "not blocked".
@@ -696,16 +699,17 @@ pub struct PendingRestart {
 }
 
 /// [MUTATES STATE] The single system-update tool. Covers orca binary updates,
-/// host identity (hostname/fqdn/addressing), and OS package upgrades. Omit
-/// every arg for a read-only state probe.
+/// host identity (hostname/fqdn/addressing), and OS package upgrades. Fires
+/// by default — omit every arg to apply the channel-latest update; pass
+/// `dryRun`/`--dry-run` for a read-only preview instead.
 // Not intercepted by the GENERIC gate: this verb already implements dry-run by
 // default and its plan is richer than `ExecutionPlan::generic` could be — the
 // generic one carries `detailed: false` and no changes, so gating here would
-// REPLACE a real plan with an empty one. It still spells the opt-in `execute`,
-// which is the single fleet-wide name (#636). Migrating it to return a typed
+// REPLACE a real plan with an empty one. Migrating it to return a typed
 // `ExecutionPlan` is the follow-up; that needs the body to run in plan mode,
 // which the intercept-before-body gate cannot express. `dry_run_aware` routes
-// `dryRun: true` to its own plan path.
+// `dryRun: true` to its own plan path — the only opt-in left; `execute` is a
+// legacy no-op kept for older peers (see its own doc comment).
 #[orca_tool(
     domain = "system",
     verb = "update",
@@ -776,7 +780,11 @@ async fn system_update(
         let mut out = hook
             .fleet_update(
                 crate::fleet::FleetUpdateRequest {
-                    execute: args.execute && !ctx.dry_run(),
+                    // Fire by default: `dryRun`/`--dry-run` is the only opt-in
+                    // to a preview. `args.execute` is a legacy no-op here (see
+                    // its doc comment) — the fan-out keeps spelling it
+                    // explicitly on its own per-host legs for older peers.
+                    execute: !ctx.dry_run(),
                     prerelease: args.prerelease,
                     break_lock: args.break_lock,
                     daemons_only: args.daemons_only,
@@ -1071,20 +1079,18 @@ async fn run_system_update(
         || args.daemon.is_some()
         || args.dev_source.is_some()
         || args.clear_dev_source;
-    // Per HARD RULE [[feedback-updates-are-user-actions-only]]: an empty
-    // `{}` probe MUST NOT apply anything. Per [[task-26-channel-switch-is-
-    // filter-only]]: channel is a visibility filter, not an install trigger.
-    // Binary install requires an explicit `version` arg — the user clicked
-    // Apply on a specific tag. Channel switches persist the marker and
-    // return the filtered version list, nothing else.
+    // Per [[task-26-channel-switch-is-filter-only]]: channel is a visibility
+    // filter, not an install trigger — a channel switch alone persists the
+    // marker and returns the filtered version list, nothing else.
     let _ = any_non_binary;
     let _ = channel_changed; // marker is written upstream; install intent is version-only now
-    // DRY RUN by default: a bare `orca system update` only probes. `--execute`
-    // (apply channel-latest) or an explicit `--version` (apply that tag) is the
-    // deliberate operator action that lifts the gate, unless `dryRun` is set.
-    // Per HARD RULE [[feedback-updates-are-user-actions-only]] an empty `{}`
-    // probe never applies.
-    let binary_intent = !ctx.dry_run() && (args.version.is_some() || args.execute);
+    // Fire by default: a bare `{}` applies channel-latest (or the explicit
+    // `version`, when given); `dryRun`/`--dry-run` is the only opt-in to a
+    // preview that applies nothing. This supersedes the former
+    // [[feedback-updates-are-user-actions-only]] HARD RULE for this verb —
+    // see the standing execute-by-default directive this call site was
+    // migrated under.
+    let binary_intent = !ctx.dry_run();
 
     // Effective channel = max(stored pref, channel implied by running version).
     // If the binary is a prerelease but the marker says stable (common on
@@ -1247,16 +1253,15 @@ async fn run_system_update(
         .as_deref()
         .map(|l| crate::update_state::is_update_available(utils::build_info::version(), l));
 
-    // Dry-run surfacing: when the caller did NOT ask to apply (no `--execute`,
-    // no `--version`) but an update is available, tell them exactly what
-    // `--execute` would do. Keeps the default probe non-mutating while making
-    // the actionable next step obvious.
+    // Dry-run surfacing: `binary_intent` is only false when the caller asked
+    // for a preview (`dryRun`/`--dry-run`). Tell them exactly what dropping
+    // that flag would do.
     if !binary_intent
         && update_available == Some(true)
         && let Some(l) = latest.as_deref()
     {
         notes.push(format!(
-            "dry-run: update available {} → {l} (pass --execute to apply)",
+            "dry-run: update available {} → {l} (re-run without --dry-run to apply)",
             utils::build_info::version()
         ));
     }
@@ -2792,6 +2797,33 @@ mod tests {
             panic!("a single-system dry run returns the update shape");
         };
         assert!(out.applied.is_none(), "dryRun applied {:?}", out.applied);
+    }
+
+    #[tokio::test]
+    async fn system_update_fires_by_default_with_no_execute_and_no_dry_run() {
+        // Regression for the execute-by-default migration: default-
+        // constructed args (no `execute`, no `dryRun`) must ATTEMPT a real
+        // apply, not silently probe. Against the pre-fix code this was a
+        // no-op — `binary_intent` required an explicit `--execute` (or a
+        // `--version` the caller never supplied here) that a bare call never
+        // carries, so nothing was ever attempted and `errors` stayed empty.
+        // `version: "0.0.1"` is the same deliberately-ancient, nonexistent
+        // tag the dry-run counterpart above uses — it 404s rather than
+        // actually fetching and applying a real release.
+        let args = SystemUpdateArgs {
+            version: Some("0.0.1".to_string()),
+            self_only: true,
+            ..Default::default()
+        };
+        let ctx = serve_ctx();
+        let SystemUpdateResult::Update(out) = system_update(args, &ctx).await.unwrap() else {
+            panic!("a single-system update returns the update shape");
+        };
+        assert!(
+            out.applied.is_some() || !out.errors.is_empty(),
+            "a bare call with no `execute`/`dryRun` must attempt the apply, not silently \
+             skip it: {out:?}"
+        );
     }
 
     #[tokio::test]
