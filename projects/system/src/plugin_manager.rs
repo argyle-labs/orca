@@ -1748,6 +1748,64 @@ fn purge_plugin_data(
     Ok((revoked, dropped))
 }
 
+// ── plugin.file_fetch ─────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PluginFileFetchArgs {
+    /// Plugin name, resolved via the catalog (same lookup as every other
+    /// `plugin.*` tool).
+    #[arg(long)]
+    pub name: String,
+    /// File path within the repo root.
+    #[arg(long, default_value = "compose.yml")]
+    pub path: String,
+    /// Explicit git ref/tag/branch. Omit for the repo's default branch.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    #[arg(long = "ref")]
+    pub ref_: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFileFetchOutput {
+    /// The file's content, decoded to UTF-8.
+    pub content: String,
+    /// The ref that was requested; absent when the repo's default branch was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_requested: Option<String>,
+    /// Git blob sha of the file's content at the resolved ref, when the host
+    /// reports one. This is the file's blob sha, not a commit sha.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_sha: Option<String>,
+}
+
+/// Fetch a single file's raw content from a plugin's repo at a ref — e.g. a
+/// `compose.yml` the install flow needs but that never ships as a release
+/// asset. Reads the repo's hosting API directly (GitHub or Gitea, whichever
+/// `release_source_api` resolves to), not a release.
+#[orca_tool(domain = "plugin", verb = "file_fetch")]
+async fn plugin_file_fetch(
+    args: PluginFileFetchArgs,
+    _ctx: &ToolCtx,
+) -> Result<PluginFileFetchOutput> {
+    let name = args.name.trim();
+    if name.is_empty() {
+        bail!("--name is required");
+    }
+    let path = args.path.trim();
+    if path.is_empty() {
+        bail!("--path is required");
+    }
+    let repo_url = catalog_repo_url(&catalog_resolved().await, name)?;
+    let fetched = crate::plugin_fetch::fetch_file(&repo_url, path, args.ref_.as_deref()).await?;
+    Ok(PluginFileFetchOutput {
+        content: fetched.content,
+        ref_requested: fetched.ref_requested,
+        blob_sha: fetched.blob_sha,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
