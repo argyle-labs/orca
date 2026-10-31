@@ -461,11 +461,33 @@ pub(crate) fn addresses_this_system(id: &str, ctx: &contract::ToolCtx) -> anyhow
     Ok(is_self(id, &collect_health(ctx)?))
 }
 
+/// The peer's current dial-target addresses, from the same source the live
+/// dial path uses (`dial_targets_for_peer`) — so [`cached_row_for`] checks the
+/// route-health cache against the peer's actual address set rather than
+/// whatever happens to already be in the cache. Empty if the peer has no
+/// `mesh_peers` row (never registered) or the DB can't be reached.
+fn current_peer_addresses(peer_id: &str) -> Vec<String> {
+    let Ok(conn) = db::open_default() else {
+        return Vec::new();
+    };
+    let Ok(peers) = db::mesh::list_peers(&conn) else {
+        return Vec::new();
+    };
+    let legacy = peers
+        .iter()
+        .find(|p| p.peer_id == peer_id)
+        .map(|p| p.peer_addr.clone())
+        .unwrap_or_default();
+    crate::mesh::dialer::dial_targets_for_peer(&conn, peer_id, &legacy).unwrap_or_default()
+}
+
 /// A cached-skip row for `id`, if the route-health cache already knows this
 /// peer is unreachable — pulled out of [`probe_system`] so it's testable
 /// without a live dial or `ToolCtx`.
 fn cached_row_for(id: &SystemId, host: &str) -> Option<MeshHealthRow> {
-    let down = crate::mesh::route_health::known_down(&id.to_string())?;
+    let peer_id = id.to_string();
+    let addresses = current_peer_addresses(&peer_id);
+    let down = crate::mesh::route_health::known_down(&peer_id, &addresses)?;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
