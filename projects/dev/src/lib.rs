@@ -5,6 +5,9 @@
 //! - [`dev_serve`] — HTTP server that streams workspace-built binaries to
 //!   peers configured to fetch from a `dev_source` URL.
 //! - [`sweep`] — workspace audits (cargo-machete / cargo-deny).
+//! - [`subscribe_tui`] — DEV-ONLY terminal client proving the
+//!   `/api/subscribe/fleet-update` WS endpoint end to end against a real
+//!   socket, before any real frontend touches it.
 //!
 //! Dev tooling MAY call into the `system` and `mesh` crates (or anywhere
 //! else it needs to). Those crates do NOT call back into `dev` — that's
@@ -12,6 +15,7 @@
 
 pub mod dev_serve;
 pub mod mode;
+pub mod subscribe_tui;
 pub mod sweep;
 
 /// Process-wide lock for tests that mutate or depend on the environment.

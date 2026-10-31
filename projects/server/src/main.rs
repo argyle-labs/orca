@@ -203,6 +203,18 @@ enum DevAction {
     },
     /// (legacy) `git pull --ff-only` the cloned `$ORCA_HOME/dev/orca` repo.
     Sync,
+    /// DEV-ONLY: live terminal client for `/api/subscribe/fleet-update`,
+    /// proving the wire format against a real WebSocket before any real
+    /// frontend touches it. Hidden — not a first-class CLI feature.
+    #[command(hide = true)]
+    SubscribeTui {
+        /// WS endpoint. Default: `ws://127.0.0.1:<this host's REST port>/api/subscribe/fleet-update`.
+        #[arg(long)]
+        url: Option<String>,
+        /// Bearer token presented to `require_auth` (e.g. from `orca auth token create`).
+        #[arg(long)]
+        token: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -863,6 +875,15 @@ async fn cmd_dev_action(
                 );
             }
             Ok(())
+        }
+        Some(DevAction::SubscribeTui { url, token }) => {
+            let url = url.unwrap_or_else(|| {
+                format!(
+                    "ws://127.0.0.1:{}/api/subscribe/fleet-update",
+                    db::ports::http_port()
+                )
+            });
+            dev::subscribe_tui::run(url, token).await
         }
     }
 }

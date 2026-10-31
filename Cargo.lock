@@ -4222,15 +4222,19 @@ version = "0.2.1-rc.21"
 dependencies = [
  "anyhow",
  "axum",
+ "crossterm",
+ "futures-util",
  "orca-contract",
  "orca-files",
  "orca-utils",
  "orca-workspace-hack",
+ "ratatui",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.29.0",
 ]
 
 [[package]]

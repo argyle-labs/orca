@@ -787,6 +787,15 @@ pub(crate) enum ToolRoleCheck {
     },
 }
 
+/// Non-`/api/v1/*` routes gated to a fixed role, keyed by exact path.
+/// `/api/subscribe/fleet-update` streams the same live host/version/update-status
+/// data `system.update.status` reports, so it needs the same admin bar rather
+/// than falling open under bare `require_auth`. The role is hardcoded here
+/// rather than looked up via `system.update.status`'s own required role —
+/// that tool is read-shaped and defaults to `"any"`, which would make this
+/// gate a no-op.
+const EXTRA_PATH_ROLES: &[(&str, &str)] = &[("/api/subscribe/fleet-update", "admin")];
+
 /// REST role decision. The raw path is still percent-encoded while the router
 /// decodes its `{name}` segment, so the lookup runs on the decoded name — the
 /// same string the registry will dispatch. An unregistered name is refused
@@ -798,6 +807,9 @@ pub(crate) fn check_tool_role(
     caller_role: Option<&str>,
     can_mutate: bool,
 ) -> ToolRoleCheck {
+    if let Some(&(extra_path, required)) = EXTRA_PATH_ROLES.iter().find(|(p, _)| *p == path) {
+        return role_decision(extra_path, required, caller_role, can_mutate);
+    }
     let Some(raw) = tool_name_from_path(path) else {
         return ToolRoleCheck::Pass;
     };
