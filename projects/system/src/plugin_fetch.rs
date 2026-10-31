@@ -406,6 +406,16 @@ pub async fn fetch(
     Ok(fetched)
 }
 
+/// The GitHub PAT, but only for a GitHub source; Gitea reads are public and a
+/// GitHub PAT is an invalid bearer there (mirrors update::effective_token).
+fn active_api_token() -> String {
+    if update::source_is_github() {
+        update::resolve_github_token()
+    } else {
+        String::new()
+    }
+}
+
 /// Like [`fetch`], but resolves the asset for an **explicit** target triple
 /// rather than this daemon's own. This is what lets a token-holding peer serve
 /// a plugin asset for a requester on a different arch/libc: the holder runs
@@ -423,13 +433,7 @@ pub async fn fetch_for_target(
     if triple == "unknown-target" {
         bail!("empty/unknown target triple; cannot resolve a matching plugin asset");
     }
-    // Send the GitHub PAT only for a GitHub source; Gitea reads are public and a
-    // GitHub PAT is an invalid bearer there (mirrors update::effective_token).
-    let token = if update::source_is_github() {
-        update::resolve_github_token()
-    } else {
-        String::new()
-    };
+    let token = active_api_token();
 
     let client = utils::http::Client::new();
     let release =
@@ -558,11 +562,7 @@ struct ContentsFile {
 pub async fn fetch_file(repo_url: &str, path: &str, ref_: Option<&str>) -> Result<FetchedFile> {
     let api = repo_api_base(repo_url)
         .with_context(|| format!("catalog repoUrl is not a github.com URL: {repo_url}"))?;
-    let token = if update::source_is_github() {
-        update::resolve_github_token()
-    } else {
-        String::new()
-    };
+    let token = active_api_token();
     let client = utils::http::Client::new();
     fetch_file_from(&client, &api, &token, path, ref_).await
 }
@@ -582,6 +582,16 @@ async fn fetch_file_from(
     path: &str,
     ref_: Option<&str>,
 ) -> Result<FetchedFile> {
+    // A `.`/`..` segment survives `utils::url::encode` unchanged (it doesn't
+    // escape dots) and `url::Url::parse` then normalizes it away before the
+    // request is sent — collapsing `{api}/contents/../../x` down to `{host}/x`
+    // and smuggling the bearer token outside the `/contents/{path}` scope.
+    // Reject it client-side rather than trying to encode around it.
+    if let Some(bad) = path.split('/').find(|seg| *seg == "." || *seg == "..") {
+        bail!(
+            "path '{path}' contains a disallowed '{bad}' segment (dot-segments are rejected to prevent escaping the contents API scope)"
+        );
+    }
     let encoded_path = path
         .split('/')
         .map(utils::url::encode)
@@ -885,6 +895,56 @@ mod tests {
             msg.contains("unknown target triple"),
             "unexpected error: {msg}"
         );
+    }
+
+    // ── fetch_file / fetch_file_from: contents API scope + dispatch ───────────
+
+    #[tokio::test]
+    async fn fetch_file_from_rejects_dot_segment_path() {
+        // Leading `../`, an embedded `/../`, and a bare `.` segment must all be
+        // rejected before any request is built — a `.`/`..` segment survives
+        // percent-encoding unchanged and `url::Url::parse` would otherwise
+        // normalize it away, escaping the `/contents/{path}` scope.
+        let client = utils::http::Client::new();
+        for path in [
+            "../admin/users",
+            "contents/../../admin/users",
+            "./x",
+            "a/./b",
+        ] {
+            let res =
+                fetch_file_from(&client, "https://api.github.com/repos/x/y", "", path, None).await;
+            let Err(err) = res else {
+                panic!("dot-segment path '{path}' must be rejected");
+            };
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("disallowed") && msg.contains(path),
+                "unexpected error for '{path}': {msg}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_file_rejects_non_github_repo() {
+        // `fetch_file` must dispatch through `repo_api_base` before delegating
+        // to `fetch_file_from`, failing on a non-github repoUrl with the
+        // catalog-context error — mirrors `fetch_for_target_rejects_non_github_repo`.
+        let res = fetch_file(
+            "https://gitlab.com/argyle-labs/proxmox",
+            "compose.yml",
+            None,
+        )
+        .await;
+        let Err(err) = res else {
+            panic!("non-github repoUrl must fail");
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not a github.com URL"),
+            "unexpected error: {msg}"
+        );
+        assert!(msg.contains("gitlab.com"), "should echo the bad url: {msg}");
     }
 
     // ── fetch: real-target delegation to fetch_for_target ─────────────────────
