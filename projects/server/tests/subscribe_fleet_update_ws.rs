@@ -8,7 +8,9 @@
 
 mod common;
 
-use common::{mint_admin_token, oneshot_raw_with_headers, with_isolated_env};
+use common::{
+    mint_admin_token, mint_member_session_cookie, oneshot_raw_with_headers, with_isolated_env,
+};
 use futures_util::StreamExt;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -36,6 +38,36 @@ async fn fleet_update_ws_requires_auth() {
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+}
+
+/// An authenticated but under-privileged (`member`) caller must be refused
+/// before the WS upgrade — this endpoint streams the same live fleet
+/// host/version/update-status data `system.update.status` reports, and must
+/// sit behind an admin bar even though that tool itself is read-shaped and
+/// only requires `"any"` by default.
+#[tokio::test]
+async fn fleet_update_ws_requires_admin_role() {
+    let env = with_isolated_env();
+    let cookie = mint_member_session_cookie(&env).await;
+    let (status, _) = oneshot_raw_with_headers(
+        env.router(),
+        "GET",
+        "/api/subscribe/fleet-update",
+        None,
+        None,
+        &[
+            ("cookie", HeaderValue::from_str(&cookie).unwrap()),
+            ("connection", HeaderValue::from_static("Upgrade")),
+            ("upgrade", HeaderValue::from_static("websocket")),
+            (
+                "sec-websocket-key",
+                HeaderValue::from_static("dGhlIHNhbXBsZSBub25jZQ=="),
+            ),
+            ("sec-websocket-version", HeaderValue::from_static("13")),
+        ],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
 }
 
 /// A published `FleetUpdateEvent` round-trips to a real WS client connecting

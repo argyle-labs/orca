@@ -1856,8 +1856,9 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // /api/mcp/catalog); the tools/call path re-applies per-tool RBAC.
         .route("/api/mcp", post(mcp_jsonrpc_handler))
         // Browser-facing push for fleet-update progress (one topic, proving the
-        // subscribe pattern end to end — see `system::mesh::subscribe`). Auth
-        // gated like every other `/api/*` route below, via `require_auth`.
+        // subscribe pattern end to end — see `system::mesh::subscribe`). Streams
+        // the same data as `system.update.status`, so `require_tool_role` gates
+        // it to `admin` via `EXTRA_PATH_ROLES`, not just `require_auth`.
         .route("/api/subscribe/fleet-update", get(fleet_update_ws_handler))
         .route("/docs", get(docs_handler))
         .route("/docs/auth.js", get(docs_auth_js_handler))

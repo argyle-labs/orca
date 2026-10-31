@@ -119,6 +119,44 @@ pub fn mint_admin_token(env: &IsolatedEnv) -> String {
     mint_token(env, "admin")
 }
 
+/// Seed a `member`-role user and sign them in through the real
+/// `/api/auth/web/signin` route, returning the `cookie:` header value for
+/// the resulting session. `member` is a user/session role, not a token role
+/// (the `api_tokens` table's CHECK constraint only allows `admin`/`read`), so
+/// this mirrors how a real non-first self-registered user gets a session
+/// (`auth_routes.rs`'s `signup`) rather than minting a token.
+#[allow(dead_code)]
+pub async fn mint_member_session_cookie(env: &IsolatedEnv) -> String {
+    let conn = db::open_default().unwrap();
+    let username = format!("member-{}", utils::id::new());
+    let password = "password1234";
+    let hash = auth::password::hash_password(password).unwrap();
+    let now = utils::time::now_rfc3339();
+    identities::users::insert(&conn, &utils::id::new(), &username, &hash, "member", &now).unwrap();
+    drop(conn);
+
+    let peer: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/web/signin")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({"username": username, "password": password}))
+                .unwrap(),
+        ))
+        .unwrap();
+    let mut req = req;
+    req.extensions_mut().insert(ConnectInfo(peer));
+    let resp = env.router().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "member signin failed");
+    resp.headers()
+        .get(axum::http::header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .expect("signin set a session cookie")
+        .to_string()
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut s = String::with_capacity(bytes.len() * 2);
