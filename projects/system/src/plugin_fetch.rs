@@ -524,6 +524,124 @@ pub async fn fetch_for_target(
     })
 }
 
+// ── Arbitrary file fetch (contents API, not a release asset) ─────────────────
+
+/// A single file fetched from a plugin repo at a ref, via the hosting API's
+/// "Contents" endpoint rather than a release asset.
+#[derive(Debug)]
+pub struct FetchedFile {
+    pub content: String,
+    /// The git ref actually requested; `None` when the repo's default branch
+    /// was used (the Contents API resolves that itself from an omitted `ref`
+    /// query param).
+    pub ref_requested: Option<String>,
+    /// Git blob sha of the file's content at the resolved ref, when the
+    /// host's Contents API response reports one. This is the file's blob
+    /// sha, not a commit sha — the Contents API never reports the latter.
+    pub blob_sha: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ContentsFile {
+    content: String,
+    #[serde(default)]
+    encoding: String,
+    #[serde(default)]
+    sha: String,
+}
+
+/// Fetch a single file's raw content from a plugin repo at an optional ref.
+///
+/// * `repo_url` — the catalog entry's `repoUrl`.
+/// * `path` — file path within the repo root, e.g. `"compose.yml"`.
+/// * `ref_` — explicit git ref/tag/branch, or `None` for the repo's default branch.
+pub async fn fetch_file(repo_url: &str, path: &str, ref_: Option<&str>) -> Result<FetchedFile> {
+    let api = repo_api_base(repo_url)
+        .with_context(|| format!("catalog repoUrl is not a github.com URL: {repo_url}"))?;
+    let token = if update::source_is_github() {
+        update::resolve_github_token()
+    } else {
+        String::new()
+    };
+    let client = utils::http::Client::new();
+    fetch_file_from(&client, &api, &token, path, ref_).await
+}
+
+/// Pure core of [`fetch_file`]: given an already-resolved API base and token,
+/// fetch `path` via `{api}/contents/{path}` — the one endpoint shape GitHub
+/// and Gitea share (both return the file's base64 content in the same JSON
+/// shape), so a single implementation covers both hosts without branching on
+/// which one is active, same spirit as [`repo_api_base`] itself. Split out so
+/// it is testable against a mock server without depending on the ambient
+/// release-source settings (see [`repo_api_base_from`] for the analogous
+/// split).
+async fn fetch_file_from(
+    client: &utils::http::Client,
+    api: &str,
+    token: &str,
+    path: &str,
+    ref_: Option<&str>,
+) -> Result<FetchedFile> {
+    let encoded_path = path
+        .split('/')
+        .map(utils::url::encode)
+        .collect::<Vec<_>>()
+        .join("/");
+    let mut req = client
+        .get(format!("{api}/contents/{encoded_path}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+        .header(
+            "User-Agent",
+            format!("orca/{}", utils::build_info::version()),
+        );
+    if let Some(r) = ref_ {
+        req = req.query("ref", r);
+    }
+    if !token.is_empty() {
+        req = req.bearer(token);
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        // Distinct from an auth/rate-limit failure below: the repo, ref, or
+        // path doesn't exist, not a credentials problem.
+        Err(utils::http::HttpError::Status { status: 404, .. }) => {
+            bail!(
+                "file '{path}' not found at {api} (ref {}); repo, ref, or path may not exist",
+                ref_.unwrap_or("default branch")
+            );
+        }
+        Err(utils::http::HttpError::Status {
+            status, summary, ..
+        }) => {
+            bail!("fetch {path} from {api}: http {status}: {summary}");
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e)).with_context(|| format!("fetch {path} from {api}"));
+        }
+    };
+    let file: ContentsFile = resp.json().context("parse contents json")?;
+    if !file.encoding.is_empty() && file.encoding != "base64" {
+        bail!(
+            "unsupported content encoding '{}' for {path}",
+            file.encoding
+        );
+    }
+    let cleaned: String = file
+        .content
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let bytes = utils::encoding::base64_decode(&cleaned)
+        .with_context(|| format!("decode base64 content for {path}"))?;
+    let content = String::from_utf8(bytes).with_context(|| format!("{path} is not valid UTF-8"))?;
+    Ok(FetchedFile {
+        content,
+        ref_requested: ref_.map(str::to_string),
+        blob_sha: (!file.sha.is_empty()).then_some(file.sha),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -940,6 +1058,276 @@ mod tests {
             assert!(
                 msg.contains("public asset download failed"),
                 "unexpected error: {msg}"
+            );
+        }
+    }
+
+    // ── fetch_file_from (mocked HTTP) ─────────────────────────────────────────
+    mod contents {
+        use super::*;
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // GitHub wraps base64 content in 60-char lines; Gitea does not. Both
+        // decode fine once whitespace is stripped.
+        const GITHUB_SHAPED_BODY: &str = r#"{
+            "content": "Y29tcG9z\nZTogb2s=",
+            "encoding": "base64",
+            "sha": "deadbeef"
+        }"#;
+
+        #[tokio::test]
+        async fn fetch_file_from_decodes_github_style_response() {
+            // A GitHub-shaped api base (`.../contents/{path}`) with the
+            // multi-line base64 content GitHub actually sends.
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/repos/x/y/contents/compose.yml"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(GITHUB_SHAPED_BODY))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let got = fetch_file_from(
+                &client,
+                &format!("{}/repos/x/y", server.uri()),
+                "",
+                "compose.yml",
+                None,
+            )
+            .await
+            .expect("mocked contents response should decode");
+            assert_eq!(got.content, "compose: ok");
+            assert_eq!(got.blob_sha, Some("deadbeef".to_string()));
+            assert_eq!(got.ref_requested, None);
+        }
+
+        #[tokio::test]
+        async fn fetch_file_from_decodes_gitea_style_response() {
+            // Gitea's Contents API mirrors GitHub's shape exactly (#422 unifies
+            // on this for release lookups too) — the same `fetch_file_from`
+            // handles a Gitea api base with no branching, which is the whole
+            // point of not reimplementing a second code path for it.
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/repos/x/y/contents/compose.yml"))
+                .and(query_param("ref", "v1.2.3"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(
+                    r#"{"content":"Y29tcG9zZTogb2s=","encoding":"base64","sha":"cafef00d"}"#,
+                ))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let got = fetch_file_from(
+                &client,
+                &format!("{}/api/v1/repos/x/y", server.uri()),
+                "",
+                "compose.yml",
+                Some("v1.2.3"),
+            )
+            .await
+            .expect("mocked Gitea-shaped contents response should decode");
+            assert_eq!(got.content, "compose: ok");
+            assert_eq!(got.blob_sha, Some("cafef00d".to_string()));
+            assert_eq!(got.ref_requested, Some("v1.2.3".to_string()));
+        }
+
+        #[tokio::test]
+        async fn fetch_file_from_404_is_distinct_from_an_auth_error() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/repos/x/y/contents/missing.yml"))
+                .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let err = fetch_file_from(
+                &client,
+                &format!("{}/repos/x/y", server.uri()),
+                "",
+                "missing.yml",
+                None,
+            )
+            .await
+            .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("not found"), "unexpected error: {msg}");
+            assert!(
+                !msg.contains("http 404"),
+                "should not read like a raw status code: {msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn fetch_file_from_auth_failure_reads_distinctly_from_404() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/repos/x/y/contents/compose.yml"))
+                .respond_with(ResponseTemplate::new(401).set_body_string("Bad credentials"))
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let err = fetch_file_from(
+                &client,
+                &format!("{}/repos/x/y", server.uri()),
+                "sometoken",
+                "compose.yml",
+                None,
+            )
+            .await
+            .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("http 401"), "unexpected error: {msg}");
+            assert!(
+                !msg.contains("not found"),
+                "must not collapse into the 404 message: {msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn fetch_file_from_rejects_non_base64_encoding() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/repos/x/y/contents/compose.yml"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(r#"{"content":"not used","encoding":"none","sha":"x"}"#),
+                )
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let err = fetch_file_from(
+                &client,
+                &format!("{}/repos/x/y", server.uri()),
+                "",
+                "compose.yml",
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("unsupported content encoding"),
+                "{err:#}"
+            );
+        }
+
+        #[tokio::test]
+        async fn fetch_file_from_rejects_non_utf8_content() {
+            let server = MockServer::start().await;
+            // base64 of the raw bytes 0xFF 0xFE — not valid UTF-8.
+            Mock::given(method("GET"))
+                .and(path("/repos/x/y/contents/compose.yml"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(r#"{"content":"//4=","encoding":"base64","sha":"x"}"#),
+                )
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let err = fetch_file_from(
+                &client,
+                &format!("{}/repos/x/y", server.uri()),
+                "",
+                "compose.yml",
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("not valid UTF-8"), "{err:#}");
+        }
+
+        #[tokio::test]
+        async fn fetch_file_from_sends_bearer_token_when_present() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/repos/x/y/contents/compose.yml"))
+                .and(header("Authorization", "Bearer secret-tok"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(r#"{"content":"b2s=","encoding":"base64","sha":"x"}"#),
+                )
+                .mount(&server)
+                .await;
+            let client = utils::http::Client::new();
+            let got = fetch_file_from(
+                &client,
+                &format!("{}/repos/x/y", server.uri()),
+                "secret-tok",
+                "compose.yml",
+                None,
+            )
+            .await
+            .expect("mock only matches when the bearer header is sent");
+            assert_eq!(got.content, "ok");
+        }
+
+        /// A current-thread runtime so `block_on` runs the async fetch on THIS
+        /// thread — the one `with_thread_db_path` scoped the db to.
+        /// `#[tokio::test]` cannot be used here: its runtime is already
+        /// active, so a nested `block_on` inside the sync
+        /// `with_thread_db_path` closure would panic.
+        fn rt() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build current-thread runtime")
+        }
+
+        #[test]
+        #[serial_test::serial(env)]
+        fn fetch_file_reuses_resolve_github_token_rather_than_duplicating_it() {
+            // `fetch_file_from`'s token plumbing is exercised above against an
+            // explicit token argument; this confirms the value that
+            // `fetch_file` actually threads through IS the one
+            // `update::resolve_github_token()` resolves — not a second,
+            // independently-implemented token lookup.
+            let _env = crate::test_env::snapshot();
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let dbp = tmp.path().join("orca.db");
+            // SAFETY: sound under nextest's process-per-test; under threaded
+            // cargo test, env readers outside serial(env) can still race.
+            unsafe {
+                std::env::remove_var("GITHUB_TOKEN");
+            }
+            let got =
+                db::with_thread_db_path(&dbp, || {
+                    let conn = db::open_default().expect("open temp canonical db");
+                    secrets::upsert(
+                        &conn,
+                        "orca.github_token",
+                        "inline",
+                        "orca.github_token",
+                        None,
+                    )
+                    .expect("upsert secret metadata");
+                    secrets::write_inline_value(&conn, "orca.github_token", "reused-tok")
+                        .expect("write inline value");
+                    let token = update::resolve_github_token();
+                    assert_eq!(token, "reused-tok");
+                    rt().block_on(async {
+                        let server = MockServer::start().await;
+                        Mock::given(method("GET"))
+                            .and(path("/repos/x/y/contents/compose.yml"))
+                            .and(header("Authorization", "Bearer reused-tok"))
+                            .respond_with(ResponseTemplate::new(200).set_body_string(
+                                r#"{"content":"b2s=","encoding":"base64","sha":"x"}"#,
+                            ))
+                            .mount(&server)
+                            .await;
+                        let client = utils::http::Client::new();
+                        fetch_file_from(
+                            &client,
+                            &format!("{}/repos/x/y", server.uri()),
+                            &token,
+                            "compose.yml",
+                            None,
+                        )
+                        .await
+                    })
+                });
+            assert_eq!(
+                got.expect("mock only matches when the reused token is sent")
+                    .content,
+                "ok"
             );
         }
     }
