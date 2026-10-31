@@ -18,6 +18,11 @@
 //! Sustained failure surfaces via [`take_stale_routes`], which the roster tick
 //! turns into an operator notification with a suppress-address remediation.
 //!
+//! [`known_down`] is a third, read-only consumer: the mesh-wide `system
+//! health` sweep checks it before dialing a peer, so a peer the heartbeat
+//! already knows is unreachable doesn't cost the operator a fresh connect
+//! timeout on every call.
+//!
 //! Cache freshness TTL is 60s — matched to the `roster_sync` tick so a "last
 //! good" address stays trusted exactly until the next probe re-confirms it.
 
@@ -154,6 +159,113 @@ pub fn take_stale_routes(peer_id: &str) -> Vec<StaleRoute> {
     out
 }
 
+/// A peer whose every cached address is currently in a failing streak, as
+/// reported by [`known_down`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownDown {
+    /// Epoch-ms of the earliest ongoing failure across the peer's addresses.
+    pub down_since_ms: u64,
+    /// The worst (highest) consecutive-failure count across its addresses.
+    pub consecutive_failures: u32,
+}
+
+/// Outcome of checking one cached [`Route`] against `now`.
+enum RouteCheck {
+    /// Failing, with the epoch-ms of the first failure in the streak.
+    Down(u64, u32),
+    /// A fresh success, or no failing streak at all.
+    Reachable,
+    /// `consecutive_failures > 0` but `first_fail_ms` is unset — `record_failure`
+    /// always sets both together, so this should never happen; treat as
+    /// "can't tell" rather than letting it blow up the caller.
+    Unknown,
+}
+
+fn check_route(r: &Route, now: u64) -> RouteCheck {
+    let fresh_success = r
+        .last_success_ms
+        .is_some_and(|t| now.saturating_sub(t) <= TTL_MS);
+    if fresh_success || r.consecutive_failures == 0 {
+        return RouteCheck::Reachable;
+    }
+    match r.first_fail_ms {
+        Some(first_fail) => RouteCheck::Down(first_fail, r.consecutive_failures),
+        None => RouteCheck::Unknown,
+    }
+}
+
+/// Read-only: is `peer_id` known-down from the route-health cache, with no
+/// live dial needed?
+///
+/// `current_addresses` is the peer's *current* address set (e.g. from
+/// [`crate::mesh::dialer::dial_targets_for_peer`]) — the same source the live
+/// dial path uses. True only when EVERY address in it has a cache entry that
+/// is both failing and has no success within [`TTL_MS`]; an address the peer
+/// currently has but that was never dialed (so it has no cache entry at all)
+/// means we can't rule it out, so this fails open to `None` rather than
+/// reporting the peer down. A fresh success on any one address also means the
+/// peer is reachable by at least one route.
+///
+/// When `current_addresses` is empty — no authoritative address list is
+/// available (e.g. the peer has no registered routes at all) — falls back to
+/// whatever is cached for the peer, since there's nothing else to check
+/// against.
+///
+/// Side-effect-free: unlike [`take_stale_routes`], this never mutates
+/// `notified`, so it is safe to call on every `system health` sweep.
+pub fn known_down(peer_id: &str, current_addresses: &[String]) -> Option<KnownDown> {
+    let now = now_ms();
+    let g = cache().lock().expect("route_health poisoned");
+    if current_addresses.is_empty() {
+        return known_down_from_cache(&g, peer_id, now);
+    }
+    let mut down_since_ms: Option<u64> = None;
+    let mut consecutive_failures = 0u32;
+    for addr in current_addresses {
+        let r = g.get(&(peer_id.to_string(), addr.clone()))?;
+        match check_route(r, now) {
+            RouteCheck::Reachable => return None,
+            RouteCheck::Unknown => continue,
+            RouteCheck::Down(first_fail, failures) => {
+                down_since_ms = Some(down_since_ms.map_or(first_fail, |d| d.min(first_fail)));
+                consecutive_failures = consecutive_failures.max(failures);
+            }
+        }
+    }
+    down_since_ms.map(|down_since_ms| KnownDown {
+        down_since_ms,
+        consecutive_failures,
+    })
+}
+
+/// Cache-only fallback for [`known_down`] when the caller has no current
+/// address list to cross-check against.
+fn known_down_from_cache(
+    g: &HashMap<(String, String), Route>,
+    peer_id: &str,
+    now: u64,
+) -> Option<KnownDown> {
+    let mut down_since_ms: Option<u64> = None;
+    let mut consecutive_failures = 0u32;
+    for ((pid, _), r) in g.iter() {
+        if pid != peer_id {
+            continue;
+        }
+        match check_route(r, now) {
+            RouteCheck::Reachable => return None,
+            RouteCheck::Unknown => continue,
+            RouteCheck::Down(first_fail, failures) => {
+                down_since_ms = Some(down_since_ms.map_or(first_fail, |d| d.min(first_fail)));
+                consecutive_failures = consecutive_failures.max(failures);
+            }
+        }
+    }
+    down_since_ms.map(|down_since_ms| KnownDown {
+        down_since_ms,
+        consecutive_failures,
+    })
+}
+
 /// Drop every cached route for a peer whose `peer_id` is not in `active`. The
 /// cache is otherwise append-only: `record_success`/`record_failure` insert a
 /// `(peer_id, address)` on first dial and nothing ever removes it, so a departed
@@ -258,6 +370,131 @@ mod tests {
         let g = cache().lock().unwrap();
         assert!(g.contains_key(&(keep.to_string(), "a".to_string())));
         assert!(!g.contains_key(&(drop.to_string(), "b".to_string())));
+    }
+
+    #[test]
+    fn known_down_is_none_for_a_never_dialed_peer() {
+        let p = "peer-known-down-unseen";
+        assert_eq!(known_down(p, &[]), None);
+    }
+
+    #[test]
+    fn known_down_is_none_with_a_recent_success_despite_an_old_failure() {
+        let p = "peer-known-down-recent-success";
+        let addr = "a".to_string();
+        {
+            let mut g = cache().lock().unwrap();
+            g.insert(
+                (p.to_string(), addr),
+                Route {
+                    last_success_ms: Some(now_ms()),
+                    consecutive_failures: 3,
+                    first_fail_ms: Some(now_ms().saturating_sub(SUSTAINED_FAIL_MS)),
+                    notified: false,
+                },
+            );
+        }
+        assert_eq!(known_down(p, &[]), None);
+    }
+
+    #[test]
+    fn known_down_is_some_for_a_failing_streak_past_ttl() {
+        let p = "peer-known-down-failing";
+        let addr = "a".to_string();
+        let first_fail = now_ms().saturating_sub(TTL_MS + 5_000);
+        {
+            let mut g = cache().lock().unwrap();
+            g.insert(
+                (p.to_string(), addr),
+                Route {
+                    last_success_ms: None,
+                    consecutive_failures: 4,
+                    first_fail_ms: Some(first_fail),
+                    notified: false,
+                },
+            );
+        }
+        let down = known_down(p, &[]).expect("expected known-down");
+        assert_eq!(down.down_since_ms, first_fail);
+        assert_eq!(down.consecutive_failures, 4);
+    }
+
+    #[test]
+    fn known_down_is_some_when_every_current_address_is_cached_and_failing() {
+        let p = "peer-known-down-all-current-failing";
+        let addr_a = "a".to_string();
+        let addr_b = "b".to_string();
+        let first_fail = now_ms().saturating_sub(TTL_MS + 5_000);
+        {
+            let mut g = cache().lock().unwrap();
+            g.insert(
+                (p.to_string(), addr_a.clone()),
+                Route {
+                    last_success_ms: None,
+                    consecutive_failures: 4,
+                    first_fail_ms: Some(first_fail),
+                    notified: false,
+                },
+            );
+            g.insert(
+                (p.to_string(), addr_b.clone()),
+                Route {
+                    last_success_ms: None,
+                    consecutive_failures: 2,
+                    first_fail_ms: Some(first_fail + 1_000),
+                    notified: false,
+                },
+            );
+        }
+        let down = known_down(p, &[addr_a, addr_b]).expect("expected known-down");
+        assert_eq!(down.down_since_ms, first_fail);
+        assert_eq!(down.consecutive_failures, 4);
+    }
+
+    #[test]
+    fn known_down_is_none_when_a_current_address_has_never_been_dialed() {
+        // Reproduces the bug: one stale-failing cached address plus a second
+        // current address that has no cache entry at all (never dialed) must
+        // fail open to `None`, not report the peer down.
+        let p = "peer-known-down-untried-address";
+        let stale = "stale".to_string();
+        let untried = "untried".to_string();
+        {
+            let mut g = cache().lock().unwrap();
+            g.insert(
+                (p.to_string(), stale.clone()),
+                Route {
+                    last_success_ms: None,
+                    consecutive_failures: 4,
+                    first_fail_ms: Some(now_ms().saturating_sub(TTL_MS + 5_000)),
+                    notified: false,
+                },
+            );
+        }
+        assert_eq!(known_down(p, &[stale, untried]), None);
+    }
+
+    #[test]
+    fn known_down_skips_a_route_that_violates_the_first_fail_invariant() {
+        // `consecutive_failures > 0` with no `first_fail_ms` should never
+        // happen (record_failure always sets both together) but must skip
+        // the route rather than aborting the whole check.
+        let p = "peer-known-down-invariant-violation";
+        let addr = "a".to_string();
+        {
+            let mut g = cache().lock().unwrap();
+            g.insert(
+                (p.to_string(), addr.clone()),
+                Route {
+                    last_success_ms: None,
+                    consecutive_failures: 4,
+                    first_fail_ms: None,
+                    notified: false,
+                },
+            );
+        }
+        assert_eq!(known_down(p, std::slice::from_ref(&addr)), None);
+        assert_eq!(known_down(p, &[]), None);
     }
 
     #[test]
