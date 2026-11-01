@@ -29,8 +29,7 @@ pub struct CallerIdentity {
 impl CallerIdentity {
     /// True if this caller's role meets `required` in the shared tier order,
     /// so `super-admin` passes an `admin` gate where `role == "admin"` would
-    /// refuse it. The identity carries a single role today; this is the one
-    /// check to extend when it carries several.
+    /// refuse it.
     pub fn satisfies(&self, required: &str) -> bool {
         crate::roles::satisfies(&self.role, required)
     }

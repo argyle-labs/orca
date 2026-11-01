@@ -45,4 +45,23 @@ mod tests {
         assert!(!satisfies("super-admin", "bogus"));
         assert!(!satisfies("", "admin"));
     }
+
+    #[test]
+    fn any_passes_every_caller() {
+        assert!(satisfies("admin", "any"));
+        assert!(satisfies("", "any"));
+        assert!(satisfies("bogus", "any"));
+    }
+
+    #[test]
+    fn empty_required_is_refused() {
+        assert!(!satisfies("super-admin", ""));
+        assert!(!satisfies("", ""));
+    }
+
+    #[test]
+    fn aliases_rank_with_their_tier() {
+        assert!(satisfies("member", "user"));
+        assert!(satisfies("read-only", "read"));
+    }
 }
