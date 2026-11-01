@@ -352,19 +352,6 @@ args = ["server.js"]
         assert!(format!("{err:#}").contains("HTTP URL"), "got: {err:#}");
     }
 
-    /// Other tests in the process (e.g. mesh registry PKI) may have installed
-    /// the provider already; that counts as installed.
-    fn install_ring_provider_once() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            let installed = rustls::crypto::ring::default_provider().install_default();
-            assert!(
-                installed.is_ok() || rustls::crypto::CryptoProvider::get_default().is_some(),
-                "install rustls ring CryptoProvider"
-            );
-        });
-    }
-
     #[test]
     fn sync_errors_without_plugin_token() {
         let dir = tempfile::tempdir().unwrap();
@@ -378,7 +365,7 @@ args = ["server.js"]
 
     #[test]
     fn sync_pushes_each_and_marks_synced() {
-        install_ring_provider_once();
+        utils::http::ensure_crypto_provider();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -411,7 +398,7 @@ args = ["server.js"]
 
     #[test]
     fn sync_token_from_mcp_env_when_not_stored() {
-        install_ring_provider_once();
+        utils::http::ensure_crypto_provider();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -464,7 +451,7 @@ PLUGIN_TOKEN = "env-secret"
 
     #[test]
     fn sync_reports_failure_without_mark() {
-        install_ring_provider_once();
+        utils::http::ensure_crypto_provider();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
