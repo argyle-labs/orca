@@ -74,7 +74,7 @@ pub struct FleetPluginResult {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FleetUpdateOutput {
-    /// True when nothing was applied (no `--execute`).
+    /// True when nothing was applied (a `dryRun`/`--dry-run` preview).
     pub dry_run: bool,
     /// Per-host daemon update plan/results, in apply order (local last).
     pub systems: Vec<FleetSystemResult>,
