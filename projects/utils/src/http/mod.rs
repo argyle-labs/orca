@@ -134,6 +134,7 @@ struct ClientConfig {
     connect_timeout: Duration,
     pool_max_idle_per_host: usize,
     pool_idle_timeout: Duration,
+    build_wait: Duration,
     #[cfg(test)]
     build_delay: Duration,
 }
@@ -144,6 +145,7 @@ impl Default for ClientConfig {
             connect_timeout: CONNECT_TIMEOUT,
             pool_max_idle_per_host: 8,
             pool_idle_timeout: Duration::from_secs(30),
+            build_wait: DEFAULT_TIMEOUT,
             #[cfg(test)]
             build_delay: Duration::ZERO,
         }
@@ -334,11 +336,34 @@ impl Client {
                 }
             }
         };
-        let built = rx
-            .wait_for(Option::is_some)
-            .await
-            .map_err(|_| HttpError::Build("build thread exited".into()))?
-            .clone();
+        // A timer thread rather than `tokio::time`: callers may have no runtime.
+        // Dropping `cancel` wakes it early once the build lands or we're dropped.
+        let wait = self.inner.config.build_wait;
+        let (cancel, cancel_rx) = std::sync::mpsc::channel::<()>();
+        let (fire, fired) = tokio::sync::oneshot::channel::<()>();
+        std::thread::Builder::new()
+            .name("http-client-build-wait".into())
+            .spawn(move || {
+                if cancel_rx.recv_timeout(wait) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                    _ = fire.send(());
+                }
+            })
+            .map_err(|e| HttpError::Build(format!("spawn build wait timer: {e}")))?;
+        let ready = std::pin::pin!(rx.wait_for(Option::is_some));
+        let built = match futures_util::future::select(ready, fired).await {
+            futures_util::future::Either::Left((ready, _)) => {
+                let built = ready
+                    .map_err(|_| HttpError::Build("build thread exited".into()))?
+                    .clone();
+                drop(cancel);
+                built
+            }
+            futures_util::future::Either::Right(_) => {
+                return Err(HttpError::Build(format!(
+                    "client build stalled: no result after {wait:?} (system proxy read hung?)"
+                )));
+            }
+        };
         match built {
             Some(Built::Client(client)) => Ok(client),
             Some(Built::Failed(e)) => Err(HttpError::Build(e)),
@@ -1106,6 +1131,28 @@ mod tests {
         let (a, b) = tokio::join!(client.pool(false), client.pool(false));
         a.unwrap();
         b.unwrap();
+        client.pool(false).await.unwrap();
+        let builds = client
+            .inner
+            .secure
+            .builds
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(builds, 1);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_build_times_out_then_later_calls_succeed() {
+        let mut b = Client::builder();
+        b.config.build_delay = Duration::from_millis(400);
+        b.config.build_wait = Duration::from_millis(50);
+        let client = b.build();
+        let err = client.pool(false).await.unwrap_err();
+        assert!(err.to_string().contains("stalled"), "{err}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while client.inner.secure.client.get().is_none() {
+            assert!(std::time::Instant::now() < deadline, "build never finished");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         client.pool(false).await.unwrap();
         let builds = client
             .inner
