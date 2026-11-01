@@ -1791,8 +1791,12 @@ mod tests {
             idle: Duration::from_secs(5),
             deadline: Instant::now() + Duration::from_millis(600),
         };
+        let deadline = stream.deadline;
         let started = Instant::now();
-        let err = invoke_on(&mut stream, 7, "fake.stream", json!({}), None, "fake").unwrap_err();
+        let err = crate::ws::with_invoke_deadline(deadline, || {
+            invoke_on(&mut stream, 7, "fake.stream", json!({}), None, "fake")
+        })
+        .unwrap_err();
         assert!(is_ceiling(&err), "got: {err:#}");
         assert!(started.elapsed() < Duration::from_secs(5));
     }

@@ -383,42 +383,55 @@ fn exec_http_stream(
     // `on_chunk` is borrowed and not `Send`, so the stream is driven on the cap
     // runtime and each chunk is relayed back to run `on_chunk` on this thread.
     // The bounded channel gives backpressure; a consumer that stalls past the
-    // plugin idle timeout, or drops the receiver, ends the task.
+    // plugin idle timeout, or drops the receiver, ends the task. The invoke
+    // ceiling bounds the task too, since no socket op runs while waiting on `rx`.
     let send_timeout = dispatch::plugin_idle_timeout();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Value>>(16);
+    let deadline = crate::ws::invoke_deadline();
     cap_runtime().spawn(
         async move {
             let send = |item| send_within(&tx, item, send_timeout);
-            let resp = match builder.send_stream().await {
-                Ok(resp) => resp,
-                Err(e) => {
-                    send(Err(anyhow!("http.stream: {e}"))).await;
+            let relay = async {
+                let resp = match builder.send_stream().await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        send(Err(anyhow!("http.stream: {e}"))).await;
+                        return;
+                    }
+                };
+                // seq 0: the head (status + headers), before any body byte.
+                let head = HttpStreamChunk::Head {
+                    status: resp.status(),
+                    headers: resp
+                        .headers
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                };
+                if !send(serde_json::to_value(head).map_err(Into::into)).await {
                     return;
                 }
-            };
-            // seq 0: the head (status + headers), before any body byte.
-            let head = HttpStreamChunk::Head {
-                status: resp.status(),
-                headers: resp
-                    .headers
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            };
-            if !send(serde_json::to_value(head).map_err(Into::into)).await {
-                return;
-            }
-            let mut body = Box::pin(resp.bytes_stream());
-            while let Some(item) = plugin_toolkit::stream::next(&mut body).await {
-                let chunk = item
-                    .map_err(|e| anyhow!("http.stream: body: {e}"))
-                    .and_then(|bytes| {
-                        serde_json::to_value(HttpStreamChunk::Body { bytes }).map_err(Into::into)
-                    });
-                let failed = chunk.is_err();
-                if !send(chunk).await || failed {
-                    return;
+                let mut body = Box::pin(resp.bytes_stream());
+                while let Some(item) = plugin_toolkit::stream::next(&mut body).await {
+                    let chunk = item
+                        .map_err(|e| anyhow!("http.stream: body: {e}"))
+                        .and_then(|bytes| {
+                            serde_json::to_value(HttpStreamChunk::Body { bytes })
+                                .map_err(Into::into)
+                        });
+                    let failed = chunk.is_err();
+                    if !send(chunk).await || failed {
+                        return;
+                    }
                 }
+            };
+            match deadline {
+                Some(d) => {
+                    if tokio::time::timeout_at(d.into(), relay).await.is_err() {
+                        send(Err(anyhow!("http.stream: invoke ceiling reached"))).await;
+                    }
+                }
+                None => relay.await,
             }
         }
         .instrument(tracing::Span::current()),

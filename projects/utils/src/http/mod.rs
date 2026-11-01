@@ -299,7 +299,13 @@ impl Client {
             if insecure {
                 b = b.danger_accept_invalid_certs(true);
             }
-            b.build().map_err(HttpError::from)
+            // `build` reads the system proxy config synchronously (configd on
+            // macOS), which can stall for seconds under load; keep it off the
+            // async workers so callers' timeouts still fire.
+            tokio::task::spawn_blocking(move || b.build())
+                .await
+                .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
+                .map_err(HttpError::from)
         })
         .await
         .cloned()

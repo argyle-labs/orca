@@ -739,15 +739,20 @@ mod tests {
         None
     }
 
+    /// The group leader exits only once the holder has left the group (written
+    /// its pid), so the group kill can never reach it first; `linger` keeps the
+    /// leader alive after that.
     #[cfg(unix)]
-    fn detached_holder(dir: &std::path::Path) -> Command {
+    fn detached_holder(dir: &std::path::Path, linger: bool) -> Command {
         let script = format!(
             "perl -MPOSIX -e 'POSIX::setsid(); $SIG{{PIPE}}=q(IGNORE); $|=1; \
-             open(P, q(>), q({pid})); print P qq($$\\n); close(P); \
+             open(P, q(>), q({pid}.tmp)); print P qq($$\\n); close(P); rename(q({pid}.tmp), q({pid})); \
              for (1..600) {{ unless (print qq(x\\n)) {{ open(M, q(>), q({mark})); print M qq(epipe\\n); close(M); exit }} \
-             select(undef, undef, undef, 0.05) }}' &",
+             select(undef, undef, undef, 0.05) }}' & \
+             while [ ! -e {pid} ]; do sleep 0.01; done; {tail}",
             pid = dir.join("pid").display(),
             mark = dir.join("mark").display(),
+            tail = if linger { "sleep 60" } else { ":" },
         );
         Command::new("sh")
             .arg("-c")
@@ -770,7 +775,7 @@ mod tests {
     async fn output_within_errors_when_pipe_held_outside_group() {
         let dir = std::env::temp_dir().join(format!("pghold-{}", crate::mint_uuidv7()));
         std::fs::create_dir_all(&dir).unwrap();
-        let res = detached_holder(&dir)
+        let res = detached_holder(&dir, false)
             .output_within(Duration::from_secs(10))
             .await;
         let pid = wait_for_file(&dir.join("pid")).await;
@@ -788,15 +793,18 @@ mod tests {
     async fn cancelling_output_within_aborts_the_pipe_reader() {
         let dir = std::env::temp_dir().join(format!("pgcancel-{}", crate::mint_uuidv7()));
         std::fs::create_dir_all(&dir).unwrap();
-        let cancelled = tokio::time::timeout(
-            Duration::from_millis(100),
-            detached_holder(&dir).output_within(Duration::from_secs(60)),
-        )
-        .await
-        .is_err();
+        let pid_file = dir.join("pid");
+        let started = tokio::select! {
+            _ = detached_holder(&dir, true).output_within(Duration::from_secs(60)) => None,
+            pid = wait_for_file(&pid_file) => Some(pid.is_some()),
+        };
         let mark = wait_for_file(&dir.join("mark")).await;
         kill_holder(&dir);
-        assert!(cancelled, "expected the outer timeout to cancel");
+        assert_eq!(
+            started,
+            Some(true),
+            "expected the holder to start, then the cancel"
+        );
         assert_eq!(
             mark.as_deref(),
             Some("epipe\n"),
