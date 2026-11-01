@@ -115,6 +115,8 @@ struct Pool {
     building: std::sync::Mutex<Option<tokio::sync::watch::Receiver<Option<Built>>>>,
     #[cfg(test)]
     builds: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    dies: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -318,18 +320,13 @@ impl Client {
                     std::thread::Builder::new()
                         .name("http-client-build".into())
                         .spawn(move || {
-                            let built = inner.build_pool(insecure);
-                            let pool = inner.pool(insecure);
-                            let mut building = pool
-                                .building
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            match &built {
-                                Built::Client(client) => _ = pool.client.set(client.clone()),
-                                Built::Failed(_) | Built::Panicked(_) => {}
-                            }
-                            *building = None;
-                            tx.send_replace(Some(built));
+                            let mut guard = BuildGuard {
+                                inner,
+                                insecure,
+                                tx,
+                                built: None,
+                            };
+                            guard.built = Some(guard.inner.build_pool(insecure));
                         })
                         .map_err(|e| HttpError::Build(format!("spawn build thread: {e}")))?;
                     *building = Some(rx.clone());
@@ -351,6 +348,33 @@ impl Client {
     }
 }
 
+/// Publishes the build outcome and clears `building` on every exit of the build
+/// thread, so a thread that dies outside `catch_unwind` leaves the cell empty
+/// and the next caller retries instead of joining a dead receiver.
+struct BuildGuard {
+    inner: Arc<Inner>,
+    insecure: bool,
+    tx: tokio::sync::watch::Sender<Option<Built>>,
+    built: Option<Built>,
+}
+
+impl Drop for BuildGuard {
+    fn drop(&mut self) {
+        let pool = self.inner.pool(self.insecure);
+        let mut building = pool
+            .building
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(Built::Client(client)) = &self.built {
+            _ = pool.client.set(client.clone());
+        }
+        *building = None;
+        if let Some(built) = self.built.take() {
+            self.tx.send_replace(Some(built));
+        }
+    }
+}
+
 impl Inner {
     fn pool(&self, insecure: bool) -> &Pool {
         if insecure {
@@ -367,6 +391,17 @@ impl Inner {
                 .builds
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::thread::sleep(self.config.build_delay);
+            let dies = &self.pool(insecure).dies;
+            if dies
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok()
+            {
+                panic!("build thread killed outside catch_unwind");
+            }
         }
         let cfg = &self.config;
         let built = std::panic::catch_unwind(|| {
@@ -1078,6 +1113,24 @@ mod tests {
             .builds
             .load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(builds, 1);
+    }
+
+    #[tokio::test]
+    async fn a_dead_build_thread_is_retried() {
+        let client = Client::new();
+        client
+            .inner
+            .secure
+            .dies
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(client.pool(false).await.is_err());
+        client.pool(false).await.unwrap();
+        let builds = client
+            .inner
+            .secure
+            .builds
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(builds, 2);
     }
 
     #[test]
