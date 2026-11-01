@@ -81,16 +81,23 @@ pub fn mark_synced(conn: &Connection, plugin_id: &str) -> Result<()> {
 /// This is the canonical credential-sync primitive — per
 /// `project_db_sync_primitive`, sync belongs in db, not in per-domain modules.
 pub async fn sync(plugin_id: &str) -> Result<()> {
-    let conn = crate::open_default()?;
+    let db_path = crate::db_path_override_snapshot();
 
-    let creds = list(&conn, plugin_id)?;
-    if creds.is_empty() {
+    let id = plugin_id.to_owned();
+    let loaded = with_conn(db_path.clone(), move |conn| {
+        let creds = list(conn, &id)?;
+        if creds.is_empty() {
+            return Ok(None);
+        }
+        let plugin = crate::plugins::get(conn, &id)?
+            .with_context(|| format!("plugin '{id}' not registered — run `orca plugin add`"))?;
+        Ok(Some((creds, plugin)))
+    })
+    .await?;
+    let Some((creds, plugin)) = loaded else {
         println!("no credentials to sync for plugin '{plugin_id}'");
         return Ok(());
-    }
-
-    let plugin = crate::plugins::get(&conn, plugin_id)?
-        .with_context(|| format!("plugin '{plugin_id}' not registered — run `orca plugin add`"))?;
+    };
 
     let (manifest, _) = plugin_manifest::parse_path(&plugin.manifest_path)?;
 
@@ -135,13 +142,31 @@ pub async fn sync(plugin_id: &str) -> Result<()> {
     }
 
     if failed == 0 {
-        mark_synced(&conn, plugin_id)?;
+        let id = plugin_id.to_owned();
+        with_conn(db_path, move |conn| mark_synced(conn, &id)).await?;
         println!("synced {synced} credential(s) to plugin '{plugin_id}'");
     } else {
         println!("synced {synced}, failed {failed} — credentials NOT marked as synced");
     }
 
     Ok(())
+}
+
+// The task-local DB override doesn't follow into spawn_blocking, so the
+// snapshot taken on the async side is reopened explicitly.
+async fn with_conn<T: Send + 'static>(
+    db_path: Option<std::path::PathBuf>,
+    f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(move || {
+        let conn = match db_path {
+            Some(path) => crate::open_unencrypted(&path)?,
+            None => crate::open_default()?,
+        };
+        f(&conn)
+    })
+    .await
+    .context("credential DB task panicked")?
 }
 
 // Redirect errors embed the target URL; status and transport errors are URL-free.
