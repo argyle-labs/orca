@@ -397,12 +397,11 @@ pub struct SystemUpdateArgs {
     #[arg(long)]
     pub version: Option<String>,
 
-    /// Legacy no-op on a daemon built after the fire-by-default flip: updates
-    /// apply by default now, and `dryRun`/`--dry-run` is the opt-in preview —
-    /// this flag no longer gates anything here. Kept so a request built for an
-    /// older daemon's pre-flip gate (which still requires it to apply) still
-    /// works there, and the fleet fan-out still spells it explicitly on every
-    /// per-host leg for that same reason.
+    /// Leg-level apply signal. A direct call (`self_only` unset) applies by
+    /// default and ignores this; a `self_only` leg applies only when this (or
+    /// `version`) is set, because every controller, old or new, spells it
+    /// explicitly on its legs and an old controller's probes send `false`
+    /// without a wire `dryRun`. `dryRun` still overrides it.
     #[serde(default)]
     #[arg(long)]
     pub execute: bool,
@@ -551,6 +550,15 @@ pub struct SystemUpdateArgs {
 fn neutralize_system_update(args: &mut SystemUpdateArgs) {
     args.execute = false;
     args.version = None;
+}
+
+/// An addressed update forwarded to its owning system. Preserves the id and
+/// pins `self_only` (forwarding `id: None` would read as "every system" on the
+/// far side); spells `execute` because a `self_only` leg applies only on it.
+fn forwarded_leg(mut args: SystemUpdateArgs, ctx: &contract::ToolCtx) -> SystemUpdateArgs {
+    args.self_only = true;
+    args.execute = !ctx.dry_run();
+    args
 }
 
 /// A this-system mutation `dryRun` cannot preview: each applies directly.
@@ -708,8 +716,8 @@ pub struct PendingRestart {
 // REPLACE a real plan with an empty one. Migrating it to return a typed
 // `ExecutionPlan` is the follow-up; that needs the body to run in plan mode,
 // which the intercept-before-body gate cannot express. `dry_run_aware` routes
-// `dryRun: true` to its own plan path — the only opt-in left; `execute` is a
-// legacy no-op kept for older peers (see its own doc comment).
+// `dryRun: true` to its own plan path; `execute` gates only `self_only` legs
+// (see its own doc comment).
 #[orca_tool(
     domain = "system",
     verb = "update",
@@ -749,11 +757,7 @@ async fn system_update(
         (_, true) => true,
         (Some(id), false) => {
             if !crate::system::addresses_this_system(id, ctx)? {
-                let mut leg = args;
-                // Preserve the id and pin `self_only`: forwarding `id: None`
-                // would read as "every system" on the far side, turning one
-                // addressed update into a second fan-out.
-                leg.self_only = true;
+                let leg = forwarded_leg(args, ctx);
                 return dispatch::cli::exec_remote::<SystemUpdate>(id, leg, ctx).await;
             }
             // The id names us: this system is the termination point.
@@ -780,10 +784,8 @@ async fn system_update(
         let mut out = hook
             .fleet_update(
                 crate::fleet::FleetUpdateRequest {
-                    // Fire by default: `dryRun`/`--dry-run` is the only opt-in
-                    // to a preview. `args.execute` is a legacy no-op here (see
-                    // its doc comment) — the fan-out keeps spelling it
-                    // explicitly on its own per-host legs for older peers.
+                    // A direct fan-out fires by default; `dryRun` is the
+                    // only opt-in to a preview.
                     execute: !ctx.dry_run(),
                     prerelease: args.prerelease,
                     break_lock: args.break_lock,
@@ -1084,13 +1086,12 @@ async fn run_system_update(
     // marker and returns the filtered version list, nothing else.
     let _ = any_non_binary;
     let _ = channel_changed; // marker is written upstream; install intent is version-only now
-    // Fire by default: a bare `{}` applies channel-latest (or the explicit
-    // `version`, when given); `dryRun`/`--dry-run` is the only opt-in to a
-    // preview that applies nothing. This supersedes the former
-    // [[feedback-updates-are-user-actions-only]] HARD RULE for this verb —
-    // see the standing execute-by-default directive this call site was
-    // migrated under.
-    let binary_intent = !ctx.dry_run();
+    // A direct call fires by default; `dryRun` is the only opt-in to a
+    // preview. A `self_only` leg keeps the pre-flip contract: older
+    // controllers probe legs with `execute: false` and no wire `dryRun`, so
+    // ignoring `execute` there would turn every probe into an apply.
+    let binary_intent =
+        !ctx.dry_run() && (!args.self_only || args.execute || args.version.is_some());
 
     // Effective channel = max(stored pref, channel implied by running version).
     // If the binary is a prerelease but the marker says stable (common on
@@ -2799,20 +2800,65 @@ mod tests {
         assert!(out.applied.is_none(), "dryRun applied {:?}", out.applied);
     }
 
+    /// Point the binary path at a dev source nothing listens on, so an apply
+    /// attempt surfaces as a `dev-source check failed` error with no real fetch.
+    fn unreachable_dev_source_home() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
+        unsafe {
+            std::env::set_var("ORCA_HOME", dir.path());
+            std::env::remove_var("ORCA_DEV");
+        }
+        crate::dev::write_dev_source("http://127.0.0.1:1").expect("write dev source");
+        dir
+    }
+
+    fn attempted_apply(out: &SystemUpdateOutput) -> bool {
+        out.errors
+            .iter()
+            .any(|e| e.contains("dev-source check failed"))
+    }
+
     #[tokio::test]
-    async fn system_update_fires_by_default_with_no_execute_and_no_dry_run() {
-        // Regression for the execute-by-default migration: default-
-        // constructed args (no `execute`, no `dryRun`) must ATTEMPT a real
-        // apply, not silently probe. Against the pre-fix code this was a
-        // no-op — `binary_intent` required an explicit `--execute` (or a
-        // `--version` the caller never supplied here) that a bare call never
-        // carries, so nothing was ever attempted and `errors` stayed empty.
-        // `version: "0.0.1"` is the same deliberately-ancient, nonexistent
-        // tag the dry-run counterpart above uses — it 404s rather than
-        // actually fetching and applying a real release.
+    #[serial_test::serial(env)]
+    async fn a_direct_update_fires_by_default() {
+        let _env = crate::test_env::snapshot();
+        let _home = unreachable_dev_source_home();
+        let ctx = serve_ctx();
+        let id = "019f0000-0000-7000-8000-0000000000aa";
+        std::fs::write(ctx.config.app_dir.join("machine_id"), id).unwrap();
         let args = SystemUpdateArgs {
-            version: Some("0.0.1".to_string()),
+            id: Some(id.parse().unwrap()),
+            list_channels: true,
+            ..Default::default()
+        };
+        let SystemUpdateResult::Update(out) = system_update(args, &ctx).await.unwrap() else {
+            panic!("a single-system update returns the update shape");
+        };
+        assert!(
+            attempted_apply(&out),
+            "a direct call must attempt the apply: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_forwarded_leg_spells_execute_from_dry_run() {
+        let mut ctx = serve_ctx();
+        let leg = forwarded_leg(SystemUpdateArgs::default(), &ctx);
+        assert!(leg.self_only && leg.execute);
+        ctx.set_dry_run(true);
+        let leg = forwarded_leg(SystemUpdateArgs::default(), &ctx);
+        assert!(leg.self_only && !leg.execute);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_self_only_leg_without_execute_only_probes() {
+        let _env = crate::test_env::snapshot();
+        let _home = unreachable_dev_source_home();
+        let args = SystemUpdateArgs {
             self_only: true,
+            list_channels: true,
             ..Default::default()
         };
         let ctx = serve_ctx();
@@ -2820,9 +2866,8 @@ mod tests {
             panic!("a single-system update returns the update shape");
         };
         assert!(
-            out.applied.is_some() || !out.errors.is_empty(),
-            "a bare call with no `execute`/`dryRun` must attempt the apply, not silently \
-             skip it: {out:?}"
+            !attempted_apply(&out) && out.applied.is_none(),
+            "an old controller's probe leg must not apply: {out:?}"
         );
     }
 
