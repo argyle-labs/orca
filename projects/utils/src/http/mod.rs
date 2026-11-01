@@ -36,7 +36,6 @@ use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::OnceCell;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Connection-establishment cap applied to every pooled client (secure and
@@ -66,6 +65,8 @@ pub enum HttpError {
     Decode(String),
     #[error("redirect: {0}")]
     Redirect(String),
+    #[error("build http client: {0}")]
+    Build(String),
     #[error("response body exceeded {limit} bytes")]
     ResponseTooLarge { limit: usize },
     #[error("http {status}: {summary}")]
@@ -101,8 +102,26 @@ pub struct Client {
 #[derive(Default)]
 struct Inner {
     config: ClientConfig,
-    secure: OnceCell<reqwest::Client>,
-    insecure: OnceCell<reqwest::Client>,
+    secure: Pool,
+    insecure: Pool,
+}
+
+/// One lazily built `reqwest::Client`. The build runs on its own thread and
+/// publishes to every waiter, so a dropped caller neither cancels it nor lets a
+/// retry start a second one.
+#[derive(Default)]
+struct Pool {
+    client: std::sync::OnceLock<reqwest::Client>,
+    building: std::sync::Mutex<Option<tokio::sync::watch::Receiver<Option<Built>>>>,
+    #[cfg(test)]
+    builds: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Clone)]
+enum Built {
+    Client(reqwest::Client),
+    Failed(String),
+    Panicked(String),
 }
 
 /// Client-level transport settings composed into a [`Client`]. These cannot
@@ -113,6 +132,8 @@ struct ClientConfig {
     connect_timeout: Duration,
     pool_max_idle_per_host: usize,
     pool_idle_timeout: Duration,
+    #[cfg(test)]
+    build_delay: Duration,
 }
 
 impl Default for ClientConfig {
@@ -121,6 +142,8 @@ impl Default for ClientConfig {
             connect_timeout: CONNECT_TIMEOUT,
             pool_max_idle_per_host: 8,
             pool_idle_timeout: Duration::from_secs(30),
+            #[cfg(test)]
+            build_delay: Duration::ZERO,
         }
     }
 }
@@ -158,8 +181,8 @@ impl ClientBuilder {
         Client {
             inner: Arc::new(Inner {
                 config: self.config,
-                secure: OnceCell::new(),
-                insecure: OnceCell::new(),
+                secure: Pool::default(),
+                insecure: Pool::default(),
             }),
         }
     }
@@ -271,13 +294,82 @@ impl Client {
     }
 
     async fn pool(&self, insecure: bool) -> Result<reqwest::Client, HttpError> {
-        let cell = if insecure {
-            &self.inner.insecure
-        } else {
-            &self.inner.secure
+        let pool = self.inner.pool(insecure);
+        if let Some(client) = pool.client.get() {
+            return Ok(client.clone());
+        }
+        let mut rx = {
+            let mut building = pool
+                .building
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(client) = pool.client.get() {
+                return Ok(client.clone());
+            }
+            match &*building {
+                Some(rx) => rx.clone(),
+                None => {
+                    let (tx, rx) = tokio::sync::watch::channel(None);
+                    let inner = Arc::clone(&self.inner);
+                    // A plain thread, not `spawn_blocking`: `build` reads the
+                    // system proxy config synchronously (configd on macOS) and
+                    // can stall for seconds, and this must work with or without
+                    // a tokio runtime and survive its shutdown.
+                    std::thread::Builder::new()
+                        .name("http-client-build".into())
+                        .spawn(move || {
+                            let built = inner.build_pool(insecure);
+                            let pool = inner.pool(insecure);
+                            let mut building = pool
+                                .building
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            match &built {
+                                Built::Client(client) => _ = pool.client.set(client.clone()),
+                                Built::Failed(_) | Built::Panicked(_) => {}
+                            }
+                            *building = None;
+                            tx.send_replace(Some(built));
+                        })
+                        .map_err(|e| HttpError::Build(format!("spawn build thread: {e}")))?;
+                    *building = Some(rx.clone());
+                    rx
+                }
+            }
         };
-        let cfg = self.inner.config.clone();
-        cell.get_or_try_init(|| async move {
+        let built = rx
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| HttpError::Build("build thread exited".into()))?
+            .clone();
+        match built {
+            Some(Built::Client(client)) => Ok(client),
+            Some(Built::Failed(e)) => Err(HttpError::Build(e)),
+            Some(Built::Panicked(msg)) => panic!("reqwest client build panicked: {msg}"),
+            None => unreachable!("wait_for returned an unset value"),
+        }
+    }
+}
+
+impl Inner {
+    fn pool(&self, insecure: bool) -> &Pool {
+        if insecure {
+            &self.insecure
+        } else {
+            &self.secure
+        }
+    }
+
+    fn build_pool(&self, insecure: bool) -> Built {
+        #[cfg(test)]
+        {
+            self.pool(insecure)
+                .builds
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(self.config.build_delay);
+        }
+        let cfg = &self.config;
+        let built = std::panic::catch_unwind(|| {
             // reqwest (rustls + ring, no aws-lc) panics `No provider set`
             // unless a process-default crypto provider is installed before a
             // client is built. Production entrypoints install ring at startup,
@@ -299,16 +391,19 @@ impl Client {
             if insecure {
                 b = b.danger_accept_invalid_certs(true);
             }
-            // `build` reads the system proxy config synchronously (configd on
-            // macOS), which can stall for seconds under load; keep it off the
-            // async workers so callers' timeouts still fire.
-            tokio::task::spawn_blocking(move || b.build())
-                .await
-                .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
-                .map_err(HttpError::from)
-        })
-        .await
-        .cloned()
+            b.build()
+        });
+        match built {
+            Ok(Ok(client)) => Built::Client(client),
+            Ok(Err(e)) => Built::Failed(HttpError::from(e).to_string()),
+            Err(payload) => Built::Panicked(
+                payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_default(),
+            ),
+        }
     }
 }
 
@@ -943,6 +1038,53 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn slow_client(delay: Duration) -> Client {
+        let mut b = Client::builder();
+        b.config.build_delay = delay;
+        b.build()
+    }
+
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        struct Unpark(std::thread::Thread);
+        impl std::task::Wake for Unpark {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut fut = std::pin::pin!(fut);
+        loop {
+            if let std::task::Poll::Ready(out) = fut.as_mut().poll(&mut cx) {
+                return out;
+            }
+            std::thread::park();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_build_is_awaited_not_restarted() {
+        let client = slow_client(Duration::from_millis(300));
+        let first = tokio::time::timeout(Duration::from_millis(20), client.pool(false)).await;
+        assert!(first.is_err(), "first caller cancelled mid-build");
+        let (a, b) = tokio::join!(client.pool(false), client.pool(false));
+        a.unwrap();
+        b.unwrap();
+        client.pool(false).await.unwrap();
+        let builds = client
+            .inner
+            .secure
+            .builds
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(builds, 1);
+    }
+
+    #[test]
+    fn pool_builds_without_a_tokio_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        block_on(Client::new().pool(false)).unwrap();
+    }
 
     async fn flaky(server: &MockServer, verb: &str, first: ResponseTemplate, fails: u64) {
         Mock::given(method(verb))

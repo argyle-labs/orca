@@ -58,7 +58,7 @@ pub struct DevVersionInfo {
 /// Returns `Some` if the sha256 on the server differs from the running binary.
 pub async fn check_for_update_dev(source_url: &str) -> Result<Option<String>> {
     let url = utils::url::join(source_url, "version.json");
-    let client = utils::http::Client::new();
+    let client = utils::http::shared();
     let info: DevVersionInfo = client
         .get(url)
         .send()
@@ -80,7 +80,7 @@ pub async fn check_for_update_dev(source_url: &str) -> Result<Option<String>> {
 /// `/version.json` to pin the expected sha256, then sha256-verifies the
 /// downloaded bytes before writing — fail-closed, no install without match.
 pub async fn apply_update_dev(source_url: &str) -> Result<()> {
-    let client = utils::http::Client::new();
+    let client = utils::http::shared();
 
     let info: DevVersionInfo = client
         .get(utils::url::join(source_url, "version.json"))

@@ -67,7 +67,7 @@ pub struct Client {
 impl Client {
     pub fn new() -> Self {
         Self {
-            http: HttpClient::new(),
+            http: utils::http::shared().clone(),
         }
     }
 

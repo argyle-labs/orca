@@ -294,9 +294,9 @@ pub async fn resolve_version(
     } else {
         String::new()
     };
-    let client = utils::http::Client::new();
+    let client = utils::http::shared();
     let release =
-        resolve_release(name, repo_url, version, allow_prerelease, &client, &token).await?;
+        resolve_release(name, repo_url, version, allow_prerelease, client, &token).await?;
     Ok(release.tag_name.trim_start_matches('v').to_string())
 }
 
@@ -435,9 +435,9 @@ pub async fn fetch_for_target(
     }
     let token = active_api_token();
 
-    let client = utils::http::Client::new();
+    let client = utils::http::shared();
     let release =
-        resolve_release(name, repo_url, version, allow_prerelease, &client, &token).await?;
+        resolve_release(name, repo_url, version, allow_prerelease, client, &token).await?;
     let resolved = release.tag_name.trim_start_matches('v').to_string();
 
     // Resolve the asset via orca core's single-source-of-truth candidate order
@@ -563,8 +563,8 @@ pub async fn fetch_file(repo_url: &str, path: &str, ref_: Option<&str>) -> Resul
     let api = repo_api_base(repo_url)
         .with_context(|| format!("catalog repoUrl is not a github.com URL: {repo_url}"))?;
     let token = active_api_token();
-    let client = utils::http::Client::new();
-    fetch_file_from(&client, &api, &token, path, ref_).await
+    let client = utils::http::shared();
+    fetch_file_from(client, &api, &token, path, ref_).await
 }
 
 /// Pure core of [`fetch_file`]: given an already-resolved API base and token,

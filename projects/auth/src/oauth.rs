@@ -92,7 +92,7 @@ pub async fn cmd_oauth_github() -> Result<()> {
     let client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID")
         .context("GITHUB_OAUTH_CLIENT_ID not set — add to .env.orca.tpl and 1Password")?;
 
-    let client = utils::http::Client::new();
+    let client = utils::http::shared();
 
     let resp: DeviceCodeResponse = client
         .post("https://github.com/login/device/code")
@@ -208,7 +208,7 @@ pub async fn cmd_oauth_atlassian() -> Result<()> {
 
     let code = receive_callback(listener, &state)?;
 
-    let token_resp: AtlassianTokenResponse = utils::http::Client::new()
+    let token_resp: AtlassianTokenResponse = utils::http::shared()
         .post(ATLASSIAN_TOKEN_URL)
         .form(vec![
             ("grant_type".into(), "authorization_code".into()),

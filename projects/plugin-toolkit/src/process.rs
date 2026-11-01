@@ -741,45 +741,64 @@ mod tests {
 
     /// The group leader exits only once the holder has left the group (written
     /// its pid), so the group kill can never reach it first; `linger` keeps the
-    /// leader alive after that.
+    /// leader alive after that. Paths reach the scripts through the environment
+    /// so no quoting of them is needed.
     #[cfg(unix)]
     fn detached_holder(dir: &std::path::Path, linger: bool) -> Command {
         let script = format!(
-            "perl -MPOSIX -e 'POSIX::setsid(); $SIG{{PIPE}}=q(IGNORE); $|=1; \
-             open(P, q(>), q({pid}.tmp)); print P qq($$\\n); close(P); rename(q({pid}.tmp), q({pid})); \
-             for (1..600) {{ unless (print qq(x\\n)) {{ open(M, q(>), q({mark})); print M qq(epipe\\n); close(M); exit }} \
+            "echo $$ > \"$LEADER\"; \
+             perl -MPOSIX -e 'POSIX::setsid(); $SIG{{PIPE}}=q(IGNORE); $|=1; \
+             open(P, q(>), \"$ENV{{PID}}.tmp\"); print P qq($$\\n); close(P); rename(\"$ENV{{PID}}.tmp\", $ENV{{PID}}); \
+             for (1..600) {{ unless (print qq(x\\n)) {{ open(M, q(>), $ENV{{MARK}}); print M qq(epipe\\n); close(M); exit }} \
              select(undef, undef, undef, 0.05) }}' & \
-             while [ ! -e {pid} ]; do sleep 0.01; done; {tail}",
-            pid = dir.join("pid").display(),
-            mark = dir.join("mark").display(),
-            tail = if linger { "sleep 60" } else { ":" },
+             while [ ! -e \"$PID\" ]; do sleep 0.01; done; {tail}",
+            tail = if linger { "exec sleep 60" } else { ":" },
         );
         Command::new("sh")
             .arg("-c")
             .arg(script)
+            .env("PID", dir.join("pid"))
+            .env("MARK", dir.join("mark"))
+            .env("LEADER", dir.join("leader"))
             .kill_process_group_on_timeout()
     }
 
+    /// Kills the holder and the group leader and removes the dir, on every exit
+    /// path of the test.
     #[cfg(unix)]
-    fn kill_holder(dir: &std::path::Path) {
-        if let Ok(s) = std::fs::read_to_string(dir.join("pid"))
-            && let Ok(pid) = s.trim().parse::<libc::pid_t>()
-        {
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+    struct HolderDir(std::path::PathBuf);
+
+    #[cfg(unix)]
+    impl HolderDir {
+        fn new(prefix: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("{prefix}-{}", crate::mint_uuidv7()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
         }
-        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    impl Drop for HolderDir {
+        fn drop(&mut self) {
+            for name in ["pid", "leader"] {
+                if let Ok(s) = std::fs::read_to_string(self.0.join(name))
+                    && let Ok(pid) = s.trim().parse::<libc::pid_t>()
+                {
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
+            std::fs::remove_dir_all(&self.0).ok();
+        }
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn output_within_errors_when_pipe_held_outside_group() {
-        let dir = std::env::temp_dir().join(format!("pghold-{}", crate::mint_uuidv7()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let res = detached_holder(&dir, false)
+        let dir = HolderDir::new("pghold");
+        let res = detached_holder(&dir.0, false)
             .output_within(Duration::from_secs(10))
             .await;
-        let pid = wait_for_file(&dir.join("pid")).await;
-        kill_holder(&dir);
+        let pid = wait_for_file(&dir.0.join("pid")).await;
         assert!(pid.is_some(), "holder never wrote its pid");
         let err = res.expect_err("expected pipe-held error");
         assert!(
@@ -791,15 +810,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancelling_output_within_aborts_the_pipe_reader() {
-        let dir = std::env::temp_dir().join(format!("pgcancel-{}", crate::mint_uuidv7()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let pid_file = dir.join("pid");
+        let dir = HolderDir::new("pgcancel");
+        let pid_file = dir.0.join("pid");
         let started = tokio::select! {
-            _ = detached_holder(&dir, true).output_within(Duration::from_secs(60)) => None,
+            _ = detached_holder(&dir.0, true).output_within(Duration::from_secs(60)) => None,
             pid = wait_for_file(&pid_file) => Some(pid.is_some()),
         };
-        let mark = wait_for_file(&dir.join("mark")).await;
-        kill_holder(&dir);
+        let mark = wait_for_file(&dir.0.join("mark")).await;
         assert_eq!(
             started,
             Some(true),

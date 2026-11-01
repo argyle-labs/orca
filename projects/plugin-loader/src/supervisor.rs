@@ -267,6 +267,11 @@ pub fn invoke_on<S: Read + Write>(
                     return Err(e).with_context(|| format!("streaming capability '{cap}'"));
                 }
                 let end = match result {
+                    // The ceiling ends the invoke itself, so the supervisor kills
+                    // the plugin rather than relaying it as a cap failure.
+                    Err(e) if is_ceiling(&e) => {
+                        return Err(e).with_context(|| format!("streaming capability '{cap}'"));
+                    }
                     Ok(()) => Frame::CapStreamEnd {
                         id: cap_id,
                         ok: true,
@@ -664,7 +669,7 @@ struct Ceiling<'a> {
 }
 
 #[derive(Debug)]
-struct CeilingHit;
+pub(crate) struct CeilingHit;
 
 impl std::fmt::Display for CeilingHit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1758,17 +1763,16 @@ mod tests {
 
     #[test]
     fn a_streaming_cap_past_the_ceiling_errors() {
-        use std::io::Write as _;
         let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/", http.local_addr().unwrap());
         thread::spawn(move || {
             let (mut conn, _) = http.accept().unwrap();
             let mut req = [0u8; 1024];
             _ = conn.read(&mut req);
-            _ = conn.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
-            while conn.write_all(b"4\r\ndata\r\n").is_ok() {
-                thread::sleep(Duration::from_millis(10));
-            }
+            // No response head: no chunk ever reaches the socket, so only the
+            // relay's own deadline can end the cap.
+            thread::sleep(Duration::from_secs(10));
+            drop(conn);
         });
 
         let (mut plugin_end, mut orca_end) = UnixStream::pair().unwrap();
@@ -1798,6 +1802,11 @@ mod tests {
         })
         .unwrap_err();
         assert!(is_ceiling(&err), "got: {err:#}");
+        assert!(
+            err.chain()
+                .any(|c| c.to_string() == "streaming capability 'http.stream'"),
+            "ceiling came from the relay, got: {err:#}"
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 

@@ -238,7 +238,7 @@ pub async fn discover_from(
     triple: &str,
     previous: &[CatalogEntry],
 ) -> Result<Discovery> {
-    let client = utils::http::Client::new();
+    let client = utils::http::shared();
     let ua = format!("orca/{}", utils::build_info::version());
     let get = |url: String| {
         let mut r = client

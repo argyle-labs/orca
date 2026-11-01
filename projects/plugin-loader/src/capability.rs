@@ -428,7 +428,8 @@ fn exec_http_stream(
             match deadline {
                 Some(d) => {
                     if tokio::time::timeout_at(d.into(), relay).await.is_err() {
-                        send(Err(anyhow!("http.stream: invoke ceiling reached"))).await;
+                        let hit = std::io::Error::other(crate::supervisor::CeilingHit);
+                        send(Err(anyhow::Error::from(hit).context("http.stream"))).await;
                     }
                 }
                 None => relay.await,
