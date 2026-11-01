@@ -196,8 +196,15 @@ impl Command {
         }
     }
 
-    /// Run up to `budget`, capturing stdout + stderr. `Ok(None)` if it timed out
-    /// (the child, or its process group, is killed and reaped).
+    /// Run up to `budget`, capturing stdout + stderr. `Ok(None)` if the child
+    /// did not exit in time (the child, or its process group, is killed and
+    /// reaped).
+    ///
+    /// Once the child exits, the pipes get [`PIPE_GRACE`] to reach EOF. A process
+    /// the child left behind may still hold them open; the output read so far is
+    /// then returned with the child's own exit status. That process is left
+    /// running unless [`kill_process_group_on_timeout`](Self::kill_process_group_on_timeout)
+    /// was set, in which case the group is killed.
     pub async fn output_within(mut self, budget: Duration) -> std::io::Result<Option<Output>> {
         self.inner
             .stdout(std::process::Stdio::piped())
@@ -212,7 +219,14 @@ impl Command {
             .take()
             .expect("stderr was piped, so it is present");
         let mut guard = GroupGuard::new(self.kill_group, &child);
-        let mut reader = AbortOnDrop(tokio::spawn(read_pipes(stdout, stderr)));
+        let out_buf = SharedBuf::default();
+        let err_buf = SharedBuf::default();
+        let mut reader = AbortOnDrop(tokio::spawn(read_pipes(
+            stdout,
+            stderr,
+            out_buf.clone(),
+            err_buf.clone(),
+        )));
         let deadline = tokio::time::Instant::now() + budget;
         if tokio::time::timeout_at(deadline, guard.wait_leader(&mut child))
             .await
@@ -224,35 +238,23 @@ impl Command {
             guard.disarm();
             return Ok(None);
         }
-        let pipes = match tokio::time::timeout_at(deadline, &mut reader).await {
-            Ok(pipes) => pipes,
+        let grace_end = deadline.min(tokio::time::Instant::now() + PIPE_GRACE);
+        match tokio::time::timeout_at(grace_end, &mut reader).await {
+            Ok(pipes) => pipes.map_err(std::io::Error::other)??,
             Err(_) => {
-                guard.kill_on_timeout(&mut child);
-                // The group is dead, so a pipe still open after the grace belongs
-                // to a process that left it (setsid) and would hang the reader.
-                let held =
-                    guard.armed() && tokio::time::timeout(PIPE_GRACE, &mut reader).await.is_err();
                 reader.abort();
-                child.wait().await?;
-                guard.disarm();
-                if held {
-                    return Err(std::io::Error::other(
-                        "output pipe held open by a process outside the process group",
-                    ));
-                }
-                return Ok(None);
+                guard.kill();
             }
-        };
+        }
         let status = child.wait().await?;
         guard.disarm();
-        let (stdout, stderr) = pipes.map_err(std::io::Error::other)??;
         Ok(Some(Output {
             status: ExitStatus {
                 success: status.success(),
                 code: status.code(),
             },
-            stdout,
-            stderr,
+            stdout: take_buf(&out_buf),
+            stderr: take_buf(&err_buf),
         }))
     }
 
@@ -316,19 +318,38 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
+type SharedBuf = std::sync::Arc<std::sync::Mutex<Vec<u8>>>;
+
+fn take_buf(buf: &SharedBuf) -> Vec<u8> {
+    std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+// Reads into shared buffers so output survives the reader being aborted.
 async fn read_pipes(
-    mut stdout: tokio::process::ChildStdout,
-    mut stderr: tokio::process::ChildStderr,
-) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let (o, e) = tokio::join!(
-        tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut out),
-        tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut err),
-    );
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    out: SharedBuf,
+    err: SharedBuf,
+) -> std::io::Result<()> {
+    let (o, e) = tokio::join!(read_pipe(stdout, out), read_pipe(stderr, err));
     o?;
-    e?;
-    Ok((out, err))
+    e
+}
+
+async fn read_pipe(
+    mut pipe: impl tokio::io::AsyncRead + Unpin,
+    buf: SharedBuf,
+) -> std::io::Result<()> {
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = tokio::io::AsyncReadExt::read(&mut pipe, &mut chunk).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        buf.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(&chunk[..n]);
+    }
 }
 
 struct GroupGuard {
@@ -344,10 +365,6 @@ impl GroupGuard {
                 None
             },
         }
-    }
-
-    fn armed(&self) -> bool {
-        self.pgid.is_some()
     }
 
     fn disarm(&mut self) {
@@ -803,18 +820,51 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn output_within_errors_when_pipe_held_outside_group() {
+    async fn output_within_returns_leader_status_when_pipe_held_outside_group() {
         let dir = HolderDir::new("pghold");
-        let res = detached_holder(&dir.0, false)
-            .output_within(Duration::from_secs(1))
-            .await;
-        let pid = wait_for_file(&dir.0.join("pid")).await;
-        assert!(pid.is_some(), "holder never wrote its pid");
-        let err = res.expect_err("expected pipe-held error");
+        let out = detached_holder(&dir.0, false)
+            .output_within(Duration::from_secs(10))
+            .await
+            .unwrap()
+            .expect("leader exited in time");
+        assert!(out.status.success);
+    }
+
+    #[cfg(unix)]
+    async fn grandchild_holding_stdout(opt_in: bool) {
+        let dir = HolderDir::new("pgpipe");
+        let mut cmd = Command::new("sh")
+            .arg("-c")
+            .arg("echo hi; sleep 30 & echo $! > \"$PID\"")
+            .env("PID", dir.0.join("pid"));
+        if opt_in {
+            cmd = cmd.kill_process_group_on_timeout();
+        }
+        let started = std::time::Instant::now();
+        let out = cmd
+            .output_within(Duration::from_secs(10))
+            .await
+            .unwrap()
+            .expect("leader exited in time");
         assert!(
-            err.to_string().contains("outside the process group"),
-            "{err}"
+            started.elapsed() < Duration::from_secs(3),
+            "took {:?}",
+            started.elapsed()
         );
+        assert!(out.status.success);
+        assert_eq!(out.stdout, b"hi\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_within_returns_when_grandchild_holds_stdout() {
+        grandchild_holding_stdout(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_within_returns_when_grandchild_holds_stdout_in_group() {
+        grandchild_holding_stdout(true).await;
     }
 
     #[cfg(unix)]
