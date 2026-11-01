@@ -286,7 +286,7 @@ async fn plugin_update(
     }
 
     if args.cred_sync {
-        db::plugin_creds::sync(&args.id)?;
+        db::plugin_creds::sync(&args.id).await?;
         out.applied.push("cred-sync".to_string());
     }
 
