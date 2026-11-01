@@ -65,6 +65,7 @@ pub mod mesh_relay;
 pub use utils::invocation_scope;
 pub mod owner;
 mod remote;
+pub mod roles;
 mod tool;
 
 pub use cluster_roster::{AggregateClusterRoster, ClusterEntry, ClusterNode, ClusterRoster};

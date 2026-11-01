@@ -233,27 +233,7 @@ pub fn is_custody(tool: &str) -> bool {
     !is_remote_admin_safe(tool)
 }
 
-/// Rank of a role in the tier order `read-only` < `user` < `admin` <
-/// `super-admin`. `read` is `read-only` and `member` is `user`; `any` and
-/// unknown roles rank lowest.
-pub fn role_rank(role: &str) -> u8 {
-    match role {
-        "super-admin" => 4,
-        "admin" => 3,
-        "user" | "member" => 2,
-        "read-only" | "read" => 1,
-        _ => 0,
-    }
-}
-
-/// True if the caller's identity-role satisfies the tool's required-role,
-/// ranked by [`role_rank`]. `"read"` exists so sensitive read-only surfaces
-/// (e.g. `fs.*`) can be gated above `"any"` without requiring admin. Unknown
-/// required values fail closed, so a typo in `role = "..."` never falls open.
-pub fn satisfies(caller_role: &str, required: &str) -> bool {
-    let need = role_rank(required);
-    (need > 0 || required == "any") && role_rank(caller_role) >= need
-}
+pub use contract::roles::{role_rank, satisfies};
 
 pub fn second_factor_ok(requires_second_factor: bool, second_factor: bool) -> bool {
     !requires_second_factor || second_factor
