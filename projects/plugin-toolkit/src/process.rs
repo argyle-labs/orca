@@ -228,15 +228,16 @@ impl Command {
             err_buf.clone(),
         )));
         let deadline = tokio::time::Instant::now() + budget;
-        if tokio::time::timeout_at(deadline, guard.wait_leader(&mut child))
-            .await
-            .is_err()
-        {
-            reader.abort();
-            guard.kill_on_timeout(&mut child);
-            child.wait().await?;
-            guard.disarm();
-            return Ok(None);
+        match tokio::time::timeout_at(deadline, guard.wait_leader(&mut child)).await {
+            // Guard stays armed so its drop kills an opted-in group.
+            Ok(result) => result?,
+            Err(_) => {
+                reader.abort();
+                guard.kill_on_timeout(&mut child);
+                child.wait().await?;
+                guard.disarm();
+                return Ok(None);
+            }
         }
         let grace_end = deadline.min(tokio::time::Instant::now() + PIPE_GRACE);
         match tokio::time::timeout_at(grace_end, &mut reader).await {
