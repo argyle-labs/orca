@@ -80,17 +80,28 @@ pub fn mark_synced(conn: &Connection, plugin_id: &str) -> Result<()> {
 ///
 /// This is the canonical credential-sync primitive — per
 /// `project_db_sync_primitive`, sync belongs in db, not in per-domain modules.
-pub fn sync(plugin_id: &str) -> Result<()> {
-    let conn = crate::open_default()?;
+pub async fn sync(plugin_id: &str) -> Result<()> {
+    sync_with(utils::http::shared(), plugin_id).await
+}
 
-    let creds = list(&conn, plugin_id)?;
-    if creds.is_empty() {
+async fn sync_with(client: &utils::http::Client, plugin_id: &str) -> Result<()> {
+    let db_path = crate::db_path_override_snapshot();
+
+    let id = plugin_id.to_owned();
+    let loaded = with_conn(db_path.clone(), move |conn| {
+        let creds = list(conn, &id)?;
+        if creds.is_empty() {
+            return Ok(None);
+        }
+        let plugin = crate::plugins::get(conn, &id)?
+            .with_context(|| format!("plugin '{id}' not registered — run `orca plugin add`"))?;
+        Ok(Some((creds, plugin)))
+    })
+    .await?;
+    let Some((creds, plugin)) = loaded else {
         println!("no credentials to sync for plugin '{plugin_id}'");
         return Ok(());
-    }
-
-    let plugin = crate::plugins::get(&conn, plugin_id)?
-        .with_context(|| format!("plugin '{plugin_id}' not registered — run `orca plugin add`"))?;
+    };
 
     let (manifest, _) = plugin_manifest::parse_path(&plugin.manifest_path)?;
 
@@ -113,7 +124,7 @@ pub fn sync(plugin_id: &str) -> Result<()> {
         })
         .with_context(|| format!("no PLUGIN_TOKEN found for plugin '{plugin_id}'"))?;
 
-    let client = reqwest::blocking::Client::new();
+    let url = utils::url::join(&base_url, "creds");
     let mut synced = 0usize;
     let mut failed = 0usize;
 
@@ -122,32 +133,52 @@ pub fn sync(plugin_id: &str) -> Result<()> {
             // Don't push the auth token to itself — it's already on the host.
             continue;
         }
-        let url = utils::url::join(&base_url, "creds");
         #[allow(clippy::disallowed_types)]
         let body = serde_json::json!({"key": cred.key, "value": cred.value});
-        match client.put(&url).bearer_auth(&bearer).json(&body).send() {
-            Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 204 => {
-                synced += 1;
-            }
-            Ok(resp) => {
-                eprintln!("  failed {}: HTTP {}", cred.key, resp.status());
-                failed += 1;
-            }
+        match client.put(&url).bearer(&bearer).json(&body).send().await {
+            Ok(_) => synced += 1,
             Err(e) => {
-                eprintln!("  failed {}: {}", cred.key, e);
+                eprintln!("  failed {}: {}", cred.key, push_error_text(&e));
                 failed += 1;
             }
         }
     }
 
     if failed == 0 {
-        mark_synced(&conn, plugin_id)?;
+        let id = plugin_id.to_owned();
+        with_conn(db_path, move |conn| mark_synced(conn, &id)).await?;
         println!("synced {synced} credential(s) to plugin '{plugin_id}'");
     } else {
         println!("synced {synced}, failed {failed} — credentials NOT marked as synced");
     }
 
     Ok(())
+}
+
+// The task-local DB override doesn't follow into spawn_blocking, so the
+// snapshot taken on the async side is reopened explicitly.
+async fn with_conn<T: Send + 'static>(
+    db_path: Option<std::path::PathBuf>,
+    f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(move || {
+        let conn = match db_path {
+            Some(path) => crate::open_unencrypted(&path)?,
+            None => crate::open_default()?,
+        };
+        f(&conn)
+    })
+    .await
+    .context("credential DB task panicked")?
+}
+
+// Redirect errors embed the target URL; status and transport errors are URL-free.
+fn push_error_text(e: &utils::http::HttpError) -> String {
+    match e {
+        utils::http::HttpError::Status { status, .. } => format!("HTTP {status}"),
+        utils::http::HttpError::Redirect(_) => "redirect refused".to_string(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +266,28 @@ url = "{base_url}"
         crate::plugins::upsert(conn, &row).unwrap();
     }
 
+    // Each test builds its own runtime; the process-global shared() client's
+    // pooled connections are bound to whichever runtime first used them.
+    fn block_sync(plugin_id: &str) -> Result<()> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(sync_with(&utils::http::Client::new(), plugin_id))
+    }
+
+    #[test]
+    fn push_error_text_omits_redirect_target() {
+        let e = utils::http::HttpError::Redirect(
+            "refusing redirect to http://h/creds?token=secret".into(),
+        );
+        let text = push_error_text(&e);
+        assert!(
+            !text.contains("secret") && !text.contains("http://"),
+            "got: {text}"
+        );
+    }
+
     fn open_test_path(dir: &std::path::Path) -> (std::path::PathBuf, Connection) {
         let path = dir.join("test.db");
         let conn = crate::open_unencrypted(&path).unwrap();
@@ -247,7 +300,7 @@ url = "{base_url}"
         let (path, conn) = open_test_path(dir.path());
         install_http_plugin(&conn, dir.path(), "p-nocreds", "http://127.0.0.1:1");
         drop(conn);
-        crate::with_thread_db_path(&path, || sync("p-nocreds").unwrap());
+        crate::with_thread_db_path(&path, || block_sync("p-nocreds").unwrap());
     }
 
     #[test]
@@ -256,7 +309,7 @@ url = "{base_url}"
         let (path, conn) = open_test_path(dir.path());
         set(&conn, "ghost", "API_KEY", "v").unwrap();
         drop(conn);
-        let err = crate::with_thread_db_path(&path, || sync("ghost").err().unwrap());
+        let err = crate::with_thread_db_path(&path, || block_sync("ghost").err().unwrap());
         assert!(
             format!("{err:#}").contains("not registered"),
             "got: {err:#}"
@@ -295,7 +348,7 @@ args = ["server.js"]
         set(&conn, "stdio-plugin", "PLUGIN_TOKEN", "tok").unwrap();
         set(&conn, "stdio-plugin", "API_KEY", "v").unwrap();
         drop(conn);
-        let err = crate::with_thread_db_path(&path, || sync("stdio-plugin").err().unwrap());
+        let err = crate::with_thread_db_path(&path, || block_sync("stdio-plugin").err().unwrap());
         assert!(format!("{err:#}").contains("HTTP URL"), "got: {err:#}");
     }
 
@@ -320,7 +373,7 @@ args = ["server.js"]
         install_http_plugin(&conn, dir.path(), "p-notok", "http://127.0.0.1:1");
         set(&conn, "p-notok", "API_KEY", "v").unwrap();
         drop(conn);
-        let err = crate::with_thread_db_path(&path, || sync("p-notok").err().unwrap());
+        let err = crate::with_thread_db_path(&path, || block_sync("p-notok").err().unwrap());
         assert!(format!("{err:#}").contains("PLUGIN_TOKEN"), "got: {err:#}");
     }
 
@@ -349,7 +402,7 @@ args = ["server.js"]
         set(&conn, "p-sync", "OTHER", "v2").unwrap();
         drop(conn);
 
-        crate::with_thread_db_path(&path, || sync("p-sync").unwrap());
+        crate::with_thread_db_path(&path, || block_sync("p-sync").unwrap());
 
         let conn = crate::open_unencrypted(&path).unwrap();
         let creds = list(&conn, "p-sync").unwrap();
@@ -407,7 +460,7 @@ PLUGIN_TOKEN = "env-secret"
         set(&conn, "p-envtok", "API_KEY", "v").unwrap();
         drop(conn);
 
-        crate::with_thread_db_path(&path, || sync("p-envtok").unwrap());
+        crate::with_thread_db_path(&path, || block_sync("p-envtok").unwrap());
     }
 
     #[test]
@@ -433,7 +486,7 @@ PLUGIN_TOKEN = "env-secret"
         set(&conn, "p-fail", "API_KEY", "v").unwrap();
         drop(conn);
 
-        crate::with_thread_db_path(&path, || sync("p-fail").unwrap());
+        crate::with_thread_db_path(&path, || block_sync("p-fail").unwrap());
 
         let conn = crate::open_unencrypted(&path).unwrap();
         let creds = list(&conn, "p-fail").unwrap();

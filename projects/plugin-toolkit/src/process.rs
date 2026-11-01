@@ -88,10 +88,11 @@ impl Command {
         Ok(Self::new(program))
     }
 
-    /// Start the child in its own process group so a timeout in
-    /// [`status_within`](Command::status_within) / [`output_within`](Command::output_within)
-    /// SIGKILLs the whole group, grandchildren included. Unix only; elsewhere
-    /// only the direct child is killed.
+    /// Start the child in its own process group so a timeout SIGKILLs the whole
+    /// group, grandchildren included, as does cancelling the future. A child that
+    /// exits in time leaves the group alone, so processes it backgrounded keep
+    /// running. Opt-in because a separate group leaves the tty foreground group.
+    /// Unix only; elsewhere only the direct child is killed.
     pub fn kill_process_group_on_timeout(mut self) -> Self {
         #[cfg(unix)]
         self.inner.process_group(0);
@@ -159,7 +160,11 @@ impl Command {
 
     /// Run to completion, capturing stdout + stderr.
     pub async fn output(mut self) -> std::io::Result<Output> {
-        let out = self.inner.output().await?;
+        self.inner
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let out = spawn(&mut self.inner)?.wait_with_output().await?;
         Ok(Output {
             status: ExitStatus {
                 success: out.status.success(),
@@ -174,14 +179,13 @@ impl Command {
     /// `Ok(None)` if it timed out (the child is killed). Output is not captured —
     /// use for liveness/exit-code probes.
     pub async fn status_within(mut self, budget: Duration) -> std::io::Result<Option<ExitStatus>> {
-        let mut child = self.inner.spawn()?;
+        let mut child = spawn(&mut self.inner)?;
         let mut guard = GroupGuard::new(self.kill_group, &child);
         match crate::time::timeout(budget, guard.wait_leader(&mut child)).await {
             Some(result) => {
                 result?;
-                guard.kill();
-                let st = child.wait().await?;
                 guard.disarm();
+                let st = child.wait().await?;
                 Ok(Some(ExitStatus {
                     success: st.success(),
                     code: st.code(),
@@ -196,13 +200,25 @@ impl Command {
         }
     }
 
-    /// Run up to `budget`, capturing stdout + stderr. `Ok(None)` if it timed out
-    /// (the child, or its process group, is killed and reaped).
+    /// Run up to `budget`, capturing stdout + stderr. Never returns partial
+    /// output as success:
+    ///
+    /// - The child exits and both pipes reach EOF before the deadline:
+    ///   `Ok(Some(output))` with the complete output.
+    /// - The child has not exited by the deadline: `Ok(None)`; the child is
+    ///   killed and reaped.
+    /// - The child exits but a process it left behind still holds a pipe open at
+    ///   the deadline: `Err` wrapping a [`PipeHeldOpen`] that carries the child's
+    ///   exit status.
+    ///
+    /// On either deadline path the process group is also killed if
+    /// [`kill_process_group_on_timeout`](Self::kill_process_group_on_timeout) was
+    /// set; otherwise processes the child left behind keep running.
     pub async fn output_within(mut self, budget: Duration) -> std::io::Result<Option<Output>> {
         self.inner
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = self.inner.spawn()?;
+        let mut child = spawn(&mut self.inner)?;
         let stdout = child
             .stdout
             .take()
@@ -212,61 +228,44 @@ impl Command {
             .take()
             .expect("stderr was piped, so it is present");
         let mut guard = GroupGuard::new(self.kill_group, &child);
-        let mut reader = AbortOnDrop(tokio::spawn(read_pipes(stdout, stderr)));
-        let deadline = tokio::time::Instant::now() + budget;
-        if tokio::time::timeout_at(deadline, guard.wait_leader(&mut child))
-            .await
-            .is_err()
-        {
-            reader.abort();
-            guard.kill_on_timeout(&mut child);
-            child.wait().await?;
-            guard.disarm();
-            return Ok(None);
-        }
-        let pipes = if guard.armed() {
-            match tokio::time::timeout(PIPE_GRACE, &mut reader).await {
-                Ok(pipes) => {
-                    guard.kill();
-                    pipes
-                }
-                Err(_) => {
-                    guard.kill();
-                    match tokio::time::timeout(PIPE_GRACE, &mut reader).await {
-                        Ok(pipes) => pipes,
-                        Err(_) => {
-                            reader.abort();
-                            child.wait().await?;
-                            guard.disarm();
-                            return Err(std::io::Error::other(
-                                "output pipe held open by a process outside the process group",
-                            ));
-                        }
-                    }
-                }
-            }
-        } else {
-            match tokio::time::timeout_at(deadline, &mut reader).await {
-                Ok(pipes) => pipes,
-                Err(_) => {
-                    reader.abort();
-                    guard.kill_on_timeout(&mut child);
-                    child.wait().await?;
-                    guard.disarm();
-                    return Ok(None);
-                }
-            }
-        };
-        let status = child.wait().await?;
-        guard.disarm();
-        let (stdout, stderr) = pipes.map_err(std::io::Error::other)??;
-        Ok(Some(Output {
-            status: ExitStatus {
-                success: status.success(),
-                code: status.code(),
-            },
+        let out_buf = SharedBuf::default();
+        let err_buf = SharedBuf::default();
+        let mut reader = AbortOnDrop(tokio::spawn(read_pipes(
             stdout,
             stderr,
+            out_buf.clone(),
+            err_buf.clone(),
+        )));
+        let deadline = tokio::time::Instant::now() + budget;
+        match tokio::time::timeout_at(deadline, guard.wait_leader(&mut child)).await {
+            // Guard stays armed so its drop kills an opted-in group.
+            Ok(result) => result?,
+            Err(_) => {
+                reader.abort();
+                guard.kill_on_timeout(&mut child);
+                child.wait().await?;
+                guard.disarm();
+                return Ok(None);
+            }
+        }
+        let eof = drain_pipes(&mut reader, deadline).await?;
+        if !eof {
+            reader.abort();
+            guard.kill();
+        }
+        let status = child.wait().await?;
+        guard.disarm();
+        let status = ExitStatus {
+            success: status.success(),
+            code: status.code(),
+        };
+        if !eof {
+            return Err(std::io::Error::other(PipeHeldOpen { status }));
+        }
+        Ok(Some(Output {
+            status,
+            stdout: take_buf(&out_buf),
+            stderr: take_buf(&err_buf),
         }))
     }
 
@@ -283,7 +282,7 @@ impl Command {
         self.inner
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped());
-        let mut child = self.inner.spawn()?;
+        let mut child = spawn(&mut self.inner)?;
         let stdin = child
             .stdin
             .take()
@@ -303,7 +302,37 @@ impl Command {
     }
 }
 
-const PIPE_GRACE: Duration = Duration::from_millis(200);
+/// [`Command::output_within`]'s error when the child exited but its stdout or
+/// stderr was still held open, by a process it left behind, at the deadline.
+#[derive(Clone, Copy, Debug)]
+pub struct PipeHeldOpen {
+    pub status: ExitStatus,
+}
+
+impl std::fmt::Display for PipeHeldOpen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "process exited (exit {:?}) but its output pipe was still held open at the deadline",
+            self.status.code
+        )
+    }
+}
+
+impl std::error::Error for PipeHeldOpen {}
+
+// `Ok(true)` once both pipes hit EOF, `Ok(false)` if the deadline came first.
+async fn drain_pipes<F>(reader: &mut F, deadline: tokio::time::Instant) -> std::io::Result<bool>
+where
+    F: std::future::Future<
+            Output = std::result::Result<std::io::Result<()>, tokio::task::JoinError>,
+        > + Unpin,
+{
+    match tokio::time::timeout_at(deadline, reader).await {
+        Ok(pipes) => pipes.map_err(std::io::Error::other)?.map(|()| true),
+        Err(_) => Ok(false),
+    }
+}
 
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
 
@@ -330,19 +359,46 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
+fn spawn(cmd: &mut tokio::process::Command) -> std::io::Result<tokio::process::Child> {
+    #[cfg(all(test, unix))]
+    let _gate = tests::FORK_GATE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cmd.spawn()
+}
+
+type SharedBuf = std::sync::Arc<std::sync::Mutex<Vec<u8>>>;
+
+fn take_buf(buf: &SharedBuf) -> Vec<u8> {
+    std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+// Reads into shared buffers so output survives the reader being aborted.
 async fn read_pipes(
-    mut stdout: tokio::process::ChildStdout,
-    mut stderr: tokio::process::ChildStderr,
-) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let (o, e) = tokio::join!(
-        tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut out),
-        tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut err),
-    );
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    out: SharedBuf,
+    err: SharedBuf,
+) -> std::io::Result<()> {
+    let (o, e) = tokio::join!(read_pipe(stdout, out), read_pipe(stderr, err));
     o?;
-    e?;
-    Ok((out, err))
+    e
+}
+
+async fn read_pipe(
+    mut pipe: impl tokio::io::AsyncRead + Unpin,
+    buf: SharedBuf,
+) -> std::io::Result<()> {
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = tokio::io::AsyncReadExt::read(&mut pipe, &mut chunk).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        buf.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(&chunk[..n]);
+    }
 }
 
 struct GroupGuard {
@@ -358,10 +414,6 @@ impl GroupGuard {
                 None
             },
         }
-    }
-
-    fn armed(&self) -> bool {
-        self.pgid.is_some()
     }
 
     fn disarm(&mut self) {
@@ -617,37 +669,26 @@ mod tests {
         assert!(st.is_none(), "expected timeout → None");
     }
 
+    /// The leader forks a holder in its group that blocks on a pipe only the
+    /// leader writes to. The group kill leaves fd 6 silent; a holder that
+    /// outlives the leader sees EOF and reports it there.
     #[cfg(unix)]
-    async fn grandchild_dies_after_timeout(run: impl AsyncFnOnce(Command) -> bool) {
-        grandchild_dies("; wait", run).await;
-    }
+    const SURVIVOR_REPORTER: &str = r#"exec perl -MPOSIX -e 'pipe(R, W) or die; my $k = fork; die unless defined $k; if (!$k) { close W; POSIX::close(4); sysread(R, my $b, 1); POSIX::write(6, qq(survived\n), 9); exit } close R; POSIX::close(6); POSIX::write(4, qq($k\n), length qq($k\n)); POSIX::close(4); select(undef, undef, undef, undef)'"#;
 
     #[cfg(unix)]
-    async fn grandchild_dies(tail: &str, run: impl AsyncFnOnce(Command) -> bool) {
-        let dir = std::env::temp_dir().join(format!("pgkill-{}", crate::mint_uuidv7()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let pidfile = dir.join("pid");
-        let cmd = Command::new("sh")
-            .arg("-c")
-            .arg(format!("sleep 30 & echo $! > {}{tail}", pidfile.display()))
+    async fn grandchild_dies_after_timeout(run: impl AsyncFnOnce(Command) -> bool) {
+        let dir = HolderDir::new("pgkill");
+        let dead = dir.death_watch();
+        let cmd = dir
+            .command(SURVIVOR_REPORTER)
             .kill_process_group_on_timeout();
-        assert!(run(cmd).await, "expected timeout");
-        let pid: libc::pid_t = wait_for_file(&pidfile)
-            .await
-            .expect("grandchild pid written")
-            .trim()
-            .parse()
-            .unwrap();
-        let mut alive = true;
-        for _ in 0..50 {
-            if !process_alive(pid) {
-                alive = false;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        std::fs::remove_dir_all(&dir).ok();
-        assert!(!alive, "grandchild sleep {pid} survived the timeout");
+        let (timed_out, _) = tokio::join!(run(cmd), dir.pid());
+        assert!(timed_out, "expected timeout");
+        assert_eq!(
+            read_to_eof(dead).await,
+            "",
+            "group member outlived the leader"
+        );
     }
 
     #[cfg(unix)]
@@ -689,27 +730,46 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn output_within_kills_group_when_leader_exits_first() {
-        grandchild_dies("", async |cmd| {
-            cmd.output_within(Duration::from_secs(10))
-                .await
-                .unwrap()
-                .is_some_and(|out| out.status.success)
-        })
-        .await;
+    async fn backgrounded_grandchild_survives(
+        opt_in: bool,
+        run: impl AsyncFnOnce(Command) -> bool,
+    ) {
+        let dir = HolderDir::new("pgkeep");
+        let mut cmd = dir.command("sleep 30 >/dev/null 2>&1 4>&- & echo $! >&4");
+        if opt_in {
+            cmd = cmd.kill_process_group_on_timeout();
+        }
+        assert!(run(cmd).await, "expected a successful run");
+        let pid = dir.pid().await;
+        assert!(process_alive(pid), "backgrounded sleep {pid} was killed");
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn status_within_kills_group_after_normal_exit() {
-        grandchild_dies("", async |cmd| {
-            cmd.status_within(Duration::from_secs(10))
-                .await
-                .unwrap()
-                .is_some_and(|st| st.success)
-        })
-        .await;
+    async fn status_within_leaves_backgrounded_grandchild_alive() {
+        for opt_in in [false, true] {
+            backgrounded_grandchild_survives(opt_in, async |cmd| {
+                cmd.status_within(Duration::from_secs(10))
+                    .await
+                    .unwrap()
+                    .is_some_and(|st| st.success)
+            })
+            .await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_within_leaves_backgrounded_grandchild_alive() {
+        for opt_in in [false, true] {
+            backgrounded_grandchild_survives(opt_in, async |cmd| {
+                cmd.output_within(Duration::from_secs(10))
+                    .await
+                    .unwrap()
+                    .is_some_and(|out| out.status.success)
+            })
+            .await;
+        }
     }
 
     #[cfg(unix)]
@@ -726,107 +786,321 @@ mod tests {
         .await;
     }
 
+    /// The group leader exits only once the holder has left the group (sent its
+    /// pid up fd 3), so the group kill can never reach it first; `linger` keeps
+    /// the leader alive after that.
     #[cfg(unix)]
-    async fn wait_for_file(path: &std::path::Path) -> Option<String> {
-        for _ in 0..250 {
-            if let Ok(s) = std::fs::read_to_string(path)
-                && s.ends_with('\n')
-            {
-                return Some(s);
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        None
-    }
-
-    /// The group leader exits only once the holder has left the group (written
-    /// its pid), so the group kill can never reach it first; `linger` keeps the
-    /// leader alive after that. Paths reach the scripts through the environment
-    /// so no quoting of them is needed.
-    #[cfg(unix)]
-    fn detached_holder(dir: &std::path::Path, linger: bool) -> Command {
+    fn detached_holder(dir: &HolderDir, linger: bool) -> Command {
         let script = format!(
-            "echo $$ > \"$LEADER\"; \
-             perl -MPOSIX -e 'POSIX::setsid(); $SIG{{PIPE}}=q(IGNORE); $|=1; \
-             open(P, q(>), \"$ENV{{PID}}.tmp\"); print P qq($$\\n); close(P); rename(\"$ENV{{PID}}.tmp\", $ENV{{PID}}); \
-             for (1..600) {{ unless (print qq(x\\n)) {{ open(M, q(>), $ENV{{MARK}}); print M qq(epipe\\n); close(M); exit }} \
-             select(undef, undef, undef, 0.05) }}' & \
-             while [ ! -e \"$PID\" ]; do sleep 0.01; done; {tail}",
-            tail = if linger { "exec sleep 60" } else { ":" },
+            "echo $$ > \"$LEADER\"; exec 7>&1; \
+             {{ perl -MPOSIX -e 'POSIX::setsid(); $SIG{{PIPE}}=q(IGNORE); $|=1; \
+             POSIX::write(3, qq($$\\n), length qq($$\\n)); POSIX::close(3); \
+             for (1..600) {{ unless (print qq(x\\n)) {{ POSIX::write(5, qq(epipe\\n), 6); exit }} \
+             select(undef, undef, undef, 0.05) }}' 3>&1 1>&7 7>&- 4>&- & }} \
+             | {{ read holder; echo \"$holder\" >&4; }}; {tail}",
+            tail = if linger {
+                "exec sleep 60 4>&- 5>&- 7>&-"
+            } else {
+                ":"
+            },
         );
-        Command::new("sh")
-            .arg("-c")
-            .arg(script)
-            .env("PID", dir.join("pid"))
-            .env("MARK", dir.join("mark"))
-            .env("LEADER", dir.join("leader"))
-            .kill_process_group_on_timeout()
+        dir.command(&script).kill_process_group_on_timeout()
     }
 
-    /// Kills the holder and the group leader and removes the dir, on every exit
-    /// path of the test.
+    /// Both ends close on exec; [`HolderDir::command`] dups the write end into
+    /// the child only, so the process under test is its sole writer.
     #[cfg(unix)]
-    struct HolderDir(std::path::PathBuf);
+    fn cloexec_pipe() -> (std::fs::File, std::os::fd::OwnedFd) {
+        use std::os::fd::FromRawFd;
+        let mut fds = [0; 2];
+        // macOS has no pipe2, so a fork between pipe() and FD_CLOEXEC would
+        // leak these ends into an unrelated child and delay EOF.
+        let _gate = FORK_GATE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+        for fd in fds {
+            assert_ne!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                -1,
+                "FD_CLOEXEC"
+            );
+        }
+        unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::os::fd::OwnedFd::from_raw_fd(fds[1]),
+            )
+        }
+    }
+
+    /// Every spawn in this file reads it; [`cloexec_pipe`] writes it.
+    #[cfg(unix)]
+    pub(super) static FORK_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    #[cfg(unix)]
+    fn set_nonblocking(file: &std::fs::File, on: bool) {
+        use std::os::fd::AsRawFd;
+        let fd = file.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        let flags = if on {
+            flags | libc::O_NONBLOCK
+        } else {
+            flags & !libc::O_NONBLOCK
+        };
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    }
+
+    /// Reads byte by byte so a second line on the same pipe is left unread;
+    /// returns what was read if every writer closes first.
+    #[cfg(unix)]
+    async fn read_line(file: &std::fs::File) -> String {
+        use std::io::Read;
+        let mut file = file.try_clone().unwrap();
+        tokio::task::spawn_blocking(move || {
+            let mut line = Vec::new();
+            let mut byte = [0u8];
+            while file.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
+                line.push(byte[0]);
+            }
+            String::from_utf8(line).unwrap()
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Returns once every process holding the pipe's write end has exited.
+    #[cfg(unix)]
+    async fn read_to_eof(file: std::fs::File) -> String {
+        use std::io::Read;
+        let mut file = file;
+        tokio::task::spawn_blocking(move || {
+            let mut out = String::new();
+            file.read_to_string(&mut out).unwrap();
+            out
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Kills every holder and group leader it has seen and removes the dir, on
+    /// every exit path of the test.
+    #[cfg(unix)]
+    struct HolderDir {
+        path: std::path::PathBuf,
+        pid: std::fs::File,
+        mark: std::fs::File,
+        writers: std::sync::Mutex<Vec<(std::os::fd::OwnedFd, libc::c_int)>>,
+        seen: std::sync::Mutex<Vec<libc::pid_t>>,
+    }
 
     #[cfg(unix)]
     impl HolderDir {
         fn new(prefix: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("{prefix}-{}", crate::mint_uuidv7()));
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
+            let path = std::env::temp_dir().join(format!("{prefix}-{}", crate::mint_uuidv7()));
+            std::fs::create_dir_all(&path).unwrap();
+            let (pid, pid_w) = cloexec_pipe();
+            let (mark, mark_w) = cloexec_pipe();
+            Self {
+                pid,
+                mark,
+                writers: std::sync::Mutex::new(vec![(pid_w, 4), (mark_w, 5)]),
+                path,
+                seen: Default::default(),
+            }
+        }
+
+        /// The child gets the pid pipe on fd 4, the mark pipe on fd 5 and the
+        /// death watch on fd 6. The parent's write ends drop with the command,
+        /// so a child that exits without writing yields EOF.
+        fn command(&self, script: &str) -> Command {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::process::CommandExt;
+            let writers = std::mem::take(&mut *self.writers.lock().unwrap());
+            assert!(
+                (1..=3).contains(&writers.len()),
+                "command() needs 1 to 3 writers and runs once per HolderDir"
+            );
+            let mut cmd = Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .env("LEADER", self.path.join("leader"));
+            // Sources move above every target first so no dup2 clobbers one.
+            unsafe {
+                cmd.inner.as_std_mut().pre_exec(move || {
+                    let mut high = [0; 3];
+                    for (slot, (fd, _)) in high.iter_mut().zip(&writers) {
+                        *slot = libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10);
+                        if *slot < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                    for (from, (_, to)) in high.iter().zip(&writers) {
+                        if libc::dup2(*from, *to) < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                    Ok(())
+                });
+            }
+            cmd
+        }
+
+        fn death_watch(&self) -> std::fs::File {
+            let (dead, dead_w) = cloexec_pipe();
+            let mut writers = self.writers.lock().unwrap();
+            assert!(!writers.is_empty(), "death_watch() must precede command()");
+            writers.push((dead_w, 6));
+            drop(writers);
+            dead
+        }
+
+        async fn pid(&self) -> libc::pid_t {
+            let line = read_line(&self.pid).await;
+            let pid = line
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("process under test sent no pid: {line:?}"));
+            self.seen.lock().unwrap().push(pid);
+            pid
+        }
+
+        async fn mark(&self) -> String {
+            read_line(&self.mark).await
         }
     }
 
     #[cfg(unix)]
     impl Drop for HolderDir {
         fn drop(&mut self) {
-            for name in ["pid", "leader"] {
-                if let Ok(s) = std::fs::read_to_string(self.0.join(name))
-                    && let Ok(pid) = s.trim().parse::<libc::pid_t>()
-                {
-                    unsafe { libc::kill(pid, libc::SIGKILL) };
-                }
+            use std::io::Read;
+            let mut pids = std::mem::take(&mut *self.seen.lock().unwrap());
+            set_nonblocking(&self.pid, true);
+            let mut unread = String::new();
+            (&self.pid).read_to_string(&mut unread).ok();
+            if let Ok(leader) = std::fs::read_to_string(self.path.join("leader")) {
+                unread.push_str(&leader);
             }
-            std::fs::remove_dir_all(&self.0).ok();
+            pids.extend(
+                unread
+                    .lines()
+                    .filter_map(|l| l.trim().parse::<libc::pid_t>().ok()),
+            );
+            for pid in pids {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            std::fs::remove_dir_all(&self.path).ok();
         }
     }
 
     #[cfg(unix)]
+    async fn kill_holder_once_ready(dir: &HolderDir) {
+        let pid = dir.pid().await;
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
-    async fn output_within_errors_when_pipe_held_outside_group() {
+    async fn output_within_waits_for_holder_outside_group_to_close_pipe() {
         let dir = HolderDir::new("pghold");
-        let res = detached_holder(&dir.0, false)
-            .output_within(Duration::from_secs(10))
-            .await;
-        let pid = wait_for_file(&dir.0.join("pid")).await;
-        assert!(pid.is_some(), "holder never wrote its pid");
-        let err = res.expect_err("expected pipe-held error");
-        assert!(
-            err.to_string().contains("outside the process group"),
-            "{err}"
+        let (out, ()) = tokio::join!(
+            detached_holder(&dir, false).output_within(Duration::from_secs(600)),
+            kill_holder_once_ready(&dir),
         );
+        let out = out.unwrap().expect("leader exited in time");
+        assert!(out.status.success);
+    }
+
+    /// The holder sends its pid before the leader exits, so the test kills it
+    /// and the pipe then reaches EOF.
+    #[cfg(unix)]
+    async fn grandchild_holding_stdout(opt_in: bool) {
+        let dir = HolderDir::new("pgpipe");
+        let mut cmd = dir.command("echo hi; sleep 30 4>&- & echo $! >&4");
+        if opt_in {
+            cmd = cmd.kill_process_group_on_timeout();
+        }
+        let (out, ()) = tokio::join!(
+            cmd.output_within(Duration::from_secs(600)),
+            kill_holder_once_ready(&dir),
+        );
+        let out = out.unwrap().expect("leader exited in time");
+        assert!(out.status.success);
+        assert_eq!(out.stdout, b"hi\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_within_returns_full_output_once_grandchild_releases_stdout() {
+        grandchild_holding_stdout(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_within_returns_full_output_once_grandchild_in_group_releases_stdout() {
+        grandchild_holding_stdout(true).await;
+    }
+
+    fn pipe_reader() -> (
+        tokio::io::DuplexStream,
+        AbortOnDrop<std::io::Result<()>>,
+        SharedBuf,
+    ) {
+        let (writer, pipe) = tokio::io::duplex(64);
+        let buf = SharedBuf::default();
+        let reader = AbortOnDrop(tokio::spawn(read_pipe(pipe, buf.clone())));
+        (writer, reader, buf)
+    }
+
+    /// A deadline already in the past makes the timeout fire on its first poll,
+    /// so the held-pipe path is reached without waiting on any clock.
+    #[tokio::test]
+    async fn drain_pipes_reports_held_pipe_at_deadline() {
+        let (writer, mut reader, _buf) = pipe_reader();
+        let deadline = tokio::time::Instant::now();
+        assert!(
+            !drain_pipes(&mut reader, deadline).await.unwrap(),
+            "held pipe reported as EOF"
+        );
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn drain_pipes_reports_eof_before_deadline() {
+        let (mut writer, mut reader, buf) = pipe_reader();
+        writer.write_all(b"all").await.unwrap();
+        drop(writer);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+        assert!(drain_pipes(&mut reader, deadline).await.unwrap());
+        assert_eq!(take_buf(&buf), b"all");
+    }
+
+    #[test]
+    fn pipe_held_open_error_carries_exit_status() {
+        let err = std::io::Error::other(PipeHeldOpen {
+            status: ExitStatus {
+                success: false,
+                code: Some(7),
+            },
+        });
+        let held = err
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<PipeHeldOpen>())
+            .expect("PipeHeldOpen inside the io::Error");
+        assert_eq!(held.status.code, Some(7));
+        assert!(err.to_string().contains("still held open"), "{err}");
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn cancelling_output_within_aborts_the_pipe_reader() {
         let dir = HolderDir::new("pgcancel");
-        let pid_file = dir.0.join("pid");
         let started = tokio::select! {
-            _ = detached_holder(&dir.0, true).output_within(Duration::from_secs(60)) => None,
-            pid = wait_for_file(&pid_file) => Some(pid.is_some()),
+            _ = detached_holder(&dir, true).output_within(Duration::from_secs(60)) => false,
+            _ = dir.pid() => true,
         };
-        let mark = wait_for_file(&dir.0.join("mark")).await;
-        assert_eq!(
-            started,
-            Some(true),
-            "expected the holder to start, then the cancel"
-        );
-        assert_eq!(
-            mark.as_deref(),
-            Some("epipe\n"),
-            "pipe reader leaked after cancel"
-        );
+        assert!(started, "expected the holder to start, then the cancel");
+        assert_eq!(dir.mark().await, "epipe", "pipe reader leaked after cancel");
     }
 
     #[tokio::test]

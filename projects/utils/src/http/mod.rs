@@ -104,6 +104,11 @@ struct Inner {
     config: ClientConfig,
     secure: Pool,
     insecure: Pool,
+    #[cfg(test)]
+    attempts: std::sync::atomic::AtomicUsize,
+    /// When set, retry delays are recorded here instead of slept.
+    #[cfg(test)]
+    retry_delays: Option<std::sync::Mutex<Vec<Duration>>>,
 }
 
 /// One lazily built `reqwest::Client`. The build runs on its own thread and
@@ -136,7 +141,9 @@ struct ClientConfig {
     pool_idle_timeout: Duration,
     build_wait: Duration,
     #[cfg(test)]
-    build_delay: Duration,
+    build_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
+    #[cfg(test)]
+    build_done: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl Default for ClientConfig {
@@ -147,7 +154,9 @@ impl Default for ClientConfig {
             pool_idle_timeout: Duration::from_secs(30),
             build_wait: DEFAULT_TIMEOUT,
             #[cfg(test)]
-            build_delay: Duration::ZERO,
+            build_gate: None,
+            #[cfg(test)]
+            build_done: None,
         }
     }
 }
@@ -187,6 +196,10 @@ impl ClientBuilder {
                 config: self.config,
                 secure: Pool::default(),
                 insecure: Pool::default(),
+                #[cfg(test)]
+                attempts: Default::default(),
+                #[cfg(test)]
+                retry_delays: None,
             }),
         }
     }
@@ -297,7 +310,11 @@ impl Client {
         }
     }
 
-    async fn pool(&self, insecure: bool) -> Result<reqwest::Client, HttpError> {
+    async fn pool(
+        &self,
+        insecure: bool,
+        timeout: Option<Duration>,
+    ) -> Result<reqwest::Client, HttpError> {
         let pool = self.inner.pool(insecure);
         if let Some(client) = pool.client.get() {
             return Ok(client.clone());
@@ -336,31 +353,46 @@ impl Client {
                 }
             }
         };
-        // A timer thread rather than `tokio::time`: callers may have no runtime.
-        // Dropping `cancel` wakes it early once the build lands or we're dropped.
-        let wait = self.inner.config.build_wait;
-        let (cancel, cancel_rx) = std::sync::mpsc::channel::<()>();
-        let (fire, fired) = tokio::sync::oneshot::channel::<()>();
-        std::thread::Builder::new()
-            .name("http-client-build-wait".into())
-            .spawn(move || {
-                if cancel_rx.recv_timeout(wait) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
-                    _ = fire.send(());
-                }
-            })
-            .map_err(|e| HttpError::Build(format!("spawn build wait timer: {e}")))?;
+        let wait = timeout.map_or(self.inner.config.build_wait, |t| {
+            t.min(self.inner.config.build_wait)
+        });
+        let mut _cancel = None;
+        // A runtime built without `enable_time` panics on `sleep`, and tokio
+        // exposes no check for that, so a panic means "use the thread timer".
+        let sleep = tokio::runtime::Handle::try_current().ok().and_then(|_| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tokio::time::sleep(wait))).ok()
+        });
+        let fired: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            if let Some(sleep) = sleep {
+                Box::pin(sleep)
+            } else {
+                // No usable `tokio::time`, so time out on a thread.
+                // Dropping `cancel` wakes it early once the build lands or we're dropped.
+                let (cancel, cancel_rx) = std::sync::mpsc::channel::<()>();
+                let (fire, fired) = tokio::sync::oneshot::channel::<()>();
+                std::thread::Builder::new()
+                    .name("http-client-build-wait".into())
+                    .spawn(move || {
+                        if cancel_rx.recv_timeout(wait)
+                            == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                        {
+                            _ = fire.send(());
+                        }
+                    })
+                    .map_err(|e| HttpError::Build(format!("spawn build wait timer: {e}")))?;
+                _cancel = Some(cancel);
+                Box::pin(async move {
+                    _ = fired.await;
+                })
+            };
         let ready = std::pin::pin!(rx.wait_for(Option::is_some));
         let built = match futures_util::future::select(ready, fired).await {
-            futures_util::future::Either::Left((ready, _)) => {
-                let built = ready
-                    .map_err(|_| HttpError::Build("build thread exited".into()))?
-                    .clone();
-                drop(cancel);
-                built
-            }
+            futures_util::future::Either::Left((ready, _)) => ready
+                .map_err(|_| HttpError::Build("build thread exited".into()))?
+                .clone(),
             futures_util::future::Either::Right(_) => {
                 return Err(HttpError::Build(format!(
-                    "client build stalled: no result after {wait:?} (system proxy read hung?)"
+                    "client build stalled after {wait:?}"
                 )));
             }
         };
@@ -397,6 +429,10 @@ impl Drop for BuildGuard {
         if let Some(built) = self.built.take() {
             self.tx.send_replace(Some(built));
         }
+        #[cfg(test)]
+        if let Some(done) = &self.inner.config.build_done {
+            done.notify_one();
+        }
     }
 }
 
@@ -415,7 +451,12 @@ impl Inner {
             self.pool(insecure)
                 .builds
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            std::thread::sleep(self.config.build_delay);
+            if let Some(gate) = &self.config.build_gate {
+                _ = gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv();
+            }
             let dies = &self.pool(insecure).dies;
             if dies
                 .fetch_update(
@@ -596,6 +637,11 @@ impl RequestBuilder {
         };
         let mut attempt = 1;
         loop {
+            #[cfg(test)]
+            self.client
+                .inner
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let result = self.dispatch_once(extra_headers, deadline).await;
             if attempt >= attempts {
                 return result;
@@ -616,6 +662,15 @@ impl RequestBuilder {
                 }
             }
             drop(result);
+            #[cfg(test)]
+            if let Some(delays) = &self.client.inner.retry_delays {
+                delays
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(delay);
+                attempt += 1;
+                continue;
+            }
             tokio::time::sleep(delay).await;
             attempt += 1;
         }
@@ -633,7 +688,7 @@ impl RequestBuilder {
         with_body: bool,
         timeout: Option<Duration>,
     ) -> Result<reqwest::RequestBuilder, HttpError> {
-        let client = self.client.pool(self.insecure).await?;
+        let client = self.client.pool(self.insecure, timeout).await?;
         let mut req = client.request(method.clone(), url.clone());
         for (k, v) in headers {
             req = req.header(k, v);
@@ -1099,10 +1154,24 @@ mod tests {
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn slow_client(delay: Duration) -> Client {
+    /// The build thread blocks until the returned sender sends or drops;
+    /// `Notify` fires once the outcome is published.
+    fn gated_client(
+        build_wait: Option<Duration>,
+    ) -> (
+        Client,
+        std::sync::mpsc::Sender<()>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let (gate, gate_rx) = std::sync::mpsc::channel();
+        let done = Arc::new(tokio::sync::Notify::new());
         let mut b = Client::builder();
-        b.config.build_delay = delay;
-        b.build()
+        b.config.build_gate = Some(Arc::new(std::sync::Mutex::new(gate_rx)));
+        b.config.build_done = Some(Arc::clone(&done));
+        if let Some(wait) = build_wait {
+            b.config.build_wait = wait;
+        }
+        (b.build(), gate, done)
     }
 
     fn block_on<F: std::future::Future>(fut: F) -> F::Output {
@@ -1125,13 +1194,20 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_build_is_awaited_not_restarted() {
-        let client = slow_client(Duration::from_millis(300));
-        let first = tokio::time::timeout(Duration::from_millis(20), client.pool(false)).await;
-        assert!(first.is_err(), "first caller cancelled mid-build");
-        let (a, b) = tokio::join!(client.pool(false), client.pool(false));
+        let (client, gate, _done) = gated_client(None);
+        let mut first = Box::pin(client.pool(false, None));
+        let pending =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx).is_pending()))
+                .await;
+        assert!(pending, "first caller is mid-build");
+        drop(first);
+        gate.send(()).unwrap();
+        // A restarted build then finds the gate closed and runs at once, so `builds == 1` fails fast.
+        drop(gate);
+        let (a, b) = tokio::join!(client.pool(false, None), client.pool(false, None));
         a.unwrap();
         b.unwrap();
-        client.pool(false).await.unwrap();
+        client.pool(false, None).await.unwrap();
         let builds = client
             .inner
             .secure
@@ -1142,24 +1218,29 @@ mod tests {
 
     #[tokio::test]
     async fn a_stalled_build_times_out_then_later_calls_succeed() {
-        let mut b = Client::builder();
-        b.config.build_delay = Duration::from_millis(400);
-        b.config.build_wait = Duration::from_millis(50);
-        let client = b.build();
-        let err = client.pool(false).await.unwrap_err();
-        assert!(err.to_string().contains("stalled"), "{err}");
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while client.inner.secure.client.get().is_none() {
-            assert!(std::time::Instant::now() < deadline, "build never finished");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        client.pool(false).await.unwrap();
+        let (client, gate, done) = gated_client(Some(Duration::from_millis(50)));
+        let err = client.pool(false, None).await.unwrap_err();
+        assert!(err.to_string().contains("stalled after 50ms"), "{err}");
+        gate.send(()).unwrap();
+        done.notified().await;
+        assert!(client.inner.secure.client.get().is_some());
+        client.pool(false, None).await.unwrap();
         let builds = client
             .inner
             .secure
             .builds
             .load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(builds, 1);
+    }
+
+    #[tokio::test]
+    async fn a_short_request_timeout_bounds_the_build_wait() {
+        let (client, _gate, _done) = gated_client(None);
+        let err = client
+            .pool(false, Some(Duration::from_millis(50)))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("stalled after 50ms"), "{err}");
     }
 
     #[tokio::test]
@@ -1170,8 +1251,8 @@ mod tests {
             .secure
             .dies
             .store(1, std::sync::atomic::Ordering::SeqCst);
-        assert!(client.pool(false).await.is_err());
-        client.pool(false).await.unwrap();
+        assert!(client.pool(false, None).await.is_err());
+        client.pool(false, None).await.unwrap();
         let builds = client
             .inner
             .secure
@@ -1181,9 +1262,22 @@ mod tests {
     }
 
     #[test]
+    fn a_runtime_without_timers_bounds_the_build_wait_on_a_thread() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        let (client, _gate, _done) = gated_client(None);
+        let err = rt
+            .block_on(client.pool(false, Some(Duration::from_millis(50))))
+            .unwrap_err();
+        assert!(err.to_string().contains("stalled after 50ms"), "{err}");
+    }
+
+    #[test]
     fn pool_builds_without_a_tokio_runtime() {
         assert!(tokio::runtime::Handle::try_current().is_err());
-        block_on(Client::new().pool(false)).unwrap();
+        block_on(Client::new().pool(false, None)).unwrap();
     }
 
     async fn flaky(server: &MockServer, verb: &str, first: ResponseTemplate, fails: u64) {
@@ -1233,10 +1327,17 @@ mod tests {
             1,
         )
         .await;
-        let start = std::time::Instant::now();
-        let resp = Client::new().get(server.uri()).send().await.unwrap();
+        let client = Client {
+            inner: Arc::new(Inner {
+                retry_delays: Some(Default::default()),
+                ..Default::default()
+            }),
+        };
+        let resp = client.get(server.uri()).send().await.unwrap();
         assert_eq!(resp.status, 200);
-        assert!(start.elapsed() >= Duration::from_secs(1));
+        let delays = client.inner.retry_delays.as_ref().unwrap().lock().unwrap();
+        assert_eq!(delays.len(), 1);
+        assert!(delays[0] >= Duration::from_secs(1));
     }
 
     #[tokio::test]
@@ -1308,15 +1409,21 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let start = std::time::Instant::now();
-        let err = Client::new()
+        let client = Client::new();
+        let err = client
             .get(format!("http://127.0.0.1:{port}/"))
             .timeout(Duration::from_secs(5))
             .send()
             .await
             .unwrap_err();
         assert!(matches!(err, HttpError::Request(e) if e.is_connect()));
-        assert!(start.elapsed() >= RETRY_BASE_DELAY / 2);
+        assert!(
+            client
+                .inner
+                .attempts
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= 2
+        );
     }
 
     #[tokio::test]

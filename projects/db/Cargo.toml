@@ -10,7 +10,7 @@ path = "src/lib.rs"
 
 [features]
 default = ["http", "config"]
-http = ["dep:reqwest"]
+http = ["dep:reqwest", "utils/http"]
 config = ["dep:toml"]
 # Exposes `db::testing::test_conn` (an in-memory schema+migrations connection)
 # to downstream crates' test binaries. Enabled by domain crates that own query
@@ -41,7 +41,7 @@ schemars    = { workspace = true }
 sha2        = { workspace = true }
 async-trait = { workspace = true }
 inventory   = { workspace = true }
-reqwest     = { workspace = true, features = ["blocking"], optional = true }
+reqwest     = { workspace = true, optional = true }
 # Foreign-database schema introspection (`db::schema`) — connects to external
 # MySQL/Postgres engines to render the `schema.*` tabbed view. Folded in from
 # the former standalone `database` crate (2026-07-01).
