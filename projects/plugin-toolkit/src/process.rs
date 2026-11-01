@@ -657,16 +657,26 @@ mod tests {
         assert!(st.is_none(), "expected timeout → None");
     }
 
+    /// The leader forks a holder in its group that blocks on a pipe only the
+    /// leader writes to. The group kill leaves fd 6 silent; a holder that
+    /// outlives the leader sees EOF and reports it there.
+    #[cfg(unix)]
+    const SURVIVOR_REPORTER: &str = r#"exec perl -MPOSIX -e 'pipe(R, W) or die; my $k = fork; die unless defined $k; if (!$k) { close W; POSIX::close(4); sysread(R, my $b, 1); POSIX::write(6, qq(survived\n), 9); exit } close R; POSIX::close(6); POSIX::write(4, qq($k\n), length qq($k\n)); POSIX::close(4); select(undef, undef, undef, undef)'"#;
+
     #[cfg(unix)]
     async fn grandchild_dies_after_timeout(run: impl AsyncFnOnce(Command) -> bool) {
         let dir = HolderDir::new("pgkill");
         let dead = dir.death_watch();
         let cmd = dir
-            .command("sleep 30 3>\"$DEAD\" & echo $! > \"$PID\"; wait")
+            .command(SURVIVOR_REPORTER)
             .kill_process_group_on_timeout();
         let (timed_out, _) = tokio::join!(run(cmd), dir.pid());
         assert!(timed_out, "expected timeout");
-        wait_closed(dead).await;
+        assert_eq!(
+            read_to_eof(dead).await,
+            "",
+            "group member outlived the leader"
+        );
     }
 
     #[cfg(unix)]
@@ -713,7 +723,7 @@ mod tests {
         run: impl AsyncFnOnce(Command) -> bool,
     ) {
         let dir = HolderDir::new("pgkeep");
-        let mut cmd = dir.command("sleep 30 >/dev/null 2>&1 & echo $! > \"$PID\"");
+        let mut cmd = dir.command("sleep 30 >/dev/null 2>&1 4>&- & echo $! >&4");
         if opt_in {
             cmd = cmd.kill_process_group_on_timeout();
         }
@@ -765,39 +775,42 @@ mod tests {
     }
 
     /// The group leader exits only once the holder has left the group (sent its
-    /// pid up the `UP` fifo), so the group kill can never reach it first;
-    /// `linger` keeps the leader alive after that.
+    /// pid up fd 3), so the group kill can never reach it first; `linger` keeps
+    /// the leader alive after that.
     #[cfg(unix)]
     fn detached_holder(dir: &HolderDir, linger: bool) -> Command {
         let script = format!(
-            "echo $$ > \"$LEADER\"; \
-             perl -MPOSIX -e 'POSIX::setsid(); $SIG{{PIPE}}=q(IGNORE); $|=1; \
-             open(U, q(>), $ENV{{UP}}); print U qq($$\\n); close(U); \
-             for (1..600) {{ unless (print qq(x\\n)) {{ open(M, q(>), $ENV{{MARK}}); print M qq(epipe\\n); close(M); exit }} \
-             select(undef, undef, undef, 0.05) }}' & \
-             read holder < \"$UP\"; echo \"$holder\" > \"$PID\"; {tail}",
-            tail = if linger { "exec sleep 60" } else { ":" },
+            "echo $$ > \"$LEADER\"; exec 7>&1; \
+             {{ perl -MPOSIX -e 'POSIX::setsid(); $SIG{{PIPE}}=q(IGNORE); $|=1; \
+             POSIX::write(3, qq($$\\n), length qq($$\\n)); POSIX::close(3); \
+             for (1..600) {{ unless (print qq(x\\n)) {{ POSIX::write(5, qq(epipe\\n), 6); exit }} \
+             select(undef, undef, undef, 0.05) }}' 3>&1 1>&7 7>&- 4>&- & }} \
+             | {{ read holder; echo \"$holder\" >&4; }}; {tail}",
+            tail = if linger {
+                "exec sleep 60 4>&- 5>&- 7>&-"
+            } else {
+                ":"
+            },
         );
         dir.command(&script).kill_process_group_on_timeout()
     }
 
+    /// Both ends close on exec; [`HolderDir::command`] dups the write end into
+    /// the child only, so the process under test is its sole writer.
     #[cfg(unix)]
-    fn mkfifo(path: &std::path::Path) {
-        use std::os::unix::ffi::OsStrExt;
-        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
-    }
-
-    /// Holding both ends keeps writers from blocking on open and keeps lines
-    /// written before the test reads them from being dropped at last close.
-    #[cfg(unix)]
-    fn held_fifo(path: &std::path::Path) -> std::fs::File {
-        mkfifo(path);
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .unwrap()
+    fn cloexec_pipe() -> (std::fs::File, std::os::fd::OwnedFd) {
+        use std::os::fd::FromRawFd;
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+        for fd in fds {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::os::fd::OwnedFd::from_raw_fd(fds[1]),
+            )
+        }
     }
 
     #[cfg(unix)]
@@ -813,7 +826,8 @@ mod tests {
         unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
     }
 
-    /// Reads byte by byte so a second line on the same fifo is left unread.
+    /// Reads byte by byte so a second line on the same pipe is left unread;
+    /// returns what was read if every writer closes first.
     #[cfg(unix)]
     async fn read_line(file: &std::fs::File) -> String {
         use std::io::Read;
@@ -821,31 +835,27 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             let mut line = Vec::new();
             let mut byte = [0u8];
-            loop {
-                file.read_exact(&mut byte).unwrap();
-                if byte[0] == b'\n' {
-                    return String::from_utf8(line).unwrap();
-                }
+            while file.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
                 line.push(byte[0]);
             }
+            String::from_utf8(line).unwrap()
         })
         .await
         .unwrap()
     }
 
-    /// Returns once every process that inherited the watch fifo's write end
-    /// has exited.
+    /// Returns once every process holding the pipe's write end has exited.
     #[cfg(unix)]
-    async fn wait_closed(file: std::fs::File) {
+    async fn read_to_eof(file: std::fs::File) -> String {
         use std::io::Read;
-        set_nonblocking(&file, false);
         let mut file = file;
         tokio::task::spawn_blocking(move || {
-            let mut buf = [0u8; 64];
-            while file.read(&mut buf).unwrap() != 0 {}
+            let mut out = String::new();
+            file.read_to_string(&mut out).unwrap();
+            out
         })
         .await
-        .unwrap();
+        .unwrap()
     }
 
     /// Kills every holder and group leader it has seen and removes the dir, on
@@ -855,6 +865,7 @@ mod tests {
         path: std::path::PathBuf,
         pid: std::fs::File,
         mark: std::fs::File,
+        writers: std::sync::Mutex<Vec<(std::os::fd::OwnedFd, libc::c_int)>>,
         seen: std::sync::Mutex<Vec<libc::pid_t>>,
     }
 
@@ -863,41 +874,61 @@ mod tests {
         fn new(prefix: &str) -> Self {
             let path = std::env::temp_dir().join(format!("{prefix}-{}", crate::mint_uuidv7()));
             std::fs::create_dir_all(&path).unwrap();
-            mkfifo(&path.join("up"));
+            let (pid, pid_w) = cloexec_pipe();
+            let (mark, mark_w) = cloexec_pipe();
             Self {
-                pid: held_fifo(&path.join("pid")),
-                mark: held_fifo(&path.join("mark")),
+                pid,
+                mark,
+                writers: std::sync::Mutex::new(vec![(pid_w, 4), (mark_w, 5)]),
                 path,
                 seen: Default::default(),
             }
         }
 
+        /// The child gets the pid pipe on fd 4, the mark pipe on fd 5 and the
+        /// death watch on fd 6. The parent's write ends drop with the command,
+        /// so a child that exits without writing yields EOF.
         fn command(&self, script: &str) -> Command {
-            Command::new("sh")
+            use std::os::fd::AsRawFd;
+            use std::os::unix::process::CommandExt;
+            let writers = std::mem::take(&mut *self.writers.lock().unwrap());
+            let mut cmd = Command::new("sh")
                 .arg("-c")
                 .arg(script)
-                .env("PID", self.path.join("pid"))
-                .env("MARK", self.path.join("mark"))
-                .env("LEADER", self.path.join("leader"))
-                .env("UP", self.path.join("up"))
-                .env("DEAD", self.path.join("dead"))
+                .env("LEADER", self.path.join("leader"));
+            // Sources move above every target first so no dup2 clobbers one.
+            unsafe {
+                cmd.inner.as_std_mut().pre_exec(move || {
+                    let mut high = [0; 3];
+                    for (slot, (fd, _)) in high.iter_mut().zip(&writers) {
+                        *slot = libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10);
+                        if *slot < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                    for (from, (_, to)) in high.iter().zip(&writers) {
+                        if libc::dup2(*from, *to) < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                    Ok(())
+                });
+            }
+            cmd
         }
 
-        /// Opened non-blocking before any writer exists so the open cannot
-        /// block; the writer's open then succeeds because a reader is present.
         fn death_watch(&self) -> std::fs::File {
-            use std::os::unix::fs::OpenOptionsExt;
-            let path = self.path.join("dead");
-            mkfifo(&path);
-            std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(path)
-                .unwrap()
+            let (dead, dead_w) = cloexec_pipe();
+            self.writers.lock().unwrap().push((dead_w, 6));
+            dead
         }
 
         async fn pid(&self) -> libc::pid_t {
-            let pid = read_line(&self.pid).await.trim().parse().unwrap();
+            let line = read_line(&self.pid).await;
+            let pid = line
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("process under test sent no pid: {line:?}"));
             self.seen.lock().unwrap().push(pid);
             pid
         }
@@ -953,7 +984,7 @@ mod tests {
     #[cfg(unix)]
     async fn grandchild_holding_stdout(opt_in: bool) {
         let dir = HolderDir::new("pgpipe");
-        let mut cmd = dir.command("echo hi; sleep 30 & echo $! > \"$PID\"");
+        let mut cmd = dir.command("echo hi; sleep 30 4>&- & echo $! >&4");
         if opt_in {
             cmd = cmd.kill_process_group_on_timeout();
         }
