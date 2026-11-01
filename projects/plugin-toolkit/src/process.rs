@@ -88,10 +88,10 @@ impl Command {
         Ok(Self::new(program))
     }
 
-    /// Start the child in its own process group so a timeout in
-    /// [`status_within`](Command::status_within) / [`output_within`](Command::output_within)
-    /// SIGKILLs the whole group, grandchildren included. Unix only; elsewhere
-    /// only the direct child is killed.
+    /// Start the child in its own process group so a timeout SIGKILLs the whole
+    /// group, grandchildren included. [`status_within`](Command::status_within) and
+    /// [`output_within`](Command::output_within) always apply it. Unix only;
+    /// elsewhere only the direct child is killed.
     pub fn kill_process_group_on_timeout(mut self) -> Self {
         #[cfg(unix)]
         self.inner.process_group(0);
@@ -174,6 +174,7 @@ impl Command {
     /// `Ok(None)` if it timed out (the child is killed). Output is not captured —
     /// use for liveness/exit-code probes.
     pub async fn status_within(mut self, budget: Duration) -> std::io::Result<Option<ExitStatus>> {
+        self = self.kill_process_group_on_timeout();
         let mut child = self.inner.spawn()?;
         let mut guard = GroupGuard::new(self.kill_group, &child);
         match crate::time::timeout(budget, guard.wait_leader(&mut child)).await {
@@ -199,6 +200,7 @@ impl Command {
     /// Run up to `budget`, capturing stdout + stderr. `Ok(None)` if it timed out
     /// (the child, or its process group, is killed and reaped).
     pub async fn output_within(mut self, budget: Duration) -> std::io::Result<Option<Output>> {
+        self = self.kill_process_group_on_timeout();
         self.inner
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -629,8 +631,7 @@ mod tests {
         let pidfile = dir.join("pid");
         let cmd = Command::new("sh")
             .arg("-c")
-            .arg(format!("sleep 30 & echo $! > {}{tail}", pidfile.display()))
-            .kill_process_group_on_timeout();
+            .arg(format!("sleep 30 & echo $! > {}{tail}", pidfile.display()));
         assert!(run(cmd).await, "expected timeout");
         let pid: libc::pid_t = wait_for_file(&pidfile)
             .await
