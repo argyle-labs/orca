@@ -160,7 +160,11 @@ impl Command {
 
     /// Run to completion, capturing stdout + stderr.
     pub async fn output(mut self) -> std::io::Result<Output> {
-        let out = self.inner.output().await?;
+        self.inner
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let out = spawn(&mut self.inner)?.wait_with_output().await?;
         Ok(Output {
             status: ExitStatus {
                 success: out.status.success(),
@@ -175,7 +179,7 @@ impl Command {
     /// `Ok(None)` if it timed out (the child is killed). Output is not captured —
     /// use for liveness/exit-code probes.
     pub async fn status_within(mut self, budget: Duration) -> std::io::Result<Option<ExitStatus>> {
-        let mut child = self.inner.spawn()?;
+        let mut child = spawn(&mut self.inner)?;
         let mut guard = GroupGuard::new(self.kill_group, &child);
         match crate::time::timeout(budget, guard.wait_leader(&mut child)).await {
             Some(result) => {
@@ -214,7 +218,7 @@ impl Command {
         self.inner
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = self.inner.spawn()?;
+        let mut child = spawn(&mut self.inner)?;
         let stdout = child
             .stdout
             .take()
@@ -278,7 +282,7 @@ impl Command {
         self.inner
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped());
-        let mut child = self.inner.spawn()?;
+        let mut child = spawn(&mut self.inner)?;
         let stdin = child
             .stdin
             .take()
@@ -353,6 +357,14 @@ impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+fn spawn(cmd: &mut tokio::process::Command) -> std::io::Result<tokio::process::Child> {
+    #[cfg(all(test, unix))]
+    let _gate = tests::FORK_GATE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cmd.spawn()
 }
 
 type SharedBuf = std::sync::Arc<std::sync::Mutex<Vec<u8>>>;
@@ -801,9 +813,18 @@ mod tests {
     fn cloexec_pipe() -> (std::fs::File, std::os::fd::OwnedFd) {
         use std::os::fd::FromRawFd;
         let mut fds = [0; 2];
+        // macOS has no pipe2, so a fork between pipe() and FD_CLOEXEC would
+        // leak these ends into an unrelated child and delay EOF.
+        let _gate = FORK_GATE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
         for fd in fds {
-            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+            assert_ne!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                -1,
+                "FD_CLOEXEC"
+            );
         }
         unsafe {
             (
@@ -812,6 +833,10 @@ mod tests {
             )
         }
     }
+
+    /// Every spawn in this file reads it; [`cloexec_pipe`] writes it.
+    #[cfg(unix)]
+    pub(super) static FORK_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
     #[cfg(unix)]
     fn set_nonblocking(file: &std::fs::File, on: bool) {
@@ -892,6 +917,10 @@ mod tests {
             use std::os::fd::AsRawFd;
             use std::os::unix::process::CommandExt;
             let writers = std::mem::take(&mut *self.writers.lock().unwrap());
+            assert!(
+                (1..=3).contains(&writers.len()),
+                "command() needs 1 to 3 writers and runs once per HolderDir"
+            );
             let mut cmd = Command::new("sh")
                 .arg("-c")
                 .arg(script)
@@ -919,7 +948,10 @@ mod tests {
 
         fn death_watch(&self) -> std::fs::File {
             let (dead, dead_w) = cloexec_pipe();
-            self.writers.lock().unwrap().push((dead_w, 6));
+            let mut writers = self.writers.lock().unwrap();
+            assert!(!writers.is_empty(), "death_watch() must precede command()");
+            writers.push((dead_w, 6));
+            drop(writers);
             dead
         }
 
