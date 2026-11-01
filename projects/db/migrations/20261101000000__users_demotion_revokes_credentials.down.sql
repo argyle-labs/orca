@@ -1,0 +1,1 @@
+DROP TRIGGER IF EXISTS users_demotion_revokes_credentials;

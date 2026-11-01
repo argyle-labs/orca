@@ -1993,6 +1993,14 @@ mod tests {
         assert_eq!(call().await.unwrap().status(), axum::http::StatusCode::OK);
 
         identities::users::set_role(&conn, &uid, "read-only", &utils::time::now_rfc3339()).unwrap();
+        assert!(try_token_auth_with(&conn, token, utils::time::now()).is_none());
+        assert_eq!(
+            call().await.unwrap().status(),
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+
+        // An admin row that outlives the demotion is still capped per request.
+        insert_token_for_user(&conn, "admin", &sha256_hex(token.as_bytes()), Some(&uid));
         let ident = try_token_auth_with(&conn, token, utils::time::now()).unwrap();
         assert_eq!(ident.role, "read-only");
         assert_eq!(
