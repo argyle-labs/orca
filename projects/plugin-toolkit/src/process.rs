@@ -196,15 +196,20 @@ impl Command {
         }
     }
 
-    /// Run up to `budget`, capturing stdout + stderr. `Ok(None)` if the child
-    /// did not exit in time (the child, or its process group, is killed and
-    /// reaped).
+    /// Run up to `budget`, capturing stdout + stderr. Never returns partial
+    /// output as success:
     ///
-    /// Once the child exits, the pipes get [`PIPE_GRACE`] to reach EOF. A process
-    /// the child left behind may still hold them open; the output read so far is
-    /// then returned with the child's own exit status. That process is left
-    /// running unless [`kill_process_group_on_timeout`](Self::kill_process_group_on_timeout)
-    /// was set, in which case the group is killed.
+    /// - The child exits and both pipes reach EOF before the deadline:
+    ///   `Ok(Some(output))` with the complete output.
+    /// - The child has not exited by the deadline: `Ok(None)`; the child is
+    ///   killed and reaped.
+    /// - The child exits but a process it left behind still holds a pipe open at
+    ///   the deadline: `Err` wrapping a [`PipeHeldOpen`] that carries the child's
+    ///   exit status.
+    ///
+    /// On either deadline path the process group is also killed if
+    /// [`kill_process_group_on_timeout`](Self::kill_process_group_on_timeout) was
+    /// set; otherwise processes the child left behind keep running.
     pub async fn output_within(mut self, budget: Duration) -> std::io::Result<Option<Output>> {
         self.inner
             .stdout(std::process::Stdio::piped())
@@ -239,21 +244,22 @@ impl Command {
                 return Ok(None);
             }
         }
-        let grace_end = deadline.min(tokio::time::Instant::now() + PIPE_GRACE);
-        match tokio::time::timeout_at(grace_end, &mut reader).await {
-            Ok(pipes) => pipes.map_err(std::io::Error::other)??,
-            Err(_) => {
-                reader.abort();
-                guard.kill();
-            }
+        let eof = drain_pipes(&mut reader, deadline).await?;
+        if !eof {
+            reader.abort();
+            guard.kill();
         }
         let status = child.wait().await?;
         guard.disarm();
+        let status = ExitStatus {
+            success: status.success(),
+            code: status.code(),
+        };
+        if !eof {
+            return Err(std::io::Error::other(PipeHeldOpen { status }));
+        }
         Ok(Some(Output {
-            status: ExitStatus {
-                success: status.success(),
-                code: status.code(),
-            },
+            status,
             stdout: take_buf(&out_buf),
             stderr: take_buf(&err_buf),
         }))
@@ -292,7 +298,37 @@ impl Command {
     }
 }
 
-const PIPE_GRACE: Duration = Duration::from_millis(200);
+/// [`Command::output_within`]'s error when the child exited but its stdout or
+/// stderr was still held open, by a process it left behind, at the deadline.
+#[derive(Clone, Copy, Debug)]
+pub struct PipeHeldOpen {
+    pub status: ExitStatus,
+}
+
+impl std::fmt::Display for PipeHeldOpen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "process exited (exit {:?}) but its output pipe was still held open at the deadline",
+            self.status.code
+        )
+    }
+}
+
+impl std::error::Error for PipeHeldOpen {}
+
+// `Ok(true)` once both pipes hit EOF, `Ok(false)` if the deadline came first.
+async fn drain_pipes<F>(reader: &mut F, deadline: tokio::time::Instant) -> std::io::Result<bool>
+where
+    F: std::future::Future<
+            Output = std::result::Result<std::io::Result<()>, tokio::task::JoinError>,
+        > + Unpin,
+{
+    match tokio::time::timeout_at(deadline, reader).await {
+        Ok(pipes) => pipes.map_err(std::io::Error::other)?.map(|()| true),
+        Err(_) => Ok(false),
+    }
+}
 
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
 
@@ -820,52 +856,111 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn output_within_returns_leader_status_when_pipe_held_outside_group() {
-        let dir = HolderDir::new("pghold");
-        let out = detached_holder(&dir.0, false)
-            .output_within(Duration::from_secs(10))
+    async fn kill_holder_once_ready(pid_file: &std::path::Path) {
+        let pid: libc::pid_t = wait_for_file(pid_file)
             .await
-            .unwrap()
-            .expect("leader exited in time");
-        assert!(out.status.success);
+            .expect("holder pid written")
+            .trim()
+            .parse()
+            .unwrap();
+        unsafe { libc::kill(pid, libc::SIGKILL) };
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn output_within_waits_for_holder_outside_group_to_close_pipe() {
+        let dir = HolderDir::new("pghold");
+        let pid_file = dir.0.join("pid");
+        let (out, ()) = tokio::join!(
+            detached_holder(&dir.0, false).output_within(Duration::from_secs(600)),
+            kill_holder_once_ready(&pid_file),
+        );
+        let out = out.unwrap().expect("leader exited in time");
+        assert!(out.status.success);
+    }
+
+    /// The holder writes its pid file (atomically, via rename) before the leader
+    /// exits, so the test kills it from that file and the pipe then reaches EOF.
+    #[cfg(unix)]
     async fn grandchild_holding_stdout(opt_in: bool) {
         let dir = HolderDir::new("pgpipe");
+        let pid_file = dir.0.join("pid");
         let mut cmd = Command::new("sh")
             .arg("-c")
-            .arg("echo hi; sleep 30 & echo $! > \"$PID\"")
-            .env("PID", dir.0.join("pid"));
+            .arg("echo hi; sleep 30 & echo $! > \"$PID.tmp\" && mv \"$PID.tmp\" \"$PID\"")
+            .env("PID", &pid_file);
         if opt_in {
             cmd = cmd.kill_process_group_on_timeout();
         }
-        let started = std::time::Instant::now();
-        let out = cmd
-            .output_within(Duration::from_secs(10))
-            .await
-            .unwrap()
-            .expect("leader exited in time");
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "took {:?}",
-            started.elapsed()
+        let (out, ()) = tokio::join!(
+            cmd.output_within(Duration::from_secs(600)),
+            kill_holder_once_ready(&pid_file),
         );
+        let out = out.unwrap().expect("leader exited in time");
         assert!(out.status.success);
         assert_eq!(out.stdout, b"hi\n");
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn output_within_returns_when_grandchild_holds_stdout() {
+    async fn output_within_returns_full_output_once_grandchild_releases_stdout() {
         grandchild_holding_stdout(false).await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn output_within_returns_when_grandchild_holds_stdout_in_group() {
+    async fn output_within_returns_full_output_once_grandchild_in_group_releases_stdout() {
         grandchild_holding_stdout(true).await;
+    }
+
+    fn pipe_reader() -> (
+        tokio::io::DuplexStream,
+        AbortOnDrop<std::io::Result<()>>,
+        SharedBuf,
+    ) {
+        let (writer, pipe) = tokio::io::duplex(64);
+        let buf = SharedBuf::default();
+        let reader = AbortOnDrop(tokio::spawn(read_pipe(pipe, buf.clone())));
+        (writer, reader, buf)
+    }
+
+    /// A deadline already in the past makes the timeout fire on its first poll,
+    /// so the held-pipe path is reached without waiting on any clock.
+    #[tokio::test]
+    async fn drain_pipes_reports_held_pipe_at_deadline() {
+        let (writer, mut reader, _buf) = pipe_reader();
+        let deadline = tokio::time::Instant::now();
+        assert!(
+            !drain_pipes(&mut reader, deadline).await.unwrap(),
+            "held pipe reported as EOF"
+        );
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn drain_pipes_reports_eof_before_deadline() {
+        let (mut writer, mut reader, buf) = pipe_reader();
+        writer.write_all(b"all").await.unwrap();
+        drop(writer);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+        assert!(drain_pipes(&mut reader, deadline).await.unwrap());
+        assert_eq!(take_buf(&buf), b"all");
+    }
+
+    #[test]
+    fn pipe_held_open_error_carries_exit_status() {
+        let err = std::io::Error::other(PipeHeldOpen {
+            status: ExitStatus {
+                success: false,
+                code: Some(7),
+            },
+        });
+        let held = err
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<PipeHeldOpen>())
+            .expect("PipeHeldOpen inside the io::Error");
+        assert_eq!(held.status.code, Some(7));
+        assert!(err.to_string().contains("still held open"), "{err}");
     }
 
     #[cfg(unix)]
