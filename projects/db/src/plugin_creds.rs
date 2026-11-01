@@ -352,17 +352,16 @@ args = ["server.js"]
         assert!(format!("{err:#}").contains("HTTP URL"), "got: {err:#}");
     }
 
-    /// Install rustls' ring CryptoProvider exactly once per process.
-    /// `install_default()` errors when a provider is already registered, which
-    /// is the *expected* path on the 2nd+ test in this module — guard with
-    /// `Once` so the first install panics on real failures and later calls are
-    /// no-ops (no error swallowed).
+    /// Other tests in the process (e.g. mesh registry PKI) may have installed
+    /// the provider already; that counts as installed.
     fn install_ring_provider_once() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .expect("install rustls ring CryptoProvider");
+            let installed = rustls::crypto::ring::default_provider().install_default();
+            assert!(
+                installed.is_ok() || rustls::crypto::CryptoProvider::get_default().is_some(),
+                "install rustls ring CryptoProvider"
+            );
         });
     }
 
