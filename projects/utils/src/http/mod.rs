@@ -104,6 +104,8 @@ struct Inner {
     config: ClientConfig,
     secure: Pool,
     insecure: Pool,
+    #[cfg(test)]
+    attempts: std::sync::atomic::AtomicUsize,
 }
 
 /// One lazily built `reqwest::Client`. The build runs on its own thread and
@@ -191,6 +193,8 @@ impl ClientBuilder {
                 config: self.config,
                 secure: Pool::default(),
                 insecure: Pool::default(),
+                #[cfg(test)]
+                attempts: Default::default(),
             }),
         }
     }
@@ -628,6 +632,11 @@ impl RequestBuilder {
         };
         let mut attempt = 1;
         loop {
+            #[cfg(test)]
+            self.client
+                .inner
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let result = self.dispatch_once(extra_headers, deadline).await;
             if attempt >= attempts {
                 return result;
@@ -1383,15 +1392,21 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let start = std::time::Instant::now();
-        let err = Client::new()
+        let client = Client::new();
+        let err = client
             .get(format!("http://127.0.0.1:{port}/"))
             .timeout(Duration::from_secs(5))
             .send()
             .await
             .unwrap_err();
         assert!(matches!(err, HttpError::Request(e) if e.is_connect()));
-        assert!(start.elapsed() >= RETRY_BASE_DELAY / 2);
+        assert!(
+            client
+                .inner
+                .attempts
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= 2
+        );
     }
 
     #[tokio::test]
