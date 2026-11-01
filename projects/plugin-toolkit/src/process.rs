@@ -179,8 +179,8 @@ impl Command {
         let mut guard = GroupGuard::new(self.kill_group, &child);
         match crate::time::timeout(budget, guard.wait_leader(&mut child)).await {
             Some(result) => {
-                guard.disarm();
                 result?;
+                guard.disarm();
                 let st = child.wait().await?;
                 Ok(Some(ExitStatus {
                     success: st.success(),
