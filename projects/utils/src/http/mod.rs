@@ -340,30 +340,38 @@ impl Client {
                 }
             }
         };
-        // A timer thread rather than `tokio::time`: callers may have no runtime.
-        // Dropping `cancel` wakes it early once the build lands or we're dropped.
         let wait = timeout.map_or(self.inner.config.build_wait, |t| {
             t.min(self.inner.config.build_wait)
         });
-        let (cancel, cancel_rx) = std::sync::mpsc::channel::<()>();
-        let (fire, fired) = tokio::sync::oneshot::channel::<()>();
-        std::thread::Builder::new()
-            .name("http-client-build-wait".into())
-            .spawn(move || {
-                if cancel_rx.recv_timeout(wait) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
-                    _ = fire.send(());
-                }
-            })
-            .map_err(|e| HttpError::Build(format!("spawn build wait timer: {e}")))?;
+        let mut _cancel = None;
+        let fired: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            if tokio::runtime::Handle::try_current().is_ok() {
+                Box::pin(tokio::time::sleep(wait))
+            } else {
+                // No runtime to drive `tokio::time`, so time out on a thread.
+                // Dropping `cancel` wakes it early once the build lands or we're dropped.
+                let (cancel, cancel_rx) = std::sync::mpsc::channel::<()>();
+                let (fire, fired) = tokio::sync::oneshot::channel::<()>();
+                std::thread::Builder::new()
+                    .name("http-client-build-wait".into())
+                    .spawn(move || {
+                        if cancel_rx.recv_timeout(wait)
+                            == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                        {
+                            _ = fire.send(());
+                        }
+                    })
+                    .map_err(|e| HttpError::Build(format!("spawn build wait timer: {e}")))?;
+                _cancel = Some(cancel);
+                Box::pin(async move {
+                    _ = fired.await;
+                })
+            };
         let ready = std::pin::pin!(rx.wait_for(Option::is_some));
         let built = match futures_util::future::select(ready, fired).await {
-            futures_util::future::Either::Left((ready, _)) => {
-                let built = ready
-                    .map_err(|_| HttpError::Build("build thread exited".into()))?
-                    .clone();
-                drop(cancel);
-                built
-            }
+            futures_util::future::Either::Left((ready, _)) => ready
+                .map_err(|_| HttpError::Build("build thread exited".into()))?
+                .clone(),
             futures_util::future::Either::Right(_) => {
                 return Err(HttpError::Build(format!(
                     "client build stalled after {wait:?}"
