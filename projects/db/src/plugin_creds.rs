@@ -81,6 +81,10 @@ pub fn mark_synced(conn: &Connection, plugin_id: &str) -> Result<()> {
 /// This is the canonical credential-sync primitive — per
 /// `project_db_sync_primitive`, sync belongs in db, not in per-domain modules.
 pub async fn sync(plugin_id: &str) -> Result<()> {
+    sync_with(utils::http::shared(), plugin_id).await
+}
+
+async fn sync_with(client: &utils::http::Client, plugin_id: &str) -> Result<()> {
     let db_path = crate::db_path_override_snapshot();
 
     let id = plugin_id.to_owned();
@@ -120,7 +124,6 @@ pub async fn sync(plugin_id: &str) -> Result<()> {
         })
         .with_context(|| format!("no PLUGIN_TOKEN found for plugin '{plugin_id}'"))?;
 
-    let client = utils::http::shared();
     let url = utils::url::join(&base_url, "creds");
     let mut synced = 0usize;
     let mut failed = 0usize;
@@ -263,12 +266,14 @@ url = "{base_url}"
         crate::plugins::upsert(conn, &row).unwrap();
     }
 
-    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    // Each test builds its own runtime; the process-global shared() client's
+    // pooled connections are bound to whichever runtime first used them.
+    fn block_sync(plugin_id: &str) -> Result<()> {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(f)
+            .block_on(sync_with(&utils::http::Client::new(), plugin_id))
     }
 
     #[test]
@@ -295,7 +300,7 @@ url = "{base_url}"
         let (path, conn) = open_test_path(dir.path());
         install_http_plugin(&conn, dir.path(), "p-nocreds", "http://127.0.0.1:1");
         drop(conn);
-        crate::with_thread_db_path(&path, || block_on(sync("p-nocreds")).unwrap());
+        crate::with_thread_db_path(&path, || block_sync("p-nocreds").unwrap());
     }
 
     #[test]
@@ -304,7 +309,7 @@ url = "{base_url}"
         let (path, conn) = open_test_path(dir.path());
         set(&conn, "ghost", "API_KEY", "v").unwrap();
         drop(conn);
-        let err = crate::with_thread_db_path(&path, || block_on(sync("ghost")).err().unwrap());
+        let err = crate::with_thread_db_path(&path, || block_sync("ghost").err().unwrap());
         assert!(
             format!("{err:#}").contains("not registered"),
             "got: {err:#}"
@@ -343,8 +348,7 @@ args = ["server.js"]
         set(&conn, "stdio-plugin", "PLUGIN_TOKEN", "tok").unwrap();
         set(&conn, "stdio-plugin", "API_KEY", "v").unwrap();
         drop(conn);
-        let err =
-            crate::with_thread_db_path(&path, || block_on(sync("stdio-plugin")).err().unwrap());
+        let err = crate::with_thread_db_path(&path, || block_sync("stdio-plugin").err().unwrap());
         assert!(format!("{err:#}").contains("HTTP URL"), "got: {err:#}");
     }
 
@@ -369,7 +373,7 @@ args = ["server.js"]
         install_http_plugin(&conn, dir.path(), "p-notok", "http://127.0.0.1:1");
         set(&conn, "p-notok", "API_KEY", "v").unwrap();
         drop(conn);
-        let err = crate::with_thread_db_path(&path, || block_on(sync("p-notok")).err().unwrap());
+        let err = crate::with_thread_db_path(&path, || block_sync("p-notok").err().unwrap());
         assert!(format!("{err:#}").contains("PLUGIN_TOKEN"), "got: {err:#}");
     }
 
@@ -398,7 +402,7 @@ args = ["server.js"]
         set(&conn, "p-sync", "OTHER", "v2").unwrap();
         drop(conn);
 
-        crate::with_thread_db_path(&path, || block_on(sync("p-sync")).unwrap());
+        crate::with_thread_db_path(&path, || block_sync("p-sync").unwrap());
 
         let conn = crate::open_unencrypted(&path).unwrap();
         let creds = list(&conn, "p-sync").unwrap();
@@ -456,7 +460,7 @@ PLUGIN_TOKEN = "env-secret"
         set(&conn, "p-envtok", "API_KEY", "v").unwrap();
         drop(conn);
 
-        crate::with_thread_db_path(&path, || block_on(sync("p-envtok")).unwrap());
+        crate::with_thread_db_path(&path, || block_sync("p-envtok").unwrap());
     }
 
     #[test]
@@ -482,7 +486,7 @@ PLUGIN_TOKEN = "env-secret"
         set(&conn, "p-fail", "API_KEY", "v").unwrap();
         drop(conn);
 
-        crate::with_thread_db_path(&path, || block_on(sync("p-fail")).unwrap());
+        crate::with_thread_db_path(&path, || block_sync("p-fail").unwrap());
 
         let conn = crate::open_unencrypted(&path).unwrap();
         let creds = list(&conn, "p-fail").unwrap();
