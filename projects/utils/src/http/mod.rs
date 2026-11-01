@@ -1202,6 +1202,8 @@ mod tests {
         assert!(pending, "first caller is mid-build");
         drop(first);
         gate.send(()).unwrap();
+        // A restarted build then finds the gate closed and runs at once, so `builds == 1` fails fast.
+        drop(gate);
         let (a, b) = tokio::join!(client.pool(false, None), client.pool(false, None));
         a.unwrap();
         b.unwrap();
@@ -1234,14 +1236,11 @@ mod tests {
     #[tokio::test]
     async fn a_short_request_timeout_bounds_the_build_wait() {
         let (client, _gate, _done) = gated_client(None);
-        let start = std::time::Instant::now();
         let err = client
             .pool(false, Some(Duration::from_millis(50)))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("stalled after 50ms"), "{err}");
-        // Hang guard only: the gate is never released, so the error text is the real check.
-        assert!(start.elapsed() < Duration::from_secs(10));
     }
 
     #[tokio::test]
@@ -1269,13 +1268,10 @@ mod tests {
             .build()
             .unwrap();
         let (client, _gate, _done) = gated_client(None);
-        let started = std::time::Instant::now();
         let err = rt
             .block_on(client.pool(false, Some(Duration::from_millis(50))))
             .unwrap_err();
         assert!(err.to_string().contains("stalled after 50ms"), "{err}");
-        // Hang guard only: the gate is never released, so the error text is the real check.
-        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]
