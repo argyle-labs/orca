@@ -244,6 +244,8 @@ pub use ::tikv_jemallocator;
 // `default-features = false` they vanish.
 #[cfg(feature = "tools")]
 pub use ::contract;
+#[cfg(feature = "tools")]
+pub use ::contract::CallerIdentity;
 // The `db` crate + `rusqlite` are the heavy in-core storage layer
 // (reqwest/mysql/postgres/moka + the SQLite driver). Only the in-daemon
 // `endpoint_resource!` path references them, so they ride the `db-incore`

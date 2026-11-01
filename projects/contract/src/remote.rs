@@ -26,6 +26,16 @@ pub struct CallerIdentity {
     pub can_mutate: bool,
 }
 
+impl CallerIdentity {
+    /// True if this caller's role meets `required` in the shared tier order,
+    /// so `super-admin` passes an `admin` gate where `role == "admin"` would
+    /// refuse it. The identity carries a single role today; this is the one
+    /// check to extend when it carries several.
+    pub fn satisfies(&self, required: &str) -> bool {
+        crate::roles::satisfies(&self.role, required)
+    }
+}
+
 /// One system in the mesh, as the transport knows it.
 ///
 /// The minimum a domain crate needs to address a resource it does not own:
@@ -124,6 +134,24 @@ mod tests {
                 "caller_user": caller.map(|c| c.user_id),
             }))
         }
+    }
+
+    fn caller(role: &str) -> CallerIdentity {
+        CallerIdentity {
+            user_id: "u".into(),
+            username: "n".into(),
+            role: role.into(),
+            can_mutate: false,
+        }
+    }
+
+    #[test]
+    fn caller_satisfies_uses_tier_order() {
+        assert!(caller("admin").satisfies("admin"));
+        assert!(caller("super-admin").satisfies("admin"));
+        assert!(!caller("read").satisfies("admin"));
+        assert!(!caller("bogus").satisfies("read"));
+        assert!(!caller("admin").satisfies("bogus"));
     }
 
     #[test]
