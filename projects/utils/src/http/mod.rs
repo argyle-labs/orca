@@ -344,11 +344,16 @@ impl Client {
             t.min(self.inner.config.build_wait)
         });
         let mut _cancel = None;
+        // A runtime built without `enable_time` panics on `sleep`, and tokio
+        // exposes no check for that, so a panic means "use the thread timer".
+        let sleep = tokio::runtime::Handle::try_current().ok().and_then(|_| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tokio::time::sleep(wait))).ok()
+        });
         let fired: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
-            if tokio::runtime::Handle::try_current().is_ok() {
-                Box::pin(tokio::time::sleep(wait))
+            if let Some(sleep) = sleep {
+                Box::pin(sleep)
             } else {
-                // No runtime to drive `tokio::time`, so time out on a thread.
+                // No usable `tokio::time`, so time out on a thread.
                 // Dropping `cancel` wakes it early once the build lands or we're dropped.
                 let (cancel, cancel_rx) = std::sync::mpsc::channel::<()>();
                 let (fire, fired) = tokio::sync::oneshot::channel::<()>();
@@ -1204,6 +1209,21 @@ mod tests {
             .builds
             .load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(builds, 2);
+    }
+
+    #[test]
+    fn a_runtime_without_timers_bounds_the_build_wait_on_a_thread() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        let client = slow_client(Duration::from_millis(2000));
+        let started = std::time::Instant::now();
+        let err = rt
+            .block_on(client.pool(false, Some(Duration::from_millis(50))))
+            .unwrap_err();
+        assert!(err.to_string().contains("stalled after 50ms"), "{err}");
+        assert!(started.elapsed() < Duration::from_millis(1500));
     }
 
     #[test]
