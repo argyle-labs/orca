@@ -106,6 +106,9 @@ struct Inner {
     insecure: Pool,
     #[cfg(test)]
     attempts: std::sync::atomic::AtomicUsize,
+    /// When set, retry delays are recorded here instead of slept.
+    #[cfg(test)]
+    retry_delays: Option<std::sync::Mutex<Vec<Duration>>>,
 }
 
 /// One lazily built `reqwest::Client`. The build runs on its own thread and
@@ -195,6 +198,8 @@ impl ClientBuilder {
                 insecure: Pool::default(),
                 #[cfg(test)]
                 attempts: Default::default(),
+                #[cfg(test)]
+                retry_delays: None,
             }),
         }
     }
@@ -657,6 +662,15 @@ impl RequestBuilder {
                 }
             }
             drop(result);
+            #[cfg(test)]
+            if let Some(delays) = &self.client.inner.retry_delays {
+                delays
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(delay);
+                attempt += 1;
+                continue;
+            }
             tokio::time::sleep(delay).await;
             attempt += 1;
         }
@@ -1317,10 +1331,17 @@ mod tests {
             1,
         )
         .await;
-        let start = std::time::Instant::now();
-        let resp = Client::new().get(server.uri()).send().await.unwrap();
+        let client = Client {
+            inner: Arc::new(Inner {
+                retry_delays: Some(Default::default()),
+                ..Default::default()
+            }),
+        };
+        let resp = client.get(server.uri()).send().await.unwrap();
         assert_eq!(resp.status, 200);
-        assert!(start.elapsed() >= Duration::from_secs(1));
+        let delays = client.inner.retry_delays.as_ref().unwrap().lock().unwrap();
+        assert_eq!(delays.len(), 1);
+        assert!(delays[0] >= Duration::from_secs(1));
     }
 
     #[tokio::test]
