@@ -211,7 +211,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     // 60 req/hr per IP — ample for update checks). When a token IS present we
     // send it (higher rate limit / private-repo readiness). Empty token →
     // unauthenticated request, not an error.
-    let client = utils::http::Client::new();
+    let client = utils::http::shared();
     let user_agent = format!("{APP_NAME}/{}", utils::build_info::version());
     // Release source is configurable (default GitHub). A GitHub PAT is only
     // valid against GitHub, so drop it for any other origin (Gitea reads public).
@@ -229,7 +229,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     //     so the candidate just needs to be IN the response set.
     let releases: Vec<Release> = if *channel == Channel::Stable {
         let url = format!("{api}/releases/latest");
-        match github_get(&client, url, token, &user_agent).await {
+        match github_get(client, url, token, &user_agent).await {
             Ok(resp) => vec![resp.json().context("failed to parse release JSON")?],
             Err(utils::http::HttpError::Status { status: 404, .. }) => return Ok(None),
             Err(e) => return Err(anyhow::Error::from(e).context("release API request failed")),
@@ -238,7 +238,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
         // `per_page` (GitHub) and `limit` (Gitea) — each origin honours its own
         // and ignores the other, so one URL lists ≥100 releases on both.
         let list_url = format!("{api}/releases?per_page=100&limit=100");
-        let mut all: Vec<Release> = github_get(&client, list_url, token, &user_agent)
+        let mut all: Vec<Release> = github_get(client, list_url, token, &user_agent)
             .await
             .context("release API request failed")?
             .json()
@@ -249,7 +249,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
         // stable release, OR the origin (Gitea) has no /releases/latest route —
         // fine either way, the paginated list is sufficient.
         let latest_url = format!("{api}/releases/latest");
-        match github_get(&client, latest_url, token, &user_agent).await {
+        match github_get(client, latest_url, token, &user_agent).await {
             Ok(resp) => {
                 let stable: Release = resp.json().context("failed to parse latest release JSON")?;
                 if !all.iter().any(|r| r.tag_name == stable.tag_name) {
@@ -397,10 +397,10 @@ pub async fn list_versions(channel: &Channel, token: &str) -> Result<Vec<Version
 
     // Public repo → unauthenticated listing works; send the token only when we
     // have one. See the note in `check_for_update`.
-    let client = utils::http::Client::new();
+    let client = utils::http::shared();
     let user_agent = format!("{APP_NAME}/{}", utils::build_info::version());
     let url = format!("{APP_REPO_API_URL}/releases?per_page=100");
-    let releases: Vec<ReleaseMeta> = github_get(&client, url, token, &user_agent)
+    let releases: Vec<ReleaseMeta> = github_get(client, url, token, &user_agent)
         .await
         .context("GitHub API request failed")?
         .json()
@@ -436,7 +436,7 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     // present for the higher rate limit). See `check_for_update`. A GitHub PAT
     // is invalid against a non-GitHub origin, so drop it there.
     let token = effective_token(token);
-    let client = utils::http::Client::new();
+    let client = utils::http::shared();
 
     require_checksum_url(&info.version, &info.checksum_url)?;
 
@@ -446,7 +446,7 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     let checksum_url = localize_asset_url(&info.checksum_url);
     let asset_url = localize_asset_url(&info.asset_url);
 
-    let cs_bytes = download_asset(&client, &checksum_url, token).await?;
+    let cs_bytes = download_asset(client, &checksum_url, token).await?;
     let cs_str = String::from_utf8_lossy(&cs_bytes);
     // Format: "<hash>  <filename>"
     let expected = cs_str
@@ -456,7 +456,7 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
         .with_context(|| format!("checksum file empty at {checksum_url}"))?;
 
     println!("[orca] downloading v{}...", info.version);
-    let binary = download_asset(&client, &asset_url, token).await?;
+    let binary = download_asset(client, &asset_url, token).await?;
 
     verify_sha256(&binary, &expected)?;
     println!("[orca] checksum OK");
@@ -953,7 +953,7 @@ pub async fn fetch_release_asset(
     } else {
         format!("v{v_tag}")
     };
-    let client = utils::http::Client::new();
+    let client = utils::http::shared();
     let user_agent = format!("{APP_NAME}/{}", utils::build_info::version());
     // Configurable release source (default GitHub); drop a GitHub-only PAT for
     // any other origin. `/releases/tags/{tag}` is served by both GitHub and Gitea.
@@ -988,14 +988,14 @@ pub async fn fetch_release_asset(
     let checksum_url = select_checksum_url(&release.assets, &checksum_name)
         .with_context(|| format!("no checksum asset {checksum_name} for {v_tag}"))?;
 
-    let cs_bytes = download_asset(&client, &checksum_url, token).await?;
+    let cs_bytes = download_asset(client, &checksum_url, token).await?;
     let cs_str = String::from_utf8_lossy(&cs_bytes);
     let expected = cs_str
         .split_whitespace()
         .next()
         .map(|s| s.to_string())
         .with_context(|| format!("checksum file empty at {checksum_url}"))?;
-    let bytes = download_asset(&client, &asset_url, token).await?;
+    let bytes = download_asset(client, &asset_url, token).await?;
     verify_sha256(&bytes, &expected)?;
     Ok((bytes, expected, stripped))
 }

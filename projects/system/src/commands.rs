@@ -1520,7 +1520,7 @@ async fn find_release_by_tag(
         ""
     };
     let url = format!("{api}/releases/tags/{v_tag}");
-    let client = utils::http::Client::new();
+    let client = utils::http::shared();
     let user_agent = format!("{APP_NAME}/{}", utils::build_info::version());
     let req = client
         .get(url)

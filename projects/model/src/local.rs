@@ -106,11 +106,18 @@ pub async fn discover_local_llm() -> Option<LocalLlm> {
     None
 }
 
+fn probe_client() -> &'static Client {
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        Client::builder()
+            .connect_timeout(Duration::from_millis(500))
+            .build()
+    })
+}
+
 async fn probe_lmstudio(base_url: &str) -> bool {
     // Fast probe: give up on a dead endpoint in 500ms (connect) / 2s (total).
-    let client = Client::builder()
-        .connect_timeout(Duration::from_millis(500))
-        .build();
+    let client = probe_client();
 
     // `send()` errors on a non-2xx status, so a bad status hits this else.
     let Ok(resp) = client
@@ -136,9 +143,7 @@ async fn probe_lmstudio(base_url: &str) -> bool {
 
 async fn probe_ollama(base_url: &str) -> bool {
     // Fast probe: give up on a dead endpoint in 500ms (connect) / 2s (total).
-    let client = Client::builder()
-        .connect_timeout(Duration::from_millis(500))
-        .build();
+    let client = probe_client();
 
     // Ollama exposes /api/tags or /v1/models (via OpenAI compat layer).
     // `send()` succeeds only on a 2xx, so reachability == `is_ok`.
@@ -153,9 +158,12 @@ async fn probe_ollama(base_url: &str) -> bool {
 /// POST a single-turn prompt to a local LLM and return the response text.
 /// Returns `None` on any error, connection failure, or timeout.
 pub async fn complete(llm: &LocalLlm, prompt: &str, timeout_ms: u64) -> Option<String> {
-    let client = Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .build();
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .build()
+    });
 
     let body = json!({
         "model": "",

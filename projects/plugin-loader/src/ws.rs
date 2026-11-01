@@ -206,6 +206,11 @@ pub(crate) fn with_invoke_deadline<R>(deadline: Instant, f: impl FnOnce() -> R) 
     f()
 }
 
+/// The enclosing invoke's ceiling on this thread, if one is running.
+pub(crate) fn invoke_deadline() -> Option<Instant> {
+    INVOKE_DEADLINE.get()
+}
+
 fn wait_limit(requested_ms: Option<u64>) -> Duration {
     let wait = requested_ms
         .map_or(DEFAULT_TIMEOUT, Duration::from_millis)

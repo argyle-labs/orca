@@ -37,7 +37,7 @@ impl LMStudioBackend {
             // The shared pooled client applies a 10s connect timeout but no
             // total-request timeout, so slow local models can stream for as
             // long as they need.
-            client: Client::new(),
+            client: utils::http::shared().clone(),
             base_url: base_url.into(),
             model: model.into(),
         }

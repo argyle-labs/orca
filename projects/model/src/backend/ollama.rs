@@ -21,7 +21,7 @@ impl OllamaBackend {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         crate::ensure_crypto_provider();
         OllamaBackend {
-            client: Client::new(),
+            client: utils::http::shared().clone(),
             base_url: base_url.into(),
             model: model.into(),
         }

@@ -21,7 +21,7 @@ impl ClaudeBackend {
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         crate::ensure_crypto_provider();
         ClaudeBackend {
-            client: Client::new(),
+            client: utils::http::shared().clone(),
             api_key: api_key.into(),
             model: model.into(),
         }

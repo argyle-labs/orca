@@ -87,13 +87,24 @@ async fn probe(url: &str, insecure: bool) -> bool {
 }
 
 #[cfg(all(feature = "delegated-http", not(feature = "http")))]
-async fn probe(url: &str, insecure: bool) -> bool {
-    let client = match crate::reqwest::ClientBuilder::new()
+fn probe_client(insecure: bool) -> Option<&'static crate::reqwest::Client> {
+    static SECURE: std::sync::OnceLock<crate::reqwest::Client> = std::sync::OnceLock::new();
+    static INSECURE: std::sync::OnceLock<crate::reqwest::Client> = std::sync::OnceLock::new();
+    let cell = if insecure { &INSECURE } else { &SECURE };
+    if let Some(client) = cell.get() {
+        return Some(client);
+    }
+    let client = crate::reqwest::ClientBuilder::new()
         .danger_accept_invalid_certs(insecure)
         .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
+        .ok()?;
+    Some(cell.get_or_init(|| client))
+}
+
+#[cfg(all(feature = "delegated-http", not(feature = "http")))]
+async fn probe(url: &str, insecure: bool) -> bool {
+    let Some(client) = probe_client(insecure) else {
+        return false;
     };
     let request = match client.get(url).build() {
         Ok(r) => r,
@@ -115,6 +126,17 @@ pub async fn resolve_reachable(key: &str, routes: &[Route], insecure: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(feature = "delegated-http", not(feature = "http")))]
+    #[test]
+    fn probe_client_is_cached_per_insecure_flag() {
+        let a = probe_client(false).unwrap();
+        let b = probe_client(false).unwrap();
+        let c = probe_client(true).unwrap();
+        assert!(std::ptr::eq(a, b));
+        assert!(!std::ptr::eq(a, c));
+        assert!(std::ptr::eq(c, probe_client(true).unwrap()));
+    }
 
     #[test]
     fn parse_shorthand() {
