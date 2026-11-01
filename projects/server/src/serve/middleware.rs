@@ -399,6 +399,13 @@ fn try_token_auth_with(
     {
         return None;
     }
+    let role = match row.user_id.as_deref() {
+        Some(uid) => {
+            let user = identities::users::find_by_id(conn, uid).ok()??;
+            dispatch::tool_roles::effective_role(&user.role, &row.role).to_string()
+        }
+        None => row.role,
+    };
     _ = auth::api_tokens::touch(conn, &row.id, &now.to_rfc3339());
     Some(AuthIdentity {
         kind: AuthKind::Token {
@@ -406,7 +413,7 @@ fn try_token_auth_with(
             name: row.name,
             user_id: row.user_id,
         },
-        role: row.role,
+        role,
         can_mutate: row.can_mutate,
     })
 }
@@ -442,9 +449,6 @@ fn caller_from_token_with(
     let ident = try_token_auth_with(conn, token, now)?;
     let uid = identity_user_id(&ident)?;
     let u = identities::users::find_by_id(conn, &uid).ok()??;
-    // Role and capability come from the TOKEN, not the user row: the token is
-    // what this call presented, and it may be scoped narrower than its
-    // issuing user.
     Some(contract::CallerIdentity {
         user_id: u.id,
         username: u.username,
@@ -642,8 +646,8 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
             }
             match caller {
                 Some(mut c) => {
-                    // Dispatch re-checks the role against this identity, so
-                    // it carries the token's scope, not the issuing user's.
+                    // Dispatch re-checks the role against this identity, so it
+                    // carries the token's scope capped by the user's current role.
                     c.role = ident.role.clone();
                     c.can_mutate = ident.can_mutate;
                     req.extensions_mut().insert(c);
@@ -1468,6 +1472,12 @@ mod tests {
         let ident = caller_from_token_with(&c, token, utils::time::now()).unwrap();
         assert_eq!(ident.user_id, uid);
         assert_eq!(ident.role, "read");
+        assert_eq!(
+            try_token_auth_with(&c, token, utils::time::now())
+                .unwrap()
+                .role,
+            "read"
+        );
         assert!(!ident.can_mutate);
     }
 
@@ -1951,6 +1961,50 @@ mod tests {
             let resp = auth_router().oneshot(req).await.unwrap();
             assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
         }
+    }
+
+    #[tokio::test]
+    async fn admin_token_of_a_demoted_user_is_capped_to_the_users_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let _db_guard = override_default_db(&dir);
+        let conn = db::open_unencrypted(&_db_guard).unwrap();
+        let uid = insert_user(&conn, "admin");
+        let token = "admin_token_of_a_demoted_user";
+        insert_token_for_user(&conn, "admin", &sha256_hex(token.as_bytes()), Some(&uid));
+        let gated = format!("/api/v1/{}", dispatch::diagnostics_surface::REPAIR_TOOL);
+        let router = axum::Router::new()
+            .route(
+                &gated,
+                axum::routing::post(|| async { axum::http::StatusCode::OK }),
+            )
+            .layer(axum::middleware::from_fn(require_tool_role))
+            .layer(axum::middleware::from_fn(require_auth));
+        let call = || {
+            let mut req = AxumReq::builder()
+                .method("POST")
+                .uri(&gated)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo::<SocketAddr>("10.0.0.1:12345".parse().unwrap()));
+            router.clone().oneshot(req)
+        };
+        assert_eq!(call().await.unwrap().status(), axum::http::StatusCode::OK);
+
+        identities::users::set_role(&conn, &uid, "read-only", &utils::time::now_rfc3339()).unwrap();
+        let ident = try_token_auth_with(&conn, token, utils::time::now()).unwrap();
+        assert_eq!(ident.role, "read-only");
+        assert_eq!(
+            caller_from_token_with(&conn, token, utils::time::now())
+                .unwrap()
+                .role,
+            "read-only"
+        );
+        assert_eq!(
+            call().await.unwrap().status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]

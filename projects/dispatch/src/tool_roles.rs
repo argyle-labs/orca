@@ -246,6 +246,16 @@ pub fn role_rank(role: &str) -> u8 {
     }
 }
 
+/// The lower-ranked of a user's current role and the role of the token they
+/// presented, so a token never outranks its user.
+pub fn effective_role<'a>(user_role: &'a str, token_role: &'a str) -> &'a str {
+    if role_rank(token_role) < role_rank(user_role) {
+        token_role
+    } else {
+        user_role
+    }
+}
+
 /// True if the caller's identity-role satisfies the tool's required-role,
 /// ranked by [`role_rank`]. `"read"` exists so sensitive read-only surfaces
 /// (e.g. `fs.*`) can be gated above `"any"` without requiring admin. Unknown
