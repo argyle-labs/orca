@@ -109,6 +109,11 @@ struct Inner {
     /// When set, retry delays are recorded here instead of slept.
     #[cfg(test)]
     retry_delays: Option<std::sync::Mutex<Vec<Duration>>>,
+    /// When set, each redirect hop advances [`Inner::now`] by this much.
+    #[cfg(test)]
+    hop_cost: Option<Duration>,
+    #[cfg(test)]
+    skew: std::sync::Mutex<Duration>,
 }
 
 /// One lazily built `reqwest::Client`. The build runs on its own thread and
@@ -200,6 +205,10 @@ impl ClientBuilder {
                 attempts: Default::default(),
                 #[cfg(test)]
                 retry_delays: None,
+                #[cfg(test)]
+                hop_cost: None,
+                #[cfg(test)]
+                skew: Default::default(),
             }),
         }
     }
@@ -437,6 +446,17 @@ impl Drop for BuildGuard {
 }
 
 impl Inner {
+    fn now(&self) -> std::time::Instant {
+        let now = std::time::Instant::now();
+        #[cfg(test)]
+        let now = now
+            + *self
+                .skew
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        now
+    }
+
     fn pool(&self, insecure: bool) -> &Pool {
         if insecure {
             &self.insecure
@@ -628,7 +648,7 @@ impl RequestBuilder {
         apply_timeout: bool,
     ) -> Result<reqwest::Response, HttpError> {
         let deadline = apply_timeout
-            .then(|| std::time::Instant::now().checked_add(self.timeout))
+            .then(|| self.client.inner.now().checked_add(self.timeout))
             .flatten();
         let attempts = if self.retry_enabled() {
             self.max_attempts
@@ -656,7 +676,7 @@ impl RequestBuilder {
                 Err(_) => return result,
             };
             if let Some(d) = deadline {
-                let left = d.saturating_duration_since(std::time::Instant::now());
+                let left = d.saturating_duration_since(self.client.inner.now());
                 if delay >= left {
                     return result;
                 }
@@ -750,7 +770,7 @@ impl RequestBuilder {
         for _ in 0..=MAX_REDIRECTS {
             let hop_timeout = match deadline {
                 Some(d) => {
-                    let left = d.saturating_duration_since(std::time::Instant::now());
+                    let left = d.saturating_duration_since(self.client.inner.now());
                     if left.is_zero() {
                         return Err(HttpError::Redirect(format!(
                             "timeout of {:?} exhausted while following redirects",
@@ -773,6 +793,15 @@ impl RequestBuilder {
                 .await?
                 .send()
                 .await?;
+            #[cfg(test)]
+            if let Some(cost) = self.client.inner.hop_cost {
+                *self
+                    .client
+                    .inner
+                    .skew
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) += cost;
+            }
             let status = resp.status().as_u16();
             if !self.follow_redirects || !matches!(status, 301 | 302 | 303 | 307 | 308) {
                 return Ok(resp);
@@ -1388,18 +1417,37 @@ mod tests {
     async fn retries_stay_within_total_deadline() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "30"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "3600"))
             .mount(&server)
             .await;
-        let err = Client::new()
+        let client = Client {
+            inner: Arc::new(Inner {
+                retry_delays: Some(Default::default()),
+                ..Default::default()
+            }),
+        };
+        let err = client
             .get(server.uri())
-            .timeout(Duration::from_millis(500))
+            .timeout(Duration::from_secs(60))
             .max_attempts(10)
             .send()
             .await
             .unwrap_err();
-        assert!(matches!(err, HttpError::Status { status: 429, .. }));
+        assert!(
+            matches!(err, HttpError::Status { status: 429, .. }),
+            "{err}"
+        );
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert!(
+            client
+                .inner
+                .retry_delays
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1409,10 +1457,15 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let client = Client::new();
+        let client = Client {
+            inner: Arc::new(Inner {
+                retry_delays: Some(Default::default()),
+                ..Default::default()
+            }),
+        };
         let err = client
             .get(format!("http://127.0.0.1:{port}/"))
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(60))
             .send()
             .await
             .unwrap_err();
@@ -2003,28 +2056,26 @@ mod tests {
     async fn timeout_is_total_across_redirect_hops() {
         let a = MockServer::start().await;
         Mock::given(path("/start"))
-            .respond_with(
-                ResponseTemplate::new(302)
-                    .insert_header("Location", "/start")
-                    .set_delay(Duration::from_millis(150)),
-            )
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", "/start"))
             .mount(&a)
             .await;
-        let started = std::time::Instant::now();
-        let err = Client::new()
+        let client = Client {
+            inner: Arc::new(Inner {
+                hop_cost: Some(Duration::from_secs(40)),
+                ..Default::default()
+            }),
+        };
+        let err = client
             .get(format!("{}/start", a.uri()))
-            .timeout(Duration::from_millis(400))
+            .timeout(Duration::from_secs(100))
             .send()
             .await
             .unwrap_err();
-        assert!(started.elapsed() >= Duration::from_millis(400), "{err}");
-        let timed_out = match &err {
-            HttpError::Request(e) => e.is_timeout(),
-            HttpError::Redirect(m) => m.contains("exhausted"),
-            _ => false,
-        };
-        assert!(timed_out, "{err}");
-        assert!(a.received_requests().await.unwrap().len() < MAX_REDIRECTS + 1);
+        assert!(
+            matches!(&err, HttpError::Redirect(m) if m.contains("exhausted")),
+            "{err}"
+        );
+        assert_eq!(a.received_requests().await.unwrap().len(), 3);
     }
 
     #[tokio::test]
