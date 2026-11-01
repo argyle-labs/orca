@@ -89,9 +89,10 @@ impl Command {
     }
 
     /// Start the child in its own process group so a timeout SIGKILLs the whole
-    /// group, grandchildren included. [`status_within`](Command::status_within) and
-    /// [`output_within`](Command::output_within) always apply it. Unix only;
-    /// elsewhere only the direct child is killed.
+    /// group, grandchildren included, as does cancelling the future. A child that
+    /// exits in time leaves the group alone, so processes it backgrounded keep
+    /// running. Opt-in because a separate group leaves the tty foreground group.
+    /// Unix only; elsewhere only the direct child is killed.
     pub fn kill_process_group_on_timeout(mut self) -> Self {
         #[cfg(unix)]
         self.inner.process_group(0);
@@ -174,15 +175,13 @@ impl Command {
     /// `Ok(None)` if it timed out (the child is killed). Output is not captured —
     /// use for liveness/exit-code probes.
     pub async fn status_within(mut self, budget: Duration) -> std::io::Result<Option<ExitStatus>> {
-        self = self.kill_process_group_on_timeout();
         let mut child = self.inner.spawn()?;
         let mut guard = GroupGuard::new(self.kill_group, &child);
         match crate::time::timeout(budget, guard.wait_leader(&mut child)).await {
             Some(result) => {
-                result?;
-                guard.kill();
-                let st = child.wait().await?;
                 guard.disarm();
+                result?;
+                let st = child.wait().await?;
                 Ok(Some(ExitStatus {
                     success: st.success(),
                     code: st.code(),
@@ -200,7 +199,6 @@ impl Command {
     /// Run up to `budget`, capturing stdout + stderr. `Ok(None)` if it timed out
     /// (the child, or its process group, is killed and reaped).
     pub async fn output_within(mut self, budget: Duration) -> std::io::Result<Option<Output>> {
-        self = self.kill_process_group_on_timeout();
         self.inner
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -226,37 +224,23 @@ impl Command {
             guard.disarm();
             return Ok(None);
         }
-        let pipes = if guard.armed() {
-            match tokio::time::timeout(PIPE_GRACE, &mut reader).await {
-                Ok(pipes) => {
-                    guard.kill();
-                    pipes
+        let pipes = match tokio::time::timeout_at(deadline, &mut reader).await {
+            Ok(pipes) => pipes,
+            Err(_) => {
+                guard.kill_on_timeout(&mut child);
+                // The group is dead, so a pipe still open after the grace belongs
+                // to a process that left it (setsid) and would hang the reader.
+                let held =
+                    guard.armed() && tokio::time::timeout(PIPE_GRACE, &mut reader).await.is_err();
+                reader.abort();
+                child.wait().await?;
+                guard.disarm();
+                if held {
+                    return Err(std::io::Error::other(
+                        "output pipe held open by a process outside the process group",
+                    ));
                 }
-                Err(_) => {
-                    guard.kill();
-                    match tokio::time::timeout(PIPE_GRACE, &mut reader).await {
-                        Ok(pipes) => pipes,
-                        Err(_) => {
-                            reader.abort();
-                            child.wait().await?;
-                            guard.disarm();
-                            return Err(std::io::Error::other(
-                                "output pipe held open by a process outside the process group",
-                            ));
-                        }
-                    }
-                }
-            }
-        } else {
-            match tokio::time::timeout_at(deadline, &mut reader).await {
-                Ok(pipes) => pipes,
-                Err(_) => {
-                    reader.abort();
-                    guard.kill_on_timeout(&mut child);
-                    child.wait().await?;
-                    guard.disarm();
-                    return Ok(None);
-                }
+                return Ok(None);
             }
         };
         let status = child.wait().await?;
@@ -621,17 +605,13 @@ mod tests {
 
     #[cfg(unix)]
     async fn grandchild_dies_after_timeout(run: impl AsyncFnOnce(Command) -> bool) {
-        grandchild_dies("; wait", run).await;
-    }
-
-    #[cfg(unix)]
-    async fn grandchild_dies(tail: &str, run: impl AsyncFnOnce(Command) -> bool) {
         let dir = std::env::temp_dir().join(format!("pgkill-{}", crate::mint_uuidv7()));
         std::fs::create_dir_all(&dir).unwrap();
         let pidfile = dir.join("pid");
         let cmd = Command::new("sh")
             .arg("-c")
-            .arg(format!("sleep 30 & echo $! > {}{tail}", pidfile.display()));
+            .arg(format!("sleep 30 & echo $! > {}; wait", pidfile.display()))
+            .kill_process_group_on_timeout();
         assert!(run(cmd).await, "expected timeout");
         let pid: libc::pid_t = wait_for_file(&pidfile)
             .await
@@ -690,27 +670,56 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn output_within_kills_group_when_leader_exits_first() {
-        grandchild_dies("", async |cmd| {
-            cmd.output_within(Duration::from_secs(10))
-                .await
-                .unwrap()
-                .is_some_and(|out| out.status.success)
-        })
-        .await;
+    async fn backgrounded_grandchild_survives(
+        opt_in: bool,
+        run: impl AsyncFnOnce(Command) -> bool,
+    ) {
+        let dir = HolderDir::new("pgkeep");
+        let pidfile = dir.0.join("pid");
+        let mut cmd = Command::new("sh").arg("-c").arg(format!(
+            "sleep 30 >/dev/null 2>&1 & echo $! > {}",
+            pidfile.display()
+        ));
+        if opt_in {
+            cmd = cmd.kill_process_group_on_timeout();
+        }
+        assert!(run(cmd).await, "expected a successful run");
+        let pid: libc::pid_t = wait_for_file(&pidfile)
+            .await
+            .expect("grandchild pid written")
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(process_alive(pid), "backgrounded sleep {pid} was killed");
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn status_within_kills_group_after_normal_exit() {
-        grandchild_dies("", async |cmd| {
-            cmd.status_within(Duration::from_secs(10))
-                .await
-                .unwrap()
-                .is_some_and(|st| st.success)
-        })
-        .await;
+    async fn status_within_leaves_backgrounded_grandchild_alive() {
+        for opt_in in [false, true] {
+            backgrounded_grandchild_survives(opt_in, async |cmd| {
+                cmd.status_within(Duration::from_secs(10))
+                    .await
+                    .unwrap()
+                    .is_some_and(|st| st.success)
+            })
+            .await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_within_leaves_backgrounded_grandchild_alive() {
+        for opt_in in [false, true] {
+            backgrounded_grandchild_survives(opt_in, async |cmd| {
+                cmd.output_within(Duration::from_secs(10))
+                    .await
+                    .unwrap()
+                    .is_some_and(|out| out.status.success)
+            })
+            .await;
+        }
     }
 
     #[cfg(unix)]
@@ -797,7 +806,7 @@ mod tests {
     async fn output_within_errors_when_pipe_held_outside_group() {
         let dir = HolderDir::new("pghold");
         let res = detached_holder(&dir.0, false)
-            .output_within(Duration::from_secs(10))
+            .output_within(Duration::from_secs(1))
             .await;
         let pid = wait_for_file(&dir.0.join("pid")).await;
         assert!(pid.is_some(), "holder never wrote its pid");
