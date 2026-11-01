@@ -1245,7 +1245,7 @@ mod tests {
         assert_eq!(builds, 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_stalled_build_times_out_then_later_calls_succeed() {
         let (client, gate, done) = gated_client(Some(Duration::from_millis(50)));
         let err = client.pool(false, None).await.unwrap_err();
@@ -1262,7 +1262,7 @@ mod tests {
         assert_eq!(builds, 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_short_request_timeout_bounds_the_build_wait() {
         let (client, _gate, _done) = gated_client(None);
         let err = client
@@ -1298,9 +1298,9 @@ mod tests {
             .unwrap();
         let (client, _gate, _done) = gated_client(None);
         let err = rt
-            .block_on(client.pool(false, Some(Duration::from_millis(50))))
+            .block_on(client.pool(false, Some(Duration::ZERO)))
             .unwrap_err();
-        assert!(err.to_string().contains("stalled after 50ms"), "{err}");
+        assert!(err.to_string().contains("stalled after 0ns"), "{err}");
     }
 
     #[test]
