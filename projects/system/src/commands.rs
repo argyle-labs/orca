@@ -1254,17 +1254,17 @@ async fn run_system_update(
         .as_deref()
         .map(|l| crate::update_state::is_update_available(utils::build_info::version(), l));
 
-    // Dry-run surfacing: `binary_intent` is only false when the caller asked
-    // for a preview (`dryRun`/`--dry-run`). Tell them exactly what dropping
-    // that flag would do.
+    // `binary_intent` is false for a dry-run preview or a self_only leg sent without execute.
     if !binary_intent
         && update_available == Some(true)
         && let Some(l) = latest.as_deref()
     {
-        notes.push(format!(
-            "dry-run: update available {} → {l} (re-run without --dry-run to apply)",
-            utils::build_info::version()
-        ));
+        let current = utils::build_info::version();
+        notes.push(if ctx.dry_run() {
+            format!("dry-run: update available {current} → {l} (re-run without --dry-run to apply)")
+        } else {
+            format!("self_only leg without execute: probe only, update available {current} → {l}")
+        });
     }
 
     let pending_restart = crate::update::read_pending_restart()
