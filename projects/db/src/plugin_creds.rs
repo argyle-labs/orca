@@ -352,20 +352,6 @@ args = ["server.js"]
         assert!(format!("{err:#}").contains("HTTP URL"), "got: {err:#}");
     }
 
-    /// Install rustls' ring CryptoProvider exactly once per process.
-    /// `install_default()` errors when a provider is already registered, which
-    /// is the *expected* path on the 2nd+ test in this module — guard with
-    /// `Once` so the first install panics on real failures and later calls are
-    /// no-ops (no error swallowed).
-    fn install_ring_provider_once() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .expect("install rustls ring CryptoProvider");
-        });
-    }
-
     #[test]
     fn sync_errors_without_plugin_token() {
         let dir = tempfile::tempdir().unwrap();
@@ -379,7 +365,7 @@ args = ["server.js"]
 
     #[test]
     fn sync_pushes_each_and_marks_synced() {
-        install_ring_provider_once();
+        utils::http::ensure_crypto_provider();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -412,7 +398,7 @@ args = ["server.js"]
 
     #[test]
     fn sync_token_from_mcp_env_when_not_stored() {
-        install_ring_provider_once();
+        utils::http::ensure_crypto_provider();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -465,7 +451,7 @@ PLUGIN_TOKEN = "env-secret"
 
     #[test]
     fn sync_reports_failure_without_mark() {
-        install_ring_provider_once();
+        utils::http::ensure_crypto_provider();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
