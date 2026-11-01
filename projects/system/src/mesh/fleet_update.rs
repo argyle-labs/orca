@@ -3,8 +3,9 @@
 //! A single operator action that updates the whole mesh: every joined peer's
 //! daemon first (PHASE 1), then every installed plugin on every host (PHASE 2).
 //!
-//! DRY RUN by default — it only probes current→latest per host/plugin and
-//! reports whether an update is available. `execute` applies. Per
+//! FIRES by default — it rolls current→latest on every host/plugin. Pass
+//! `dryRun`/`--dry-run` to preview current→latest per host/plugin instead,
+//! without applying anything. Per
 //! [[orca-must-never-bring-down-host]] the daemon self-updates are applied
 //! SEQUENTIALLY, one host at a time, health-gated between hosts (poll the peer
 //! back onto the new version before moving on), and the LOCAL host is updated
@@ -334,10 +335,10 @@ pub(crate) async fn dispatch_at<T: contract::OrcaTool>(
 /// safety check from [[orca-must-never-bring-down-host]] was inert while looking
 /// merely slow, because the refusal was retried for the full timeout.
 ///
-/// A dry-run `system.update` (`execute: false`) is the right probe: it reports
-/// the peer's current version and whether an update is still outstanding, which
-/// is exactly the convergence question, and it reuses the credential the operator
-/// already presented to drive the apply.
+/// A dry-run `system.update` is the right probe: it reports the peer's current
+/// version and whether an update is still outstanding, which is exactly the
+/// convergence question, and it reuses the credential the operator already
+/// presented to drive the apply.
 async fn health_gate(
     t: &Target,
     target: &str,
@@ -347,17 +348,22 @@ async fn health_gate(
     // Kept so a timeout can say WHY it never converged. Reporting a bare
     // "timed out" leaves the operator with 180s of silence and no cause.
     let mut last_err: Option<String> = None;
+    // `ctx` here is the real-apply context carried through from the caller
+    // (`dry_run() == false` — this fan-out is genuinely applying), but this
+    // poll must never itself apply: a forced-dry-run clone is what keeps it a
+    // probe now that `system.update` fires by default on `!ctx.dry_run()`.
+    let mut probe_ctx = ctx.clone();
+    probe_ctx.set_dry_run(true);
     loop {
         // Give the peer a moment to restart before the first probe.
         tokio::time::sleep(HEALTH_GATE_POLL).await;
-        // Dry run: probe only, never apply. `self_only` for the same reason the
-        // apply pins it — a per-host leg must not re-enter the fan-out.
+        // `self_only` for the same reason the apply pins it — a per-host leg
+        // must not re-enter the fan-out.
         let probe = SystemUpdateArgs {
-            execute: false,
             self_only: true,
             ..Default::default()
         };
-        match dispatch_at::<crate::commands::SystemUpdate>(t, probe, ctx).await {
+        match dispatch_at::<crate::commands::SystemUpdate>(t, probe, &probe_ctx).await {
             Ok(SystemUpdateResult::Update(out)) => {
                 let on_target = norm(&out.current_version) == norm(target);
                 if on_target || !out.update_available.unwrap_or(false) {
@@ -638,9 +644,9 @@ fn plugin_row_outcome(
     }
 }
 
-/// [MUTATES STATE] Update the WHOLE fleet. DRY RUN by default: reports the plan
-/// for every joined peer's daemon then every installed plugin on every host.
-/// `--execute` applies.
+/// [MUTATES STATE] Update the WHOLE fleet. Fires by default: applies to every
+/// joined peer's daemon then every installed plugin on every host.
+/// `dryRun`/`--dry-run` previews instead.
 ///
 /// ## Order, and why
 ///
@@ -737,7 +743,7 @@ pub async fn fleet_update(
 
     // A dry run applies nothing, so it has no ordering requirement and no reason
     // to be slow. Probing every host concurrently is what makes a fleet-wide
-    // without `--execute` — the natural way to ask "what version is everything
+    // `dryRun`/`--dry-run` — the natural way to ask "what version is everything
     // on" — usable at all: serially it ran long enough for MCP clients to abort
     // it at their 300s idle timeout (#626).
     if !execute {

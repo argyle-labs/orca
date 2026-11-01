@@ -293,9 +293,11 @@ fn page_slice<T: Clone>(full: &[T], page: usize, per_page: usize) -> Vec<T> {
         .collect()
 }
 
-/// Args for [`system_update`]. Every field is optional; omit-all = read-only
-/// state probe (returns current_version / channel / channels / pinned_to /
-/// available_versions + pagination).
+/// Args for [`system_update`]. Every field is optional; omit-all APPLIES the
+/// channel-latest update fleet-wide (every joined system, then every
+/// installed plugin on every one) — fire by default, `dryRun`/`--dry-run` is
+/// the opt-in preview (returns current_version / channel / channels /
+/// pinned_to / available_versions + pagination without changing anything).
 ///
 /// One tool, many surfaces:
 ///   - orca binary: `channel`, `version` (one-shot, no pin), `dev_source`, `clear_dev_source`
@@ -366,8 +368,8 @@ pub struct SystemUpdateArgs {
     /// which is what pushes the cheapest, safest form of the call past an MCP
     /// client's idle timeout (#626).
     ///
-    /// Read-only by nature, but accepted with `--execute` too, where it means
-    /// "roll the daemons, leave plugins alone".
+    /// Still applies by default — this just means "roll the daemons, leave
+    /// plugins alone" instead of skipping the plugin phase's read.
     #[serde(default)]
     #[arg(long)]
     pub daemons_only: bool,
@@ -395,11 +397,11 @@ pub struct SystemUpdateArgs {
     #[arg(long)]
     pub version: Option<String>,
 
-    /// Actually apply the channel-latest update. Updates are DRY RUN by default:
-    /// a bare `orca system update` probes current→latest and reports whether an
-    /// update is available WITHOUT applying it. Pass `--execute` to apply. An
-    /// explicit `--version` already implies apply (a deliberate operator action)
-    /// and does not need this flag; `dryRun: true` overrides both.
+    /// Leg-level apply signal. A direct call (`self_only` unset) applies by
+    /// default and ignores this; a `self_only` leg applies only when this (or
+    /// `version`) is set, because every controller, old or new, spells it
+    /// explicitly on its legs and an old controller's probes send `false`
+    /// without a wire `dryRun`. `dryRun` still overrides it.
     #[serde(default)]
     #[arg(long)]
     pub execute: bool,
@@ -550,6 +552,15 @@ fn neutralize_system_update(args: &mut SystemUpdateArgs) {
     args.version = None;
 }
 
+/// An addressed update forwarded to its owning system. Preserves the id and
+/// pins `self_only` (forwarding `id: None` would read as "every system" on the
+/// far side); spells `execute` because a `self_only` leg applies only on it.
+fn forwarded_leg(mut args: SystemUpdateArgs, ctx: &contract::ToolCtx) -> SystemUpdateArgs {
+    args.self_only = true;
+    args.execute = !ctx.dry_run();
+    args
+}
+
 /// A this-system mutation `dryRun` cannot preview: each applies directly.
 fn dry_run_unpreviewable_arg(args: &SystemUpdateArgs) -> Option<&'static str> {
     if args.os_packages {
@@ -672,9 +683,9 @@ pub struct SystemUpdateOutput {
     pub update_available: Option<bool>,
     /// True when this host structurally cannot obtain a release asset: it holds
     /// no local `github_token` and has no paired member to delegate the fetch to
-    /// (#652). Reported on a DRY RUN so an operator sees "this host cannot
-    /// update" before committing to `--execute`, instead of discovering it
-    /// per-host mid-fan-out.
+    /// (#652). Reported on a DRY RUN preview so an operator sees "this host
+    /// cannot update" before committing to a real run, instead of discovering
+    /// it per-host mid-fan-out.
     ///
     /// `None` from a peer too old to compute it — absence is "unknown", never
     /// "not blocked".
@@ -696,16 +707,17 @@ pub struct PendingRestart {
 }
 
 /// [MUTATES STATE] The single system-update tool. Covers orca binary updates,
-/// host identity (hostname/fqdn/addressing), and OS package upgrades. Omit
-/// every arg for a read-only state probe.
+/// host identity (hostname/fqdn/addressing), and OS package upgrades. Fires
+/// by default — omit every arg to apply the channel-latest update; pass
+/// `dryRun`/`--dry-run` for a read-only preview instead.
 // Not intercepted by the GENERIC gate: this verb already implements dry-run by
 // default and its plan is richer than `ExecutionPlan::generic` could be — the
 // generic one carries `detailed: false` and no changes, so gating here would
-// REPLACE a real plan with an empty one. It still spells the opt-in `execute`,
-// which is the single fleet-wide name (#636). Migrating it to return a typed
+// REPLACE a real plan with an empty one. Migrating it to return a typed
 // `ExecutionPlan` is the follow-up; that needs the body to run in plan mode,
 // which the intercept-before-body gate cannot express. `dry_run_aware` routes
-// `dryRun: true` to its own plan path.
+// `dryRun: true` to its own plan path; `execute` gates only `self_only` legs
+// (see its own doc comment).
 #[orca_tool(
     domain = "system",
     verb = "update",
@@ -745,11 +757,7 @@ async fn system_update(
         (_, true) => true,
         (Some(id), false) => {
             if !crate::system::addresses_this_system(id, ctx)? {
-                let mut leg = args;
-                // Preserve the id and pin `self_only`: forwarding `id: None`
-                // would read as "every system" on the far side, turning one
-                // addressed update into a second fan-out.
-                leg.self_only = true;
+                let leg = forwarded_leg(args, ctx);
                 return dispatch::cli::exec_remote::<SystemUpdate>(id, leg, ctx).await;
             }
             // The id names us: this system is the termination point.
@@ -776,7 +784,9 @@ async fn system_update(
         let mut out = hook
             .fleet_update(
                 crate::fleet::FleetUpdateRequest {
-                    execute: args.execute && !ctx.dry_run(),
+                    // A direct fan-out fires by default; `dryRun` is the
+                    // only opt-in to a preview.
+                    execute: !ctx.dry_run(),
                     prerelease: args.prerelease,
                     break_lock: args.break_lock,
                     daemons_only: args.daemons_only,
@@ -1071,20 +1081,17 @@ async fn run_system_update(
         || args.daemon.is_some()
         || args.dev_source.is_some()
         || args.clear_dev_source;
-    // Per HARD RULE [[feedback-updates-are-user-actions-only]]: an empty
-    // `{}` probe MUST NOT apply anything. Per [[task-26-channel-switch-is-
-    // filter-only]]: channel is a visibility filter, not an install trigger.
-    // Binary install requires an explicit `version` arg — the user clicked
-    // Apply on a specific tag. Channel switches persist the marker and
-    // return the filtered version list, nothing else.
+    // Per [[task-26-channel-switch-is-filter-only]]: channel is a visibility
+    // filter, not an install trigger — a channel switch alone persists the
+    // marker and returns the filtered version list, nothing else.
     let _ = any_non_binary;
     let _ = channel_changed; // marker is written upstream; install intent is version-only now
-    // DRY RUN by default: a bare `orca system update` only probes. `--execute`
-    // (apply channel-latest) or an explicit `--version` (apply that tag) is the
-    // deliberate operator action that lifts the gate, unless `dryRun` is set.
-    // Per HARD RULE [[feedback-updates-are-user-actions-only]] an empty `{}`
-    // probe never applies.
-    let binary_intent = !ctx.dry_run() && (args.version.is_some() || args.execute);
+    // A direct call fires by default; `dryRun` is the only opt-in to a
+    // preview. A `self_only` leg keeps the pre-flip contract: older
+    // controllers probe legs with `execute: false` and no wire `dryRun`, so
+    // ignoring `execute` there would turn every probe into an apply.
+    let binary_intent =
+        !ctx.dry_run() && (!args.self_only || args.execute || args.version.is_some());
 
     // Effective channel = max(stored pref, channel implied by running version).
     // If the binary is a prerelease but the marker says stable (common on
@@ -1247,18 +1254,17 @@ async fn run_system_update(
         .as_deref()
         .map(|l| crate::update_state::is_update_available(utils::build_info::version(), l));
 
-    // Dry-run surfacing: when the caller did NOT ask to apply (no `--execute`,
-    // no `--version`) but an update is available, tell them exactly what
-    // `--execute` would do. Keeps the default probe non-mutating while making
-    // the actionable next step obvious.
+    // `binary_intent` is false for a dry-run preview or a self_only leg sent without execute.
     if !binary_intent
         && update_available == Some(true)
         && let Some(l) = latest.as_deref()
     {
-        notes.push(format!(
-            "dry-run: update available {} → {l} (pass --execute to apply)",
-            utils::build_info::version()
-        ));
+        let current = utils::build_info::version();
+        notes.push(if ctx.dry_run() {
+            format!("dry-run: update available {current} → {l} (re-run without --dry-run to apply)")
+        } else {
+            format!("self_only leg without execute: probe only, update available {current} → {l}")
+        });
     }
 
     let pending_restart = crate::update::read_pending_restart()
@@ -2792,6 +2798,77 @@ mod tests {
             panic!("a single-system dry run returns the update shape");
         };
         assert!(out.applied.is_none(), "dryRun applied {:?}", out.applied);
+    }
+
+    /// Point the binary path at a dev source nothing listens on, so an apply
+    /// attempt surfaces as a `dev-source check failed` error with no real fetch.
+    fn unreachable_dev_source_home() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // SAFETY: sound under nextest's process-per-test; under threaded cargo test, env readers outside serial(env) can still race.
+        unsafe {
+            std::env::set_var("ORCA_HOME", dir.path());
+            std::env::remove_var("ORCA_DEV");
+        }
+        crate::dev::write_dev_source("http://127.0.0.1:1").expect("write dev source");
+        dir
+    }
+
+    fn attempted_apply(out: &SystemUpdateOutput) -> bool {
+        out.errors
+            .iter()
+            .any(|e| e.contains("dev-source check failed"))
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_direct_update_fires_by_default() {
+        let _env = crate::test_env::snapshot();
+        let _home = unreachable_dev_source_home();
+        let ctx = serve_ctx();
+        let id = "019f0000-0000-7000-8000-0000000000aa";
+        std::fs::write(ctx.config.app_dir.join("machine_id"), id).unwrap();
+        let args = SystemUpdateArgs {
+            id: Some(id.parse().unwrap()),
+            list_channels: true,
+            ..Default::default()
+        };
+        let SystemUpdateResult::Update(out) = system_update(args, &ctx).await.unwrap() else {
+            panic!("a single-system update returns the update shape");
+        };
+        assert!(
+            attempted_apply(&out),
+            "a direct call must attempt the apply: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_forwarded_leg_spells_execute_from_dry_run() {
+        let mut ctx = serve_ctx();
+        let leg = forwarded_leg(SystemUpdateArgs::default(), &ctx);
+        assert!(leg.self_only && leg.execute);
+        ctx.set_dry_run(true);
+        let leg = forwarded_leg(SystemUpdateArgs::default(), &ctx);
+        assert!(leg.self_only && !leg.execute);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_self_only_leg_without_execute_only_probes() {
+        let _env = crate::test_env::snapshot();
+        let _home = unreachable_dev_source_home();
+        let args = SystemUpdateArgs {
+            self_only: true,
+            list_channels: true,
+            ..Default::default()
+        };
+        let ctx = serve_ctx();
+        let SystemUpdateResult::Update(out) = system_update(args, &ctx).await.unwrap() else {
+            panic!("a single-system update returns the update shape");
+        };
+        assert!(
+            !attempted_apply(&out) && out.applied.is_none(),
+            "an old controller's probe leg must not apply: {out:?}"
+        );
     }
 
     #[tokio::test]
