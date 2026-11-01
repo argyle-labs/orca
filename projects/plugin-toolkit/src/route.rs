@@ -88,17 +88,17 @@ async fn probe(url: &str, insecure: bool) -> bool {
 
 #[cfg(all(feature = "delegated-http", not(feature = "http")))]
 fn probe_client(insecure: bool) -> Option<&'static crate::reqwest::Client> {
-    static SECURE: std::sync::OnceLock<Option<crate::reqwest::Client>> = std::sync::OnceLock::new();
-    static INSECURE: std::sync::OnceLock<Option<crate::reqwest::Client>> =
-        std::sync::OnceLock::new();
+    static SECURE: std::sync::OnceLock<crate::reqwest::Client> = std::sync::OnceLock::new();
+    static INSECURE: std::sync::OnceLock<crate::reqwest::Client> = std::sync::OnceLock::new();
     let cell = if insecure { &INSECURE } else { &SECURE };
-    cell.get_or_init(|| {
-        crate::reqwest::ClientBuilder::new()
-            .danger_accept_invalid_certs(insecure)
-            .build()
-            .ok()
-    })
-    .as_ref()
+    if let Some(client) = cell.get() {
+        return Some(client);
+    }
+    let client = crate::reqwest::ClientBuilder::new()
+        .danger_accept_invalid_certs(insecure)
+        .build()
+        .ok()?;
+    Some(cell.get_or_init(|| client))
 }
 
 #[cfg(all(feature = "delegated-http", not(feature = "http")))]
