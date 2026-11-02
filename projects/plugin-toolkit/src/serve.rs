@@ -304,8 +304,12 @@ fn serve_session<S: Read + Write + Send + 'static>(
     // orca-owned reactor (`reactor::block_on`) with the cap sink installed. ──
     let base_ctx = minimal_ctx();
     let cap_id = Arc::new(AtomicU64::new(0));
+    let desync = Arc::new(AtomicBool::new(false));
 
     loop {
+        if desync.load(Ordering::SeqCst) {
+            bail!("protocol desync: a capability round-trip consumed a non-capability frame");
+        }
         let frame = read_frame(&mut *lock(&stream))?;
         let Some(frame) = frame else { break }; // clean EOF
         match frame {
@@ -318,8 +322,9 @@ fn serve_session<S: Read + Write + Send + 'static>(
             } => {
                 let beating = heartbeat.as_ref().map(Heartbeat::busy);
                 let ctx = invoke_ctx(&base_ctx, caller, call_chain);
-                let sink = cap_sink(&stream, &cap_id);
-                let stream_sink = cap_stream_sink(&stream, &cap_id);
+                let live = Arc::new(AtomicBool::new(true));
+                let sink = cap_sink(&stream, &cap_id, &live, &desync);
+                let stream_sink = cap_stream_sink(&stream, &cap_id, &live, &desync);
                 let result = with_sinks(process_wide, sink, stream_sink, || {
                     // Hybrid arm first (mirrors the cdylib `invoke`): a bespoke
                     // backend op (e.g. `proxmox.__unit.*`) is handled by
@@ -355,6 +360,9 @@ fn serve_session<S: Read + Write + Send + 'static>(
                     crate::reactor::block_on(crate::dispatch::dispatch(&tool, args, &ctx))
                 });
                 drop(beating);
+                // Core attributes a Cap to the Invoke it is serving, so a sink clone
+                // outliving this Invoke must never write once the Result is sent.
+                live.store(false, Ordering::SeqCst);
                 let reply = match result {
                     Ok(value) => Frame::Result {
                         id,
@@ -528,20 +536,34 @@ fn with_sinks<R>(
     })
 }
 
+/// A non-capability frame read mid round-trip was meant for the serve loop and is
+/// now lost, so the session cannot continue.
+fn unexpected(cap: &str, frame: &Frame, desync: &AtomicBool) -> String {
+    desync.store(true, Ordering::SeqCst);
+    format!("capability {cap}: protocol error: unexpected {frame:?} during a capability round-trip")
+}
+
 /// Build the capability sink for one `Invoke`: a closure that performs a
 /// `Cap → CapResult` round-trip on the shared socket, holding the socket for the
 /// whole round-trip so concurrent callers never interleave frames.
 fn cap_sink<S: Read + Write + Send + 'static>(
     stream: &Arc<Mutex<S>>,
     cap_id: &Arc<AtomicU64>,
+    live: &Arc<AtomicBool>,
+    desync: &Arc<AtomicBool>,
 ) -> SharedCapSink {
     let stream = Arc::clone(stream);
     let cap_id = Arc::clone(cap_id);
+    let live = Arc::clone(live);
+    let desync = Arc::clone(desync);
     Arc::new(move |cap: &str, op_json: &str| {
         let args: Value = serde_json::from_str(op_json)
             .map_err(|e| format!("capability {cap}: bad op json: {e}"))?;
         let id = cap_id.fetch_add(1, Ordering::Relaxed);
         let mut s = lock(&stream);
+        if !live.load(Ordering::SeqCst) {
+            return Err(format!("capability {cap}: called after its invoke ended"));
+        }
         write_frame(
             &mut *s,
             &Frame::Cap {
@@ -569,8 +591,8 @@ fn cap_sink<S: Read + Write + Send + 'static>(
                         Err(error.unwrap_or_else(|| format!("capability {cap} failed")))
                     };
                 }
-                Some(Frame::Shutdown) => return Err(format!("capability {cap}: shutdown")),
-                Some(_) => continue,
+                Some(Frame::CapResult { .. }) => continue,
+                Some(other) => return Err(unexpected(cap, &other, &desync)),
                 None => return Err(format!("capability {cap}: connection closed")),
             }
         }
@@ -584,9 +606,13 @@ fn cap_sink<S: Read + Write + Send + 'static>(
 fn cap_stream_sink<S: Read + Write + Send + 'static>(
     stream: &Arc<Mutex<S>>,
     cap_id: &Arc<AtomicU64>,
+    live: &Arc<AtomicBool>,
+    desync: &Arc<AtomicBool>,
 ) -> SharedCapStreamSink {
     let stream = Arc::clone(stream);
     let cap_id = Arc::clone(cap_id);
+    let live = Arc::clone(live);
+    let desync = Arc::clone(desync);
     Arc::new(
         move |cap: &str,
               op_json: &str,
@@ -595,6 +621,9 @@ fn cap_stream_sink<S: Read + Write + Send + 'static>(
                 .map_err(|e| format!("capability {cap}: bad op json: {e}"))?;
             let id = cap_id.fetch_add(1, Ordering::Relaxed);
             let mut s = lock(&stream);
+            if !live.load(Ordering::SeqCst) {
+                return Err(format!("capability {cap}: called after its invoke ended"));
+            }
             write_frame(
                 &mut *s,
                 &Frame::Cap {
@@ -618,8 +647,8 @@ fn cap_stream_sink<S: Read + Write + Send + 'static>(
                             Err(error.unwrap_or_else(|| format!("capability {cap} stream failed")))
                         };
                     }
-                    Some(Frame::Shutdown) => return Err(format!("capability {cap}: shutdown")),
-                    Some(_) => continue,
+                    Some(Frame::CapStreamChunk { .. } | Frame::CapStreamEnd { .. }) => continue,
+                    Some(other) => return Err(unexpected(cap, &other, &desync)),
                     None => return Err(format!("capability {cap}: connection closed")),
                 }
             }
@@ -722,6 +751,114 @@ mod tests {
         }
         write_frame(&mut orca, &Frame::Shutdown).unwrap();
         plugin.join().unwrap().unwrap();
+    }
+
+    fn invoke(orca: &mut UnixStream, id: u64, tool: &str) {
+        write_frame(
+            orca,
+            &Frame::Invoke {
+                id,
+                tool: tool.into(),
+                args: json!({}),
+                caller: None,
+                call_chain: Vec::new(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn welcome(orca: &mut UnixStream) {
+        let _ = read_frame(orca).unwrap().unwrap(); // Hello
+        write_frame(
+            orca,
+            &Frame::Welcome {
+                protocol: PROTOCOL_VERSION.into(),
+                capabilities: vec![],
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_sink_outliving_its_invoke_cannot_send_a_cap_into_the_next() {
+        use std::sync::{Barrier, mpsc};
+        let release = Arc::new(Barrier::new(2));
+        let (leftover_tx, leftover_rx) = mpsc::channel();
+        let (plugin_end, mut orca) = UnixStream::pair().unwrap();
+        let gate = Arc::clone(&release);
+        let plugin = thread::spawn(move || {
+            let mut s = spec();
+            s.backend_dispatch = Some(Box::new(move |tool: &str, _| match tool {
+                "test.__be.a" => {
+                    let sink = crate::capsink::process_cap_sink().expect("sink installed");
+                    let (gate, tx) = (Arc::clone(&gate), leftover_tx.clone());
+                    thread::spawn(move || {
+                        gate.wait();
+                        let reply = sink("tool.call", "{}");
+                        drop(sink);
+                        _ = tx.send(reply);
+                    });
+                    Some(Ok(json!("a")))
+                }
+                "test.__be.b" => Some(Ok(json!("b"))),
+                _ => None,
+            }));
+            serve_session(plugin_end, s, None, true)
+        });
+        welcome(&mut orca);
+
+        invoke(&mut orca, 1, "test.__be.a");
+        let Frame::Result { id: 1, value, .. } = read_frame(&mut orca).unwrap().unwrap() else {
+            panic!("expected A's Result")
+        };
+        assert_eq!(value, json!("a"));
+        release.wait();
+        invoke(&mut orca, 2, "test.__be.b");
+        match read_frame(&mut orca).unwrap().unwrap() {
+            Frame::Result { id, ok, value, .. } => {
+                assert_eq!((id, ok, value), (2, true, json!("b")));
+            }
+            f => panic!("expected B's Result, got {f:?}"),
+        }
+        // The serve loop holds the socket while idle-reading, so the leftover only
+        // gets it once the session ends.
+        write_frame(&mut orca, &Frame::Shutdown).unwrap();
+        plugin.join().unwrap().unwrap();
+        let err = leftover_rx.recv().unwrap().unwrap_err();
+        assert!(err.contains("called after its invoke ended"), "{err}");
+        assert_eq!(read_frame(&mut orca).unwrap(), None, "no Cap reached orca");
+    }
+
+    #[test]
+    fn a_non_cap_frame_during_a_round_trip_is_fatal() {
+        let (plugin_end, mut orca) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || {
+            let mut s = spec();
+            s.backend_dispatch = Some(Box::new(|tool: &str, _| {
+                (tool == "test.__be.cap").then(|| {
+                    crate::capsink::cap_route("db.op", "{}")
+                        .expect("sink installed")
+                        .map(|_| json!("unreachable"))
+                        .map_err(|e| json!(e.to_string()))
+                })
+            }));
+            serve_session(plugin_end, s, None, false)
+        });
+        welcome(&mut orca);
+        invoke(&mut orca, 1, "test.__be.cap");
+        assert!(matches!(
+            read_frame(&mut orca).unwrap().unwrap(),
+            Frame::Cap { .. }
+        ));
+        invoke(&mut orca, 2, "test.__be.cap");
+        match read_frame(&mut orca).unwrap().unwrap() {
+            Frame::Result { id, ok, error, .. } => {
+                assert_eq!((id, ok), (1, false));
+                assert!(error.unwrap().contains("protocol error"));
+            }
+            f => panic!("expected Result, got {f:?}"),
+        }
+        assert!(plugin.join().unwrap().is_err());
     }
 
     #[test]

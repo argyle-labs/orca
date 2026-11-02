@@ -211,6 +211,11 @@ pub fn with_process_cap_sink<R>(sink: SharedCapSink, body: impl FnOnce() -> R) -
     body()
 }
 
+#[cfg(all(test, feature = "tools", feature = "endpoints"))]
+pub(crate) fn process_cap_sink() -> Option<SharedCapSink> {
+    process_slot(&PROCESS_SINK)
+}
+
 /// The streaming counterpart of [`with_process_cap_sink`].
 pub fn with_process_cap_stream_sink<R>(sink: SharedCapStreamSink, body: impl FnOnce() -> R) -> R {
     struct Restore(Option<SharedCapStreamSink>);
