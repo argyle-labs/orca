@@ -23,6 +23,16 @@ pub fn satisfies(caller_role: &str, required: &str) -> bool {
     (need > 0 || required == "any") && role_rank(caller_role) >= need
 }
 
+/// The lower-ranked of a user's current role and the role of the token they
+/// presented, so a token never outranks its user.
+pub fn effective_role<'a>(user_role: &'a str, token_role: &'a str) -> &'a str {
+    if role_rank(token_role) < role_rank(user_role) {
+        token_role
+    } else {
+        user_role
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

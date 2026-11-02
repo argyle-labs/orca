@@ -379,6 +379,8 @@ fn extract_bearer(req: &Request) -> Option<&str> {
         })
 }
 
+const UNBOUND_TOKEN_ROLE: &str = "none";
+
 fn try_token_auth(token: &str) -> Option<AuthIdentity> {
     let conn = db::open_default().ok()?;
     try_token_auth_with(&conn, token, utils::time::now())
@@ -399,6 +401,15 @@ fn try_token_auth_with(
     {
         return None;
     }
+    let role = match row.user_id.as_deref() {
+        Some(uid) => {
+            let user = identities::users::find_by_id(conn, uid).ok()??;
+            dispatch::tool_roles::effective_role(&user.role, &row.role).to_string()
+        }
+        // No user means no role a demotion could ever cap, so the stored
+        // role is not honoured: rank 0 passes only `any` tools.
+        None => UNBOUND_TOKEN_ROLE.to_string(),
+    };
     _ = auth::api_tokens::touch(conn, &row.id, &now.to_rfc3339());
     Some(AuthIdentity {
         kind: AuthKind::Token {
@@ -406,7 +417,7 @@ fn try_token_auth_with(
             name: row.name,
             user_id: row.user_id,
         },
-        role: row.role,
+        role,
         can_mutate: row.can_mutate,
     })
 }
@@ -442,9 +453,6 @@ fn caller_from_token_with(
     let ident = try_token_auth_with(conn, token, now)?;
     let uid = identity_user_id(&ident)?;
     let u = identities::users::find_by_id(conn, &uid).ok()??;
-    // Role and capability come from the TOKEN, not the user row: the token is
-    // what this call presented, and it may be scoped narrower than its
-    // issuing user.
     Some(contract::CallerIdentity {
         user_id: u.id,
         username: u.username,
@@ -642,8 +650,8 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
             }
             match caller {
                 Some(mut c) => {
-                    // Dispatch re-checks the role against this identity, so
-                    // it carries the token's scope, not the issuing user's.
+                    // Dispatch re-checks the role against this identity, so it
+                    // carries the token's scope capped by the user's current role.
                     c.role = ident.role.clone();
                     c.can_mutate = ident.can_mutate;
                     req.extensions_mut().insert(c);
@@ -735,7 +743,7 @@ pub async fn require_tool_role(req: Request, next: Next) -> Response {
         req = Request::from_parts(parts, Body::from(bytes));
     }
     if unbound {
-        decision = refuse_unbound(&path, decision, caller_role.as_deref());
+        decision = refuse_unbound(&path, decision);
     }
     match decision {
         ToolRoleCheck::Pass => next.run(req).await,
@@ -825,12 +833,11 @@ pub(crate) fn check_tool_role(
     }
 }
 
-pub(crate) fn refuse_unbound(
-    path: &str,
-    decision: ToolRoleCheck,
-    caller_role: Option<&str>,
-) -> ToolRoleCheck {
-    if decision != ToolRoleCheck::Pass || caller_role == Some("admin") {
+/// A token with no bound user has no role a demotion could cap, so its stored
+/// role is never honoured for role-gated tools. The first-token bootstrap
+/// window authenticates as `AuthKind::Bootstrap`, not as an unbound token.
+pub(crate) fn refuse_unbound(path: &str, decision: ToolRoleCheck) -> ToolRoleCheck {
+    if decision != ToolRoleCheck::Pass {
         return decision;
     }
     let Some(tool) = tool_name_from_path(path).and_then(|raw| utils::url::decode(raw).ok()) else {
@@ -1044,23 +1051,19 @@ mod tests {
     }
 
     #[test]
-    fn unbound_token_is_refused_role_gated_tools_unless_admin() {
+    fn unbound_token_is_refused_role_gated_tools_even_as_admin() {
         let gated = format!("/api/v1/{}", dispatch::diagnostics_surface::REPAIR_TOOL);
         let open = format!("/api/v1/{}", dispatch::ups_surface::STATE_TOOL);
         assert!(matches!(
-            refuse_unbound(&gated, ToolRoleCheck::Pass, Some("member")),
+            refuse_unbound(&gated, ToolRoleCheck::Pass),
+            ToolRoleCheck::Forbidden { .. }
+        ));
+        assert!(matches!(
+            refuse_unbound(BOOTSTRAP_ALLOWED_TOOL, ToolRoleCheck::Pass),
             ToolRoleCheck::Forbidden { .. }
         ));
         assert_eq!(
-            refuse_unbound(&gated, ToolRoleCheck::Pass, Some("admin")),
-            ToolRoleCheck::Pass
-        );
-        assert_eq!(
-            refuse_unbound(&open, ToolRoleCheck::Pass, Some("member")),
-            ToolRoleCheck::Pass
-        );
-        assert_eq!(
-            refuse_unbound(BOOTSTRAP_ALLOWED_TOOL, ToolRoleCheck::Pass, Some("admin")),
+            refuse_unbound(&open, ToolRoleCheck::Pass),
             ToolRoleCheck::Pass
         );
     }
@@ -1468,6 +1471,12 @@ mod tests {
         let ident = caller_from_token_with(&c, token, utils::time::now()).unwrap();
         assert_eq!(ident.user_id, uid);
         assert_eq!(ident.role, "read");
+        assert_eq!(
+            try_token_auth_with(&c, token, utils::time::now())
+                .unwrap()
+                .role,
+            "read"
+        );
         assert!(!ident.can_mutate);
     }
 
@@ -1510,13 +1519,34 @@ mod tests {
         let (_d, c) = test_db();
         let token = "plaintext_token_value";
         let hash = sha256_hex(token.as_bytes());
-        insert_token(&c, "admin", &hash, None);
+        let uid = insert_user(&c, "admin");
+        insert_token_for_user(&c, "admin", &hash, Some(&uid));
         let ident = try_token_auth_with(&c, token, utils::time::now()).unwrap();
         assert_eq!(ident.role, "admin");
         match ident.kind {
             AuthKind::Token { name, .. } => assert_eq!(name, "test-token"),
             _ => panic!("expected Token"),
         }
+    }
+
+    #[test]
+    fn unbound_admin_token_authenticates_at_rank_zero() {
+        let (_d, c) = test_db();
+        let token = "unbound_admin_token";
+        insert_token(&c, "admin", &sha256_hex(token.as_bytes()), None);
+        let ident = try_token_auth_with(&c, token, utils::time::now()).unwrap();
+        assert_eq!(ident.role, UNBOUND_TOKEN_ROLE);
+        assert_eq!(contract::roles::role_rank(&ident.role), 0);
+        let gated = dispatch::diagnostics_surface::REPAIR_TOOL;
+        assert!(!mcp_tool_role_allows(
+            gated,
+            Some(&ident.role),
+            ident.can_mutate
+        ));
+        assert!(matches!(
+            check_tool_role(&format!("/api/v1/{gated}"), false, Some(&ident.role), false),
+            ToolRoleCheck::Forbidden { .. }
+        ));
     }
 
     #[test]
@@ -1951,6 +1981,58 @@ mod tests {
             let resp = auth_router().oneshot(req).await.unwrap();
             assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
         }
+    }
+
+    #[tokio::test]
+    async fn admin_token_of_a_demoted_user_is_capped_to_the_users_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let _db_guard = override_default_db(&dir);
+        let conn = db::open_unencrypted(&_db_guard).unwrap();
+        let uid = insert_user(&conn, "admin");
+        let token = "admin_token_of_a_demoted_user";
+        insert_token_for_user(&conn, "admin", &sha256_hex(token.as_bytes()), Some(&uid));
+        let gated = format!("/api/v1/{}", dispatch::diagnostics_surface::REPAIR_TOOL);
+        let router = axum::Router::new()
+            .route(
+                &gated,
+                axum::routing::post(|| async { axum::http::StatusCode::OK }),
+            )
+            .layer(axum::middleware::from_fn(require_tool_role))
+            .layer(axum::middleware::from_fn(require_auth));
+        let call = || {
+            let mut req = AxumReq::builder()
+                .method("POST")
+                .uri(&gated)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo::<SocketAddr>("10.0.0.1:12345".parse().unwrap()));
+            router.clone().oneshot(req)
+        };
+        assert_eq!(call().await.unwrap().status(), axum::http::StatusCode::OK);
+
+        identities::users::set_role(&conn, &uid, "read-only", &utils::time::now_rfc3339()).unwrap();
+        assert!(try_token_auth_with(&conn, token, utils::time::now()).is_none());
+        assert_eq!(
+            call().await.unwrap().status(),
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+
+        // An admin row that outlives the demotion is still capped per request.
+        insert_token_for_user(&conn, "admin", &sha256_hex(token.as_bytes()), Some(&uid));
+        let ident = try_token_auth_with(&conn, token, utils::time::now()).unwrap();
+        assert_eq!(ident.role, "read-only");
+        assert_eq!(
+            caller_from_token_with(&conn, token, utils::time::now())
+                .unwrap()
+                .role,
+            "read-only"
+        );
+        assert_eq!(
+            call().await.unwrap().status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]

@@ -25,6 +25,7 @@ tracing  = { workspace = true }
 orca-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
+contract = { workspace = true }
 db = { workspace = true, default-features = true, features = ["test-util"] }
 
 [lints]
