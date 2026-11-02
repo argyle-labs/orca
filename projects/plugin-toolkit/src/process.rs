@@ -106,27 +106,27 @@ impl Command {
     /// into its own error type, replacing hand-rolled `status.success()` checks.
     pub async fn run_checked(self) -> std::result::Result<Vec<u8>, ToolError> {
         let program = self.program.clone();
-        // An I/O failure to even launch the process is surfaced as a ToolError
-        // with no exit code, mirroring a killed-by-signal outcome.
-        let out = match self.output().await {
-            Ok(out) => out,
-            Err(e) => {
-                return Err(ToolError {
-                    tool: program,
-                    code: None,
-                    stderr: e.to_string(),
-                });
-            }
-        };
-        if out.status.success {
-            Ok(out.stdout)
-        } else {
-            Err(ToolError {
-                tool: program,
-                code: out.status.code,
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            })
-        }
+        checked(program, self.output().await.map(Some))
+    }
+
+    /// [`run_checked`](Self::run_checked) bounded by `budget`.
+    pub async fn run_checked_within(
+        self,
+        budget: Duration,
+    ) -> std::result::Result<Vec<u8>, ToolError> {
+        self.run_checked_until(tokio::time::Instant::now() + budget)
+            .await
+    }
+
+    /// [`run_checked`](Self::run_checked) bounded by `deadline`, with
+    /// [`output_until`](Self::output_until) semantics. A timeout or held pipe is
+    /// a [`ToolError`] with no exit code.
+    pub async fn run_checked_until(
+        self,
+        deadline: tokio::time::Instant,
+    ) -> std::result::Result<Vec<u8>, ToolError> {
+        let program = self.program.clone();
+        checked(program, self.output_until(deadline).await)
     }
 
     /// Append one argument.
@@ -178,10 +178,33 @@ impl Command {
     /// Spawn and wait up to `budget`. `Ok(Some(status))` if it exited in time;
     /// `Ok(None)` if it timed out (the child is killed). Output is not captured —
     /// use for liveness/exit-code probes.
-    pub async fn status_within(mut self, budget: Duration) -> std::io::Result<Option<ExitStatus>> {
+    pub async fn status_within(self, budget: Duration) -> std::io::Result<Option<ExitStatus>> {
+        self.status_until(tokio::time::Instant::now() + budget)
+            .await
+    }
+
+    /// [`status_within`](Self::status_within) with an absolute deadline.
+    pub async fn status_until(
+        self,
+        deadline: tokio::time::Instant,
+    ) -> std::io::Result<Option<ExitStatus>> {
+        self.status_or(tokio::time::sleep_until(deadline)).await
+    }
+
+    /// [`status_within`](Self::status_within) ended by `cancel` instead of a
+    /// clock; completing `cancel` is handled exactly like reaching the deadline.
+    pub async fn status_or(
+        mut self,
+        cancel: impl std::future::Future<Output = ()>,
+    ) -> std::io::Result<Option<ExitStatus>> {
         let mut child = spawn(&mut self.inner)?;
         let mut guard = GroupGuard::new(self.kill_group, &child);
-        match crate::time::timeout(budget, guard.wait_leader(&mut child)).await {
+        let finished = tokio::select! {
+            biased;
+            result = guard.wait_leader(&mut child) => Some(result),
+            () = cancel => None,
+        };
+        match finished {
             Some(result) => {
                 result?;
                 guard.disarm();
@@ -214,7 +237,26 @@ impl Command {
     /// On either deadline path the process group is also killed if
     /// [`kill_process_group_on_timeout`](Self::kill_process_group_on_timeout) was
     /// set; otherwise processes the child left behind keep running.
-    pub async fn output_within(mut self, budget: Duration) -> std::io::Result<Option<Output>> {
+    pub async fn output_within(self, budget: Duration) -> std::io::Result<Option<Output>> {
+        self.output_until(tokio::time::Instant::now() + budget)
+            .await
+    }
+
+    /// [`output_within`](Self::output_within) with an absolute deadline.
+    pub async fn output_until(
+        self,
+        deadline: tokio::time::Instant,
+    ) -> std::io::Result<Option<Output>> {
+        self.output_or(tokio::time::sleep_until(deadline)).await
+    }
+
+    /// [`output_within`](Self::output_within) ended by `cancel` instead of a
+    /// clock; completing `cancel` is handled exactly like reaching the deadline,
+    /// including the [`PipeHeldOpen`] path when it fires while pipes drain.
+    pub async fn output_or(
+        mut self,
+        cancel: impl std::future::Future<Output = ()>,
+    ) -> std::io::Result<Option<Output>> {
         self.inner
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -236,11 +278,16 @@ impl Command {
             out_buf.clone(),
             err_buf.clone(),
         )));
-        let deadline = tokio::time::Instant::now() + budget;
-        match tokio::time::timeout_at(deadline, guard.wait_leader(&mut child)).await {
+        let mut cancel = std::pin::pin!(cancel);
+        let finished = tokio::select! {
+            biased;
+            result = guard.wait_leader(&mut child) => Some(result),
+            () = &mut cancel => None,
+        };
+        match finished {
             // Guard stays armed so its drop kills an opted-in group.
-            Ok(result) => result?,
-            Err(_) => {
+            Some(result) => result?,
+            None => {
                 reader.abort();
                 guard.kill_on_timeout(&mut child);
                 child.wait().await?;
@@ -248,7 +295,7 @@ impl Command {
                 return Ok(None);
             }
         }
-        let eof = drain_pipes(&mut reader, deadline).await?;
+        let eof = drain_pipes(&mut reader, cancel).await?;
         if !eof {
             reader.abort();
             guard.kill();
@@ -321,16 +368,53 @@ impl std::fmt::Display for PipeHeldOpen {
 
 impl std::error::Error for PipeHeldOpen {}
 
-// `Ok(true)` once both pipes hit EOF, `Ok(false)` if the deadline came first.
-async fn drain_pipes<F>(reader: &mut F, deadline: tokio::time::Instant) -> std::io::Result<bool>
+// `Ok(true)` once both pipes hit EOF, `Ok(false)` if `cancel` came first.
+async fn drain_pipes<F>(
+    reader: &mut F,
+    cancel: impl std::future::Future<Output = ()>,
+) -> std::io::Result<bool>
 where
     F: std::future::Future<
             Output = std::result::Result<std::io::Result<()>, tokio::task::JoinError>,
         > + Unpin,
 {
-    match tokio::time::timeout_at(deadline, reader).await {
-        Ok(pipes) => pipes.map_err(std::io::Error::other)?.map(|()| true),
-        Err(_) => Ok(false),
+    tokio::select! {
+        biased;
+        pipes = reader => pipes.map_err(std::io::Error::other)?.map(|()| true),
+        () = cancel => Ok(false),
+    }
+}
+
+// A launch failure, timeout or held pipe has no exit code, like a signal kill.
+fn checked(
+    program: String,
+    out: std::io::Result<Option<Output>>,
+) -> std::result::Result<Vec<u8>, ToolError> {
+    let out = match out {
+        Ok(Some(out)) => out,
+        Ok(None) => {
+            return Err(ToolError {
+                tool: program,
+                code: None,
+                stderr: "timed out".to_string(),
+            });
+        }
+        Err(e) => {
+            return Err(ToolError {
+                tool: program,
+                code: None,
+                stderr: e.to_string(),
+            });
+        }
+    };
+    if out.status.success {
+        Ok(out.stdout)
+    } else {
+        Err(ToolError {
+            tool: program,
+            code: out.status.code,
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        })
     }
 }
 
@@ -1059,7 +1143,9 @@ mod tests {
         let (writer, mut reader, _buf) = pipe_reader();
         let deadline = tokio::time::Instant::now();
         assert!(
-            !drain_pipes(&mut reader, deadline).await.unwrap(),
+            !drain_pipes(&mut reader, tokio::time::sleep_until(deadline))
+                .await
+                .unwrap(),
             "held pipe reported as EOF"
         );
         drop(writer);
@@ -1071,7 +1157,11 @@ mod tests {
         writer.write_all(b"all").await.unwrap();
         drop(writer);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
-        assert!(drain_pipes(&mut reader, deadline).await.unwrap());
+        assert!(
+            drain_pipes(&mut reader, tokio::time::sleep_until(deadline))
+                .await
+                .unwrap()
+        );
         assert_eq!(take_buf(&buf), b"all");
     }
 
@@ -1101,6 +1191,116 @@ mod tests {
         };
         assert!(started, "expected the holder to start, then the cancel");
         assert_eq!(dir.mark().await, "epipe", "pipe reader leaked after cancel");
+    }
+
+    #[tokio::test]
+    async fn drain_pipes_stops_on_cancel() {
+        let (writer, mut reader, _buf) = pipe_reader();
+        assert!(
+            !drain_pipes(&mut reader, std::future::ready(()))
+                .await
+                .unwrap()
+        );
+        drop(writer);
+    }
+
+    /// The child reports its pid on fd 4 once running; that report is the cancel.
+    #[cfg(unix)]
+    async fn group_dies_on_cancel(run: impl AsyncFnOnce(Command, &HolderDir) -> bool) {
+        let dir = HolderDir::new("pgcancelsig");
+        let dead = dir.death_watch();
+        let cmd = dir
+            .command(SURVIVOR_REPORTER)
+            .kill_process_group_on_timeout();
+        assert!(run(cmd, &dir).await, "expected the cancel path");
+        assert_eq!(
+            read_to_eof(dead).await,
+            "",
+            "group member outlived the leader"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn status_or_kills_process_group_on_cancel() {
+        group_dies_on_cancel(async |cmd, dir| {
+            cmd.status_or(async {
+                dir.pid().await;
+            })
+            .await
+            .unwrap()
+            .is_none()
+        })
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_or_kills_process_group_on_cancel() {
+        group_dies_on_cancel(async |cmd, dir| {
+            cmd.output_or(async {
+                dir.pid().await;
+            })
+            .await
+            .unwrap()
+            .is_none()
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn output_or_returns_output_when_cancel_never_fires() {
+        let out = Command::new("printf")
+            .arg("hi")
+            .output_or(std::future::pending())
+            .await
+            .unwrap()
+            .expect("not cancelled");
+        assert_eq!(out.stdout, b"hi");
+    }
+
+    #[tokio::test]
+    async fn status_until_past_deadline_times_out() {
+        let st = Command::new("sleep")
+            .arg("30")
+            .status_until(tokio::time::Instant::now())
+            .await
+            .unwrap();
+        assert!(st.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_checked_until_past_deadline_is_a_tool_error() {
+        let err = Command::new("sleep")
+            .arg("30")
+            .run_checked_until(tokio::time::Instant::now())
+            .await
+            .expect_err("expected timeout");
+        assert_eq!(err.tool, "sleep");
+        assert_eq!(err.code, None);
+        assert_eq!(err.stderr, "timed out");
+    }
+
+    #[tokio::test]
+    async fn run_checked_within_returns_stdout_on_success() {
+        let out = Command::new("printf")
+            .arg("hello")
+            .run_checked_within(Duration::from_secs(600))
+            .await
+            .expect("run printf");
+        assert_eq!(out, b"hello");
+    }
+
+    #[tokio::test]
+    async fn run_checked_within_reports_non_zero_exit() {
+        let err = Command::new("sh")
+            .arg("-c")
+            .arg("echo boom >&2; exit 3")
+            .run_checked_within(Duration::from_secs(600))
+            .await
+            .expect_err("expected non-zero exit");
+        assert_eq!(err.code, Some(3));
+        assert_eq!(err.stderr, "boom");
     }
 
     #[tokio::test]

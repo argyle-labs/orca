@@ -3,24 +3,26 @@
 //! A subprocess plugin connects the socket orca handed it (`$ORCA_PLUGIN_SOCKET`),
 //! declares its surface with a [`Frame::Hello`], then serves `Invoke → dispatch →
 //! Result` until orca sends `Shutdown` (or closes). Tools reach orca's DB/secret
-//! services through the capability sink ([`crate::capsink`]).
+//! services through the capability sink ([`crate::runtime::with_cap_sink`]) — HTTP
+//! stays in-process for now (see the reqwest-shedding follow-up).
 //!
-//! ## Socket sharing
+//! ## Single-thread by design
 //!
-//! orca dispatches one `Invoke` at a time per plugin. While it runs, capability
-//! round-trips may come from any thread of the tool (`spawn_blocking`, spawned
-//! tasks), so the socket sits behind a `Mutex` held for each whole round-trip.
-//! [`serve`] owns the process and installs the sink process-wide;
-//! [`serve_on`] scopes it to the dispatch thread so several in-memory sessions
-//! can share one process.
+//! The loop drives tool futures on a **current-thread** tokio runtime so a tool's
+//! `db_op`/`secret_op` (which read the thread-local cap sink) run on the same
+//! thread that owns the socket. Combined with orca's serial-dispatch contract
+//! (one `Invoke` in flight per plugin), the socket needs no locking beyond the
+//! `RefCell` that lets the loop and the cap round-trip share it.
 #![cfg(all(feature = "tools", feature = "endpoints"))]
 // serve() carries tool args/results as JSON `Value` across the socket — the same
 // transport-dynamic boundary as the FFI's `args_json`; typing happens in the
 // tools against their schemas. Sanctioned escape hatch, scoped to this seam.
 #![allow(clippy::disallowed_types)]
 
+use std::cell::Cell;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,10 +33,7 @@ use plugin_proto::{
 };
 use serde_json::Value;
 
-use crate::capsink::{
-    SharedCapSink, SharedCapStreamSink, with_cap_sink, with_cap_stream_sink, with_process_cap_sink,
-    with_process_cap_stream_sink,
-};
+use crate::capsink::{CapSink, CapStreamSink, with_cap_sink, with_cap_stream_sink};
 use crate::contract::{CallerIdentity, ToolCtx};
 use crate::tool_manifest::{manifest_for_prefixes, minimal_ctx};
 
@@ -198,16 +197,16 @@ pub fn serve(spec: PluginSpec) -> Result<()> {
     let stream = std::os::unix::net::UnixStream::connect(&path)
         .with_context(|| format!("connect plugin socket {path}"))?;
     let beat = stream.try_clone().context("clone plugin socket")?;
-    serve_session(stream, spec, Some((Box::new(beat), HEARTBEAT_EVERY)), true)
+    serve_session(stream, spec, Some((Box::new(beat), HEARTBEAT_EVERY)))
 }
 
 /// Serve over an already-connected stream. Split from [`serve`] so the loop is
 /// testable over an in-memory `UnixStream` pair.
-pub fn serve_on<S: Read + Write + Send + 'static>(stream: S, spec: PluginSpec) -> Result<()> {
+pub fn serve_on<S: Read + Write + 'static>(stream: S, spec: PluginSpec) -> Result<()> {
     check_shared_endpoint_providers(&spec.name)?;
     #[cfg(feature = "in-process")]
     crate::dispatch::init()?;
-    serve_session(stream, spec, None, false)
+    serve_session(stream, spec, None)
 }
 
 fn check_shared_endpoint_providers(name: &str) -> Result<()> {
@@ -235,15 +234,13 @@ fn shared_provider_mismatches<'a>(
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
 
 /// `heartbeat`: a second writer onto the same socket plus its period.
-/// `process_wide`: install the capability sink and core caps for every thread.
-fn serve_session<S: Read + Write + Send + 'static>(
+fn serve_session<S: Read + Write + 'static>(
     stream: S,
     spec: PluginSpec,
     heartbeat: Option<(Box<dyn Write + Send>, Duration)>,
-    process_wide: bool,
 ) -> Result<()> {
     let write_lock = Arc::new(Mutex::new(()));
-    let stream = Arc::new(Mutex::new(FrameWriter {
+    let stream = Rc::new(std::cell::RefCell::new(FrameWriter {
         inner: stream,
         pending: Vec::new(),
         lock: Arc::clone(&write_lock),
@@ -274,9 +271,9 @@ fn serve_session<S: Read + Write + Send + 'static>(
         schema,
         api_surfaces: surface_refs(&spec.api_surfaces)?,
     };
-    write_frame(&mut *lock(&stream), &hello)?;
+    write_frame(&mut *stream.borrow_mut(), &hello)?;
 
-    match read_frame(&mut *lock(&stream))? {
+    match read_frame(&mut *stream.borrow_mut())? {
         Some(Frame::Welcome {
             protocol,
             capabilities,
@@ -284,29 +281,27 @@ fn serve_session<S: Read + Write + Send + 'static>(
             if !protocol_compatible(&protocol, PROTOCOL_VERSION) {
                 bail!("daemon protocol {protocol} incompatible with plugin {PROTOCOL_VERSION}");
             }
-            if process_wide {
-                crate::capsink::set_process_core_caps(&capabilities);
-            } else {
-                crate::capsink::set_core_body_b64(
-                    capabilities.iter().any(|c| c == crate::abi::HTTP_BODY_B64),
-                );
-                crate::capsink::set_core_no_follow(
-                    capabilities.iter().any(|c| c == crate::abi::HTTP_NO_FOLLOW),
-                );
-                crate::capsink::set_core_privileged(&capabilities);
-            }
+            crate::capsink::set_core_body_b64(
+                capabilities.iter().any(|c| c == crate::abi::HTTP_BODY_B64),
+            );
+            crate::capsink::set_core_no_follow(
+                capabilities.iter().any(|c| c == crate::abi::HTTP_NO_FOLLOW),
+            );
+            crate::capsink::set_core_privileged(&capabilities);
         }
         Some(other) => bail!("expected Welcome, got {other:?}"),
         None => bail!("daemon closed before Welcome"),
     }
 
     // ── Serve loop. Each dispatch is driven to completion via the shared,
-    // orca-owned reactor (`reactor::block_on`) with the cap sink installed. ──
+    // orca-owned reactor (`reactor::block_on`) on the socket-owning thread, honoring
+    // the cap-sink thread-affinity contract: the future runs to completion on
+    // this thread, so `db_op`/`secret_op` reach the thread-local sink. ──
     let base_ctx = minimal_ctx();
-    let cap_id = Arc::new(AtomicU64::new(0));
+    let cap_id = Rc::new(Cell::new(0u64));
 
     loop {
-        let frame = read_frame(&mut *lock(&stream))?;
+        let frame = read_frame(&mut *stream.borrow_mut())?;
         let Some(frame) = frame else { break }; // clean EOF
         match frame {
             Frame::Invoke {
@@ -320,39 +315,41 @@ fn serve_session<S: Read + Write + Send + 'static>(
                 let ctx = invoke_ctx(&base_ctx, caller, call_chain);
                 let sink = cap_sink(&stream, &cap_id);
                 let stream_sink = cap_stream_sink(&stream, &cap_id);
-                let result = with_sinks(process_wide, sink, stream_sink, || {
-                    // Hybrid arm first (mirrors the cdylib `invoke`): a bespoke
-                    // backend op (e.g. `proxmox.__unit.*`) is handled by
-                    // `backend_dispatch`; anything it declines falls through to
-                    // the `#[orca_tool]` dispatch surface. Args/results cross as
-                    // `Value` (the wire's own type — no String hop).
-                    // Instrumentation diagnostics first (opt-in): answer the
-                    // built-in `<plugin>.__orca_diag.*` ops core's proxy calls.
-                    // Declines (None) for every other tool.
-                    if crate::instrument::enabled()
-                        && let Some(res) =
-                            crate::instrument::diag::dispatch(&spec.name, &tool, args.clone())
-                    {
-                        return res.map_err(|e| {
-                            let msg = match &e {
-                                Value::String(s) => s.clone(),
-                                other => other.to_string(),
-                            };
-                            anyhow::anyhow!("instrumentation diag '{tool}' failed: {msg}")
-                        });
-                    }
-                    if let Some(bd) = &spec.backend_dispatch
-                        && let Some(res) = bd(&tool, args.clone())
-                    {
-                        return res.map_err(|e| {
-                            let msg = match &e {
-                                Value::String(s) => s.clone(),
-                                other => other.to_string(),
-                            };
-                            anyhow::anyhow!("backend '{tool}' failed: {msg}")
-                        });
-                    }
-                    crate::reactor::block_on(crate::dispatch::dispatch(&tool, args, &ctx))
+                let result = with_cap_sink(sink, || {
+                    with_cap_stream_sink(stream_sink, || {
+                        // Hybrid arm first (mirrors the cdylib `invoke`): a bespoke
+                        // backend op (e.g. `proxmox.__unit.*`) is handled by
+                        // `backend_dispatch`; anything it declines falls through to
+                        // the `#[orca_tool]` dispatch surface. Args/results cross as
+                        // `Value` (the wire's own type — no String hop).
+                        // Instrumentation diagnostics first (opt-in): answer the
+                        // built-in `<plugin>.__orca_diag.*` ops core's proxy calls.
+                        // Declines (None) for every other tool.
+                        if crate::instrument::enabled()
+                            && let Some(res) =
+                                crate::instrument::diag::dispatch(&spec.name, &tool, args.clone())
+                        {
+                            return res.map_err(|e| {
+                                let msg = match &e {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                anyhow::anyhow!("instrumentation diag '{tool}' failed: {msg}")
+                            });
+                        }
+                        if let Some(bd) = &spec.backend_dispatch
+                            && let Some(res) = bd(&tool, args.clone())
+                        {
+                            return res.map_err(|e| {
+                                let msg = match &e {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                anyhow::anyhow!("backend '{tool}' failed: {msg}")
+                            });
+                        }
+                        crate::reactor::block_on(crate::dispatch::dispatch(&tool, args, &ctx))
+                    })
                 });
                 drop(beating);
                 let reply = match result {
@@ -371,11 +368,11 @@ fn serve_session<S: Read + Write + Send + 'static>(
                         error: Some(format!("{e:#}")),
                     },
                 };
-                write_frame(&mut *lock(&stream), &reply)?;
+                write_frame(&mut *stream.borrow_mut(), &reply)?;
             }
             Frame::SurfaceGet { id, name } => {
                 write_frame(
-                    &mut *lock(&stream),
+                    &mut *stream.borrow_mut(),
                     &surface_reply(&spec.api_surfaces, id, &name),
                 )?;
             }
@@ -505,43 +502,21 @@ fn invoke_ctx(base: &ToolCtx, caller: Option<VerifiedCaller>, call_chain: Vec<St
     ctx
 }
 
-fn lock<S>(stream: &Mutex<S>) -> std::sync::MutexGuard<'_, S> {
-    stream.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-/// Run `body` with the sinks installed process-wide or, for an in-memory
-/// session, on the current thread only.
-fn with_sinks<R>(
-    process_wide: bool,
-    sink: SharedCapSink,
-    stream_sink: SharedCapStreamSink,
-    body: impl FnOnce() -> R,
-) -> R {
-    if process_wide {
-        return with_process_cap_sink(sink, || with_process_cap_stream_sink(stream_sink, body));
-    }
-    with_cap_sink(Box::new(move |cap, op| sink(cap, op)), || {
-        with_cap_stream_sink(
-            Box::new(move |cap, op, on_chunk| stream_sink(cap, op, on_chunk)),
-            body,
-        )
-    })
-}
-
 /// Build the capability sink for one `Invoke`: a closure that performs a
-/// `Cap → CapResult` round-trip on the shared socket, holding the socket for the
-/// whole round-trip so concurrent callers never interleave frames.
-fn cap_sink<S: Read + Write + Send + 'static>(
-    stream: &Arc<Mutex<S>>,
-    cap_id: &Arc<AtomicU64>,
-) -> SharedCapSink {
-    let stream = Arc::clone(stream);
-    let cap_id = Arc::clone(cap_id);
-    Arc::new(move |cap: &str, op_json: &str| {
+/// `Cap → CapResult` round-trip on the shared socket. `db_op`/`secret_op` reach
+/// it through the thread-local installed by [`with_cap_sink`].
+fn cap_sink<S: Read + Write + 'static>(
+    stream: &Rc<std::cell::RefCell<S>>,
+    cap_id: &Rc<Cell<u64>>,
+) -> CapSink {
+    let stream = Rc::clone(stream);
+    let cap_id = Rc::clone(cap_id);
+    Box::new(move |cap: &str, op_json: &str| {
         let args: Value = serde_json::from_str(op_json)
             .map_err(|e| format!("capability {cap}: bad op json: {e}"))?;
-        let id = cap_id.fetch_add(1, Ordering::Relaxed);
-        let mut s = lock(&stream);
+        let id = cap_id.get();
+        cap_id.set(id.wrapping_add(1));
+        let mut s = stream.borrow_mut();
         write_frame(
             &mut *s,
             &Frame::Cap {
@@ -581,20 +556,21 @@ fn cap_sink<S: Read + Write + Send + 'static>(
 /// …) → CapStreamEnd` round-trip on the shared socket, delivering each chunk to
 /// `on_chunk`. Shares the same `cap_id` counter as [`cap_sink`] so streaming and
 /// one-shot capability ids never collide.
-fn cap_stream_sink<S: Read + Write + Send + 'static>(
-    stream: &Arc<Mutex<S>>,
-    cap_id: &Arc<AtomicU64>,
-) -> SharedCapStreamSink {
-    let stream = Arc::clone(stream);
-    let cap_id = Arc::clone(cap_id);
-    Arc::new(
+fn cap_stream_sink<S: Read + Write + 'static>(
+    stream: &Rc<std::cell::RefCell<S>>,
+    cap_id: &Rc<Cell<u64>>,
+) -> CapStreamSink {
+    let stream = Rc::clone(stream);
+    let cap_id = Rc::clone(cap_id);
+    Box::new(
         move |cap: &str,
               op_json: &str,
               on_chunk: &mut dyn FnMut(u64, String) -> std::result::Result<(), String>| {
             let args: Value = serde_json::from_str(op_json)
                 .map_err(|e| format!("capability {cap}: bad op json: {e}"))?;
-            let id = cap_id.fetch_add(1, Ordering::Relaxed);
-            let mut s = lock(&stream);
+            let id = cap_id.get();
+            cap_id.set(id.wrapping_add(1));
+            let mut s = stream.borrow_mut();
             write_frame(
                 &mut *s,
                 &Frame::Cap {
