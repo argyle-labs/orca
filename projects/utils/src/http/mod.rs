@@ -112,6 +112,9 @@ struct Inner {
     /// When set, each redirect hop advances [`Inner::now`] by this much.
     #[cfg(test)]
     hop_cost: Option<Duration>,
+    /// When set, the timeout handed to each redirect hop is recorded here.
+    #[cfg(test)]
+    hop_timeouts: Option<std::sync::Mutex<Vec<Option<Duration>>>>,
     #[cfg(test)]
     skew: std::sync::Mutex<Duration>,
 }
@@ -207,6 +210,8 @@ impl ClientBuilder {
                 retry_delays: None,
                 #[cfg(test)]
                 hop_cost: None,
+                #[cfg(test)]
+                hop_timeouts: None,
                 #[cfg(test)]
                 skew: Default::default(),
             }),
@@ -781,6 +786,12 @@ impl RequestBuilder {
                 }
                 None => None,
             };
+            #[cfg(test)]
+            if let Some(t) = &self.client.inner.hop_timeouts {
+                t.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(hop_timeout);
+            }
             let resp = self
                 .build_request(
                     &method,
@@ -1245,7 +1256,7 @@ mod tests {
         assert_eq!(builds, 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_stalled_build_times_out_then_later_calls_succeed() {
         let (client, gate, done) = gated_client(Some(Duration::from_millis(50)));
         let err = client.pool(false, None).await.unwrap_err();
@@ -1262,7 +1273,7 @@ mod tests {
         assert_eq!(builds, 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_short_request_timeout_bounds_the_build_wait() {
         let (client, _gate, _done) = gated_client(None);
         let err = client
@@ -1298,9 +1309,9 @@ mod tests {
             .unwrap();
         let (client, _gate, _done) = gated_client(None);
         let err = rt
-            .block_on(client.pool(false, Some(Duration::from_millis(50))))
+            .block_on(client.pool(false, Some(Duration::ZERO)))
             .unwrap_err();
-        assert!(err.to_string().contains("stalled after 50ms"), "{err}");
+        assert!(err.to_string().contains("stalled after 0ns"), "{err}");
     }
 
     #[test]
@@ -2062,6 +2073,7 @@ mod tests {
         let client = Client {
             inner: Arc::new(Inner {
                 hop_cost: Some(Duration::from_secs(40)),
+                hop_timeouts: Some(Default::default()),
                 ..Default::default()
             }),
         };
@@ -2076,6 +2088,15 @@ mod tests {
             "{err}"
         );
         assert_eq!(a.received_requests().await.unwrap().len(), 3);
+        let hops = client.inner.hop_timeouts.as_ref().unwrap().lock().unwrap();
+        assert_eq!(hops.len(), 3, "{hops:?}");
+        for (hop, (max, min)) in hops.iter().zip([(100, 60), (60, 20), (20, 0)]) {
+            let hop = hop.unwrap();
+            assert!(
+                hop <= Duration::from_secs(max) && hop > Duration::from_secs(min),
+                "{hops:?}"
+            );
+        }
     }
 
     #[tokio::test]
