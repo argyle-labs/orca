@@ -520,6 +520,12 @@ static CORE_VERB_KEY: OnceLock<contract::invocation_scope::CoreVerbKey> = OnceLo
 
 #[cfg(feature = "in-process")]
 pub fn init() -> std::result::Result<(), contract::invocation_scope::KeyStolen> {
+    // Serializes check-then-claim so concurrent callers can't both see an empty
+    // cell and have the loser's `claim()` report the key as stolen.
+    static INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = INIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if CORE_VERB_KEY.get().is_some() {
         return Ok(());
     }
@@ -2442,6 +2448,26 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[test]
+    fn concurrent_init_claims_the_key_once() {
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    init()
+                })
+            })
+            .collect();
+        for h in handles {
+            assert!(h.join().unwrap().is_ok());
+        }
+        let key = CORE_VERB_KEY.get().unwrap() as *const _;
+        assert!(contract::invocation_scope::CoreVerbKey::claim().is_none());
+        assert_eq!(CORE_VERB_KEY.get().unwrap() as *const _, key);
     }
 
     #[test]
