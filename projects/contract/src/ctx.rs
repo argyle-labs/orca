@@ -41,7 +41,7 @@ pub struct ToolCtx {
     /// True when the caller asked for a dry run (`dryRun: true`). Lets a tool
     /// body that runs outside the central gate plan instead of apply.
     dry_run: bool,
-    unbound_role: Option<String>,
+    unbound: bool,
     local_transport: bool,
     second_factor: bool,
     owner_cli: bool,
@@ -59,7 +59,7 @@ impl ToolCtx {
             peer_target: None,
             correlation_id: None,
             dry_run: false,
-            unbound_role: None,
+            unbound: false,
             local_transport: false,
             second_factor: false,
             owner_cli: false,
@@ -142,12 +142,12 @@ impl ToolCtx {
         self.correlation_id.as_deref()
     }
 
-    pub fn set_unbound_role(&mut self, role: Option<String>) {
-        self.unbound_role = role;
+    pub fn set_unbound(&mut self, unbound: bool) {
+        self.unbound = unbound;
     }
 
-    pub fn unbound_role(&self) -> Option<&str> {
-        self.unbound_role.as_deref()
+    pub fn unbound(&self) -> bool {
+        self.unbound
     }
 
     pub fn set_local_transport(&mut self, local: bool) {

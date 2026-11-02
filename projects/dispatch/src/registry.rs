@@ -39,9 +39,7 @@ pub const PEER_HEADER: &str = "x-orca-peer";
 /// ctx's ambient host-operator identity, which is an admin.
 #[cfg(feature = "server")]
 #[derive(Clone, Debug)]
-pub struct UnboundCaller {
-    pub role: String,
-}
+pub struct UnboundCaller;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 #[cfg(any(feature = "server", feature = "in-process"))]
@@ -682,12 +680,12 @@ fn authorize_fallback(name: &str, ctx: &ToolCtx) -> Result<()> {
         ))
         .into());
     }
-    if let Some(role) = ctx.unbound_role()
+    if ctx.unbound()
         && let Some(required) = crate::tool_roles::known_role(name)
-        && !crate::tool_roles::satisfies(role, required)
+        && required != "any"
     {
         return Err(contract::OrcaError::forbidden(format!(
-            "{name} requires role '{required}'; a token with no resolvable user has '{role}'"
+            "{name} requires role '{required}'; a token with no resolvable user has no role"
         ))
         .into());
     }
@@ -864,9 +862,9 @@ async fn http_dispatch(
     let mut ctx = (*state.ctx).clone();
     ctx.set_local_transport(false);
     ctx.set_second_factor(false);
-    if let Some(Extension(u)) = unbound {
+    if unbound.is_some() {
         ctx.set_caller(None);
-        ctx.set_unbound_role(Some(u.role));
+        ctx.set_unbound(true);
     }
     if let Some(Extension(c)) = caller {
         ctx.set_verified_caller(Some(c.clone()));
@@ -2521,15 +2519,11 @@ mod tests {
         let mut ctx = make_ctx().with_auth(identity("host_admin"));
         assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_ok());
         ctx.set_caller(None);
-        ctx.set_unbound_role(Some("admin".into()));
-        assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_ok());
-        ctx.set_unbound_role(Some("member".into()));
+        ctx.set_unbound(true);
         assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_err());
         assert!(authorize_fallback(crate::ups_surface::STATE_TOOL, &ctx).is_ok());
         assert!(authorize_fallback("__no_such_tool__", &ctx).is_ok());
-        ctx.set_unbound_role(Some("super-admin".into()));
-        assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_ok());
-        ctx.set_unbound_role(Some("bogus".into()));
+        ctx.set_caller(Some(identity("host_admin")));
         assert!(authorize_fallback(crate::diagnostics_surface::REPAIR_TOOL, &ctx).is_err());
     }
 
@@ -2608,9 +2602,7 @@ mod tests {
                 .body(Body::from("{}"))
                 .unwrap();
             if unbound {
-                req.extensions_mut().insert(UnboundCaller {
-                    role: "admin".into(),
-                });
+                req.extensions_mut().insert(UnboundCaller);
             }
             req
         };
