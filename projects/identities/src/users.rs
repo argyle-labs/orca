@@ -618,6 +618,140 @@ mod tests {
         assert!(set_role(&conn, "u1", "admin", "t3").unwrap());
     }
 
+    fn seed_credentials(conn: &Connection, uid: &str) {
+        conn.execute(
+            "INSERT INTO api_tokens (id, name, token_hash, role, created_at, user_id)
+             VALUES ('tA', 'admin-tok', 'hA', 'admin', 't0', ?1),
+                    ('tR', 'read-tok', 'hR', 'read', 't0', ?1)",
+            params![uid],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, user_id, created_at, last_used_at, expires_at)
+             VALUES ('s1', ?1, 't0', 't0', '2999-01-01T00:00:00Z')",
+            params![uid],
+        )
+        .unwrap();
+    }
+
+    fn token_roles(conn: &Connection, uid: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT role FROM api_tokens WHERE user_id = ?1 ORDER BY role")
+            .unwrap();
+        stmt.query_map(params![uid], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn active_sessions(conn: &Connection, uid: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE user_id = ?1 AND revoked_at IS NULL",
+            params![uid],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn demotion_deletes_admin_tokens_and_revokes_sessions() {
+        let conn = test_conn();
+        insert(&conn, "u1", "alice", "h", "admin", "t0").unwrap();
+        seed_credentials(&conn, "u1");
+        assert!(set_role(&conn, "u1", "user", "t1").unwrap());
+        assert_eq!(token_roles(&conn, "u1"), vec!["read".to_string()]);
+        assert_eq!(active_sessions(&conn, "u1"), 0);
+    }
+
+    #[test]
+    fn demotion_within_admin_tier_keeps_admin_tokens_but_revokes_sessions() {
+        let conn = test_conn();
+        insert(&conn, "u0", "root", "h", "super-admin", "t0").unwrap();
+        insert(&conn, "u1", "alice", "h", "super-admin", "t0").unwrap();
+        seed_credentials(&conn, "u1");
+        assert!(set_role(&conn, "u1", "admin", "t1").unwrap());
+        assert_eq!(
+            token_roles(&conn, "u1"),
+            vec!["admin".to_string(), "read".to_string()]
+        );
+        assert_eq!(active_sessions(&conn, "u1"), 0);
+    }
+
+    #[test]
+    fn promotion_leaves_tokens_and_sessions_alone() {
+        let conn = test_conn();
+        insert(&conn, "u1", "alice", "h", "user", "t0").unwrap();
+        seed_credentials(&conn, "u1");
+        assert!(set_role(&conn, "u1", "admin", "t1").unwrap());
+        assert_eq!(
+            token_roles(&conn, "u1"),
+            vec!["admin".to_string(), "read".to_string()]
+        );
+        assert_eq!(active_sessions(&conn, "u1"), 1);
+    }
+
+    fn allowed_roles(conn: &Connection) -> Vec<String> {
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let start = sql.find("CHECK (role IN (").unwrap() + "CHECK (role IN (".len();
+        let end = start + sql[start..].find(')').unwrap();
+        sql[start..end]
+            .split(',')
+            .map(|r| r.trim().trim_matches('\'').to_string())
+            .collect()
+    }
+
+    #[test]
+    fn demotion_trigger_ranks_match_role_rank() {
+        let roles = allowed_roles(&test_conn());
+        assert!(roles.len() > 1);
+        for from in &roles {
+            for to in &roles {
+                let conn = test_conn();
+                insert(&conn, "u1", "alice", "h", from, "t0").unwrap();
+                seed_credentials(&conn, "u1");
+                conn.execute("UPDATE users SET role = ?1 WHERE id = 'u1'", params![to])
+                    .unwrap();
+                let demoted = contract::roles::role_rank(to) < contract::roles::role_rank(from);
+                let admin_kept = !demoted
+                    || contract::roles::role_rank(to) >= contract::roles::role_rank("admin");
+                let expected_tokens: Vec<String> = if admin_kept {
+                    vec!["admin".into(), "read".into()]
+                } else {
+                    vec!["read".into()]
+                };
+                assert_eq!(token_roles(&conn, "u1"), expected_tokens, "{from} -> {to}");
+                assert_eq!(
+                    active_sessions(&conn, "u1"),
+                    i64::from(!demoted),
+                    "{from} -> {to}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replicated_role_write_applies_the_same_revocation() {
+        let conn = test_conn();
+        insert(&conn, "u1", "alice", "h", "admin", "t0").unwrap();
+        seed_credentials(&conn, "u1");
+        conn.execute(
+            "INSERT INTO users (id, username, username_lower, password_hash, role,
+                                created_at, password_updated_at, updated_at)
+             VALUES ('u1', 'alice', 'alice', 'h', 'read-only', 't0', 't0', 't9')
+             ON CONFLICT(id) DO UPDATE SET role = excluded.role, updated_at = excluded.updated_at",
+            [],
+        )
+        .unwrap();
+        assert_eq!(token_roles(&conn, "u1"), vec!["read".to_string()]);
+        assert_eq!(active_sessions(&conn, "u1"), 0);
+    }
+
     #[test]
     fn password_update_bumps_timestamp() {
         let conn = test_conn();
