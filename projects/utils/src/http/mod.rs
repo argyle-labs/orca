@@ -112,6 +112,9 @@ struct Inner {
     /// When set, each redirect hop advances [`Inner::now`] by this much.
     #[cfg(test)]
     hop_cost: Option<Duration>,
+    /// When set, the timeout handed to each redirect hop is recorded here.
+    #[cfg(test)]
+    hop_timeouts: Option<std::sync::Mutex<Vec<Option<Duration>>>>,
     #[cfg(test)]
     skew: std::sync::Mutex<Duration>,
 }
@@ -207,6 +210,8 @@ impl ClientBuilder {
                 retry_delays: None,
                 #[cfg(test)]
                 hop_cost: None,
+                #[cfg(test)]
+                hop_timeouts: None,
                 #[cfg(test)]
                 skew: Default::default(),
             }),
@@ -781,6 +786,12 @@ impl RequestBuilder {
                 }
                 None => None,
             };
+            #[cfg(test)]
+            if let Some(t) = &self.client.inner.hop_timeouts {
+                t.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(hop_timeout);
+            }
             let resp = self
                 .build_request(
                     &method,
@@ -2062,6 +2073,7 @@ mod tests {
         let client = Client {
             inner: Arc::new(Inner {
                 hop_cost: Some(Duration::from_secs(40)),
+                hop_timeouts: Some(Default::default()),
                 ..Default::default()
             }),
         };
@@ -2076,6 +2088,15 @@ mod tests {
             "{err}"
         );
         assert_eq!(a.received_requests().await.unwrap().len(), 3);
+        let hops = client.inner.hop_timeouts.as_ref().unwrap().lock().unwrap();
+        assert_eq!(hops.len(), 3, "{hops:?}");
+        for (hop, (max, min)) in hops.iter().zip([(100, 60), (60, 20), (20, 0)]) {
+            let hop = hop.unwrap();
+            assert!(
+                hop <= Duration::from_secs(max) && hop > Duration::from_secs(min),
+                "{hops:?}"
+            );
+        }
     }
 
     #[tokio::test]
