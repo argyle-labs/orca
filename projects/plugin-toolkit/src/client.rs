@@ -320,6 +320,13 @@ impl Client {
         Ok(Response::from_wire(wire))
     }
 
+    /// [`Client::send`] for async tools: awaits the round-trip instead of
+    /// blocking the worker it runs on.
+    pub async fn send_async(&self, req: Request) -> Result<Response> {
+        let wire = capsink::http_request_async(&req.to_wire()).await?;
+        Ok(Response::from_wire(wire))
+    }
+
     /// Send a request and return an orca-owned [`ByteStream`] over the response
     /// body — the body is NOT buffered host-side. Routes over the `http.stream`
     /// capability. Use for large downloads and long-lived feeds. Errors if no
@@ -642,6 +649,17 @@ mod tests {
         let resp = resp.unwrap();
         assert_eq!(resp.status, 200);
         assert_eq!(resp.text(), "pong");
+    }
+
+    #[test]
+    fn send_async_routes_through_cap_sink() {
+        let sink = Box::new(|_cap: &str, _op: &str| {
+            Ok::<String, String>(r#"{"status":202,"headers":[],"body":[]}"#.into())
+        });
+        let resp = capsink::with_cap_sink(sink, || {
+            crate::reactor::block_on(Client::new().send_async(Request::new("GET", "http://h/")))
+        });
+        assert_eq!(resp.unwrap().status, 202);
     }
 
     #[test]
