@@ -690,6 +690,51 @@ mod tests {
         assert_eq!(active_sessions(&conn, "u1"), 1);
     }
 
+    fn allowed_roles(conn: &Connection) -> Vec<String> {
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let start = sql.find("CHECK (role IN (").unwrap() + "CHECK (role IN (".len();
+        let end = start + sql[start..].find(')').unwrap();
+        sql[start..end]
+            .split(',')
+            .map(|r| r.trim().trim_matches('\'').to_string())
+            .collect()
+    }
+
+    #[test]
+    fn demotion_trigger_ranks_match_role_rank() {
+        let roles = allowed_roles(&test_conn());
+        assert!(roles.len() > 1);
+        for from in &roles {
+            for to in &roles {
+                let conn = test_conn();
+                insert(&conn, "u1", "alice", "h", from, "t0").unwrap();
+                seed_credentials(&conn, "u1");
+                conn.execute("UPDATE users SET role = ?1 WHERE id = 'u1'", params![to])
+                    .unwrap();
+                let demoted = contract::roles::role_rank(to) < contract::roles::role_rank(from);
+                let admin_kept = !demoted
+                    || contract::roles::role_rank(to) >= contract::roles::role_rank("admin");
+                let expected_tokens: Vec<String> = if admin_kept {
+                    vec!["admin".into(), "read".into()]
+                } else {
+                    vec!["read".into()]
+                };
+                assert_eq!(token_roles(&conn, "u1"), expected_tokens, "{from} -> {to}");
+                assert_eq!(
+                    active_sessions(&conn, "u1"),
+                    i64::from(!demoted),
+                    "{from} -> {to}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn replicated_role_write_applies_the_same_revocation() {
         let conn = test_conn();
