@@ -324,6 +324,12 @@ impl Client {
         }
     }
 
+    /// Build the pool for `insecure` without sending, bounded by the client's
+    /// own build wait rather than any request's timeout.
+    pub(crate) async fn ready(&self, insecure: bool) -> Result<(), HttpError> {
+        self.pool(insecure, None).await.map(drop)
+    }
+
     async fn pool(
         &self,
         insecure: bool,
@@ -1189,30 +1195,31 @@ fn flatten_headers(h: &reqwest::header::HeaderMap) -> HashMap<String, String> {
 }
 
 #[cfg(test)]
+/// The build thread blocks until the returned sender sends or drops;
+/// `Notify` fires once the outcome is published.
+pub(crate) fn gated_client(
+    build_wait: Option<Duration>,
+) -> (
+    Client,
+    std::sync::mpsc::Sender<()>,
+    Arc<tokio::sync::Notify>,
+) {
+    let (gate, gate_rx) = std::sync::mpsc::channel();
+    let done = Arc::new(tokio::sync::Notify::new());
+    let mut b = Client::builder();
+    b.config.build_gate = Some(Arc::new(std::sync::Mutex::new(gate_rx)));
+    b.config.build_done = Some(Arc::clone(&done));
+    if let Some(wait) = build_wait {
+        b.config.build_wait = wait;
+    }
+    (b.build(), gate, done)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    /// The build thread blocks until the returned sender sends or drops;
-    /// `Notify` fires once the outcome is published.
-    fn gated_client(
-        build_wait: Option<Duration>,
-    ) -> (
-        Client,
-        std::sync::mpsc::Sender<()>,
-        Arc<tokio::sync::Notify>,
-    ) {
-        let (gate, gate_rx) = std::sync::mpsc::channel();
-        let done = Arc::new(tokio::sync::Notify::new());
-        let mut b = Client::builder();
-        b.config.build_gate = Some(Arc::new(std::sync::Mutex::new(gate_rx)));
-        b.config.build_done = Some(Arc::clone(&done));
-        if let Some(wait) = build_wait {
-            b.config.build_wait = wait;
-        }
-        (b.build(), gate, done)
-    }
 
     fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         struct Unpark(std::thread::Thread);
