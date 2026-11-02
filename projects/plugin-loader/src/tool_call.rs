@@ -218,7 +218,7 @@ pub(crate) fn prepare(
     }
     ctx.set_verified_caller(Some(caller.clone()));
     ctx.set_caller(Some(caller));
-    ctx.set_unbound_role(None);
+    ctx.set_unbound(false);
     ctx.set_second_factor(false);
     ctx.set_owner_cli(false);
     ctx.set_local_transport(false);

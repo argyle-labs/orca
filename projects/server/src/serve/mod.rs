@@ -677,9 +677,9 @@ async fn mcp_jsonrpc_handler(
     let mut tool_ctx = crate::mcp::build_tool_ctx(cfg.clone());
     tool_ctx.set_local_transport(false);
     tool_ctx.set_second_factor(false);
-    if let Some(axum::Extension(u)) = unbound {
+    if unbound.is_some() {
         tool_ctx.set_caller(None);
-        tool_ctx.set_unbound_role(Some(u.role));
+        tool_ctx.set_unbound(true);
     }
     if let Some(axum::Extension(c)) = caller {
         tool_ctx.set_verified_caller(Some(c.clone()));
