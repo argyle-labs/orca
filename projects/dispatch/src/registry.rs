@@ -34,8 +34,8 @@ use axum::{
 #[cfg(feature = "server")]
 pub const PEER_HEADER: &str = "x-orca-peer";
 
-/// Request extension marking an authenticated request with no resolvable
-/// user (a legacy or orphaned token). Such a request must never borrow the
+/// Marker request extension: the request authenticated with a token that
+/// resolves to no user, so it carries no role. It must never borrow the
 /// ctx's ambient host-operator identity, which is an admin.
 #[cfg(feature = "server")]
 #[derive(Clone, Debug)]
