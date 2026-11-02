@@ -234,9 +234,17 @@ pub fn invoke_on<S: Read + Write>(
                 };
             }
             Frame::Cap {
+                invoke: Some(other),
+                cap,
+                ..
+            } if other != id => {
+                bail!("capability '{cap}' for invoke {other} arrived during invoke {id}");
+            }
+            Frame::Cap {
                 id: cap_id,
                 cap,
                 args,
+                ..
             } if capability::is_streaming_cap(&cap) => {
                 // Streaming capability: relay each chunk as a CapStreamChunk as it
                 // is produced, then terminate with a CapStreamEnd. The chunk sink
@@ -290,6 +298,7 @@ pub fn invoke_on<S: Read + Write>(
                 id: cap_id,
                 cap,
                 args,
+                ..
             } => {
                 let result = if cap == capability::API_CALL {
                     capability::handle_api_call(args, principal, inv)
@@ -1323,6 +1332,7 @@ mod tests {
                     id: 99,
                     cap: "does.not.exist".into(),
                     args: Value::Null,
+                    invoke: None,
                 },
             )
             .unwrap();
@@ -1352,6 +1362,35 @@ mod tests {
         let out = invoke_on(&mut orca_end, 42, "work", Value::Null, None, "p").unwrap();
         assert_eq!(out, json!({"done": true}));
         plugin.join().unwrap();
+    }
+
+    #[test]
+    fn a_cap_for_another_invoke_is_rejected() {
+        let (plugin_end, mut orca_end) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || {
+            let mut s = plugin_end;
+            let _ = read_frame(&mut s).unwrap().unwrap();
+            write_frame(
+                &mut s,
+                &Frame::Cap {
+                    id: 0,
+                    cap: "db.op".into(),
+                    args: Value::Null,
+                    invoke: Some(41),
+                },
+            )
+            .unwrap();
+            s
+        });
+        let err = invoke_on(&mut orca_end, 42, "work", Value::Null, None, "p").unwrap_err();
+        assert!(!err.is::<ToolFailed>(), "session must not stay healthy");
+        assert!(err.to_string().contains("for invoke 41"), "{err:#}");
+        drop(plugin.join().unwrap());
+        assert_eq!(
+            read_frame(&mut orca_end).unwrap(),
+            None,
+            "no CapResult written"
+        );
     }
 
     #[test]
@@ -1407,6 +1446,7 @@ mod tests {
                     id: 9,
                     cap: capability::API_CALL.into(),
                     args: call,
+                    invoke: None,
                 },
             )
             .unwrap();
@@ -1489,6 +1529,7 @@ mod tests {
                     cap: "http.stream".into(),
                     // Not a valid HttpStreamRequest -> parse error.
                     args: json!("not an object"),
+                    invoke: None,
                 },
             )
             .unwrap();
@@ -1784,6 +1825,7 @@ mod tests {
                     id: 1,
                     cap: "http.stream".into(),
                     args: json!({ "method": "GET", "url": url }),
+                    invoke: None,
                 },
             )
             .unwrap();

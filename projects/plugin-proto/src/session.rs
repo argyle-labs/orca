@@ -25,6 +25,7 @@ use crate::{Frame, PROTOCOL_VERSION, ProtoError, protocol_compatible, read_frame
 pub struct Caps<'a, S: std::io::Read + std::io::Write> {
     stream: &'a mut S,
     next_id: &'a mut u64,
+    invoke: u64,
 }
 
 impl<S: std::io::Read + std::io::Write> Caps<'_, S> {
@@ -44,6 +45,7 @@ impl<S: std::io::Read + std::io::Write> Caps<'_, S> {
                 id,
                 cap: cap.to_string(),
                 args,
+                invoke: Some(self.invoke),
             },
         )
         .map_err(|e| format!("capability {cap}: send failed: {e}"))?;
@@ -99,6 +101,7 @@ impl<S: std::io::Read + std::io::Write> Caps<'_, S> {
                 id,
                 cap: cap.to_string(),
                 args,
+                invoke: Some(self.invoke),
             },
         )
         .map_err(|e| format!("capability {cap}: send failed: {e}"))?;
@@ -185,6 +188,7 @@ where
                     let mut caps = Caps {
                         stream: &mut stream,
                         next_id: &mut cap_id,
+                        invoke: id,
                     };
                     handler(&tool, args, &mut caps)
                 };
@@ -398,7 +402,13 @@ mod tests {
         )
         .unwrap();
         match read_frame(&mut orca).unwrap().unwrap() {
-            Frame::Cap { id, cap, args } => {
+            Frame::Cap {
+                id,
+                cap,
+                args,
+                invoke,
+            } => {
+                assert_eq!(invoke, Some(2));
                 assert_eq!(cap, "http.request");
                 assert_eq!(args, json!({"url": "x"}));
                 write_frame(

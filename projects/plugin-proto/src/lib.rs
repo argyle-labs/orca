@@ -200,11 +200,15 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_kind: Option<String>,
     },
-    /// plugin → orca: call a host capability. `id` is the plugin's request id.
+    /// plugin → orca: call a host capability. `id` is the plugin's request id;
+    /// `invoke` is the id of the [`Frame::Invoke`] the call serves, absent from
+    /// older plugins.
     Cap {
         id: u64,
         cap: String,
         args: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invoke: Option<u64>,
     },
     /// orca → plugin: result of a [`Frame::Cap`] with the matching `id`.
     CapResult {
@@ -451,6 +455,7 @@ mod tests {
             id: 1,
             cap: "http.request".into(),
             args: json!({"method": "GET", "url": "https://x"}),
+            invoke: Some(42),
         });
         roundtrip(&Frame::CapStreamChunk {
             id: 1,
