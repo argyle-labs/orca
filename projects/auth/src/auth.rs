@@ -270,6 +270,17 @@ fn compute_expires_at(base: utils::time::Timestamp, days: Option<u32>) -> Option
     })
 }
 
+/// A caller may only mint tokens at or below its own tier, otherwise a token
+/// becomes a privilege-escalation path.
+fn check_role_within_caller(requested: &str, caller_role: &str) -> anyhow::Result<()> {
+    if contract::roles::role_rank(requested) > contract::roles::role_rank(caller_role) {
+        anyhow::bail!(
+            "cannot mint a '{requested}' token: caller role '{caller_role}' allows at most '{caller_role}'"
+        );
+    }
+    Ok(())
+}
+
 /// [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is
 /// returned exactly once and cannot be recovered from the DB. Token only
 /// authenticates calls to this host's `:12000` — not to other peers.
@@ -279,6 +290,9 @@ async fn auth_token_create(
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<TokenCreateOutput> {
     validate_token_role(&args.role)?;
+    if let Some(caller) = ctx.relay_caller() {
+        check_role_within_caller(&args.role, &caller.role)?;
+    }
     let mut raw = [0u8; 16];
     rand::rng().fill_bytes(&mut raw);
     let (plaintext, token_hash) = mint_token(&raw);
@@ -680,6 +694,19 @@ async fn auth_logout(_args: LogoutArgs, _ctx: &contract::ToolCtx) -> anyhow::Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn user_caller_cannot_mint_admin_token() {
+        let err = super::check_role_within_caller("admin", "user").unwrap_err();
+        assert!(err.to_string().contains("'admin'"));
+        assert!(err.to_string().contains("'user'"));
+    }
+
+    #[test]
+    fn admin_caller_can_mint_admin_and_user_tokens() {
+        super::check_role_within_caller("admin", "admin").unwrap();
+        super::check_role_within_caller("user", "admin").unwrap();
+    }
+
     use super::*;
     use utils::time::Timestamp;
 
