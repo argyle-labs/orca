@@ -233,7 +233,7 @@ pub fn is_custody(tool: &str) -> bool {
     !is_remote_admin_safe(tool)
 }
 
-pub use contract::roles::{role_rank, satisfies};
+pub use contract::roles::{effective_role, role_rank, satisfies};
 
 pub fn second_factor_ok(requires_second_factor: bool, second_factor: bool) -> bool {
     !requires_second_factor || second_factor

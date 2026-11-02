@@ -705,16 +705,7 @@ fn custody_target<'a>(tool: &'a str, args: &'a Value) -> &'a str {
     }
 }
 
-use dispatch::tool_roles::role_rank;
-
-/// The lower-ranked of the replicated user role and the caller token's role.
-fn effective_role<'a>(user_role: &'a str, token_role: &'a str) -> &'a str {
-    if role_rank(token_role) < role_rank(user_role) {
-        token_role
-    } else {
-        user_role
-    }
-}
+use dispatch::tool_roles::effective_role;
 
 fn role_satisfies(role: &str, required: &str) -> bool {
     dispatch::tool_roles::satisfies(role, required)
@@ -1176,6 +1167,7 @@ fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dispatch::tool_roles::role_rank;
 
     #[test]
     fn a_relayed_invalid_args_error_stays_invalid_across_the_mesh() {

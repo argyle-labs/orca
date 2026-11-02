@@ -4324,6 +4324,7 @@ name = "orca-identities"
 version = "0.2.1-rc.21"
 dependencies = [
  "anyhow",
+ "orca-contract",
  "orca-db",
  "orca-derive",
  "orca-macro-runtime",

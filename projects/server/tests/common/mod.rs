@@ -43,6 +43,7 @@ impl IsolatedEnv {
     /// the dev fallback (proxy) but that path is never exercised by these tests
     /// — they only hit concrete registered routes.
     pub fn router(&self) -> Router {
+        dispatch::init().unwrap();
         orca::serve::build_router(true, self.db_path.clone())
     }
 }
@@ -99,6 +100,18 @@ pub fn mint_token_with(env: &IsolatedEnv, role: &str, can_mutate: bool) -> Strin
     let hash = utils::hash::sha256_hex(plaintext.as_bytes());
     let id = utils::id::new();
     let now = utils::time::now_rfc3339();
+    // An unbound token is refused every role-gated tool, so bind it to a user
+    // whose role does not cap the token's.
+    let user_id = utils::id::new();
+    identities::users::insert(
+        &conn,
+        &user_id,
+        &format!("tok-{user_id}"),
+        "x-hash",
+        "admin",
+        &now,
+    )
+    .unwrap();
     auth::api_tokens::insert(
         &conn,
         &id,
@@ -107,7 +120,7 @@ pub fn mint_token_with(env: &IsolatedEnv, role: &str, can_mutate: bool) -> Strin
         role,
         &now,
         None,
-        None,
+        Some(&user_id),
         can_mutate,
     )
     .unwrap();
