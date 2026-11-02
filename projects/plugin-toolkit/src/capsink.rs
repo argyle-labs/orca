@@ -6,20 +6,15 @@
 //! (`db.op` / `secret.op` / `http.request`) route their typed payload through it
 //! as a capability round-trip to orca.
 //!
-//! The sink is valid exactly while a tool is executing, so tool code deep in the
-//! call graph reaches the socket without threading a channel through every
-//! signature. Lookup order: the current thread's sink ([`with_cap_sink`]), then
-//! the process-wide sink ([`with_process_cap_sink`]) that a subprocess plugin's
-//! serve loop installs, so calls from `spawn_blocking` / spawned tasks / any other
-//! thread of the plugin reach it too. When neither is installed (in-process
-//! cdylib, or in-core `endpoint_resource!`) callers fall through to their FFI /
-//! pooled paths.
+//! Thread-local because a plugin's serve loop and its dispatch run on ONE thread,
+//! serially: the sink is valid exactly while a tool is executing, so tool code
+//! deep in the call graph reaches the socket without threading a channel through
+//! every signature. When no sink is installed (in-process cdylib, or in-core
+//! `endpoint_resource!`) callers fall through to their FFI / pooled paths.
 //!
 //! This module is dependency-light on purpose (serde_json + the ABI types only,
 //! no rusqlite): the delegated-HTTP shim reaches [`http_request`] without pulling
 //! the `db` feature.
-
-use std::sync::{Arc, RwLock};
 
 use anyhow::{Result, anyhow};
 
@@ -40,51 +35,11 @@ pub type CapStreamSink = Box<
     ) -> std::result::Result<(), String>,
 >;
 
-/// A [`CapSink`] callable from any thread, for [`with_process_cap_sink`].
-pub type SharedCapSink =
-    Arc<dyn Fn(&str, &str) -> std::result::Result<String, String> + Send + Sync>;
-
-/// A [`CapStreamSink`] callable from any thread, for [`with_process_cap_stream_sink`].
-pub type SharedCapStreamSink = Arc<
-    dyn Fn(
-            &str,
-            &str,
-            &mut dyn FnMut(u64, String) -> std::result::Result<(), String>,
-        ) -> std::result::Result<(), String>
-        + Send
-        + Sync,
->;
-
-// Thread-local `Some` overrides the process-wide caps core sent in `Welcome`.
 thread_local! {
-    static CORE_BODY_B64: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-    static CORE_NO_FOLLOW: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-    static CORE_PRIVILEGED: std::cell::RefCell<Option<Vec<String>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-static PROCESS_CORE_CAPS: RwLock<Vec<String>> = RwLock::new(Vec::new());
-
-const PRIVILEGED: [&str; 4] = [
-    crate::abi::LXC_EXEC,
-    crate::abi::LXC_PUSH,
-    crate::abi::PRIVILEGED_APPLY,
-    crate::abi::TOOL_CALL,
-];
-
-fn process_core_has(cap: &str) -> bool {
-    PROCESS_CORE_CAPS
-        .read()
-        .unwrap_or_else(|p| p.into_inner())
-        .iter()
-        .any(|c| c == cap)
-}
-
-/// Record the capabilities core advertised in `Welcome` for every thread of the
-/// process.
-#[cfg(all(feature = "tools", feature = "endpoints"))]
-pub(crate) fn set_process_core_caps(caps: &[String]) {
-    *PROCESS_CORE_CAPS.write().unwrap_or_else(|p| p.into_inner()) = caps.to_vec();
+    static CORE_BODY_B64: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CORE_NO_FOLLOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CORE_PRIVILEGED: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(any(
@@ -93,30 +48,23 @@ pub(crate) fn set_process_core_caps(caps: &[String]) {
     all(feature = "tools", feature = "endpoints")
 ))]
 pub(crate) fn set_core_privileged(caps: &[String]) {
-    let caps = caps
-        .iter()
-        .filter(|cap| PRIVILEGED.contains(&cap.as_str()))
-        .cloned()
-        .collect();
-    CORE_PRIVILEGED.with(|c| *c.borrow_mut() = Some(caps));
+    let privileged = [
+        crate::abi::LXC_EXEC,
+        crate::abi::LXC_PUSH,
+        crate::abi::PRIVILEGED_APPLY,
+        crate::abi::TOOL_CALL,
+    ];
+    CORE_PRIVILEGED.with(|c| {
+        *c.borrow_mut() = caps
+            .iter()
+            .filter(|cap| privileged.contains(&cap.as_str()))
+            .cloned()
+            .collect()
+    });
 }
 
 pub fn core_advertises(cap: &str) -> bool {
-    CORE_PRIVILEGED
-        .with(|c| c.borrow().as_ref().map(|v| v.iter().any(|c| c == cap)))
-        .unwrap_or_else(|| PRIVILEGED.contains(&cap) && process_core_has(cap))
-}
-
-fn core_body_b64() -> bool {
-    CORE_BODY_B64
-        .with(|c| c.get())
-        .unwrap_or_else(|| process_core_has(crate::abi::HTTP_BODY_B64))
-}
-
-fn core_no_follow() -> bool {
-    CORE_NO_FOLLOW
-        .with(|c| c.get())
-        .unwrap_or_else(|| process_core_has(crate::abi::HTTP_NO_FOLLOW))
+    CORE_PRIVILEGED.with(|c| c.borrow().iter().any(|c| c == cap))
 }
 
 /// Run a privileged capability through core when core advertises `cap` and a
@@ -137,7 +85,7 @@ pub(crate) fn privileged_route(
     all(feature = "tools", feature = "endpoints")
 ))]
 pub(crate) fn set_core_body_b64(on: bool) {
-    CORE_BODY_B64.with(|c| c.set(Some(on)));
+    CORE_BODY_B64.with(|c| c.set(on));
 }
 
 #[cfg(any(
@@ -146,17 +94,17 @@ pub(crate) fn set_core_body_b64(on: bool) {
     all(feature = "tools", feature = "endpoints")
 ))]
 pub(crate) fn set_core_no_follow(on: bool) {
-    CORE_NO_FOLLOW.with(|c| c.set(Some(on)));
+    CORE_NO_FOLLOW.with(|c| c.set(on));
 }
 
 #[cfg(any(test, feature = "testing"))]
 pub fn with_core_caps<R>(caps: &[&str], body: impl FnOnce() -> R) -> R {
-    struct Restore(Option<bool>, Option<bool>, Option<Vec<String>>);
+    struct Restore(bool, bool, Vec<String>);
     impl Drop for Restore {
         fn drop(&mut self) {
-            CORE_BODY_B64.with(|c| c.set(self.0));
-            CORE_NO_FOLLOW.with(|c| c.set(self.1));
-            CORE_PRIVILEGED.with(|c| *c.borrow_mut() = self.2.take());
+            set_core_body_b64(self.0);
+            set_core_no_follow(self.1);
+            set_core_privileged(&self.2);
         }
     }
     let _restore = Restore(
@@ -172,7 +120,7 @@ pub fn with_core_caps<R>(caps: &[&str], body: impl FnOnce() -> R) -> R {
 }
 
 fn request_wire(req: &HttpRequest) -> Result<String> {
-    Ok(if core_body_b64() {
+    Ok(if CORE_BODY_B64.with(|c| c.get()) {
         serde_json::to_string(req)?
     } else {
         serde_json::to_string(&req.legacy())?
@@ -184,43 +132,6 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     static CAP_STREAM_SINK: std::cell::RefCell<Option<CapStreamSink>> =
         const { std::cell::RefCell::new(None) };
-}
-
-static PROCESS_SINK: RwLock<Option<SharedCapSink>> = RwLock::new(None);
-static PROCESS_STREAM_SINK: RwLock<Option<SharedCapStreamSink>> = RwLock::new(None);
-
-fn swap_process<T>(slot: &RwLock<Option<T>>, value: Option<T>) -> Option<T> {
-    std::mem::replace(&mut *slot.write().unwrap_or_else(|p| p.into_inner()), value)
-}
-
-fn process_slot<T: Clone>(slot: &RwLock<Option<T>>) -> Option<T> {
-    slot.read().unwrap_or_else(|p| p.into_inner()).clone()
-}
-
-/// Install `sink` for every thread of the process for the duration of `body`,
-/// then restore the previous one (even on panic). A thread-local sink from
-/// [`with_cap_sink`] still takes precedence on its own thread.
-pub fn with_process_cap_sink<R>(sink: SharedCapSink, body: impl FnOnce() -> R) -> R {
-    struct Restore(Option<SharedCapSink>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            swap_process(&PROCESS_SINK, self.0.take());
-        }
-    }
-    let _restore = Restore(swap_process(&PROCESS_SINK, Some(sink)));
-    body()
-}
-
-/// The streaming counterpart of [`with_process_cap_sink`].
-pub fn with_process_cap_stream_sink<R>(sink: SharedCapStreamSink, body: impl FnOnce() -> R) -> R {
-    struct Restore(Option<SharedCapStreamSink>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            swap_process(&PROCESS_STREAM_SINK, self.0.take());
-        }
-    }
-    let _restore = Restore(swap_process(&PROCESS_STREAM_SINK, Some(sink)));
-    body()
 }
 
 /// Install `sink` for the current thread, run `body`, then restore the previous
@@ -240,29 +151,12 @@ pub fn with_cap_sink<R>(sink: CapSink, body: impl FnOnce() -> R) -> R {
 
 /// Route one op through the installed capability sink. `Some(_)` in subprocess
 /// mode; `None` when no sink is installed (fall through to FFI / in-core).
-/// Blocks the calling thread for the round-trip; async code uses
-/// [`cap_route_async`].
 pub(crate) fn cap_route(cap: &str, op_json: &str) -> Option<Result<String>> {
-    let local = CAP_SINK.with(|c| c.borrow_mut().as_mut().map(|sink| sink(cap, op_json)));
-    local
-        .or_else(|| process_slot(&PROCESS_SINK).map(|sink| sink(cap, op_json)))
-        .map(|r| r.map_err(|e| anyhow!("capability {cap}: {e}")))
-}
-
-/// [`cap_route`] without blocking an async worker: the process-wide sink's
-/// round-trip runs on the blocking pool. A thread-local sink is not `Send`, so it
-/// runs inline.
-pub(crate) async fn cap_route_async(cap: &str, op_json: String) -> Option<Result<String>> {
-    if CAP_SINK.with(|c| c.borrow().is_some()) {
-        return cap_route(cap, &op_json);
-    }
-    let sink = process_slot(&PROCESS_SINK)?;
-    let name = cap.to_string();
-    let reply = tokio::task::spawn_blocking(move || sink(&name, &op_json))
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|r| r);
-    Some(reply.map_err(|e| anyhow!("capability {cap}: {e}")))
+    CAP_SINK.with(|c| {
+        c.borrow_mut()
+            .as_mut()
+            .map(|sink| sink(cap, op_json).map_err(|e| anyhow!("capability {cap}: {e}")))
+    })
 }
 
 /// Install a streaming sink for the current thread for the duration of `body`,
@@ -288,14 +182,11 @@ pub(crate) fn cap_route_stream(
     op_json: &str,
     on_chunk: &mut dyn FnMut(u64, String) -> std::result::Result<(), String>,
 ) -> Option<Result<()>> {
-    let local = CAP_STREAM_SINK.with(|c| {
+    CAP_STREAM_SINK.with(|c| {
         c.borrow_mut()
             .as_mut()
-            .map(|sink| sink(cap, op_json, &mut *on_chunk))
-    });
-    local
-        .or_else(|| process_slot(&PROCESS_STREAM_SINK).map(|sink| sink(cap, op_json, on_chunk)))
-        .map(|r| r.map_err(|e| anyhow!("capability {cap}: {e}")))
+            .map(|sink| sink(cap, op_json, on_chunk).map_err(|e| anyhow!("capability {cap}: {e}")))
+    })
 }
 
 /// Perform an HTTP request through orca's runtime instead of a plugin-local
@@ -310,27 +201,13 @@ pub(crate) fn cap_route_stream(
 /// socket. This is the seam the delegated-HTTP shim (and Phase B'd progenitor
 /// clients) execute through.
 pub fn http_request(req: &HttpRequest) -> Result<HttpResponse> {
-    http_reply(cap_route("http.request", &http_op(req)?))
-}
-
-/// [`http_request`] for async code: awaits the round-trip instead of blocking
-/// the worker it runs on.
-pub async fn http_request_async(req: &HttpRequest) -> Result<HttpResponse> {
-    http_reply(cap_route_async("http.request", http_op(req)?).await)
-}
-
-fn http_op(req: &HttpRequest) -> Result<String> {
-    if req.follow_redirects == Some(false) && !core_no_follow() {
+    if req.follow_redirects == Some(false) && !CORE_NO_FOLLOW.with(|c| c.get()) {
         return Err(anyhow!(
             "http.request: follow_redirects=false needs a core advertising {}; upgrade orca",
             crate::abi::HTTP_NO_FOLLOW
         ));
     }
-    request_wire(req)
-}
-
-fn http_reply(routed: Option<Result<String>>) -> Result<HttpResponse> {
-    match routed {
+    match cap_route("http.request", &request_wire(req)?) {
         Some(reply_json) => Ok(serde_json::from_str(&reply_json?)?),
         None => Err(anyhow!(
             "http.request capability unavailable: this plugin is not running as an orca subprocess"
@@ -460,18 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn http_request_async_routes_through_sink() {
-        let out = with_cap_sink(
-            Box::new(|cap: &str, _: &str| {
-                assert_eq!(cap, "http.request");
-                Ok(r#"{"status":201,"headers":[],"body":[]}"#.to_string())
-            }),
-            || crate::reactor::block_on(http_request_async(&post(b""))),
-        );
-        assert_eq!(out.unwrap().status, 201);
-    }
-
-    #[test]
     fn privileged_route_needs_the_advertised_cap_and_a_sink() {
         let sink = || -> CapSink {
             Box::new(|cap: &str, _: &str| {
@@ -557,8 +422,8 @@ mod tests {
     #[test]
     fn nested_with_core_caps_restores_outer_scope() {
         use crate::abi::{HTTP_BODY_B64, HTTP_NO_FOLLOW, LXC_EXEC, TOOL_CALL};
-        let no_follow = core_no_follow;
-        let body_b64 = core_body_b64;
+        let no_follow = || CORE_NO_FOLLOW.with(|c| c.get());
+        let body_b64 = || CORE_BODY_B64.with(|c| c.get());
         with_core_caps(&[HTTP_NO_FOLLOW, TOOL_CALL], || {
             with_core_caps(&[HTTP_BODY_B64, LXC_EXEC], || {
                 assert!(body_b64() && !no_follow());
