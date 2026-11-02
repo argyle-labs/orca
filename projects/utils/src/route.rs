@@ -303,16 +303,29 @@ impl<'a> IntoIterator for &'a Routes {
     }
 }
 
+/// Budget for the probe request itself; the shared client's first build is
+/// awaited beforehand so a slow build (macOS proxy read) never counts against it.
+#[cfg(feature = "http")]
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Probe a base URL: any HTTP response (even 401/404) proves the host is
 /// reachable; only a transport error (connect refused, DNS failure, timeout)
 /// counts as down — which lets resolution survive a broken DNS path by falling
 /// through to a raw-IP route.
 #[cfg(feature = "http")]
 pub async fn probe_http(url: &str, insecure: bool) -> bool {
-    match crate::http::shared()
+    probe_with(crate::http::shared(), url, insecure).await
+}
+
+#[cfg(feature = "http")]
+async fn probe_with(client: &crate::http::Client, url: &str, insecure: bool) -> bool {
+    if client.ready(insecure).await.is_err() {
+        return false;
+    }
+    match client
         .get(url)
         .insecure(insecure)
-        .timeout(std::time::Duration::from_secs(3))
+        .timeout(PROBE_TIMEOUT)
         .send()
         .await
     {
@@ -346,6 +359,10 @@ where
         anyhow::bail!(
             "endpoint '{key}' has no enabled URL-addressable routes; register one with `--route kind=scheme://value[:port]`"
         );
+    }
+    // One route leaves nothing to choose; the request's own error is the answer.
+    if let [(url, _)] = candidates.as_slice() {
+        return Ok(url.clone());
     }
 
     let cached = last_good().lock().ok().and_then(|m| m.get(key).cloned());
@@ -495,10 +512,51 @@ mod tests {
 
     #[test]
     fn resolve_all_down_lists_tried_paths() {
-        let routes = vec![Route::new("lan_v4", "http", "10.0.0.1", Some(1))];
+        let routes = vec![
+            Route::new("lan_v4", "http", "10.0.0.1", Some(1)),
+            Route::new("fqdn", "https", "x.example.com", None),
+        ];
         let err = block_on(resolve_reachable("down", &routes, |_| async { false }))
             .unwrap_err()
             .to_string();
         assert!(err.contains("lan_v4=http://10.0.0.1:1"), "got: {err}");
+        assert!(err.contains("fqdn=https://x.example.com"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_single_route_skips_the_probe() {
+        let routes = vec![Route::new("lan_v4", "http", "10.0.0.1", Some(1))];
+        let url = block_on(resolve_reachable("single", &routes, |_| async {
+            panic!("a single route must not be probed")
+        }))
+        .unwrap();
+        assert_eq!(url, "http://10.0.0.1:1");
+    }
+
+    #[cfg(feature = "http")]
+    #[tokio::test(start_paused = true)]
+    async fn probe_budget_excludes_a_slow_client_build() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let (client, gate, done) = crate::http::gated_client(Some(PROBE_TIMEOUT * 10));
+        let url = server.uri();
+        let mut probe = std::pin::pin!(probe_with(&client, &url, false));
+        let poll = |cx: &mut std::task::Context<'_>| {
+            std::task::Poll::Ready(probe.as_mut().poll(cx).is_pending())
+        };
+        let mut poll = poll;
+        assert!(std::future::poll_fn(&mut poll).await, "build is gated");
+        tokio::time::advance(PROBE_TIMEOUT * 2).await;
+        assert!(
+            std::future::poll_fn(&mut poll).await,
+            "a build outlasting the probe budget is still awaited"
+        );
+        gate.send(()).unwrap();
+        done.notified().await;
+        tokio::time::resume();
+        assert!(probe.await);
     }
 }
