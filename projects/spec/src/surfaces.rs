@@ -511,7 +511,7 @@ async fn run(
         None => None,
     };
     let base = utils::route::resolve_reachable(&route_key, &routes, |url| async move {
-        utils::route::probe_http(&url, insecure).await
+        probe(&url, insecure).await
     })
     .await?;
     let req = surface.build_request_with(op, &base, &args, secret.as_deref(), &columns)?;
@@ -541,6 +541,21 @@ async fn run(
     surface
         .decode_response(op, &resp.body)
         .map(Outcome::Response)
+}
+
+// Tests own their upstream, so the probe (capped at 3s including the shared
+// client's first build) only adds a load-sensitive failure mode.
+#[cfg(test)]
+tokio::task_local! {
+    static ASSUME_REACHABLE: ();
+}
+
+async fn probe(url: &str, insecure: bool) -> bool {
+    #[cfg(test)]
+    if ASSUME_REACHABLE.try_with(|_| ()).is_ok() {
+        return true;
+    }
+    utils::route::probe_http(url, insecure).await
 }
 
 fn endpoint_row(plugin: &str, binding: &EndpointBinding, endpoint: &str) -> Result<DbRow> {
@@ -814,7 +829,9 @@ mod tests {
 
     async fn in_temp_db<F: std::future::Future>(f: F) -> F::Output {
         let dir = tempfile::tempdir().unwrap();
-        db::with_db_path(dir.path().join("orca.db"), f).await
+        super::ASSUME_REACHABLE
+            .scope((), db::with_db_path(dir.path().join("orca.db"), f))
+            .await
     }
 
     #[test]
