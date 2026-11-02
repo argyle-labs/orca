@@ -1,4 +1,4 @@
--- Ranks mirror dispatch::tool_roles::role_rank. api_tokens.role is only
+-- Ranks mirror contract::roles::role_rank. api_tokens.role is only
 -- 'admin' or 'read', and no token tier matches 'user', so outranking admin
 -- tokens are deleted rather than silently rewritten to 'read'.
 CREATE TRIGGER IF NOT EXISTS users_demotion_revokes_credentials

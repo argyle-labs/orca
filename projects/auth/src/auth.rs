@@ -275,7 +275,7 @@ fn compute_expires_at(base: utils::time::Timestamp, days: Option<u32>) -> Option
 fn check_role_within_caller(requested: &str, caller_role: &str) -> anyhow::Result<()> {
     if contract::roles::role_rank(requested) > contract::roles::role_rank(caller_role) {
         anyhow::bail!(
-            "cannot mint a '{requested}' token: caller role '{caller_role}' allows at most '{caller_role}'"
+            "cannot mint a '{requested}' token: it outranks the caller's role '{caller_role}'"
         );
     }
     Ok(())
