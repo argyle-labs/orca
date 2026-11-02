@@ -657,9 +657,7 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
                     req.extensions_mut().insert(c);
                 }
                 None => {
-                    req.extensions_mut().insert(dispatch::UnboundCaller {
-                        role: ident.role.clone(),
-                    });
+                    req.extensions_mut().insert(dispatch::UnboundCaller);
                 }
             }
             req.extensions_mut().insert(ident);
