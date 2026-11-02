@@ -1800,7 +1800,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(""))
             .mount(&server)
             .await;
-        let r = Client::new()
+        let client = Client::new();
+        client.ready(true).await.unwrap();
+        let r = client
             .get(format!("{}/x", server.uri()))
             .insecure(true)
             .timeout(Duration::from_secs(5))
