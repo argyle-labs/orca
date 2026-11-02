@@ -6,11 +6,11 @@
 //! services through the capability sink ([`crate::runtime::with_cap_sink`]) — HTTP
 //! stays in-process for now (see the reqwest-shedding follow-up).
 //!
-//! ## Single-thread by design
+//! ## Socket-owning thread
 //!
-//! The loop drives tool futures on a **current-thread** tokio runtime so a tool's
-//! `db_op`/`secret_op` (which read the thread-local cap sink) run on the same
-//! thread that owns the socket. Combined with orca's serial-dispatch contract
+//! The loop drives each tool future to completion with the shared reactor's
+//! `block_on` on the thread that owns the socket, so a tool's
+//! `db_op`/`secret_op` (which read the thread-local cap sink) run on that thread. Combined with orca's serial-dispatch contract
 //! (one `Invoke` in flight per plugin), the socket needs no locking beyond the
 //! `RefCell` that lets the loop and the cap round-trip share it.
 #![cfg(all(feature = "tools", feature = "endpoints"))]
@@ -299,8 +299,12 @@ fn serve_session<S: Read + Write + 'static>(
     // this thread, so `db_op`/`secret_op` reach the thread-local sink. ──
     let base_ctx = minimal_ctx();
     let cap_id = Rc::new(Cell::new(0u64));
+    let desync = Rc::new(Cell::new(false));
 
     loop {
+        if desync.get() {
+            bail!("protocol desync: a capability round-trip read a non-capability frame");
+        }
         let frame = read_frame(&mut *stream.borrow_mut())?;
         let Some(frame) = frame else { break }; // clean EOF
         match frame {
@@ -313,8 +317,13 @@ fn serve_session<S: Read + Write + 'static>(
             } => {
                 let beating = heartbeat.as_ref().map(Heartbeat::busy);
                 let ctx = invoke_ctx(&base_ctx, caller, call_chain);
-                let sink = cap_sink(&stream, &cap_id);
-                let stream_sink = cap_stream_sink(&stream, &cap_id);
+                let cap = CapScope {
+                    invoke: id,
+                    live: Rc::new(Cell::new(true)),
+                    desync: Rc::clone(&desync),
+                };
+                let sink = cap_sink(&stream, &cap_id, &cap);
+                let stream_sink = cap_stream_sink(&stream, &cap_id, &cap);
                 let result = with_cap_sink(sink, || {
                     with_cap_stream_sink(stream_sink, || {
                         // Hybrid arm first (mirrors the cdylib `invoke`): a bespoke
@@ -352,6 +361,10 @@ fn serve_session<S: Read + Write + 'static>(
                     })
                 });
                 drop(beating);
+                cap.live.set(false);
+                if desync.get() {
+                    continue;
+                }
                 let reply = match result {
                     Ok(value) => Frame::Result {
                         id,
@@ -377,7 +390,6 @@ fn serve_session<S: Read + Write + 'static>(
                 )?;
             }
             Frame::Shutdown => break,
-            // Stray frames outside an active capability round-trip — ignore.
             _ => {}
         }
     }
@@ -502,27 +514,60 @@ fn invoke_ctx(base: &ToolCtx, caller: Option<VerifiedCaller>, call_chain: Vec<St
     ctx
 }
 
+/// The invoke a capability sink serves.
+#[derive(Clone)]
+struct CapScope {
+    invoke: u64,
+    /// Cleared before the invoke's `Result` is written.
+    live: Rc<Cell<bool>>,
+    desync: Rc<Cell<bool>>,
+}
+
+impl CapScope {
+    fn check(&self, cap: &str) -> std::result::Result<(), String> {
+        if self.live.get() {
+            Ok(())
+        } else {
+            Err(format!(
+                "capability {cap} called after its invoke {} ended",
+                self.invoke
+            ))
+        }
+    }
+
+    /// The reader consumed a frame meant for the serve loop, so the session can
+    /// no longer be trusted.
+    fn desynced(&self, cap: &str, frame: &Frame) -> String {
+        self.desync.set(true);
+        format!("capability {cap}: protocol error: unexpected {frame:?} mid-capability")
+    }
+}
+
 /// Build the capability sink for one `Invoke`: a closure that performs a
 /// `Cap → CapResult` round-trip on the shared socket. `db_op`/`secret_op` reach
 /// it through the thread-local installed by [`with_cap_sink`].
 fn cap_sink<S: Read + Write + 'static>(
     stream: &Rc<std::cell::RefCell<S>>,
     cap_id: &Rc<Cell<u64>>,
+    scope: &CapScope,
 ) -> CapSink {
     let stream = Rc::clone(stream);
     let cap_id = Rc::clone(cap_id);
+    let scope = scope.clone();
     Box::new(move |cap: &str, op_json: &str| {
         let args: Value = serde_json::from_str(op_json)
             .map_err(|e| format!("capability {cap}: bad op json: {e}"))?;
+        let mut s = stream.borrow_mut();
+        scope.check(cap)?;
         let id = cap_id.get();
         cap_id.set(id.wrapping_add(1));
-        let mut s = stream.borrow_mut();
         write_frame(
             &mut *s,
             &Frame::Cap {
                 id,
                 cap: cap.to_string(),
                 args,
+                invoke: Some(scope.invoke),
             },
         )
         .map_err(|e| format!("capability {cap}: send: {e}"))?;
@@ -544,8 +589,14 @@ fn cap_sink<S: Read + Write + 'static>(
                         Err(error.unwrap_or_else(|| format!("capability {cap} failed")))
                     };
                 }
-                Some(Frame::Shutdown) => return Err(format!("capability {cap}: shutdown")),
-                Some(_) => continue,
+                // Leftovers of an earlier, abandoned stream are capability traffic.
+                Some(
+                    Frame::Log { .. }
+                    | Frame::CapResult { .. }
+                    | Frame::CapStreamChunk { .. }
+                    | Frame::CapStreamEnd { .. },
+                ) => continue,
+                Some(other) => return Err(scope.desynced(cap, &other)),
                 None => return Err(format!("capability {cap}: connection closed")),
             }
         }
@@ -559,24 +610,28 @@ fn cap_sink<S: Read + Write + 'static>(
 fn cap_stream_sink<S: Read + Write + 'static>(
     stream: &Rc<std::cell::RefCell<S>>,
     cap_id: &Rc<Cell<u64>>,
+    scope: &CapScope,
 ) -> CapStreamSink {
     let stream = Rc::clone(stream);
     let cap_id = Rc::clone(cap_id);
+    let scope = scope.clone();
     Box::new(
         move |cap: &str,
               op_json: &str,
               on_chunk: &mut dyn FnMut(u64, String) -> std::result::Result<(), String>| {
             let args: Value = serde_json::from_str(op_json)
                 .map_err(|e| format!("capability {cap}: bad op json: {e}"))?;
+            let mut s = stream.borrow_mut();
+            scope.check(cap)?;
             let id = cap_id.get();
             cap_id.set(id.wrapping_add(1));
-            let mut s = stream.borrow_mut();
             write_frame(
                 &mut *s,
                 &Frame::Cap {
                     id,
                     cap: cap.to_string(),
                     args,
+                    invoke: Some(scope.invoke),
                 },
             )
             .map_err(|e| format!("capability {cap}: send: {e}"))?;
@@ -594,8 +649,14 @@ fn cap_stream_sink<S: Read + Write + 'static>(
                             Err(error.unwrap_or_else(|| format!("capability {cap} stream failed")))
                         };
                     }
-                    Some(Frame::Shutdown) => return Err(format!("capability {cap}: shutdown")),
-                    Some(_) => continue,
+                    // Leftovers of an earlier, abandoned stream are capability traffic.
+                    Some(
+                        Frame::Log { .. }
+                        | Frame::CapResult { .. }
+                        | Frame::CapStreamChunk { .. }
+                        | Frame::CapStreamEnd { .. },
+                    ) => continue,
+                    Some(other) => return Err(scope.desynced(cap, &other)),
                     None => return Err(format!("capability {cap}: connection closed")),
                 }
             }
@@ -1010,5 +1071,103 @@ mod tests {
         assert!(surface_refs(&too_many[..MAX_API_SURFACES]).is_ok());
         let big: &'static [u8] = vec![b' '; MAX_API_SURFACE_BYTES + 1].leak();
         assert!(surface_refs(&[("big".into(), big)]).is_err());
+    }
+
+    fn cap_calling(tool: &str, _args: Value) -> Option<std::result::Result<Value, Value>> {
+        tool.strip_prefix("test.__be.")?;
+        Some(
+            match crate::capsink::cap_route("db.op", "{}").expect("sink installed") {
+                Ok(v) => Ok(Value::String(v)),
+                Err(e) => Err(Value::String(format!("{e:#}"))),
+            },
+        )
+    }
+
+    fn cap_plugin() -> (thread::JoinHandle<Result<()>>, UnixStream) {
+        let (plugin_end, mut orca) = UnixStream::pair().unwrap();
+        let plugin = thread::spawn(move || {
+            let mut s = spec();
+            s.backend_dispatch = Some(Box::new(cap_calling));
+            serve_session(plugin_end, s, None)
+        });
+        let _ = read_frame(&mut orca).unwrap().unwrap();
+        write_frame(
+            &mut orca,
+            &Frame::Welcome {
+                protocol: PROTOCOL_VERSION.into(),
+                capabilities: vec![],
+            },
+        )
+        .unwrap();
+        write_frame(
+            &mut orca,
+            &Frame::Invoke {
+                id: 7,
+                tool: "test.__be.go".into(),
+                args: Value::Null,
+                caller: None,
+                call_chain: Vec::new(),
+            },
+        )
+        .unwrap();
+        (plugin, orca)
+    }
+
+    #[test]
+    fn cap_frames_carry_the_invoke_id() {
+        let (plugin, mut orca) = cap_plugin();
+        let Frame::Cap { id, invoke, .. } = read_frame(&mut orca).unwrap().unwrap() else {
+            panic!("expected Cap")
+        };
+        assert_eq!(invoke, Some(7));
+        write_frame(
+            &mut orca,
+            &Frame::CapResult {
+                id,
+                ok: true,
+                value: json!(1),
+                error: None,
+                error_kind: None,
+            },
+        )
+        .unwrap();
+        match read_frame(&mut orca).unwrap().unwrap() {
+            Frame::Result { id, ok, .. } => assert!(id == 7 && ok),
+            f => panic!("expected Result, got {f:?}"),
+        }
+        write_frame(&mut orca, &Frame::Shutdown).unwrap();
+        plugin.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_non_capability_frame_mid_capability_ends_the_session() {
+        let (plugin, mut orca) = cap_plugin();
+        let Frame::Cap { .. } = read_frame(&mut orca).unwrap().unwrap() else {
+            panic!("expected Cap")
+        };
+        write_frame(&mut orca, &Frame::Shutdown).unwrap();
+        let err = plugin.join().unwrap().unwrap_err();
+        assert!(format!("{err:#}").contains("protocol desync"), "{err:#}");
+        assert_eq!(read_frame(&mut orca).unwrap(), None, "no Result written");
+    }
+
+    #[test]
+    fn sink_refuses_after_its_invoke_ended() {
+        let (plugin_end, mut orca) = UnixStream::pair().unwrap();
+        let stream = Rc::new(std::cell::RefCell::new(plugin_end));
+        let scope = CapScope {
+            invoke: 3,
+            live: Rc::new(Cell::new(false)),
+            desync: Rc::new(Cell::new(false)),
+        };
+        let cap_id = Rc::new(Cell::new(0));
+        let mut sink = cap_sink(&stream, &cap_id, &scope);
+        let err = sink("db.op", "{}").unwrap_err();
+        assert!(err.contains("called after its invoke 3 ended"), "{err}");
+        let mut stream_sink = cap_stream_sink(&stream, &cap_id, &scope);
+        let err = stream_sink("http.stream", "{}", &mut |_, _| Ok(())).unwrap_err();
+        assert!(err.contains("called after its invoke 3 ended"), "{err}");
+        drop((sink, stream_sink, stream));
+        assert_eq!(read_frame(&mut orca).unwrap(), None, "no Cap written");
     }
 }
