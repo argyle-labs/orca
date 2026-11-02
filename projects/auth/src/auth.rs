@@ -1313,6 +1313,70 @@ mod tests {
         .await;
     }
 
+    fn ctx_with_caller(role: &str) -> contract::ToolCtx {
+        let mut ctx = test_ctx();
+        ctx.set_verified_caller(Some(contract::CallerIdentity {
+            user_id: "u-1".into(),
+            username: "caller".into(),
+            role: role.into(),
+            can_mutate: false,
+        }));
+        ctx
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn token_create_refuses_role_above_verified_caller_before_db_write() {
+        use contract::OrcaTool;
+        let (_dir, path) = temp_db();
+        db::with_db_path(path, async {
+            let err = AuthTokenCreate::run(
+                TokenCreateArgs {
+                    name: "escalate".into(),
+                    role: "admin".into(),
+                    expires_in_days: None,
+                    can_mutate: false,
+                },
+                &ctx_with_caller("user"),
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(err.contains("cannot mint a 'admin' token"), "{err}");
+            let listed = AuthTokenList::run(TokenListArgs::default(), &test_ctx())
+                .await
+                .unwrap();
+            assert!(listed.tokens.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn token_create_allows_admin_verified_caller_to_mint_admin() {
+        use contract::OrcaTool;
+        let (_dir, path) = temp_db();
+        db::with_db_path(path, async {
+            let created = AuthTokenCreate::run(
+                TokenCreateArgs {
+                    name: "admin-tok".into(),
+                    role: "admin".into(),
+                    expires_in_days: None,
+                    can_mutate: false,
+                },
+                &ctx_with_caller("admin"),
+            )
+            .await
+            .unwrap();
+            let listed = AuthTokenList::run(TokenListArgs::default(), &test_ctx())
+                .await
+                .unwrap();
+            assert_eq!(listed.tokens.len(), 1);
+            assert_eq!(listed.tokens[0].id, created.id);
+            assert_eq!(listed.tokens[0].role, "admin");
+        })
+        .await;
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn token_create_expiry_is_persisted_and_future_dated() {
         use contract::OrcaTool;
