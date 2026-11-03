@@ -759,6 +759,8 @@ mod tests {
     #[cfg(unix)]
     const SURVIVOR_REPORTER: &str = r#"exec perl -MPOSIX -e 'pipe(R, W) or die; my $k = fork; die unless defined $k; if (!$k) { close W; POSIX::close(4); sysread(R, my $b, 1); POSIX::write(6, qq(survived\n), 9); exit } close R; POSIX::close(6); POSIX::write(4, qq($k\n), length qq($k\n)); POSIX::close(4); select(undef, undef, undef, undef)'"#;
 
+    /// Run under a paused clock: the pending blocking pid read inhibits
+    /// auto-advance, so the budget only elapses once the child reported ready.
     #[cfg(unix)]
     async fn grandchild_dies_after_timeout(run: impl AsyncFnOnce(Command) -> bool) {
         let dir = HolderDir::new("pgkill");
@@ -790,7 +792,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn status_within_kills_process_group_on_timeout() {
         grandchild_dies_after_timeout(async |cmd| {
             cmd.status_within(Duration::from_millis(300))
@@ -802,7 +804,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn output_within_kills_process_group_on_timeout() {
         grandchild_dies_after_timeout(async |cmd| {
             cmd.output_within(Duration::from_millis(300))
@@ -857,7 +859,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dropping_the_future_kills_the_group() {
         grandchild_dies_after_timeout(async |cmd| {
             tokio::time::timeout(
