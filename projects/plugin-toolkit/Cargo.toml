@@ -193,7 +193,7 @@ libc = { workspace = true }
 [dev-dependencies]
 # Rotation tests write real files and must not touch the operator's state dir.
 tempfile = { workspace = true }
-tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 wiremock = { workspace = true }
 rustls   = { workspace = true }
 utils    = { workspace = true, features = ["test-scope"] }
