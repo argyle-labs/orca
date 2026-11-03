@@ -292,7 +292,16 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
             // surface: `run_json` is the one path REST, MCP, CLI and mesh/exec
             // all funnel through, so a surface that mis-keys its own gate (an
             // encoded path, a missed re-check) still cannot reach the body.
-            // No caller means an in-process owner path with nothing to check.
+            // A token with no resolvable user has no role, so it reaches only
+            // `any` tools; otherwise no caller is an in-process owner path.
+            if ctx.unbound() && T::REQUIRED_ROLE != "any" {
+                return Err(contract::OrcaError::forbidden(format!(
+                    "{} requires role '{}'; a token with no resolvable user has no role",
+                    T::NAME,
+                    T::REQUIRED_ROLE
+                ))
+                .into());
+            }
             if let Some(caller) = ctx.caller()
                 && !crate::tool_roles::authorize(
                     &caller.role,
@@ -775,6 +784,33 @@ mod tests {
             .await
             .expect("ok");
         assert_eq!(v, serde_json::json!({"doubled": 42}));
+    }
+
+    #[tokio::test]
+    async fn run_json_refuses_unbound_ctx_role_gated_tools_only() {
+        let gated = ToolWrapper::<DoubleTool>(PhantomData);
+        let open = ToolWrapper::<ErrTool>(PhantomData);
+        let mut unbound = ctx();
+        unbound.set_caller(None);
+        unbound.set_unbound(true);
+        let err = gated
+            .run_json(serde_json::json!({"n": 1}), &unbound)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no resolvable user"), "got: {err}");
+        let err = open
+            .run_json(serde_json::json!({"n": 1}), &unbound)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "boom");
+
+        let mut owner = ctx();
+        owner.set_caller(None);
+        let v = gated
+            .run_json(serde_json::json!({"n": 1}), &owner)
+            .await
+            .expect("in-process owner passes");
+        assert_eq!(v, serde_json::json!({"doubled": 2}));
     }
 
     #[tokio::test]
