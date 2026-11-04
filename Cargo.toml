@@ -211,7 +211,7 @@ unicode-width = "0.2"
 utoipa-axum = "0.2"
 wiremock = "0.6"
 x509-parser = "0.18"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # Internal crates — declared once here; members use `x.workspace = true`.
 # The key is the flat import name; `package` is the published `orca-*` name.
