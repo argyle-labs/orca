@@ -451,6 +451,7 @@ pub fn mcp_definitions() -> Vec<Value> {
             "name": d.get("name").cloned().unwrap_or(Value::Null),
             "description": d.get("description").cloned().unwrap_or(Value::Null),
             "inputSchema": advertise_system(d.get("input_schema").cloned().unwrap_or(json!({ "type": "object" }))),
+            "execute_gated": d.get("execute_gated").and_then(Value::as_bool).unwrap_or(false),
         }));
     }
     // Merge the live, plugin-driven unit surface (unit.<kind>.<verb|action>),
@@ -1738,6 +1739,20 @@ mod tests {
     }
 
     #[test]
+    fn mcp_definitions_carry_execute_gated_for_plugin_tools() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
+        install_fake_plugin();
+        let defs = mcp_definitions();
+        let gate = |n: &str| {
+            defs.iter()
+                .find(|d| d["name"] == n)
+                .map(|d| d["execute_gated"].clone())
+        };
+        assert_eq!(gate(GATED_PLUGIN_TOOL), Some(json!(true)));
+        assert_eq!(gate(FAKE_PLUGIN_TOOL), Some(json!(false)));
+    }
+
+    #[test]
     fn role_table_is_consistent_with_required_role_lookup() {
         for (name, role) in role_table() {
             assert_eq!(required_role(name), Some(role));
@@ -1874,7 +1889,7 @@ mod tests {
                 Box::new(|| {
                     vec![
                         json!({ "name": FAKE_PLUGIN_TOOL }),
-                        json!({ "name": GATED_PLUGIN_TOOL }),
+                        json!({ "name": GATED_PLUGIN_TOOL, "execute_gated": true }),
                         json!({ "name": AWARE_PLUGIN_TOOL }),
                         json!({
                             "name": OWN_SYSTEM_TOOL,
