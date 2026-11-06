@@ -1081,7 +1081,10 @@ fn plugin_verb_args(verb_sub: &ArgMatches) -> Result<serde_json::Value> {
         .flatten()
         .copied()
         .unwrap_or(false);
-    if dry_run && let Some(obj) = args.as_object_mut() {
+    if dry_run {
+        let obj = args
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("--dry-run needs a JSON object payload"))?;
         obj.insert(contract::plan::DRY_RUN_FIELD.to_string(), true.into());
     }
     Ok(args)
@@ -2727,6 +2730,32 @@ mod tests {
         let m2 = root.get_matches_from(["orca", "dockge", "deploy", "k=2"]);
         let (_d2, _v2, leaf2) = walk_to_verb(&m2).unwrap();
         assert_eq!(build_unit_args(leaf2).unwrap()["k"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn plugin_verb_args_dry_run_fails_closed_on_non_object_body() {
+        let mut gated = plugin_op("garage", "update");
+        gated.execute_gated = true;
+        let mut root = Command::new("orca");
+        for c in plugin_verb_cli_commands_from(vec![gated]) {
+            root = root.subcommand(c);
+        }
+        let run = |json: &str| {
+            let m = root.clone().get_matches_from([
+                "orca",
+                "garage",
+                "update",
+                "--dry-run",
+                "--json",
+                json,
+            ]);
+            let (_d, _v, leaf) = walk_to_verb(&m).unwrap();
+            plugin_verb_args(leaf)
+        };
+        assert!(run("null").is_err());
+        assert!(run("[]").is_err());
+        assert_eq!(run("{}").unwrap()["dryRun"], true);
+        assert_eq!(run(r#"{"dryRun":false}"#).unwrap()["dryRun"], true);
     }
 
     #[test]
