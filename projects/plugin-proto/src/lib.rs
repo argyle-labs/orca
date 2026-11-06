@@ -52,6 +52,10 @@ pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 /// `ToolDef` that already crosses the FFI as a string, so porting is lossless.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolDef {
+    /// Stable UUIDv7 committed in the plugin's source; `None` from a plugin
+    /// that has not adopted tool ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     pub description: String,
     /// JSON Schema (Draft 2020-12) for the tool's args.
@@ -378,12 +382,23 @@ mod tests {
     }
 
     #[test]
+    fn tool_def_without_id_parses_and_omits_id_when_serialized() {
+        let old = json!({
+            "name": "x.y", "description": "", "input_schema": {}, "output_schema": {}
+        });
+        let def: ToolDef = serde_json::from_value(old).unwrap();
+        assert_eq!(def.id, None);
+        assert!(serde_json::to_value(&def).unwrap().get("id").is_none());
+    }
+
+    #[test]
     fn frames_roundtrip() {
         roundtrip(&Frame::Hello {
             protocol: "1.0".into(),
             plugin: "proxmox".into(),
             version: "0.1.1-rc.3".into(),
             manifest: vec![ToolDef {
+                id: Some("019a5c1e-7b3a-7c4d-8e2f-0123456789ab".into()),
                 name: "proxmox.get_facts".into(),
                 description: "host facts".into(),
                 input_schema: json!({"type": "object"}),

@@ -2481,6 +2481,17 @@ mod registry_tests {
     }
 
     #[test]
+    fn plugin_tools_id_migration_adds_then_drops_the_column() {
+        let has_id = |c: &Connection| c.prepare("SELECT id FROM plugin_tools").is_ok();
+        let conn = test_conn();
+        assert!(has_id(&conn));
+        migrate(&conn, MigrateDirection::Down, 1).unwrap();
+        assert!(!has_id(&conn));
+        migrate(&conn, MigrateDirection::Up, usize::MAX).unwrap();
+        assert!(has_id(&conn));
+    }
+
+    #[test]
     fn migrate_down_refuses_a_version_this_binary_cannot_revert() {
         // A version applied by a NEWER orca. Clearing its tracking row would leave
         // the tables as that binary shaped them while `db.detail` reports the older

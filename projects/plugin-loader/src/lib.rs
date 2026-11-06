@@ -1482,7 +1482,7 @@ fn install_tool_policies(software: &str, tools: &HashMap<String, ToolDef>) {
 /// the plugin's rows (used on unload). Best-effort: a DB failure here must
 /// not block the plugin from loading, since authz already went through.
 fn sync_tool_catalog(plugin_id: &str, tools: &HashMap<String, ToolDef>) {
-    let rows: Vec<(String, String, String, String)> = tools
+    let rows: Vec<db::plugin_tools::PluginToolDecl> = tools
         .values()
         .map(|d| {
             let schema = serde_json::to_string(&d.input_schema).unwrap_or_else(|_| "{}".into());
@@ -1496,6 +1496,7 @@ fn sync_tool_catalog(plugin_id: &str, tools: &HashMap<String, ToolDef>) {
                 d.description.clone(),
                 schema,
                 sensitivity.to_string(),
+                d.id.clone(),
             )
         })
         .collect();
@@ -1541,6 +1542,8 @@ pub struct LoadedPluginInfo {
     pub orca_compat: String,
     /// Sorted names of the tools this plugin registered.
     pub tools: Vec<String>,
+    /// Tool name -> committed id, for the tools that declare one.
+    pub tool_ids: HashMap<String, String>,
 }
 
 /// Summaries of every currently-loaded plugin, in load order. Drives
@@ -1552,12 +1555,18 @@ pub fn loaded_plugins() -> Vec<LoadedPluginInfo> {
         .map(|p| {
             let mut tools: Vec<String> = p.tools.keys().cloned().collect();
             tools.sort();
+            let tool_ids = p
+                .tools
+                .iter()
+                .filter_map(|(name, d)| d.id.clone().map(|id| (name.clone(), id)))
+                .collect();
             LoadedPluginInfo {
                 software: p.software.clone(),
                 semver: p.semver.clone(),
                 target_compat: p.target_compat.clone(),
                 orca_compat: p.orca_compat.clone(),
                 tools,
+                tool_ids,
             }
         })
         .collect()
@@ -3380,6 +3389,7 @@ mod loader_tests {
             version: "9.9.9".into(),
             manifest: vec![
                 plugin_proto::ToolDef {
+                    id: Some("019a5c1e-7b3a-7c4d-8e2f-0123456789ab".into()),
                     name: "loaderfakeplugin.ping".into(),
                     description: "echo the args back".into(),
                     input_schema: sj::json!({ "type": "object" }),
@@ -3396,6 +3406,7 @@ mod loader_tests {
                     remote_admin: None,
                 },
                 plugin_proto::ToolDef {
+                    id: None,
                     name: "loaderfakeplugin.fetch".into(),
                     description: "relay an http.request capability call".into(),
                     input_schema: sj::json!({ "type": "object" }),
@@ -3551,6 +3562,14 @@ mod loader_tests {
                 .iter()
                 .any(|t| t.name == "loaderfakeplugin.ping"),
             "loaded_tool_defs lists its tool"
+        );
+        assert_eq!(
+            loaded_plugins()
+                .iter()
+                .find(|p| p.software == "loaderfakeplugin")
+                .and_then(|p| p.tool_ids.get("loaderfakeplugin.ping").cloned())
+                .as_deref(),
+            Some("019a5c1e-7b3a-7c4d-8e2f-0123456789ab")
         );
 
         // Async dispatch routes through spawn_blocking → the subprocess, which
@@ -3762,6 +3781,7 @@ mod loader_tests {
             target_compat: "6.12".to_string(),
             orca_compat: ">=0.1".to_string(),
             tools: vec!["x".to_string()],
+            tool_ids: HashMap::new(),
         };
         let cloned = info.clone();
         assert_eq!(cloned.semver, "1.2.3");

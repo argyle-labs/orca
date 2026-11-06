@@ -32,6 +32,10 @@ use schemars::{JsonSchema, Schema};
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct ToolDef {
     /// Fully-qualified tool name, e.g. `"jellyfin.server_info"`.
+    /// Stable UUIDv7 committed in the plugin's source; `None` from a plugin
+    /// that has not adopted tool ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     /// One-line human description.
     pub description: String,
@@ -858,6 +862,23 @@ mod tests {
         assert!(def.dry_run_aware);
         let back: ToolDef = serde_json::from_value(serde_json::to_value(&def).unwrap()).unwrap();
         assert!(back.dry_run_aware);
+    }
+
+    #[test]
+    fn tool_def_id_round_trips_and_is_optional() {
+        let base =
+            json!({"name": "p.x", "description": "d", "input_schema": {}, "output_schema": {}});
+        let old: ToolDef = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(old.id, None);
+        assert!(serde_json::to_value(&old).unwrap().get("id").is_none());
+        let mut with_id = base;
+        with_id["id"] = json!("019a5c1e-7b3a-7c4d-8e2f-0123456789ab");
+        let def: ToolDef = serde_json::from_value(with_id).unwrap();
+        let back: ToolDef = serde_json::from_value(serde_json::to_value(&def).unwrap()).unwrap();
+        assert_eq!(
+            back.id.as_deref(),
+            Some("019a5c1e-7b3a-7c4d-8e2f-0123456789ab")
+        );
     }
 
     #[test]
