@@ -4376,6 +4376,24 @@ mod tests {
         assert!(!kernel_mount_live(Ok(t), "/mnt/y").unwrap());
     }
 
+    #[test]
+    fn kernel_mount_live_never_matches_an_empty_normalized_target() {
+        let t = vec![mt("/", "nfs4"), mt("", "cifs"), mt("//", "nfs")];
+        for norm in ["", "/"] {
+            assert!(!kernel_mount_live(Ok(t.clone()), norm).unwrap(), "{norm:?}");
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn unmount_kernel_mount_skips_the_privileged_helper_off_linux() {
+        use utils::privileged::testing::{Recorder, with_exec};
+        let rec = Recorder::new(utils::privileged::PrivilegedOutput::default());
+        let r = with_exec(rec.clone(), unmount_kernel_mount("/mnt/x")).await;
+        assert!(r.unwrap().is_none());
+        assert!(rec.calls().is_empty());
+    }
+
     fn mt(mp: &str, fs: &str) -> storage::mount_table::MountEntry {
         storage::mount_table::MountEntry {
             source: "h:/e".into(),

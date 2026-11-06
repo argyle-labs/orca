@@ -745,7 +745,10 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
         PrivilegedOp::Unmount { targets } => {
             let mut res = guard_unmount(
                 &targets,
-                || std::fs::read_to_string(MAP_FILE).unwrap_or_default(),
+                || match std::fs::read_to_string(MAP_FILE) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+                    r => r.map_err(|e| e.to_string()),
+                },
                 || read_ledger(LEDGER_FILE),
                 stacked_fstypes,
                 |t| async move { force_unmount(&t).await },
@@ -1562,14 +1565,24 @@ async fn guard_unmount<M, G, L, U, F>(
     mut umount: U,
 ) -> PrivilegedResult
 where
-    M: FnOnce() -> String,
+    M: FnOnce() -> Result<String, String>,
     G: FnOnce() -> Result<String, String>,
     L: Fn(&str) -> Result<Vec<String>, String>,
     U: FnMut(String) -> F,
     F: std::future::Future<Output = Result<Unwound, String>>,
 {
     let mut res = PrivilegedResult::default();
-    let map = read_map();
+    let map = match read_map() {
+        Ok(m) => m,
+        Err(e) => {
+            res.errors.extend(
+                targets
+                    .iter()
+                    .map(|t| format!("release {t}: refused: cannot read {MAP_FILE}: {e}")),
+            );
+            return res;
+        }
+    };
     let declared = declared_map_keys(&map);
     let mut ledger = None;
     let mut read_ledger = Some(read_ledger);
@@ -1632,23 +1645,30 @@ const MAX_STACKED_UNMOUNTS: usize = 16;
 /// detached. Runs root-side inside the helper. A non-zero exit (e.g. "not
 /// mounted") surfaces as an error the caller collects but does not treat as fatal.
 async fn force_unmount(target: &str) -> Result<Unwound, String> {
-    unwind_stacked(
-        || stacked_fstypes(target),
-        || async {
-            let out = utils::privileged::host_command("umount")
-                .map_err(|e| e.to_string())?
-                .args(["-lf", "--", target])
-                .output()
-                .await
-                .map_err(|e| e.to_string())?;
-            if out.status.success() {
-                Ok(())
-            } else {
-                Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-            }
-        },
-    )
-    .await
+    force_unmount_with(target, stacked_fstypes, run_umount_lf).await
+}
+
+async fn force_unmount_with<L, U, F>(target: &str, layers: L, umount: U) -> Result<Unwound, String>
+where
+    L: Fn(&str) -> Result<Vec<String>, String>,
+    U: Fn(String) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    unwind_stacked(|| layers(target), || umount(target.to_string())).await
+}
+
+async fn run_umount_lf(target: String) -> Result<(), String> {
+    let out = utils::privileged::host_command("umount")
+        .map_err(|e| e.to_string())?
+        .args(["-lf", "--", &target])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
 }
 
 /// Filesystem types stacked at `target`, oldest first (topmost last).
@@ -3491,6 +3511,48 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn guard_names_the_map_file_when_it_is_unreadable() {
+        let res = guard_unmount(
+            &["/mnt/data".to_string()],
+            || Err("Permission denied (os error 13)".to_string()),
+            || Ok(String::new()),
+            |_| Ok(vec!["cifs".to_string()]),
+            |_| async { Ok(Unwound::Detached) },
+        )
+        .await;
+        assert_eq!(
+            res.errors,
+            vec![format!(
+                "release /mnt/data: refused: cannot read {MAP_FILE}: Permission denied (os error 13)"
+            )]
+        );
+        assert!(res.changed.is_empty() && res.unchanged.is_empty());
+    }
+
+    #[tokio::test]
+    async fn force_unmount_with_reports_detached_after_releasing_the_cifs_layer() {
+        let table = stack(&["autofs", "cifs"]);
+        let calls = std::cell::Cell::new(0);
+        let out = force_unmount_with(
+            "/mnt/data",
+            |t| {
+                assert_eq!(t, "/mnt/data");
+                Ok(table.borrow().clone())
+            },
+            |t| {
+                assert_eq!(t, "/mnt/data");
+                calls.set(calls.get() + 1);
+                table.borrow_mut().pop();
+                async { Ok(()) }
+            },
+        )
+        .await;
+        assert_eq!(out, Ok(Unwound::Detached));
+        assert_eq!(calls.get(), 1);
+        assert_eq!(*table.borrow(), vec!["autofs".to_string()]);
+    }
+
     const TEST_MAP: &str =
         "# header\n/mnt/data  -fstype=cifs  //h/s\n/mnt/media\t-fstype=nfs4  h:/m\n";
 
@@ -3502,7 +3564,7 @@ mod tests {
         let calls = std::cell::RefCell::new(Vec::new());
         let res = guard_unmount(
             &targets,
-            || TEST_MAP.to_string(),
+            || Ok(TEST_MAP.to_string()),
             || Ok(String::new()),
             |p| {
                 Ok(mounted
@@ -3669,7 +3731,7 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         let res = guard_unmount(
             &["/mnt/thor".to_string()],
-            String::new,
+            || Ok(String::new()),
             || Ok(ledger),
             |_| Ok(table.borrow().clone()),
             |_| async {
@@ -3885,7 +3947,7 @@ mod tests {
             results.push(
                 guard_unmount(
                     &[t.to_string()],
-                    || map.clone(),
+                    || Ok(map.clone()),
                     || Ok(String::new()),
                     |_| Ok(vec!["cifs".to_string()]),
                     |p| {
@@ -3907,7 +3969,7 @@ mod tests {
         let calls = std::cell::RefCell::new(Vec::new());
         let res = guard_unmount(
             &targets,
-            || TEST_MAP.to_string(),
+            || Ok(TEST_MAP.to_string()),
             || Ok(String::new()),
             |_| Err("cannot read mount table: denied".to_string()),
             |p| {
@@ -3935,7 +3997,7 @@ mod tests {
         let calls = std::cell::RefCell::new(Vec::new());
         let res = guard_unmount(
             &[target.to_string()],
-            || map.to_string(),
+            || Ok(map.to_string()),
             || ledger.map(str::to_string).map_err(str::to_string),
             |_| Ok(mounted.iter().map(|s| s.to_string()).collect()),
             |p| {
@@ -4053,7 +4115,7 @@ mod tests {
         let ledger = read_ledger(path).unwrap();
         let res = guard_unmount(
             &["/mnt/thor".to_string()],
-            String::new,
+            || Ok(String::new()),
             || Ok(ledger),
             |_| Ok(vec!["cifs".to_string()]),
             |_| async { Err("busy".to_string()) },
@@ -4092,7 +4154,7 @@ mod tests {
                 "/mnt/gone".to_string(),
                 "/mnt/foreign".to_string(),
             ],
-            || "/mnt/data  -fstype=nfs4  h:/d\n".to_string(),
+            || Ok("/mnt/data  -fstype=nfs4  h:/d\n".to_string()),
             || Ok(ledger.to_string()),
             |_| Ok(vec!["autofs".to_string(), "nfs4".to_string()]),
             |p| {
