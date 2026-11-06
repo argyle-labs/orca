@@ -46,6 +46,7 @@ jobs:
           version-env: ORCA_RELEASE_VERSION
           doctests: 'true'
           size-check: 'false'
+          build-jobs: '4'
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
