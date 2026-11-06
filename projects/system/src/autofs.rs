@@ -697,14 +697,13 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             res
         }
         PrivilegedOp::Unmount { targets } => {
-            let mut res = PrivilegedResult::default();
-            for t in &targets {
-                match force_unmount(t).await {
-                    Ok(()) => res.changed.push(t.clone()),
-                    Err(e) => res.errors.push(format!("release {t}: {e}")),
-                }
-            }
-            res
+            guard_unmount(
+                &targets,
+                || std::fs::read_to_string(MAP_FILE).unwrap_or_default(),
+                stacked_fstypes,
+                |t| async move { force_unmount(&t).await },
+            )
+            .await
         }
         PrivilegedOp::Mount {
             mounts,
@@ -1394,6 +1393,76 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
 
     out.no_stale_found = out.recovered.is_empty() && out.still_stale.is_empty();
     out
+}
+
+fn normalize_unmount_target(target: &str) -> Result<String, &'static str> {
+    if target.contains('\0') {
+        return Err("NUL in path");
+    }
+    let trimmed = target.trim_end_matches('/');
+    let Some(rest) = trimmed.strip_prefix('/') else {
+        return Err("not an absolute path");
+    };
+    if rest.split('/').any(|c| matches!(c, "" | "." | "..")) {
+        return Err("path has an empty, `.` or `..` component");
+    }
+    Ok(trimmed.to_string())
+}
+
+fn declared_map_keys(map: &str) -> std::collections::HashSet<&str> {
+    map.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| l.split_whitespace().next())
+        .collect()
+}
+
+/// Root-side gate for [`PrivilegedOp::Unmount`]: a target is released only if it
+/// is a key of the orca-owned direct map AND currently has a network or autofs
+/// layer mounted. Anything else is refused without invoking umount.
+async fn guard_unmount<M, L, U, F>(
+    targets: &[String],
+    read_map: M,
+    layers: L,
+    mut umount: U,
+) -> PrivilegedResult
+where
+    M: FnOnce() -> String,
+    L: Fn(&str) -> Vec<String>,
+    U: FnMut(String) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    let mut res = PrivilegedResult::default();
+    let map = read_map();
+    let declared = declared_map_keys(&map);
+    for t in targets {
+        let path = match normalize_unmount_target(t) {
+            Ok(p) => p,
+            Err(why) => {
+                res.errors.push(format!("release {t}: refused: {why}"));
+                continue;
+            }
+        };
+        if !declared.contains(path.as_str()) {
+            res.errors
+                .push(format!("release {t}: refused: not a declared orca mount"));
+            continue;
+        }
+        if !layers(&path)
+            .iter()
+            .any(|f| is_network_fstype(f) || f == "autofs")
+        {
+            res.errors.push(format!(
+                "release {t}: refused: no network or autofs mount present"
+            ));
+            continue;
+        }
+        match umount(path.clone()).await {
+            Ok(()) => res.changed.push(path),
+            Err(e) => res.errors.push(format!("release {t}: {e}")),
+        }
+    }
+    res
 }
 
 const MAX_STACKED_UNMOUNTS: usize = 16;
@@ -3046,6 +3115,86 @@ mod tests {
             err.contains("refusing to run host-mutating `umount`"),
             "{err}"
         );
+    }
+
+    const TEST_MAP: &str =
+        "# header\n/mnt/data  -fstype=cifs  //h/s\n/mnt/media\t-fstype=nfs4  h:/m\n";
+
+    async fn run_guard(
+        targets: &[&str],
+        mounted: &[(&str, &[&str])],
+    ) -> (PrivilegedResult, Vec<String>) {
+        let targets: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
+        let calls = std::cell::RefCell::new(Vec::new());
+        let res = guard_unmount(
+            &targets,
+            || TEST_MAP.to_string(),
+            |p| {
+                mounted
+                    .iter()
+                    .find(|(m, _)| *m == p)
+                    .map(|(_, l)| l.iter().map(|s| s.to_string()).collect())
+                    .unwrap_or_default()
+            },
+            |p| {
+                calls.borrow_mut().push(p);
+                async { Ok(()) }
+            },
+        )
+        .await;
+        (res, calls.into_inner())
+    }
+
+    #[tokio::test]
+    async fn guard_refuses_undeclared_and_malformed_targets() {
+        let live: &[(&str, &[&str])] =
+            &[("/", &["ext4"]), ("/home", &["cifs"]), ("/proc", &["proc"])];
+        for bad in [
+            "/",
+            "/home",
+            "/proc",
+            "relative/path",
+            "/mnt/data/../etc",
+            "/mnt/./data",
+            "/mnt/data\0",
+            "/mnt//data",
+            "",
+        ] {
+            let (res, calls) = run_guard(&[bad], live).await;
+            assert!(calls.is_empty(), "{bad:?} must not umount");
+            assert!(res.changed.is_empty());
+            assert_eq!(res.errors.len(), 1, "{bad:?}: {res:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn guard_refuses_declared_key_without_network_mount() {
+        let (res, calls) = run_guard(&["/mnt/data"], &[("/mnt/data", &["ext4"])]).await;
+        assert!(calls.is_empty());
+        assert_eq!(res.errors.len(), 1);
+        assert!(res.errors[0].contains("no network or autofs mount"));
+    }
+
+    #[tokio::test]
+    async fn guard_accepts_declared_live_cifs_and_normalizes_trailing_slash() {
+        let live: &[(&str, &[&str])] = &[
+            ("/mnt/data", &["cifs"]),
+            ("/mnt/media", &["autofs", "nfs4"]),
+        ];
+        let (res, calls) = run_guard(&["/mnt/data/", "/mnt/media"], live).await;
+        assert_eq!(calls, vec!["/mnt/data", "/mnt/media"]);
+        assert_eq!(res.changed, vec!["/mnt/data", "/mnt/media"]);
+        assert!(res.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn guard_mixed_op_processes_good_target_and_errors_bad() {
+        let live: &[(&str, &[&str])] = &[("/mnt/data", &["cifs"]), ("/home", &["cifs"])];
+        let (res, calls) = run_guard(&["/home", "/mnt/data"], live).await;
+        assert_eq!(calls, vec!["/mnt/data"]);
+        assert_eq!(res.changed, vec!["/mnt/data"]);
+        assert_eq!(res.errors.len(), 1);
+        assert!(res.errors[0].contains("release /home: refused"));
     }
 
     fn stack(layers: &[&str]) -> std::cell::RefCell<Vec<String>> {
