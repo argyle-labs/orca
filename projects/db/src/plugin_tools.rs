@@ -16,10 +16,10 @@ pub struct PluginToolRow {
     pub sensitivity: String,
     pub declared_at: String,
     /// Committed UUIDv7 the plugin declared; `None` until it adopts tool ids.
-    pub id: Option<String>,
+    pub tool_id: Option<String>,
 }
 
-/// `(fq_name, description, input_schema, sensitivity, id)` as declared by a plugin manifest.
+/// `(fq_name, description, input_schema, sensitivity, tool_id)` as declared by a plugin manifest.
 pub type PluginToolDecl = (String, String, String, String, Option<String>);
 
 /// Returned by `replace` when a tool's fq_name (`<namespace>.<name>`) is
@@ -112,7 +112,7 @@ pub fn upsert(
 pub fn replace(conn: &mut Connection, plugin_id: &str, tools: &[PluginToolDecl]) -> Result<()> {
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM plugin_tools WHERE plugin_id = ?1", [plugin_id])?;
-    for (fq_name, description, schema, sensitivity, id) in tools {
+    for (fq_name, description, schema, sensitivity, tool_id) in tools {
         if !matches!(sensitivity.as_str(), "general" | "sensitive") {
             anyhow::bail!("sensitivity must be 'general' or 'sensitive', got '{sensitivity}'");
         }
@@ -127,7 +127,7 @@ pub fn replace(conn: &mut Connection, plugin_id: &str, tools: &[PluginToolDecl])
         }
         tx.execute(
             "INSERT INTO plugin_tools
-                (plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity, id)
+                (plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity, tool_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 plugin_id,
@@ -137,7 +137,7 @@ pub fn replace(conn: &mut Connection, plugin_id: &str, tools: &[PluginToolDecl])
                 description,
                 schema,
                 sensitivity,
-                id
+                tool_id
             ],
         )?;
     }
@@ -167,7 +167,7 @@ fn collision_owner(
 /// List all tools declared by a single plugin.
 pub fn list(conn: &Connection, plugin_id: &str) -> Result<Vec<PluginToolRow>> {
     let mut stmt = conn.prepare(
-        "SELECT plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity, declared_at, id
+        "SELECT plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity, declared_at, tool_id
          FROM plugin_tools WHERE plugin_id = ?1 ORDER BY name",
     )?;
     let rows = stmt.query_map([plugin_id], row_from)?;
@@ -178,7 +178,7 @@ pub fn list(conn: &Connection, plugin_id: &str) -> Result<Vec<PluginToolRow>> {
 /// surface plugin tools to LLMs.
 pub fn list_all(conn: &Connection) -> Result<Vec<PluginToolRow>> {
     let mut stmt = conn.prepare(
-        "SELECT plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity, declared_at, id
+        "SELECT plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity, declared_at, tool_id
          FROM plugin_tools ORDER BY fq_name",
     )?;
     let rows = stmt.query_map([], row_from)?;
@@ -188,7 +188,7 @@ pub fn list_all(conn: &Connection) -> Result<Vec<PluginToolRow>> {
 /// Look up a single tool by its fully-qualified name (`<plugin_namespace>.<name>`).
 pub fn get(conn: &Connection, fq_name: &str) -> Result<Option<PluginToolRow>> {
     let mut stmt = conn.prepare(
-        "SELECT plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity, declared_at, id
+        "SELECT plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity, declared_at, tool_id
          FROM plugin_tools WHERE fq_name = ?1",
     )?;
     let row = stmt.query_row([fq_name], row_from).optional()?;
@@ -205,7 +205,7 @@ fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<PluginToolRow> {
         input_schema: r.get(5)?,
         sensitivity: r.get(6)?,
         declared_at: r.get(7)?,
-        id: r.get(8)?,
+        tool_id: r.get(8)?,
     })
 }
 
@@ -233,10 +233,10 @@ mod tests {
         with_id.4 = Some(TOOL_ID.to_string());
         replace(&mut conn, "p", &[with_id, tool("arr.movies")]).unwrap();
         assert_eq!(
-            get(&conn, "arr.shows").unwrap().unwrap().id.as_deref(),
+            get(&conn, "arr.shows").unwrap().unwrap().tool_id.as_deref(),
             Some(TOOL_ID)
         );
-        assert_eq!(get(&conn, "arr.movies").unwrap().unwrap().id, None);
+        assert_eq!(get(&conn, "arr.movies").unwrap().unwrap().tool_id, None);
     }
 
     #[test]

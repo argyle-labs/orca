@@ -599,7 +599,7 @@ pub fn core_tool_catalog() -> Vec<Value> {
                 "description": row.description,
                 "inputSchema": schema,
             }),
-            row.id,
+            row.tool_id,
         ));
     }
     all_orca
