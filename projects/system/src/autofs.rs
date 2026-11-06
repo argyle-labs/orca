@@ -597,15 +597,19 @@ pub async fn apply_elected(
     apply_op(plan_with_map(mounts, render_map_elected(mounts, elected)).await).await
 }
 
-/// A newline or NUL in a target cannot be expressed in an autofs map line, so
+fn unrepresentable_key_char(c: char) -> bool {
+    (c.is_control() || c.is_whitespace()) && c != ' ' && c != '\t'
+}
+
+/// A newline, NUL or other control/whitespace char in a target cannot be expressed in an autofs map line, so
 /// the whole apply is refused rather than writing a corrupt map.
 fn refuse_unrepresentable(mounts: &[ManagedMount]) -> Option<ApplyOutcome> {
     let errors: Vec<String> = mounts
         .iter()
-        .filter(|m| m.target.contains(['\n', '\r', '\0']))
+        .filter(|m| m.target.contains(unrepresentable_key_char))
         .map(|m| {
             format!(
-                "mount target {:?} contains a newline or NUL, which an autofs map cannot represent",
+                "mount target {:?} contains a control or whitespace character, which an autofs map cannot represent",
                 m.target
             )
         })
@@ -1482,7 +1486,7 @@ fn first_map_key(line: &str) -> String {
     while let Some(c) = chars.next() {
         match c {
             '\\' => key.extend(chars.next()),
-            c if c.is_whitespace() => break,
+            ' ' | '\t' => break,
             c => key.push(c),
         }
     }
@@ -2350,6 +2354,16 @@ mod tests {
     }
 
     #[test]
+    fn first_map_key_splits_only_on_space_and_tab() {
+        assert_eq!(
+            first_map_key("/mnt/a\x0bb\x0cc\u{a0}d  opts"),
+            "/mnt/a\x0bb\x0cc\u{a0}d"
+        );
+        assert_eq!(first_map_key("/mnt/a\tb"), "/mnt/a");
+        assert_eq!(first_map_key("/mnt/a\\ b\\\tc  x"), "/mnt/a b\tc");
+    }
+
+    #[test]
     fn master_mountpoint_round_trips_escaped_keys() {
         for target in SPECIAL_TARGETS {
             let line = format!("{}  /etc/auto.x", escape_map_key(target));
@@ -2367,7 +2381,16 @@ mod tests {
 
     #[tokio::test]
     async fn apply_refuses_targets_a_map_cannot_represent() {
-        for target in ["/mnt/a\nb", "/mnt/a\rb", "/mnt/a\0b"] {
+        for target in [
+            "/mnt/a\nb",
+            "/mnt/a\rb",
+            "/mnt/a\0b",
+            "/mnt/a\x0bb",
+            "/mnt/a\x0cb",
+            "/mnt/a\u{85}b",
+            "/mnt/a\u{a0}b",
+            "/mnt/a\u{2028}b",
+        ] {
             let m = mount_at(target);
             let out = apply(std::slice::from_ref(&m)).await;
             assert!(out.changed.is_empty() && !out.reloaded);
