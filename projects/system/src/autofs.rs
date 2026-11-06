@@ -1527,7 +1527,15 @@ where
         let stack = layers()?;
         match stack.last() {
             None if attempt == 0 => umount().await?,
-            Some(top) if is_network_fstype(top) => umount().await?,
+            Some(top) if is_network_fstype(top) => {
+                if let Err(e) = umount().await {
+                    return if layers()?.last().is_some_and(|t| is_network_fstype(t)) {
+                        Err(e)
+                    } else {
+                        Ok(())
+                    };
+                }
+            }
             Some(top) if stack.iter().any(|f| is_network_fstype(f)) => {
                 return Err(format!(
                     "network mount is covered by a `{top}` layer; refusing to detach it"
@@ -3304,6 +3312,83 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err, "busy");
+    }
+
+    async fn run_racy(
+        reads: Vec<Result<Vec<String>, String>>,
+        failing: &[usize],
+    ) -> (Result<(), String>, usize) {
+        let reads = std::cell::RefCell::new(reads.into_iter());
+        let calls = std::cell::Cell::new(0usize);
+        let res = unwind_stacked(
+            || reads.borrow_mut().next().expect("unexpected table read"),
+            || {
+                let n = calls.get();
+                calls.set(n + 1);
+                let r = if failing.contains(&n) {
+                    Err("not mounted".to_string())
+                } else {
+                    Ok(())
+                };
+                async move { r }
+            },
+        )
+        .await;
+        (res, calls.get())
+    }
+
+    fn l(layers: &[&str]) -> Result<Vec<String>, String> {
+        Ok(layers.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_ok_when_layer_vanishes_after_failed_umount() {
+        let (res, calls) = run_racy(vec![l(&["autofs", "cifs"]), l(&["autofs"])], &[0]).await;
+        assert_eq!(res, Ok(()));
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_returns_umount_error_when_layer_remains() {
+        let (res, calls) = run_racy(vec![l(&["cifs"]), l(&["cifs"])], &[0]).await;
+        assert_eq!(res, Err("not mounted".to_string()));
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_returns_read_error_when_reread_fails() {
+        let (res, calls) = run_racy(
+            vec![
+                l(&["cifs"]),
+                Err("cannot read mount table: gone".to_string()),
+            ],
+            &[0],
+        )
+        .await;
+        assert_eq!(calls, 1);
+        assert!(res.unwrap_err().contains("cannot read mount table"));
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_never_mounted_surfaces_the_first_umount_error() {
+        let (res, calls) = run_racy(vec![l(&[])], &[0]).await;
+        assert_eq!(res, Err("not mounted".to_string()));
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_ok_when_second_layer_vanishes_concurrently() {
+        let (res, calls) = run_racy(
+            vec![
+                l(&["autofs", "cifs", "cifs"]),
+                l(&["autofs", "cifs"]),
+                l(&["autofs"]),
+            ],
+            &[1],
+        )
+        .await;
+        assert_eq!(res, Ok(()));
+        assert_eq!(calls, 2);
     }
 
     #[tokio::test]
