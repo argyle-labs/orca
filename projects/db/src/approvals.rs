@@ -53,6 +53,16 @@ pub fn insert(conn: &Connection, req: &ApprovalRequest) -> Result<()> {
     if !utils::id::is_uuidv7(&req.id) {
         return Err(anyhow!("approval id must be a UUIDv7, got {:?}", req.id));
     }
+    // Only the `transition` state machine may produce a decided state.
+    if req.state != ApprovalState::Pending
+        || req.decided_by.is_some()
+        || req.decided_at.is_some()
+        || req.decided_factor.is_some()
+    {
+        return Err(anyhow!(
+            "approval insert accepts only fresh pending requests"
+        ));
+    }
     conn.execute(
         &format!("INSERT INTO approval_requests ({COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
         params![
@@ -221,6 +231,23 @@ mod tests {
         let mut req = open(&conn, 10);
         req.id = "f47ac10b-58cc-4372-a567-0e02b2c3d479".into();
         assert!(insert(&conn, &req).is_err());
+    }
+
+    #[test]
+    fn insert_rejects_anything_but_a_fresh_pending_request() {
+        let conn = test_conn();
+        let base = open(&conn, 10);
+        let mut forged = vec![base.clone(); 4];
+        forged[0].state = ApprovalState::Approved;
+        forged[1].state = ApprovalState::Executed;
+        forged[2].decided_by = Some(utils::id::new());
+        forged[3].decided_factor = Some(Factor::None);
+        for mut req in forged {
+            req.id = utils::id::new();
+            assert!(insert(&conn, &req).is_err());
+            assert_eq!(get(&conn, &req.id).unwrap(), None);
+        }
+        assert_eq!(list(&conn, None).unwrap().len(), 1);
     }
 
     #[test]
