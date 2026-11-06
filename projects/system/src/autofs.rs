@@ -1428,7 +1428,7 @@ async fn guard_unmount<M, L, U, F>(
 ) -> PrivilegedResult
 where
     M: FnOnce() -> String,
-    L: Fn(&str) -> Vec<String>,
+    L: Fn(&str) -> Result<Vec<String>, String>,
     U: FnMut(String) -> F,
     F: std::future::Future<Output = Result<(), String>>,
 {
@@ -1448,7 +1448,16 @@ where
                 .push(format!("release {t}: refused: not a declared orca mount"));
             continue;
         }
-        if !layers(&path)
+        let stacked = match layers(&path) {
+            Ok(l) => l,
+            Err(e) => {
+                res.errors.push(format!(
+                    "release {t}: refused: cannot read mount table: {e}"
+                ));
+                continue;
+            }
+        };
+        if !stacked
             .iter()
             .any(|f| is_network_fstype(f) || f == "autofs")
         {
@@ -1492,7 +1501,7 @@ async fn force_unmount(target: &str) -> Result<(), String> {
 }
 
 /// Filesystem types stacked at `target`, oldest first (topmost last).
-fn stacked_fstypes(target: &str) -> Vec<String> {
+fn stacked_fstypes(target: &str) -> Result<Vec<String>, String> {
     let target = target.trim_end_matches('/');
     plugin_toolkit::storage::mount_table::mount_table()
         .map(|t| {
@@ -1501,7 +1510,7 @@ fn stacked_fstypes(target: &str) -> Vec<String> {
                 .map(|m| m.fstype.clone())
                 .collect()
         })
-        .unwrap_or_default()
+        .map_err(|e| format!("cannot read mount table: {e}"))
 }
 
 fn is_network_fstype(fstype: &str) -> bool {
@@ -1510,12 +1519,12 @@ fn is_network_fstype(fstype: &str) -> bool {
 
 async fn unwind_stacked<L, U, F>(mut layers: L, mut umount: U) -> Result<(), String>
 where
-    L: FnMut() -> Vec<String>,
+    L: FnMut() -> Result<Vec<String>, String>,
     U: FnMut() -> F,
     F: std::future::Future<Output = Result<(), String>>,
 {
     for attempt in 0..MAX_STACKED_UNMOUNTS {
-        let stack = layers();
+        let stack = layers()?;
         match stack.last() {
             None if attempt == 0 => umount().await?,
             Some(top) if is_network_fstype(top) => umount().await?,
@@ -1527,7 +1536,7 @@ where
             _ => return Ok(()),
         }
     }
-    if layers().last().is_some_and(|t| is_network_fstype(t)) {
+    if layers()?.last().is_some_and(|t| is_network_fstype(t)) {
         return Err(format!(
             "network mount still present after {MAX_STACKED_UNMOUNTS} unmounts"
         ));
@@ -3130,11 +3139,11 @@ mod tests {
             &targets,
             || TEST_MAP.to_string(),
             |p| {
-                mounted
+                Ok(mounted
                     .iter()
                     .find(|(m, _)| *m == p)
                     .map(|(_, l)| l.iter().map(|s| s.to_string()).collect())
-                    .unwrap_or_default()
+                    .unwrap_or_default())
             },
             |p| {
                 calls.borrow_mut().push(p);
@@ -3206,7 +3215,7 @@ mod tests {
         calls: &std::cell::Cell<usize>,
     ) -> Result<(), String> {
         unwind_stacked(
-            || table.borrow().clone(),
+            || Ok(table.borrow().clone()),
             || {
                 calls.set(calls.get() + 1);
                 table.borrow_mut().pop();
@@ -3274,7 +3283,7 @@ mod tests {
     async fn unwind_stacked_is_bounded_when_the_mount_never_clears() {
         let calls = std::cell::Cell::new(0usize);
         let err = unwind_stacked(
-            || vec!["autofs".to_string(), "cifs".to_string()],
+            || Ok(vec!["autofs".to_string(), "cifs".to_string()]),
             || {
                 calls.set(calls.get() + 1);
                 async { Ok(()) }
@@ -3289,11 +3298,73 @@ mod tests {
     #[tokio::test]
     async fn unwind_stacked_surfaces_an_umount_failure() {
         let err = unwind_stacked(
-            || vec!["cifs".to_string()],
+            || Ok(vec!["cifs".to_string()]),
             || async { Err("busy".to_string()) },
         )
         .await
         .unwrap_err();
         assert_eq!(err, "busy");
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_errors_when_the_mount_table_is_unreadable() {
+        let calls = std::cell::Cell::new(0usize);
+        let err = unwind_stacked(
+            || Err("cannot read mount table: denied".to_string()),
+            || {
+                calls.set(calls.get() + 1);
+                async { Ok(()) }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(calls.get(), 0);
+        assert!(err.contains("cannot read mount table"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_errors_when_the_table_fails_after_an_umount() {
+        let calls = std::cell::Cell::new(0usize);
+        let err = unwind_stacked(
+            || {
+                if calls.get() == 0 {
+                    Ok(vec!["cifs".to_string(), "cifs".to_string()])
+                } else {
+                    Err("cannot read mount table: gone".to_string())
+                }
+            },
+            || {
+                calls.set(calls.get() + 1);
+                async { Ok(()) }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert!(err.contains("cannot read mount table"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guard_fails_closed_when_the_mount_table_is_unreadable() {
+        let targets = vec!["/mnt/data".to_string()];
+        let calls = std::cell::RefCell::new(Vec::new());
+        let res = guard_unmount(
+            &targets,
+            || TEST_MAP.to_string(),
+            |_| Err("cannot read mount table: denied".to_string()),
+            |p| {
+                calls.borrow_mut().push(p);
+                async { Ok(()) }
+            },
+        )
+        .await;
+        assert!(calls.borrow().is_empty());
+        assert!(res.changed.is_empty());
+        assert_eq!(res.errors.len(), 1);
+        assert!(
+            res.errors[0].contains("cannot read mount table"),
+            "{}",
+            res.errors[0]
+        );
     }
 }

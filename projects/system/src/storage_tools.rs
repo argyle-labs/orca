@@ -1766,6 +1766,17 @@ fn ensure_declared_target(target: &str, declared: &[String]) -> anyhow::Result<(
     }
 }
 
+fn kernel_mount_live(
+    table: std::io::Result<Vec<storage::mount_table::MountEntry>>,
+    norm: &str,
+) -> anyhow::Result<bool> {
+    let table =
+        table.map_err(|e| anyhow::anyhow!("cannot read mount table to unmount `{norm}`: {e}"))?;
+    Ok(table
+        .iter()
+        .any(|m| m.mountpoint.trim_end_matches('/') == norm && kernel_fstype(&m.fstype)))
+}
+
 /// Linux kernel mounts (nfs/cifs) need root to release, so they go through the
 /// privileged helper, which also unwinds stacked mounts. `None` means the target
 /// is not a live kernel mount and the backend handles it.
@@ -1774,10 +1785,7 @@ async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcom
         return Ok(None);
     }
     let norm = target.trim_end_matches('/');
-    let live = storage::mount_table::mount_table()
-        .unwrap_or_default()
-        .into_iter()
-        .any(|m| m.mountpoint.trim_end_matches('/') == norm && kernel_fstype(&m.fstype));
+    let live = kernel_mount_live(storage::mount_table::mount_table(), norm)?;
     if !live {
         return Ok(None);
     }
@@ -4284,6 +4292,25 @@ mod tests {
         assert!(ensure_declared_target("/etc", &declared).is_err());
         assert!(ensure_declared_target("/mnt/data/sub", &declared).is_err());
         assert!(ensure_declared_target("/mnt/data", &[]).is_err());
+    }
+
+    #[test]
+    fn kernel_mount_live_errors_when_the_mount_table_is_unreadable() {
+        let err = kernel_mount_live(Err(std::io::Error::other("denied")), "/mnt/x").unwrap_err();
+        assert!(err.to_string().contains("cannot read mount table"), "{err}");
+    }
+
+    #[test]
+    fn kernel_mount_live_matches_a_kernel_fstype_at_the_target() {
+        let entry = |mp: &str, fs: &str| storage::mount_table::MountEntry {
+            source: "h:/e".into(),
+            mountpoint: mp.into(),
+            fstype: fs.into(),
+            options: vec![],
+        };
+        let t = vec![entry("/mnt/x/", "nfs4"), entry("/mnt/y", "tmpfs")];
+        assert!(kernel_mount_live(Ok(t.clone()), "/mnt/x").unwrap());
+        assert!(!kernel_mount_live(Ok(t), "/mnt/y").unwrap());
     }
 
     #[test]
