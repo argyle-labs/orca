@@ -486,6 +486,7 @@ pub fn tool_manifest_json() -> String {
                 "output_schema": t.output_schema(),
                 "role": t.required_role(),
                 "execute_gated": t.execute_gated(),
+                "risk": t.risk(),
                 "dry_run_aware": t.dry_run_aware(),
                 "data_mutation": t.data_mutation(),
                 "local_only": !t.remote_ok(),
