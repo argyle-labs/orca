@@ -1398,13 +1398,13 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
 
 const MAX_STACKED_UNMOUNTS: usize = 16;
 
-/// `umount -lf <target>` repeated until the path is no longer a mountpoint, so
-/// stacked mounts of one target are all removed. Runs root-side inside the
-/// helper. A non-zero exit (e.g. "not mounted") surfaces as an error the caller
-/// collects but does not treat as fatal.
+/// `umount -lf <target>` repeated until no network layer (nfs/cifs) remains at
+/// the path. The autofs layer beneath, and any non-network layer, is never
+/// detached. Runs root-side inside the helper. A non-zero exit (e.g. "not
+/// mounted") surfaces as an error the caller collects but does not treat as fatal.
 async fn force_unmount(target: &str) -> Result<(), String> {
     unwind_stacked(
-        || is_mountpoint(target),
+        || stacked_fstypes(target),
         || async {
             let out = utils::privileged::host_command("umount")
                 .map_err(|e| e.to_string())?
@@ -1422,31 +1422,48 @@ async fn force_unmount(target: &str) -> Result<(), String> {
     .await
 }
 
-fn is_mountpoint(target: &str) -> bool {
+/// Filesystem types stacked at `target`, oldest first (topmost last).
+fn stacked_fstypes(target: &str) -> Vec<String> {
     let target = target.trim_end_matches('/');
     plugin_toolkit::storage::mount_table::mount_table()
         .map(|t| {
             t.iter()
-                .any(|m| m.mountpoint.trim_end_matches('/') == target)
+                .filter(|m| m.mountpoint.trim_end_matches('/') == target)
+                .map(|m| m.fstype.clone())
+                .collect()
         })
-        .unwrap_or(false)
+        .unwrap_or_default()
 }
 
-async fn unwind_stacked<M, U, F>(mut mounted: M, mut umount: U) -> Result<(), String>
+fn is_network_fstype(fstype: &str) -> bool {
+    matches!(fstype, "nfs" | "nfs4" | "cifs" | "smb3")
+}
+
+async fn unwind_stacked<L, U, F>(mut layers: L, mut umount: U) -> Result<(), String>
 where
-    M: FnMut() -> bool,
+    L: FnMut() -> Vec<String>,
     U: FnMut() -> F,
     F: std::future::Future<Output = Result<(), String>>,
 {
-    for _ in 0..MAX_STACKED_UNMOUNTS {
-        umount().await?;
-        if !mounted() {
-            return Ok(());
+    for attempt in 0..MAX_STACKED_UNMOUNTS {
+        let stack = layers();
+        match stack.last() {
+            None if attempt == 0 => umount().await?,
+            Some(top) if is_network_fstype(top) => umount().await?,
+            Some(top) if stack.iter().any(|f| is_network_fstype(f)) => {
+                return Err(format!(
+                    "network mount is covered by a `{top}` layer; refusing to detach it"
+                ));
+            }
+            _ => return Ok(()),
         }
     }
-    Err(format!(
-        "still a mountpoint after {MAX_STACKED_UNMOUNTS} unmounts"
-    ))
+    if layers().last().is_some_and(|t| is_network_fstype(t)) {
+        return Err(format!(
+            "network mount still present after {MAX_STACKED_UNMOUNTS} unmounts"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3031,28 +3048,84 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn unwind_stacked_removes_every_layer() {
-        let layers = std::cell::Cell::new(3usize);
-        let calls = std::cell::Cell::new(0usize);
+    fn stack(layers: &[&str]) -> std::cell::RefCell<Vec<String>> {
+        std::cell::RefCell::new(layers.iter().map(|s| s.to_string()).collect())
+    }
+
+    async fn run_unwind(
+        table: &std::cell::RefCell<Vec<String>>,
+        calls: &std::cell::Cell<usize>,
+    ) -> Result<(), String> {
         unwind_stacked(
-            || layers.get() > 0,
+            || table.borrow().clone(),
             || {
                 calls.set(calls.get() + 1);
-                layers.set(layers.get() - 1);
+                table.borrow_mut().pop();
                 async { Ok(()) }
             },
         )
         .await
-        .unwrap();
-        assert_eq!(calls.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_detaches_cifs_and_keeps_autofs() {
+        let table = stack(&["autofs", "cifs"]);
+        let calls = std::cell::Cell::new(0);
+        run_unwind(&table, &calls).await.unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(*table.borrow(), ["autofs"]);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_detaches_every_network_layer_over_autofs() {
+        let table = stack(&["autofs", "cifs", "nfs4"]);
+        let calls = std::cell::Cell::new(0);
+        run_unwind(&table, &calls).await.unwrap();
+        assert_eq!(calls.get(), 2);
+        assert_eq!(*table.borrow(), ["autofs"]);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_refuses_a_non_network_layer_on_top() {
+        let table = stack(&["autofs", "cifs", "tmpfs"]);
+        let calls = std::cell::Cell::new(0);
+        let err = run_unwind(&table, &calls).await.unwrap_err();
+        assert_eq!(calls.get(), 0);
+        assert_eq!(*table.borrow(), ["autofs", "cifs", "tmpfs"]);
+        assert!(err.contains("tmpfs"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_fully_unwinds_a_pure_cifs_stack() {
+        let table = stack(&["cifs", "cifs"]);
+        let calls = std::cell::Cell::new(0);
+        run_unwind(&table, &calls).await.unwrap();
+        assert_eq!(calls.get(), 2);
+        assert!(table.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_attempts_once_when_nothing_is_mounted() {
+        let table = stack(&[]);
+        let calls = std::cell::Cell::new(0);
+        run_unwind(&table, &calls).await.unwrap();
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_leaves_a_lone_autofs_untouched() {
+        let table = stack(&["autofs"]);
+        let calls = std::cell::Cell::new(0);
+        run_unwind(&table, &calls).await.unwrap();
+        assert_eq!(calls.get(), 0);
+        assert_eq!(*table.borrow(), ["autofs"]);
     }
 
     #[tokio::test]
     async fn unwind_stacked_is_bounded_when_the_mount_never_clears() {
         let calls = std::cell::Cell::new(0usize);
         let err = unwind_stacked(
-            || true,
+            || vec!["autofs".to_string(), "cifs".to_string()],
             || {
                 calls.set(calls.get() + 1);
                 async { Ok(()) }
@@ -3061,14 +3134,17 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(calls.get(), MAX_STACKED_UNMOUNTS);
-        assert!(err.contains("still a mountpoint"), "{err}");
+        assert!(err.contains("still present"), "{err}");
     }
 
     #[tokio::test]
     async fn unwind_stacked_surfaces_an_umount_failure() {
-        let err = unwind_stacked(|| true, || async { Err("busy".to_string()) })
-            .await
-            .unwrap_err();
+        let err = unwind_stacked(
+            || vec!["cifs".to_string()],
+            || async { Err("busy".to_string()) },
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err, "busy");
     }
 }
