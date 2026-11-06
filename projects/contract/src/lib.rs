@@ -44,6 +44,13 @@ pub mod remediation;
 pub use remediation::{Blocked, ManualStep, ManualSteps, Remediation};
 /// Dry-run plan returned by execute-gated tools (see `plan::ExecutionPlan`).
 pub mod plan;
+/// Per-verb risk level.
+pub mod risk;
+pub use risk::Risk;
+/// Approval requests and their state machine.
+pub mod approval;
+/// Step-up policy and providers.
+pub mod step_up;
 // The re-export itself triggers the disallowed-type lint workspace-wide;
 // defining + exposing the type is exactly what this crate exists to do.
 #[allow(clippy::disallowed_types)]
