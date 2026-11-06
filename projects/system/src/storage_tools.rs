@@ -1829,7 +1829,7 @@ async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcom
     };
     let declared = if is_linux {
         let me = crate::host_identity::machine_id();
-        declared_targets_for_host(crate::mounts::endpoint_db::list()?, &me)
+        declared_targets_for_host(crate::mounts::endpoint_db::list()?, me)
     } else {
         Vec::new()
     };
