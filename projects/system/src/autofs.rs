@@ -1652,6 +1652,9 @@ fn stacked_fstypes(target: &str) -> Result<Vec<String>, String> {
 
 fn fstypes_at(table: &[MountEntry], target: &str) -> Vec<String> {
     let target = target.trim_end_matches('/');
+    if target.is_empty() {
+        return Vec::new();
+    }
     table
         .iter()
         .filter(|m| m.mountpoint.trim_end_matches('/') == target)
@@ -1862,9 +1865,12 @@ mod tests {
 
     #[test]
     fn fstypes_at_empty_when_absent_or_empty_target() {
-        let table = vec![entry("/mnt/data", "cifs", "a")];
+        let table = vec![entry("/mnt/data", "cifs", "a"), entry("/", "nfs4", "r")];
         assert!(fstypes_at(&table, "/mnt/other").is_empty());
-        assert!(fstypes_at(&table, "").is_empty());
+        for t in ["", "/", "//"] {
+            assert!(fstypes_at(&table, t).is_empty(), "{t:?}");
+        }
+        assert_eq!(fstypes_at(&table, "/mnt/data"), vec!["cifs".to_string()]);
     }
 
     #[test]

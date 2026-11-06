@@ -1757,7 +1757,10 @@ fn kernel_fstype(fstype: &str) -> bool {
 /// root helper is never handed a caller-chosen path.
 fn ensure_declared_target(target: &str, declared: &[String]) -> anyhow::Result<()> {
     let norm = |p: &str| p.trim_end_matches('/').to_string();
-    if declared.iter().any(|d| norm(d) == norm(target)) {
+    if declared
+        .iter()
+        .any(|d| !norm(d).is_empty() && norm(d) == norm(target))
+    {
         Ok(())
     } else {
         anyhow::bail!(
@@ -1772,6 +1775,9 @@ fn kernel_mount_live(
 ) -> anyhow::Result<bool> {
     let table =
         table.map_err(|e| anyhow::anyhow!("cannot read mount table to unmount `{norm}`: {e}"))?;
+    if norm.is_empty() {
+        return Ok(false);
+    }
     Ok(table
         .iter()
         .any(|m| m.mountpoint.trim_end_matches('/') == norm && kernel_fstype(&m.fstype)))
@@ -1795,6 +1801,9 @@ fn plan_kernel_unmount(
         return Ok(None);
     }
     let norm = target.trim_end_matches('/');
+    if norm.is_empty() {
+        anyhow::bail!("refusing to unmount the root filesystem");
+    }
     if !kernel_mount_live(table, norm)? {
         return Ok(None);
     }
@@ -4324,6 +4333,23 @@ mod tests {
         assert!(ensure_declared_target("/etc", &declared).is_err());
         assert!(ensure_declared_target("/mnt/data/sub", &declared).is_err());
         assert!(ensure_declared_target("/mnt/data", &[]).is_err());
+    }
+
+    #[test]
+    fn declared_root_never_authorizes_anything() {
+        let declared = d("/");
+        assert!(ensure_declared_target("/mnt/x", &declared).is_err());
+        assert!(ensure_declared_target("", &declared).is_err());
+        assert!(ensure_declared_target("/", &declared).is_err());
+        assert!(ensure_declared_target("", &d("")).is_err());
+    }
+
+    #[test]
+    fn plan_refuses_the_root_filesystem() {
+        for t in ["/", "", "//"] {
+            let e = plan_kernel_unmount(true, t, Ok(vec![mt("/", "nfs4")]), &d("/")).unwrap_err();
+            assert!(e.to_string().contains("root filesystem"), "{t:?}: {e}");
+        }
     }
 
     #[test]
