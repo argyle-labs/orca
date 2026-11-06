@@ -235,7 +235,7 @@ fn managed_targets(mounts: &[ManagedMount]) -> Vec<String> {
 fn map_line(m: &ManagedMount) -> String {
     let opts = autofs_options(m);
     let locations = ordered_sources(&m.source, m.failover_sources.as_deref()).join(" ");
-    format!("{}  {}  {}", m.target, opts, locations)
+    format!("{}  {}  {}", escape_map_key(&m.target), opts, locations)
 }
 
 /// Render the direct-map body writing the **single elected source** per mount
@@ -272,7 +272,7 @@ pub fn render_map_elected(
 /// server — orca owns source selection.
 fn map_line_for(m: &ManagedMount, source: &str) -> String {
     let opts = autofs_options(m);
-    format!("{}  {}  {}", m.target, opts, source)
+    format!("{}  {}  {}", escape_map_key(&m.target), opts, source)
 }
 
 /// Build the autofs `-fstype=…,opt,opt` option string for a mount. The option
@@ -1409,11 +1409,37 @@ fn normalize_unmount_target(target: &str) -> Result<String, &'static str> {
     Ok(trimmed.to_string())
 }
 
-fn declared_map_keys(map: &str) -> std::collections::HashSet<&str> {
+/// autofs map keys end at the first unescaped whitespace; spaces, tabs and
+/// backslashes in a target are backslash-escaped so the key survives intact.
+fn escape_map_key(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    for c in key.chars() {
+        if c == ' ' || c == '\t' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn first_map_key(line: &str) -> String {
+    let mut key = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => key.extend(chars.next()),
+            c if c.is_whitespace() => break,
+            c => key.push(c),
+        }
+    }
+    key
+}
+
+fn declared_map_keys(map: &str) -> std::collections::HashSet<String> {
     map.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .filter_map(|l| l.split_whitespace().next())
+        .map(first_map_key)
         .collect()
 }
 
@@ -1443,7 +1469,7 @@ where
                 continue;
             }
         };
-        if !declared.contains(path.as_str()) {
+        if !declared.contains(&path) {
             res.errors
                 .push(format!("release {t}: refused: not a declared orca mount"));
             continue;
@@ -3427,6 +3453,31 @@ mod tests {
         .unwrap_err();
         assert_eq!(calls.get(), 1);
         assert!(err.contains("cannot read mount table"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guard_matches_escaped_space_key_and_refuses_its_prefix() {
+        let map = format!("{}  -fstype=cifs  //h/s\n", escape_map_key("/mnt/my dir"));
+        assert_eq!(map, "/mnt/my\\ dir  -fstype=cifs  //h/s\n");
+        let calls = std::cell::RefCell::new(Vec::new());
+        let mut results = Vec::new();
+        for t in ["/mnt/my dir", "/mnt/my"] {
+            results.push(
+                guard_unmount(
+                    &[t.to_string()],
+                    || map.clone(),
+                    |_| Ok(vec!["cifs".to_string()]),
+                    |p| {
+                        calls.borrow_mut().push(p);
+                        async { Ok(()) }
+                    },
+                )
+                .await,
+            );
+        }
+        assert_eq!(results[0].changed, vec!["/mnt/my dir".to_string()]);
+        assert!(results[1].changed.is_empty() && results[1].errors.len() == 1);
+        assert_eq!(*calls.borrow(), vec!["/mnt/my dir".to_string()]);
     }
 
     #[tokio::test]

@@ -521,6 +521,15 @@ malformed
     }
 
     #[test]
+    fn parse_linux_unescapes_tab_newline_backslash_and_leaves_malformed() {
+        let raw =
+            "srv:/x /mnt/a\\011b\\012c\\134d nfs4 rw 0 0\nsrv:/y /mnt/bad\\04x\\99 nfs4 rw 0 0\n";
+        let m = parse_linux_proc_mounts(raw);
+        assert_eq!(m[0].mountpoint, "/mnt/a\tb\nc\\d");
+        assert_eq!(m[1].mountpoint, "/mnt/bad\\04x\\99");
+    }
+
+    #[test]
     fn parse_macos_mount_normalizes_rows() {
         let raw = "\
 //user@srv/public on /Volumes/public (smbfs, nodev, nosuid, mounted by user)
