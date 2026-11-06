@@ -1818,11 +1818,16 @@ fn outcome_from_result(
     if !r.errors.is_empty() {
         anyhow::bail!("unmount {target}: {}", r.errors.join("; "));
     }
+    let detail = if r.unchanged.is_empty() {
+        "released via privileged helper"
+    } else {
+        "no network mount to release"
+    };
     Ok(MountOutcome {
         target: target.to_string(),
-        mounted: false,
+        mounted: !r.unchanged.is_empty(),
         recovered: false,
-        detail: Some("released via privileged helper".into()),
+        detail: Some(detail.into()),
     })
 }
 
@@ -4477,6 +4482,13 @@ mod tests {
         assert_eq!(o.target, "/x");
         assert!(!o.mounted && !o.recovered);
         assert_eq!(o.detail.as_deref(), Some("released via privileged helper"));
+        let lone = crate::autofs::PrivilegedResult {
+            unchanged: vec!["/x".into()],
+            ..Default::default()
+        };
+        let o = outcome_from_result("/x", lone).unwrap();
+        assert!(o.mounted && !o.recovered);
+        assert_eq!(o.detail.as_deref(), Some("no network mount to release"));
     }
 
     #[test]

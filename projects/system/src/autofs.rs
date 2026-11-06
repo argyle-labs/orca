@@ -192,6 +192,9 @@ pub struct PrivilegedResult {
     pub changed: Vec<String>,
     /// Whether autofs was restarted.
     pub restarted: bool,
+    /// Unmount targets that held nothing detachable (autofs layer only); still authorized.
+    #[serde(default)]
+    pub unchanged: Vec<String>,
     /// Non-fatal errors — collected, not thrown, so one bad step doesn't abort.
     pub errors: Vec<String>,
 }
@@ -1559,7 +1562,7 @@ where
     G: FnOnce() -> Result<String, String>,
     L: Fn(&str) -> Result<Vec<String>, String>,
     U: FnMut(String) -> F,
-    F: std::future::Future<Output = Result<(), String>>,
+    F: std::future::Future<Output = Result<Unwound, String>>,
 {
     let mut res = PrivilegedResult::default();
     let map = read_map();
@@ -1610,7 +1613,8 @@ where
             continue;
         }
         match umount(path.clone()).await {
-            Ok(()) => res.changed.push(path),
+            Ok(Unwound::Detached) => res.changed.push(path),
+            Ok(Unwound::NothingToDetach) => res.unchanged.push(path),
             Err(e) => res.errors.push(format!("release {t}: {e}")),
         }
     }
@@ -1623,7 +1627,7 @@ const MAX_STACKED_UNMOUNTS: usize = 16;
 /// the path. The autofs layer beneath, and any non-network layer, is never
 /// detached. Runs root-side inside the helper. A non-zero exit (e.g. "not
 /// mounted") surfaces as an error the caller collects but does not treat as fatal.
-async fn force_unmount(target: &str) -> Result<(), String> {
+async fn force_unmount(target: &str) -> Result<Unwound, String> {
     unwind_stacked(
         || stacked_fstypes(target),
         || async {
@@ -1673,21 +1677,38 @@ fn is_network_fstype(fstype: &str) -> bool {
     matches!(fstype, "nfs" | "nfs4" | "cifs" | "smb3")
 }
 
-async fn unwind_stacked<L, U, F>(mut layers: L, mut umount: U) -> Result<(), String>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unwound {
+    Detached,
+    NothingToDetach,
+}
+
+async fn unwind_stacked<L, U, F>(mut layers: L, mut umount: U) -> Result<Unwound, String>
 where
     L: FnMut() -> Result<Vec<String>, String>,
     U: FnMut() -> F,
     F: std::future::Future<Output = Result<(), String>>,
 {
+    let mut detached = false;
+    let outcome = |detached| {
+        if detached {
+            Unwound::Detached
+        } else {
+            Unwound::NothingToDetach
+        }
+    };
     for attempt in 0..MAX_STACKED_UNMOUNTS {
         let stack = layers()?;
         match stack.last() {
-            None if attempt == 0 => umount().await?,
+            None if attempt == 0 => {
+                umount().await?;
+                detached = true;
+            }
             Some(top) if is_network_fstype(top) => {
                 if let Err(e) = umount().await {
                     let after = layers()?;
                     if !after.iter().any(|f| is_network_fstype(f)) {
-                        return Ok(());
+                        return Ok(Unwound::Detached);
                     }
                     return match after.last() {
                         Some(top) if !is_network_fstype(top) => Err(format!(
@@ -1696,13 +1717,14 @@ where
                         _ => Err(e),
                     };
                 }
+                detached = true;
             }
             Some(top) if stack.iter().any(|f| is_network_fstype(f)) => {
                 return Err(format!(
                     "network mount is covered by a `{top}` layer; refusing to detach it"
                 ));
             }
-            _ => return Ok(()),
+            _ => return Ok(outcome(detached)),
         }
     }
     if layers()?.last().is_some_and(|t| is_network_fstype(t)) {
@@ -1710,7 +1732,7 @@ where
             "network mount still present after {MAX_STACKED_UNMOUNTS} unmounts"
         ));
     }
-    Ok(())
+    Ok(outcome(detached))
 }
 
 #[cfg(test)]
@@ -2938,6 +2960,7 @@ mod tests {
             changed: vec!["/mnt/a".into(), "/mnt/b".into()],
             restarted: true,
             errors: vec!["mount /mnt/c: boom".into()],
+            unchanged: vec![],
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("\"restarted\":true"));
@@ -3465,7 +3488,7 @@ mod tests {
             },
             |p| {
                 calls.borrow_mut().push(p);
-                async { Ok(()) }
+                async { Ok(Unwound::Detached) }
             },
         )
         .await;
@@ -3531,7 +3554,7 @@ mod tests {
     async fn run_unwind(
         table: &std::cell::RefCell<Vec<String>>,
         calls: &std::cell::Cell<usize>,
-    ) -> Result<(), String> {
+    ) -> Result<Unwound, String> {
         unwind_stacked(
             || Ok(table.borrow().clone()),
             || {
@@ -3547,7 +3570,8 @@ mod tests {
     async fn unwind_stacked_detaches_cifs_and_keeps_autofs() {
         let table = stack(&["autofs", "cifs"]);
         let calls = std::cell::Cell::new(0);
-        run_unwind(&table, &calls).await.unwrap();
+        let out = run_unwind(&table, &calls).await.unwrap();
+        assert_eq!(out, Unwound::Detached);
         assert_eq!(calls.get(), 1);
         assert_eq!(*table.borrow(), ["autofs"]);
     }
@@ -3592,9 +3616,48 @@ mod tests {
     async fn unwind_stacked_leaves_a_lone_autofs_untouched() {
         let table = stack(&["autofs"]);
         let calls = std::cell::Cell::new(0);
-        run_unwind(&table, &calls).await.unwrap();
+        let out = run_unwind(&table, &calls).await.unwrap();
+        assert_eq!(out, Unwound::NothingToDetach);
         assert_eq!(calls.get(), 0);
         assert_eq!(*table.borrow(), ["autofs"]);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_reports_detached_for_a_lone_cifs() {
+        let table = stack(&["cifs"]);
+        let calls = std::cell::Cell::new(0);
+        let out = run_unwind(&table, &calls).await.unwrap();
+        assert_eq!(out, Unwound::Detached);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn unmount_of_a_lone_autofs_is_unchanged_and_stays_in_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        let path = path.to_str().unwrap();
+        ledger_update(path, &["/mnt/thor".to_string()], &[])
+            .await
+            .unwrap();
+        let ledger = read_ledger(path).unwrap();
+        let table = stack(&["autofs"]);
+        let calls = std::cell::Cell::new(0);
+        let res = guard_unmount(
+            &["/mnt/thor".to_string()],
+            String::new,
+            || Ok(ledger),
+            |_| Ok(table.borrow().clone()),
+            |_| async {
+                calls.set(calls.get() + 1);
+                unwind_stacked(|| Ok(table.borrow().clone()), || async { Ok(()) }).await
+            },
+        )
+        .await;
+        assert_eq!(calls.get(), 1);
+        assert!(res.changed.is_empty() && res.errors.is_empty());
+        assert_eq!(res.unchanged, vec!["/mnt/thor".to_string()]);
+        ledger_update(path, &[], &res.changed).await.unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "/mnt/thor\n");
     }
 
     const _: () = assert!(MAX_STACKED_UNMOUNTS == 16);
@@ -3630,7 +3693,7 @@ mod tests {
     async fn run_racy(
         reads: Vec<Result<Vec<String>, String>>,
         failing: &[usize],
-    ) -> (Result<(), String>, usize) {
+    ) -> (Result<Unwound, String>, usize) {
         let reads = std::cell::RefCell::new(reads.into_iter());
         let calls = std::cell::Cell::new(0usize);
         let res = unwind_stacked(
@@ -3657,7 +3720,7 @@ mod tests {
     #[tokio::test]
     async fn unwind_stacked_ok_when_layer_vanishes_after_failed_umount() {
         let (res, calls) = run_racy(vec![l(&["autofs", "cifs"]), l(&["autofs"])], &[0]).await;
-        assert_eq!(res, Ok(()));
+        assert_eq!(res, Ok(Unwound::Detached));
         assert_eq!(calls, 1);
     }
 
@@ -3695,7 +3758,7 @@ mod tests {
     #[tokio::test]
     async fn unwind_stacked_ok_when_only_autofs_remains_after_failed_umount() {
         let (res, calls) = run_racy(vec![l(&["cifs"]), l(&["autofs"])], &[0]).await;
-        assert_eq!(res, Ok(()));
+        assert_eq!(res, Ok(Unwound::Detached));
         assert_eq!(calls, 1);
     }
 
@@ -3709,7 +3772,7 @@ mod tests {
     #[tokio::test]
     async fn unwind_stacked_ok_when_everything_vanishes_after_failed_umount() {
         let (res, calls) = run_racy(vec![l(&["cifs"]), l(&[])], &[0]).await;
-        assert_eq!(res, Ok(()));
+        assert_eq!(res, Ok(Unwound::Detached));
         assert_eq!(calls, 1);
     }
 
@@ -3745,7 +3808,7 @@ mod tests {
             &[1],
         )
         .await;
-        assert_eq!(res, Ok(()));
+        assert_eq!(res, Ok(Unwound::Detached));
         assert_eq!(calls, 2);
     }
 
@@ -3802,7 +3865,7 @@ mod tests {
                     |_| Ok(vec!["cifs".to_string()]),
                     |p| {
                         calls.borrow_mut().push(p);
-                        async { Ok(()) }
+                        async { Ok(Unwound::Detached) }
                     },
                 )
                 .await,
@@ -3824,7 +3887,7 @@ mod tests {
             |_| Err("cannot read mount table: denied".to_string()),
             |p| {
                 calls.borrow_mut().push(p);
-                async { Ok(()) }
+                async { Ok(Unwound::Detached) }
             },
         )
         .await;
@@ -3852,7 +3915,7 @@ mod tests {
             |_| Ok(mounted.iter().map(|s| s.to_string()).collect()),
             |p| {
                 calls.borrow_mut().push(p);
-                async { Ok(()) }
+                async { Ok(Unwound::Detached) }
             },
         )
         .await;
@@ -4009,7 +4072,7 @@ mod tests {
             |_| Ok(vec!["autofs".to_string(), "nfs4".to_string()]),
             |p| {
                 calls.borrow_mut().push(p);
-                async { Ok(()) }
+                async { Ok(Unwound::Detached) }
             },
         )
         .await;
