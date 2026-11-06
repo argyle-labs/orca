@@ -169,6 +169,8 @@ pub(crate) fn assert_invalid(err: &anyhow::Error, needle: &str) {
 
 /// Object-safe version of OrcaTool. Implemented automatically for any OrcaTool via ToolWrapper.
 pub trait ErasedTool: Send + Sync {
+    /// Mirrors `OrcaToolDef::ID`.
+    fn id(&self) -> Option<&'static str>;
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     /// Whether this tool may be invoked by a paired system via `mesh/exec`.
@@ -220,6 +222,10 @@ unsafe impl<T: OrcaTool> Send for ToolWrapper<T> {}
 unsafe impl<T: OrcaTool> Sync for ToolWrapper<T> {}
 
 impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
+    fn id(&self) -> Option<&'static str> {
+        T::ID
+    }
+
     fn name(&self) -> &'static str {
         T::NAME
     }

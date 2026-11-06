@@ -59,6 +59,10 @@ struct ToolCache {
     ordered: Vec<Box<dyn ErasedTool>>,
     /// Name → index into `ordered`. `dispatch` and friends look up here.
     by_name: HashMap<&'static str, usize>,
+    /// Id → index into `ordered`.
+    by_id: HashMap<&'static str, usize>,
+    /// One message per id claimed by two tools.
+    id_conflicts: Vec<String>,
 }
 
 static CACHE: OnceLock<ToolCache> = OnceLock::new();
@@ -80,8 +84,55 @@ fn cache() -> &'static ToolCache {
             by_name.insert(entry.name, ordered.len());
             ordered.push(tool);
         }
-        ToolCache { ordered, by_name }
+        let (by_id, id_conflicts) = index_ids(&ordered);
+        ToolCache {
+            ordered,
+            by_name,
+            by_id,
+            id_conflicts,
+        }
     })
+}
+
+fn index_ids(ordered: &[Box<dyn ErasedTool>]) -> (HashMap<&'static str, usize>, Vec<String>) {
+    let mut by_id: HashMap<&'static str, usize> = HashMap::new();
+    let mut conflicts = Vec::new();
+    for (i, tool) in ordered.iter().enumerate() {
+        let Some(id) = tool.id() else { continue };
+        match by_id.get(id) {
+            Some(&first) => conflicts.push(format!(
+                "tool id {id} is declared by both `{}` and `{}`",
+                ordered[first].name(),
+                tool.name()
+            )),
+            None => {
+                by_id.insert(id, i);
+            }
+        }
+    }
+    (by_id, conflicts)
+}
+
+/// Fails, naming both tools, when two registered tools share an id.
+pub fn validate_tool_ids() -> Result<()> {
+    let conflicts = &cache().id_conflicts;
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!("{}", conflicts.join("; "))
+}
+
+pub fn tool_name_for_id(id: &str) -> Option<&'static str> {
+    let c = cache();
+    c.by_id.get(id).map(|i| c.ordered[*i].name())
+}
+
+pub fn registered_tool_ids() -> Vec<(&'static str, &'static str)> {
+    cache()
+        .ordered
+        .iter()
+        .filter_map(|t| t.id().map(|id| (id, t.name())))
+        .collect()
 }
 
 pub(crate) fn find(name: &str) -> Option<&'static dyn ErasedTool> {
@@ -437,6 +488,7 @@ pub fn mcp_definitions() -> Vec<Value> {
         .iter()
         .map(|t| {
             json!({
+                "id": t.id(),
                 "name": t.name(),
                 "description": t.description(),
                 "inputSchema": advertise_ambient(t.input_schema(), t.remote_ok()),
@@ -449,6 +501,7 @@ pub fn mcp_definitions() -> Vec<Value> {
     for d in dynamic_tool_defs() {
         let name = d.get("name").and_then(Value::as_str);
         defs.push(json!({
+            "id": d.get("id").cloned().unwrap_or(Value::Null),
             "name": d.get("name").cloned().unwrap_or(Value::Null),
             "description": d.get("description").cloned().unwrap_or(Value::Null),
             "inputSchema": advertise_system(d.get("input_schema").cloned().unwrap_or(json!({ "type": "object" }))),
@@ -466,7 +519,7 @@ pub fn mcp_definitions() -> Vec<Value> {
 }
 
 /// Build a plugin's tool manifest as a JSON string: an array of objects
-/// `{ name, description, input_schema, output_schema, role, execute_gated,
+/// `{ id, name, description, input_schema, output_schema, role, execute_gated,
 /// data_mutation }`. The daemon installs the last three into [`crate::tool_roles`]
 /// at plugin load so plugin tools are gated like core ones. This is the exact
 /// shape `plugin_toolkit::abi::ToolDef` deserializes, so a plugin builds its
@@ -480,6 +533,7 @@ pub fn tool_manifest_json() -> String {
         .iter()
         .map(|t| {
             json!({
+                "id": t.id(),
                 "name": t.name(),
                 "description": t.description(),
                 "input_schema": t.input_schema(),
@@ -1145,6 +1199,7 @@ mod tests {
     struct EchoTool;
 
     impl OrcaToolDef for EchoTool {
+        const ID: Option<&'static str> = Some("019a5c1e-0000-7000-8000-000000000001");
         const NAME: &'static str = "echo.local";
         const DESCRIPTION: &'static str = "Echoes a message.";
         const REQUIRED_ROLE: &'static str = "admin";
@@ -1186,6 +1241,7 @@ mod tests {
     struct AddTool;
 
     impl OrcaToolDef for AddTool {
+        const ID: Option<&'static str> = Some("019a5c1e-0000-7000-8000-000000000002");
         const NAME: &'static str = "add.local";
         const DESCRIPTION: &'static str = "Adds two numbers.";
         const REMOTE_OK: bool = true;
@@ -1731,6 +1787,52 @@ mod tests {
         assert!(out["properties"]["peer"].is_object());
     }
 
+    struct DupOfEcho;
+
+    impl OrcaToolDef for DupOfEcho {
+        const ID: Option<&'static str> = EchoTool::ID;
+        const NAME: &'static str = "echo.dup";
+        const DESCRIPTION: &'static str = "Shares echo's id.";
+        type Args = EchoArgs;
+        type Output = String;
+    }
+
+    #[async_trait]
+    impl OrcaTool for DupOfEcho {
+        async fn run(args: EchoArgs, _ctx: &ToolCtx) -> Result<String> {
+            Ok(args.message)
+        }
+    }
+
+    #[test]
+    fn index_ids_names_both_tools_on_a_duplicate_id() {
+        let tools: Vec<Box<dyn ErasedTool>> = vec![
+            Box::new(ToolWrapper::<EchoTool>(PhantomData)),
+            Box::new(ToolWrapper::<AddTool>(PhantomData)),
+            Box::new(ToolWrapper::<DupOfEcho>(PhantomData)),
+        ];
+        let (by_id, conflicts) = index_ids(&tools);
+        assert_eq!(by_id.len(), 2);
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].contains("echo.local"), "{conflicts:?}");
+        assert!(conflicts[0].contains("echo.dup"), "{conflicts:?}");
+        assert!(
+            conflicts[0].contains(EchoTool::ID.unwrap()),
+            "{conflicts:?}"
+        );
+    }
+
+    #[test]
+    fn index_ids_accepts_distinct_ids() {
+        let tools: Vec<Box<dyn ErasedTool>> = vec![
+            Box::new(ToolWrapper::<EchoTool>(PhantomData)),
+            Box::new(ToolWrapper::<AddTool>(PhantomData)),
+        ];
+        let (by_id, conflicts) = index_ids(&tools);
+        assert_eq!(by_id.len(), 2);
+        assert!(conflicts.is_empty());
+    }
+
     #[test]
     fn mcp_definitions_returns_a_vec_even_when_empty() {
         let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
@@ -1752,6 +1854,39 @@ mod tests {
         };
         assert_eq!(gate(GATED_PLUGIN_TOOL), Some(json!(true)));
         assert_eq!(gate(FAKE_PLUGIN_TOOL), Some(json!(false)));
+    }
+
+    const FAKE_PLUGIN_TOOL_ID: &str = "019a5c1e-7b3a-7c4d-8e2f-0123456789ab";
+
+    #[test]
+    fn mcp_definitions_carry_plugin_tool_ids() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
+        install_fake_plugin();
+        let defs = mcp_definitions();
+        let id = |n: &str| {
+            defs.iter()
+                .find(|d| d["name"] == n)
+                .map(|d| d["id"].clone())
+        };
+        assert_eq!(id(FAKE_PLUGIN_TOOL), Some(json!(FAKE_PLUGIN_TOOL_ID)));
+        assert_eq!(id(GATED_PLUGIN_TOOL), Some(Value::Null));
+    }
+
+    #[test]
+    fn tool_manifest_json_entries_carry_an_id_key() {
+        let manifest: Vec<Value> = serde_json::from_str(&tool_manifest_json()).unwrap();
+        assert!(manifest.iter().all(|t| t.get("id").is_some()));
+    }
+
+    #[test]
+    fn tool_id_lookup_resolves_registered_ids() {
+        let tools: Vec<Box<dyn ErasedTool>> = vec![
+            Box::new(ToolWrapper::<EchoTool>(PhantomData)),
+            Box::new(ToolWrapper::<AddTool>(PhantomData)),
+        ];
+        let (by_id, _) = index_ids(&tools);
+        assert_eq!(by_id.len(), 2);
+        assert_eq!(tools[by_id[EchoTool::ID.unwrap()]].name(), "echo.local");
     }
 
     #[test]
@@ -1905,7 +2040,7 @@ mod tests {
                 }),
                 Box::new(|| {
                     vec![
-                        json!({ "name": FAKE_PLUGIN_TOOL }),
+                        json!({ "name": FAKE_PLUGIN_TOOL, "id": FAKE_PLUGIN_TOOL_ID }),
                         json!({ "name": GATED_PLUGIN_TOOL, "execute_gated": true }),
                         json!({ "name": AWARE_PLUGIN_TOOL }),
                         json!({ "name": OMITTED_GATED_PLUGIN_TOOL }),

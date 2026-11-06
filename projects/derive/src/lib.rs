@@ -285,6 +285,9 @@ struct ToolAttr {
     role: Option<LitStr>,
     /// `#[orca_tool(..., second_factor = true)]`. Independent of `role`.
     second_factor: bool,
+    /// `#[orca_tool(..., id = "<uuidv7>")]`: the tool's stable id, minted once
+    /// and committed so every member reports the same one.
+    id: Option<LitStr>,
     /// `#[orca_tool(..., risk = "low|medium|high")]`. Absent derives from the
     /// verb shape (read = low, else medium); `high` is only ever explicit.
     risk: Option<&'static str>,
@@ -320,6 +323,7 @@ impl Parse for ToolAttr {
         let mut remote_admin = false;
         let mut role: Option<LitStr> = None;
         let mut second_factor = false;
+        let mut id: Option<LitStr> = None;
         let mut risk: Option<&'static str> = None;
         let mut title: Option<LitStr> = None;
         let mut crate_path: Option<syn::Path> = None;
@@ -542,6 +546,19 @@ impl Parse for ToolAttr {
                         }
                     };
                 }
+                "id" => {
+                    let s = lit_str(&nv.value)?;
+                    if !is_canonical_uuidv7(&s.value()) {
+                        return Err(syn::Error::new_spanned(
+                            &s,
+                            format!(
+                                "id must be a lowercase canonical UUIDv7, got {:?}",
+                                s.value()
+                            ),
+                        ));
+                    }
+                    id = Some(s);
+                }
                 "risk" => {
                     let lit = lit_str(&nv.value)?;
                     risk = Some(match lit.value().as_str() {
@@ -610,11 +627,24 @@ impl Parse for ToolAttr {
             remote_admin,
             role,
             second_factor,
+            id,
             risk,
             title,
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
         })
     }
+}
+
+/// Lowercase 8-4-4-4-12 hex with version nibble 7 and an RFC 4122 variant.
+fn is_canonical_uuidv7(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => matches!(c, b'0'..=b'9' | b'a'..=b'f'),
+        })
+        && b[14] == b'7'
+        && matches!(b[19], b'8' | b'9' | b'a' | b'b')
 }
 
 fn lit_str(expr: &Expr) -> syn::Result<LitStr> {
@@ -1233,6 +1263,10 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let tool_callable_lit = attr.tool_callable;
     let remote_admin_lit = attr.remote_admin;
     let second_factor_lit = attr.second_factor;
+    let id_tokens = match &attr.id {
+        Some(id) => quote! { ::core::option::Option::Some(#id) },
+        None => quote! { ::core::option::Option::None },
+    };
     let risk_variant = syn::Ident::new(
         attr.risk
             .unwrap_or(if read_shaped { "Low" } else { "Medium" }),
@@ -1475,6 +1509,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         pub struct #zst_ident;
 
         impl #crate_path::contract::OrcaToolDef for #zst_ident {
+            const ID: ::core::option::Option<&'static str> = #id_tokens;
             const NAME: &'static str = #tool_name;
             const DESCRIPTION: &'static str = #description;
             const REMOTE_OK: bool = #remote_ok_lit;
@@ -1598,6 +1633,41 @@ mod tests {
     use super::*;
     use quote::quote;
     use syn::parse_quote;
+
+    // ── tool id ───────────────────────────────────────────────────────────────
+
+    const GOOD_ID: &str = "019a5c1e-7b3a-7c4d-8e2f-0123456789ab";
+
+    fn parse_id_attr(extra: &str) -> syn::Result<ToolAttr> {
+        syn::parse_str(&format!("domain = \"d\", verb = \"list\"{extra}"))
+    }
+
+    #[test]
+    fn tool_attr_accepts_canonical_uuidv7_id() {
+        let attr = parse_id_attr(&format!(", id = \"{GOOD_ID}\"")).unwrap();
+        assert_eq!(attr.id.unwrap().value(), GOOD_ID);
+    }
+
+    #[test]
+    fn tool_attr_id_is_optional() {
+        assert!(parse_id_attr("").unwrap().id.is_none());
+    }
+
+    #[test]
+    fn tool_attr_rejects_invalid_ids() {
+        for bad in [
+            "",
+            "not-a-uuid",
+            "019a5c1e-7b3a-4c4d-8e2f-0123456789ab",
+            "019A5C1E-7B3A-7C4D-8E2F-0123456789AB",
+            "019a5c1e7b3a7c4d8e2f0123456789ab",
+            "019a5c1e-7b3a-7c4d-ce2f-0123456789ab",
+            "019a5c1e-7b3a-7c4d-8e2f-0123456789a",
+        ] {
+            let err = parse_id_attr(&format!(", id = \"{bad}\"")).err();
+            assert!(err.is_some(), "accepted {bad:?}");
+        }
+    }
 
     // ── orca_async ────────────────────────────────────────────────────────────
 
