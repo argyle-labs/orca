@@ -3396,6 +3396,8 @@ mod tests {
         assert_eq!(*table.borrow(), ["autofs"]);
     }
 
+    const _: () = assert!(MAX_STACKED_UNMOUNTS == 16);
+
     #[tokio::test]
     async fn unwind_stacked_is_bounded_when_the_mount_never_clears() {
         let calls = std::cell::Cell::new(0usize);
@@ -3403,12 +3405,13 @@ mod tests {
             || Ok(vec!["autofs".to_string(), "cifs".to_string()]),
             || {
                 calls.set(calls.get() + 1);
+                assert!(calls.get() <= 64, "unwind_stacked has no bound");
                 async { Ok(()) }
             },
         )
         .await
         .unwrap_err();
-        assert_eq!(calls.get(), MAX_STACKED_UNMOUNTS);
+        assert_eq!(calls.get(), 16);
         assert!(err.contains("still present"), "{err}");
     }
 
