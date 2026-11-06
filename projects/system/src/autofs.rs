@@ -1553,15 +1553,18 @@ async fn force_unmount(target: &str) -> Result<(), String> {
 
 /// Filesystem types stacked at `target`, oldest first (topmost last).
 fn stacked_fstypes(target: &str) -> Result<Vec<String>, String> {
-    let target = target.trim_end_matches('/');
     plugin_toolkit::storage::mount_table::mount_table()
-        .map(|t| {
-            t.iter()
-                .filter(|m| m.mountpoint.trim_end_matches('/') == target)
-                .map(|m| m.fstype.clone())
-                .collect()
-        })
+        .map(|t| fstypes_at(&t, target))
         .map_err(|e| format!("cannot read mount table: {e}"))
+}
+
+fn fstypes_at(table: &[MountEntry], target: &str) -> Vec<String> {
+    let target = target.trim_end_matches('/');
+    table
+        .iter()
+        .filter(|m| m.mountpoint.trim_end_matches('/') == target)
+        .map(|m| m.fstype.clone())
+        .collect()
 }
 
 fn is_network_fstype(fstype: &str) -> bool {
@@ -1730,6 +1733,59 @@ mod tests {
             fstype: fstype.into(),
             options: Vec::new(),
         }
+    }
+
+    #[test]
+    fn fstypes_at_matches_exact_mountpoint_only() {
+        let table = vec![
+            entry("/mnt/data", "autofs", "a"),
+            entry("/mnt/data/sub", "nfs4", "b"),
+            entry("/mnt/database", "nfs4", "c"),
+            entry("/mnt/data", "cifs", "d"),
+        ];
+        assert_eq!(fstypes_at(&table, "/mnt/data"), vec!["autofs", "cifs"]);
+    }
+
+    #[test]
+    fn fstypes_at_preserves_table_order() {
+        let fwd = vec![entry("/m", "autofs", "a"), entry("/m", "cifs", "b")];
+        let rev = vec![entry("/m", "cifs", "b"), entry("/m", "autofs", "a")];
+        assert_eq!(fstypes_at(&fwd, "/m").last().unwrap(), "cifs");
+        assert_eq!(fstypes_at(&rev, "/m"), vec!["cifs", "autofs"]);
+    }
+
+    #[test]
+    fn fstypes_at_ignores_trailing_slashes() {
+        let table = vec![entry("/mnt/data/", "cifs", "a")];
+        assert_eq!(fstypes_at(&table, "/mnt/data"), vec!["cifs"]);
+        assert_eq!(fstypes_at(&table, "/mnt/data/"), vec!["cifs"]);
+        let table = vec![entry("/mnt/data", "cifs", "a")];
+        assert_eq!(fstypes_at(&table, "/mnt/data/"), vec!["cifs"]);
+    }
+
+    #[test]
+    fn fstypes_at_empty_when_absent_or_empty_target() {
+        let table = vec![entry("/mnt/data", "cifs", "a")];
+        assert!(fstypes_at(&table, "/mnt/other").is_empty());
+        assert!(fstypes_at(&table, "").is_empty());
+    }
+
+    #[test]
+    fn fstypes_at_matches_mountpoint_with_space() {
+        let table = vec![entry("/mnt/my share", "cifs", "a")];
+        assert_eq!(fstypes_at(&table, "/mnt/my share"), vec!["cifs"]);
+        assert!(fstypes_at(&table, "/mnt/my").is_empty());
+    }
+
+    #[test]
+    fn fstypes_at_over_parsed_proc_mounts() {
+        let raw = "systemd-1 /mnt/data autofs rw,relatime 0 0\n\
+                   //srv/share /mnt/data cifs rw,vers=3.0 0 0\n\
+                   //srv/other /mnt/my\\040share cifs rw 0 0\n\
+                   /dev/sda1 /mnt/database ext4 rw 0 0\n";
+        let table = plugin_toolkit::storage::mount_table::parse_linux_proc_mounts(raw);
+        assert_eq!(fstypes_at(&table, "/mnt/data"), vec!["autofs", "cifs"]);
+        assert_eq!(fstypes_at(&table, "/mnt/my share"), vec!["cifs"]);
     }
 
     #[test]
