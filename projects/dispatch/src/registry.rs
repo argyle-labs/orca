@@ -447,11 +447,12 @@ pub fn mcp_definitions() -> Vec<Value> {
     // them alongside the static registry. `dynamic_tool_defs` carries the
     // plugin manifest shape (`input_schema`); remap to MCP's `inputSchema`.
     for d in dynamic_tool_defs() {
+        let name = d.get("name").and_then(Value::as_str);
         defs.push(json!({
             "name": d.get("name").cloned().unwrap_or(Value::Null),
             "description": d.get("description").cloned().unwrap_or(Value::Null),
             "inputSchema": advertise_system(d.get("input_schema").cloned().unwrap_or(json!({ "type": "object" }))),
-            "execute_gated": d.get("execute_gated").and_then(Value::as_bool).unwrap_or(false),
+            "execute_gated": name.is_some_and(crate::tool_roles::plugin_execute_gated),
         }));
     }
     // Merge the live, plugin-driven unit surface (unit.<kind>.<verb|action>),
@@ -1753,6 +1754,21 @@ mod tests {
     }
 
     #[test]
+    fn catalog_execute_gated_follows_the_daemon_policy_default() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.blocking_lock();
+        install_fake_plugin();
+        let defs = mcp_definitions();
+        let gate = |n: &str| {
+            defs.iter()
+                .find(|d| d["name"] == n)
+                .map(|d| d["execute_gated"].clone())
+        };
+        assert_eq!(gate(OMITTED_GATED_PLUGIN_TOOL), Some(json!(true)));
+        assert_eq!(gate(EXPLICIT_OFF_PLUGIN_TOOL), Some(json!(false)));
+        assert_eq!(gate(READ_OMITTED_PLUGIN_TOOL), Some(json!(false)));
+    }
+
+    #[test]
     fn role_table_is_consistent_with_required_role_lookup() {
         for (name, role) in role_table() {
             assert_eq!(required_role(name), Some(role));
@@ -1891,6 +1907,9 @@ mod tests {
                         json!({ "name": FAKE_PLUGIN_TOOL }),
                         json!({ "name": GATED_PLUGIN_TOOL, "execute_gated": true }),
                         json!({ "name": AWARE_PLUGIN_TOOL }),
+                        json!({ "name": OMITTED_GATED_PLUGIN_TOOL }),
+                        json!({ "name": EXPLICIT_OFF_PLUGIN_TOOL, "execute_gated": false }),
+                        json!({ "name": READ_OMITTED_PLUGIN_TOOL }),
                         json!({
                             "name": OWN_SYSTEM_TOOL,
                             "input_schema": { "properties": { "systemId": { "type": "string" } } }
@@ -1907,6 +1926,35 @@ mod tests {
                     None,
                 ),
             )]);
+            crate::tool_roles::install_plugin_tools([
+                (
+                    OMITTED_GATED_PLUGIN_TOOL.to_string(),
+                    crate::tool_roles::PluginToolPolicy::from_manifest(
+                        OMITTED_GATED_PLUGIN_TOOL,
+                        Some("any"),
+                        None,
+                        None,
+                    ),
+                ),
+                (
+                    EXPLICIT_OFF_PLUGIN_TOOL.to_string(),
+                    crate::tool_roles::PluginToolPolicy::from_manifest(
+                        EXPLICIT_OFF_PLUGIN_TOOL,
+                        Some("any"),
+                        Some(false),
+                        None,
+                    ),
+                ),
+                (
+                    READ_OMITTED_PLUGIN_TOOL.to_string(),
+                    crate::tool_roles::PluginToolPolicy::from_manifest(
+                        READ_OMITTED_PLUGIN_TOOL,
+                        Some("any"),
+                        None,
+                        None,
+                    ),
+                ),
+            ]);
             crate::tool_roles::install_plugin_tools([(
                 AWARE_PLUGIN_TOOL.to_string(),
                 crate::tool_roles::PluginToolPolicy::from_manifest(
@@ -1921,6 +1969,9 @@ mod tests {
     }
 
     const AWARE_PLUGIN_TOOL: &str = "rest_fallback_test_plugin.aware";
+    const OMITTED_GATED_PLUGIN_TOOL: &str = "rest_fallback_test_plugin.apply";
+    const EXPLICIT_OFF_PLUGIN_TOOL: &str = "rest_fallback_test_plugin.explicit_off";
+    const READ_OMITTED_PLUGIN_TOOL: &str = "rest_fallback_test_plugin.list";
 
     static AWARE_SEEN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
 
