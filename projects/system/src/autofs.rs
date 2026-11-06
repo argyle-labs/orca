@@ -128,6 +128,10 @@ pub enum PrivilegedOp {
     /// Force-release wedged mounts (`umount -lf`) so autofs can remount + fail
     /// over. Used by the self-heal path.
     Unmount { targets: Vec<String> },
+    /// [`PrivilegedOp::Unmount`] for targets the caller confirmed are declared
+    /// placements on this host but that never entered the map or ledger (adopted
+    /// direct kernel mounts). The same normalization and live-mount checks apply.
+    UnmountDeclared { targets: Vec<String> },
     /// Realize mounts natively via `mount(8)` — the autofs-free apply path. Each
     /// [`MountReq`] is already rendered (source elected, options rendered by the
     /// owning backend); the root helper just runs the mount. This is the
@@ -703,6 +707,25 @@ pub async fn run_privileged(op: &PrivilegedOp) -> PrivilegedResult {
 
 // ── Root side: the privileged executor (runs inside `orca admin storage-apply`) ─
 
+async fn execute_unmount(targets: &[String], extra_declared: &[String]) -> PrivilegedResult {
+    let mut res = guard_unmount_declared(
+        targets,
+        extra_declared,
+        || match std::fs::read_to_string(MAP_FILE) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            r => r.map_err(|e| e.to_string()),
+        },
+        || read_ledger(LEDGER_FILE),
+        stacked_fstypes,
+        |t| async move { force_unmount(&t).await },
+    )
+    .await;
+    if let Err(e) = ledger_update(LEDGER_FILE, &[], &res.changed).await {
+        res.errors.push(e);
+    }
+    res
+}
+
 /// Execute a validated [`PrivilegedOp`] as root. Called only from the
 /// `admin storage-apply` CLI path (via `sudo`). Validates every write path,
 /// writes atomically (temp + rename), and restarts autofs.
@@ -742,23 +765,8 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             }
             res
         }
-        PrivilegedOp::Unmount { targets } => {
-            let mut res = guard_unmount(
-                &targets,
-                || match std::fs::read_to_string(MAP_FILE) {
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-                    r => r.map_err(|e| e.to_string()),
-                },
-                || read_ledger(LEDGER_FILE),
-                stacked_fstypes,
-                |t| async move { force_unmount(&t).await },
-            )
-            .await;
-            if let Err(e) = ledger_update(LEDGER_FILE, &[], &res.changed).await {
-                res.errors.push(e);
-            }
-            res
-        }
+        PrivilegedOp::Unmount { targets } => execute_unmount(&targets, &[]).await,
+        PrivilegedOp::UnmountDeclared { targets } => execute_unmount(&targets, &targets).await,
         PrivilegedOp::Mount {
             mounts,
             keep_secret_files,
@@ -1557,8 +1565,29 @@ async fn ledger_update(path: &str, add: &[String], remove: &[String]) -> Result<
 /// is a key of the orca-owned direct map or in the root-owned mount ledger AND
 /// currently has a network or autofs layer mounted. Anything else is refused
 /// without invoking umount.
+#[cfg(test)]
 async fn guard_unmount<M, G, L, U, F>(
     targets: &[String],
+    read_map: M,
+    read_ledger: G,
+    layers: L,
+    umount: U,
+) -> PrivilegedResult
+where
+    M: FnOnce() -> Result<String, String>,
+    G: FnOnce() -> Result<String, String>,
+    L: Fn(&str) -> Result<Vec<String>, String>,
+    U: FnMut(String) -> F,
+    F: std::future::Future<Output = Result<Unwound, String>>,
+{
+    guard_unmount_declared(targets, &[], read_map, read_ledger, layers, umount).await
+}
+
+/// `extra_declared` are caller-vouched placements, authorized like map keys only
+/// after the same normalization and live network/autofs checks.
+async fn guard_unmount_declared<M, G, L, U, F>(
+    targets: &[String],
+    extra_declared: &[String],
     read_map: M,
     read_ledger: G,
     layers: L,
@@ -1583,7 +1612,12 @@ where
             return res;
         }
     };
-    let declared = declared_map_keys(&map);
+    let mut declared = declared_map_keys(&map);
+    declared.extend(
+        extra_declared
+            .iter()
+            .filter_map(|t| normalize_unmount_target(t).ok()),
+    );
     let mut ledger = None;
     let mut read_ledger = Some(read_ledger);
     for t in targets {
@@ -2531,6 +2565,16 @@ mod tests {
     }
 
     // ── PrivilegedOp::Unmount + PrivilegedResult serde ────────────────────
+
+    #[test]
+    fn unmount_declared_op_roundtrips_json() {
+        let op = PrivilegedOp::UnmountDeclared {
+            targets: vec!["/mnt/data".into()],
+        };
+        let s = serde_json::to_string(&op).unwrap();
+        assert!(s.contains("\"op\":\"unmount_declared\""));
+        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
+    }
 
     #[test]
     fn unmount_op_roundtrips_json() {
@@ -3622,6 +3666,58 @@ mod tests {
         assert_eq!(calls, vec!["/mnt/data", "/mnt/media"]);
         assert_eq!(res.changed, vec!["/mnt/data", "/mnt/media"]);
         assert!(res.errors.is_empty());
+    }
+
+    async fn run_guard_declared(
+        targets: &[&str],
+        extra: &[&str],
+        live: &[(&str, &[&str])],
+    ) -> (PrivilegedResult, Vec<String>) {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let targets: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
+        let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+        let res = guard_unmount_declared(
+            &targets,
+            &extra,
+            || Ok(String::new()),
+            || Ok(String::new()),
+            |p| {
+                Ok(live
+                    .iter()
+                    .find(|(m, _)| *m == p)
+                    .map(|(_, f)| f.iter().map(|s| s.to_string()).collect())
+                    .unwrap_or_default())
+            },
+            |t| {
+                calls.borrow_mut().push(t);
+                async { Ok(Unwound::Detached) }
+            },
+        )
+        .await;
+        (res, calls.into_inner())
+    }
+
+    #[tokio::test]
+    async fn guard_releases_declared_but_unledgered_live_cifs_target() {
+        let live: &[(&str, &[&str])] = &[("/mnt/data", &["cifs"])];
+        let (res, calls) = run_guard_declared(&["/mnt/data/"], &["/mnt/data"], live).await;
+        assert_eq!(calls, vec!["/mnt/data"]);
+        assert_eq!(res.changed, vec!["/mnt/data"]);
+        assert!(res.errors.is_empty(), "{res:?}");
+    }
+
+    #[tokio::test]
+    async fn guard_still_refuses_undeclared_and_unsafe_targets_with_declared_set() {
+        let live: &[(&str, &[&str])] = &[("/mnt/data", &["cifs"]), ("/", &["ext4"])];
+        let (res, calls) = run_guard_declared(&["/mnt/data"], &["/mnt/other"], live).await;
+        assert!(calls.is_empty() && res.errors.len() == 1, "{res:?}");
+        for bad in ["/", "/mnt//data", "/mnt/../etc", "relative"] {
+            let (res, calls) = run_guard_declared(&[bad], &[bad], live).await;
+            assert!(
+                calls.is_empty() && res.errors.len() == 1,
+                "{bad:?}: {res:?}"
+            );
+        }
     }
 
     #[tokio::test]

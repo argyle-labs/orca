@@ -1850,7 +1850,7 @@ async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcom
     let Some(norm) = plan_kernel_unmount(is_linux, target, table, &declared)? else {
         return Ok(None);
     };
-    let r = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
+    let r = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::UnmountDeclared {
         targets: vec![norm],
     })
     .await;
