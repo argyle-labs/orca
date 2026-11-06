@@ -1777,38 +1777,70 @@ fn kernel_mount_live(
         .any(|m| m.mountpoint.trim_end_matches('/') == norm && kernel_fstype(&m.fstype)))
 }
 
-/// Linux kernel mounts (nfs/cifs) need root to release, so they go through the
-/// privileged helper, which also unwinds stacked mounts. `None` means the target
-/// is not a live kernel mount and the backend handles it.
-async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcome>> {
-    if !cfg!(target_os = "linux") {
+fn declared_targets_for_host(rows: Vec<crate::mounts::EndpointRow>, me: &str) -> Vec<String> {
+    rows.into_iter()
+        .filter(|m| m.host == me)
+        .map(|m| m.target)
+        .collect()
+}
+
+/// `Some(normalized target)` when it is a live kernel mount declared on this host.
+fn plan_kernel_unmount(
+    is_linux: bool,
+    target: &str,
+    table: std::io::Result<Vec<storage::mount_table::MountEntry>>,
+    declared_for_host: &[String],
+) -> anyhow::Result<Option<String>> {
+    if !is_linux {
         return Ok(None);
     }
     let norm = target.trim_end_matches('/');
-    let live = kernel_mount_live(storage::mount_table::mount_table(), norm)?;
-    if !live {
+    if !kernel_mount_live(table, norm)? {
         return Ok(None);
     }
-    let me = crate::host_identity::machine_id();
-    let declared: Vec<String> = crate::mounts::endpoint_db::list()?
-        .into_iter()
-        .filter(|m| m.host == me)
-        .map(|m| m.target)
-        .collect();
-    ensure_declared_target(target, &declared)?;
-    let r = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
-        targets: vec![target.to_string()],
-    })
-    .await;
+    ensure_declared_target(target, declared_for_host)?;
+    Ok(Some(norm.to_string()))
+}
+
+fn outcome_from_result(
+    target: &str,
+    r: crate::autofs::PrivilegedResult,
+) -> anyhow::Result<MountOutcome> {
     if !r.errors.is_empty() {
         anyhow::bail!("unmount {target}: {}", r.errors.join("; "));
     }
-    Ok(Some(MountOutcome {
+    Ok(MountOutcome {
         target: target.to_string(),
         mounted: false,
         recovered: false,
         detail: Some("released via privileged helper".into()),
-    }))
+    })
+}
+
+/// Linux kernel mounts (nfs/cifs) need root to release, so they go through the
+/// privileged helper, which also unwinds stacked mounts. `None` means the target
+/// is not a live kernel mount and the backend handles it.
+async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcome>> {
+    let is_linux = cfg!(target_os = "linux");
+    let table = if is_linux {
+        storage::mount_table::mount_table()
+    } else {
+        Ok(Vec::new())
+    };
+    let declared = if is_linux {
+        let me = crate::host_identity::machine_id();
+        declared_targets_for_host(crate::mounts::endpoint_db::list()?, &me)
+    } else {
+        Vec::new()
+    };
+    let Some(norm) = plan_kernel_unmount(is_linux, target, table, &declared)? else {
+        return Ok(None);
+    };
+    let r = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
+        targets: vec![norm],
+    })
+    .await;
+    outcome_from_result(target, r).map(Some)
 }
 
 // ── mount.update (dispatcher) ────────────────────────────────────────
@@ -4311,6 +4343,114 @@ mod tests {
         let t = vec![entry("/mnt/x/", "nfs4"), entry("/mnt/y", "tmpfs")];
         assert!(kernel_mount_live(Ok(t.clone()), "/mnt/x").unwrap());
         assert!(!kernel_mount_live(Ok(t), "/mnt/y").unwrap());
+    }
+
+    fn mt(mp: &str, fs: &str) -> storage::mount_table::MountEntry {
+        storage::mount_table::MountEntry {
+            source: "h:/e".into(),
+            mountpoint: mp.into(),
+            fstype: fs.into(),
+            options: vec![],
+        }
+    }
+
+    fn d(p: &str) -> Vec<String> {
+        vec![p.to_string()]
+    }
+
+    #[test]
+    fn plan_routes_a_declared_live_nfs_mount_with_the_normalized_target() {
+        let r = plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/a", "nfs4")]), &d("/mnt/a"));
+        assert_eq!(r.unwrap().as_deref(), Some("/mnt/a"));
+    }
+
+    #[test]
+    fn plan_ignores_non_kernel_and_absent_targets() {
+        let fuse = plan_kernel_unmount(
+            true,
+            "/mnt/a",
+            Ok(vec![mt("/mnt/a", "fuse.rclone")]),
+            &d("/mnt/a"),
+        );
+        assert!(fuse.unwrap().is_none());
+        let absent =
+            plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/b", "nfs4")]), &d("/mnt/a"));
+        assert!(absent.unwrap().is_none());
+    }
+
+    #[test]
+    fn plan_refuses_a_live_mount_that_is_not_declared() {
+        let r = plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/a", "cifs")]), &[]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn plan_matches_through_trailing_slash_normalization() {
+        let r = plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/a/", "nfs")]), &d("/mnt/a"));
+        assert_eq!(r.unwrap().as_deref(), Some("/mnt/a"));
+        let r = plan_kernel_unmount(true, "/mnt/a/", Ok(vec![mt("/mnt/a", "nfs")]), &d("/mnt/a"));
+        assert_eq!(r.unwrap().as_deref(), Some("/mnt/a"));
+    }
+
+    #[test]
+    fn plan_is_none_off_linux_regardless_of_the_table() {
+        let r = plan_kernel_unmount(
+            false,
+            "/mnt/a",
+            Ok(vec![mt("/mnt/a", "nfs4")]),
+            &d("/mnt/a"),
+        );
+        assert!(r.unwrap().is_none());
+    }
+
+    #[test]
+    fn plan_errors_on_linux_when_the_mount_table_is_unreadable() {
+        let r = plan_kernel_unmount(true, "/mnt/a", Err(std::io::Error::other("denied")), &[]);
+        assert!(
+            r.unwrap_err()
+                .to_string()
+                .contains("cannot read mount table")
+        );
+    }
+
+    #[test]
+    fn declared_targets_exclude_other_hosts() {
+        let row = |host: &str, target: &str| crate::mounts::EndpointRow {
+            id: "i".into(),
+            name: "n".into(),
+            share_id: "s".into(),
+            host: host.into(),
+            target: target.into(),
+            remount_policy: None,
+            health: plugin_toolkit::storage::MountHealth::Ok,
+            active_route: None,
+            active_options: None,
+            drift: false,
+            multi_mounted: false,
+            enabled: true,
+            guest: None,
+        };
+        let got = declared_targets_for_host(
+            vec![row("me", "/mnt/mine"), row("other", "/mnt/theirs")],
+            "me",
+        );
+        assert_eq!(got, vec!["/mnt/mine".to_string()]);
+    }
+
+    #[test]
+    fn outcome_maps_errors_to_err_and_success_to_released() {
+        let busy = crate::autofs::PrivilegedResult {
+            errors: vec!["busy".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            outcome_from_result("/x", busy).unwrap_err().to_string(),
+            "unmount /x: busy"
+        );
+        let o = outcome_from_result("/x", crate::autofs::PrivilegedResult::default()).unwrap();
+        assert_eq!(o.target, "/x");
+        assert!(!o.mounted && !o.recovered);
+        assert_eq!(o.detail.as_deref(), Some("released via privileged helper"));
     }
 
     #[test]
