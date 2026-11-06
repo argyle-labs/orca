@@ -359,12 +359,12 @@ fn is_ancestor_or_equal(mountpoint: &str, target: &str) -> bool {
 
 /// The mountpoint (first whitespace-delimited field) of a master-map line, or
 /// `None` for blanks/comments.
-fn master_mountpoint(line: &str) -> Option<&str> {
+fn master_mountpoint(line: &str) -> Option<String> {
     let t = line.trim();
     if t.is_empty() || t.starts_with('#') {
         return None;
     }
-    t.split_whitespace().next()
+    Some(first_map_key(t))
 }
 
 /// Does a master-file line already register our direct map ([`MAP_FILE`])?
@@ -404,7 +404,7 @@ pub fn merge_master(existing: &str, managed_targets: &[String]) -> String {
         }
         // Evict a foreign entry that shadows one of our managed targets.
         if let Some(mp) = master_mountpoint(line)
-            && managed_targets.iter().any(|t| is_ancestor_or_equal(mp, t))
+            && managed_targets.iter().any(|t| is_ancestor_or_equal(&mp, t))
         {
             continue;
         }
@@ -569,6 +569,9 @@ async fn plan_with_map(mounts: &[ManagedMount], map: String) -> PrivilegedOp {
 /// Render + plan + apply for a mount set. Idempotent: an unchanged host makes no
 /// privileged call at all.
 pub async fn apply(mounts: &[ManagedMount]) -> ApplyOutcome {
+    if let Some(outcome) = refuse_unrepresentable(mounts) {
+        return outcome;
+    }
     apply_op(plan(mounts).await).await
 }
 
@@ -580,7 +583,29 @@ pub async fn apply_elected(
     mounts: &[ManagedMount],
     elected: &std::collections::HashMap<String, String>,
 ) -> ApplyOutcome {
+    if let Some(outcome) = refuse_unrepresentable(mounts) {
+        return outcome;
+    }
     apply_op(plan_with_map(mounts, render_map_elected(mounts, elected)).await).await
+}
+
+/// A newline or NUL in a target cannot be expressed in an autofs map line, so
+/// the whole apply is refused rather than writing a corrupt map.
+fn refuse_unrepresentable(mounts: &[ManagedMount]) -> Option<ApplyOutcome> {
+    let errors: Vec<String> = mounts
+        .iter()
+        .filter(|m| m.target.contains(['\n', '\r', '\0']))
+        .map(|m| {
+            format!(
+                "mount target {:?} contains a newline or NUL, which an autofs map cannot represent",
+                m.target
+            )
+        })
+        .collect();
+    (!errors.is_empty()).then(|| ApplyOutcome {
+        errors,
+        ..ApplyOutcome::default()
+    })
 }
 
 /// Run a planned [`PrivilegedOp::Apply`], short-circuiting an empty diff.
@@ -2075,13 +2100,71 @@ mod tests {
         assert_eq!(master_line(), format!("/-  {MAP_FILE} --timeout=0"));
     }
 
+    fn mount_at(target: &str) -> ManagedMount {
+        ManagedMount {
+            target: target.into(),
+            ..mount("x", "h:/x", None)
+        }
+    }
+
+    const SPECIAL_TARGETS: [&str; 3] = ["/mnt/my dir", "/mnt/back\\slash", "/mnt/tab\tdir"];
+
+    #[test]
+    fn rendered_map_keys_round_trip_special_characters() {
+        for target in SPECIAL_TARGETS {
+            let m = mount_at(target);
+            let all = render_map(std::slice::from_ref(&m));
+            assert_eq!(declared_map_keys(&all), [target.to_string()].into());
+            let elected = [(target.to_string(), "h:/x".to_string())].into();
+            let one = render_map_elected(std::slice::from_ref(&m), &elected);
+            assert_eq!(declared_map_keys(&one), [target.to_string()].into());
+        }
+    }
+
+    #[test]
+    fn plain_target_rendering_is_unescaped() {
+        let m = mount("data", "h:/d", None);
+        assert!(map_line(&m).starts_with("/mnt/data  -fstype="));
+    }
+
+    #[test]
+    fn master_mountpoint_round_trips_escaped_keys() {
+        for target in SPECIAL_TARGETS {
+            let line = format!("{}  /etc/auto.x", escape_map_key(target));
+            assert_eq!(master_mountpoint(&line).as_deref(), Some(target));
+        }
+    }
+
+    #[test]
+    fn merge_master_evicts_shadowing_entry_with_escaped_mountpoint() {
+        let existing = "/mnt/my\\ dir  /etc/auto.pool\n/net\t-hosts\n";
+        let out = merge_master(existing, &["/mnt/my dir/data".to_string()]);
+        assert!(!out.contains("auto.pool"));
+        assert!(out.contains("/net"));
+    }
+
+    #[tokio::test]
+    async fn apply_refuses_targets_a_map_cannot_represent() {
+        for target in ["/mnt/a\nb", "/mnt/a\rb", "/mnt/a\0b"] {
+            let m = mount_at(target);
+            let out = apply(std::slice::from_ref(&m)).await;
+            assert!(out.changed.is_empty() && !out.reloaded);
+            assert_eq!(out.errors.len(), 1);
+            let out = apply_elected(std::slice::from_ref(&m), &Default::default()).await;
+            assert_eq!(out.errors.len(), 1);
+        }
+    }
+
     // ── master_mountpoint ─────────────────────────────────────────────────
 
     #[test]
     fn master_mountpoint_extracts_first_field() {
-        assert_eq!(master_mountpoint("/misc\t/etc/auto.misc"), Some("/misc"));
         assert_eq!(
-            master_mountpoint("  /mnt/pool  /etc/auto.pool --ghost"),
+            master_mountpoint("/misc\t/etc/auto.misc").as_deref(),
+            Some("/misc")
+        );
+        assert_eq!(
+            master_mountpoint("  /mnt/pool  /etc/auto.pool --ghost").as_deref(),
             Some("/mnt/pool")
         );
     }
