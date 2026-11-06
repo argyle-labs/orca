@@ -593,12 +593,14 @@ pub fn core_tool_catalog() -> Vec<Value> {
     for row in load_plugin_tool_rows() {
         let schema: Value =
             serde_json::from_str(&row.input_schema).unwrap_or_else(|_| json!({"type": "object"}));
-        all_orca.push(json!({
-            "id": row.id,
-            "name": row.fq_name,
-            "description": row.description,
-            "inputSchema": schema,
-        }));
+        all_orca.push(dispatch::with_id(
+            json!({
+                "name": row.fq_name,
+                "description": row.description,
+                "inputSchema": schema,
+            }),
+            row.id,
+        ));
     }
     all_orca
 }
@@ -1425,7 +1427,7 @@ mod tests {
         let cat = core_tool_catalog();
         let find = |n: &str| cat.iter().find(|t| t["name"] == n).expect("in catalog");
         assert_eq!(find("idns.with")["id"], id);
-        assert!(find("idns.without")["id"].is_null());
+        assert!(find("idns.without").get("id").is_none());
 
         unwire_isolated_home(&dir);
     }

@@ -484,18 +484,28 @@ pub fn dispatchable(name: &str, args: &Value) -> bool {
 
 // ── MCP ──────────────────────────────────────────────────────────────────────
 
+/// Insert `id` only when present: consumers treat a missing key and `null` differently.
+pub fn with_id(mut def: Value, id: Option<impl serde::Serialize>) -> Value {
+    if let (Some(id), Some(obj)) = (id, def.as_object_mut()) {
+        obj.insert("id".into(), json!(id));
+    }
+    def
+}
+
 /// Build the JSON array for `tools/list`.
 pub fn mcp_definitions() -> Vec<Value> {
     let mut defs: Vec<Value> = cache()
         .ordered
         .iter()
         .map(|t| {
-            json!({
-                "id": t.id(),
-                "name": t.name(),
-                "description": t.description(),
-                "inputSchema": advertise_ambient(t.input_schema(), t.remote_ok()),
-            })
+            with_id(
+                json!({
+                    "name": t.name(),
+                    "description": t.description(),
+                    "inputSchema": advertise_ambient(t.input_schema(), t.remote_ok()),
+                }),
+                t.id(),
+            )
         })
         .collect();
     // Merge dynamically-loaded plugin tools so `tools/list` surfaces
@@ -503,13 +513,15 @@ pub fn mcp_definitions() -> Vec<Value> {
     // plugin manifest shape (`input_schema`); remap to MCP's `inputSchema`.
     for d in dynamic_tool_defs() {
         let name = d.get("name").and_then(Value::as_str);
-        defs.push(json!({
-            "id": d.get("id").cloned().unwrap_or(Value::Null),
-            "name": d.get("name").cloned().unwrap_or(Value::Null),
-            "description": d.get("description").cloned().unwrap_or(Value::Null),
-            "inputSchema": advertise_system(d.get("input_schema").cloned().unwrap_or(json!({ "type": "object" }))),
-            "execute_gated": name.is_some_and(crate::tool_roles::plugin_execute_gated),
-        }));
+        defs.push(with_id(
+            json!({
+                "name": d.get("name").cloned().unwrap_or(Value::Null),
+                "description": d.get("description").cloned().unwrap_or(Value::Null),
+                "inputSchema": advertise_system(d.get("input_schema").cloned().unwrap_or(json!({ "type": "object" }))),
+                "execute_gated": name.is_some_and(crate::tool_roles::plugin_execute_gated),
+            }),
+            d.get("id").and_then(Value::as_str),
+        ));
     }
     // Merge the live, plugin-driven unit surface (unit.<kind>.<verb|action>),
     // built from the current provider catalog — already in MCP `inputSchema` shape.
@@ -535,23 +547,25 @@ pub fn tool_manifest_json() -> String {
         .ordered
         .iter()
         .map(|t| {
-            json!({
-                "id": t.id(),
-                "name": t.name(),
-                "description": t.description(),
-                "input_schema": t.input_schema(),
-                "output_schema": t.output_schema(),
-                "role": t.required_role(),
-                "execute_gated": t.execute_gated(),
-                "risk": t.risk(),
-                "dry_run_aware": t.dry_run_aware(),
-                "data_mutation": t.data_mutation(),
-                "local_only": !t.remote_ok(),
-                "reaches": t.reaches(),
-                "tool_calls": t.tool_calls(),
-                "tool_callable": t.tool_callable(),
-                "remote_admin": t.remote_admin(),
-            })
+            with_id(
+                json!({
+                    "name": t.name(),
+                    "description": t.description(),
+                    "input_schema": t.input_schema(),
+                    "output_schema": t.output_schema(),
+                    "role": t.required_role(),
+                    "execute_gated": t.execute_gated(),
+                    "risk": t.risk(),
+                    "dry_run_aware": t.dry_run_aware(),
+                    "data_mutation": t.data_mutation(),
+                    "local_only": !t.remote_ok(),
+                    "reaches": t.reaches(),
+                    "tool_calls": t.tool_calls(),
+                    "tool_callable": t.tool_callable(),
+                    "remote_admin": t.remote_admin(),
+                }),
+                t.id(),
+            )
         })
         .collect();
     // The registry is always serializable JSON; never fails in practice.
@@ -1887,13 +1901,21 @@ mod tests {
                 .map(|d| d["id"].clone())
         };
         assert_eq!(id(FAKE_PLUGIN_TOOL), Some(json!(FAKE_PLUGIN_TOOL_ID)));
-        assert_eq!(id(GATED_PLUGIN_TOOL), Some(Value::Null));
+        assert!(
+            defs.iter()
+                .find(|d| d["name"] == GATED_PLUGIN_TOOL)
+                .is_some_and(|d| d.get("id").is_none())
+        );
     }
 
     #[test]
-    fn tool_manifest_json_entries_carry_an_id_key() {
+    fn tool_manifest_json_omits_absent_ids() {
         let manifest: Vec<Value> = serde_json::from_str(&tool_manifest_json()).unwrap();
-        assert!(manifest.iter().all(|t| t.get("id").is_some()));
+        assert!(
+            manifest
+                .iter()
+                .all(|t| t.get("id").is_none_or(|i| i.is_string()))
+        );
     }
 
     #[test]

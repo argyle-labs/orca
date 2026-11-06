@@ -68,7 +68,7 @@ pub use registry::{
     dynamic_owns, dynamic_tool_defs, execute_gated_names, local_only_names, mcp_definitions, names,
     plugin_idle_timeout, plugin_max_invoke, plugin_permit_wait, registered_tool_ids,
     remote_ok_names, required_role, role_table, second_factor_names, set_dynamic_dispatch,
-    take_ambient, tool_exists, tool_manifest_json, tool_name_for_id, validate_tool_ids,
+    take_ambient, tool_exists, tool_manifest_json, tool_name_for_id, validate_tool_ids, with_id,
 };
 #[cfg(feature = "server")]
 pub use registry::{PEER_HEADER, UnboundCaller, axum_router};
