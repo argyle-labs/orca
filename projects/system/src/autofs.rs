@@ -1675,10 +1675,15 @@ where
             None if attempt == 0 => umount().await?,
             Some(top) if is_network_fstype(top) => {
                 if let Err(e) = umount().await {
-                    return if layers()?.last().is_some_and(|t| is_network_fstype(t)) {
-                        Err(e)
-                    } else {
-                        Ok(())
+                    let after = layers()?;
+                    if !after.iter().any(|f| is_network_fstype(f)) {
+                        return Ok(());
+                    }
+                    return match after.last() {
+                        Some(top) if !is_network_fstype(top) => Err(format!(
+                            "network mount is covered by a `{top}` layer; refusing to detach it"
+                        )),
+                        _ => Err(e),
                     };
                 }
             }
@@ -3613,6 +3618,51 @@ mod tests {
     async fn unwind_stacked_returns_umount_error_when_layer_remains() {
         let (res, calls) = run_racy(vec![l(&["cifs"]), l(&["cifs"])], &[0]).await;
         assert_eq!(res, Err("not mounted".to_string()));
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_refuses_when_covered_after_failed_umount() {
+        let (res, calls) = run_racy(vec![l(&["nfs4"]), l(&["nfs4", "tmpfs"])], &[0]).await;
+        assert_eq!(
+            res,
+            Err("network mount is covered by a `tmpfs` layer; refusing to detach it".to_string())
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_covered_autofs_stack_after_failed_umount() {
+        let (res, calls) = run_racy(
+            vec![l(&["autofs", "cifs"]), l(&["autofs", "cifs", "tmpfs"])],
+            &[0],
+        )
+        .await;
+        assert_eq!(
+            res,
+            Err("network mount is covered by a `tmpfs` layer; refusing to detach it".to_string())
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_ok_when_only_autofs_remains_after_failed_umount() {
+        let (res, calls) = run_racy(vec![l(&["cifs"]), l(&["autofs"])], &[0]).await;
+        assert_eq!(res, Ok(()));
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_returns_umount_error_when_network_layers_remain_on_top() {
+        let (res, calls) = run_racy(vec![l(&["cifs"]), l(&["cifs", "cifs"])], &[0]).await;
+        assert_eq!(res, Err("not mounted".to_string()));
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_ok_when_everything_vanishes_after_failed_umount() {
+        let (res, calls) = run_racy(vec![l(&["cifs"]), l(&[])], &[0]).await;
+        assert_eq!(res, Ok(()));
         assert_eq!(calls, 1);
     }
 
