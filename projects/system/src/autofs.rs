@@ -598,10 +598,10 @@ pub async fn apply_elected(
 }
 
 fn unrepresentable_key_char(c: char) -> bool {
-    (c.is_control() || c.is_whitespace()) && c != ' ' && c != '\t'
+    ((c.is_control() || c.is_whitespace()) && c != ' ' && c != '\t') || c == '"' || c == '\''
 }
 
-/// A newline, NUL or other control/whitespace char in a target cannot be expressed in an autofs map line, so
+/// A newline, NUL, other control/whitespace char or quote in a target cannot be expressed in an autofs map line, so
 /// the whole apply is refused rather than writing a corrupt map.
 fn refuse_unrepresentable(mounts: &[ManagedMount]) -> Option<ApplyOutcome> {
     let errors: Vec<String> = mounts
@@ -609,7 +609,7 @@ fn refuse_unrepresentable(mounts: &[ManagedMount]) -> Option<ApplyOutcome> {
         .filter(|m| m.target.contains(unrepresentable_key_char))
         .map(|m| {
             format!(
-                "mount target {:?} contains a control or whitespace character, which an autofs map cannot represent",
+                "mount target {:?} contains a control, whitespace or quote character, which an autofs map cannot represent",
                 m.target
             )
         })
@@ -2390,6 +2390,8 @@ mod tests {
             "/mnt/a\u{85}b",
             "/mnt/a\u{a0}b",
             "/mnt/a\u{2028}b",
+            "/mnt/a\"b",
+            "/mnt/a'b",
         ] {
             let m = mount_at(target);
             let out = apply(std::slice::from_ref(&m)).await;
