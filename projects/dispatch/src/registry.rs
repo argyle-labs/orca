@@ -115,7 +115,10 @@ fn index_ids(ordered: &[Box<dyn ErasedTool>]) -> (HashMap<&'static str, usize>, 
 
 /// Fails, naming both tools, when two registered tools share an id.
 pub fn validate_tool_ids() -> Result<()> {
-    let conflicts = &cache().id_conflicts;
+    conflicts_to_result(&cache().id_conflicts)
+}
+
+fn conflicts_to_result(conflicts: &[String]) -> Result<()> {
     if conflicts.is_empty() {
         return Ok(());
     }
@@ -1820,6 +1823,21 @@ mod tests {
             conflicts[0].contains(EchoTool::ID.unwrap()),
             "{conflicts:?}"
         );
+    }
+
+    #[test]
+    fn duplicate_id_conflicts_fail_validation_naming_both_tools() {
+        let tools: Vec<Box<dyn ErasedTool>> = vec![
+            Box::new(ToolWrapper::<EchoTool>(PhantomData)),
+            Box::new(ToolWrapper::<DupOfEcho>(PhantomData)),
+        ];
+        let (_, conflicts) = index_ids(&tools);
+        let err = conflicts_to_result(&conflicts).unwrap_err().to_string();
+        assert!(
+            err.contains("echo.local") && err.contains("echo.dup"),
+            "{err}"
+        );
+        assert!(conflicts_to_result(&[]).is_ok());
     }
 
     #[test]

@@ -968,6 +968,9 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     // Install the cdylib-plugin fallback into `dispatch` so loaded plugin tools
     // share the one REST/MCP/CLI dispatch entrypoint without dispatch having to
     // depend on plugin-loader (which would be a cycle). The host owns the wiring.
+    if let Err(e) = dispatch::validate_tool_ids() {
+        tracing::error!(error = %e, "duplicate tool ids in the registry");
+    }
     dispatch::set_dynamic_dispatch(
         Box::new(plugin_loader::invoke_plugin),
         Box::new(|| {

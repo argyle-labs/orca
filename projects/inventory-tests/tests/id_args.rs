@@ -158,3 +158,10 @@ fn every_id_argument_is_a_uuid() {
         "NATURAL_KEY_IDS entries that are UUID-typed or gone — remove them: {stale:#?}"
     );
 }
+
+#[test]
+fn no_two_registered_tools_share_an_id() {
+    if let Err(e) = dispatch::validate_tool_ids() {
+        panic!("duplicate tool ids: {e}");
+    }
+}
