@@ -65,6 +65,10 @@ pub struct ToolDef {
     /// Whether the tool executes by default and plans under `dryRun: true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execute_gated: Option<bool>,
+    /// Declared risk (`low`/`medium`/`high`); `None` from a plugin built before
+    /// the manifest carried it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dry_run_aware: bool,
     /// Whether the tool writes to an external managed system, which a
@@ -386,6 +390,7 @@ mod tests {
                 output_schema: json!({"type": "object"}),
                 role: Some("admin".into()),
                 execute_gated: Some(true),
+                risk: None,
                 dry_run_aware: false,
                 data_mutation: Some(true),
                 local_only: Some(true),
@@ -590,6 +595,10 @@ mod tests {
             (d.role, d.execute_gated, d.data_mutation),
             (None, None, None)
         );
+        assert_eq!(d.risk, None);
+        let with_risk = br#"{"name":"t.x","description":"d","input_schema":{},"output_schema":{},"risk":"high"}"#;
+        let d: ToolDef = serde_json::from_slice(with_risk).unwrap();
+        assert_eq!(d.risk.as_deref(), Some("high"));
     }
 
     #[test]

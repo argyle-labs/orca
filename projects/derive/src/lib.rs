@@ -285,6 +285,9 @@ struct ToolAttr {
     role: Option<LitStr>,
     /// `#[orca_tool(..., second_factor = true)]`. Independent of `role`.
     second_factor: bool,
+    /// `#[orca_tool(..., risk = "low|medium|high")]`. Absent derives from the
+    /// verb shape (read = low, else medium); `high` is only ever explicit.
+    risk: Option<&'static str>,
     /// Short human-friendly title shown in the API reference left nav
     /// (Scalar `summary` field). Doc comment is reserved for the full
     /// markdown description body. Set via `#[orca_tool(..., title = "...")]`;
@@ -317,6 +320,7 @@ impl Parse for ToolAttr {
         let mut remote_admin = false;
         let mut role: Option<LitStr> = None;
         let mut second_factor = false;
+        let mut risk: Option<&'static str> = None;
         let mut title: Option<LitStr> = None;
         let mut crate_path: Option<syn::Path> = None;
         for nv in items {
@@ -538,6 +542,22 @@ impl Parse for ToolAttr {
                         }
                     };
                 }
+                "risk" => {
+                    let lit = lit_str(&nv.value)?;
+                    risk = Some(match lit.value().as_str() {
+                        "low" => "Low",
+                        "medium" => "Medium",
+                        "high" => "High",
+                        other => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                format!(
+                                    "risk must be \"low\", \"medium\", or \"high\", got {other:?}"
+                                ),
+                            ));
+                        }
+                    });
+                }
                 "title" => {
                     title = Some(lit_str(&nv.value)?);
                 }
@@ -590,6 +610,7 @@ impl Parse for ToolAttr {
             remote_admin,
             role,
             second_factor,
+            risk,
             title,
             crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
         })
@@ -1212,6 +1233,11 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let tool_callable_lit = attr.tool_callable;
     let remote_admin_lit = attr.remote_admin;
     let second_factor_lit = attr.second_factor;
+    let risk_variant = syn::Ident::new(
+        attr.risk
+            .unwrap_or(if read_shaped { "Low" } else { "Medium" }),
+        Span::call_site(),
+    );
     // REQUIRED_ROLE: explicit `role = "..."` wins; otherwise default-deny
     // derives from the verb — read-shaped verbs (`list`/`detail`/`search`) get
     // "any", anything else gets "admin". This closes C2 (default-deny on
@@ -1459,6 +1485,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             const LOCAL_ONLY: bool = !#remote_ok_lit;
             const DATA_MUTATION: bool = #data_mutation_lit;
             const EXECUTE_GATED: bool = #execute_gated_lit;
+            const RISK: #crate_path::contract::Risk = #crate_path::contract::Risk::#risk_variant;
             const DRY_RUN_AWARE: bool = #dry_run_aware_lit;
             const REACHES: &'static [&'static str] = &[#(#reaches),*];
             const TOOL_CALLS: &'static [&'static str] = &[#(#tool_calls),*];
@@ -2161,6 +2188,43 @@ mod tests {
         assert!(verb_shape::is_read_shaped("audit"));
         assert!(verb_shape::is_read_shaped("privilege.audit"));
         assert!(verb_shape::is_read_shaped("backends_check"));
+    }
+
+    #[test]
+    fn risk_derives_low_for_reads_and_medium_otherwise_never_high() {
+        for (verb, want) in [
+            ("list", "Low"),
+            ("health", "Low"),
+            ("delete", "Medium"),
+            ("create", "Medium"),
+        ] {
+            let attr = parse_attr(quote!(domain = "h", verb = #verb)).unwrap();
+            let out = expand(attr, ok_fn()).unwrap().to_string();
+            assert!(
+                out.contains(&format!("Risk :: {want} ;")),
+                "verb={verb} got: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_risk_wins_over_the_derivation() {
+        for (lit, want) in [("low", "Low"), ("medium", "Medium"), ("high", "High")] {
+            let attr = parse_attr(quote!(domain = "h", verb = "delete", risk = #lit)).unwrap();
+            let out = expand(attr, ok_fn()).unwrap().to_string();
+            assert!(
+                out.contains(&format!("Risk :: {want} ;")),
+                "risk={lit} got: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_risk_is_a_compile_error() {
+        let err = parse_attr(quote!(domain = "h", verb = "delete", risk = "critical"))
+            .err()
+            .expect("must reject");
+        assert!(err.to_string().contains("risk must be"), "got: {err}");
     }
 
     #[test]

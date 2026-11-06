@@ -8,6 +8,7 @@
 //! the bottom of this file, and a migration entry in `MIGRATIONS` if the table was added
 //! to an already-deployed database.
 
+pub mod approvals;
 pub mod cache;
 pub mod config_store;
 // `docker` runtime registry now lives in the docker plugin via
@@ -81,6 +82,7 @@ pub mod settings;
 #[cfg(feature = "config")]
 pub mod startup;
 pub mod tool_mappings;
+pub mod user_two_factor;
 
 use anyhow::{Context, Result};
 use contract::config::APP_DB_FILE;

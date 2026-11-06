@@ -189,6 +189,8 @@ pub trait ErasedTool: Send + Sync {
     /// `dryRun: true` [`Self::run_json`] returns an `ExecutionPlan` without
     /// running the body.
     fn execute_gated(&self) -> bool;
+    /// Mirrors `OrcaToolDef::RISK`.
+    fn risk(&self) -> contract::Risk;
     /// Whether this ungated tool honours `dryRun` in its own body. Mirrors
     /// `OrcaToolDef::DRY_RUN_AWARE`.
     fn dry_run_aware(&self) -> bool;
@@ -244,6 +246,10 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
 
     fn execute_gated(&self) -> bool {
         T::EXECUTE_GATED
+    }
+
+    fn risk(&self) -> contract::Risk {
+        T::RISK
     }
 
     fn dry_run_aware(&self) -> bool {
@@ -1442,6 +1448,14 @@ mod tests {
         assert!(
             !ToolWrapper::<DoubleTool>(PhantomData).execute_gated(),
             "EXECUTE_GATED must default off so existing tools are unaffected"
+        );
+    }
+
+    #[test]
+    fn risk_is_forwarded() {
+        assert_eq!(
+            ToolWrapper::<DoubleTool>(PhantomData).risk(),
+            contract::Risk::Medium
         );
     }
 }

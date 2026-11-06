@@ -46,6 +46,10 @@ pub struct ToolDef {
     /// Whether the tool executes by default and plans under `dryRun: true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execute_gated: Option<bool>,
+    /// Declared risk (`low`/`medium`/`high`); `None` from a plugin built before
+    /// the manifest carried it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dry_run_aware: bool,
     /// Whether the tool writes to an external managed system.
