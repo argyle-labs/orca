@@ -31,11 +31,11 @@ use schemars::{JsonSchema, Schema};
 /// `schemars::schema_for!` produces.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct ToolDef {
-    /// Fully-qualified tool name, e.g. `"jellyfin.server_info"`.
     /// Stable UUIDv7 committed in the plugin's source; `None` from a plugin
     /// that has not adopted tool ids.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Fully-qualified tool name, e.g. `"jellyfin.server_info"`.
     pub name: String,
     /// One-line human description.
     pub description: String,

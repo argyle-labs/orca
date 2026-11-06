@@ -59,8 +59,6 @@ struct ToolCache {
     ordered: Vec<Box<dyn ErasedTool>>,
     /// Name → index into `ordered`. `dispatch` and friends look up here.
     by_name: HashMap<&'static str, usize>,
-    /// Id → index into `ordered`.
-    by_id: HashMap<&'static str, usize>,
     /// One message per id claimed by two tools.
     id_conflicts: Vec<String>,
 }
@@ -84,11 +82,10 @@ fn cache() -> &'static ToolCache {
             by_name.insert(entry.name, ordered.len());
             ordered.push(tool);
         }
-        let (by_id, id_conflicts) = index_ids(&ordered);
+        let (_, id_conflicts) = index_ids(&ordered);
         ToolCache {
             ordered,
             by_name,
-            by_id,
             id_conflicts,
         }
     })
@@ -123,19 +120,6 @@ fn conflicts_to_result(conflicts: &[String]) -> Result<()> {
         return Ok(());
     }
     anyhow::bail!("{}", conflicts.join("; "))
-}
-
-pub fn tool_name_for_id(id: &str) -> Option<&'static str> {
-    let c = cache();
-    c.by_id.get(id).map(|i| c.ordered[*i].name())
-}
-
-pub fn registered_tool_ids() -> Vec<(&'static str, &'static str)> {
-    cache()
-        .ordered
-        .iter()
-        .filter_map(|t| t.id().map(|id| (id, t.name())))
-        .collect()
 }
 
 pub(crate) fn find(name: &str) -> Option<&'static dyn ErasedTool> {
