@@ -483,6 +483,27 @@ pub enum PluginLoadStatus {
     InstalledNotLoaded,
 }
 
+/// A tool a loaded plugin contributes; `id` is its committed UUIDv7 when the
+/// plugin declares one.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct PluginToolRef {
+    pub id: Option<String>,
+    pub name: String,
+}
+
+fn tool_refs(live: Option<&plugin_loader::LoadedPluginInfo>) -> Vec<PluginToolRef> {
+    live.map(|l| {
+        l.tools
+            .iter()
+            .map(|name| PluginToolRef {
+                id: l.tool_ids.get(name).cloned(),
+                name: name.clone(),
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 /// Full per-plugin record returned by `plugin.detail` — the heavy shape, incl.
 /// the plugin's full `tools` list and compat ranges. `plugin.list` returns the
 /// thin [`PluginListRow`] instead; call `plugin.detail <name>` for this.
@@ -500,8 +521,8 @@ pub struct PluginDetailOutput {
     pub target_compat: Option<String>,
     /// orca-version compat range the loaded plugin declared.
     pub orca_compat: Option<String>,
-    /// Tool names this plugin contributes, when loaded. (Heavy — detail only.)
-    pub tools: Vec<String>,
+    /// Tools this plugin contributes, when loaded. (Heavy — detail only.)
+    pub tools: Vec<PluginToolRef>,
     /// Whether the plugin is a known first-party catalog entry, sideloaded, or
     /// merely planned.
     pub status: PluginLoadStatus,
@@ -637,7 +658,7 @@ fn build_plugin_list_rows(
             installed_version: live.map(|l| l.semver.clone()),
             target_compat: live.map(|l| l.target_compat.clone()),
             orca_compat: live.map(|l| l.orca_compat.clone()),
-            tools: live.map(|l| l.tools.clone()).unwrap_or_default(),
+            tools: tool_refs(live),
             status,
             sideloaded: false,
         });
@@ -667,7 +688,7 @@ fn build_plugin_list_rows(
             installed_version: live.map(|l| l.semver.clone()),
             target_compat: live.map(|l| l.target_compat.clone()),
             orca_compat: live.map(|l| l.orca_compat.clone()),
-            tools: live.map(|l| l.tools.clone()).unwrap_or_default(),
+            tools: tool_refs(live),
             status,
             sideloaded: true,
         });
@@ -1845,7 +1866,36 @@ mod tests {
             target_compat: ">=1.0.0".to_string(),
             orca_compat: ">=0.1.0".to_string(),
             tools: vec![format!("{software}.list"), format!("{software}.detail")],
+            tool_ids: std::collections::HashMap::new(),
         }
+    }
+
+    fn tool_ref(name: &str) -> PluginToolRef {
+        PluginToolRef {
+            id: None,
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn detail_tool_refs_carry_id_and_name() {
+        let mut live = loaded("jellyfin");
+        live.tool_ids.insert(
+            "jellyfin.list".to_string(),
+            "019a5c1e-7b3a-7c4d-8e2f-0123456789ab".to_string(),
+        );
+        let refs = tool_refs(Some(&live));
+        assert_eq!(
+            refs,
+            vec![
+                PluginToolRef {
+                    id: Some("019a5c1e-7b3a-7c4d-8e2f-0123456789ab".to_string()),
+                    name: "jellyfin.list".to_string()
+                },
+                tool_ref("jellyfin.detail"),
+            ]
+        );
+        assert!(tool_refs(None).is_empty());
     }
 
     fn entry(name: &str, status: &str) -> CatalogEntry {
@@ -2295,7 +2345,7 @@ mod tests {
             installed_version: Some("9.9.9".to_string()),
             target_compat: Some(">=1.0.0".to_string()),
             orca_compat: Some(">=0.1.0".to_string()),
-            tools: vec!["jellyfin.list".to_string(), "jellyfin.detail".to_string()],
+            tools: vec![tool_ref("jellyfin.list"), tool_ref("jellyfin.detail")],
             status: PluginLoadStatus::Loaded,
             sideloaded: false,
         };
@@ -2940,7 +2990,7 @@ mod tests {
             installed_version: Some("0.3.0".to_string()),
             target_compat: Some(">=1.0.0".to_string()),
             orca_compat: Some(">=0.1.0".to_string()),
-            tools: vec!["jellyfin.list".to_string()],
+            tools: vec![tool_ref("jellyfin.list")],
             status: PluginLoadStatus::Loaded,
             sideloaded: true,
         };

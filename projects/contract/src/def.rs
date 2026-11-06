@@ -12,6 +12,9 @@ use serde::de::DeserializeOwned;
 /// The `OrcaTool` trait requires this as a supertrait, so every tool's
 /// NAME / DESCRIPTION / Args / Output live here exactly once.
 pub trait OrcaToolDef: Send + Sync + 'static {
+    /// Stable UUIDv7 minted once and committed in source, so every member
+    /// reports the same id for the tool. `NAME` is only a label.
+    const ID: Option<&'static str> = None;
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
     /// Whether this tool may be invoked by a paired system via `mesh/exec`.

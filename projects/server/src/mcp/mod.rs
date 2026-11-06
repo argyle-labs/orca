@@ -593,11 +593,14 @@ pub fn core_tool_catalog() -> Vec<Value> {
     for row in load_plugin_tool_rows() {
         let schema: Value =
             serde_json::from_str(&row.input_schema).unwrap_or_else(|_| json!({"type": "object"}));
-        all_orca.push(json!({
-            "name": row.fq_name,
-            "description": row.description,
-            "inputSchema": schema,
-        }));
+        all_orca.push(dispatch::with_id(
+            json!({
+                "name": row.fq_name,
+                "description": row.description,
+                "inputSchema": schema,
+            }),
+            row.tool_id,
+        ));
     }
     all_orca
 }
@@ -1396,6 +1399,35 @@ mod tests {
                 .any(|r| r.fq_name == "myns.dothing"),
             "seeded row must load from db"
         );
+
+        unwire_isolated_home(&dir);
+    }
+
+    #[test]
+    fn core_tool_catalog_plugin_rows_carry_the_declared_id() {
+        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut conn, dir) = wire_isolated_home("pluginid");
+        let id = "019a5c1e-7b3a-7c4d-8e2f-0123456789ab";
+        let decl = |name: &str, id: Option<&str>| {
+            (
+                format!("idns.{name}"),
+                "d".to_string(),
+                "{}".to_string(),
+                "general".to_string(),
+                id.map(str::to_string),
+            )
+        };
+        db::plugin_tools::replace(
+            &mut conn,
+            "idpid",
+            &[decl("with", Some(id)), decl("without", None)],
+        )
+        .expect("replace plugin tools");
+
+        let cat = core_tool_catalog();
+        let find = |n: &str| cat.iter().find(|t| t["name"] == n).expect("in catalog");
+        assert_eq!(find("idns.with")["id"], id);
+        assert!(find("idns.without").get("id").is_none());
 
         unwire_isolated_home(&dir);
     }
