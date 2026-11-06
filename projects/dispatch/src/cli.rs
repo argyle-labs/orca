@@ -884,6 +884,8 @@ pub struct PluginVerbOp {
     /// The tool's declared input schema (shown in `--help`).
     #[allow(clippy::disallowed_types)]
     pub input_schema: serde_json::Value,
+    /// Mutating verb: the CLI offers `--dry-run` to preview it.
+    pub execute_gated: bool,
 }
 
 /// Fetch loaded-plugin verbs from the running daemon's `GET /api/mcp/catalog`.
@@ -929,11 +931,16 @@ pub async fn fetch_plugin_verb_ops() -> Vec<PluginVerbOp> {
             .or_else(|| t.get("input_schema"))
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
+        let execute_gated = t
+            .get("execute_gated")
+            .and_then(|g| g.as_bool())
+            .unwrap_or(false);
         ops.push(PluginVerbOp {
             domain: domain.to_string(),
             verb: verb.to_string(),
             description,
             input_schema,
+            execute_gated,
         });
     }
     ops
@@ -1015,22 +1022,33 @@ pub fn plugin_verb_cli_commands_from(ops: Vec<PluginVerbOp>) -> Vec<clap::Comman
             op.description,
             serde_json::to_string_pretty(&op.input_schema).unwrap_or_default()
         );
-        clap::Command::new(leak(op.verb.clone()))
+        let mut leaf = clap::Command::new(leak(op.verb.clone()))
             .about(op.description.clone())
-            .long_about(help)
-            .arg(
-                clap::Arg::new("json")
-                    .long("json")
-                    .value_name("JSON")
-                    .help("Args as a JSON object matching the input schema"),
-            )
-            .arg(
-                clap::Arg::new("pairs")
-                    .value_name("KEY=VALUE")
-                    .num_args(0..)
-                    .help("Args as key=value pairs (values parsed as JSON, else string)"),
-            )
-            .arg(system_id_flag())
+            .long_about(help);
+        if op.execute_gated {
+            leaf = leaf.arg(
+                clap::Arg::new(contract::plan::DRY_RUN_FIELD)
+                    .long(DRY_RUN_FLAG)
+                    .action(clap::ArgAction::SetTrue)
+                    .help(
+                        "Report what WOULD change and change nothing. Omitted, the \
+                         change is applied.",
+                    ),
+            );
+        }
+        leaf.arg(
+            clap::Arg::new("json")
+                .long("json")
+                .value_name("JSON")
+                .help("Args as a JSON object matching the input schema"),
+        )
+        .arg(
+            clap::Arg::new("pairs")
+                .value_name("KEY=VALUE")
+                .num_args(0..)
+                .help("Args as key=value pairs (values parsed as JSON, else string)"),
+        )
+        .arg(system_id_flag())
     }
 
     fn materialize(name: String, mut node: Node) -> clap::Command {
@@ -1052,6 +1070,24 @@ pub fn plugin_verb_cli_commands_from(ops: Vec<PluginVerbOp>) -> Vec<clap::Comman
         .into_iter()
         .map(|(name, node)| materialize(name, node))
         .collect()
+}
+
+#[allow(clippy::disallowed_types)]
+fn plugin_verb_args(verb_sub: &ArgMatches) -> Result<serde_json::Value> {
+    let mut args = build_unit_args(verb_sub)?;
+    let dry_run = verb_sub
+        .try_get_one::<bool>(contract::plan::DRY_RUN_FIELD)
+        .ok()
+        .flatten()
+        .copied()
+        .unwrap_or(false);
+    if dry_run {
+        let obj = args
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("--dry-run needs a JSON object payload"))?;
+        obj.insert(contract::plan::DRY_RUN_FIELD.to_string(), true.into());
+    }
+    Ok(args)
 }
 
 /// Dispatch an `orca <domain> <verb> [--json '{…}' | key=value …]` invocation,
@@ -1078,7 +1114,7 @@ pub async fn dispatch_plugin_verb(
         )));
     };
     let name = format!("{domain}.{verb}");
-    let args = match build_unit_args(verb_sub) {
+    let args = match plugin_verb_args(verb_sub) {
         Ok(a) => a,
         Err(e) => return Some(Err(e)),
     };
@@ -1501,6 +1537,7 @@ mod tests {
             verb: verb.to_string(),
             description: format!("{domain}.{verb}"),
             input_schema: serde_json::json!({}),
+            execute_gated: false,
         }
     }
 
@@ -2693,6 +2730,57 @@ mod tests {
         let m2 = root.get_matches_from(["orca", "dockge", "deploy", "k=2"]);
         let (_d2, _v2, leaf2) = walk_to_verb(&m2).unwrap();
         assert_eq!(build_unit_args(leaf2).unwrap()["k"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn plugin_verb_args_dry_run_fails_closed_on_non_object_body() {
+        let mut gated = plugin_op("garage", "update");
+        gated.execute_gated = true;
+        let mut root = Command::new("orca");
+        for c in plugin_verb_cli_commands_from(vec![gated]) {
+            root = root.subcommand(c);
+        }
+        let run = |json: &str| {
+            let m = root.clone().get_matches_from([
+                "orca",
+                "garage",
+                "update",
+                "--dry-run",
+                "--json",
+                json,
+            ]);
+            let (_d, _v, leaf) = walk_to_verb(&m).unwrap();
+            plugin_verb_args(leaf)
+        };
+        assert!(run("null").is_err());
+        assert!(run("[]").is_err());
+        assert_eq!(run("{}").unwrap()["dryRun"], true);
+        assert_eq!(run(r#"{"dryRun":false}"#).unwrap()["dryRun"], true);
+    }
+
+    #[test]
+    fn plugin_verb_leaf_dry_run_flag_only_when_gated() {
+        let mut gated = plugin_op("garage", "update");
+        gated.execute_gated = true;
+        let ungated = plugin_op("garage", "list");
+        let mut root = Command::new("orca");
+        for c in plugin_verb_cli_commands_from(vec![gated, ungated]) {
+            root = root.subcommand(c);
+        }
+        let m = root
+            .clone()
+            .get_matches_from(["orca", "garage", "update", "--dry-run"]);
+        let (_d, _v, leaf) = walk_to_verb(&m).unwrap();
+        assert!(leaf.get_flag(contract::plan::DRY_RUN_FIELD));
+        assert_eq!(plugin_verb_args(leaf).unwrap()["dryRun"], true);
+        let m = root.clone().get_matches_from(["orca", "garage", "update"]);
+        let (_d, _v, leaf) = walk_to_verb(&m).unwrap();
+        assert!(!leaf.get_flag(contract::plan::DRY_RUN_FIELD));
+        assert!(plugin_verb_args(leaf).unwrap().get("dryRun").is_none());
+        assert!(
+            root.try_get_matches_from(["orca", "garage", "list", "--dry-run"])
+                .is_err()
+        );
     }
 
     // ── run_unit: reachable-daemon vs in-process fallback ───────────────────
