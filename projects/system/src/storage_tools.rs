@@ -4455,8 +4455,27 @@ mod tests {
 
     #[test]
     fn kernel_fstype_covers_nfs_and_cifs_only() {
-        assert!(kernel_fstype("nfs4") && kernel_fstype("cifs"));
-        assert!(!kernel_fstype("fuse.rclone") && !kernel_fstype("ext4"));
+        for fstype in ["nfs", "nfs4", "cifs", "smb3"] {
+            assert!(kernel_fstype(fstype), "{fstype:?} must be a kernel fstype");
+        }
+        for fstype in [
+            "autofs",
+            "fuse.rclone",
+            "fuse.sshfs",
+            "ext4",
+            "tmpfs",
+            "overlay",
+            "NFS",
+            "cifs ",
+            "",
+            "nfs42",
+            "smb",
+        ] {
+            assert!(
+                !kernel_fstype(fstype),
+                "{fstype:?} must not be a kernel fstype"
+            );
+        }
     }
 
     #[test]
