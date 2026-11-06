@@ -1396,21 +1396,57 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
     out
 }
 
-/// `umount -lf <target>` — lazy, forced detach of a wedged mount. Runs root-side
-/// inside the helper. A non-zero exit (e.g. "not mounted") surfaces as an error
-/// the caller collects but does not treat as fatal.
+const MAX_STACKED_UNMOUNTS: usize = 16;
+
+/// `umount -lf <target>` repeated until the path is no longer a mountpoint, so
+/// stacked mounts of one target are all removed. Runs root-side inside the
+/// helper. A non-zero exit (e.g. "not mounted") surfaces as an error the caller
+/// collects but does not treat as fatal.
 async fn force_unmount(target: &str) -> Result<(), String> {
-    let out = utils::privileged::host_command("umount")
-        .map_err(|e| e.to_string())?
-        .args(["-lf", "--", target])
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    unwind_stacked(
+        || is_mountpoint(target),
+        || async {
+            let out = utils::privileged::host_command("umount")
+                .map_err(|e| e.to_string())?
+                .args(["-lf", "--", target])
+                .output()
+                .await
+                .map_err(|e| e.to_string())?;
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+            }
+        },
+    )
+    .await
+}
+
+fn is_mountpoint(target: &str) -> bool {
+    let target = target.trim_end_matches('/');
+    plugin_toolkit::storage::mount_table::mount_table()
+        .map(|t| {
+            t.iter()
+                .any(|m| m.mountpoint.trim_end_matches('/') == target)
+        })
+        .unwrap_or(false)
+}
+
+async fn unwind_stacked<M, U, F>(mut mounted: M, mut umount: U) -> Result<(), String>
+where
+    M: FnMut() -> bool,
+    U: FnMut() -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    for _ in 0..MAX_STACKED_UNMOUNTS {
+        umount().await?;
+        if !mounted() {
+            return Ok(());
+        }
     }
+    Err(format!(
+        "still a mountpoint after {MAX_STACKED_UNMOUNTS} unmounts"
+    ))
 }
 
 #[cfg(test)]
@@ -2993,5 +3029,46 @@ mod tests {
             err.contains("refusing to run host-mutating `umount`"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_removes_every_layer() {
+        let layers = std::cell::Cell::new(3usize);
+        let calls = std::cell::Cell::new(0usize);
+        unwind_stacked(
+            || layers.get() > 0,
+            || {
+                calls.set(calls.get() + 1);
+                layers.set(layers.get() - 1);
+                async { Ok(()) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_is_bounded_when_the_mount_never_clears() {
+        let calls = std::cell::Cell::new(0usize);
+        let err = unwind_stacked(
+            || true,
+            || {
+                calls.set(calls.get() + 1);
+                async { Ok(()) }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(calls.get(), MAX_STACKED_UNMOUNTS);
+        assert!(err.contains("still a mountpoint"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn unwind_stacked_surfaces_an_umount_failure() {
+        let err = unwind_stacked(|| true, || async { Err("busy".to_string()) })
+            .await
+            .unwrap_err();
+        assert_eq!(err, "busy");
     }
 }

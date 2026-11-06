@@ -1743,7 +1743,64 @@ async fn mount_unmount(provider: &str, target: &str) -> anyhow::Result<MountOutc
     if !b.supports(StorageCapability::Unmount) {
         anyhow::bail!("backend `{provider}` does not support unmount");
     }
+    if let Some(outcome) = unmount_kernel_mount(target).await? {
+        return Ok(outcome);
+    }
     Ok(utils::invocation_scope::targeting("storage", provider, b.unmount(target)).await?)
+}
+
+fn kernel_fstype(fstype: &str) -> bool {
+    matches!(fstype, "nfs" | "nfs4" | "cifs" | "smb3")
+}
+
+/// Refuses any target orca does not declare as a placement on this host, so the
+/// root helper is never handed a caller-chosen path.
+fn ensure_declared_target(target: &str, declared: &[String]) -> anyhow::Result<()> {
+    let norm = |p: &str| p.trim_end_matches('/').to_string();
+    if declared.iter().any(|d| norm(d) == norm(target)) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "`{target}` is not a mountpoint orca declares on this host; refusing to unmount it"
+        )
+    }
+}
+
+/// Linux kernel mounts (nfs/cifs) need root to release, so they go through the
+/// privileged helper, which also unwinds stacked mounts. `None` means the target
+/// is not a live kernel mount and the backend handles it.
+async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcome>> {
+    if !cfg!(target_os = "linux") {
+        return Ok(None);
+    }
+    let norm = target.trim_end_matches('/');
+    let live = storage::mount_table::mount_table()
+        .unwrap_or_default()
+        .into_iter()
+        .any(|m| m.mountpoint.trim_end_matches('/') == norm && kernel_fstype(&m.fstype));
+    if !live {
+        return Ok(None);
+    }
+    let me = crate::host_identity::machine_id();
+    let declared: Vec<String> = crate::mounts::endpoint_db::list()?
+        .into_iter()
+        .filter(|m| m.host == me)
+        .map(|m| m.target)
+        .collect();
+    ensure_declared_target(target, &declared)?;
+    let r = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
+        targets: vec![target.to_string()],
+    })
+    .await;
+    if !r.errors.is_empty() {
+        anyhow::bail!("unmount {target}: {}", r.errors.join("; "));
+    }
+    Ok(Some(MountOutcome {
+        target: target.to_string(),
+        mounted: false,
+        recovered: false,
+        detail: Some("released via privileged helper".into()),
+    }))
 }
 
 // ── mount.update (dispatcher) ────────────────────────────────────────
@@ -4217,6 +4274,22 @@ mod tests {
             let msg = err.to_string();
             assert!(msg.contains("not-a-real-backend"), "{msg}");
         });
+    }
+
+    #[test]
+    fn ensure_declared_target_accepts_declared_and_refuses_others() {
+        let declared = vec!["/mnt/data".to_string()];
+        assert!(ensure_declared_target("/mnt/data", &declared).is_ok());
+        assert!(ensure_declared_target("/mnt/data/", &declared).is_ok());
+        assert!(ensure_declared_target("/etc", &declared).is_err());
+        assert!(ensure_declared_target("/mnt/data/sub", &declared).is_err());
+        assert!(ensure_declared_target("/mnt/data", &[]).is_err());
+    }
+
+    #[test]
+    fn kernel_fstype_covers_nfs_and_cifs_only() {
+        assert!(kernel_fstype("nfs4") && kernel_fstype("cifs"));
+        assert!(!kernel_fstype("fuse.rclone") && !kernel_fstype("ext4"));
     }
 
     #[test]
