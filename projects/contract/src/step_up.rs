@@ -172,7 +172,10 @@ pub fn verify(
     if required < StepUpRequirement::StepUp {
         return Ok(Factor::None);
     }
-    provider.check(user_id, proof)
+    match provider.check(user_id, proof)? {
+        Factor::None => Err(StepUpRefusal::FactorUnavailable),
+        factor => Ok(factor),
+    }
 }
 
 /// The default provider: an approval click is enough, so it can satisfy no
@@ -376,6 +379,37 @@ mod tests {
             verify(&Always, &u, StepUpRequirement::StepUp, Some("1")),
             Ok(Factor::Totp)
         );
+    }
+
+    struct ReturnsNone;
+    impl StepUp for ReturnsNone {
+        fn factor(&self) -> Factor {
+            Factor::None
+        }
+        fn check(&self, _: &str, _: Option<&str>) -> Result<Factor, StepUpRefusal> {
+            Ok(Factor::None)
+        }
+    }
+
+    #[test]
+    fn a_provider_returning_no_factor_cannot_satisfy_step_up() {
+        let u = ApprovalCaller::User {
+            user_id: "u1".into(),
+        };
+        assert_eq!(
+            verify(&ReturnsNone, &u, StepUpRequirement::StepUp, Some("1")),
+            Err(StepUpRefusal::FactorUnavailable)
+        );
+        assert_eq!(
+            verify(&ReturnsNone, &u, StepUpRequirement::Approval, None),
+            Ok(Factor::None)
+        );
+        for c in non_users() {
+            assert_eq!(
+                verify(&ReturnsNone, &c, StepUpRequirement::StepUp, None),
+                Err(StepUpRefusal::CallerNotPermitted)
+            );
+        }
     }
 
     #[test]
