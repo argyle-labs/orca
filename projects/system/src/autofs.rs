@@ -1645,7 +1645,14 @@ async fn force_unmount(target: &str) -> Result<(), String> {
 
 /// Filesystem types stacked at `target`, oldest first (topmost last).
 fn stacked_fstypes(target: &str) -> Result<Vec<String>, String> {
-    plugin_toolkit::storage::mount_table::mount_table()
+    stacked_from(plugin_toolkit::storage::mount_table::mount_table(), target)
+}
+
+fn stacked_from(
+    table: std::io::Result<Vec<MountEntry>>,
+    target: &str,
+) -> Result<Vec<String>, String> {
+    table
         .map(|t| fstypes_at(&t, target))
         .map_err(|e| format!("cannot read mount table: {e}"))
 }
@@ -1871,6 +1878,40 @@ mod tests {
             assert!(fstypes_at(&table, t).is_empty(), "{t:?}");
         }
         assert_eq!(fstypes_at(&table, "/mnt/data"), vec!["cifs".to_string()]);
+    }
+
+    #[test]
+    fn stacked_from_propagates_read_error() {
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "proc denied");
+        let e = stacked_from(Err(err), "/mnt/data").unwrap_err();
+        assert!(e.contains("cannot read mount table"), "{e}");
+        assert!(e.contains("proc denied"), "{e}");
+    }
+
+    #[test]
+    fn stacked_from_returns_stacked_pair() {
+        let table = vec![
+            entry("/mnt/data", "autofs", "a"),
+            entry("/mnt/data", "cifs", "b"),
+        ];
+        assert_eq!(
+            stacked_from(Ok(table), "/mnt/data").unwrap(),
+            vec!["autofs", "cifs"]
+        );
+    }
+
+    #[test]
+    fn stacked_from_empty_when_no_matching_entry() {
+        let table = vec![entry("/mnt/other", "cifs", "a")];
+        assert!(stacked_from(Ok(table), "/mnt/data").unwrap().is_empty());
+    }
+
+    #[test]
+    fn stacked_from_root_target_is_empty() {
+        for t in ["", "/"] {
+            let table = vec![entry("/", "ext4", "r")];
+            assert!(stacked_from(Ok(table), t).unwrap().is_empty(), "{t:?}");
+        }
     }
 
     #[test]
