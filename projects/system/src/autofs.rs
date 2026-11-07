@@ -1481,8 +1481,8 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
 }
 
 fn normalize_unmount_target(target: &str) -> Result<String, &'static str> {
-    if target.contains('\0') {
-        return Err("NUL in path");
+    if target.chars().any(char::is_control) {
+        return Err("control character in path");
     }
     let trimmed = target.trim_end_matches('/');
     let Some(rest) = trimmed.strip_prefix('/') else {
@@ -1531,7 +1531,7 @@ fn declared_map_keys(map: &str) -> std::collections::HashSet<String> {
 
 fn parse_ledger(contents: &str) -> Result<std::collections::HashSet<String>, String> {
     let mut out = std::collections::HashSet::new();
-    for line in contents.lines().map(str::trim).filter(|l| !l.is_empty()) {
+    for line in contents.split('\n').filter(|l| !l.is_empty()) {
         let key = first_map_key(line);
         match normalize_unmount_target(&key) {
             Ok(k) if k == key => out.insert(k),
@@ -3904,6 +3904,60 @@ mod tests {
         let out = run_unwind(&table, &calls).await.unwrap();
         assert_eq!(out, Unwound::Detached);
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn normalize_refuses_control_characters() {
+        for t in [
+            "/mnt/a\n/srv/x",
+            "/mnt/a\r",
+            "/mnt/a\tb",
+            "/mnt/a\u{7}",
+            "/mnt/a\0",
+        ] {
+            assert!(normalize_unmount_target(t).is_err(), "{t:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ledger_write_never_gains_two_entries_from_one_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        let path = path.to_str().unwrap();
+        ledger_update(path, &["/mnt/a\n/srv/x".to_string()], &[])
+            .await
+            .unwrap();
+        assert!(
+            parse_ledger(&read_ledger(path).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        ledger_update(path, &["/mnt/ok".to_string(), "/mnt/b\r".to_string()], &[])
+            .await
+            .unwrap();
+        let set = parse_ledger(&read_ledger(path).unwrap()).unwrap();
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("/mnt/ok"));
+    }
+
+    #[tokio::test]
+    async fn ledger_round_trips_an_escaped_trailing_space_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        let path = path.to_str().unwrap();
+        ledger_update(path, &["/mnt/a ".to_string()], &[])
+            .await
+            .unwrap();
+        let set = parse_ledger(&read_ledger(path).unwrap()).unwrap();
+        assert_eq!(set, ["/mnt/a ".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn ledger_entry_that_normalizes_differently_is_corrupt() {
+        for line in ["/a//b\n", "/a/b/\n", "/a/./b\n", "rel\n", "/a\\\nb\n"] {
+            assert!(parse_ledger(line).is_err(), "{line:?}");
+        }
+        assert!(parse_ledger("/a/b\n").is_ok());
     }
 
     #[tokio::test]
