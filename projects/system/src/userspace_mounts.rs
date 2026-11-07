@@ -207,6 +207,7 @@ mod tests {
             options: None,
             credential: credential.map(str::to_string),
             remount_policy: None,
+            placement_id: None,
             routes: Default::default(),
             enabled: true,
         }

@@ -23,7 +23,7 @@
 //! The one failure mode autofs does *not* self-heal — an actively-held stale
 //! `hard` mount — is handled by [`recover`] (the `storage.mount.update{action=recover}` tool) and the
 //! per-host convergence loop in [`crate::mount_converge`]; its `umount -lf` also
-//! needs root, so it routes through the same seam ([`PrivilegedOp::Unmount`]).
+//! needs root, so it routes through the same seam ([`PrivilegedOp::Release`]).
 //!
 //! The pure builders ([`render_map`], [`master_line`], [`merge_master`],
 //! [`map_line`], [`autofs_options`]) unit-test without touching the host.
@@ -109,6 +109,14 @@ pub struct FileWrite {
     pub mode: Option<u32>,
 }
 
+/// A direct-map entry's placement, recorded in the root ledger by `Apply`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapPlacement {
+    pub id: String,
+    pub target: String,
+    pub source: String,
+}
+
 /// The privileged operation handed to `orca admin storage-apply` over stdin.
 /// A closed, validated vocabulary — the helper does exactly these and nothing
 /// else, so the `sudo` grant is a narrow, auditable surface.
@@ -125,10 +133,11 @@ pub enum PrivilegedOp {
         #[serde(default)]
         keep_secret_files: Vec<String>,
         init: Init,
+        /// Placements whose map entries this apply writes; root records each in the
+        /// ledger so autofs-managed mounts stay releasable by id.
+        #[serde(default)]
+        placements: Vec<MapPlacement>,
     },
-    /// Force-release wedged autofs-managed mounts (`umount -lf`) so autofs can
-    /// remount + fail over. Only keys of the orca-owned direct map are accepted.
-    Unmount { targets: Vec<String> },
     /// Release mounts root itself recorded, addressed only by placement id. Each id
     /// must be in the root ledger and its recorded target must still report the
     /// recorded source; anything else is refused.
@@ -540,15 +549,44 @@ pub struct ApplyOutcome {
 /// Build the privileged [`PrivilegedOp::Apply`] for a mount set. Reads the
 /// current master file (world-readable) to take-over-merge it, and diffs both
 /// files against disk so only genuinely-changed files are written (an unchanged
-/// host yields empty `writes` — an idempotent no-op).
+/// host yields empty `writes`; the placements still ride along so root keeps its
+/// ledger current).
 pub async fn plan(mounts: &[ManagedMount]) -> PrivilegedOp {
-    plan_with_map(mounts, render_map(mounts)).await
+    plan_with_map(mounts, render_map(mounts), map_placements(mounts, None)).await
+}
+
+/// Ledger entries for the map's mounts that carry a placement id. With `elected`,
+/// the recorded source is the elected one; a mount with none is not in the map and
+/// is skipped.
+fn map_placements(
+    mounts: &[ManagedMount],
+    elected: Option<&std::collections::HashMap<String, String>>,
+) -> Vec<MapPlacement> {
+    mounts
+        .iter()
+        .filter(|m| m.enabled && m.kind == "network_share")
+        .filter_map(|m| {
+            let source = match elected {
+                Some(e) => e.get(&m.target)?.clone(),
+                None => m.source.clone(),
+            };
+            Some(MapPlacement {
+                id: m.placement_id.clone()?,
+                target: m.target.clone(),
+                source,
+            })
+        })
+        .collect()
 }
 
 /// [`plan`] against a pre-rendered map body. Shared by the legacy all-sources
 /// path ([`render_map`]) and the elected single-source path
 /// ([`render_map_elected`]); both need the same master take-over-merge + diff.
-async fn plan_with_map(mounts: &[ManagedMount], map: String) -> PrivilegedOp {
+async fn plan_with_map(
+    mounts: &[ManagedMount],
+    map: String,
+    placements: Vec<MapPlacement>,
+) -> PrivilegedOp {
     let master_path = detect_master_file();
     let existing_master = tokio::fs::read_to_string(master_path)
         .await
@@ -576,6 +614,7 @@ async fn plan_with_map(mounts: &[ManagedMount], map: String) -> PrivilegedOp {
         writes,
         keep_secret_files: Vec::new(),
         init: detect_init(),
+        placements,
     }
 }
 
@@ -599,7 +638,15 @@ pub async fn apply_elected(
     if let Some(outcome) = refuse_unrepresentable(mounts) {
         return outcome;
     }
-    apply_op(plan_with_map(mounts, render_map_elected(mounts, elected)).await).await
+    apply_op(
+        plan_with_map(
+            mounts,
+            render_map_elected(mounts, elected),
+            map_placements(mounts, Some(elected)),
+        )
+        .await,
+    )
+    .await
 }
 
 fn unrepresentable_key_char(c: char) -> bool {
@@ -625,10 +672,15 @@ fn refuse_unrepresentable(mounts: &[ManagedMount]) -> Option<ApplyOutcome> {
     })
 }
 
-/// Run a planned [`PrivilegedOp::Apply`], short-circuiting an empty diff.
+/// Run a planned [`PrivilegedOp::Apply`], short-circuiting an empty diff with no
+/// placements to record.
 async fn apply_op(op: PrivilegedOp) -> ApplyOutcome {
     match op {
-        PrivilegedOp::Apply { ref writes, .. } if writes.is_empty() => ApplyOutcome::default(),
+        PrivilegedOp::Apply {
+            ref writes,
+            ref placements,
+            ..
+        } if writes.is_empty() && placements.is_empty() => ApplyOutcome::default(),
         op => {
             let r = run_privileged(&op).await;
             ApplyOutcome {
@@ -668,6 +720,7 @@ pub async fn retire_direct_map() -> ApplyOutcome {
         }],
         keep_secret_files: Vec::new(),
         init: detect_init(),
+        placements: Vec::new(),
     })
     .await
 }
@@ -708,19 +761,6 @@ pub async fn run_privileged(op: &PrivilegedOp) -> PrivilegedResult {
 
 // ── Root side: the privileged executor (runs inside `orca admin storage-apply`) ─
 
-async fn execute_unmount(targets: &[String]) -> PrivilegedResult {
-    guard_unmount(
-        targets,
-        || match std::fs::read_to_string(MAP_FILE) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-            r => r.map_err(|e| e.to_string()),
-        },
-        stacked_fstypes,
-        |t| async move { force_unmount(&t).await },
-    )
-    .await
-}
-
 async fn execute_release(ids: &[String]) -> PrivilegedResult {
     let (mut res, released) = guard_release(
         ids,
@@ -729,10 +769,105 @@ async fn execute_release(ids: &[String]) -> PrivilegedResult {
         |t| async move { force_unmount(&t).await },
     )
     .await;
+    let mapped = read_map_file().unwrap_or_default();
+    let released = match read_ledger(LEDGER_FILE).and_then(|c| parse_ledger(&c)) {
+        Ok(ledger) => unmapped_ids(released, &ledger, &declared_map_keys(&mapped)),
+        Err(_) => released,
+    };
     if let Err(e) = ledger_update(LEDGER_FILE, &[], &released).await {
         res.errors.push(e);
     }
     res
+}
+
+fn read_map_file() -> Result<String, String> {
+    match std::fs::read_to_string(MAP_FILE) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        r => r.map_err(|e| e.to_string()),
+    }
+}
+
+/// Released ids whose ledger row stays: a target still keyed in the map is
+/// remounted by autofs, so its row must outlive the release.
+fn unmapped_ids(
+    released: Vec<String>,
+    ledger: &Ledger,
+    map_keys: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    released
+        .into_iter()
+        .filter(|id| ledger.get(id).is_none_or(|e| !map_keys.contains(&e.target)))
+        .collect()
+}
+
+/// Ledger changes for an `Apply` that moved the map from `old_keys` to `new_keys`.
+/// Placements are recorded only for targets keyed in the new map. A row whose
+/// target left the map is dropped only when no network mount is still live there;
+/// a live one stays so it remains releasable by id.
+fn map_ledger_changes<S>(
+    old_keys: &std::collections::HashSet<String>,
+    new_keys: &std::collections::HashSet<String>,
+    placements: &[MapPlacement],
+    ledger: &Ledger,
+    live_sources: S,
+) -> (Vec<(String, LedgerEntry)>, Vec<String>, Vec<String>)
+where
+    S: Fn(&str) -> Result<Vec<String>, String>,
+{
+    let mut adds = Vec::new();
+    let mut errors = Vec::new();
+    for p in placements {
+        let keyed = normalize_unmount_target(&p.target).is_ok_and(|t| new_keys.contains(&t));
+        if keyed {
+            adds.push((
+                p.id.clone(),
+                LedgerEntry {
+                    target: p.target.clone(),
+                    source: p.source.clone(),
+                },
+            ));
+        } else {
+            errors.push(format!(
+                "refused ledger entry for {:?}: not a key of the written map",
+                p.target
+            ));
+        }
+    }
+    let removes = ledger
+        .iter()
+        .filter(|(_, e)| old_keys.contains(&e.target) && !new_keys.contains(&e.target))
+        .filter(|(_, e)| live_sources(&e.target).is_ok_and(|live| live.is_empty()))
+        .map(|(id, _)| id.clone())
+        .collect();
+    (adds, removes, errors)
+}
+
+async fn sync_map_ledger(old_map: &str, placements: &[MapPlacement], res: &mut PrivilegedResult) {
+    let new_map = match read_map_file() {
+        Ok(m) => m,
+        Err(e) => {
+            res.errors.push(format!("read {MAP_FILE}: {e}"));
+            return;
+        }
+    };
+    let ledger = match read_ledger(LEDGER_FILE).and_then(|c| parse_ledger(&c)) {
+        Ok(l) => l,
+        Err(e) => {
+            res.errors.push(e);
+            return;
+        }
+    };
+    let (adds, removes, errors) = map_ledger_changes(
+        &declared_map_keys(old_map),
+        &declared_map_keys(&new_map),
+        placements,
+        &ledger,
+        network_sources,
+    );
+    res.errors.extend(errors);
+    if let Err(e) = ledger_update(LEDGER_FILE, &adds, &removes).await {
+        res.errors.push(e);
+    }
 }
 
 /// Execute a validated [`PrivilegedOp`] as root. Called only from the
@@ -744,8 +879,10 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             writes,
             keep_secret_files: _,
             init,
+            placements,
         } => {
             let mut res = PrivilegedResult::default();
+            let old_map = read_map_file().unwrap_or_default();
             for w in &writes {
                 if !is_allowed_write(&w.path) {
                     res.errors
@@ -765,9 +902,11 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
                     Err(e) => res.errors.push(format!("restart autofs: {e}")),
                 }
             }
+            if !placements.is_empty() || res.changed.iter().any(|c| c == MAP_FILE) {
+                sync_map_ledger(&old_map, &placements, &mut res).await;
+            }
             res
         }
-        PrivilegedOp::Unmount { targets } => execute_unmount(&targets).await,
         PrivilegedOp::Release { ids } => execute_release(&ids).await,
         PrivilegedOp::Mount {
             mounts,
@@ -1323,16 +1462,26 @@ pub async fn reconcile_source(
     (trans, errors)
 }
 
+/// Release `target` through its recorded placement id; the root ledger, not the
+/// path, authorizes it.
+async fn release_by_id(target: &str) -> Vec<String> {
+    match crate::mount_converge::recorded_placement_id(target) {
+        Some(id) => {
+            run_privileged(&PrivilegedOp::Release { ids: vec![id] })
+                .await
+                .errors
+        }
+        None => vec![format!(
+            "release {target}: no placement id recorded; cannot release it"
+        )],
+    }
+}
+
 /// Clean remount of a not-busy target: lazy-detach the current mount so the next
 /// access re-triggers autofs against the freshly-elected single-source map, then
 /// re-access to bring it up now. Routes the unmount through the privileged seam.
 async fn remount_to_elected(target: &str, _probe_timeout: Duration) -> Vec<String> {
-    let mut errors = Vec::new();
-    let r = run_privileged(&PrivilegedOp::Unmount {
-        targets: vec![target.to_string()],
-    })
-    .await;
-    errors.extend(r.errors);
+    let mut errors = release_by_id(target).await;
     errors.extend(trigger(std::slice::from_ref(&target.to_string())).await);
     errors
 }
@@ -1412,11 +1561,7 @@ pub async fn force_and_retrigger(
     }
 
     // Rung 2: lazy-unmount the (possibly wedged) handle + retrigger for failover.
-    let r = run_privileged(&PrivilegedOp::Unmount {
-        targets: one(target),
-    })
-    .await;
-    errors.extend(r.errors);
+    errors.extend(release_by_id(target).await);
     errors.extend(trigger(&one(target)).await);
     if matches!(probe(target, health_timeout).await, MountHealth::Ok) {
         return (true, errors);
@@ -1658,74 +1803,6 @@ async fn ledger_update(
     write_atomic(path, &render_ledger(&ledger), Some(0o600))
         .await
         .map_err(|e| format!("write mount ledger {path}: {e}"))
-}
-
-/// Root-side gate for [`PrivilegedOp::Unmount`]: a target is released only if it
-/// is a key of the orca-owned direct map AND currently has a network or autofs
-/// layer mounted. Anything else is refused without invoking umount.
-async fn guard_unmount<M, L, U, F>(
-    targets: &[String],
-    read_map: M,
-    layers: L,
-    mut umount: U,
-) -> PrivilegedResult
-where
-    M: FnOnce() -> Result<String, String>,
-    L: Fn(&str) -> Result<Vec<String>, String>,
-    U: FnMut(String) -> F,
-    F: std::future::Future<Output = Result<Unwound, String>>,
-{
-    let mut res = PrivilegedResult::default();
-    let map = match read_map() {
-        Ok(m) => m,
-        Err(e) => {
-            res.errors.extend(
-                targets
-                    .iter()
-                    .map(|t| format!("release {t}: refused: cannot read {MAP_FILE}: {e}")),
-            );
-            return res;
-        }
-    };
-    let declared = declared_map_keys(&map);
-    for t in targets {
-        let path = match normalize_unmount_target(t) {
-            Ok(p) => p,
-            Err(why) => {
-                res.errors.push(format!("release {t}: refused: {why}"));
-                continue;
-            }
-        };
-        if !declared.contains(&path) {
-            res.errors
-                .push(format!("release {t}: refused: not a declared orca mount"));
-            continue;
-        }
-        let stacked = match layers(&path) {
-            Ok(l) => l,
-            Err(e) => {
-                res.errors.push(format!(
-                    "release {t}: refused: cannot read mount table: {e}"
-                ));
-                continue;
-            }
-        };
-        if !stacked
-            .iter()
-            .any(|f| is_network_fstype(f) || f == "autofs")
-        {
-            res.errors.push(format!(
-                "release {t}: refused: no network or autofs mount present"
-            ));
-            continue;
-        }
-        match umount(path.clone()).await {
-            Ok(Unwound::Detached) => res.changed.push(path),
-            Ok(Unwound::NothingToDetach) => res.unchanged.push(path),
-            Err(e) => res.errors.push(format!("release {t}: {e}")),
-        }
-    }
-    res
 }
 
 /// Root-side gate for [`PrivilegedOp::Release`]: an id is released only if the root
@@ -2048,6 +2125,7 @@ mod tests {
             options: Some("_netdev,nofail,x-systemd.automount,vers=4.2,hard,nconnect=4".into()),
             credential: None,
             remount_policy: None,
+            placement_id: None,
             routes: Default::default(),
             enabled: true,
         }
@@ -2405,6 +2483,7 @@ mod tests {
             }],
             keep_secret_files: Vec::new(),
             init: Init::OpenRc,
+            placements: Vec::new(),
         };
         let s = serde_json::to_string(&op).unwrap();
         assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
@@ -2721,16 +2800,6 @@ mod tests {
     }
 
     #[test]
-    fn unmount_op_roundtrips_json() {
-        let op = PrivilegedOp::Unmount {
-            targets: vec!["/mnt/a".into(), "/mnt/b".into()],
-        };
-        let s = serde_json::to_string(&op).unwrap();
-        assert!(s.contains("\"op\":\"unmount\""));
-        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
-    }
-
-    #[test]
     fn privileged_result_default_is_empty() {
         let r = PrivilegedResult::default();
         assert!(r.changed.is_empty() && r.errors.is_empty() && !r.restarted);
@@ -2881,6 +2950,7 @@ mod tests {
             }],
             keep_secret_files: Vec::new(),
             init: Init::OpenRc,
+            placements: Vec::new(),
         };
         let res = execute_privileged(op).await;
         assert!(res.changed.is_empty());
@@ -3062,6 +3132,7 @@ mod tests {
             writes: Vec::new(),
             keep_secret_files: Vec::new(),
             init: Init::OpenRc,
+            placements: Vec::new(),
         };
         let out = apply_op(op).await;
         assert!(out.changed.is_empty());
@@ -3123,6 +3194,7 @@ mod tests {
                 writes,
                 keep_secret_files,
                 init,
+                ..
             } => {
                 assert_eq!(writes.len(), 1);
                 assert!(keep_secret_files.is_empty(), "defaulted to empty");
@@ -3295,6 +3367,7 @@ mod tests {
             writes: Vec::new(),
             keep_secret_files: vec!["/etc/orca/secret-files/mnt_x.secret".into()],
             init: Init::Systemd,
+            placements: Vec::new(),
         };
         let s = serde_json::to_string(&op).unwrap();
         assert!(s.contains("mnt_x.secret"));
@@ -3406,17 +3479,17 @@ mod tests {
         assert!(res.errors.is_empty(), "no errors on a clean reap: {res:?}");
     }
 
-    // ── execute_privileged: Unmount arm records a per-target failure ───────
+    // ── execute_privileged: Release arm refuses an id the ledger lacks ─────
     #[tokio::test]
-    async fn execute_privileged_unmount_records_error_for_unmounted_target() {
-        let op = PrivilegedOp::Unmount {
-            targets: vec!["/orca/definitely/not/mounted/xyz".into()],
+    async fn execute_privileged_release_refuses_an_unledgered_id() {
+        let op = PrivilegedOp::Release {
+            ids: vec![ID_A.into()],
         };
         let res = execute_privileged(op).await;
         assert!(res.changed.is_empty(), "nothing was actually released");
-        assert!(!res.restarted, "Unmount never restarts autofs");
+        assert!(!res.restarted, "Release never restarts autofs");
         assert_eq!(res.errors.len(), 1, "one release error collected: {res:?}");
-        assert!(res.errors[0].contains("release /orca/definitely/not/mounted/xyz"));
+        assert!(res.errors[0].contains(&format!("release {ID_A}: refused")));
     }
 
     // ── execute_privileged: Mount arm rejects a non-allowlisted secret-file ─
@@ -3566,6 +3639,7 @@ mod tests {
                 writes,
                 keep_secret_files,
                 init,
+                ..
             } => {
                 assert!(keep_secret_files.is_empty());
                 assert!(matches!(init, Init::Systemd | Init::OpenRc));
@@ -3592,8 +3666,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_privileged_never_reaches_real_sudo_in_tests() {
-        let r = run_privileged(&PrivilegedOp::Unmount {
-            targets: vec!["/orca/not/mounted/xyz".into()],
+        let r = run_privileged(&PrivilegedOp::Release {
+            ids: vec![ID_A.into()],
         })
         .await;
         assert_eq!(r.errors.len(), 1, "{r:?}");
@@ -3614,8 +3688,8 @@ mod tests {
             stdout: br#"{"changed":[],"restarted":true,"errors":[]}"#.to_vec(),
             ..Default::default()
         });
-        let op = PrivilegedOp::Unmount {
-            targets: vec!["/orca/x".into()],
+        let op = PrivilegedOp::Release {
+            ids: vec![ID_A.into()],
         };
         let r = with_exec(rec.clone(), run_privileged(&op)).await;
         assert!(r.restarted, "{r:?}");
@@ -3636,8 +3710,8 @@ mod tests {
         });
         let r = with_exec(
             rec,
-            run_privileged(&PrivilegedOp::Unmount {
-                targets: vec!["/orca/x".into()],
+            run_privileged(&PrivilegedOp::Release {
+                ids: vec![ID_A.into()],
             }),
         )
         .await;
@@ -3770,24 +3844,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guard_names_the_map_file_when_it_is_unreadable() {
-        let res = guard_unmount(
-            &["/mnt/data".to_string()],
-            || Err("Permission denied (os error 13)".to_string()),
-            |_| Ok(vec!["cifs".to_string()]),
-            |_| async { Ok(Unwound::Detached) },
-        )
-        .await;
-        assert_eq!(
-            res.errors,
-            vec![format!(
-                "release /mnt/data: refused: cannot read {MAP_FILE}: Permission denied (os error 13)"
-            )]
-        );
-        assert!(res.changed.is_empty() && res.unchanged.is_empty());
-    }
-
-    #[tokio::test]
     async fn force_unmount_with_reports_detached_after_releasing_the_cifs_layer() {
         let table = stack(&["autofs", "cifs"]);
         let calls = std::cell::Cell::new(0);
@@ -3808,76 +3864,6 @@ mod tests {
         assert_eq!(out, Ok(Unwound::Detached));
         assert_eq!(calls.get(), 1);
         assert_eq!(*table.borrow(), vec!["autofs".to_string()]);
-    }
-
-    const TEST_MAP: &str =
-        "# header\n/mnt/data  -fstype=cifs  //h/s\n/mnt/media\t-fstype=nfs4  h:/m\n";
-
-    async fn run_guard(
-        targets: &[&str],
-        mounted: &[(&str, &[&str])],
-    ) -> (PrivilegedResult, Vec<String>) {
-        let targets: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
-        let calls = std::cell::RefCell::new(Vec::new());
-        let res = guard_unmount(
-            &targets,
-            || Ok(TEST_MAP.to_string()),
-            |p| {
-                Ok(mounted
-                    .iter()
-                    .find(|(m, _)| *m == p)
-                    .map(|(_, l)| l.iter().map(|s| s.to_string()).collect())
-                    .unwrap_or_default())
-            },
-            |p| {
-                calls.borrow_mut().push(p);
-                async { Ok(Unwound::Detached) }
-            },
-        )
-        .await;
-        (res, calls.into_inner())
-    }
-
-    #[tokio::test]
-    async fn guard_refuses_undeclared_and_malformed_targets() {
-        let live: &[(&str, &[&str])] =
-            &[("/", &["ext4"]), ("/home", &["cifs"]), ("/proc", &["proc"])];
-        for bad in [
-            "/",
-            "/home",
-            "/proc",
-            "relative/path",
-            "/mnt/data/../etc",
-            "/mnt/./data",
-            "/mnt/data\0",
-            "/mnt//data",
-            "",
-        ] {
-            let (res, calls) = run_guard(&[bad], live).await;
-            assert!(calls.is_empty(), "{bad:?} must not umount");
-            assert!(res.changed.is_empty());
-            assert_eq!(res.errors.len(), 1, "{bad:?}: {res:?}");
-        }
-    }
-
-    #[tokio::test]
-    async fn guard_refuses_declared_key_without_network_mount() {
-        let (res, calls) = run_guard(&["/mnt/data"], &[("/mnt/data", &["ext4"])]).await;
-        assert!(calls.is_empty());
-        assert_eq!(res.errors.len(), 1);
-        assert!(res.errors[0].contains("no network or autofs mount"));
-    }
-
-    #[tokio::test]
-    async fn guard_accepts_declared_live_cifs_and_normalizes_trailing_slash() {
-        let live: &[(&str, &[&str])] = &[
-            ("/mnt/data", &["cifs"]),
-            ("/mnt/media", &["autofs", "nfs4"]),
-        ];
-        let (res, calls) = run_guard(&["/mnt/data/", "/mnt/media"], live).await;
-        assert_eq!(calls, vec!["/mnt/data", "/mnt/media"]);
-        assert_eq!(res.changed, vec!["/mnt/data", "/mnt/media"]);
-        assert!(res.errors.is_empty());
     }
 
     async fn run_release(
@@ -3981,16 +3967,6 @@ mod tests {
         .await;
         assert!(released.is_empty());
         assert_eq!(res.errors, vec![format!("release {ID_A}: busy")]);
-    }
-
-    #[tokio::test]
-    async fn guard_mixed_op_processes_good_target_and_errors_bad() {
-        let live: &[(&str, &[&str])] = &[("/mnt/data", &["cifs"]), ("/home", &["cifs"])];
-        let (res, calls) = run_guard(&["/home", "/mnt/data"], live).await;
-        assert_eq!(calls, vec!["/mnt/data"]);
-        assert_eq!(res.changed, vec!["/mnt/data"]);
-        assert_eq!(res.errors.len(), 1);
-        assert!(res.errors[0].contains("release /home: refused"));
     }
 
     fn stack(layers: &[&str]) -> std::cell::RefCell<Vec<String>> {
@@ -4392,100 +4368,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guard_matches_escaped_space_key_and_refuses_its_prefix() {
-        let map = format!("{}  -fstype=cifs  //h/s\n", escape_map_key("/mnt/my dir"));
-        assert_eq!(map, "/mnt/my\\ dir  -fstype=cifs  //h/s\n");
-        let calls = std::cell::RefCell::new(Vec::new());
-        let mut results = Vec::new();
-        for t in ["/mnt/my dir", "/mnt/my"] {
-            results.push(
-                guard_unmount(
-                    &[t.to_string()],
-                    || Ok(map.clone()),
-                    |_| Ok(vec!["cifs".to_string()]),
-                    |p| {
-                        calls.borrow_mut().push(p);
-                        async { Ok(Unwound::Detached) }
-                    },
-                )
-                .await,
-            );
-        }
-        assert_eq!(results[0].changed, vec!["/mnt/my dir".to_string()]);
-        assert!(results[1].changed.is_empty() && results[1].errors.len() == 1);
-        assert_eq!(*calls.borrow(), vec!["/mnt/my dir".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn guard_fails_closed_when_the_mount_table_is_unreadable() {
-        let targets = vec!["/mnt/data".to_string()];
-        let calls = std::cell::RefCell::new(Vec::new());
-        let res = guard_unmount(
-            &targets,
-            || Ok(TEST_MAP.to_string()),
-            |_| Err("cannot read mount table: denied".to_string()),
-            |p| {
-                calls.borrow_mut().push(p);
-                async { Ok(Unwound::Detached) }
-            },
-        )
-        .await;
-        assert!(calls.borrow().is_empty());
-        assert!(res.changed.is_empty());
-        assert_eq!(res.errors.len(), 1);
-        assert!(
-            res.errors[0].contains("cannot read mount table"),
-            "{}",
-            res.errors[0]
-        );
-    }
-
-    async fn guard_with(
-        target: &str,
-        map: &str,
-        mounted: &[&str],
-    ) -> (PrivilegedResult, Vec<String>) {
-        let calls = std::cell::RefCell::new(Vec::new());
-        let res = guard_unmount(
-            &[target.to_string()],
-            || Ok(map.to_string()),
-            |_| Ok(mounted.iter().map(|s| s.to_string()).collect()),
-            |p| {
-                calls.borrow_mut().push(p);
-                async { Ok(Unwound::Detached) }
-            },
-        )
-        .await;
-        (res, calls.into_inner())
-    }
-
-    #[tokio::test]
-    async fn guard_refuses_a_wedged_mount_dropped_from_the_elected_map() {
-        let m = mount_at("/mnt/wedged");
-        let elected = std::collections::HashMap::new();
-        let map = render_map_elected(std::slice::from_ref(&m), &elected);
-        assert!(!declared_map_keys(&map).contains("/mnt/wedged"));
-        let (res, calls) = guard_with("/mnt/wedged", &map, &["autofs", "nfs4"]).await;
-        assert!(calls.is_empty() && res.changed.is_empty());
-        assert!(res.errors[0].contains("not a declared orca mount"));
-    }
-
-    #[tokio::test]
-    async fn guard_refuses_a_target_not_in_the_map() {
-        let (res, calls) = guard_with("/mnt/other", TEST_MAP, &["cifs"]).await;
-        assert!(calls.is_empty() && res.changed.is_empty());
-        assert!(res.errors[0].contains("not a declared orca mount"));
-    }
-
-    #[tokio::test]
-    async fn guard_authorizes_a_trailing_slash_map_key() {
-        let (res, calls) =
-            guard_with("/mnt/data", "/mnt/data/  -fstype=cifs  //h/s\n", &["cifs"]).await;
-        assert_eq!(res.changed, vec!["/mnt/data".to_string()]);
-        assert_eq!(calls, vec!["/mnt/data".to_string()]);
-    }
-
-    #[tokio::test]
     async fn failed_release_keeps_the_ledger_entry() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger");
@@ -4544,6 +4426,7 @@ mod tests {
             }],
             keep_secret_files: vec![],
             init: Init::Systemd,
+            placements: Vec::new(),
         })
         .await;
         assert!(r.errors[0].contains("refused non-allowlisted path"));
@@ -4573,5 +4456,123 @@ mod tests {
             std::fs::read_to_string(path).unwrap(),
             format!("{ID_A}\t/mnt/my\\ dir\th:/srv\n")
         );
+    }
+
+    #[tokio::test]
+    async fn release_unmounts_a_wedged_mount_dropped_from_the_elected_map() {
+        let m = mount_at("/mnt/wedged");
+        let map = render_map_elected(std::slice::from_ref(&m), &Default::default());
+        assert!(!declared_map_keys(&map).contains("/mnt/wedged"));
+        let ledger = format!("{ID_A}\t/mnt/wedged\th:/x\n");
+        let (res, released, calls) = run_release(Ok(ledger), &[ID_A], "h:/x").await;
+        assert_eq!(calls, vec!["/mnt/wedged".to_string()]);
+        assert_eq!(res.changed, vec!["/mnt/wedged".to_string()]);
+        assert_eq!(released, vec![ID_A.to_string()]);
+    }
+
+    fn keys(ks: &[&str]) -> std::collections::HashSet<String> {
+        ks.iter().map(|k| k.to_string()).collect()
+    }
+
+    fn placement(id: &str, target: &str) -> MapPlacement {
+        MapPlacement {
+            id: id.into(),
+            target: target.into(),
+            source: "h:/x".into(),
+        }
+    }
+
+    #[test]
+    fn map_placements_record_the_elected_source_and_skip_unelected_or_idless() {
+        let with_id = |name: &str, id: Option<&str>| ManagedMount {
+            placement_id: id.map(str::to_string),
+            ..mount(name, "h:/x", None)
+        };
+        let mounts = [
+            with_id("a", Some(ID_A)),
+            with_id("b", Some(ID_B)),
+            with_id("c", None),
+        ];
+        let elected = [("/mnt/a".to_string(), "e:/a".to_string())].into();
+        assert_eq!(
+            map_placements(&mounts, Some(&elected)),
+            vec![MapPlacement {
+                id: ID_A.into(),
+                target: "/mnt/a".into(),
+                source: "e:/a".into()
+            }]
+        );
+        assert_eq!(map_placements(&mounts, None).len(), 2);
+    }
+
+    #[test]
+    fn apply_records_only_placements_keyed_in_the_new_map() {
+        let (adds, removes, errors) = map_ledger_changes(
+            &keys(&[]),
+            &keys(&["/mnt/a"]),
+            &[placement(ID_A, "/mnt/a"), placement(ID_B, "/etc")],
+            &Ledger::new(),
+            |_| Ok(vec![]),
+        );
+        assert_eq!(adds.len(), 1);
+        assert_eq!(adds[0].0, ID_A);
+        assert!(removes.is_empty());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn apply_drops_a_removed_entry_only_when_no_network_mount_is_live() {
+        let ledger: Ledger = [
+            (ID_A.to_string(), led_entry("/mnt/a", "h:/a")),
+            (ID_B.to_string(), led_entry("/mnt/b", "h:/b")),
+        ]
+        .into();
+        let live = |t: &str| {
+            Ok(if t == "/mnt/b" {
+                vec!["h:/b".into()]
+            } else {
+                vec![]
+            })
+        };
+        let (_, removes, _) =
+            map_ledger_changes(&keys(&["/mnt/a", "/mnt/b"]), &keys(&[]), &[], &ledger, live);
+        assert_eq!(removes, vec![ID_A.to_string()]);
+        let (_, removes, _) = map_ledger_changes(
+            &keys(&["/mnt/a", "/mnt/b"]),
+            &keys(&[]),
+            &[],
+            &ledger,
+            |_| Err("unreadable".to_string()),
+        );
+        assert!(removes.is_empty());
+    }
+
+    #[test]
+    fn apply_keeps_rows_whose_entry_is_still_in_the_map_or_was_never_mapped() {
+        let ledger: Ledger = [
+            (ID_A.to_string(), led_entry("/mnt/a", "h:/a")),
+            (ID_B.to_string(), led_entry("/mnt/native", "h:/n")),
+        ]
+        .into();
+        let (_, removes, _) =
+            map_ledger_changes(&keys(&["/mnt/a"]), &keys(&["/mnt/a"]), &[], &ledger, |_| {
+                Ok(vec![])
+            });
+        assert!(removes.is_empty());
+    }
+
+    #[test]
+    fn release_keeps_the_row_of_a_target_still_in_the_map() {
+        let ledger: Ledger = [
+            (ID_A.to_string(), led_entry("/mnt/a", "h:/a")),
+            (ID_B.to_string(), led_entry("/mnt/b", "h:/b")),
+        ]
+        .into();
+        let out = unmapped_ids(
+            vec![ID_A.to_string(), ID_B.to_string()],
+            &ledger,
+            &keys(&["/mnt/a"]),
+        );
+        assert_eq!(out, vec![ID_B.to_string()]);
     }
 }

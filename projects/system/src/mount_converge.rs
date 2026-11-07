@@ -10,7 +10,7 @@
 //! probing, and the mount itself are all orca's — there is no automounter.
 //!
 //! The mount/unmount execution goes through the existing root/`sudo` privilege
-//! boundary as [`PrivilegedOp::Mount`] / [`PrivilegedOp::Unmount`] — the
+//! boundary as [`PrivilegedOp::Mount`] / [`PrivilegedOp::Release`] — the
 //! unprivileged daemon plans, the root helper acts.
 //!
 //! The decision core ([`plan`]) is pure and unit-tested; the async wrapper only
@@ -712,6 +712,11 @@ fn ids_file() -> Option<PathBuf> {
 /// placement can still be released by id after its row is gone.
 fn load_ids() -> Ledger {
     ids_file().map(|p| load_ledger_at(&p)).unwrap_or_default()
+}
+
+/// The placement id recorded for `target`, if this host has ever seen it.
+pub(crate) fn recorded_placement_id(target: &str) -> Option<String> {
+    load_ids().get(&norm_target(target)).cloned()
 }
 
 fn save_ids(ids: &Ledger) {

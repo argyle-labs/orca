@@ -1445,6 +1445,7 @@ fn desired_to_render_mount(
         options: (!d.options.is_empty()).then(|| d.options.clone()),
         credential: d.credential.clone(),
         remount_policy: None,
+        placement_id: Some(d.id.clone()),
         routes: Default::default(),
         enabled: true,
     }
@@ -2681,6 +2682,7 @@ mod tests {
             options: None,
             credential: None,
             remount_policy: None,
+            placement_id: None,
             routes: Default::default(),
             enabled: true,
         }
@@ -5344,6 +5346,7 @@ mod tests {
                 options: None,
                 credential: None,
                 remount_policy: None,
+                placement_id: None,
                 routes: Default::default(),
                 enabled: true,
             };
@@ -5708,6 +5711,7 @@ mod tests {
                 options: None,
                 credential: None,
                 remount_policy: None,
+                placement_id: None,
                 routes: Default::default(),
                 enabled: true,
             };
@@ -5823,6 +5827,7 @@ mod tests {
                 options: None,
                 credential: None,
                 remount_policy: None,
+                placement_id: None,
                 routes: Default::default(),
                 enabled: true,
             };

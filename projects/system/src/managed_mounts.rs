@@ -58,6 +58,9 @@ pub struct ManagedMount {
     /// Serialized remount policy (Slice 3: always | schedule | backoff |
     /// manual). Optional until the policy engine lands.
     pub remount_policy: Option<String>,
+    /// Placement id the root ledger records this map entry under; `None` for rows
+    /// with no placement.
+    pub placement_id: Option<String>,
     pub enabled: bool,
 }
 
