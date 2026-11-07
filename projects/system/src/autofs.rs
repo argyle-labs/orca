@@ -142,6 +142,14 @@ pub enum PrivilegedOp {
     /// must be in the root ledger and its recorded target must still report the
     /// recorded source; anything else is refused.
     Release { ids: Vec<String> },
+    /// Record a mount root never mounted itself, so it becomes releasable by id. The
+    /// target must carry a live network mount whose source equals `source`, and
+    /// neither the id nor the target may already be in the ledger.
+    Adopt {
+        id: String,
+        target: String,
+        source: String,
+    },
     /// Realize mounts natively via `mount(8)` — the autofs-free apply path. Each
     /// [`MountReq`] is already rendered (source elected, options rendered by the
     /// owning backend); the root helper just runs the mount. This is the
@@ -908,6 +916,14 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             res
         }
         PrivilegedOp::Release { ids } => execute_release(&ids).await,
+        PrivilegedOp::Adopt { id, target, source } => {
+            let mut res = PrivilegedResult::default();
+            match adopt_with(LEDGER_FILE, &id, &target, &source, network_sources).await {
+                Ok(target) => res.changed.push(target),
+                Err(e) => res.errors.push(format!("adopt {id}: refused: {e}")),
+            }
+            res
+        }
         PrivilegedOp::Mount {
             mounts,
             keep_secret_files,
@@ -1805,6 +1821,61 @@ async fn ledger_update(
         .map_err(|e| format!("write mount ledger {path}: {e}"))
 }
 
+fn live_sources_match(live: &[String], recorded: &str) -> bool {
+    live.iter().all(|s| {
+        s.trim_end_matches('/')
+            .eq_ignore_ascii_case(recorded.trim_end_matches('/'))
+    })
+}
+
+/// Root-side body of [`PrivilegedOp::Adopt`]. The check and the write share one
+/// ledger lock so a concurrent mount cannot slip a conflicting row in between.
+/// Returns the normalized target recorded.
+async fn adopt_with<S>(
+    path: &str,
+    id: &str,
+    target: &str,
+    source: &str,
+    sources: S,
+) -> Result<String, String>
+where
+    S: Fn(&str) -> Result<Vec<String>, String>,
+{
+    let target = normalize_unmount_target(target).map_err(|why| format!("target: {why}"))?;
+    if !is_canonical_placement_id(id) {
+        return Err("placement id is not a canonical lowercase UUID".into());
+    }
+    if !valid_ledger_source(source) {
+        return Err("invalid source".into());
+    }
+    let live = sources(&target).map_err(|e| format!("cannot read mount table: {e}"))?;
+    if live.is_empty() {
+        return Err("no network mount present at the target".into());
+    }
+    if !live_sources_match(&live, source) {
+        return Err("live source does not match the given source".into());
+    }
+    let _lock = lock_ledger(path).await?;
+    let mut ledger = parse_ledger(&read_ledger(path)?)?;
+    if ledger.contains_key(id) {
+        return Err("placement id is already recorded".into());
+    }
+    if ledger.values().any(|e| e.target == target) {
+        return Err("target is already recorded under another placement id".into());
+    }
+    ledger.insert(
+        id.to_string(),
+        LedgerEntry {
+            target: target.clone(),
+            source: source.to_string(),
+        },
+    );
+    write_atomic(path, &render_ledger(&ledger), Some(0o600))
+        .await
+        .map_err(|e| format!("write mount ledger {path}: {e}"))?;
+    Ok(target)
+}
+
 /// Root-side gate for [`PrivilegedOp::Release`]: an id is released only if the root
 /// ledger holds it and every live network layer at its recorded target still
 /// reports the recorded source. Returns the result (keyed by target) and the ids
@@ -1838,12 +1909,7 @@ where
             continue;
         };
         match sources(&entry.target) {
-            Ok(live)
-                if !live.is_empty()
-                    && live.iter().all(|s| {
-                        s.trim_end_matches('/')
-                            .eq_ignore_ascii_case(entry.source.trim_end_matches('/'))
-                    }) => {}
+            Ok(live) if !live.is_empty() && live_sources_match(&live, &entry.source) => {}
             Ok(live) if live.is_empty() => {
                 res.errors.push(format!(
                     "release {id}: refused: no network mount present at the recorded target"
@@ -1917,17 +1983,18 @@ fn stacked_fstypes(target: &str) -> Result<Vec<String>, String> {
 
 /// Sources of the network layers stacked at `target`.
 fn network_sources(target: &str) -> Result<Vec<String>, String> {
-    let target = target.trim_end_matches('/');
     plugin_toolkit::storage::mount_table::mount_table()
-        .map(|t| {
-            t.into_iter()
-                .filter(|m| {
-                    m.mountpoint.trim_end_matches('/') == target && is_network_fstype(&m.fstype)
-                })
-                .map(|m| m.source)
-                .collect()
-        })
+        .map(|t| network_sources_in(t, target))
         .map_err(|e| format!("cannot read mount table: {e}"))
+}
+
+fn network_sources_in(table: Vec<MountEntry>, target: &str) -> Vec<String> {
+    let target = target.trim_end_matches('/');
+    table
+        .into_iter()
+        .filter(|m| m.mountpoint.trim_end_matches('/') == target && is_network_fstype(&m.fstype))
+        .map(|m| m.source)
+        .collect()
 }
 
 fn stacked_from(
@@ -4574,5 +4641,178 @@ mod tests {
             &keys(&["/mnt/a"]),
         );
         assert_eq!(out, vec![ID_B.to_string()]);
+    }
+
+    // ── PrivilegedOp::Adopt ───────────────────────────────────────────────
+    const ADOPT_ID: &str = "0192f5a0-0000-7000-8000-00000000000c";
+
+    fn live(src: &'static str) -> impl Fn(&str) -> Result<Vec<String>, String> {
+        move |_| Ok(vec![src.to_string()])
+    }
+
+    fn adopt_path(dir: &tempfile::TempDir) -> String {
+        dir.path().join("ledger").to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn adopt_op_roundtrips_json() {
+        let op = PrivilegedOp::Adopt {
+            id: ADOPT_ID.into(),
+            target: "/mnt/data".into(),
+            source: "//willow/data".into(),
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(json.contains(r#""op":"adopt""#), "{json}");
+        assert_eq!(serde_json::from_str::<PrivilegedOp>(&json).unwrap(), op);
+    }
+
+    #[tokio::test]
+    async fn adopt_records_the_row_when_the_live_source_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = adopt_path(&dir);
+        let t = adopt_with(
+            &path,
+            ADOPT_ID,
+            "/mnt/data/",
+            "//willow/data",
+            live("//WILLOW/data/"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(t, "/mnt/data");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{ADOPT_ID}\t/mnt/data\t//willow/data\n")
+        );
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn adopt_refuses_a_source_mismatch_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = adopt_path(&dir);
+        let e = adopt_with(
+            &path,
+            ADOPT_ID,
+            "/mnt/data",
+            "//willow/data",
+            live("//other/data"),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("does not match"), "{e}");
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[tokio::test]
+    async fn adopt_refuses_when_no_network_layer_is_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = adopt_path(&dir);
+        let e = adopt_with(&path, ADOPT_ID, "/mnt/data", "h:/x", |_| Ok(Vec::new()))
+            .await
+            .unwrap_err();
+        assert!(e.contains("no network mount"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn adopt_refuses_an_autofs_only_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = adopt_path(&dir);
+        let table = || vec![entry("/mnt/data", "autofs", "/etc/auto.orca")];
+        let e = adopt_with(&path, ADOPT_ID, "/mnt/data", "/etc/auto.orca", |t| {
+            Ok(network_sources_in(table(), t))
+        })
+        .await
+        .unwrap_err();
+        assert!(e.contains("no network mount"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn adopt_refuses_a_noncanonical_id_or_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = adopt_path(&dir);
+        let upper = ADOPT_ID.to_uppercase();
+        assert!(
+            adopt_with(&path, &upper, "/mnt/data", "h:/x", live("h:/x"))
+                .await
+                .is_err()
+        );
+        assert!(
+            adopt_with(&path, ADOPT_ID, "/mnt/../etc", "h:/x", live("h:/x"))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn adopt_refuses_an_existing_id_or_target_without_replacing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = adopt_path(&dir);
+        let add = [(ID_A.to_string(), led_entry("/mnt/a", "h:/a"))];
+        ledger_update(&path, &add, &[]).await.unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let e = adopt_with(&path, ID_A, "/mnt/b", "h:/b", live("h:/b"))
+            .await
+            .unwrap_err();
+        assert!(e.contains("id is already recorded"), "{e}");
+        let e = adopt_with(&path, ADOPT_ID, "/mnt/a/", "h:/a", live("h:/a"))
+            .await
+            .unwrap_err();
+        assert!(e.contains("target is already recorded"), "{e}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn adopt_fails_closed_on_a_corrupt_or_unreadable_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = adopt_path(&dir);
+        std::fs::write(&path, "garbage line\n").unwrap();
+        let e = adopt_with(&path, ADOPT_ID, "/mnt/data", "h:/x", live("h:/x"))
+            .await
+            .unwrap_err();
+        assert!(e.contains("corrupt"), "{e}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "garbage line\n");
+
+        let unreadable = dir.path().join("as-dir");
+        std::fs::create_dir(&unreadable).unwrap();
+        let e = adopt_with(
+            unreadable.to_str().unwrap(),
+            ADOPT_ID,
+            "/mnt/data",
+            "h:/x",
+            live("h:/x"),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("unreadable"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn an_adopted_id_can_then_be_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = adopt_path(&dir);
+        adopt_with(
+            &path,
+            ADOPT_ID,
+            "/mnt/data",
+            "//willow/data",
+            live("//willow/data"),
+        )
+        .await
+        .unwrap();
+        let ledger = read_ledger(&path).unwrap();
+        let ids = vec![ADOPT_ID.to_string()];
+        let (res, released) = guard_release(
+            &ids,
+            || Ok(ledger),
+            live("//willow/data"),
+            |_| async { Ok(Unwound::Detached) },
+        )
+        .await;
+        assert_eq!(res.changed, vec!["/mnt/data".to_string()]);
+        assert_eq!(released, vec![ADOPT_ID.to_string()]);
+        assert!(res.errors.is_empty(), "{res:?}");
     }
 }
