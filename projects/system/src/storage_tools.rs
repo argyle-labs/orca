@@ -1811,6 +1811,32 @@ fn plan_kernel_unmount(
     Ok(Some(norm.to_string()))
 }
 
+/// The declared source for `norm`: the one the live mount reports when it is among
+/// the placement's sources (failover), else the primary, which the root side then
+/// refuses on mismatch.
+fn declared_source_for(
+    norm: &str,
+    desired: &[crate::mount_converge::DesiredMount],
+    live: &[storage::mount_table::MountEntry],
+) -> anyhow::Result<String> {
+    let d = desired
+        .iter()
+        .find(|d| d.target.trim_end_matches('/') == norm)
+        .ok_or_else(|| anyhow::anyhow!("`{norm}` has no declared source on this host"))?;
+    let trim = |s: &str| s.trim_end_matches('/').to_ascii_lowercase();
+    let active = live
+        .iter()
+        .filter(|m| m.mountpoint.trim_end_matches('/') == norm)
+        .map(|m| trim(&m.source))
+        .collect::<Vec<_>>();
+    Ok(d.sources
+        .iter()
+        .find(|s| active.contains(&trim(s)))
+        .or(d.sources.first())
+        .cloned()
+        .unwrap_or_default())
+}
+
 fn outcome_from_result(
     target: &str,
     r: crate::autofs::PrivilegedResult,
@@ -1850,8 +1876,15 @@ async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcom
     let Some(norm) = plan_kernel_unmount(is_linux, target, table, &declared)? else {
         return Ok(None);
     };
+    let desired = crate::mount_converge::desired_for_host(crate::host_identity::machine_id())?;
+    let live = storage::mount_table::mount_table()
+        .map_err(|e| anyhow::anyhow!("cannot read mount table to unmount `{norm}`: {e}"))?;
+    let source = declared_source_for(&norm, &desired, &live)?;
     let r = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::UnmountDeclared {
-        targets: vec![norm],
+        targets: vec![crate::autofs::DeclaredTarget {
+            target: norm,
+            source,
+        }],
     })
     .await;
     outcome_from_result(target, r).map(Some)
@@ -4484,6 +4517,36 @@ mod tests {
             "me",
         );
         assert_eq!(got, vec!["/mnt/mine".to_string()]);
+    }
+
+    #[test]
+    fn declared_source_prefers_the_live_failover_source() {
+        let d = crate::mount_converge::DesiredMount {
+            target: "/mnt/a".into(),
+            backend: "nfs".into(),
+            fstype: "nfs4".into(),
+            sources: vec!["a:/e".into(), "b:/e".into()],
+            routes: Vec::new(),
+            remount_policy: Default::default(),
+            replication: None,
+            options: Default::default(),
+            credential: None,
+        };
+        let live = |src: &str| storage::mount_table::MountEntry {
+            source: src.into(),
+            mountpoint: "/mnt/a".into(),
+            fstype: "nfs4".into(),
+            options: Vec::new(),
+        };
+        assert_eq!(
+            declared_source_for("/mnt/a", std::slice::from_ref(&d), &[live("b:/e/")]).unwrap(),
+            "b:/e"
+        );
+        assert_eq!(
+            declared_source_for("/mnt/a", std::slice::from_ref(&d), &[live("x:/e")]).unwrap(),
+            "a:/e"
+        );
+        assert!(declared_source_for("/mnt/z", &[d], &[]).is_err());
     }
 
     #[test]

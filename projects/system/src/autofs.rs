@@ -108,6 +108,14 @@ pub struct FileWrite {
     pub mode: Option<u32>,
 }
 
+/// A declared placement the caller vouches for: its mountpoint and the source
+/// (`host:/export`, `//server/share`) the placement mounts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredTarget {
+    pub target: String,
+    pub source: String,
+}
+
 /// The privileged operation handed to `orca admin storage-apply` over stdin.
 /// A closed, validated vocabulary — the helper does exactly these and nothing
 /// else, so the `sudo` grant is a narrow, auditable surface.
@@ -130,8 +138,9 @@ pub enum PrivilegedOp {
     Unmount { targets: Vec<String> },
     /// [`PrivilegedOp::Unmount`] for targets the caller confirmed are declared
     /// placements on this host but that never entered the map or ledger (adopted
-    /// direct kernel mounts). The same normalization and live-mount checks apply.
-    UnmountDeclared { targets: Vec<String> },
+    /// direct kernel mounts). The same normalization and live-mount checks apply,
+    /// and every live network layer must report the declared `source`.
+    UnmountDeclared { targets: Vec<DeclaredTarget> },
     /// Realize mounts natively via `mount(8)` — the autofs-free apply path. Each
     /// [`MountReq`] is already rendered (source elected, options rendered by the
     /// owning backend); the root helper just runs the mount. This is the
@@ -707,7 +716,10 @@ pub async fn run_privileged(op: &PrivilegedOp) -> PrivilegedResult {
 
 // ── Root side: the privileged executor (runs inside `orca admin storage-apply`) ─
 
-async fn execute_unmount(targets: &[String], extra_declared: &[String]) -> PrivilegedResult {
+async fn execute_unmount(
+    targets: &[String],
+    extra_declared: &[DeclaredTarget],
+) -> PrivilegedResult {
     let mut res = guard_unmount_declared(
         targets,
         extra_declared,
@@ -717,6 +729,7 @@ async fn execute_unmount(targets: &[String], extra_declared: &[String]) -> Privi
         },
         || read_ledger(LEDGER_FILE),
         stacked_fstypes,
+        network_sources,
         |t| async move { force_unmount(&t).await },
     )
     .await;
@@ -766,7 +779,10 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             res
         }
         PrivilegedOp::Unmount { targets } => execute_unmount(&targets, &[]).await,
-        PrivilegedOp::UnmountDeclared { targets } => execute_unmount(&targets, &targets).await,
+        PrivilegedOp::UnmountDeclared { targets } => {
+            let paths: Vec<String> = targets.iter().map(|d| d.target.clone()).collect();
+            execute_unmount(&paths, &targets).await
+        }
         PrivilegedOp::Mount {
             mounts,
             keep_secret_files,
@@ -1580,23 +1596,35 @@ where
     U: FnMut(String) -> F,
     F: std::future::Future<Output = Result<Unwound, String>>,
 {
-    guard_unmount_declared(targets, &[], read_map, read_ledger, layers, umount).await
+    guard_unmount_declared(
+        targets,
+        &[],
+        read_map,
+        read_ledger,
+        layers,
+        |_: &str| Ok(Vec::new()),
+        umount,
+    )
+    .await
 }
 
 /// `extra_declared` are caller-vouched placements, authorized like map keys only
-/// after the same normalization and live network/autofs checks.
-async fn guard_unmount_declared<M, G, L, U, F>(
+/// after the same normalization and live network/autofs checks, plus: every live
+/// network layer must report the declared source (`sources` lists them).
+async fn guard_unmount_declared<M, G, L, S, U, F>(
     targets: &[String],
-    extra_declared: &[String],
+    extra_declared: &[DeclaredTarget],
     read_map: M,
     read_ledger: G,
     layers: L,
+    sources: S,
     mut umount: U,
 ) -> PrivilegedResult
 where
     M: FnOnce() -> Result<String, String>,
     G: FnOnce() -> Result<String, String>,
     L: Fn(&str) -> Result<Vec<String>, String>,
+    S: Fn(&str) -> Result<Vec<String>, String>,
     U: FnMut(String) -> F,
     F: std::future::Future<Output = Result<Unwound, String>>,
 {
@@ -1612,12 +1640,11 @@ where
             return res;
         }
     };
-    let mut declared = declared_map_keys(&map);
-    declared.extend(
-        extra_declared
-            .iter()
-            .filter_map(|t| normalize_unmount_target(t).ok()),
-    );
+    let declared = declared_map_keys(&map);
+    let extra: std::collections::HashMap<String, &str> = extra_declared
+        .iter()
+        .filter_map(|d| Some((normalize_unmount_target(&d.target).ok()?, d.source.as_str())))
+        .collect();
     let mut ledger = None;
     let mut read_ledger = Some(read_ledger);
     for t in targets {
@@ -1628,7 +1655,7 @@ where
                 continue;
             }
         };
-        if !declared.contains(&path) {
+        if !declared.contains(&path) && !extra.contains_key(&path) {
             if let Some(read) = read_ledger.take() {
                 ledger = Some(read().and_then(|c| parse_ledger(&c)));
             }
@@ -1662,6 +1689,30 @@ where
                 "release {t}: refused: no network or autofs mount present"
             ));
             continue;
+        }
+        if !declared.contains(&path)
+            && let Some(want) = extra.get(&path)
+        {
+            match sources(&path) {
+                Ok(live)
+                    if !live.is_empty()
+                        && live.iter().all(|s| {
+                            s.trim_end_matches('/')
+                                .eq_ignore_ascii_case(want.trim_end_matches('/'))
+                        }) => {}
+                Ok(_) => {
+                    res.errors.push(format!(
+                        "release {t}: refused: live source does not match the declared source"
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    res.errors.push(format!(
+                        "release {t}: refused: cannot read mount table: {e}"
+                    ));
+                    continue;
+                }
+            }
         }
         match umount(path.clone()).await {
             Ok(Unwound::Detached) => res.changed.push(path),
@@ -1708,6 +1759,21 @@ async fn run_umount_lf(target: String) -> Result<(), String> {
 /// Filesystem types stacked at `target`, oldest first (topmost last).
 fn stacked_fstypes(target: &str) -> Result<Vec<String>, String> {
     stacked_from(plugin_toolkit::storage::mount_table::mount_table(), target)
+}
+
+/// Sources of the network layers stacked at `target`.
+fn network_sources(target: &str) -> Result<Vec<String>, String> {
+    let target = target.trim_end_matches('/');
+    plugin_toolkit::storage::mount_table::mount_table()
+        .map(|t| {
+            t.into_iter()
+                .filter(|m| {
+                    m.mountpoint.trim_end_matches('/') == target && is_network_fstype(&m.fstype)
+                })
+                .map(|m| m.source)
+                .collect()
+        })
+        .map_err(|e| format!("cannot read mount table: {e}"))
 }
 
 fn stacked_from(
@@ -2569,10 +2635,14 @@ mod tests {
     #[test]
     fn unmount_declared_op_roundtrips_json() {
         let op = PrivilegedOp::UnmountDeclared {
-            targets: vec!["/mnt/data".into()],
+            targets: vec![DeclaredTarget {
+                target: "/mnt/data".into(),
+                source: "//willow/data".into(),
+            }],
         };
         let s = serde_json::to_string(&op).unwrap();
         assert!(s.contains("\"op\":\"unmount_declared\""));
+        assert!(s.contains("\"source\":\"//willow/data\""));
         assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
     }
 
@@ -3672,10 +3742,17 @@ mod tests {
         targets: &[&str],
         extra: &[&str],
         live: &[(&str, &[&str])],
+        live_source: &str,
     ) -> (PrivilegedResult, Vec<String>) {
         let calls = std::cell::RefCell::new(Vec::new());
         let targets: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
-        let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+        let extra: Vec<DeclaredTarget> = extra
+            .iter()
+            .map(|s| DeclaredTarget {
+                target: s.to_string(),
+                source: "//willow/data".into(),
+            })
+            .collect();
         let res = guard_unmount_declared(
             &targets,
             &extra,
@@ -3688,6 +3765,7 @@ mod tests {
                     .map(|(_, f)| f.iter().map(|s| s.to_string()).collect())
                     .unwrap_or_default())
             },
+            |_| Ok(vec![live_source.to_string()]),
             |t| {
                 calls.borrow_mut().push(t);
                 async { Ok(Unwound::Detached) }
@@ -3698,9 +3776,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guard_refuses_declared_target_whose_live_source_differs() {
+        let live: &[(&str, &[&str])] = &[("/mnt/data", &["cifs"])];
+        let (res, calls) =
+            run_guard_declared(&["/mnt/data"], &["/mnt/data"], live, "//other/data").await;
+        assert!(calls.is_empty(), "{calls:?}");
+        assert_eq!(
+            res.errors,
+            vec!["release /mnt/data: refused: live source does not match the declared source"]
+        );
+    }
+
+    #[tokio::test]
     async fn guard_releases_declared_but_unledgered_live_cifs_target() {
         let live: &[(&str, &[&str])] = &[("/mnt/data", &["cifs"])];
-        let (res, calls) = run_guard_declared(&["/mnt/data/"], &["/mnt/data"], live).await;
+        let (res, calls) =
+            run_guard_declared(&["/mnt/data/"], &["/mnt/data"], live, "//willow/data").await;
         assert_eq!(calls, vec!["/mnt/data"]);
         assert_eq!(res.changed, vec!["/mnt/data"]);
         assert!(res.errors.is_empty(), "{res:?}");
@@ -3709,10 +3800,11 @@ mod tests {
     #[tokio::test]
     async fn guard_still_refuses_undeclared_and_unsafe_targets_with_declared_set() {
         let live: &[(&str, &[&str])] = &[("/mnt/data", &["cifs"]), ("/", &["ext4"])];
-        let (res, calls) = run_guard_declared(&["/mnt/data"], &["/mnt/other"], live).await;
+        let (res, calls) =
+            run_guard_declared(&["/mnt/data"], &["/mnt/other"], live, "//willow/data").await;
         assert!(calls.is_empty() && res.errors.len() == 1, "{res:?}");
         for bad in ["/", "/mnt//data", "/mnt/../etc", "relative"] {
-            let (res, calls) = run_guard_declared(&[bad], &[bad], live).await;
+            let (res, calls) = run_guard_declared(&[bad], &[bad], live, "//willow/data").await;
             assert!(
                 calls.is_empty() && res.errors.len() == 1,
                 "{bad:?}: {res:?}"
