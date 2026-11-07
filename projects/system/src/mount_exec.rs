@@ -45,6 +45,9 @@ pub struct SecretFile {
 /// to `mount(8)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MountReq {
+    /// Placement id (UUID) the root ledger records for this mount; the only handle
+    /// a later `Release` accepts.
+    pub placement_id: String,
     /// Source as the kernel mount helper expects it (`host:/export` for NFS).
     /// For a mount with ordered failover sources this is the single elected
     /// source — orca owns source election, one source per attempt.
@@ -204,6 +207,7 @@ mod tests {
 
     fn req(source: &str, opts: &str) -> MountReq {
         MountReq {
+            placement_id: "0192f5a0-0000-7000-8000-000000000001".to_string(),
             source: source.to_string(),
             target: "/mnt/data".to_string(),
             fstype: "nfs4".to_string(),

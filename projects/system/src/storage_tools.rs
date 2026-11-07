@@ -629,12 +629,12 @@ fn set_route_enabled(
 /// placements are left to each client's convergence loop (which sees the held
 /// route and fails off it). Returns the targets it released here.
 async fn drain_local_placements(share_id: &str, this_host: &str, settle_secs: u32) -> Vec<String> {
-    let targets: Vec<String> = crate::mounts::endpoint_db::list()
+    let (ids, targets): (Vec<String>, Vec<String>) = crate::mounts::endpoint_db::list()
         .unwrap_or_default()
         .into_iter()
         .filter(|m| m.enabled && m.share_id == share_id && m.host == this_host)
-        .map(|m| m.target)
-        .collect();
+        .map(|m| (m.id, m.target))
+        .unzip();
     if targets.is_empty() {
         return targets;
     }
@@ -643,10 +643,9 @@ async fn drain_local_placements(share_id: &str, this_host: &str, settle_secs: u3
     // expected when I/O is still in flight and the forced retry below is the
     // real attempt — so they are logged only at debug. `run_privileged`
     // collects errors into the result rather than returning a `Result`.
-    let lazy = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
-        targets: targets.clone(),
-    })
-    .await;
+    let lazy =
+        crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Release { ids: ids.clone() })
+            .await;
     if !lazy.errors.is_empty() {
         tracing::debug!(
             "[storage.drain] lazy unmount pass errors (will force-retry): {:?}",
@@ -657,10 +656,7 @@ async fn drain_local_placements(share_id: &str, this_host: &str, settle_secs: u3
     // Final forced pass: if even this reports errors the placement may still be
     // mounted and the drain did not fully release it — surface that to the
     // operator.
-    let forced = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Unmount {
-        targets: targets.clone(),
-    })
-    .await;
+    let forced = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Release { ids }).await;
     if !forced.errors.is_empty() {
         tracing::warn!(
             "[storage.drain] forced unmount of {targets:?} reported errors: {:?}",
@@ -1811,30 +1807,16 @@ fn plan_kernel_unmount(
     Ok(Some(norm.to_string()))
 }
 
-/// The declared source for `norm`: the one the live mount reports when it is among
-/// the placement's sources (failover), else the primary, which the root side then
-/// refuses on mismatch.
-fn declared_source_for(
+/// The id of this host's placement mounted at `norm`.
+fn placement_id_for(
+    rows: &[crate::mounts::EndpointRow],
+    me: &str,
     norm: &str,
-    desired: &[crate::mount_converge::DesiredMount],
-    live: &[storage::mount_table::MountEntry],
 ) -> anyhow::Result<String> {
-    let d = desired
-        .iter()
-        .find(|d| d.target.trim_end_matches('/') == norm)
-        .ok_or_else(|| anyhow::anyhow!("`{norm}` has no declared source on this host"))?;
-    let trim = |s: &str| s.trim_end_matches('/').to_ascii_lowercase();
-    let active = live
-        .iter()
-        .filter(|m| m.mountpoint.trim_end_matches('/') == norm)
-        .map(|m| trim(&m.source))
-        .collect::<Vec<_>>();
-    Ok(d.sources
-        .iter()
-        .find(|s| active.contains(&trim(s)))
-        .or(d.sources.first())
-        .cloned()
-        .unwrap_or_default())
+    rows.iter()
+        .find(|m| m.host == me && m.target.trim_end_matches('/') == norm)
+        .map(|m| m.id.clone())
+        .ok_or_else(|| anyhow::anyhow!("`{norm}` has no placement id on this host"))
 }
 
 fn outcome_from_result(
@@ -1867,26 +1849,21 @@ async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcom
     } else {
         Ok(Vec::new())
     };
-    let declared = if is_linux {
-        let me = crate::host_identity::machine_id();
-        declared_targets_for_host(crate::mounts::endpoint_db::list()?, me)
+    let (me, rows) = if is_linux {
+        (
+            crate::host_identity::machine_id(),
+            crate::mounts::endpoint_db::list()?,
+        )
     } else {
-        Vec::new()
+        ("", Vec::new())
     };
+    let declared = declared_targets_for_host(rows.clone(), me);
     let Some(norm) = plan_kernel_unmount(is_linux, target, table, &declared)? else {
         return Ok(None);
     };
-    let desired = crate::mount_converge::desired_for_host(crate::host_identity::machine_id())?;
-    let live = storage::mount_table::mount_table()
-        .map_err(|e| anyhow::anyhow!("cannot read mount table to unmount `{norm}`: {e}"))?;
-    let source = declared_source_for(&norm, &desired, &live)?;
-    let r = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::UnmountDeclared {
-        targets: vec![crate::autofs::DeclaredTarget {
-            target: norm,
-            source,
-        }],
-    })
-    .await;
+    let id = placement_id_for(&rows, me, &norm)?;
+    let r = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Release { ids: vec![id] })
+        .await;
     outcome_from_result(target, r).map(Some)
 }
 
@@ -2632,6 +2609,7 @@ mod tests {
         options: &str,
     ) -> crate::mount_converge::DesiredMount {
         crate::mount_converge::DesiredMount {
+            id: "0192f5a0-0000-7000-8000-0000000000d1".into(),
             target: target.into(),
             backend: "nfs".into(),
             fstype: fstype.into(),
@@ -3780,6 +3758,7 @@ mod tests {
     #[test]
     fn render_adapter_propagates_backend_and_credential() {
         let d = crate::mount_converge::DesiredMount {
+            id: "0192f5a0-0000-7000-8000-0000000000d1".into(),
             target: "/mnt/sec".into(),
             backend: "smb".into(),
             fstype: "cifs".into(),
@@ -4520,33 +4499,28 @@ mod tests {
     }
 
     #[test]
-    fn declared_source_prefers_the_live_failover_source() {
-        let d = crate::mount_converge::DesiredMount {
-            target: "/mnt/a".into(),
-            backend: "nfs".into(),
-            fstype: "nfs4".into(),
-            sources: vec!["a:/e".into(), "b:/e".into()],
-            routes: Vec::new(),
-            remount_policy: Default::default(),
-            replication: None,
-            options: Default::default(),
-            credential: None,
+    fn placement_id_is_this_hosts_row_for_the_normalized_target() {
+        let row = |id: &str, host: &str, target: &str| crate::mounts::EndpointRow {
+            id: id.into(),
+            name: id.into(),
+            share_id: "sh".into(),
+            host: host.into(),
+            target: target.into(),
+            remount_policy: None,
+            health: plugin_toolkit::storage::MountHealth::Ok,
+            active_route: None,
+            active_options: None,
+            drift: false,
+            multi_mounted: false,
+            enabled: true,
+            guest: None,
         };
-        let live = |src: &str| storage::mount_table::MountEntry {
-            source: src.into(),
-            mountpoint: "/mnt/a".into(),
-            fstype: "nfs4".into(),
-            options: Vec::new(),
-        };
-        assert_eq!(
-            declared_source_for("/mnt/a", std::slice::from_ref(&d), &[live("b:/e/")]).unwrap(),
-            "b:/e"
-        );
-        assert_eq!(
-            declared_source_for("/mnt/a", std::slice::from_ref(&d), &[live("x:/e")]).unwrap(),
-            "a:/e"
-        );
-        assert!(declared_source_for("/mnt/z", &[d], &[]).is_err());
+        let rows = [
+            row("theirs", "other", "/mnt/a"),
+            row("mine", "me", "/mnt/a/"),
+        ];
+        assert_eq!(placement_id_for(&rows, "me", "/mnt/a").unwrap(), "mine");
+        assert!(placement_id_for(&rows, "me", "/mnt/z").is_err());
     }
 
     #[test]

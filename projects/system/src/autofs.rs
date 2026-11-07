@@ -56,9 +56,10 @@ fn net_fstypes() -> Vec<String> {
 /// The direct map file. One line per managed mount, keyed by absolute target.
 pub const MAP_FILE: &str = "/etc/auto.orca";
 
-/// Root-written, 0600 ledger of mountpoints orca has mounted or declared; it
-/// authorizes `Unmount` for targets absent from the live map. Deliberately not in
-/// [`is_allowed_write`]: only the helper itself may change it, never a payload.
+/// Root-written, 0600 ledger of what root itself mounted, one
+/// `id<TAB>target<TAB>source` line per placement; it is the only authority for
+/// [`PrivilegedOp::Release`]. Deliberately not in [`is_allowed_write`]: only the
+/// helper itself may change it, never a payload.
 pub const LEDGER_FILE: &str = "/etc/auto.orca.ledger";
 /// Idle-unmount timeout (seconds) autofs applies to our mounts. `0` means
 /// **persistent** — autofs never idle-expires these mounts.
@@ -108,14 +109,6 @@ pub struct FileWrite {
     pub mode: Option<u32>,
 }
 
-/// A declared placement the caller vouches for: its mountpoint and the source
-/// (`host:/export`, `//server/share`) the placement mounts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeclaredTarget {
-    pub target: String,
-    pub source: String,
-}
-
 /// The privileged operation handed to `orca admin storage-apply` over stdin.
 /// A closed, validated vocabulary — the helper does exactly these and nothing
 /// else, so the `sudo` grant is a narrow, auditable surface.
@@ -133,14 +126,13 @@ pub enum PrivilegedOp {
         keep_secret_files: Vec<String>,
         init: Init,
     },
-    /// Force-release wedged mounts (`umount -lf`) so autofs can remount + fail
-    /// over. Used by the self-heal path.
+    /// Force-release wedged autofs-managed mounts (`umount -lf`) so autofs can
+    /// remount + fail over. Only keys of the orca-owned direct map are accepted.
     Unmount { targets: Vec<String> },
-    /// [`PrivilegedOp::Unmount`] for targets the caller confirmed are declared
-    /// placements on this host but that never entered the map or ledger (adopted
-    /// direct kernel mounts). The same normalization and live-mount checks apply,
-    /// and every live network layer must report the declared `source`.
-    UnmountDeclared { targets: Vec<DeclaredTarget> },
+    /// Release mounts root itself recorded, addressed only by placement id. Each id
+    /// must be in the root ledger and its recorded target must still report the
+    /// recorded source; anything else is refused.
+    Release { ids: Vec<String> },
     /// Realize mounts natively via `mount(8)` — the autofs-free apply path. Each
     /// [`MountReq`] is already rendered (source elected, options rendered by the
     /// owning backend); the root helper just runs the mount. This is the
@@ -716,24 +708,28 @@ pub async fn run_privileged(op: &PrivilegedOp) -> PrivilegedResult {
 
 // ── Root side: the privileged executor (runs inside `orca admin storage-apply`) ─
 
-async fn execute_unmount(
-    targets: &[String],
-    extra_declared: &[DeclaredTarget],
-) -> PrivilegedResult {
-    let mut res = guard_unmount_declared(
+async fn execute_unmount(targets: &[String]) -> PrivilegedResult {
+    guard_unmount(
         targets,
-        extra_declared,
         || match std::fs::read_to_string(MAP_FILE) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
             r => r.map_err(|e| e.to_string()),
         },
-        || read_ledger(LEDGER_FILE),
         stacked_fstypes,
+        |t| async move { force_unmount(&t).await },
+    )
+    .await
+}
+
+async fn execute_release(ids: &[String]) -> PrivilegedResult {
+    let (mut res, released) = guard_release(
+        ids,
+        || read_ledger(LEDGER_FILE),
         network_sources,
         |t| async move { force_unmount(&t).await },
     )
     .await;
-    if let Err(e) = ledger_update(LEDGER_FILE, &[], &res.changed).await {
+    if let Err(e) = ledger_update(LEDGER_FILE, &[], &released).await {
         res.errors.push(e);
     }
     res
@@ -759,13 +755,6 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
                 match write_atomic(&w.path, &w.contents, w.mode).await {
                     Ok(()) => {
                         res.changed.push(w.path.clone());
-                        if w.path == MAP_FILE {
-                            let keys: Vec<String> =
-                                declared_map_keys(&w.contents).into_iter().collect();
-                            if let Err(e) = ledger_update(LEDGER_FILE, &keys, &[]).await {
-                                res.errors.push(e);
-                            }
-                        }
                     }
                     Err(e) => res.errors.push(format!("write {}: {e}", w.path)),
                 }
@@ -778,11 +767,8 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             }
             res
         }
-        PrivilegedOp::Unmount { targets } => execute_unmount(&targets, &[]).await,
-        PrivilegedOp::UnmountDeclared { targets } => {
-            let paths: Vec<String> = targets.iter().map(|d| d.target.clone()).collect();
-            execute_unmount(&paths, &targets).await
-        }
+        PrivilegedOp::Unmount { targets } => execute_unmount(&targets).await,
+        PrivilegedOp::Release { ids } => execute_release(&ids).await,
         PrivilegedOp::Mount {
             mounts,
             keep_secret_files,
@@ -792,8 +778,13 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
                 match crate::mount_exec::run_mount(m).await {
                     Ok(()) => {
                         res.changed.push(m.target.clone());
+                        let entry = LedgerEntry {
+                            target: m.target.clone(),
+                            source: m.source.clone(),
+                        };
                         if let Err(e) =
-                            ledger_update(LEDGER_FILE, std::slice::from_ref(&m.target), &[]).await
+                            ledger_update(LEDGER_FILE, &[(m.placement_id.clone(), entry)], &[])
+                                .await
                         {
                             res.errors.push(e);
                         }
@@ -1529,16 +1520,69 @@ fn declared_map_keys(map: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
-fn parse_ledger(contents: &str) -> Result<std::collections::HashSet<String>, String> {
-    let mut out = std::collections::HashSet::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LedgerEntry {
+    target: String,
+    source: String,
+}
+
+type Ledger = std::collections::BTreeMap<String, LedgerEntry>;
+
+fn is_canonical_placement_id(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok_and(|u| u.hyphenated().to_string() == id)
+}
+
+fn valid_ledger_source(source: &str) -> bool {
+    !source.is_empty() && !source.chars().any(char::is_control)
+}
+
+/// Splits on unescaped tabs; an unescaped space or dangling backslash is malformed.
+fn split_ledger_fields(line: &str) -> Option<Vec<String>> {
+    let mut fields = Vec::new();
+    let mut cur = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => cur.push(chars.next()?),
+            '\t' => fields.push(std::mem::take(&mut cur)),
+            ' ' => return None,
+            c => cur.push(c),
+        }
+    }
+    fields.push(cur);
+    Some(fields)
+}
+
+fn parse_ledger(contents: &str) -> Result<Ledger, String> {
+    let corrupt = || format!("mount ledger {LEDGER_FILE} is corrupt");
+    let mut out = Ledger::new();
     for line in contents.split('\n').filter(|l| !l.is_empty()) {
-        let key = first_map_key(line);
-        match normalize_unmount_target(&key) {
-            Ok(k) if k == key => out.insert(k),
-            _ => return Err(format!("mount ledger {LEDGER_FILE} is corrupt")),
-        };
+        let fields = split_ledger_fields(line).ok_or_else(corrupt)?;
+        let [id, target, source] = <[String; 3]>::try_from(fields).map_err(|_| corrupt())?;
+        let canonical = normalize_unmount_target(&target).is_ok_and(|k| k == target);
+        if !is_canonical_placement_id(&id)
+            || !canonical
+            || !valid_ledger_source(&source)
+            || out.values().any(|e| e.target == target)
+            || out.insert(id, LedgerEntry { target, source }).is_some()
+        {
+            return Err(corrupt());
+        }
     }
     Ok(out)
+}
+
+fn render_ledger(ledger: &Ledger) -> String {
+    ledger
+        .iter()
+        .map(|(id, e)| {
+            format!(
+                "{id}\t{}\t{}\n",
+                escape_map_key(&e.target),
+                escape_map_key(&e.source)
+            )
+        })
+        .collect()
 }
 
 fn read_ledger(path: &str) -> Result<String, String> {
@@ -1570,83 +1614,64 @@ async fn lock_ledger(path: &str) -> Result<std::fs::File, String> {
     .map_err(|e| format!("mount ledger lock task: {e}"))?
 }
 
-/// Root-side only: adds are normalized, unrepresentable targets are skipped.
-async fn ledger_update(path: &str, add: &[String], remove: &[String]) -> Result<(), String> {
-    let norm = |v: &[String]| -> Vec<String> {
-        v.iter()
-            .filter_map(|t| normalize_unmount_target(t).ok())
-            .collect()
-    };
-    let (add, remove) = (norm(add), norm(remove));
-    if add.is_empty() && remove.is_empty() {
+/// Root-side only. An add replaces any entry with the same id or target; an add
+/// with a non-canonical id, unrepresentable target or invalid source is an error
+/// and nothing is written.
+async fn ledger_update(
+    path: &str,
+    add: &[(String, LedgerEntry)],
+    remove: &[String],
+) -> Result<(), String> {
+    let mut adds = Vec::with_capacity(add.len());
+    for (id, e) in add {
+        let target = normalize_unmount_target(&e.target)
+            .map_err(|why| format!("mount ledger: target {:?}: {why}", e.target))?;
+        if !is_canonical_placement_id(id) || !valid_ledger_source(&e.source) {
+            return Err(format!(
+                "mount ledger: invalid placement id or source for {target}"
+            ));
+        }
+        adds.push((
+            id.clone(),
+            LedgerEntry {
+                target,
+                source: e.source.clone(),
+            },
+        ));
+    }
+    if adds.is_empty() && remove.is_empty() {
         return Ok(());
     }
     let _lock = lock_ledger(path).await?;
-    let mut set = parse_ledger(&read_ledger(path)?)?;
-    let before = set.clone();
-    set.extend(add);
-    for r in &remove {
-        set.remove(r);
+    let mut ledger = parse_ledger(&read_ledger(path)?)?;
+    let before = ledger.clone();
+    for (id, e) in adds {
+        ledger.retain(|_, old| old.target != e.target);
+        ledger.insert(id, e);
     }
-    if set == before {
+    for r in remove {
+        ledger.remove(r);
+    }
+    if ledger == before {
         return Ok(());
     }
-    let mut keys: Vec<String> = set.iter().map(|k| escape_map_key(k)).collect();
-    keys.sort();
-    let body = keys.iter().map(|k| format!("{k}\n")).collect::<String>();
-    write_atomic(path, &body, Some(0o600))
+    write_atomic(path, &render_ledger(&ledger), Some(0o600))
         .await
         .map_err(|e| format!("write mount ledger {path}: {e}"))
 }
 
 /// Root-side gate for [`PrivilegedOp::Unmount`]: a target is released only if it
-/// is a key of the orca-owned direct map or in the root-owned mount ledger AND
-/// currently has a network or autofs layer mounted. Anything else is refused
-/// without invoking umount.
-#[cfg(test)]
-async fn guard_unmount<M, G, L, U, F>(
+/// is a key of the orca-owned direct map AND currently has a network or autofs
+/// layer mounted. Anything else is refused without invoking umount.
+async fn guard_unmount<M, L, U, F>(
     targets: &[String],
     read_map: M,
-    read_ledger: G,
     layers: L,
-    umount: U,
-) -> PrivilegedResult
-where
-    M: FnOnce() -> Result<String, String>,
-    G: FnOnce() -> Result<String, String>,
-    L: Fn(&str) -> Result<Vec<String>, String>,
-    U: FnMut(String) -> F,
-    F: std::future::Future<Output = Result<Unwound, String>>,
-{
-    guard_unmount_declared(
-        targets,
-        &[],
-        read_map,
-        read_ledger,
-        layers,
-        |_: &str| Ok(Vec::new()),
-        umount,
-    )
-    .await
-}
-
-/// `extra_declared` are caller-vouched placements, authorized like map keys only
-/// after the same normalization and live network/autofs checks, plus: every live
-/// network layer must report the declared source (`sources` lists them).
-async fn guard_unmount_declared<M, G, L, S, U, F>(
-    targets: &[String],
-    extra_declared: &[DeclaredTarget],
-    read_map: M,
-    read_ledger: G,
-    layers: L,
-    sources: S,
     mut umount: U,
 ) -> PrivilegedResult
 where
     M: FnOnce() -> Result<String, String>,
-    G: FnOnce() -> Result<String, String>,
     L: Fn(&str) -> Result<Vec<String>, String>,
-    S: Fn(&str) -> Result<Vec<String>, String>,
     U: FnMut(String) -> F,
     F: std::future::Future<Output = Result<Unwound, String>>,
 {
@@ -1663,12 +1688,6 @@ where
         }
     };
     let declared = declared_map_keys(&map);
-    let extra: std::collections::HashMap<String, &str> = extra_declared
-        .iter()
-        .filter_map(|d| Some((normalize_unmount_target(&d.target).ok()?, d.source.as_str())))
-        .collect();
-    let mut ledger = None;
-    let mut read_ledger = Some(read_ledger);
     for t in targets {
         let path = match normalize_unmount_target(t) {
             Ok(p) => p,
@@ -1677,22 +1696,10 @@ where
                 continue;
             }
         };
-        if !declared.contains(&path) && !extra.contains_key(&path) {
-            if let Some(read) = read_ledger.take() {
-                ledger = Some(read().and_then(|c| parse_ledger(&c)));
-            }
-            match &ledger {
-                Some(Ok(l)) if l.contains(&path) => {}
-                Some(Err(e)) => {
-                    res.errors.push(format!("release {t}: refused: {e}"));
-                    continue;
-                }
-                _ => {
-                    res.errors
-                        .push(format!("release {t}: refused: not a declared orca mount"));
-                    continue;
-                }
-            }
+        if !declared.contains(&path) {
+            res.errors
+                .push(format!("release {t}: refused: not a declared orca mount"));
+            continue;
         }
         let stacked = match layers(&path) {
             Ok(l) => l,
@@ -1712,30 +1719,6 @@ where
             ));
             continue;
         }
-        if !declared.contains(&path)
-            && let Some(want) = extra.get(&path)
-        {
-            match sources(&path) {
-                Ok(live)
-                    if !live.is_empty()
-                        && live.iter().all(|s| {
-                            s.trim_end_matches('/')
-                                .eq_ignore_ascii_case(want.trim_end_matches('/'))
-                        }) => {}
-                Ok(_) => {
-                    res.errors.push(format!(
-                        "release {t}: refused: live source does not match the declared source"
-                    ));
-                    continue;
-                }
-                Err(e) => {
-                    res.errors.push(format!(
-                        "release {t}: refused: cannot read mount table: {e}"
-                    ));
-                    continue;
-                }
-            }
-        }
         match umount(path.clone()).await {
             Ok(Unwound::Detached) => res.changed.push(path),
             Ok(Unwound::NothingToDetach) => res.unchanged.push(path),
@@ -1743,6 +1726,76 @@ where
         }
     }
     res
+}
+
+/// Root-side gate for [`PrivilegedOp::Release`]: an id is released only if the root
+/// ledger holds it and every live network layer at its recorded target still
+/// reports the recorded source. Returns the result (keyed by target) and the ids
+/// to drop from the ledger.
+async fn guard_release<G, S, U, F>(
+    ids: &[String],
+    read_ledger: G,
+    sources: S,
+    mut umount: U,
+) -> (PrivilegedResult, Vec<String>)
+where
+    G: FnOnce() -> Result<String, String>,
+    S: Fn(&str) -> Result<Vec<String>, String>,
+    U: FnMut(String) -> F,
+    F: std::future::Future<Output = Result<Unwound, String>>,
+{
+    let mut res = PrivilegedResult::default();
+    let mut released = Vec::new();
+    let ledger = match read_ledger().and_then(|c| parse_ledger(&c)) {
+        Ok(l) => l,
+        Err(e) => {
+            res.errors
+                .extend(ids.iter().map(|id| format!("release {id}: refused: {e}")));
+            return (res, released);
+        }
+    };
+    for id in ids {
+        let Some(entry) = ledger.get(id) else {
+            res.errors
+                .push(format!("release {id}: refused: unknown placement id"));
+            continue;
+        };
+        match sources(&entry.target) {
+            Ok(live)
+                if !live.is_empty()
+                    && live.iter().all(|s| {
+                        s.trim_end_matches('/')
+                            .eq_ignore_ascii_case(entry.source.trim_end_matches('/'))
+                    }) => {}
+            Ok(live) if live.is_empty() => {
+                res.errors.push(format!(
+                    "release {id}: refused: no network mount present at the recorded target"
+                ));
+                continue;
+            }
+            Ok(_) => {
+                res.errors.push(format!(
+                    "release {id}: refused: live source does not match the recorded source"
+                ));
+                continue;
+            }
+            Err(e) => {
+                res.errors.push(format!(
+                    "release {id}: refused: cannot read mount table: {e}"
+                ));
+                continue;
+            }
+        }
+        match umount(entry.target.clone()).await {
+            Ok(Unwound::Detached) => {
+                res.changed.push(entry.target.clone());
+                released.push(id.clone());
+            }
+            Ok(Unwound::NothingToDetach) => res.unchanged.push(entry.target.clone()),
+            Err(e) => res.errors.push(format!("release {id}: {e}")),
+        }
+    }
+    (res, released)
 }
 
 const MAX_STACKED_UNMOUNTS: usize = 16;
@@ -2653,17 +2706,17 @@ mod tests {
 
     // ── PrivilegedOp::Unmount + PrivilegedResult serde ────────────────────
 
+    const ID_A: &str = "0192f5a0-0000-7000-8000-00000000000a";
+    const ID_B: &str = "0192f5a0-0000-7000-8000-00000000000b";
+
     #[test]
-    fn unmount_declared_op_roundtrips_json() {
-        let op = PrivilegedOp::UnmountDeclared {
-            targets: vec![DeclaredTarget {
-                target: "/mnt/data".into(),
-                source: "//willow/data".into(),
-            }],
+    fn release_op_roundtrips_json_with_ids_only() {
+        let op = PrivilegedOp::Release {
+            ids: vec![ID_A.into(), ID_B.into()],
         };
         let s = serde_json::to_string(&op).unwrap();
-        assert!(s.contains("\"op\":\"unmount_declared\""));
-        assert!(s.contains("\"source\":\"//willow/data\""));
+        assert!(s.contains("\"op\":\"release\""));
+        assert!(!s.contains("target") && !s.contains("source"));
         assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
     }
 
@@ -3085,6 +3138,7 @@ mod tests {
     fn mount_op_roundtrips_json_with_defaulted_keep_set() {
         let op = PrivilegedOp::Mount {
             mounts: vec![crate::mount_exec::MountReq {
+                placement_id: ID_A.into(),
                 source: "primary:/srv/data".into(),
                 target: "/mnt/data".into(),
                 fstype: "nfs4".into(),
@@ -3132,13 +3186,25 @@ mod tests {
         assert!(serde_json::from_str::<Init>("\"openrc\"").is_err());
     }
 
+    fn id_n(n: u128) -> String {
+        uuid::Uuid::from_u128(n).hyphenated().to_string()
+    }
+
+    fn led_entry(target: &str, source: &str) -> LedgerEntry {
+        LedgerEntry {
+            target: target.into(),
+            source: source.into(),
+        }
+    }
+
     #[test]
     fn ledger_updates_from_two_threads_both_land() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger").to_str().unwrap().to_string();
-        for i in 0..50 {
-            let run = |t: String| {
+        for i in 0..50u128 {
+            let run = |n: u128, t: String| {
                 let path = path.clone();
+                let t = (id_n(n), led_entry(&t, "h:/e"));
                 std::thread::spawn(move || {
                     tokio::runtime::Builder::new_current_thread()
                         .build()
@@ -3147,7 +3213,10 @@ mod tests {
                         .unwrap();
                 })
             };
-            let (a, b) = (run(format!("/mnt/a{i}")), run(format!("/mnt/b{i}")));
+            let (a, b) = (
+                run(2 * i, format!("/mnt/a{i}")),
+                run(2 * i + 1, format!("/mnt/b{i}")),
+            );
             a.join().unwrap();
             b.join().unwrap();
         }
@@ -3161,17 +3230,12 @@ mod tests {
         let path = dir.path().join("ledger");
         std::fs::write(&path, "relative\n").unwrap();
         let path = path.to_str().unwrap();
-        assert!(
-            ledger_update(path, &["/mnt/b".to_string()], &[])
-                .await
-                .is_err()
-        );
+        let add = [(ID_B.to_string(), led_entry("/mnt/b", "h:/b"))];
+        assert!(ledger_update(path, &add, &[]).await.is_err());
         let lock = lock_ledger(path).await.unwrap();
         drop(lock);
-        std::fs::write(path, "/mnt/a\n").unwrap();
-        ledger_update(path, &["/mnt/b".to_string()], &[])
-            .await
-            .unwrap();
+        std::fs::write(path, format!("{ID_A}\t/mnt/a\th:/a\n")).unwrap();
+        ledger_update(path, &add, &[]).await.unwrap();
     }
 
     #[test]
@@ -3206,6 +3270,7 @@ mod tests {
     fn mount_op_roundtrips_with_secret_file_and_keep_set() {
         let op = PrivilegedOp::Mount {
             mounts: vec![crate::mount_exec::MountReq {
+                placement_id: ID_A.into(),
                 source: "//host/share".into(),
                 target: "/mnt/media".into(),
                 fstype: "cifs".into(),
@@ -3361,6 +3426,7 @@ mod tests {
         let target = tmp.path().join("media").to_str().unwrap().to_string();
         let op = PrivilegedOp::Mount {
             mounts: vec![crate::mount_exec::MountReq {
+                placement_id: ID_A.into(),
                 source: "//host/share".into(),
                 target,
                 fstype: "cifs".into(),
@@ -3708,7 +3774,6 @@ mod tests {
         let res = guard_unmount(
             &["/mnt/data".to_string()],
             || Err("Permission denied (os error 13)".to_string()),
-            || Ok(String::new()),
             |_| Ok(vec!["cifs".to_string()]),
             |_| async { Ok(Unwound::Detached) },
         )
@@ -3757,7 +3822,6 @@ mod tests {
         let res = guard_unmount(
             &targets,
             || Ok(TEST_MAP.to_string()),
-            || Ok(String::new()),
             |p| {
                 Ok(mounted
                     .iter()
@@ -3816,33 +3880,16 @@ mod tests {
         assert!(res.errors.is_empty());
     }
 
-    async fn run_guard_declared(
-        targets: &[&str],
-        extra: &[&str],
-        live: &[(&str, &[&str])],
+    async fn run_release(
+        ledger: Result<String, String>,
+        ids: &[&str],
         live_source: &str,
-    ) -> (PrivilegedResult, Vec<String>) {
+    ) -> (PrivilegedResult, Vec<String>, Vec<String>) {
         let calls = std::cell::RefCell::new(Vec::new());
-        let targets: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
-        let extra: Vec<DeclaredTarget> = extra
-            .iter()
-            .map(|s| DeclaredTarget {
-                target: s.to_string(),
-                source: "//willow/data".into(),
-            })
-            .collect();
-        let res = guard_unmount_declared(
-            &targets,
-            &extra,
-            || Ok(String::new()),
-            || Ok(String::new()),
-            |p| {
-                Ok(live
-                    .iter()
-                    .find(|(m, _)| *m == p)
-                    .map(|(_, f)| f.iter().map(|s| s.to_string()).collect())
-                    .unwrap_or_default())
-            },
+        let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+        let (res, released) = guard_release(
+            &ids,
+            || ledger,
             |_| Ok(vec![live_source.to_string()]),
             |t| {
                 calls.borrow_mut().push(t);
@@ -3850,44 +3897,90 @@ mod tests {
             },
         )
         .await;
-        (res, calls.into_inner())
+        (res, released, calls.into_inner())
+    }
+
+    fn ledgered() -> Result<String, String> {
+        Ok(format!("{ID_A}\t/mnt/data\t//willow/data\n"))
     }
 
     #[tokio::test]
-    async fn guard_refuses_declared_target_whose_live_source_differs() {
-        let live: &[(&str, &[&str])] = &[("/mnt/data", &["cifs"])];
-        let (res, calls) =
-            run_guard_declared(&["/mnt/data"], &["/mnt/data"], live, "//other/data").await;
-        assert!(calls.is_empty(), "{calls:?}");
-        assert_eq!(
-            res.errors,
-            vec!["release /mnt/data: refused: live source does not match the declared source"]
-        );
-    }
-
-    #[tokio::test]
-    async fn guard_releases_declared_but_unledgered_live_cifs_target() {
-        let live: &[(&str, &[&str])] = &[("/mnt/data", &["cifs"])];
-        let (res, calls) =
-            run_guard_declared(&["/mnt/data/"], &["/mnt/data"], live, "//willow/data").await;
+    async fn release_unmounts_a_ledgered_id_whose_live_source_matches() {
+        let (res, released, calls) = run_release(ledgered(), &[ID_A], "//WILLOW/data/").await;
         assert_eq!(calls, vec!["/mnt/data"]);
         assert_eq!(res.changed, vec!["/mnt/data"]);
+        assert_eq!(released, vec![ID_A]);
         assert!(res.errors.is_empty(), "{res:?}");
     }
 
     #[tokio::test]
-    async fn guard_still_refuses_undeclared_and_unsafe_targets_with_declared_set() {
-        let live: &[(&str, &[&str])] = &[("/mnt/data", &["cifs"]), ("/", &["ext4"])];
-        let (res, calls) =
-            run_guard_declared(&["/mnt/data"], &["/mnt/other"], live, "//willow/data").await;
-        assert!(calls.is_empty() && res.errors.len() == 1, "{res:?}");
-        for bad in ["/", "/mnt//data", "/mnt/../etc", "relative"] {
-            let (res, calls) = run_guard_declared(&[bad], &[bad], live, "//willow/data").await;
-            assert!(
-                calls.is_empty() && res.errors.len() == 1,
-                "{bad:?}: {res:?}"
-            );
+    async fn release_refuses_an_unknown_id() {
+        let (res, released, calls) = run_release(ledgered(), &[ID_B], "//willow/data").await;
+        assert!(calls.is_empty() && released.is_empty());
+        assert_eq!(
+            res.errors,
+            vec![format!("release {ID_B}: refused: unknown placement id")]
+        );
+    }
+
+    #[tokio::test]
+    async fn release_refuses_a_source_mismatch() {
+        let (res, released, calls) = run_release(ledgered(), &[ID_A], "//other/data").await;
+        assert!(calls.is_empty() && released.is_empty());
+        assert_eq!(
+            res.errors,
+            vec![format!(
+                "release {ID_A}: refused: live source does not match the recorded source"
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn release_refuses_everything_when_the_ledger_is_unreadable_or_corrupt() {
+        for ledger in [
+            Err("Permission denied (os error 13)".to_string()),
+            Ok("/mnt/data\n".to_string()),
+            Ok(format!("{ID_A}\t/mnt/data/\t//willow/data\n")),
+            Ok(format!("{ID_A}\t/mnt/a\th:/a\n{ID_A}\t/mnt/b\th:/b\n")),
+            Ok(format!("{ID_A}\t/mnt/a\th:/a\n{ID_B}\t/mnt/a\th:/b\n")),
+        ] {
+            let (res, released, calls) =
+                run_release(ledger.clone(), &[ID_A], "//willow/data").await;
+            assert!(calls.is_empty() && released.is_empty(), "{ledger:?}");
+            assert_eq!(res.errors.len(), 1, "{ledger:?}: {res:?}");
+            assert!(res.errors[0].starts_with(&format!("release {ID_A}: refused: ")));
         }
+    }
+
+    #[tokio::test]
+    async fn release_refuses_when_nothing_is_mounted_at_the_recorded_target() {
+        let ids = vec![ID_A.to_string()];
+        let (res, released) = guard_release(
+            &ids,
+            ledgered,
+            |_| Ok(Vec::new()),
+            |_| async { panic!("must not umount") },
+        )
+        .await;
+        assert!(released.is_empty() && res.changed.is_empty());
+        assert!(
+            res.errors[0].contains("no network mount present"),
+            "{res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn release_keeps_the_entry_when_umount_fails() {
+        let ids = vec![ID_A.to_string()];
+        let (res, released) = guard_release(
+            &ids,
+            ledgered,
+            |_| Ok(vec!["//willow/data".to_string()]),
+            |_| async { Err("busy".to_string()) },
+        )
+        .await;
+        assert!(released.is_empty());
+        assert_eq!(res.errors, vec![format!("release {ID_A}: busy")]);
     }
 
     #[tokio::test]
@@ -3999,44 +4092,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ledger_write_never_gains_two_entries_from_one_target() {
+    async fn ledger_write_rejects_unrepresentable_adds_and_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger");
         let path = path.to_str().unwrap();
-        ledger_update(path, &["/mnt/a\n/srv/x".to_string()], &[])
-            .await
-            .unwrap();
-        assert!(
-            parse_ledger(&read_ledger(path).unwrap())
-                .unwrap()
-                .is_empty()
-        );
-        ledger_update(path, &["/mnt/ok".to_string(), "/mnt/b\r".to_string()], &[])
-            .await
-            .unwrap();
-        let set = parse_ledger(&read_ledger(path).unwrap()).unwrap();
-        assert_eq!(set.len(), 1);
-        assert!(set.contains("/mnt/ok"));
+        for (id, target, source) in [
+            (ID_A, "/mnt/a\n/srv/x", "h:/a"),
+            (ID_A, "/mnt/b\r", "h:/a"),
+            ("not-a-uuid", "/mnt/a", "h:/a"),
+            (ID_A, "/mnt/a", "h:/a\nx"),
+            (ID_A, "/mnt/a", ""),
+        ] {
+            let add = [(id.to_string(), led_entry(target, source))];
+            assert!(ledger_update(path, &add, &[]).await.is_err(), "{target:?}");
+        }
+        assert!(!std::path::Path::new(path).exists());
     }
 
     #[tokio::test]
-    async fn ledger_round_trips_an_escaped_trailing_space_key() {
+    async fn ledger_round_trips_escaped_target_and_source_at_0600() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger");
         let path = path.to_str().unwrap();
-        ledger_update(path, &["/mnt/a ".to_string()], &[])
+        let e = led_entry("/mnt/a b\\c ", "//h/my share ");
+        ledger_update(path, &[(ID_A.to_string(), e.clone())], &[])
             .await
             .unwrap();
-        let set = parse_ledger(&read_ledger(path).unwrap()).unwrap();
-        assert_eq!(set, ["/mnt/a ".to_string()].into_iter().collect());
+        let ledger = parse_ledger(&read_ledger(path).unwrap()).unwrap();
+        assert_eq!(ledger, [(ID_A.to_string(), e)].into_iter().collect());
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[tokio::test]
+    async fn ledger_add_replaces_same_id_and_same_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        let path = path.to_str().unwrap();
+        let add = |id: &str, t: &str, s: &str| [(id.to_string(), led_entry(t, s))];
+        ledger_update(path, &add(ID_A, "/mnt/a", "h:/1"), &[])
+            .await
+            .unwrap();
+        ledger_update(path, &add(ID_A, "/mnt/a", "h:/2"), &[])
+            .await
+            .unwrap();
+        ledger_update(path, &add(ID_B, "/mnt/a/", "h:/3"), &[])
+            .await
+            .unwrap();
+        let ledger = parse_ledger(&read_ledger(path).unwrap()).unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[ID_B], led_entry("/mnt/a", "h:/3"));
     }
 
     #[test]
     fn ledger_entry_that_normalizes_differently_is_corrupt() {
-        for line in ["/a//b\n", "/a/b/\n", "/a/./b\n", "rel\n", "/a\\\nb\n"] {
-            assert!(parse_ledger(line).is_err(), "{line:?}");
+        let a = ID_A;
+        for line in [
+            format!("{a}\t/a//b\th:/e\n"),
+            format!("{a}\t/a/b/\th:/e\n"),
+            format!("{a}\t/a/./b\th:/e\n"),
+            format!("{a}\trel\th:/e\n"),
+            format!("{a}\t/a\\\nb\th:/e\n"),
+            format!("{a}\t/a b\th:/e\n"),
+            format!("{a}\t/a\n"),
+            format!("{a}\t/a\th:/e\textra\n"),
+            format!("{a}\t/a\t\n"),
+            "/a/b\n".to_string(),
+            format!("{}\t/a\th:/e\n", ID_A.to_uppercase()),
+            format!("{a}\t/a\th:/e\n{a}\t/b\th:/e\n"),
+        ] {
+            assert!(parse_ledger(&line).is_err(), "{line:?}");
         }
-        assert!(parse_ledger("/a/b\n").is_ok());
+        assert!(parse_ledger(&format!("{a}\t/a/b\th:/e\n")).is_ok());
     }
 
     #[tokio::test]
@@ -4044,17 +4174,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger");
         let path = path.to_str().unwrap();
-        ledger_update(path, &["/mnt/thor".to_string()], &[])
-            .await
-            .unwrap();
+        let add = [(ID_A.to_string(), led_entry("/mnt/thor", "h:/t"))];
+        ledger_update(path, &add, &[]).await.unwrap();
         let ledger = read_ledger(path).unwrap();
         let table = stack(&["autofs"]);
         let calls = std::cell::Cell::new(0);
-        let res = guard_unmount(
-            &["/mnt/thor".to_string()],
-            || Ok(String::new()),
+        let ids = vec![ID_A.to_string()];
+        let (res, released) = guard_release(
+            &ids,
             || Ok(ledger),
-            |_| Ok(table.borrow().clone()),
+            |_| Ok(vec!["h:/t".to_string()]),
             |_| async {
                 calls.set(calls.get() + 1);
                 unwind_stacked(|| Ok(table.borrow().clone()), || async { Ok(()) }).await
@@ -4064,8 +4193,12 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert!(res.changed.is_empty() && res.errors.is_empty());
         assert_eq!(res.unchanged, vec!["/mnt/thor".to_string()]);
-        ledger_update(path, &[], &res.changed).await.unwrap();
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "/mnt/thor\n");
+        assert!(released.is_empty());
+        ledger_update(path, &[], &released).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            format!("{ID_A}\t/mnt/thor\th:/t\n")
+        );
     }
 
     const _: () = assert!(MAX_STACKED_UNMOUNTS == 16);
@@ -4269,7 +4402,6 @@ mod tests {
                 guard_unmount(
                     &[t.to_string()],
                     || Ok(map.clone()),
-                    || Ok(String::new()),
                     |_| Ok(vec!["cifs".to_string()]),
                     |p| {
                         calls.borrow_mut().push(p);
@@ -4291,7 +4423,6 @@ mod tests {
         let res = guard_unmount(
             &targets,
             || Ok(TEST_MAP.to_string()),
-            || Ok(String::new()),
             |_| Err("cannot read mount table: denied".to_string()),
             |p| {
                 calls.borrow_mut().push(p);
@@ -4312,14 +4443,12 @@ mod tests {
     async fn guard_with(
         target: &str,
         map: &str,
-        ledger: Result<&str, &str>,
         mounted: &[&str],
     ) -> (PrivilegedResult, Vec<String>) {
         let calls = std::cell::RefCell::new(Vec::new());
         let res = guard_unmount(
             &[target.to_string()],
             || Ok(map.to_string()),
-            || ledger.map(str::to_string).map_err(str::to_string),
             |_| Ok(mounted.iter().map(|s| s.to_string()).collect()),
             |p| {
                 calls.borrow_mut().push(p);
@@ -4331,131 +4460,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guard_accepts_a_ledger_target_missing_from_the_map() {
-        let (res, calls) = guard_with("/mnt/thor", "", Ok("/mnt/thor\n"), &["cifs"]).await;
-        assert_eq!(res.changed, vec!["/mnt/thor".to_string()]);
-        assert_eq!(calls, vec!["/mnt/thor".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn guard_accepts_a_wedged_mount_dropped_from_the_elected_map() {
+    async fn guard_refuses_a_wedged_mount_dropped_from_the_elected_map() {
         let m = mount_at("/mnt/wedged");
         let elected = std::collections::HashMap::new();
         let map = render_map_elected(std::slice::from_ref(&m), &elected);
         assert!(!declared_map_keys(&map).contains("/mnt/wedged"));
-        let (res, calls) = guard_with(
-            "/mnt/wedged",
-            &map,
-            Ok("/mnt/wedged\n"),
-            &["autofs", "nfs4"],
-        )
-        .await;
-        assert_eq!(res.changed, vec!["/mnt/wedged".to_string()]);
-        assert_eq!(calls, vec!["/mnt/wedged".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn guard_refuses_a_target_in_neither_map_nor_ledger() {
-        let (res, calls) = guard_with("/mnt/other", TEST_MAP, Ok("/mnt/thor\n"), &["cifs"]).await;
+        let (res, calls) = guard_with("/mnt/wedged", &map, &["autofs", "nfs4"]).await;
         assert!(calls.is_empty() && res.changed.is_empty());
         assert!(res.errors[0].contains("not a declared orca mount"));
     }
 
     #[tokio::test]
-    async fn guard_refuses_on_unreadable_or_corrupt_ledger_naming_it() {
-        for ledger in [
-            Err("mount ledger unreadable: denied"),
-            Ok("relative\n"),
-            Ok("/a/../b\n"),
-        ] {
-            let (res, calls) = guard_with("/mnt/thor", "", ledger, &["cifs"]).await;
-            assert!(calls.is_empty() && res.changed.is_empty());
-            assert!(res.errors[0].contains("mount ledger"), "{}", res.errors[0]);
-        }
-    }
-
-    #[tokio::test]
-    async fn guard_treats_a_missing_ledger_file_as_empty_and_map_still_authorizes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ledger");
-        let contents = read_ledger(path.to_str().unwrap()).unwrap();
-        assert_eq!(contents, "");
-        let (res, calls) = guard_with("/mnt/data", TEST_MAP, Ok(&contents), &["cifs"]).await;
-        assert_eq!(calls, vec!["/mnt/data".to_string()]);
-        assert!(res.errors.is_empty());
+    async fn guard_refuses_a_target_not_in_the_map() {
+        let (res, calls) = guard_with("/mnt/other", TEST_MAP, &["cifs"]).await;
+        assert!(calls.is_empty() && res.changed.is_empty());
+        assert!(res.errors[0].contains("not a declared orca mount"));
     }
 
     #[tokio::test]
     async fn guard_authorizes_a_trailing_slash_map_key() {
-        let (res, calls) = guard_with(
-            "/mnt/data",
-            "/mnt/data/  -fstype=cifs  //h/s\n",
-            Ok(""),
-            &["cifs"],
-        )
-        .await;
+        let (res, calls) =
+            guard_with("/mnt/data", "/mnt/data/  -fstype=cifs  //h/s\n", &["cifs"]).await;
         assert_eq!(res.changed, vec!["/mnt/data".to_string()]);
         assert_eq!(calls, vec!["/mnt/data".to_string()]);
     }
 
     #[tokio::test]
-    async fn ledger_records_a_mount_then_authorizes_and_clears_on_unmount() {
+    async fn failed_release_keeps_the_ledger_entry() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger");
         let path = path.to_str().unwrap();
-        ledger_update(path, &["/mnt/my dir/".to_string()], &[])
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "/mnt/my\\ dir\n");
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-
-        let (res, calls) = guard_with(
-            "/mnt/my dir",
-            "",
-            read_ledger(path).as_deref().map_err(|e| e.as_str()),
-            &["cifs"],
-        )
-        .await;
-        assert_eq!(calls, vec!["/mnt/my dir".to_string()]);
-        ledger_update(path, &[], &res.changed).await.unwrap();
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "");
-    }
-
-    #[tokio::test]
-    async fn failed_unmount_keeps_the_ledger_entry() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ledger");
-        let path = path.to_str().unwrap();
-        ledger_update(path, &["/mnt/thor".to_string()], &[])
-            .await
-            .unwrap();
+        let add = [(ID_A.to_string(), led_entry("/mnt/thor", "h:/t"))];
+        ledger_update(path, &add, &[]).await.unwrap();
         let ledger = read_ledger(path).unwrap();
-        let res = guard_unmount(
-            &["/mnt/thor".to_string()],
-            || Ok(String::new()),
-            || Ok(ledger),
-            |_| Ok(vec!["cifs".to_string()]),
+        let ids = vec![ID_A.to_string()];
+        let (res, released) = guard_release(
+            &ids,
+            || Ok(ledger.clone()),
+            |_| Ok(vec!["h:/t".to_string()]),
             |_| async { Err("busy".to_string()) },
         )
         .await;
         assert!(res.changed.is_empty());
-        ledger_update(path, &[], &res.changed).await.unwrap();
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "/mnt/thor\n");
+        ledger_update(path, &[], &released).await.unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), ledger);
     }
 
     #[tokio::test]
-    async fn unmount_payload_cannot_add_to_the_ledger_or_write_it() {
+    async fn release_clears_the_ledger_entry_and_keeps_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        let path = path.to_str().unwrap();
+        let add = [
+            (ID_A.to_string(), led_entry("/mnt/a", "h:/a")),
+            (ID_B.to_string(), led_entry("/mnt/b", "h:/b")),
+        ];
+        ledger_update(path, &add, &[]).await.unwrap();
+        let ledger = read_ledger(path).unwrap();
+        let ids = vec![ID_A.to_string()];
+        let (res, released) = guard_release(
+            &ids,
+            || Ok(ledger),
+            |_| Ok(vec!["h:/a".to_string()]),
+            |_| async { Ok(Unwound::Detached) },
+        )
+        .await;
+        assert_eq!(res.changed, vec!["/mnt/a".to_string()]);
+        ledger_update(path, &[], &released).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            format!("{ID_B}\t/mnt/b\th:/b\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn release_payload_cannot_write_the_ledger() {
         assert!(!is_allowed_write(LEDGER_FILE));
-        let (res, _) = guard_with("/mnt/evil", "", Ok(""), &["cifs"]).await;
-        assert!(res.changed.is_empty());
         let r = execute_privileged(PrivilegedOp::Apply {
             writes: vec![FileWrite {
                 path: LEDGER_FILE.into(),
-                contents: "/mnt/evil\n".into(),
+                contents: format!("{ID_A}\t/mnt/evil\th:/e\n"),
                 mode: None,
             }],
             keep_secret_files: vec![],
@@ -4466,32 +4550,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn converge_orphan_in_ledger_but_gone_from_map_is_released() {
-        let ledger = "/mnt/old\n/mnt/gone\n";
-        let calls = std::cell::RefCell::new(Vec::new());
-        let res = guard_unmount(
-            &[
-                "/mnt/old/".to_string(),
-                "/mnt/gone".to_string(),
-                "/mnt/foreign".to_string(),
-            ],
-            || Ok("/mnt/data  -fstype=nfs4  h:/d\n".to_string()),
-            || Ok(ledger.to_string()),
-            |_| Ok(vec!["autofs".to_string(), "nfs4".to_string()]),
-            |p| {
-                calls.borrow_mut().push(p);
-                async { Ok(Unwound::Detached) }
-            },
-        )
-        .await;
+    async fn mount_records_a_ledger_entry_keyed_by_placement_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        let path = path.to_str().unwrap();
+        let req = crate::mount_exec::MountReq {
+            placement_id: ID_A.into(),
+            source: "h:/srv".into(),
+            target: "/mnt/my dir/".into(),
+            fstype: "nfs4".into(),
+            options: String::new(),
+            secret_file: None,
+        };
+        let e = LedgerEntry {
+            target: req.target.clone(),
+            source: req.source.clone(),
+        };
+        ledger_update(path, &[(req.placement_id.clone(), e)], &[])
+            .await
+            .unwrap();
         assert_eq!(
-            *calls.borrow(),
-            vec!["/mnt/old".to_string(), "/mnt/gone".to_string()]
+            std::fs::read_to_string(path).unwrap(),
+            format!("{ID_A}\t/mnt/my\\ dir\th:/srv\n")
         );
-        assert_eq!(
-            res.changed,
-            vec!["/mnt/old".to_string(), "/mnt/gone".to_string()]
-        );
-        assert_eq!(res.errors.len(), 1);
     }
 }

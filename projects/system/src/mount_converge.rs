@@ -53,6 +53,8 @@ const MOUNTFAIL_BACKOFF_TICKS: u32 = 5;
 /// share's ordered sources and pre-rendered options resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesiredMount {
+    /// Placement id (the `mounts` row PK) the root ledger records the mount under.
+    pub id: String,
     pub target: String,
     /// Backend that owns this share's grammar (`nfs`, `smb`) — used to resolve the
     /// generic secret-file through the owning plugin at mount time.
@@ -132,6 +134,7 @@ pub fn desired_for_host(this_host: &str) -> anyhow::Result<Vec<DesiredMount>> {
         // the failover routes. `None` ⇒ the engine's default policy.
         let remount_policy = m.remount_policy.clone().unwrap_or_default();
         out.push(DesiredMount {
+            id: m.id,
             target: m.target,
             backend: share.backend.clone(),
             fstype: share.fstype.clone(),
@@ -699,6 +702,26 @@ fn save_ledger_at(path: &Path, ledger: &Ledger) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+fn ids_file() -> Option<PathBuf> {
+    contract::config::state_dir()
+        .ok()
+        .map(|d| d.join("managed_mount_ids.json"))
+}
+
+/// Target → placement id for every placement this host has seen, so a removed
+/// placement can still be released by id after its row is gone.
+fn load_ids() -> Ledger {
+    ids_file().map(|p| load_ledger_at(&p)).unwrap_or_default()
+}
+
+fn save_ids(ids: &Ledger) {
+    if let Some(p) = ids_file()
+        && let Err(e) = save_ledger_at(&p, ids)
+    {
+        warn!("[converge] could not persist placement-id map: {e}");
+    }
+}
+
 fn load_ledger() -> Ledger {
     ledger_file()
         .map(|p| load_ledger_at(&p))
@@ -845,6 +868,7 @@ pub fn mount_req(
     secret_file: Option<crate::mount_exec::SecretFile>,
 ) -> MountReq {
     MountReq {
+        placement_id: d.id.clone(),
         source: source.to_string(),
         target: d.target.clone(),
         fstype: d.fstype.clone(),
@@ -1185,6 +1209,10 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     // No lock needed: `periodic::spawn` awaits each tick before the next, and
     // this loop is the ledger's only writer.
     let mut ledger = load_ledger();
+    let mut ids = load_ids();
+    for d in &desired {
+        ids.insert(norm_target(&d.target), d.id.clone());
+    }
 
     // Removal reconcile: an owned target no longer desired is released only if
     // the live source matches the recorded one.
@@ -1564,10 +1592,18 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     }
 
     if !unmounts.is_empty() {
-        let r = run_privileged(&PrivilegedOp::Unmount {
-            targets: unmounts.clone(),
-        })
-        .await;
+        let mut release_ids = Vec::new();
+        for t in &unmounts {
+            match ids.get(&norm_target(t)) {
+                Some(id) => release_ids.push(id.clone()),
+                None => warn!("[converge] no placement id recorded for {t}; cannot release it"),
+            }
+        }
+        let r = if release_ids.is_empty() {
+            Default::default()
+        } else {
+            run_privileged(&PrivilegedOp::Release { ids: release_ids }).await
+        };
         for e in &r.errors {
             warn!("[converge] unmount error: {e}");
         }
@@ -1700,6 +1736,10 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     reconcile_guest_mounts(this_host).await;
 
     save_ledger(&ledger);
+    ids.retain(|t, _| {
+        ledger.contains_key(t) || desired_targets.iter().any(|d| norm_target(d) == *t)
+    });
+    save_ids(&ids);
     persist_mount_state(
         this_host,
         &health_by_target,
@@ -2054,6 +2094,7 @@ mod tests {
             })
             .collect();
         DesiredMount {
+            id: "0192f5a0-0000-7000-8000-0000000000d1".to_string(),
             target: target.to_string(),
             backend: "nfs".to_string(),
             fstype: "nfs4".to_string(),
@@ -2640,8 +2681,15 @@ mod tests {
     }
 
     #[test]
+    fn mount_req_carries_the_placement_id() {
+        let req = mount_req(&d("/mnt/data"), "10.0.0.1:/e", None);
+        assert_eq!(req.placement_id, d("/mnt/data").id);
+    }
+
+    #[test]
     fn post_mount_ledger_update_matches_across_target_spelling() {
         let req = |target: &str, source: &str| MountReq {
+            placement_id: "0192f5a0-0000-7000-8000-0000000000d1".into(),
             source: source.into(),
             target: target.into(),
             fstype: "nfs4".into(),
