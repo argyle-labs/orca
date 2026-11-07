@@ -488,7 +488,7 @@ fn norm_source(s: &str) -> String {
 
 /// Whether two mount source strings name the same server+export, tolerating the
 /// cosmetic spelling differences [`norm_source`] normalizes away.
-fn same_source(a: &str, b: &str) -> bool {
+pub(crate) fn same_source(a: &str, b: &str) -> bool {
     norm_source(a) == norm_source(b)
 }
 

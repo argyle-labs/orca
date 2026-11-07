@@ -1868,6 +1868,93 @@ async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcom
     outcome_from_result(target, r).map(Some)
 }
 
+// ── mount.adopt ──────────────────────────────────────────────────────
+
+/// The `(target, source)` to adopt for placement `id`: the declared source the live
+/// network mount at the declared target reports. The root helper re-verifies it.
+fn plan_adopt(
+    id: &str,
+    desired: &[crate::mount_converge::DesiredMount],
+    table: std::io::Result<Vec<storage::mount_table::MountEntry>>,
+) -> anyhow::Result<(String, String)> {
+    let d = desired.iter().find(|d| d.id == id).ok_or_else(|| {
+        anyhow::anyhow!("`{id}` is not an enabled placement declared on this host")
+    })?;
+    let table = table.map_err(|e| anyhow::anyhow!("cannot read mount table: {e}"))?;
+    let norm = d.target.trim_end_matches('/');
+    let live: Vec<&str> = table
+        .iter()
+        .filter(|m| m.mountpoint.trim_end_matches('/') == norm && kernel_fstype(&m.fstype))
+        .map(|m| m.source.as_str())
+        .collect();
+    if live.is_empty() {
+        anyhow::bail!("no network mount is live at `{}`", d.target);
+    }
+    d.sources
+        .iter()
+        .find(|s| {
+            live.iter()
+                .all(|l| crate::mount_converge::same_source(l, s))
+        })
+        .map(|s| (d.target.clone(), s.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the live mount at `{}` is not from a source placement `{id}` declares",
+                d.target
+            )
+        })
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageMountAdoptArgs {
+    /// Placement uuidv7 `id` declared on this host whose live mount to adopt.
+    #[arg(long)]
+    pub id: Id,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageMountAdoptOutput {
+    pub id: String,
+    pub target: String,
+    pub source: String,
+}
+
+/// [MUTATES STATE] Record a live nfs/cifs mount that orca did not mount itself into the
+/// root ledger so it can be released by placement id. The mount must be live at
+/// the placement's declared target from one of its declared sources.
+#[orca_tool(
+    domain = "storage.mount",
+    verb = "adopt",
+    role = "super-admin",
+    local_only = true
+)]
+async fn storage_mount_adopt(
+    args: StorageMountAdoptArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<StorageMountAdoptOutput> {
+    if !cfg!(target_os = "linux") {
+        anyhow::bail!("adopting a mount is only supported on Linux");
+    }
+    let desired = crate::mount_converge::desired_for_host(crate::host_identity::machine_id())?;
+    let (target, source) = plan_adopt(&args.id, &desired, storage::mount_table::mount_table())?;
+    let r = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Adopt {
+        id: args.id.to_string(),
+        target: target.clone(),
+        source: source.clone(),
+    })
+    .await;
+    if !r.errors.is_empty() {
+        anyhow::bail!("{}", r.errors.join("; "));
+    }
+    Ok(StorageMountAdoptOutput {
+        id: args.id.into(),
+        target,
+        source,
+    })
+}
+
 // ── mount.update (dispatcher) ────────────────────────────────────────
 
 /// The imperative mount actions, folded onto `storage.mount.update`.
@@ -4498,6 +4585,77 @@ mod tests {
             "me",
         );
         assert_eq!(got, vec!["/mnt/mine".to_string()]);
+    }
+
+    fn adopt_desired(
+        id: &str,
+        target: &str,
+        sources: &[&str],
+    ) -> crate::mount_converge::DesiredMount {
+        crate::mount_converge::DesiredMount {
+            id: id.into(),
+            target: target.into(),
+            backend: "nfs".into(),
+            fstype: "nfs4".into(),
+            sources: sources.iter().map(|s| s.to_string()).collect(),
+            routes: Vec::new(),
+            remount_policy: Default::default(),
+            replication: None,
+            options: String::new(),
+            credential: None,
+        }
+    }
+
+    fn mnt(mountpoint: &str, fstype: &str, source: &str) -> storage::mount_table::MountEntry {
+        storage::mount_table::MountEntry {
+            source: source.into(),
+            mountpoint: mountpoint.into(),
+            fstype: fstype.into(),
+            options: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn adopt_plans_the_declared_source_matching_the_live_mount() {
+        let d = [adopt_desired("mine", "/mnt/data/", &["a:/x", "B:/data"])];
+        let table = Ok(vec![
+            mnt("/mnt/data", "autofs", "x"),
+            mnt("/mnt/data", "nfs4", "b:/data/"),
+        ]);
+        assert_eq!(
+            plan_adopt("mine", &d, table).unwrap(),
+            ("/mnt/data/".to_string(), "B:/data".to_string())
+        );
+    }
+
+    #[test]
+    fn adopt_rejects_unknown_ids_and_other_hosts_placements() {
+        let d = [adopt_desired("mine", "/mnt/data", &["a:/x"])];
+        let table = || Ok(vec![mnt("/mnt/data", "nfs4", "a:/x")]);
+        assert!(plan_adopt("theirs", &d, table()).is_err());
+        assert!(plan_adopt("mine", &[], table()).is_err());
+    }
+
+    #[test]
+    fn adopt_rejects_no_network_layer_and_foreign_source() {
+        let d = [adopt_desired("mine", "/mnt/data", &["a:/x"])];
+        let autofs_only = Ok(vec![mnt("/mnt/data", "autofs", "a:/x")]);
+        let e = plan_adopt("mine", &d, autofs_only).unwrap_err().to_string();
+        assert!(e.contains("no network mount"), "{e}");
+        let foreign = Ok(vec![mnt("/mnt/data", "nfs4", "z:/y")]);
+        let e = plan_adopt("mine", &d, foreign).unwrap_err().to_string();
+        assert!(e.contains("not from a source"), "{e}");
+    }
+
+    #[test]
+    fn adopt_requires_super_admin_and_is_local_only() {
+        use contract::OrcaToolDef;
+        assert_eq!(
+            <StorageMountAdopt as OrcaToolDef>::REQUIRED_ROLE,
+            "super-admin"
+        );
+        assert!(!contract::roles::satisfies("admin", "super-admin"));
+        const { assert!(!<StorageMountAdopt as OrcaToolDef>::REMOTE_OK) };
     }
 
     #[test]
