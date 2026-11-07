@@ -1745,7 +1745,7 @@ where
 async fn run_umount_lf(target: String) -> Result<(), String> {
     let out = utils::privileged::host_command("umount")
         .map_err(|e| e.to_string())?
-        .args(["-lf", "--", &target])
+        .args(["-lf", "--no-canonicalize", "--", &target])
         .output()
         .await
         .map_err(|e| e.to_string())?;
@@ -1756,7 +1756,9 @@ async fn run_umount_lf(target: String) -> Result<(), String> {
     }
 }
 
-/// Filesystem types stacked at `target`, oldest first (topmost last).
+/// Filesystem types stacked at `target`, oldest first (topmost last). `/proc/mounts`
+/// lists the namespace mount list in mount order, so a later row at the same path
+/// is the one mounted over the earlier rows.
 fn stacked_fstypes(target: &str) -> Result<Vec<String>, String> {
     stacked_from(plugin_toolkit::storage::mount_table::mount_table(), target)
 }
@@ -1824,10 +1826,7 @@ where
     for attempt in 0..MAX_STACKED_UNMOUNTS {
         let stack = layers()?;
         match stack.last() {
-            None if attempt == 0 => {
-                umount().await?;
-                detached = true;
-            }
+            None if attempt == 0 => return Err("nothing mounted at target".to_string()),
             Some(top) if is_network_fstype(top) => {
                 if let Err(e) = umount().await {
                     let after = layers()?;
@@ -3618,11 +3617,19 @@ mod tests {
 
     #[tokio::test]
     async fn force_unmount_never_spawns_umount_under_test() {
-        let err = force_unmount("/orca/not/mounted/xyz").await.unwrap_err();
+        let err = run_umount_lf("/orca/not/mounted/xyz".to_string())
+            .await
+            .unwrap_err();
         assert!(
             err.contains("refusing to run host-mutating `umount`"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn force_unmount_of_an_unmounted_path_refuses_without_umount() {
+        let err = force_unmount("/orca/not/mounted/xyz").await.unwrap_err();
+        assert!(err.contains("nothing mounted"), "{err}");
     }
 
     #[tokio::test]
@@ -3880,11 +3887,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unwind_stacked_attempts_once_when_nothing_is_mounted() {
+    async fn unwind_stacked_refuses_without_umount_when_nothing_is_mounted() {
         let table = stack(&[]);
         let calls = std::cell::Cell::new(0);
-        run_unwind(&table, &calls).await.unwrap();
-        assert_eq!(calls.get(), 1);
+        let err = run_unwind(&table, &calls).await.unwrap_err();
+        assert_eq!(calls.get(), 0);
+        assert!(err.contains("nothing mounted"), "{err}");
     }
 
     #[tokio::test]
@@ -4120,10 +4128,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unwind_stacked_never_mounted_surfaces_the_first_umount_error() {
+    async fn unwind_stacked_never_mounted_errors_without_calling_umount() {
         let (res, calls) = run_racy(vec![l(&[])], &[0]).await;
-        assert_eq!(res, Err("not mounted".to_string()));
-        assert_eq!(calls, 1);
+        assert_eq!(res, Err("nothing mounted at target".to_string()));
+        assert_eq!(calls, 0);
     }
 
     #[tokio::test]
