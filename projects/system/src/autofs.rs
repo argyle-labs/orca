@@ -1549,6 +1549,27 @@ fn read_ledger(path: &str) -> Result<String, String> {
     }
 }
 
+/// Exclusive flock on a sibling file (the ledger itself is replaced by rename, so
+/// it cannot carry the lock); released when the returned handle drops.
+async fn lock_ledger(path: &str) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock_path = format!("{path}.lock");
+    tokio::task::spawn_blocking(move || {
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(&lock_path)
+            .map_err(|e| format!("open mount ledger lock {lock_path}: {e}"))?;
+        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)
+            .map_err(|e| format!("lock mount ledger {lock_path}: {e}"))?;
+        Ok(f)
+    })
+    .await
+    .map_err(|e| format!("mount ledger lock task: {e}"))?
+}
+
 /// Root-side only: adds are normalized, unrepresentable targets are skipped.
 async fn ledger_update(path: &str, add: &[String], remove: &[String]) -> Result<(), String> {
     let norm = |v: &[String]| -> Vec<String> {
@@ -1560,6 +1581,7 @@ async fn ledger_update(path: &str, add: &[String], remove: &[String]) -> Result<
     if add.is_empty() && remove.is_empty() {
         return Ok(());
     }
+    let _lock = lock_ledger(path).await?;
     let mut set = parse_ledger(&read_ledger(path)?)?;
     let before = set.clone();
     set.extend(add);
@@ -3108,6 +3130,55 @@ mod tests {
         );
         // Unknown / wrong-case tokens are rejected.
         assert!(serde_json::from_str::<Init>("\"openrc\"").is_err());
+    }
+
+    #[test]
+    fn ledger_updates_from_two_threads_both_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger").to_str().unwrap().to_string();
+        for i in 0..50 {
+            let run = |t: String| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap()
+                        .block_on(ledger_update(&path, &[t], &[]))
+                        .unwrap();
+                })
+            };
+            let (a, b) = (run(format!("/mnt/a{i}")), run(format!("/mnt/b{i}")));
+            a.join().unwrap();
+            b.join().unwrap();
+        }
+        let set = parse_ledger(&read_ledger(&path).unwrap()).unwrap();
+        assert_eq!(set.len(), 100);
+    }
+
+    #[tokio::test]
+    async fn ledger_lock_released_after_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        std::fs::write(&path, "relative\n").unwrap();
+        let path = path.to_str().unwrap();
+        assert!(
+            ledger_update(path, &["/mnt/b".to_string()], &[])
+                .await
+                .is_err()
+        );
+        let lock = lock_ledger(path).await.unwrap();
+        drop(lock);
+        std::fs::write(path, "/mnt/a\n").unwrap();
+        ledger_update(path, &["/mnt/b".to_string()], &[])
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn privileged_result_parses_without_unchanged() {
+        let r: PrivilegedResult =
+            serde_json::from_str(r#"{"changed":[],"restarted":false,"errors":[]}"#).unwrap();
+        assert!(r.unchanged.is_empty());
     }
 
     // ── PrivilegedResult serde with populated fields ──────────────────────
