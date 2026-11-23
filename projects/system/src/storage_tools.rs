@@ -1729,6 +1729,20 @@ pub struct StorageRecoverOutput {
 /// This is what the periodic self-heal schedule invokes per host. Reached via
 /// `storage.mount.update{action=recover}`.
 async fn mount_recover(health_timeout_secs: Option<u64>) -> anyhow::Result<StorageRecoverOutput> {
+    mount_recover_with(health_timeout_secs, |down| async move {
+        crate::mount_converge::converge_now(crate::host_identity::machine_id(), Some(&down)).await
+    })
+    .await
+}
+
+async fn mount_recover_with<F, Fut>(
+    health_timeout_secs: Option<u64>,
+    converge: F,
+) -> anyhow::Result<StorageRecoverOutput>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<crate::mount_converge::TargetOutcome>>>,
+{
     let desired = crate::mount_converge::desired_for_host(crate::host_identity::machine_id())?;
     let mounts: Vec<crate::managed_mounts::ManagedMount> = desired
         .iter()
@@ -1753,9 +1767,7 @@ async fn mount_recover(health_timeout_secs: Option<u64>) -> anyhow::Result<Stora
         .filter(|t| !r.recovered.contains(t))
         .collect();
     if !down.is_empty() {
-        match crate::mount_converge::converge_now(crate::host_identity::machine_id(), Some(&down))
-            .await
-        {
+        match converge(down.clone()).await {
             Ok(outcomes) => fold_converge_outcomes(&mut r, &down, outcomes),
             Err(e) => {
                 r.errors.push(format!("converge failed: {e}"));
@@ -5980,6 +5992,10 @@ mod tests {
     }
 
     fn seed_recover_placement(backend: &str, host: &str, enabled: bool) {
+        seed_recover_placement_at(backend, host, enabled, "/mnt/data");
+    }
+
+    fn seed_recover_placement_at(backend: &str, host: &str, enabled: bool, target: &str) {
         let share = crate::shares::EndpointRow {
             id: "01900000-0000-7000-8000-0000000000e1".into(),
             name: "recover".into(),
@@ -6007,7 +6023,7 @@ mod tests {
             name: "m-recover".into(),
             share_id: share.id.clone(),
             host: host.into(),
-            target: "/mnt/data".into(),
+            target: target.into(),
             remount_policy: None,
             health: plugin_toolkit::storage::MountHealth::Ok,
             active_route: None,
@@ -6588,6 +6604,175 @@ mod tests {
             assert!(out.still_stale.contains(&"/mnt/stuck".to_string()));
             assert!(!out.no_stale_found);
         });
+    }
+
+    struct RecoverBackend {
+        name: String,
+        outcome: plugin_toolkit::storage::RecoverOutcome,
+    }
+
+    #[derive::orca_async]
+    impl plugin_toolkit::storage::StorageBackend for RecoverBackend {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn kind(&self) -> plugin_toolkit::storage::StorageKind {
+            plugin_toolkit::storage::StorageKind::NetworkShare
+        }
+        fn capabilities(&self) -> Vec<plugin_toolkit::storage::StorageCapability> {
+            vec![plugin_toolkit::storage::StorageCapability::RecoverStale]
+        }
+        fn endpoint(&self) -> String {
+            format!("fake://{}", self.name)
+        }
+        async fn recover_stale(
+            &self,
+            _watch: &[String],
+            _health_timeout: std::time::Duration,
+        ) -> Result<plugin_toolkit::storage::RecoverOutcome, plugin_toolkit::storage::StorageError>
+        {
+            Ok(self.outcome.clone())
+        }
+    }
+
+    fn converge_outcome(
+        target: &str,
+        source: Option<&str>,
+        error: Option<&str>,
+    ) -> crate::mount_converge::TargetOutcome {
+        crate::mount_converge::TargetOutcome {
+            target: target.into(),
+            source: source.map(String::from),
+            error: error.map(String::from),
+        }
+    }
+
+    /// Seed one placement at `target`, let a backend report `outcome`, and run
+    /// `mount_recover_with` against a canned converge result (`None` = Err).
+    fn recover_with_converge(
+        name: &str,
+        target: &str,
+        outcome: plugin_toolkit::storage::RecoverOutcome,
+        converge: Option<Vec<crate::mount_converge::TargetOutcome>>,
+    ) -> (StorageRecoverOutput, Vec<Vec<String>>) {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let out = std::cell::RefCell::new(None);
+        with_db(name, || {
+            seed_recover_placement_at(name, host(), true, target);
+            let _reg = crate::test_storage::Registered::new(std::sync::Arc::new(RecoverBackend {
+                name: name.into(),
+                outcome,
+            }));
+            let r = rt()
+                .block_on(mount_recover_with(Some(1), |down| {
+                    calls.lock().unwrap().push(down);
+                    async move { converge.ok_or_else(|| anyhow::anyhow!("boom")) }
+                }))
+                .expect("recover ok");
+            *out.borrow_mut() = Some(r);
+        });
+        (out.into_inner().unwrap(), calls.into_inner().unwrap())
+    }
+
+    fn stale_outcome(
+        still_stale: &[&str],
+        still_missing: &[&str],
+    ) -> plugin_toolkit::storage::RecoverOutcome {
+        plugin_toolkit::storage::RecoverOutcome {
+            recovered: vec![],
+            still_stale: still_stale.iter().map(|s| s.to_string()).collect(),
+            remounted: vec![],
+            still_missing: still_missing.iter().map(|s| s.to_string()).collect(),
+            errors: vec![],
+            no_stale_found: false,
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn mount_recover_marks_stale_target_recovered_when_converge_mounts_a_source() {
+        let (out, calls) = recover_with_converge(
+            "fake-conv-ok",
+            "/mnt/stuck",
+            stale_outcome(&["/mnt/stuck"], &[]),
+            Some(vec![converge_outcome("/mnt/stuck", Some("nas:/x"), None)]),
+        );
+        assert_eq!(calls, vec![vec!["/mnt/stuck".to_string()]]);
+        assert_eq!(out.recovered, vec!["/mnt/stuck".to_string()]);
+        assert!(out.still_stale.is_empty());
+        assert!(out.errors.is_empty());
+        assert!(!out.no_stale_found);
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn mount_recover_keeps_target_stale_with_reason_when_converge_reports_error() {
+        let (out, _) = recover_with_converge(
+            "fake-conv-err",
+            "/mnt/stuck",
+            stale_outcome(&["/mnt/stuck"], &[]),
+            Some(vec![converge_outcome(
+                "/mnt/stuck",
+                None,
+                Some("no live source (1 ordered sources down)"),
+            )]),
+        );
+        assert!(out.recovered.is_empty());
+        assert_eq!(out.still_stale, vec!["/mnt/stuck".to_string()]);
+        assert_eq!(
+            out.errors,
+            vec!["/mnt/stuck: no live source (1 ordered sources down)".to_string()]
+        );
+        assert!(!out.no_stale_found);
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn mount_recover_keeps_target_stale_when_converge_attempted_nothing() {
+        let (out, _) = recover_with_converge(
+            "fake-conv-none",
+            "/mnt/stuck",
+            stale_outcome(&["/mnt/stuck"], &[]),
+            Some(vec![]),
+        );
+        assert!(out.recovered.is_empty());
+        assert_eq!(out.still_stale, vec!["/mnt/stuck".to_string()]);
+        assert_eq!(
+            out.errors,
+            vec!["/mnt/stuck: no mount was attempted".to_string()]
+        );
+        assert!(!out.no_stale_found);
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn mount_recover_keeps_target_stale_when_converge_itself_fails() {
+        let (out, _) = recover_with_converge(
+            "fake-conv-fail",
+            "/mnt/stuck",
+            stale_outcome(&["/mnt/stuck"], &[]),
+            None,
+        );
+        assert!(out.recovered.is_empty());
+        assert_eq!(out.still_stale, vec!["/mnt/stuck".to_string()]);
+        assert_eq!(out.errors, vec!["converge failed: boom".to_string()]);
+        assert!(!out.no_stale_found);
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn mount_recover_mounts_a_released_still_missing_target_via_converge() {
+        let (out, calls) = recover_with_converge(
+            "fake-conv-missing",
+            "/mnt/gone",
+            stale_outcome(&[], &["/mnt/gone"]),
+            Some(vec![converge_outcome("/mnt/gone", Some("nas:/x"), None)]),
+        );
+        assert_eq!(calls, vec![vec!["/mnt/gone".to_string()]]);
+        assert_eq!(out.recovered, vec!["/mnt/gone".to_string()]);
+        assert!(out.still_stale.is_empty());
+        assert!(out.errors.is_empty());
+        assert!(!out.no_stale_found);
     }
 
     /// Regression: peer-dispatch decodes this struct on the CALLING host, and

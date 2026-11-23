@@ -1183,6 +1183,24 @@ pub struct TargetOutcome {
     pub error: Option<String>,
 }
 
+/// The two per-target probe signals, injectable so tests can present a stale
+/// target without a real mount.
+trait TargetProbe {
+    async fn has_no_mount(&self, target: &str) -> bool;
+    async fn health(&self, target: &str, timeout: Duration) -> MountHealth;
+}
+
+struct LiveTargetProbe;
+
+impl TargetProbe for LiveTargetProbe {
+    async fn has_no_mount(&self, target: &str) -> bool {
+        autofs::target_has_no_mount(target).await
+    }
+    async fn health(&self, target: &str, timeout: Duration) -> MountHealth {
+        autofs::probe(target, timeout).await
+    }
+}
+
 /// Run the tick's reconcile now for `targets` (all desired targets when `None`).
 /// The operator's request stands as confirmation, so a stale target is released
 /// and remounted from the elected live source without waiting for
@@ -1191,7 +1209,14 @@ pub async fn converge_now(
     this_host: &str,
     targets: Option<&[String]>,
 ) -> anyhow::Result<Vec<TargetOutcome>> {
-    reconcile(shared_counters(), this_host, targets, true).await
+    reconcile(
+        shared_counters(),
+        this_host,
+        targets,
+        true,
+        &LiveTargetProbe,
+    )
+    .await
 }
 
 /// One convergence pass for this host: resolve desired placements, probe each,
@@ -1201,7 +1226,14 @@ pub async fn converge_now(
 /// ledger whose live source still matches; a mount orca neither performed nor
 /// source-verified adopted is never touched.
 async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
-    reconcile(counters, host_identity::machine_id(), None, false).await?;
+    reconcile(
+        counters,
+        host_identity::machine_id(),
+        None,
+        false,
+        &LiveTargetProbe,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1209,11 +1241,12 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
 /// taken to those targets (and skips orphan release and the backend sweep, which
 /// are whole-host concerns); `confirmed` treats an in-scope stale target as
 /// already past the confirm-ticks filter.
-async fn reconcile(
+async fn reconcile<P: TargetProbe>(
     counters: &Mutex<HashMap<String, u32>>,
     this_host: &str,
     scope: Option<&[String]>,
     confirmed: bool,
+    probe: &P,
 ) -> anyhow::Result<Vec<TargetOutcome>> {
     let _pass = RECONCILE_LOCK.lock().await;
     let in_scope =
@@ -1306,8 +1339,8 @@ async fn reconcile(
         // returns `MountHealth::Ok` and an unmounted target would be misread as healthy
         // — leaving `plan()` with nothing to do and the placement never mounted.
         // Absence from `/proc/mounts` is the only reliable "not mounted" signal.
-        let absent = autofs::target_has_no_mount(&d.target).await;
-        let health = autofs::probe(&d.target, timeout).await;
+        let absent = probe.has_no_mount(&d.target).await;
+        let health = probe.health(&d.target, timeout).await;
         match classify(absent, health) {
             Presence::Missing => {
                 health_by_target.insert(d.target.clone(), MountHealth::Missing);
@@ -5204,6 +5237,73 @@ mod tests {
                 assert_eq!(out.len(), 1);
             }));
             assert_eq!(rec.calls().len(), 1);
+        });
+    }
+
+    struct FixedProbe(MountHealth);
+
+    impl TargetProbe for FixedProbe {
+        async fn has_no_mount(&self, _target: &str) -> bool {
+            false
+        }
+        async fn health(&self, _target: &str, _timeout: Duration) -> MountHealth {
+            self.0
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env, storage_registry)]
+    fn confirmed_reconcile_remounts_stale_target_without_waiting_for_confirm_ticks() {
+        let (_listener, port) = live_port();
+        with_conv_env("conv_stale_confirmed.db", port, |host| {
+            insert_conv_share("sh-1", port);
+            insert_mount("m-1", "sh-1", host, "/mnt/conv-s", true);
+            save_ledger(&led(&["/mnt/conv-s"]));
+            let rec = mounted_reply("/mnt/conv-s");
+            let targets = ["/mnt/conv-s".to_string()];
+            let counters = Mutex::new(HashMap::new());
+            let out = block_on(utils::privileged::testing::with_exec(
+                rec.clone(),
+                reconcile(
+                    &counters,
+                    host,
+                    Some(&targets),
+                    true,
+                    &FixedProbe(MountHealth::Stale),
+                ),
+            ))
+            .expect("reconcile ok");
+            assert_eq!(rec.calls().len(), 2, "release then mount in one call");
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].target, "/mnt/conv-s");
+            assert!(out[0].source.is_some());
+            assert!(out[0].error.is_none());
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env, storage_registry)]
+    fn plain_tick_does_not_act_on_first_stale_observation() {
+        let (_listener, port) = live_port();
+        with_conv_env("conv_stale_tick.db", port, |host| {
+            insert_conv_share("sh-1", port);
+            insert_mount("m-1", "sh-1", host, "/mnt/conv-t", true);
+            save_ledger(&led(&["/mnt/conv-t"]));
+            let rec = mounted_reply("/mnt/conv-t");
+            let counters = Mutex::new(HashMap::new());
+            let out = block_on(utils::privileged::testing::with_exec(
+                rec.clone(),
+                reconcile(
+                    &counters,
+                    host,
+                    None,
+                    false,
+                    &FixedProbe(MountHealth::Stale),
+                ),
+            ))
+            .expect("reconcile ok");
+            assert!(out.is_empty());
+            assert!(rec.calls().is_empty(), "blip filter holds the first stale");
         });
     }
 }
