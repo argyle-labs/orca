@@ -1231,7 +1231,7 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             }
             let old_map = read_map_file().unwrap_or_default();
             for w in &writes {
-                match write_atomic(&w.path, &w.contents, w.mode).await {
+                match write_file_write(w).await {
                     Ok(()) => {
                         res.changed.push(w.path.clone());
                     }
@@ -1513,6 +1513,21 @@ fn set_mode_tree(path: &str, mode: u32, recursive: bool) -> std::io::Result<usiz
         }
     }
     Ok(changed)
+}
+
+/// On-disk mode for a helper-written path, derived from its class. The caller's
+/// `FileWrite::mode` is never trusted: it could widen the master/map files or
+/// expose a secret-file.
+fn write_mode_for(path: &str) -> u32 {
+    if path == LEDGER_FILE || plugin_toolkit::storage::is_valid_secret_file_path(path) {
+        0o600
+    } else {
+        0o644
+    }
+}
+
+async fn write_file_write(w: &FileWrite) -> std::io::Result<()> {
+    write_atomic(&w.path, &w.contents, Some(write_mode_for(&w.path))).await
 }
 
 /// Atomic write: create the parent dir, write a sibling temp file, then rename
@@ -3442,6 +3457,45 @@ mod tests {
         assert!(!is_allowed_write("/etc/orca/secret-files/../../shadow"));
         assert!(!is_allowed_write("/etc/orca/secret-files/sub/x.secret"));
         assert!(!is_allowed_write("/etc/shadow"));
+    }
+
+    #[tokio::test]
+    async fn apply_write_ignores_caller_mode_for_map_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("auto.orca");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let w = FileWrite {
+            path: target.to_str().unwrap().into(),
+            contents: "new\n".into(),
+            mode: Some(0o666),
+        };
+        write_file_write(&w).await.unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+        let fresh = FileWrite {
+            path: tmp.path().join("fresh").to_str().unwrap().into(),
+            contents: "x".into(),
+            mode: Some(0o666),
+        };
+        write_file_write(&fresh).await.unwrap();
+        let mode = std::fs::metadata(&fresh.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+    }
+
+    #[test]
+    fn write_mode_is_derived_from_path_class() {
+        let secret = format!(
+            "{}/mnt_media.secret",
+            plugin_toolkit::storage::SECRET_FILE_DIR
+        );
+        assert!(plugin_toolkit::storage::is_valid_secret_file_path(&secret));
+        assert_eq!(write_mode_for(&secret), 0o600);
+        assert_eq!(write_mode_for(LEDGER_FILE), 0o600);
+        assert_eq!(write_mode_for(MAP_FILE), 0o644);
+        assert_eq!(write_mode_for("/etc/auto.master"), 0o644);
+        assert_eq!(write_mode_for("/etc/autofs/auto.master"), 0o644);
     }
 
     #[tokio::test]
