@@ -1293,15 +1293,22 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
                 match crate::mount_exec::run_mount(m).await {
                     Ok(()) => {
                         res.changed.push(m.target.clone());
-                        let entry = LedgerEntry {
-                            target: m.target.clone(),
-                            source: m.source.clone(),
-                        };
-                        if let Err(e) =
-                            ledger_update(LEDGER_FILE, &[(m.placement_id.clone(), entry)], &[])
+                        match observed_ledger_entry(
+                            plugin_toolkit::storage::mount_table::mount_table(),
+                            &m.target,
+                        ) {
+                            Ok(entry) => {
+                                if let Err(e) = ledger_update(
+                                    LEDGER_FILE,
+                                    &[(m.placement_id.clone(), entry)],
+                                    &[],
+                                )
                                 .await
-                        {
-                            res.errors.push(e);
+                                {
+                                    res.errors.push(e);
+                                }
+                            }
+                            Err(w) => res.warnings.push(w),
                         }
                     }
                     Err(e) => res
@@ -2216,9 +2223,10 @@ async fn lock_ledger(path: &str) -> Result<std::fs::File, String> {
     .map_err(|e| format!("mount ledger lock task: {e}"))?
 }
 
-/// Root-side only. An add replaces any entry with the same id or target; an add
-/// with a non-canonical id, unrepresentable target or invalid source is an error
-/// and nothing is written.
+/// Root-side only. An add may refresh the source of an id already recorded for the
+/// same target; rebinding an id to another target, or taking a target recorded
+/// under another id, is an error. An add with a non-canonical id, unrepresentable
+/// target or invalid source is also an error. On any error nothing is written.
 async fn ledger_update(
     path: &str,
     add: &[(String, LedgerEntry)],
@@ -2248,7 +2256,23 @@ async fn ledger_update(
     let mut ledger = parse_ledger(&read_ledger(path)?)?;
     let before = ledger.clone();
     for (id, e) in adds {
-        ledger.retain(|_, old| old.target != e.target);
+        if let Some(old) = ledger.get(&id)
+            && old.target != e.target
+        {
+            return Err(format!(
+                "mount ledger: placement {id} is already recorded for {}, refusing to rebind to {}",
+                old.target, e.target
+            ));
+        }
+        if let Some((other, _)) = ledger
+            .iter()
+            .find(|(other, old)| **other != id && old.target == e.target)
+        {
+            return Err(format!(
+                "mount ledger: {} is already recorded under placement {other}",
+                e.target
+            ));
+        }
         ledger.insert(id, e);
     }
     for r in remove {
@@ -2478,6 +2502,24 @@ fn network_sources_in(table: Vec<MountEntry>, target: &str) -> Vec<String> {
         .filter(|m| m.mountpoint.trim_end_matches('/') == target && is_network_fstype(&m.fstype))
         .map(|m| m.source)
         .collect()
+}
+
+/// Ledger row for `target` built from the source the kernel reports for the
+/// topmost network layer, never from caller-supplied text.
+fn observed_ledger_entry(
+    table: std::io::Result<Vec<MountEntry>>,
+    target: &str,
+) -> Result<LedgerEntry, String> {
+    let table = table.map_err(|e| {
+        format!("mount ledger not updated for {target}: cannot read mount table: {e}")
+    })?;
+    let source = network_sources_in(table, target).pop().ok_or_else(|| {
+        format!("mount ledger not updated for {target}: no network mount observed")
+    })?;
+    Ok(LedgerEntry {
+        target: target.to_string(),
+        source,
+    })
 }
 
 fn stacked_from(
@@ -5115,7 +5157,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ledger_add_replaces_same_id_and_same_target() {
+    async fn ledger_add_refreshes_source_for_same_id_and_target() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger");
         let path = path.to_str().unwrap();
@@ -5123,15 +5165,59 @@ mod tests {
         ledger_update(path, &add(ID_A, "/mnt/a", "h:/1"), &[])
             .await
             .unwrap();
-        ledger_update(path, &add(ID_A, "/mnt/a", "h:/2"), &[])
-            .await
-            .unwrap();
-        ledger_update(path, &add(ID_B, "/mnt/a/", "h:/3"), &[])
+        ledger_update(path, &add(ID_A, "/mnt/a/", "h:/2"), &[])
             .await
             .unwrap();
         let ledger = parse_ledger(&read_ledger(path).unwrap()).unwrap();
         assert_eq!(ledger.len(), 1);
-        assert_eq!(ledger[ID_B], led_entry("/mnt/a", "h:/3"));
+        assert_eq!(ledger[ID_A], led_entry("/mnt/a", "h:/2"));
+    }
+
+    #[tokio::test]
+    async fn ledger_refuses_to_rebind_id_or_take_over_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        let path = path.to_str().unwrap();
+        let add = |id: &str, t: &str, s: &str| [(id.to_string(), led_entry(t, s))];
+        ledger_update(path, &add(ID_A, "/mnt/a", "h:/1"), &[])
+            .await
+            .unwrap();
+        assert!(
+            ledger_update(path, &add(ID_A, "/mnt/b", "h:/1"), &[])
+                .await
+                .is_err()
+        );
+        assert!(
+            ledger_update(path, &add(ID_B, "/mnt/a/", "h:/3"), &[])
+                .await
+                .is_err()
+        );
+        let ledger = parse_ledger(&read_ledger(path).unwrap()).unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[ID_A], led_entry("/mnt/a", "h:/1"));
+    }
+
+    fn net_entry(target: &str, source: &str) -> MountEntry {
+        MountEntry {
+            source: source.into(),
+            mountpoint: target.into(),
+            fstype: "nfs4".into(),
+            options: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn observed_entry_uses_kernel_source_not_caller_value() {
+        let table = Ok(vec![net_entry("/mnt/a", "real:/export")]);
+        let e = observed_ledger_entry(table, "/mnt/a").unwrap();
+        assert_eq!(e, led_entry("/mnt/a", "real:/export"));
+    }
+
+    #[test]
+    fn observed_entry_warns_when_table_unreadable() {
+        let err = std::io::Error::other("boom");
+        assert!(observed_ledger_entry(Err(err), "/mnt/a").is_err());
+        assert!(observed_ledger_entry(Ok(vec![]), "/mnt/a").is_err());
     }
 
     #[test]
