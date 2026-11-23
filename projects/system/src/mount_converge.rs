@@ -1272,6 +1272,7 @@ pub struct TargetOutcome {
 trait TargetProbe {
     async fn has_no_mount(&self, target: &str) -> bool;
     async fn health(&self, target: &str, timeout: Duration) -> MountHealth;
+    fn mount_table(&self) -> Vec<plugin_toolkit::storage::mount_table::MountEntry>;
 }
 
 struct LiveTargetProbe;
@@ -1282,6 +1283,9 @@ impl TargetProbe for LiveTargetProbe {
     }
     async fn health(&self, target: &str, timeout: Duration) -> MountHealth {
         autofs::probe(target, timeout).await
+    }
+    fn mount_table(&self) -> Vec<plugin_toolkit::storage::mount_table::MountEntry> {
+        plugin_toolkit::storage::mount_table().unwrap_or_default()
     }
 }
 
@@ -1347,7 +1351,7 @@ async fn reconcile<P: TargetProbe>(
     // fail-back / degrade transition without a second probe, and to the live `-o`
     // option tokens the kernel reports so option-drift can be detected without a
     // second read.
-    let mount_table = plugin_toolkit::storage::mount_table().unwrap_or_default();
+    let mount_table = probe.mount_table();
     // Count entries per mountpoint BEFORE collapsing to the by-target maps: >1
     // means the target is stacked (an anomaly the write path blocks but a
     // reconcile must tolerate + surface). Surfaced per-target as `multi_mounted`.
@@ -5363,6 +5367,9 @@ mod tests {
         async fn health(&self, _target: &str, _timeout: Duration) -> MountHealth {
             self.0
         }
+        fn mount_table(&self) -> Vec<plugin_toolkit::storage::mount_table::MountEntry> {
+            Vec::new()
+        }
     }
 
     #[test]
@@ -5554,5 +5561,244 @@ mod tests {
         assert_eq!(adopt_refusals(&c).len(), 1);
         tick_adopt_refused_backoff(&mut c);
         assert!(adopt_refusals(&c).is_empty());
+    }
+
+    // ── reconcile-level adopt/release flows over an injected mount table ──
+
+    struct TableProbe {
+        health: MountHealth,
+        table: Vec<plugin_toolkit::storage::mount_table::MountEntry>,
+    }
+
+    impl TargetProbe for TableProbe {
+        async fn has_no_mount(&self, _target: &str) -> bool {
+            false
+        }
+        async fn health(&self, _target: &str, _timeout: Duration) -> MountHealth {
+            self.health
+        }
+        fn mount_table(&self) -> Vec<plugin_toolkit::storage::mount_table::MountEntry> {
+            self.table.clone()
+        }
+    }
+
+    /// Answers each privileged op like the root helper would and logs it by kind.
+    struct HelperScript {
+        ops: Mutex<Vec<String>>,
+        release_unknown: bool,
+        adopt_error: Option<&'static str>,
+    }
+
+    impl HelperScript {
+        fn new(release_unknown: bool, adopt_error: Option<&'static str>) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                ops: Mutex::new(Vec::new()),
+                release_unknown,
+                adopt_error,
+            })
+        }
+
+        fn ops(&self) -> Vec<String> {
+            self.ops.lock().unwrap().clone()
+        }
+    }
+
+    impl utils::privileged::PrivilegedExec for HelperScript {
+        fn exec(
+            &self,
+            call: utils::privileged::PrivilegedCall,
+        ) -> utils::privileged::PrivilegedFuture {
+            let op: PrivilegedOp = serde_json::from_slice(&call.stdin).expect("op payload");
+            let mut ops = self.ops.lock().unwrap();
+            let (name, changed, errors): (&str, Vec<String>, Vec<String>) = match &op {
+                PrivilegedOp::Release { .. } => {
+                    let prior = ops.iter().filter(|o| *o == "release").count();
+                    let errs = if self.release_unknown && prior == 0 {
+                        vec!["release id-1: refused: unknown placement id".to_string()]
+                    } else {
+                        Vec::new()
+                    };
+                    ("release", Vec::new(), errs)
+                }
+                PrivilegedOp::Adopt { .. } => (
+                    "adopt",
+                    Vec::new(),
+                    self.adopt_error.map(String::from).into_iter().collect(),
+                ),
+                PrivilegedOp::Mount { mounts, .. } => (
+                    "mount",
+                    mounts.iter().map(|m| m.target.clone()).collect(),
+                    Vec::new(),
+                ),
+                _ => ("other", Vec::new(), Vec::new()),
+            };
+            ops.push(name.to_string());
+            let stdout = serde_json::to_vec(&serde_json::json!({
+                "changed": changed,
+                "restarted": false,
+                "errors": errors,
+            }))
+            .unwrap();
+            Box::pin(std::future::ready(Ok(
+                utils::privileged::PrivilegedOutput {
+                    success: true,
+                    stdout,
+                    ..Default::default()
+                },
+            )))
+        }
+    }
+
+    fn adopt_refused_note(target: &str) -> Option<notifications::dismissable::Notification> {
+        notifications::dismissable::get(&format!("converge:adopt-refused:{target}")).expect("get")
+    }
+
+    #[test]
+    #[serial_test::serial(env, storage_registry)]
+    fn refused_adopt_drops_the_mount_reports_once_and_backs_off() {
+        let (_listener, port) = live_port();
+        with_conv_env("conv_refused.db", port, |host| {
+            insert_conv_share("sh-1", port);
+            insert_mount("m-1", "sh-1", host, "/mnt/conv-r", true);
+            save_ledger(&led(&["/mnt/conv-r"]));
+            save_ids(&ids_for("/mnt/conv-r"));
+            let before = load_ledger();
+            let probe = TableProbe {
+                health: MountHealth::Stale,
+                table: vec![entry("/mnt/conv-r", "nas:/other", "nfs4")],
+            };
+            let helper = HelperScript::new(true, Some("adopt: not an orca mount"));
+            let counters = Mutex::new(HashMap::new());
+            let targets = ["/mnt/conv-r".to_string()];
+            let run = || {
+                block_on(utils::privileged::testing::with_exec(
+                    helper.clone(),
+                    reconcile(&counters, host, Some(&targets), true, &probe),
+                ))
+                .expect("reconcile ok")
+            };
+
+            let out = run();
+            assert_eq!(helper.ops(), ["release", "adopt"], "no Mount op over it");
+            assert_eq!(
+                out,
+                vec![TargetOutcome {
+                    target: "/mnt/conv-r".into(),
+                    source: None,
+                    error: Some("adopt: not an orca mount".into()),
+                }]
+            );
+            assert!(adopt_refused_note("/mnt/conv-r").is_some());
+            assert_eq!(load_ledger(), before);
+
+            // A re-raise would reactivate the dismissed row.
+            notifications::dismissable::dismiss("converge:adopt-refused:/mnt/conv-r")
+                .expect("dismiss");
+            let out = run();
+            assert_eq!(
+                helper.ops(),
+                ["release", "adopt"],
+                "backed off: no helper call"
+            );
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].error.as_deref(), Some("adopt: not an orca mount"));
+            assert_eq!(
+                adopt_refused_note("/mnt/conv-r").expect("row").state,
+                notifications::dismissable::State::Dismissed
+            );
+            assert_eq!(load_ledger(), before);
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env, storage_registry)]
+    fn orphan_that_releases_ok_leaves_the_ledger() {
+        let (_listener, port) = live_port();
+        with_conv_env("conv_orphan_ok.db", port, |host| {
+            save_ledger(&led(&["/mnt/conv-o"]));
+            save_ids(&ids_for("/mnt/conv-o"));
+            let probe = TableProbe {
+                health: MountHealth::Ok,
+                table: vec![entry("/mnt/conv-o", "nas:/mnt/conv-o", "nfs4")],
+            };
+            let helper = HelperScript::new(false, None);
+            let counters = Mutex::new(HashMap::new());
+            block_on(utils::privileged::testing::with_exec(
+                helper.clone(),
+                reconcile(&counters, host, None, false, &probe),
+            ))
+            .expect("reconcile ok");
+            assert_eq!(helper.ops(), ["release"]);
+            assert!(!load_ledger().contains_key("/mnt/conv-o"));
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env, storage_registry)]
+    fn orphan_with_refused_adopt_is_reported_once_then_backed_off() {
+        let (_listener, port) = live_port();
+        with_conv_env("conv_orphan_refused.db", port, |host| {
+            save_ledger(&led(&["/mnt/conv-p"]));
+            save_ids(&ids_for("/mnt/conv-p"));
+            let before = load_ledger();
+            let probe = TableProbe {
+                health: MountHealth::Ok,
+                table: vec![entry("/mnt/conv-p", "nas:/mnt/conv-p", "nfs4")],
+            };
+            let helper = HelperScript::new(true, Some("adopt: foreign"));
+            let counters = Mutex::new(HashMap::new());
+            let run = || {
+                block_on(utils::privileged::testing::with_exec(
+                    helper.clone(),
+                    reconcile(&counters, host, None, false, &probe),
+                ))
+                .expect("reconcile ok")
+            };
+
+            run();
+            assert_eq!(helper.ops(), ["release", "adopt"]);
+            assert!(adopt_refused_note("/mnt/conv-p").is_some());
+            assert_eq!(load_ledger(), before, "still owned until released");
+
+            notifications::dismissable::dismiss("converge:adopt-refused:/mnt/conv-p")
+                .expect("dismiss");
+            run();
+            assert_eq!(
+                helper.ops(),
+                ["release", "adopt"],
+                "backed off: no helper call"
+            );
+            assert_eq!(
+                adopt_refused_note("/mnt/conv-p").expect("row").state,
+                notifications::dismissable::State::Dismissed
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env, storage_registry)]
+    fn root_unknown_cifs_target_is_released_adopted_released_then_mounted() {
+        let (_listener, port) = live_port();
+        with_conv_env("conv_adopt_mount.db", port, |host| {
+            insert_conv_share("sh-1", port);
+            insert_mount("m-1", "sh-1", host, "/mnt/conv-m", true);
+            save_ledger(&led(&["/mnt/conv-m"]));
+            save_ids(&ids_for("/mnt/conv-m"));
+            let probe = TableProbe {
+                health: MountHealth::Stale,
+                table: vec![entry("/mnt/conv-m", "//127.0.0.1/export", "cifs")],
+            };
+            let helper = HelperScript::new(true, None);
+            let counters = Mutex::new(HashMap::new());
+            let targets = ["/mnt/conv-m".to_string()];
+            let out = block_on(utils::privileged::testing::with_exec(
+                helper.clone(),
+                reconcile(&counters, host, Some(&targets), true, &probe),
+            ))
+            .expect("reconcile ok");
+            assert_eq!(helper.ops(), ["release", "adopt", "release", "mount"]);
+            assert_eq!(out.len(), 1);
+            assert!(out[0].error.is_none());
+        });
     }
 }
