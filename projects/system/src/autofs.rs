@@ -1290,6 +1290,13 @@ fn unmapped_ids(
         .collect()
 }
 
+type MapLedgerChanges = (
+    Vec<(String, LedgerEntry)>,
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+);
+
 /// Ledger changes for an `Apply` that moved the map from `old_keys` to `new_keys`.
 /// Placements are recorded only for targets keyed in the new map. A row whose
 /// target left the map is dropped only when no network mount is still live there;
@@ -1300,15 +1307,33 @@ fn map_ledger_changes<S>(
     placements: &[MapPlacement],
     ledger: &Ledger,
     live_sources: S,
-) -> (Vec<(String, LedgerEntry)>, Vec<String>, Vec<String>)
+) -> MapLedgerChanges
 where
     S: Fn(&str) -> Result<Vec<String>, String>,
 {
     let mut adds = Vec::new();
     let mut errors = Vec::new();
+    let mut warnings = Vec::new();
     for p in placements {
         let keyed = normalize_unmount_target(&p.target).is_ok_and(|t| new_keys.contains(&t));
         if keyed {
+            match live_sources(&p.target) {
+                Ok(live) if live.is_empty() || live_sources_match(&live, &p.source) => {}
+                Ok(_) => {
+                    warnings.push(format!(
+                        "skipped ledger entry for {:?}: a mount with a different source is live there",
+                        p.target
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    warnings.push(format!(
+                        "skipped ledger entry for {:?}: cannot read mount table: {e}",
+                        p.target
+                    ));
+                    continue;
+                }
+            }
             adds.push((
                 p.id.clone(),
                 LedgerEntry {
@@ -1329,7 +1354,7 @@ where
         .filter(|(_, e)| live_sources(&e.target).is_ok_and(|live| live.is_empty()))
         .map(|(id, _)| id.clone())
         .collect();
-    (adds, removes, errors)
+    (adds, removes, errors, warnings)
 }
 
 async fn sync_map_ledger(old_map: &str, placements: &[MapPlacement], res: &mut PrivilegedResult) {
@@ -1347,7 +1372,7 @@ async fn sync_map_ledger(old_map: &str, placements: &[MapPlacement], res: &mut P
             return;
         }
     };
-    let (adds, removes, errors) = map_ledger_changes(
+    let (adds, removes, errors, warnings) = map_ledger_changes(
         &declared_map_keys(old_map),
         &declared_map_keys(&new_map),
         placements,
@@ -1355,6 +1380,7 @@ async fn sync_map_ledger(old_map: &str, placements: &[MapPlacement], res: &mut P
         network_sources,
     );
     res.errors.extend(errors);
+    res.warnings.extend(warnings);
     if let Err(e) = ledger_update(LEDGER_FILE, &adds, &removes).await {
         res.errors.push(e);
     }
@@ -2528,7 +2554,7 @@ where
         return Err("live source does not match the given source".into());
     }
     if !owned(&target)? {
-        return Err("mount does not look orca-managed".into());
+        return Err("mount does not look orca-managed: adopting a mount orca did not create requires a local admin; remote adopt only accepts cifs mounts using orca's service account".into());
     }
     let _lock = lock_ledger(path).await?;
     let mut ledger = parse_ledger(&read_ledger(path)?)?;
@@ -2672,25 +2698,21 @@ fn network_sources(target: &str) -> Result<Vec<String>, String> {
         .map_err(|e| format!("cannot read mount table: {e}"))
 }
 
-/// Root-readable proof orca made the mount: the target is keyed in the direct
-/// map, or a cifs/smb3 layer carries orca's own service credentials. Reads
+/// Root-readable proof orca made the mount: every network layer is cifs/smb3
+/// carrying orca's own service credentials, and the target is not a protected
+/// system path. The map is caller-writable, so a map key proves nothing. Reads
 /// /proc/mounts only, never stats the target.
 fn orca_owned(target: &str) -> Result<bool, String> {
-    let keys = declared_map_keys(&read_map_file()?);
     let table = plugin_toolkit::storage::mount_table::mount_table()
         .map_err(|e| format!("cannot read mount table: {e}"))?;
-    Ok(orca_owned_in(&keys, &table, target))
+    Ok(orca_owned_in(&table, target))
 }
 
-fn orca_owned_in(
-    keys: &std::collections::HashSet<String>,
-    table: &[MountEntry],
-    target: &str,
-) -> bool {
-    if keys.contains(target.trim_end_matches('/')) {
-        return true;
-    }
+fn orca_owned_in(table: &[MountEntry], target: &str) -> bool {
     let t = target.trim_end_matches('/');
+    if validate_target_meaning(t).is_err() {
+        return false;
+    }
     let mut layers = table
         .iter()
         .filter(|m| m.mountpoint.trim_end_matches('/') == t && is_network_fstype(&m.fstype))
@@ -5936,7 +5958,7 @@ mod tests {
 
     #[test]
     fn apply_records_only_placements_keyed_in_the_new_map() {
-        let (adds, removes, errors) = map_ledger_changes(
+        let (adds, removes, errors, _) = map_ledger_changes(
             &keys(&[]),
             &keys(&["/mnt/a"]),
             &[placement(ID_A, "/mnt/a"), placement(ID_B, "/etc")],
@@ -5947,6 +5969,32 @@ mod tests {
         assert_eq!(adds[0].0, ID_A);
         assert!(removes.is_empty());
         assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn apply_skips_a_placement_over_a_live_mount_of_another_source() {
+        let (adds, _, _, warnings) = map_ledger_changes(
+            &keys(&[]),
+            &keys(&["/mnt/a"]),
+            &[placement(ID_A, "/mnt/a")],
+            &Ledger::new(),
+            |_| Ok(vec!["other:/y".to_string()]),
+        );
+        assert!(adds.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+
+    #[test]
+    fn apply_records_a_placement_whose_live_mount_matches_its_source() {
+        let (adds, _, _, warnings) = map_ledger_changes(
+            &keys(&[]),
+            &keys(&["/mnt/a"]),
+            &[placement(ID_A, "/mnt/a")],
+            &Ledger::new(),
+            |_| Ok(vec!["H:/x/".to_string()]),
+        );
+        assert_eq!(adds.len(), 1);
+        assert!(warnings.is_empty());
     }
 
     #[test]
@@ -5963,10 +6011,10 @@ mod tests {
                 vec![]
             })
         };
-        let (_, removes, _) =
+        let (_, removes, _, _) =
             map_ledger_changes(&keys(&["/mnt/a", "/mnt/b"]), &keys(&[]), &[], &ledger, live);
         assert_eq!(removes, vec![ID_A.to_string()]);
-        let (_, removes, _) = map_ledger_changes(
+        let (_, removes, _, _) = map_ledger_changes(
             &keys(&["/mnt/a", "/mnt/b"]),
             &keys(&[]),
             &[],
@@ -5983,7 +6031,7 @@ mod tests {
             (ID_B.to_string(), led_entry("/mnt/native", "h:/n")),
         ]
         .into();
-        let (_, removes, _) =
+        let (_, removes, _, _) =
             map_ledger_changes(&keys(&["/mnt/a"]), &keys(&["/mnt/a"]), &[], &ledger, |_| {
                 Ok(vec![])
             });
@@ -6040,11 +6088,8 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    fn owned_over(
-        map: &'static str,
-        table: Vec<MountEntry>,
-    ) -> impl Fn(&str) -> Result<bool, String> {
-        move |t| Ok(orca_owned_in(&declared_map_keys(map), &table, t))
+    fn owned_over(table: Vec<MountEntry>) -> impl Fn(&str) -> Result<bool, String> {
+        move |t| Ok(orca_owned_in(&table, t))
     }
 
     fn opt_entry(fstype: &str, source: &str, opts: &[&str]) -> MountEntry {
@@ -6054,7 +6099,7 @@ mod tests {
         }
     }
 
-    async fn adopt_over(map: &'static str, table: Vec<MountEntry>) -> Result<String, String> {
+    async fn adopt_over(table: Vec<MountEntry>) -> Result<String, String> {
         let dir = tempfile::tempdir().unwrap();
         let path = adopt_path(&dir);
         let t = table.clone();
@@ -6064,36 +6109,44 @@ mod tests {
             "/mnt/data",
             "h:/x",
             move |tg| Ok(network_sources_in(t.clone(), tg)),
-            owned_over(map, table),
+            owned_over(table),
         )
         .await
     }
 
     #[tokio::test]
-    async fn adopt_accepts_a_map_keyed_target() {
+    async fn adopt_refuses_a_foreign_nfs_target_even_when_keyed_in_the_map() {
         let t = vec![opt_entry("nfs4", "h:/x", &["rw"])];
-        assert!(adopt_over("/mnt/data -fstype=nfs h:/x\n", t).await.is_ok());
+        let e = adopt_over(t).await.unwrap_err();
+        assert!(e.contains("requires a local admin"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn adopt_refuses_a_protected_target_even_with_orca_credentials() {
+        let t = vec![MountEntry {
+            options: vec!["username=orca".into()],
+            ..entry("/etc", "cifs", "h:/x")
+        }];
+        assert!(!orca_owned_in(&t, "/etc"));
     }
 
     #[tokio::test]
     async fn adopt_accepts_a_cifs_mount_with_orca_credentials() {
         let t = vec![opt_entry("cifs", "h:/x", &["rw", "username=orca"])];
-        assert!(adopt_over("", t).await.is_ok());
+        assert!(adopt_over(t).await.is_ok());
     }
 
     #[tokio::test]
     async fn adopt_refuses_an_unrelated_nfs_mount() {
         let t = vec![opt_entry("nfs4", "h:/x", &["rw"])];
-        let e = adopt_over("/mnt/other -fstype=nfs h:/y\n", t)
-            .await
-            .unwrap_err();
+        let e = adopt_over(t).await.unwrap_err();
         assert!(e.contains("orca-managed"), "{e}");
     }
 
     #[tokio::test]
     async fn adopt_refuses_a_cifs_mount_with_another_username() {
         let t = vec![opt_entry("cifs", "h:/x", &["username=admin"])];
-        let e = adopt_over("", t).await.unwrap_err();
+        let e = adopt_over(t).await.unwrap_err();
         assert!(e.contains("orca-managed"), "{e}");
     }
 
@@ -6103,7 +6156,7 @@ mod tests {
             opt_entry("cifs", "h:/x", &["username=orca"]),
             opt_entry("nfs4", "h:/x", &["rw"]),
         ];
-        assert!(adopt_over("", t).await.is_err());
+        assert!(adopt_over(t).await.is_err());
     }
 
     #[tokio::test]
