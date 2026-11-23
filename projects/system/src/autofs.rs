@@ -2918,13 +2918,13 @@ where
     unwind_stacked(|| layers(target), || umount(target.to_string())).await
 }
 
-struct AncestorMeta {
-    is_dir: bool,
-    uid: u32,
-    mode: u32,
+pub(crate) struct AncestorMeta {
+    pub(crate) is_dir: bool,
+    pub(crate) uid: u32,
+    pub(crate) mode: u32,
 }
 
-fn read_ancestor_meta(p: &Path) -> std::io::Result<AncestorMeta> {
+pub(crate) fn read_ancestor_meta(p: &Path) -> std::io::Result<AncestorMeta> {
     use std::os::unix::fs::MetadataExt;
     let m = std::fs::symlink_metadata(p)?;
     Ok(AncestorMeta {
@@ -2938,7 +2938,7 @@ fn read_ancestor_meta(p: &Path) -> std::io::Result<AncestorMeta> {
 /// directory that no one else can write, so nobody can swap an ancestor for a
 /// symlink between the mount-table check and umount's own path resolution.
 /// `target` itself is never queried: a dead hard mount makes `stat` hang forever.
-fn check_ancestors<M>(target: &str, meta: M) -> Result<(), String>
+pub(crate) fn check_ancestors<M>(target: &str, meta: M) -> Result<(), String>
 where
     M: Fn(&Path) -> std::io::Result<AncestorMeta>,
 {
@@ -5087,7 +5087,7 @@ mod tests {
         mount_locked(
             &ledger,
             &m,
-            |m| async move { crate::mount_exec::run_mount(&m).await },
+            |m| async move { crate::mount_exec::run_mount_checked(&m, |_| async { Ok(()) }).await },
             || Ok(Vec::new()),
             &mut res,
         )

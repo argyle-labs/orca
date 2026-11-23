@@ -113,14 +113,17 @@ const MOUNTPOINT_PREP_TIMEOUT: Duration = Duration::from_secs(10);
 /// timeout (`umount -lf` is idempotent) and retrying once under the same bound.
 /// A stale NFS/CIFS handle makes the path exist but fail `stat`, so without the
 /// release convergence could never re-create the dir and never remount.
-async fn prepare_mountpoint_with<M, MF, U, UF, D, DF>(
+async fn prepare_mountpoint_with<C, CF, M, MF, U, UF, D, DF>(
     target: &str,
+    check: C,
     mkdir: M,
     release: U,
     deadline: D,
     may_release: bool,
 ) -> Result<(), String>
 where
+    C: Fn(String) -> CF,
+    CF: std::future::Future<Output = Result<(), String>>,
     M: Fn(String) -> MF,
     MF: std::future::Future<Output = std::io::Result<()>>,
     U: Fn(String) -> UF,
@@ -128,6 +131,7 @@ where
     D: Fn() -> DF,
     DF: std::future::Future<Output = ()>,
 {
+    check(target.to_string()).await?;
     let bounded = || async {
         tokio::select! {
             r = mkdir(target.to_string()) => r.map_err(|e| e.to_string()),
@@ -154,8 +158,24 @@ where
 /// is idempotent. Returns the trimmed stderr on failure so the convergence loop
 /// can log why a source failed before advancing to the next.
 pub async fn run_mount(req: &MountReq) -> Result<(), String> {
+    run_mount_checked(req, |t| async move {
+        tokio::task::spawn_blocking(move || {
+            crate::autofs::check_ancestors(&t, crate::autofs::read_ancestor_meta)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    })
+    .await
+}
+
+pub(crate) async fn run_mount_checked<C, CF>(req: &MountReq, check: C) -> Result<(), String>
+where
+    C: Fn(String) -> CF,
+    CF: std::future::Future<Output = Result<(), String>>,
+{
     prepare_mountpoint_with(
         &req.target,
+        check,
         |t| async move {
             tokio::task::spawn_blocking(move || std::fs::create_dir_all(t))
                 .await
@@ -329,6 +349,7 @@ mod tests {
         let (m, r) = (mk.clone(), rel.clone());
         let out = prepare_mountpoint_with(
             "/mnt/x",
+            |_| async { Ok(()) },
             move |_| {
                 m.fetch_add(1, SeqCst);
                 async { Ok(()) }
@@ -352,6 +373,7 @@ mod tests {
         let (m, r) = (mk.clone(), rel.clone());
         let out = prepare_mountpoint_with(
             "/mnt/x",
+            |_| async { Ok(()) },
             move |_| {
                 let n = m.fetch_add(1, SeqCst);
                 async move {
@@ -381,6 +403,7 @@ mod tests {
         let r = rel.clone();
         let out = prepare_mountpoint_with(
             "/mnt/x",
+            |_| async { Ok(()) },
             |_| std::future::pending::<std::io::Result<()>>(),
             move |_| {
                 r.fetch_add(1, SeqCst);
@@ -402,6 +425,7 @@ mod tests {
         let r = rel.clone();
         let out = prepare_mountpoint_with(
             "/mnt/x",
+            |_| async { Ok(()) },
             |_| async { Err(std::io::Error::other("stale")) },
             move |_| {
                 r.fetch_add(1, SeqCst);
@@ -413,5 +437,66 @@ mod tests {
         .await;
         assert!(out.unwrap_err().contains("someone else"));
         assert_eq!(rel.load(SeqCst), 0);
+    }
+
+    fn guarded(mid: (bool, u32, u32)) -> (Result<(), String>, usize, Vec<String>) {
+        use crate::autofs::{AncestorMeta, check_ancestors};
+        use std::sync::atomic::Ordering::SeqCst;
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (mk, rel) = dir_probe();
+        let (m, r, l) = (mk.clone(), rel.clone(), log.clone());
+        let out = futures::executor::block_on(prepare_mountpoint_with(
+            "/mnt/x/target",
+            move |t| {
+                let l = l.clone();
+                async move {
+                    check_ancestors(&t, |p| {
+                        l.lock().unwrap().push(p.display().to_string());
+                        let (is_dir, uid, mode) = match p.to_str().unwrap() {
+                            "/mnt" => mid,
+                            "/" | "/mnt/x" => (true, 0, 0o755),
+                            _ => return Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                        };
+                        Ok(AncestorMeta { is_dir, uid, mode })
+                    })
+                }
+            },
+            move |_| {
+                m.fetch_add(1, SeqCst);
+                async { Ok(()) }
+            },
+            move |_| {
+                r.fetch_add(1, SeqCst);
+                async { Ok(()) }
+            },
+            std::future::pending::<()>,
+            true,
+        ));
+        assert_eq!(rel.load(SeqCst), 0);
+        let calls = log.lock().unwrap().clone();
+        (out, mk.load(SeqCst), calls)
+    }
+
+    #[test]
+    fn mount_refuses_symlinked_ancestor_without_mkdir() {
+        let (out, mkdirs, calls) = guarded((false, 0, 0o755));
+        assert!(out.unwrap_err().contains("ancestor /mnt "));
+        assert_eq!(mkdirs, 0);
+        assert!(!calls.contains(&"/mnt/x/target".to_string()));
+    }
+
+    #[test]
+    fn mount_refuses_group_writable_ancestor() {
+        let (out, mkdirs, _) = guarded((true, 0, 0o775));
+        assert!(out.unwrap_err().contains("writable"));
+        assert_eq!(mkdirs, 0);
+    }
+
+    #[test]
+    fn mount_proceeds_with_clean_ancestors_never_querying_target() {
+        let (out, mkdirs, calls) = guarded((true, 0, 0o755));
+        assert_eq!(out, Ok(()));
+        assert_eq!(mkdirs, 1);
+        assert_eq!(calls, ["/", "/mnt", "/mnt/x"]);
     }
 }
