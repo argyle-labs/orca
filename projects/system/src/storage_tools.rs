@@ -1996,9 +1996,21 @@ where
         .map(Some)
 }
 
+/// The root helper refused to adopt the live mount; callers must not mount over it.
+#[derive(Debug)]
+pub(crate) struct AdoptRefused(pub String);
+
+impl std::fmt::Display for AdoptRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AdoptRefused {}
+
 /// Releases `id`; if the root helper has no ledger entry for it, adopts the live
 /// mount (the helper's ownership proof is the gate) and retries the release once.
-async fn release_adopting<F, Fut>(
+pub(crate) async fn release_adopting<F, Fut>(
     target: &str,
     id: &str,
     norm: &str,
@@ -2030,7 +2042,7 @@ where
     })
     .await;
     if !adopted.errors.is_empty() {
-        anyhow::bail!("{}", adopted.errors.join("; "));
+        return Err(AdoptRefused(adopted.errors.join("; ")).into());
     }
     let mut out = outcome_from_result(target, run(release()).await)?;
     out.detail = Some(format!(

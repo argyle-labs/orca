@@ -377,6 +377,7 @@ fn should_swap(d: &DesiredMount, sig: &FailoverSignal) -> bool {
 fn keep_stale_counter_key(key: &str, desired: &[DesiredMount]) -> bool {
     key.starts_with("failover:")
         || key.starts_with("mountfail:")
+        || key.starts_with(ADOPT_REFUSED_PREFIX)
         || desired.iter().any(|d| d.target == key)
 }
 
@@ -1142,6 +1143,89 @@ fn record_mount_outcomes(
     }
 }
 
+const ADOPT_REFUSED_PREFIX: &str = "adoptrefused:";
+
+fn adopt_refused_key(target: &str, reason: &str) -> String {
+    format!("{ADOPT_REFUSED_PREFIX}{}|{reason}", norm_target(target))
+}
+
+/// Count down every adopt-refusal backoff; an expired one lets the adopt be retried.
+fn tick_adopt_refused_backoff(c: &mut HashMap<String, u32>) {
+    c.retain(|k, n| {
+        if !k.starts_with(ADOPT_REFUSED_PREFIX) {
+            return true;
+        }
+        *n = n.saturating_sub(1);
+        *n > 0
+    });
+}
+
+/// Normalized target -> refusal reason for every adopt refusal still backed off.
+fn adopt_refusals(c: &HashMap<String, u32>) -> HashMap<String, String> {
+    c.keys()
+        .filter_map(|k| k.strip_prefix(ADOPT_REFUSED_PREFIX)?.split_once('|'))
+        .map(|(t, r)| (t.to_string(), r.to_string()))
+        .collect()
+}
+
+struct Refusal {
+    target: String,
+    reason: String,
+    /// False when replayed from backoff without asking the helper again.
+    fresh: bool,
+}
+
+#[derive(Default)]
+struct ReleaseReport {
+    released: Vec<String>,
+    refused: Vec<Refusal>,
+}
+
+/// Releases each target through the same adopt-then-release path as
+/// `storage.mount.update action=unmount`. A target whose adopt the root helper
+/// refuses (a foreign mount) is reported in `refused` so nothing mounts over it;
+/// any other failure is logged and the target is left to the mount that follows.
+async fn release_targets<F, Fut>(
+    targets: &[String],
+    ids: &Ledger,
+    table: &[plugin_toolkit::storage::mount_table::MountEntry],
+    backed_off: &HashMap<String, String>,
+    mut run: F,
+) -> ReleaseReport
+where
+    F: FnMut(PrivilegedOp) -> Fut,
+    Fut: std::future::Future<Output = autofs::PrivilegedResult>,
+{
+    let mut report = ReleaseReport::default();
+    for t in targets {
+        let norm = norm_target(t);
+        if let Some(reason) = backed_off.get(&norm) {
+            report.refused.push(Refusal {
+                target: t.clone(),
+                reason: reason.clone(),
+                fresh: false,
+            });
+            continue;
+        }
+        let Some(id) = ids.get(&norm) else {
+            warn!("[converge] no placement id recorded for {t}; cannot release it");
+            continue;
+        };
+        match crate::storage_tools::release_adopting(t, id, &norm, table, &mut run).await {
+            Ok(_) => report.released.push(t.clone()),
+            Err(e) => match e.downcast::<crate::storage_tools::AdoptRefused>() {
+                Ok(refused) => report.refused.push(Refusal {
+                    target: t.clone(),
+                    reason: refused.0,
+                    fresh: true,
+                }),
+                Err(e) => warn!("[converge] unmount error: {e}"),
+            },
+        }
+    }
+    report
+}
+
 /// The elected source string, or `None` for an empty election.
 fn elected_source(election: &Election) -> Option<String> {
     match election {
@@ -1282,7 +1366,8 @@ async fn reconcile<P: TargetProbe>(
         .map(|e| (e.mountpoint.clone(), e.source.clone()))
         .collect();
     let live_options_by_target: HashMap<String, Vec<String>> = mount_table
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|e| (e.mountpoint, e.options))
         .collect();
 
@@ -1702,30 +1787,59 @@ async fn reconcile<P: TargetProbe>(
     }
 
     if !unmounts.is_empty() {
-        let mut release_ids = Vec::new();
-        for t in &unmounts {
-            match ids.get(&norm_target(t)) {
-                Some(id) => release_ids.push(id.clone()),
-                None => warn!("[converge] no placement id recorded for {t}; cannot release it"),
-            }
-        }
-        let r = if release_ids.is_empty() {
-            Default::default()
-        } else {
-            run_privileged(&PrivilegedOp::Release { ids: release_ids }).await
+        let backed_off = {
+            let mut c = counters.lock().expect("converge counters poisoned");
+            tick_adopt_refused_backoff(&mut c);
+            adopt_refusals(&c)
         };
-        for e in &r.errors {
-            warn!("[converge] unmount error: {e}");
-        }
-        // A released target reported in `changed`: if it was an orphan, it is now
-        // fully torn down and leaves the ledger; a stale-remount release stays
-        // (its Mount re-adds it below).
-        for t in &r.changed {
+        let report = release_targets(
+            &unmounts,
+            &ids,
+            &mount_table,
+            &backed_off,
+            |op| async move { run_privileged(&op).await },
+        )
+        .await;
+        // A released orphan is fully torn down and leaves the ledger; a
+        // stale-remount release stays (its Mount re-adds it below).
+        for t in &report.released {
             if orphan_set.contains(t.as_str()) {
                 ledger.remove(&norm_target(t));
                 info!("[converge] unmounted removed placement {t}");
             } else {
                 info!("[converge] released {t} (remounting)");
+            }
+        }
+        for r in &report.refused {
+            if r.fresh {
+                warn!(
+                    "[converge] cannot release {}: {}; not mounting over it",
+                    r.target, r.reason
+                );
+                raise_notification(
+                    format!("converge:adopt-refused:{}", r.target),
+                    Severity::Warn,
+                    false,
+                    format!("Mount at {} is not managed by orca", r.target),
+                    format!(
+                        "orca cannot release {}: {}. Release it manually so orca can mount the placement.",
+                        r.target, r.reason
+                    ),
+                    None,
+                );
+                counters.lock().expect("converge counters poisoned").insert(
+                    adopt_refused_key(&r.target, &r.reason),
+                    MOUNTFAIL_BACKOFF_TICKS,
+                );
+            }
+            let nt = norm_target(&r.target);
+            if reqs.iter().any(|q| norm_target(&q.target) == nt) {
+                reqs.retain(|q| norm_target(&q.target) != nt);
+                outcomes.push(TargetOutcome {
+                    target: r.target.clone(),
+                    source: None,
+                    error: Some(r.reason.clone()),
+                });
             }
         }
     }
@@ -5305,5 +5419,140 @@ mod tests {
             assert!(out.is_empty());
             assert!(rec.calls().is_empty(), "blip filter holds the first stale");
         });
+    }
+
+    // ── release_targets: adopt-then-release for converge unmounts ─────────
+
+    fn entry(
+        mountpoint: &str,
+        source: &str,
+        fstype: &str,
+    ) -> plugin_toolkit::storage::mount_table::MountEntry {
+        plugin_toolkit::storage::mount_table::MountEntry {
+            source: source.into(),
+            mountpoint: mountpoint.into(),
+            fstype: fstype.into(),
+            options: Vec::new(),
+        }
+    }
+
+    fn scripted(
+        ops: &std::cell::RefCell<Vec<String>>,
+        replies: Vec<autofs::PrivilegedResult>,
+    ) -> impl FnMut(PrivilegedOp) -> std::future::Ready<autofs::PrivilegedResult> + '_ {
+        let mut replies = replies.into_iter();
+        move |op| {
+            ops.borrow_mut().push(match &op {
+                PrivilegedOp::Release { .. } => "release".to_string(),
+                PrivilegedOp::Adopt { .. } => "adopt".to_string(),
+                _ => "other".to_string(),
+            });
+            std::future::ready(replies.next().expect("scripted reply"))
+        }
+    }
+
+    fn failed(msg: &str) -> autofs::PrivilegedResult {
+        autofs::PrivilegedResult {
+            errors: vec![msg.to_string()],
+            ..Default::default()
+        }
+    }
+
+    fn ids_for(target: &str) -> Ledger {
+        Ledger::from([(norm_target(target), "id-1".to_string())])
+    }
+
+    #[test]
+    fn unledgered_orca_target_is_released_adopted_then_released() {
+        let ops = std::cell::RefCell::new(Vec::new());
+        let table = [entry("/mnt/a", "//nas/a", "cifs")];
+        let report = block_on(release_targets(
+            &["/mnt/a".to_string()],
+            &ids_for("/mnt/a"),
+            &table,
+            &HashMap::new(),
+            scripted(
+                &ops,
+                vec![
+                    failed("release id-1: refused: unknown placement id"),
+                    Default::default(),
+                    Default::default(),
+                ],
+            ),
+        ));
+        assert_eq!(*ops.borrow(), ["release", "adopt", "release"]);
+        assert_eq!(report.released, ["/mnt/a"]);
+        assert!(report.refused.is_empty());
+    }
+
+    #[test]
+    fn ledgered_target_is_released_once() {
+        let ops = std::cell::RefCell::new(Vec::new());
+        let report = block_on(release_targets(
+            &["/mnt/a".to_string()],
+            &ids_for("/mnt/a"),
+            &[],
+            &HashMap::new(),
+            scripted(&ops, vec![Default::default()]),
+        ));
+        assert_eq!(*ops.borrow(), ["release"]);
+        assert_eq!(report.released, ["/mnt/a"]);
+    }
+
+    #[test]
+    fn refused_adopt_is_reported_and_not_released() {
+        let ops = std::cell::RefCell::new(Vec::new());
+        let table = [entry("/mnt/a", "nas:/a", "nfs4")];
+        let report = block_on(release_targets(
+            &["/mnt/a".to_string()],
+            &ids_for("/mnt/a"),
+            &table,
+            &HashMap::new(),
+            scripted(
+                &ops,
+                vec![
+                    failed("release id-1: refused: unknown placement id"),
+                    failed("adopt: not an orca mount"),
+                ],
+            ),
+        ));
+        assert_eq!(*ops.borrow(), ["release", "adopt"]);
+        assert!(report.released.is_empty());
+        assert_eq!(report.refused.len(), 1);
+        assert!(report.refused[0].fresh);
+        assert_eq!(report.refused[0].reason, "adopt: not an orca mount");
+    }
+
+    #[test]
+    fn backed_off_refusal_is_replayed_without_calling_the_helper() {
+        let ops = std::cell::RefCell::new(Vec::new());
+        let backed_off = HashMap::from([("/mnt/a".to_string(), "adopt: foreign".to_string())]);
+        let report = block_on(release_targets(
+            &["/mnt/a".to_string()],
+            &ids_for("/mnt/a"),
+            &[],
+            &backed_off,
+            scripted(&ops, vec![]),
+        ));
+        assert!(ops.borrow().is_empty());
+        assert!(!report.refused[0].fresh);
+    }
+
+    #[test]
+    fn adopt_refusal_backoff_expires_and_survives_the_stale_prune() {
+        let mut c = HashMap::new();
+        c.insert(adopt_refused_key("/mnt/a/", "foreign"), 2);
+        assert!(keep_stale_counter_key(
+            &adopt_refused_key("/mnt/a", "foreign"),
+            &[]
+        ));
+        assert_eq!(
+            adopt_refusals(&c).get("/mnt/a").map(String::as_str),
+            Some("foreign")
+        );
+        tick_adopt_refused_backoff(&mut c);
+        assert_eq!(adopt_refusals(&c).len(), 1);
+        tick_adopt_refused_backoff(&mut c);
+        assert!(adopt_refusals(&c).is_empty());
     }
 }
