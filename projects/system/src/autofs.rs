@@ -907,7 +907,19 @@ fn validate_master_contents(contents: &str, existing: &str) -> Result<(), String
 
 /// Checks the structured mounts and that the map write is exactly their
 /// rendering, so nothing but the renderer's output can reach the map file.
-fn validate_managed(managed: &ManagedMaps, writes: &[FileWrite]) -> Vec<String> {
+/// A map write without structured mounts is refused outright. Retiring the map
+/// needs zero mounts; its contents must be the header-only render or blank.
+fn validate_managed(managed: Option<&ManagedMaps>, writes: &[FileWrite]) -> Vec<String> {
+    let map_write = writes.iter().find(|w| w.path == MAP_FILE);
+    let Some(managed) = managed else {
+        return map_write
+            .map(|_| {
+                vec![format!(
+                    "refused write {MAP_FILE}: map write requires structured mounts"
+                )]
+            })
+            .unwrap_or_default();
+    };
     let mut errors: Vec<String> = managed
         .managed_mounts()
         .iter()
@@ -921,8 +933,9 @@ fn validate_managed(managed: &ManagedMaps, writes: &[FileWrite]) -> Vec<String> 
             .filter_map(|(_, src)| validate_location(src).err()),
     );
     if errors.is_empty()
-        && let Some(w) = writes.iter().find(|w| w.path == MAP_FILE)
+        && let Some(w) = map_write
         && w.contents != managed.render()
+        && !(managed.mounts.is_empty() && w.contents.trim().is_empty())
     {
         errors.push(format!(
             "refused write {MAP_FILE}: map does not match its structured mounts"
@@ -1211,9 +1224,7 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             let mut res = PrivilegedResult::default();
             let existing_master = std::fs::read_to_string(detect_master_file()).unwrap_or_default();
             let mut refused = validate_apply_writes(&writes, &existing_master);
-            if let Some(m) = &managed {
-                refused.extend(validate_managed(m, &writes));
-            }
+            refused.extend(validate_managed(managed.as_ref(), &writes));
             if !refused.is_empty() {
                 res.errors = refused;
                 return res;
@@ -3554,7 +3565,7 @@ mod tests {
         else {
             unreachable!()
         };
-        assert!(validate_managed(&managed.unwrap(), &writes).is_empty());
+        assert!(validate_managed(managed.as_ref(), &writes).is_empty());
     }
 
     #[tokio::test]
@@ -3577,6 +3588,55 @@ mod tests {
         assert!(res.changed.is_empty() && !res.errors.is_empty());
     }
 
+    #[tokio::test]
+    async fn map_write_without_managed_is_refused_and_unwritten() {
+        let ms = vec![mount("a", "h:/x", None)];
+        let res = execute_privileged(PrivilegedOp::Apply {
+            writes: apply_writes(&render_map(&ms), ""),
+            keep_secret_files: Vec::new(),
+            init: Init::Systemd,
+            placements: Vec::new(),
+            managed: None,
+        })
+        .await;
+        assert!(res.changed.is_empty() && !res.restarted);
+        assert!(res.errors.iter().any(|e| e.contains("requires structured")));
+    }
+
+    #[test]
+    fn master_only_write_without_managed_is_accepted() {
+        let w = vec![FileWrite {
+            path: "/etc/auto.master".into(),
+            contents: "/net\t-hosts\n".into(),
+            mode: None,
+        }];
+        assert!(validate_managed(None, &w).is_empty());
+    }
+
+    #[test]
+    fn empty_map_retire_with_zero_mounts_is_accepted() {
+        let none = ManagedMaps::from_mounts(&[], None);
+        for contents in [render_map(&[]), String::new()] {
+            let w = vec![FileWrite {
+                path: MAP_FILE.into(),
+                contents,
+                mode: None,
+            }];
+            assert!(validate_managed(Some(&none), &w).is_empty());
+        }
+    }
+
+    #[test]
+    fn empty_map_retire_with_extra_text_is_refused() {
+        let none = ManagedMaps::from_mounts(&[], None);
+        let w = vec![FileWrite {
+            path: MAP_FILE.into(),
+            contents: format!("{}/mnt/evil  -fstype=nfs  e:/x\n", render_map(&[])),
+            mode: None,
+        }];
+        assert!(!validate_managed(Some(&none), &w).is_empty());
+    }
+
     #[test]
     fn apply_payload_without_managed_deserializes() {
         let json = r#"{"op":"apply","writes":[],"init":"systemd"}"#;
@@ -3593,7 +3653,7 @@ mod tests {
             keep_secret_files: vec![],
             init: Init::Systemd,
             placements: vec![],
-            managed: None,
+            managed: Some(ManagedMaps::from_mounts(&[mount("a", "h:/x", None)], None)),
         })
         .await;
         assert!(res.changed.is_empty() && !res.restarted && !res.errors.is_empty());
