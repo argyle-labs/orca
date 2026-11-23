@@ -129,10 +129,6 @@ pub enum DrainMode {
     Force,
 }
 
-fn default_settle_secs() -> u32 {
-    15
-}
-
 /// Drain policy — how a source is released from every client before a
 /// coordinated operation (a source reboot) that will take it offline.
 // Persisted snake_case alongside [`Failover`]; see there.
@@ -146,10 +142,6 @@ pub struct Drain {
     /// Lazy vs lazy-force unmount.
     #[serde(default)]
     pub mode: DrainMode,
-    /// Seconds to wait after the lazy unmount before the forced one, letting
-    /// in-flight I/O settle.
-    #[serde(default = "default_settle_secs")]
-    pub settle_secs: u32,
 }
 
 impl Default for Drain {
@@ -157,7 +149,6 @@ impl Default for Drain {
         Self {
             enabled: true,
             mode: DrainMode::default(),
-            settle_secs: default_settle_secs(),
         }
     }
 }
@@ -218,7 +209,6 @@ mod tests {
         assert_eq!(p.failover.probe, SourceProbe::Auto);
         assert!(p.drain.enabled);
         assert_eq!(p.drain.mode, DrainMode::Lazy);
-        assert_eq!(p.drain.settle_secs, 15);
     }
 
     fn non_default_policy() -> RemountPolicy {
@@ -233,7 +223,6 @@ mod tests {
             drain: Drain {
                 enabled: true,
                 mode: DrainMode::Force,
-                settle_secs: 42,
             },
         }
     }
@@ -262,7 +251,7 @@ mod tests {
         let written = serde_json::to_string(&p).unwrap();
         assert!(written.contains("\"return_to_primary\":false"), "{written}");
         assert!(written.contains("\"confirm_ticks\":7"), "{written}");
-        assert!(written.contains("\"settle_secs\":42"), "{written}");
+        assert!(!written.contains("settle_secs"), "{written}");
         assert!(!written.contains("returnToPrimary"), "{written}");
         assert!(!written.contains("confirmTicks"), "{written}");
         assert!(!written.contains("settleSecs"), "{written}");
@@ -276,7 +265,15 @@ mod tests {
         assert_eq!(f["return_to_primary"], false);
         assert_eq!(f["confirm_ticks"], 7);
         let d = serde_json::to_value(&p.drain).unwrap();
-        assert_eq!(d["settle_secs"], 42);
+        assert!(d.get("settle_secs").is_none());
+    }
+
+    #[test]
+    fn legacy_settle_secs_key_is_ignored_on_read() {
+        let d: Drain =
+            serde_json::from_str(r#"{"enabled":true,"mode":"force","settle_secs":42}"#).unwrap();
+        assert_eq!(d.mode, DrainMode::Force);
+        assert!(!serde_json::to_string(&d).unwrap().contains("settle_secs"));
     }
 
     #[test]
@@ -298,7 +295,6 @@ mod tests {
             drain: Drain {
                 enabled: true,
                 mode: DrainMode::Force,
-                settle_secs: 30,
             },
         };
         let s = serde_json::to_string(&p).unwrap();
