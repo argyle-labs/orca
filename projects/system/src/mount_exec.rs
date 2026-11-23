@@ -103,29 +103,60 @@ pub fn umount_argv(target: &str) -> Vec<String> {
     ]
 }
 
+/// `mkdir` on a wedged hard mount to a dead server blocks in D-state forever;
+/// the blocking thread may linger but the async task gives up after this bound.
+const MOUNTPOINT_PREP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Create the mountpoint, force-releasing a stale/wedged handle on error or
+/// timeout (`umount -lf` is idempotent) and retrying once under the same bound.
+/// A stale NFS/CIFS handle makes the path exist but fail `stat`, so without the
+/// release convergence could never re-create the dir and never remount.
+async fn prepare_mountpoint_with<M, MF, U, UF, D, DF>(
+    target: &str,
+    mkdir: M,
+    release: U,
+    deadline: D,
+) -> Result<(), String>
+where
+    M: Fn(String) -> MF,
+    MF: std::future::Future<Output = std::io::Result<()>>,
+    U: Fn(String) -> UF,
+    UF: std::future::Future<Output = Result<(), String>>,
+    D: Fn() -> DF,
+    DF: std::future::Future<Output = ()>,
+{
+    let bounded = || async {
+        tokio::select! {
+            r = mkdir(target.to_string()) => r.map_err(|e| e.to_string()),
+            () = deadline() => Err("timed out; mountpoint unresponsive".to_string()),
+        }
+    };
+    let Err(first) = bounded().await else {
+        return Ok(());
+    };
+    // Best-effort: the retry below is authoritative for whether we can proceed.
+    let _released = release(target.to_string()).await;
+    bounded().await.map_err(|second| {
+        format!("create mountpoint {target}: {second} (stale-release retry after: {first})")
+    })
+}
+
 /// Realize `req` by exec-ing the native `mount` (root side). The mountpoint is
 /// created first (a missing target is the common first-mount case); `mkdir -p`
 /// is idempotent. Returns the trimmed stderr on failure so the convergence loop
 /// can log why a source failed before advancing to the next.
 pub async fn run_mount(req: &MountReq) -> Result<(), String> {
-    if let Err(e) = tokio::fs::create_dir_all(&req.target).await {
-        // A stale/wedged NFS handle at the mountpoint (dead server) makes the
-        // path exist but not `stat`/traverse, so `create_dir_all` fails EEXIST —
-        // the failure mode that wedged convergence: it could never re-create the
-        // dir, so it could never remount. Force-release the target (`umount -lf`
-        // is idempotent — "not mounted" is success) and retry once. A prior
-        // plan()-emitted lazy Unmount may also still be detaching; this collapses
-        // the release+remount so a stale handle self-heals in one tick.
-        // Best-effort release; the create_dir_all retry below is authoritative
-        // for whether we can proceed, so a umount error here is discarded.
-        let _released = run_umount(&req.target).await;
-        if let Err(e2) = tokio::fs::create_dir_all(&req.target).await {
-            return Err(format!(
-                "create mountpoint {}: {e2} (stale-release retry after: {e})",
-                req.target
-            ));
-        }
-    }
+    prepare_mountpoint_with(
+        &req.target,
+        |t| async move {
+            tokio::task::spawn_blocking(move || std::fs::create_dir_all(t))
+                .await
+                .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+        },
+        |t| async move { run_umount(&t).await },
+        || tokio::time::sleep(MOUNTPOINT_PREP_TIMEOUT),
+    )
+    .await?;
     // Materialize the backend-produced secret-file (0600, root) before mounting so
     // the mount helper can read it. Core validates the path against the secret-file
     // allowlist — it never trusts an arbitrary path from the plugin — but knows
@@ -266,5 +297,82 @@ mod tests {
     #[test]
     fn umount_argv_is_lazy_force_guarded() {
         assert_eq!(umount_argv("/mnt/data"), ["-l", "-f", "--", "/mnt/data"]);
+    }
+
+    fn dir_probe() -> (
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        Default::default()
+    }
+
+    #[tokio::test]
+    async fn prepare_healthy_target_does_not_release() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mk, rel) = dir_probe();
+        let (m, r) = (mk.clone(), rel.clone());
+        let out = prepare_mountpoint_with(
+            "/mnt/x",
+            move |_| {
+                m.fetch_add(1, SeqCst);
+                async { Ok(()) }
+            },
+            move |_| {
+                r.fetch_add(1, SeqCst);
+                async { Ok(()) }
+            },
+            std::future::pending::<()>,
+        )
+        .await;
+        assert_eq!(out, Ok(()));
+        assert_eq!((mk.load(SeqCst), rel.load(SeqCst)), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn prepare_mkdir_error_releases_then_retries() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mk, rel) = dir_probe();
+        let (m, r) = (mk.clone(), rel.clone());
+        let out = prepare_mountpoint_with(
+            "/mnt/x",
+            move |_| {
+                let n = m.fetch_add(1, SeqCst);
+                async move {
+                    if n == 0 {
+                        Err(std::io::Error::other("stale"))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            move |_| {
+                r.fetch_add(1, SeqCst);
+                async { Ok(()) }
+            },
+            std::future::pending::<()>,
+        )
+        .await;
+        assert_eq!(out, Ok(()));
+        assert_eq!((mk.load(SeqCst), rel.load(SeqCst)), (2, 1));
+    }
+
+    #[tokio::test]
+    async fn prepare_hung_mkdir_times_out_and_releases() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (_, rel) = dir_probe();
+        let r = rel.clone();
+        let out = prepare_mountpoint_with(
+            "/mnt/x",
+            |_| std::future::pending::<std::io::Result<()>>(),
+            move |_| {
+                r.fetch_add(1, SeqCst);
+                async { Ok(()) }
+            },
+            || std::future::ready(()),
+        )
+        .await;
+        let err = out.unwrap_err();
+        assert!(err.contains("timed out") && err.contains("/mnt/x"), "{err}");
+        assert_eq!(rel.load(SeqCst), 1);
     }
 }
