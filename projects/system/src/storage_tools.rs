@@ -1744,6 +1744,31 @@ async fn mount_recover(health_timeout_secs: Option<u64>) -> anyhow::Result<Stora
     r.recovered.append(&mut r.remounted);
     r.still_stale.append(&mut r.still_missing);
 
+    // Releasing a wedged mount leaves the target empty; only the converge pass
+    // elects a live source and mounts it, so run it now for what is still down.
+    let targets: Vec<String> = mounts.iter().map(|m| m.target.clone()).collect();
+    let down: Vec<String> = crate::autofs::probe_stale(&targets, timeout)
+        .await
+        .into_iter()
+        .filter(|t| !r.recovered.contains(t))
+        .collect();
+    if !down.is_empty() {
+        match crate::mount_converge::converge_now(crate::host_identity::machine_id(), Some(&down))
+            .await
+        {
+            Ok(outcomes) => fold_converge_outcomes(&mut r, &down, outcomes),
+            Err(e) => {
+                r.errors.push(format!("converge failed: {e}"));
+                for t in down {
+                    if !r.still_stale.contains(&t) {
+                        r.still_stale.push(t);
+                    }
+                }
+            }
+        }
+    }
+    r.no_stale_found = r.recovered.is_empty() && r.still_stale.is_empty();
+
     Ok(StorageRecoverOutput {
         recovered: r.recovered,
         still_stale: r.still_stale,
@@ -1751,6 +1776,35 @@ async fn mount_recover(health_timeout_secs: Option<u64>) -> anyhow::Result<Stora
         errors: r.errors,
         no_stale_found: r.no_stale_found,
     })
+}
+
+/// Recovered only when a mount from an elected live source is present afterward;
+/// anything else (no outcome, or an error) stays still_stale with its reason.
+fn fold_converge_outcomes(
+    r: &mut MergedRecover,
+    down: &[String],
+    outcomes: Vec<crate::mount_converge::TargetOutcome>,
+) {
+    for t in down {
+        let outcome = outcomes.iter().find(|o| o.target == *t);
+        match outcome {
+            Some(o) if o.source.is_some() && o.error.is_none() => {
+                r.still_stale.retain(|s| s != t);
+                if !r.recovered.contains(t) {
+                    r.recovered.push(t.clone());
+                }
+            }
+            other => {
+                let why = other
+                    .and_then(|o| o.error.clone())
+                    .unwrap_or_else(|| "no mount was attempted".to_string());
+                r.errors.push(format!("{t}: {why}"));
+                if !r.still_stale.contains(t) {
+                    r.still_stale.push(t.clone());
+                }
+            }
+        }
+    }
 }
 
 // ── mount.update{action=unmount} ─────────────────────────────────────

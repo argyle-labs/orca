@@ -29,7 +29,7 @@ use plugin_toolkit::storage::{
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -1153,20 +1153,45 @@ fn elected_source(election: &Election) -> Option<String> {
 /// Spawn the per-host convergence loop. Returns the periodic handle the daemon
 /// leaks for the process lifetime (scheduler convention).
 pub fn spawn() -> JoinHandle<()> {
-    // Per-target consecutive-stale counters (the confirm-ticks blip filter),
-    // shared across ticks.
-    let counters = Arc::new(Mutex::new(HashMap::<String, u32>::new()));
     periodic::spawn(
         periodic::PeriodicSpec {
             name: "storage.converge.run",
             initial_delay: Duration::from_secs(12),
             interval: Duration::from_secs(INTERVAL_SECS),
         },
-        periodic::boxed(move || {
-            let counters = counters.clone();
-            async move { tick(&counters).await }
-        }),
+        periodic::boxed(|| async { tick(shared_counters()).await }),
     )
+}
+
+/// Per-target consecutive-stale counters (the confirm-ticks blip filter) and
+/// mount-failure backoff, shared by the tick and operator-invoked converges.
+fn shared_counters() -> &'static Mutex<HashMap<String, u32>> {
+    static COUNTERS: std::sync::OnceLock<Mutex<HashMap<String, u32>>> = std::sync::OnceLock::new();
+    COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Serializes whole reconcile passes so an operator-invoked converge never
+/// interleaves with a tick on the ledger, the mount table, or privileged ops.
+static RECONCILE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Result of one operator-driven reconcile for a single target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetOutcome {
+    pub target: String,
+    /// The source now mounted at the target, when a mount from a live source is present.
+    pub source: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Run the tick's reconcile now for `targets` (all desired targets when `None`).
+/// The operator's request stands as confirmation, so a stale target is released
+/// and remounted from the elected live source without waiting for
+/// `CONFIRM_TICKS`. Returns one outcome per target a mount was attempted for.
+pub async fn converge_now(
+    this_host: &str,
+    targets: Option<&[String]>,
+) -> anyhow::Result<Vec<TargetOutcome>> {
+    reconcile(shared_counters(), this_host, targets, true).await
 }
 
 /// One convergence pass for this host: resolve desired placements, probe each,
@@ -1176,7 +1201,24 @@ pub fn spawn() -> JoinHandle<()> {
 /// ledger whose live source still matches; a mount orca neither performed nor
 /// source-verified adopted is never touched.
 async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
-    let this_host = host_identity::machine_id();
+    reconcile(counters, host_identity::machine_id(), None, false).await?;
+    Ok(())
+}
+
+/// The body shared by [`tick`] and [`converge_now`]. `scope` limits the actions
+/// taken to those targets (and skips orphan release and the backend sweep, which
+/// are whole-host concerns); `confirmed` treats an in-scope stale target as
+/// already past the confirm-ticks filter.
+async fn reconcile(
+    counters: &Mutex<HashMap<String, u32>>,
+    this_host: &str,
+    scope: Option<&[String]>,
+    confirmed: bool,
+) -> anyhow::Result<Vec<TargetOutcome>> {
+    let _pass = RECONCILE_LOCK.lock().await;
+    let in_scope =
+        |t: &str| scope.is_none_or(|s| s.iter().any(|x| norm_target(x) == norm_target(t)));
+    let mut outcomes: Vec<TargetOutcome> = Vec::new();
     let desired = desired_for_host(this_host)?;
     let desired_targets: HashSet<String> = desired.iter().map(|d| d.target.clone()).collect();
     let secret_files = resolve_secret_files(&desired).await;
@@ -1211,8 +1253,7 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         .map(|e| (e.mountpoint, e.options))
         .collect();
 
-    // No lock needed: `periodic::spawn` awaits each tick before the next, and
-    // this loop is the ledger's only writer.
+    // `RECONCILE_LOCK` makes this pass the ledger's only writer.
     let mut ledger = load_ledger();
     let mut ids = load_ids();
     for d in &desired {
@@ -1295,20 +1336,25 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         // failover confirm streak every tick, so a healthy mount on a held/drained
         // source could never accrue `confirm_ticks` and would never swap off it.
         c.retain(|t, _| keep_stale_counter_key(t, &desired));
-        let mut confirmed = HashSet::new();
+        let mut confirmed_set = HashSet::new();
         for d in &desired {
             if stale_now.contains(&d.target) {
+                if confirmed && in_scope(&d.target) {
+                    confirmed_set.insert(d.target.clone());
+                    c.remove(&d.target);
+                    continue;
+                }
                 let n = c.entry(d.target.clone()).or_insert(0);
                 *n += 1;
                 if *n >= CONFIRM_TICKS {
-                    confirmed.insert(d.target.clone());
+                    confirmed_set.insert(d.target.clone());
                     *n = 0; // reset so a still-down mount re-confirms
                 }
             } else {
                 c.remove(&d.target);
             }
         }
-        confirmed
+        confirmed_set
     };
     for d in &desired {
         if stale_now.contains(&d.target) && !confirmed_stale.contains(&d.target) {
@@ -1500,8 +1546,14 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         ),
         &ledger,
     );
-    for t in &orphan_unmounts {
-        actions.push(Action::Unmount { target: t.clone() });
+    if scope.is_some() {
+        actions.retain(|a| match a {
+            Action::Unmount { target } | Action::Mount { target } => in_scope(target),
+        });
+    } else {
+        for t in &orphan_unmounts {
+            actions.push(Action::Unmount { target: t.clone() });
+        }
     }
     // No early-return on an empty plan: the execution blocks below already no-op
     // when there is nothing to mount/unmount, and the tail must still run the
@@ -1569,6 +1621,11 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
                                         "[converge] {target} already mounted from a desired \
                                          source; adopting (no remount)"
                                     );
+                                    outcomes.push(TargetOutcome {
+                                        target: target.clone(),
+                                        source: active_by_target.get(target.as_str()).cloned(),
+                                        error: None,
+                                    });
                                     continue;
                                 }
                                 MountExec::Foreign(active) => {
@@ -1577,6 +1634,11 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
                                          (desired {src}); refusing to stack — a safe replace \
                                          requires the drain/unmount path, leaving as-is"
                                     );
+                                    outcomes.push(TargetOutcome {
+                                        target: target.clone(),
+                                        source: None,
+                                        error: Some(format!("occupied by foreign mount {active}")),
+                                    });
                                     continue;
                                 }
                                 MountExec::Proceed => {}
@@ -1585,12 +1647,22 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
                         info!("[converge] {target}: elected source {src}");
                         reqs.push(mount_req(d, &src, secret_files.get(target).cloned()));
                     }
-                    None => warn!(
-                        "[converge] {} has NO live source ({} ordered sources down); \
-                         leaving unmounted",
-                        target,
-                        d.sources.len()
-                    ),
+                    None => {
+                        warn!(
+                            "[converge] {} has NO live source ({} ordered sources down); \
+                             leaving unmounted",
+                            target,
+                            d.sources.len()
+                        );
+                        outcomes.push(TargetOutcome {
+                            target: target.clone(),
+                            source: None,
+                            error: Some(format!(
+                                "no live source ({} ordered sources down)",
+                                d.sources.len()
+                            )),
+                        });
+                    }
                 }
             }
         }
@@ -1648,6 +1720,23 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         for e in &r.errors {
             warn!("[converge] mount error: {e}");
         }
+        for req in &attempted {
+            let done = r
+                .changed
+                .iter()
+                .any(|c| norm_target(c) == norm_target(&req.0));
+            outcomes.push(TargetOutcome {
+                target: req.0.clone(),
+                source: done.then(|| req.1.clone()),
+                error: (!done).then(|| {
+                    if r.errors.is_empty() {
+                        "mount was not applied".to_string()
+                    } else {
+                        r.errors.join("; ")
+                    }
+                }),
+            });
+        }
     }
 
     sync_secret_files(&secret_files, &secret_keep).await;
@@ -1694,7 +1783,11 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
     // containers itself — it only calls the backend. Runs every tick (healthy
     // hosts included), which is exactly where consumer-stale surfaces.
     let policy = remediation_policy();
-    if policy.acts() {
+    if scope.is_some() {
+        debug!(
+            "[converge] scoped converge; leaving the backend consumer recovery sweep to the tick"
+        );
+    } else if policy.acts() {
         let merged = crate::storage_tools::recover_backends_only(
             desired
                 .iter()
@@ -1753,7 +1846,7 @@ async fn tick(counters: &Mutex<HashMap<String, u32>>) -> anyhow::Result<()> {
         &drift_by_target,
         &mount_count_by_target,
     );
-    Ok(())
+    Ok(outcomes)
 }
 
 /// One guest mount orca has applied, keyed by `(guest, target, applier)`. Only
@@ -4946,6 +5039,171 @@ mod tests {
             let res = block_on(tick(&counters));
             assert!(res.is_ok(), "acting-policy tick returns Ok: {res:?}");
             assert!(load_ledger().is_empty());
+        });
+    }
+
+    // ── converge_now: operator-driven reconcile ───────────────────────────
+
+    struct ConvBackend(u16);
+
+    #[derive::orca_async]
+    impl plugin_toolkit::storage::StorageBackend for ConvBackend {
+        fn name(&self) -> &str {
+            "conv-backend"
+        }
+        fn kind(&self) -> plugin_toolkit::storage::StorageKind {
+            plugin_toolkit::storage::StorageKind::NetworkShare
+        }
+        fn capabilities(&self) -> Vec<plugin_toolkit::storage::StorageCapability> {
+            Vec::new()
+        }
+        fn endpoint(&self) -> String {
+            "fake://conv-backend".into()
+        }
+        fn net_fstypes(&self) -> Vec<String> {
+            vec!["convfs".into()]
+        }
+        fn default_source_port(&self) -> Option<u16> {
+            Some(self.0)
+        }
+    }
+
+    fn insert_conv_share(id: &str, port: u16) {
+        let route = Route {
+            path: Some("/export".to_string()),
+            ..Route::new("lan_v4", "smb", "127.0.0.1", Some(port))
+        };
+        let row = shares::EndpointRow {
+            id: id.to_string(),
+            name: format!("share-{id}"),
+            backend: "conv-backend".into(),
+            fstype: "convfs".into(),
+            options: String::new(),
+            credential: None,
+            replication: None,
+            sync_targets: "[]".to_string(),
+            fleet_export: false,
+            routes: plugin_toolkit::route::Routes::from(vec![route]),
+            enabled: true,
+        };
+        shares::endpoint_db::insert(&row).expect("insert share");
+    }
+
+    fn mounted_reply(target: &str) -> std::sync::Arc<utils::privileged::testing::Recorder> {
+        utils::privileged::testing::Recorder::new(utils::privileged::PrivilegedOutput {
+            success: true,
+            stdout: format!(r#"{{"changed":["{target}"],"restarted":false,"errors":[]}}"#)
+                .into_bytes(),
+            ..Default::default()
+        })
+    }
+
+    /// Run `f` with a registered fake backend probing `port`, a temp db and ORCA_HOME.
+    fn with_conv_env(name: &str, port: u16, f: impl FnOnce(&str)) {
+        let _env = crate::test_env::snapshot();
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("ORCA_HOME", dir.path()) };
+        crate::host_identity::init(dir.path()).ok();
+        let _reg = crate::test_storage::Registered::new(std::sync::Arc::new(ConvBackend(port)));
+        with_db(name, || f(host_identity::machine_id()));
+    }
+
+    fn live_port() -> (std::net::TcpListener, u16) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let p = l.local_addr().unwrap().port();
+        (l, p)
+    }
+
+    fn dead_port() -> u16 {
+        live_port().1
+    }
+
+    #[test]
+    #[serial_test::serial(env, storage_registry)]
+    fn converge_now_mounts_elected_live_source_in_one_call() {
+        let (_listener, port) = live_port();
+        with_conv_env("conv_live.db", port, |host| {
+            insert_conv_share("sh-1", port);
+            insert_mount("m-1", "sh-1", host, "/mnt/conv-a", true);
+            let rec = mounted_reply("/mnt/conv-a");
+            let out = block_on(utils::privileged::testing::with_exec(
+                rec.clone(),
+                converge_now(host, Some(&["/mnt/conv-a".to_string()])),
+            ))
+            .expect("converge ok");
+            assert_eq!(
+                out,
+                vec![TargetOutcome {
+                    target: "/mnt/conv-a".into(),
+                    source: Some("//127.0.0.1/export".to_string()),
+                    error: None,
+                }]
+            );
+            assert_eq!(rec.calls().len(), 1, "one Mount op, no tick wait");
+            assert!(load_ledger().contains_key("/mnt/conv-a"));
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env, storage_registry)]
+    fn converge_now_without_live_source_reports_reason_and_mounts_nothing() {
+        let port = dead_port();
+        with_conv_env("conv_dead.db", port, |host| {
+            insert_conv_share("sh-1", port);
+            insert_mount("m-1", "sh-1", host, "/mnt/conv-b", true);
+            let rec = mounted_reply("/mnt/conv-b");
+            let out = block_on(utils::privileged::testing::with_exec(
+                rec.clone(),
+                converge_now(host, Some(&["/mnt/conv-b".to_string()])),
+            ))
+            .expect("converge ok");
+            assert_eq!(out.len(), 1);
+            assert!(out[0].source.is_none());
+            assert!(out[0].error.as_deref().unwrap().contains("no live source"));
+            assert!(rec.calls().is_empty(), "nothing mounted");
+            assert!(!load_ledger().contains_key("/mnt/conv-b"));
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env, storage_registry)]
+    fn converge_now_leaves_targets_outside_scope_untouched() {
+        let (_listener, port) = live_port();
+        with_conv_env("conv_scope.db", port, |host| {
+            insert_conv_share("sh-1", port);
+            insert_mount("m-1", "sh-1", host, "/mnt/conv-c", true);
+            insert_mount("m-2", "sh-1", host, "/mnt/conv-d", true);
+            let rec = mounted_reply("/mnt/conv-c");
+            let out = block_on(utils::privileged::testing::with_exec(
+                rec.clone(),
+                converge_now(host, Some(&["/mnt/conv-c".to_string()])),
+            ))
+            .expect("converge ok");
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].target, "/mnt/conv-c");
+            assert_eq!(rec.calls().len(), 1);
+            assert!(!load_ledger().contains_key("/mnt/conv-d"));
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(env, storage_registry)]
+    fn converge_now_waits_for_a_running_tick() {
+        let (_listener, port) = live_port();
+        with_conv_env("conv_lock.db", port, |host| {
+            insert_conv_share("sh-1", port);
+            insert_mount("m-1", "sh-1", host, "/mnt/conv-e", true);
+            let rec = mounted_reply("/mnt/conv-e");
+            block_on(utils::privileged::testing::with_exec(rec.clone(), async {
+                let targets = ["/mnt/conv-e".to_string()];
+                let held = RECONCILE_LOCK.lock().await;
+                let mut fut = Box::pin(converge_now(host, Some(&targets)));
+                assert!(futures::poll!(&mut fut).is_pending(), "blocked by the lock");
+                drop(held);
+                let out = fut.await.expect("converge ok");
+                assert_eq!(out.len(), 1);
+            }));
+            assert_eq!(rec.calls().len(), 1);
         });
     }
 }
