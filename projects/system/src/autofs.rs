@@ -1740,6 +1740,8 @@ where
 pub struct RecoverOutcome {
     pub recovered: Vec<String>,
     pub still_stale: Vec<String>,
+    /// Probes clean but no mount is present at the target (bare directory).
+    pub still_missing: Vec<String>,
     pub healthy: Vec<String>,
     pub errors: Vec<String>,
     pub no_stale_found: bool,
@@ -2011,49 +2013,88 @@ pub async fn force_and_retrigger(
     allow_reload: bool,
     health_timeout: Duration,
 ) -> (bool, Vec<String>) {
+    force_and_retrigger_with(&LiveRecoverEnv { health_timeout }, target, allow_reload).await
+}
+
+/// Side-effecting seams of the recovery ladder, injectable so the ladder's success
+/// judgement is testable without a kernel mount table or privileged helper.
+trait RecoverEnv {
+    async fn probe(&self, target: &str) -> MountHealth;
+    async fn has_no_mount(&self, target: &str) -> bool;
+    async fn reload(&self) -> Vec<String>;
+    async fn trigger(&self, target: &str) -> Vec<String>;
+    async fn release_then_trigger(&self, target: &str) -> Vec<String>;
+}
+
+struct LiveRecoverEnv {
+    health_timeout: Duration,
+}
+
+impl RecoverEnv for LiveRecoverEnv {
+    async fn probe(&self, target: &str) -> MountHealth {
+        probe(target, self.health_timeout).await
+    }
+    async fn has_no_mount(&self, target: &str) -> bool {
+        target_has_no_mount(target).await
+    }
+    async fn reload(&self) -> Vec<String> {
+        force_reload().await
+    }
+    async fn trigger(&self, target: &str) -> Vec<String> {
+        trigger(&[target.to_string()]).await
+    }
+    async fn release_then_trigger(&self, target: &str) -> Vec<String> {
+        release_then_trigger(
+            target,
+            || release_by_id(target),
+            || async { trigger(&[target.to_string()]).await },
+        )
+        .await
+    }
+}
+
+/// Recovered means probe `Ok` AND a mount-table entry at the target: after the
+/// direct map is retired, a released mount leaves a bare directory that `stat`s clean.
+async fn is_live<E: RecoverEnv>(env: &E, target: &str) -> bool {
+    matches!(env.probe(target).await, MountHealth::Ok) && !env.has_no_mount(target).await
+}
+
+async fn force_and_retrigger_with<E: RecoverEnv>(
+    env: &E,
+    target: &str,
+    allow_reload: bool,
+) -> (bool, Vec<String>) {
     let mut errors = Vec::new();
-    let one = |t: &str| vec![t.to_string()];
 
     // Rung 1: autofs isn't providing the mount — reload, then trigger. Fires when
     // the path probes `Missing` OR when the mount table has no entry at all for the
     // target (bare-dir false positive: the direct-map trigger never loaded, so
     // `stat` succeeds and `probe` reports `Ok` even though nothing is mounted — the
     // frigg `/mnt/data` case). Gated on source reachability so a down server never
-    // churns the global autofs restart. Success requires a REAL mount to appear
-    // (mount-table entry), not merely a clean `stat` on the same bare dir.
-    let missing_or_no_entry = matches!(probe(target, health_timeout).await, MountHealth::Missing)
-        || target_has_no_mount(target).await;
+    // churns the global autofs restart.
+    let missing_or_no_entry =
+        matches!(env.probe(target).await, MountHealth::Missing) || env.has_no_mount(target).await;
     if allow_reload && missing_or_no_entry {
-        errors.extend(force_reload().await);
-        errors.extend(trigger(&one(target)).await);
-        if matches!(probe(target, health_timeout).await, MountHealth::Ok)
-            && !target_has_no_mount(target).await
-        {
+        errors.extend(env.reload().await);
+        errors.extend(env.trigger(target).await);
+        if is_live(env, target).await {
             return (true, errors);
         }
     }
 
     // Rung 2: lazy-unmount the (possibly wedged) handle + retrigger for failover.
-    errors.extend(
-        release_then_trigger(
-            target,
-            || release_by_id(target),
-            || async { trigger(&one(target)).await },
-        )
-        .await,
-    );
-    if matches!(probe(target, health_timeout).await, MountHealth::Ok) {
+    errors.extend(env.release_then_trigger(target).await);
+    if is_live(env, target).await {
         return (true, errors);
     }
 
     // Rung 3: last escalation — force a reload and retrigger once more. Still gated
     // on source reachability to avoid restarting autofs against a dead server.
     if allow_reload {
-        errors.extend(force_reload().await);
-        errors.extend(trigger(&one(target)).await);
+        errors.extend(env.reload().await);
+        errors.extend(env.trigger(target).await);
     }
-    let recovered = matches!(probe(target, health_timeout).await, MountHealth::Ok);
-    (recovered, errors)
+    (is_live(env, target).await, errors)
 }
 
 /// Self-heal the one failure mode autofs can't recover on its own: an
@@ -2063,6 +2104,10 @@ pub async fn force_and_retrigger(
 /// stale probe. The automated per-host loop instead confirms across several
 /// ticks before acting (see [`crate::mount_converge`]).
 pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOutcome {
+    recover_with(&LiveRecoverEnv { health_timeout }, targets).await
+}
+
+async fn recover_with<E: RecoverEnv>(env: &E, targets: &[String]) -> RecoverOutcome {
     let mut out = RecoverOutcome::default();
 
     for target in targets {
@@ -2072,18 +2117,23 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
         // WriteDenied where only server-side perms are wrong — a remount can't fix
         // that); Indeterminate = never acted on (a probe glitch must not
         // force-release a healthy mount); Recover = force-release + retrigger.
-        match probe(target, health_timeout).await.recovery_action() {
-            RecoveryAction::Leave => out.healthy.push(target.clone()),
+        let action = env.probe(target).await.recovery_action();
+        // A bare directory probes Ok but serves nothing: treat as missing.
+        let bare = matches!(action, RecoveryAction::Leave) && env.has_no_mount(target).await;
+        match action {
+            RecoveryAction::Leave if !bare => out.healthy.push(target.clone()),
             RecoveryAction::Indeterminate => out.errors.push(format!(
                 "probe {target}: indeterminate health, left untouched"
             )),
-            RecoveryAction::Recover => {
+            RecoveryAction::Leave | RecoveryAction::Recover => {
                 // On-demand `storage.mount.update{action=recover}`: user-initiated and one-shot, so allow
                 // the reload escalation (no periodic-restart churn risk here).
-                let (recovered, errs) = force_and_retrigger(target, true, health_timeout).await;
+                let (recovered, errs) = force_and_retrigger_with(env, target, true).await;
                 out.errors.extend(errs);
                 if recovered {
                     out.recovered.push(target.clone());
+                } else if matches!(env.probe(target).await, MountHealth::Ok) {
+                    out.still_missing.push(target.clone());
                 } else {
                     out.still_stale.push(target.clone());
                 }
@@ -2091,7 +2141,8 @@ pub async fn recover(targets: &[String], health_timeout: Duration) -> RecoverOut
         }
     }
 
-    out.no_stale_found = out.recovered.is_empty() && out.still_stale.is_empty();
+    out.no_stale_found =
+        out.recovered.is_empty() && out.still_stale.is_empty() && out.still_missing.is_empty();
     out
 }
 
@@ -4284,6 +4335,7 @@ mod tests {
         let o = RecoverOutcome {
             recovered: vec!["/mnt/a".into()],
             still_stale: vec!["/mnt/b".into()],
+            still_missing: vec![],
             healthy: vec!["/mnt/c".into()],
             errors: vec!["e".into()],
             no_stale_found: false,
@@ -4433,31 +4485,6 @@ mod tests {
         );
     }
 
-    // ── recover: an existing dir probes healthy and is never acted on ──────
-    #[tokio::test]
-    async fn recover_healthy_target_is_classified_healthy_not_recovered() {
-        // A real, existing directory stats clean → `probe_health` => MountHealth::Ok,
-        // so `recover` must route it to `healthy` and take NO recovery action
-        // (no reload, no unmount). Deterministic: no network, no privilege.
-        let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().to_str().unwrap().to_string();
-        let out = recover(std::slice::from_ref(&target), Duration::from_millis(500)).await;
-        assert_eq!(out.healthy, vec![target], "existing dir is healthy");
-        assert!(
-            out.recovered.is_empty(),
-            "a healthy target is never recovered"
-        );
-        assert!(out.still_stale.is_empty());
-        assert!(
-            out.errors.is_empty(),
-            "healthy sweep records no errors: {out:?}"
-        );
-        assert!(
-            out.no_stale_found,
-            "no recovered and no still-stale => no stale found"
-        );
-    }
-
     // ── plan: read-only take-over-merge + file diff (no privileged spawn) ─────
     //
     // `plan` only reads the host's (world-readable) master file and diffs the
@@ -4578,6 +4605,113 @@ mod tests {
     async fn force_reload_surfaces_helper_errors_without_a_grant() {
         let errors = force_reload().await;
         assert!(!errors.is_empty(), "{errors:?}");
+    }
+
+    struct FakeEnv {
+        health: MountHealth,
+        mounted_before: bool,
+        mounted_after_release: bool,
+        calls: std::sync::Mutex<Vec<&'static str>>,
+        released: std::sync::atomic::AtomicBool,
+    }
+
+    impl FakeEnv {
+        fn new(health: MountHealth, before: bool, after: bool) -> Self {
+            Self {
+                health,
+                mounted_before: before,
+                mounted_after_release: after,
+                calls: Default::default(),
+                released: Default::default(),
+            }
+        }
+        fn called(&self, c: &str) -> bool {
+            self.calls.lock().unwrap().contains(&c)
+        }
+    }
+
+    impl RecoverEnv for FakeEnv {
+        async fn probe(&self, _: &str) -> MountHealth {
+            if self.released.load(std::sync::atomic::Ordering::SeqCst) {
+                MountHealth::Ok
+            } else {
+                self.health
+            }
+        }
+        async fn has_no_mount(&self, _: &str) -> bool {
+            let released = self.released.load(std::sync::atomic::Ordering::SeqCst);
+            !(if released {
+                self.mounted_after_release
+            } else {
+                self.mounted_before
+            })
+        }
+        async fn reload(&self) -> Vec<String> {
+            self.calls.lock().unwrap().push("reload");
+            vec![]
+        }
+        async fn trigger(&self, _: &str) -> Vec<String> {
+            vec![]
+        }
+        async fn release_then_trigger(&self, _: &str) -> Vec<String> {
+            self.calls.lock().unwrap().push("release");
+            self.released
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn released_bare_directory_is_not_recovered() {
+        let env = FakeEnv::new(MountHealth::Stale, true, false);
+        let (ok, _) = force_and_retrigger_with(&env, "/mnt/data", false).await;
+        assert!(!ok, "probe Ok on a bare dir must not count as recovered");
+    }
+
+    #[tokio::test]
+    async fn released_bare_directory_is_reported_missing() {
+        let env = FakeEnv::new(MountHealth::Stale, true, false);
+        let out = recover_with(&env, &["/mnt/data".to_string()]).await;
+        assert!(
+            out.recovered.is_empty() && out.healthy.is_empty(),
+            "{out:?}"
+        );
+        assert!(out.still_stale.is_empty(), "{out:?}");
+        assert_eq!(out.still_missing, vec!["/mnt/data".to_string()]);
+        assert!(!out.no_stale_found);
+    }
+
+    #[tokio::test]
+    async fn bare_directory_at_declared_target_is_missing_not_healthy() {
+        let env = FakeEnv::new(MountHealth::Ok, false, false);
+        let out = recover_with(&env, &["/mnt/data".to_string()]).await;
+        assert!(out.healthy.is_empty(), "{out:?}");
+        assert_eq!(out.still_missing, vec!["/mnt/data".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn real_mount_after_release_is_recovered() {
+        let env = FakeEnv::new(MountHealth::Stale, true, true);
+        let out = recover_with(&env, &["/mnt/data".to_string()]).await;
+        assert_eq!(out.recovered, vec!["/mnt/data".to_string()]);
+        assert!(env.called("release"));
+    }
+
+    #[tokio::test]
+    async fn healthy_mounted_target_is_untouched() {
+        let env = FakeEnv::new(MountHealth::Ok, true, true);
+        let out = recover_with(&env, &["/mnt/data".to_string()]).await;
+        assert_eq!(out.healthy, vec!["/mnt/data".to_string()]);
+        assert!(!env.called("release") && !env.called("reload"));
+    }
+
+    #[tokio::test]
+    async fn indeterminate_is_never_released() {
+        let env = FakeEnv::new(MountHealth::Error, true, true);
+        let out = recover_with(&env, &["/mnt/data".to_string()]).await;
+        assert!(!env.called("release") && !env.called("reload"));
+        assert!(out.recovered.is_empty() && out.still_missing.is_empty());
+        assert_eq!(out.errors.len(), 1);
     }
 
     // ── force_and_retrigger: a permanently-missing target is never recovered ──
