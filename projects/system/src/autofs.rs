@@ -1471,16 +1471,36 @@ pub async fn elect_live_source(m: &ManagedMount, probe_timeout: Duration) -> Ele
 /// Is `target` currently held open by a process (a container reading it)?
 /// Best-effort, unprivileged (`fuser -sm`): a busy mount must not be forcibly
 /// remounted under the Safe policy — we log a pending failback instead. A probe
-/// error is treated as **busy** (fail safe: never disrupt on uncertainty).
+/// error is treated as **busy** (fail safe: never disrupt on uncertainty). A
+/// probe that times out is treated as **not busy**: `fuser -m` stats the mount,
+/// so a wedged mount that cannot answer must still reach the release path.
 pub(crate) async fn is_busy(target: &str) -> bool {
-    match Command::new("fuser")
-        .args(["-sm", "--", target])
-        .output()
-        .await
-    {
-        // `fuser -s` exits 0 when *something* holds the path, 1 when nothing does.
-        Ok(out) => out.status.success(),
-        Err(_) => true,
+    is_busy_with(
+        target,
+        |t| async move {
+            Command::new("fuser")
+                .args(["-sm", "--", &t])
+                .kill_on_drop(true)
+                .output()
+                .await
+                // `fuser -s` exits 0 when *something* holds the path, 1 when nothing does.
+                .map(|out| out.status.success())
+        },
+        || tokio::time::sleep(TRIGGER_TIMEOUT),
+    )
+    .await
+}
+
+async fn is_busy_with<R, F, D, DF>(target: &str, run: R, deadline: D) -> bool
+where
+    R: Fn(String) -> F,
+    F: std::future::Future<Output = std::io::Result<bool>>,
+    D: Fn() -> DF,
+    DF: std::future::Future<Output = ()>,
+{
+    tokio::select! {
+        r = run(target.to_string()) => r.unwrap_or(true),
+        () = deadline() => false,
     }
 }
 
@@ -3522,6 +3542,39 @@ mod tests {
         .await;
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("still stale"), "{errors:?}");
+    }
+
+    #[tokio::test]
+    async fn busy_probe_reports_busy() {
+        let busy = is_busy_with(
+            "/mnt/x",
+            |_| std::future::ready(Ok(true)),
+            std::future::pending::<()>,
+        )
+        .await;
+        assert!(busy);
+    }
+
+    #[tokio::test]
+    async fn idle_probe_reports_not_busy() {
+        let busy = is_busy_with(
+            "/mnt/x",
+            |_| std::future::ready(Ok(false)),
+            std::future::pending::<()>,
+        )
+        .await;
+        assert!(!busy);
+    }
+
+    #[tokio::test]
+    async fn probe_that_never_answers_proceeds_to_release() {
+        let busy = is_busy_with(
+            "/mnt/x",
+            |_| std::future::pending::<std::io::Result<bool>>(),
+            || std::future::ready(()),
+        )
+        .await;
+        assert!(!busy);
     }
 
     #[tokio::test]
