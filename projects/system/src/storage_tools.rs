@@ -1855,11 +1855,16 @@ fn outcome_from_result(
     } else {
         "no network mount to release"
     };
+    let detail = if r.warnings.is_empty() {
+        detail.to_string()
+    } else {
+        format!("{detail} (warnings: {})", r.warnings.join("; "))
+    };
     Ok(MountOutcome {
         target: target.to_string(),
         mounted: !r.unchanged.is_empty(),
         recovered: false,
-        detail: Some(detail.into()),
+        detail: Some(detail),
     })
 }
 
@@ -4761,6 +4766,24 @@ mod tests {
         let o = outcome_from_result("/x", lone).unwrap();
         assert!(o.mounted && !o.recovered);
         assert_eq!(o.detail.as_deref(), Some("no network mount to release"));
+    }
+
+    #[test]
+    fn outcome_surfaces_warnings_without_failing() {
+        let r = crate::autofs::PrivilegedResult {
+            warnings: vec!["ledger cleanup failed".into()],
+            ..Default::default()
+        };
+        let o = outcome_from_result("/x", r).unwrap();
+        let d = o.detail.unwrap();
+        assert!(d.starts_with("released via privileged helper"));
+        assert!(d.contains("ledger cleanup failed"));
+        let both = crate::autofs::PrivilegedResult {
+            errors: vec!["busy".into()],
+            warnings: vec!["w".into()],
+            ..Default::default()
+        };
+        assert!(outcome_from_result("/x", both).is_err());
     }
 
     #[test]
