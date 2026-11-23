@@ -1210,22 +1210,68 @@ async fn execute_release(ids: &[String]) -> PrivilegedResult {
         ids,
         &declared_map_keys(&mapped),
         network_sources,
+        orca_owned,
         |t| async move { force_unmount(&t).await },
     )
     .await
 }
 
+/// Runs one mount and records its ledger row under one ledger lock, so a Release
+/// cannot interleave between the mount and the row.
+async fn mount_locked<R, F, T>(
+    path: &str,
+    m: &crate::mount_exec::MountReq,
+    run: R,
+    table: T,
+    res: &mut PrivilegedResult,
+) where
+    R: FnOnce(crate::mount_exec::MountReq) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+    T: FnOnce() -> std::io::Result<Vec<MountEntry>>,
+{
+    let _lock = match lock_ledger(path).await {
+        Ok(l) => l,
+        Err(e) => {
+            res.errors.push(format!(
+                "mount {} from {}: refused: {e}",
+                m.target, m.source
+            ));
+            return;
+        }
+    };
+    match run(m.clone()).await {
+        Ok(()) => {
+            res.changed.push(m.target.clone());
+            match observed_ledger_entry(table(), &m.target) {
+                Ok(entry) => {
+                    if let Err(e) =
+                        ledger_update_locked(path, &[(m.placement_id.clone(), entry)], &[]).await
+                    {
+                        res.errors.push(e);
+                    }
+                }
+                Err(w) => res.warnings.push(w),
+            }
+        }
+        Err(e) => res
+            .errors
+            .push(format!("mount {} from {}: {e}", m.target, m.source)),
+    }
+}
+
 /// Holds the ledger lock from the authorization check through the last umount so
 /// a concurrent Mount/Apply/Adopt cannot remount the target in between.
-async fn release_locked<S, U, F>(
+async fn release_locked<S, O, U, F>(
     path: &str,
     ids: &[String],
     map_keys: &std::collections::HashSet<String>,
     sources: S,
+    owned: O,
     umount: U,
 ) -> PrivilegedResult
 where
     S: Fn(&str) -> Result<Vec<String>, String>,
+    O: Fn(&str) -> Result<bool, String>,
     U: FnMut(String) -> F,
     F: std::future::Future<Output = Result<Unwound, String>>,
 {
@@ -1238,7 +1284,8 @@ where
             return res;
         }
     };
-    let (mut res, released) = guard_release(ids, || read_ledger(path), sources, umount).await;
+    let (mut res, released) =
+        guard_release(ids, || read_ledger(path), sources, owned, umount).await;
     if let Err(e) = ledger_release(path, &released, map_keys).await {
         res.warnings
             .push(format!("released, but ledger cleanup failed: {e}"));
@@ -1457,31 +1504,14 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
                     ));
                     continue;
                 }
-                match crate::mount_exec::run_mount(m).await {
-                    Ok(()) => {
-                        res.changed.push(m.target.clone());
-                        match observed_ledger_entry(
-                            plugin_toolkit::storage::mount_table::mount_table(),
-                            &m.target,
-                        ) {
-                            Ok(entry) => {
-                                if let Err(e) = ledger_update(
-                                    LEDGER_FILE,
-                                    &[(m.placement_id.clone(), entry)],
-                                    &[],
-                                )
-                                .await
-                                {
-                                    res.errors.push(e);
-                                }
-                            }
-                            Err(w) => res.warnings.push(w),
-                        }
-                    }
-                    Err(e) => res
-                        .errors
-                        .push(format!("mount {} from {}: {e}", m.target, m.source)),
-                }
+                mount_locked(
+                    LEDGER_FILE,
+                    m,
+                    |m| async move { crate::mount_exec::run_mount(&m).await },
+                    plugin_toolkit::storage::mount_table::mount_table,
+                    &mut res,
+                )
+                .await;
             }
             // Reap secret-files not in the authoritative keep-set (deleted mount /
             // rotated secret), scoped to `SECRET_FILE_DIR`. Same generic reaper the
@@ -2465,6 +2495,19 @@ async fn ledger_update(
     add: &[(String, LedgerEntry)],
     remove: &[String],
 ) -> Result<(), String> {
+    if add.is_empty() && remove.is_empty() {
+        return Ok(());
+    }
+    let _lock = lock_ledger(path).await?;
+    ledger_update_locked(path, add, remove).await
+}
+
+/// Body of [`ledger_update`] for a caller already holding [`lock_ledger`].
+async fn ledger_update_locked(
+    path: &str,
+    add: &[(String, LedgerEntry)],
+    remove: &[String],
+) -> Result<(), String> {
     let mut adds = Vec::with_capacity(add.len());
     for (id, e) in add {
         let target = normalize_unmount_target(&e.target)
@@ -2485,7 +2528,6 @@ async fn ledger_update(
     if adds.is_empty() && remove.is_empty() {
         return Ok(());
     }
-    let _lock = lock_ledger(path).await?;
     let mut ledger = parse_ledger(&read_ledger(path)?)?;
     let before = ledger.clone();
     for (id, e) in adds {
@@ -2546,6 +2588,7 @@ where
     if !valid_ledger_source(source) {
         return Err("invalid source".into());
     }
+    let _lock = lock_ledger(path).await?;
     let live = sources(&target).map_err(|e| format!("cannot read mount table: {e}"))?;
     if live.is_empty() {
         return Err("no network mount present at the target".into());
@@ -2556,7 +2599,6 @@ where
     if !owned(&target)? {
         return Err("mount does not look orca-managed: adopting a mount orca did not create requires a local admin; remote adopt only accepts cifs mounts using orca's service account".into());
     }
-    let _lock = lock_ledger(path).await?;
     let mut ledger = parse_ledger(&read_ledger(path)?)?;
     if ledger.contains_key(id) {
         return Err("placement id is already recorded".into());
@@ -2578,19 +2620,22 @@ where
 }
 
 /// Root-side gate for [`PrivilegedOp::Release`]: an id is released only if the root
-/// ledger holds it and a network layer is live at its recorded target. The live
-/// source is deliberately not compared: after a failover the ledger names the
-/// elected source while the wedged mount is still on the dead one. Returns the result (keyed by target) and the ids
-/// to drop from the ledger.
-async fn guard_release<G, S, U, F>(
+/// ledger holds it and a network layer is live at its recorded target. A live
+/// source differing from the ledger is fine only when orca made the mount: after
+/// a failover the ledger names the elected source while the wedged mount is
+/// still on the dead one. Returns the result (keyed by target) and the ids to
+/// drop from the ledger.
+async fn guard_release<G, S, O, U, F>(
     ids: &[String],
     read_ledger: G,
     sources: S,
+    owned: O,
     mut umount: U,
 ) -> (PrivilegedResult, Vec<String>)
 where
     G: FnOnce() -> Result<String, String>,
     S: Fn(&str) -> Result<Vec<String>, String>,
+    O: Fn(&str) -> Result<bool, String>,
     U: FnMut(String) -> F,
     F: std::future::Future<Output = Result<Unwound, String>>,
 {
@@ -2624,6 +2669,30 @@ where
                 continue;
             }
         };
+        // The row was true when recorded; a foreign mount may have replaced orca's
+        // since. Either orca made every layer or the live source is the ledgered one.
+        match owned(&entry.target) {
+            Ok(true) => {}
+            Ok(false) if live_sources_match(&checked, &entry.source) => {}
+            Ok(false) => {
+                res.errors.push(format!(
+                    "release {id}: refused: the mount now at {} is not one orca made and not the recorded source; dropping the stale ledger row",
+                    entry.target
+                ));
+                res.warnings.push(format!(
+                    "dropped stale ledger row {id} for {}: a foreign mount replaced it",
+                    entry.target
+                ));
+                released.push(id.clone());
+                continue;
+            }
+            Err(e) => {
+                res.errors.push(format!(
+                    "release {id}: refused: cannot verify ownership: {e}"
+                ));
+                continue;
+            }
+        }
         match sources(&entry.target) {
             Ok(now) if now == checked => {}
             Ok(_) => {
@@ -4652,8 +4721,9 @@ mod tests {
     async fn execute_privileged_mount_records_secret_file_refusal() {
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("media").to_str().unwrap().to_string();
-        let op = PrivilegedOp::Mount {
-            mounts: vec![crate::mount_exec::MountReq {
+        let ledger = tmp.path().join("ledger").to_str().unwrap().to_string();
+        let m = {
+            crate::mount_exec::MountReq {
                 placement_id: ID_A.into(),
                 source: "//host/share".into(),
                 target,
@@ -4663,10 +4733,17 @@ mod tests {
                     path: "/etc/orca/secret-files/../../shadow".into(),
                     contents: "username=x\npassword=y\n".into(),
                 }),
-            }],
-            keep_secret_files: Vec::new(),
+            }
         };
-        let res = execute_privileged(op).await;
+        let mut res = PrivilegedResult::default();
+        mount_locked(
+            &ledger,
+            &m,
+            |m| async move { crate::mount_exec::run_mount(&m).await },
+            || Ok(Vec::new()),
+            &mut res,
+        )
+        .await;
         assert!(res.changed.is_empty(), "no mount succeeded");
         assert_eq!(res.errors.len(), 1, "one mount error: {res:?}");
         assert!(
@@ -5113,6 +5190,7 @@ mod tests {
             &ids,
             || ledger,
             |_| Ok(vec![live_source.to_string()]),
+            |_| Ok(true),
             |t| {
                 calls.borrow_mut().push(t);
                 async { Ok(Unwound::Detached) }
@@ -5124,6 +5202,78 @@ mod tests {
 
     fn ledgered() -> Result<String, String> {
         Ok(format!("{ID_A}\t/mnt/data\t//willow/data\n"))
+    }
+
+    #[tokio::test]
+    async fn release_refuses_a_foreign_mount_at_the_target_and_drops_the_stale_row() {
+        let ids = vec![ID_A.to_string()];
+        let (res, released) = guard_release(
+            &ids,
+            ledgered,
+            |_| Ok(vec!["nas:/admin".to_string()]),
+            |_| Ok(false),
+            |_| async { panic!("must not umount") },
+        )
+        .await;
+        assert_eq!(released, vec![ID_A]);
+        assert!(res.changed.is_empty(), "{res:?}");
+        assert!(res.errors[0].contains("not one orca made"), "{res:?}");
+        assert!(res.warnings[0].contains("stale ledger row"), "{res:?}");
+    }
+
+    #[tokio::test]
+    async fn release_still_unmounts_an_orca_made_mount_live_from_another_source() {
+        let ids = vec![ID_A.to_string()];
+        let (res, released) = guard_release(
+            &ids,
+            ledgered,
+            |_| Ok(vec!["//dead/data".to_string()]),
+            |_| Ok(true),
+            |_| async { Ok(Unwound::Detached) },
+        )
+        .await;
+        assert_eq!(released, vec![ID_A]);
+        assert_eq!(res.changed, vec!["/mnt/data"]);
+        assert!(res.errors.is_empty(), "{res:?}");
+    }
+
+    #[tokio::test]
+    async fn mount_holds_the_ledger_lock_through_run_mount() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("ledger").to_str().unwrap().to_string();
+        let lock_path = format!("{p}.lock");
+        let blocked = std::cell::Cell::new(false);
+        let m = crate::mount_exec::MountReq {
+            placement_id: ID_A.to_string(),
+            source: "h:/x".into(),
+            target: "/mnt/data".into(),
+            fstype: "nfs4".into(),
+            options: String::new(),
+            secret_file: None,
+        };
+        let mut res = PrivilegedResult::default();
+        mount_locked(
+            &p,
+            &m,
+            |_| {
+                let f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .mode(0o600)
+                    .open(&lock_path)
+                    .unwrap();
+                let r = rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive);
+                blocked.set(r.is_err());
+                async { Ok(()) }
+            },
+            || Ok(Vec::new()),
+            &mut res,
+        )
+        .await;
+        assert!(blocked.get(), "Release could take the lock mid-mount");
+        assert_eq!(res.changed, vec!["/mnt/data"]);
     }
 
     #[tokio::test]
@@ -5139,6 +5289,7 @@ mod tests {
             &[ID_A.to_string()],
             &keys(&[]),
             |_| Ok(vec!["//willow/data".to_string()]),
+            |_| Ok(true),
             |_| {
                 let f = std::fs::OpenOptions::new()
                     .write(true)
@@ -5179,6 +5330,7 @@ mod tests {
                     .to_string(),
                 ])
             },
+            |_| Ok(true),
             |_| async { panic!("detached an unauthorized mount") },
         )
         .await;
@@ -5233,6 +5385,7 @@ mod tests {
             &ids,
             ledgered,
             |_| Ok(vec!["//dead/data".to_string()]),
+            |_| Ok(true),
             |_| {
                 unwind_stacked(
                     || Ok(table.borrow().clone()),
@@ -5291,6 +5444,7 @@ mod tests {
             &ids,
             ledgered,
             |_| Ok(Vec::new()),
+            |_| Ok(true),
             |_| async { panic!("must not umount") },
         )
         .await;
@@ -5342,6 +5496,7 @@ mod tests {
             &ids,
             ledgered,
             |_| Ok(vec!["//willow/data".to_string()]),
+            |_| Ok(true),
             |_| async { Ok(Unwound::Detached) },
         )
         .await;
@@ -5355,6 +5510,7 @@ mod tests {
             &ids,
             ledgered,
             |_| Ok(Vec::new()),
+            |_| Ok(true),
             |_| async { panic!("must not umount") },
         )
         .await;
@@ -5368,6 +5524,7 @@ mod tests {
             &ids,
             ledgered,
             |_| Ok(vec!["//willow/data".to_string()]),
+            |_| Ok(true),
             |_| async { Err("busy".to_string()) },
         )
         .await;
@@ -5610,6 +5767,7 @@ mod tests {
             &ids,
             || Ok(ledger),
             |_| Ok(vec!["h:/t".to_string()]),
+            |_| Ok(true),
             |_| async {
                 calls.set(calls.get() + 1);
                 unwind_stacked(|| Ok(table.borrow().clone()), || async { Ok(()) }).await
@@ -5830,6 +5988,7 @@ mod tests {
             &ids,
             || Ok(ledger.clone()),
             |_| Ok(vec!["h:/t".to_string()]),
+            |_| Ok(true),
             |_| async { Err("busy".to_string()) },
         )
         .await;
@@ -5854,6 +6013,7 @@ mod tests {
             &ids,
             || Ok(ledger),
             |_| Ok(vec!["h:/a".to_string()]),
+            |_| Ok(true),
             |_| async { Ok(Unwound::Detached) },
         )
         .await;
@@ -6306,6 +6466,7 @@ mod tests {
             &ids,
             || Ok(ledger),
             live("//willow/data"),
+            |_| Ok(true),
             |_| async { Ok(Unwound::Detached) },
         )
         .await;
