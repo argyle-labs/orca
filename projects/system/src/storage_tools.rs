@@ -1815,7 +1815,7 @@ fn plan_kernel_unmount(
     is_linux: bool,
     target: &str,
     table: std::io::Result<Vec<storage::mount_table::MountEntry>>,
-    declared_for_host: &[String],
+    declared_for_host: &Result<Vec<String>, String>,
 ) -> anyhow::Result<Option<String>> {
     if !is_linux {
         return Ok(None);
@@ -1827,7 +1827,17 @@ fn plan_kernel_unmount(
     if !kernel_mount_live(table, norm)? {
         return Ok(None);
     }
-    ensure_declared_target(target, declared_for_host)?;
+    // The DB is only needed for live network mounts; fuse and others never reach here.
+    let declared = declared_for_host.as_ref().map_err(|e| {
+        anyhow::anyhow!(
+            "cannot read the mounts database to release live network mount `{target}`: {e}"
+        )
+    })?;
+    ensure_declared_target(target, declared).map_err(|e| {
+        anyhow::anyhow!(
+            "{e}; declare it as a placement and release it with `--id <placement>` (or adopt it with `storage mount adopt` as super-admin first)"
+        )
+    })?;
     Ok(Some(norm.to_string()))
 }
 
@@ -1869,8 +1879,11 @@ fn outcome_from_result(
 }
 
 /// Linux kernel mounts (nfs/cifs) need root to release, so they go through the
-/// privileged helper, which also unwinds stacked mounts. `None` means the target
-/// is not a live kernel mount and the backend handles it.
+/// privileged helper, which also unwinds stacked mounts. Only a live network mount
+/// declared as a placement on this host is released here; an undeclared one is
+/// refused (this path has no caller context, so the super-admin `adopt` authorization
+/// cannot be applied) and a mounts-DB failure blocks only that case. `None` means the
+/// target is not a live kernel mount and the backend handles it.
 async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcome>> {
     let is_linux = cfg!(target_os = "linux");
     let table = if is_linux {
@@ -1881,15 +1894,16 @@ async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcom
     let (me, rows) = if is_linux {
         (
             crate::host_identity::machine_id(),
-            crate::mounts::endpoint_db::list()?,
+            crate::mounts::endpoint_db::list().map_err(|e| e.to_string()),
         )
     } else {
-        ("", Vec::new())
+        ("", Ok(Vec::new()))
     };
-    let declared = declared_targets_for_host(rows.clone(), me);
+    let declared = rows.clone().map(|r| declared_targets_for_host(r, me));
     let Some(norm) = plan_kernel_unmount(is_linux, target, table, &declared)? else {
         return Ok(None);
     };
+    let rows = rows.map_err(|e| anyhow::anyhow!(e))?;
     let id = placement_id_for(&rows, me, &norm)?;
     let r = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Release { ids: vec![id] })
         .await;
@@ -4598,7 +4612,8 @@ mod tests {
     #[test]
     fn plan_refuses_the_root_filesystem() {
         for t in ["/", "", "//"] {
-            let e = plan_kernel_unmount(true, t, Ok(vec![mt("/", "nfs4")]), &d("/")).unwrap_err();
+            let e =
+                plan_kernel_unmount(true, t, Ok(vec![mt("/", "nfs4")]), &Ok(d("/"))).unwrap_err();
             assert!(e.to_string().contains("root filesystem"), "{t:?}: {e}");
         }
     }
@@ -4655,7 +4670,12 @@ mod tests {
 
     #[test]
     fn plan_routes_a_declared_live_nfs_mount_with_the_normalized_target() {
-        let r = plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/a", "nfs4")]), &d("/mnt/a"));
+        let r = plan_kernel_unmount(
+            true,
+            "/mnt/a",
+            Ok(vec![mt("/mnt/a", "nfs4")]),
+            &Ok(d("/mnt/a")),
+        );
         assert_eq!(r.unwrap().as_deref(), Some("/mnt/a"));
     }
 
@@ -4665,25 +4685,68 @@ mod tests {
             true,
             "/mnt/a",
             Ok(vec![mt("/mnt/a", "fuse.rclone")]),
-            &d("/mnt/a"),
+            &Ok(d("/mnt/a")),
         );
         assert!(fuse.unwrap().is_none());
-        let absent =
-            plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/b", "nfs4")]), &d("/mnt/a"));
+        let absent = plan_kernel_unmount(
+            true,
+            "/mnt/a",
+            Ok(vec![mt("/mnt/b", "nfs4")]),
+            &Ok(d("/mnt/a")),
+        );
         assert!(absent.unwrap().is_none());
     }
 
     #[test]
+    fn plan_db_error_does_not_block_non_network_unmounts() {
+        let db = Err("db locked".to_string());
+        let fuse = plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/a", "fuse.rclone")]), &db);
+        assert!(fuse.unwrap().is_none());
+        let absent = plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/b", "nfs4")]), &db);
+        assert!(absent.unwrap().is_none());
+    }
+
+    #[test]
+    fn plan_db_error_refuses_a_live_network_mount_naming_the_db() {
+        let db = Err("db locked".to_string());
+        let e = plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/a", "cifs")]), &db)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("mounts database") && e.contains("db locked"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn plan_undeclared_live_mount_error_says_how_to_proceed() {
+        let e = plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/a", "cifs")]), &Ok(vec![]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--id") && e.contains("adopt"), "{e}");
+    }
+
+    #[test]
     fn plan_refuses_a_live_mount_that_is_not_declared() {
-        let r = plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/a", "cifs")]), &[]);
+        let r = plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/a", "cifs")]), &Ok(vec![]));
         assert!(r.is_err());
     }
 
     #[test]
     fn plan_matches_through_trailing_slash_normalization() {
-        let r = plan_kernel_unmount(true, "/mnt/a", Ok(vec![mt("/mnt/a/", "nfs")]), &d("/mnt/a"));
+        let r = plan_kernel_unmount(
+            true,
+            "/mnt/a",
+            Ok(vec![mt("/mnt/a/", "nfs")]),
+            &Ok(d("/mnt/a")),
+        );
         assert_eq!(r.unwrap().as_deref(), Some("/mnt/a"));
-        let r = plan_kernel_unmount(true, "/mnt/a/", Ok(vec![mt("/mnt/a", "nfs")]), &d("/mnt/a"));
+        let r = plan_kernel_unmount(
+            true,
+            "/mnt/a/",
+            Ok(vec![mt("/mnt/a", "nfs")]),
+            &Ok(d("/mnt/a")),
+        );
         assert_eq!(r.unwrap().as_deref(), Some("/mnt/a"));
     }
 
@@ -4693,14 +4756,19 @@ mod tests {
             false,
             "/mnt/a",
             Ok(vec![mt("/mnt/a", "nfs4")]),
-            &d("/mnt/a"),
+            &Ok(d("/mnt/a")),
         );
         assert!(r.unwrap().is_none());
     }
 
     #[test]
     fn plan_errors_on_linux_when_the_mount_table_is_unreadable() {
-        let r = plan_kernel_unmount(true, "/mnt/a", Err(std::io::Error::other("denied")), &[]);
+        let r = plan_kernel_unmount(
+            true,
+            "/mnt/a",
+            Err(std::io::Error::other("denied")),
+            &Ok(vec![]),
+        );
         assert!(
             r.unwrap_err()
                 .to_string()
