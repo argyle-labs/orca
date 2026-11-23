@@ -396,7 +396,19 @@ fn map_line_for(m: &ManagedMount, source: &str) -> String {
 /// option string, so map rendering never depends on a live registry.
 fn autofs_options(m: &ManagedMount) -> String {
     let rendered = render_backend_options(&m.backend, m.fstype.as_str(), m.options.as_deref());
-    strip_fstab_only(&m.fstype, &rendered)
+    force_nosuid_nodev(strip_fstab_only(&m.fstype, &rendered))
+}
+
+/// Network mounts must never carry setuid/device files from a remote server;
+/// both the daemon and the helper render through here, so they stay byte-identical.
+fn force_nosuid_nodev(mut opts: String) -> String {
+    for flag in ["nosuid", "nodev"] {
+        if !opts.split(',').any(|o| o == flag) {
+            opts.push(',');
+            opts.push_str(flag);
+        }
+    }
+    opts
 }
 
 /// Render a mount's options through the registered backend named `backend`,
@@ -3327,7 +3339,7 @@ mod tests {
         );
         assert_eq!(
             map_line(&m),
-            "/mnt/data  -fstype=nfs4,vers=4.2,hard,nconnect=4  \
+            "/mnt/data  -fstype=nfs4,vers=4.2,hard,nconnect=4,nosuid,nodev  \
              primary:/srv/pool/data secondary:/srv/pool/data"
         );
     }
@@ -3349,7 +3361,7 @@ mod tests {
         // even with a failover declared, the elected line carries ONE source
         assert_eq!(
             map_line_for(&m, "secondary:/srv/pool/data"),
-            "/mnt/data  -fstype=nfs4,vers=4.2,hard,nconnect=4  secondary:/srv/pool/data"
+            "/mnt/data  -fstype=nfs4,vers=4.2,hard,nconnect=4,nosuid,nodev  secondary:/srv/pool/data"
         );
     }
 
@@ -3761,7 +3773,7 @@ mod tests {
         );
         assert_eq!(
             map_line(&m),
-            "/mnt/data  -fstype=nfs4,vers=4.2,hard,nconnect=4  \
+            "/mnt/data  -fstype=nfs4,vers=4.2,hard,nconnect=4,nosuid,nodev  \
              primary:/srv/data secondary:/srv/data tertiary:/srv/data"
         );
     }
@@ -3773,7 +3785,10 @@ mod tests {
         // Core is fstype-agnostic: with no registered backend it renders the raw
         // option string verbatim (here empty), so the map carries only `-fstype`.
         // The NFS safety floor now lives in the nfs plugin's rendering.
-        assert_eq!(map_line(&m), "/mnt/solo  -fstype=nfs4  primary:/s");
+        assert_eq!(
+            map_line(&m),
+            "/mnt/solo  -fstype=nfs4,nosuid,nodev  primary:/s"
+        );
     }
 
     // ── merge_master edge cases ───────────────────────────────────────────
@@ -4036,6 +4051,59 @@ mod tests {
         el.insert("/mnt/a".to_string(), "host:/export".to_string());
         let w = apply_writes(&render_map_elected(&ms, &el), &merge_master("", &[]));
         assert!(check_writes(&w, "").is_empty());
+    }
+
+    fn flag_count(line: &str, flag: &str) -> usize {
+        line.split_whitespace()
+            .nth(1)
+            .unwrap()
+            .split(',')
+            .filter(|o| *o == flag)
+            .count()
+    }
+
+    #[test]
+    fn map_line_always_has_nosuid_nodev_exactly_once() {
+        for fstype in ["nfs4", "cifs"] {
+            for opts in [
+                None,
+                Some("vers=4"),
+                Some("nosuid"),
+                Some("nodev,ro"),
+                Some("nosuid,nodev"),
+            ] {
+                let mut m = mount("a", "h:/x", None);
+                m.fstype = fstype.into();
+                m.options = opts.map(str::to_string);
+                let line = map_line(&m);
+                assert_eq!(flag_count(&line, "nosuid"), 1, "{line}");
+                assert_eq!(flag_count(&line, "nodev"), 1, "{line}");
+                let el = elected(&[("/mnt/a", "h:/x")]);
+                let map = render_map_elected(&[m], &el);
+                assert_eq!(flag_count(map.lines().last().unwrap(), "nosuid"), 1);
+                assert_eq!(flag_count(map.lines().last().unwrap(), "nodev"), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn root_helper_requires_nosuid_nodev_map_byte_for_byte() {
+        let ms = vec![mount("a", "host:/export", None)];
+        let managed = ManagedMaps::from_mounts(&ms, None);
+        let map = render_map(&ms);
+        let w = apply_writes(&map, "");
+        assert!(validate_managed(Some(&managed), &w).is_empty());
+        let stripped = map.replace(",nosuid,nodev", "");
+        assert_ne!(stripped, map);
+        let w = apply_writes(&stripped, "");
+        assert!(!validate_managed(Some(&managed), &w).is_empty());
+    }
+
+    #[test]
+    fn declared_map_keys_survive_forced_options() {
+        let ms = vec![mount("a", "host:/export", None)];
+        let keys = declared_map_keys(&render_map(&ms));
+        assert!(keys.contains("/mnt/a"), "{keys:?}");
     }
 
     fn req(source: &str, fstype: &str, target: &str, options: &str) -> crate::mount_exec::MountReq {
@@ -4487,7 +4555,7 @@ mod tests {
         m.options = None;
         assert_eq!(
             map_line_for(&m, "primary:/s"),
-            "/mnt/solo  -fstype=nfs4  primary:/s"
+            "/mnt/solo  -fstype=nfs4,nosuid,nodev  primary:/s"
         );
     }
 
