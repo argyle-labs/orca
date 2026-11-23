@@ -1891,6 +1891,7 @@ async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcom
     } else {
         Ok(Vec::new())
     };
+    let live_table = table.as_ref().map(|t| t.clone()).unwrap_or_default();
     let (me, rows) = if is_linux {
         (
             crate::host_identity::machine_id(),
@@ -1905,9 +1906,55 @@ async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcom
     };
     let rows = rows.map_err(|e| anyhow::anyhow!(e))?;
     let id = placement_id_for(&rows, me, &norm)?;
-    let r = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Release { ids: vec![id] })
-        .await;
-    outcome_from_result(target, r).map(Some)
+    release_adopting(target, &id, &norm, &live_table, |op| async move {
+        crate::autofs::run_privileged(&op).await
+    })
+    .await
+    .map(Some)
+}
+
+/// Releases `id`; if the root helper has no ledger entry for it, adopts the live
+/// mount (the helper's ownership proof is the gate) and retries the release once.
+async fn release_adopting<F, Fut>(
+    target: &str,
+    id: &str,
+    norm: &str,
+    table: &[storage::mount_table::MountEntry],
+    mut run: F,
+) -> anyhow::Result<MountOutcome>
+where
+    F: FnMut(crate::autofs::PrivilegedOp) -> Fut,
+    Fut: std::future::Future<Output = crate::autofs::PrivilegedResult>,
+{
+    let release = || crate::autofs::PrivilegedOp::Release {
+        ids: vec![id.to_string()],
+    };
+    let r = run(release()).await;
+    if !r.errors.iter().any(|e| e.contains("unknown placement id")) {
+        return outcome_from_result(target, r);
+    }
+    // Topmost layer: the source the helper re-verifies against the stack.
+    let source = table
+        .iter()
+        .rev()
+        .find(|m| m.mountpoint.trim_end_matches('/') == norm && kernel_fstype(&m.fstype))
+        .map(|m| m.source.clone())
+        .ok_or_else(|| anyhow::anyhow!("no network mount is live at `{target}`"))?;
+    let adopted = run(crate::autofs::PrivilegedOp::Adopt {
+        id: id.to_string(),
+        target: target.to_string(),
+        source,
+    })
+    .await;
+    if !adopted.errors.is_empty() {
+        anyhow::bail!("{}", adopted.errors.join("; "));
+    }
+    let mut out = outcome_from_result(target, run(release()).await)?;
+    out.detail = Some(format!(
+        "adopted the pre-existing mount first; {}",
+        out.detail.unwrap_or_default()
+    ));
+    Ok(out)
 }
 
 // ── mount.adopt ──────────────────────────────────────────────────────
@@ -2691,6 +2738,105 @@ async fn storage_detail(
 #[allow(clippy::disallowed_types)] // tests build serde_json::Value fixtures directly
 mod tests {
     use super::*;
+
+    fn live(src: &str, mp: &str) -> storage::mount_table::MountEntry {
+        storage::mount_table::MountEntry {
+            source: src.into(),
+            mountpoint: mp.into(),
+            fstype: "cifs".into(),
+            options: Vec::new(),
+        }
+    }
+
+    async fn drive(
+        table: Vec<storage::mount_table::MountEntry>,
+        replies: Vec<Vec<String>>,
+    ) -> (
+        anyhow::Result<MountOutcome>,
+        Vec<crate::autofs::PrivilegedOp>,
+    ) {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let replies = std::sync::Mutex::new(replies.into_iter());
+        let out = release_adopting("/mnt/w", "id1", "/mnt/w", &table, |op| {
+            calls.lock().unwrap().push(op);
+            let errors = replies
+                .lock()
+                .unwrap()
+                .next()
+                .expect("unexpected extra helper call");
+            async move {
+                crate::autofs::PrivilegedResult {
+                    errors,
+                    ..Default::default()
+                }
+            }
+        })
+        .await;
+        (out, calls.into_inner().unwrap())
+    }
+
+    const UNKNOWN: &str = "release id1: refused: unknown placement id";
+
+    #[tokio::test]
+    async fn ledgered_id_releases_without_adopt() {
+        let (out, calls) = drive(vec![live("//w/s", "/mnt/w")], vec![vec![]]).await;
+        assert!(!out.unwrap().detail.unwrap().contains("adopted"));
+        assert!(matches!(
+            calls[..],
+            [crate::autofs::PrivilegedOp::Release { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn unledgered_id_adopts_then_retries_release_once() {
+        let (out, calls) = drive(
+            vec![live("//w/s", "/mnt/w")],
+            vec![vec![UNKNOWN.into()], vec![], vec![]],
+        )
+        .await;
+        assert!(out.unwrap().detail.unwrap().contains("adopted"));
+        assert!(matches!(
+            &calls[..],
+            [
+                crate::autofs::PrivilegedOp::Release { .. },
+                crate::autofs::PrivilegedOp::Adopt { source, .. },
+                crate::autofs::PrivilegedOp::Release { .. },
+            ] if source == "//w/s"
+        ));
+    }
+
+    #[tokio::test]
+    async fn refused_adopt_returns_refusal_and_releases_nothing() {
+        let (out, calls) = drive(
+            vec![live("//w/s", "/mnt/w")],
+            vec![vec![UNKNOWN.into()], vec!["not orca-owned".into()]],
+        )
+        .await;
+        assert_eq!(out.unwrap_err().to_string(), "not orca-owned");
+        assert_eq!(calls.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn still_unledgered_after_adopt_does_not_loop() {
+        let (out, calls) = drive(
+            vec![live("//w/s", "/mnt/w")],
+            vec![vec![UNKNOWN.into()], vec![], vec![UNKNOWN.into()]],
+        )
+        .await;
+        assert!(out.is_err());
+        assert_eq!(calls.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn no_live_layer_keeps_unledgered_behaviour_without_adopt() {
+        let (out, calls) = drive(vec![], vec![vec![UNKNOWN.into()]]).await;
+        assert!(
+            out.unwrap_err()
+                .to_string()
+                .contains("no network mount is live")
+        );
+        assert_eq!(calls.len(), 1);
+    }
 
     fn entries() -> Vec<(String, String)> {
         vec![("a".into(), "/mnt/a".into()), ("b".into(), "/mnt/b".into())]
