@@ -2918,7 +2918,61 @@ where
     unwind_stacked(|| layers(target), || umount(target.to_string())).await
 }
 
+struct AncestorMeta {
+    is_dir: bool,
+    uid: u32,
+    mode: u32,
+}
+
+fn read_ancestor_meta(p: &Path) -> std::io::Result<AncestorMeta> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(p)?;
+    Ok(AncestorMeta {
+        is_dir: m.file_type().is_dir(),
+        uid: m.uid(),
+        mode: m.mode(),
+    })
+}
+
+/// Refuses unless every proper ancestor of `target` is a root-owned real
+/// directory that no one else can write, so nobody can swap an ancestor for a
+/// symlink between the mount-table check and umount's own path resolution.
+/// `target` itself is never queried: a dead hard mount makes `stat` hang forever.
+fn check_ancestors<M>(target: &str, meta: M) -> Result<(), String>
+where
+    M: Fn(&Path) -> std::io::Result<AncestorMeta>,
+{
+    let mut chain: Vec<&Path> = Path::new(target.trim_end_matches('/'))
+        .ancestors()
+        .skip(1)
+        .collect();
+    chain.reverse();
+    for a in chain {
+        let shown = if a.as_os_str().is_empty() {
+            Path::new("/")
+        } else {
+            a
+        };
+        let refuse = |why: &str| format!("refused: ancestor {} of {target} {why}", shown.display());
+        let m = meta(shown).map_err(|e| refuse(&format!("cannot be inspected: {e}")))?;
+        if !m.is_dir {
+            return Err(refuse("is not a real directory"));
+        }
+        if m.uid != 0 {
+            return Err(refuse("is not owned by root"));
+        }
+        if m.mode & 0o022 != 0 {
+            return Err(refuse("is group- or world-writable"));
+        }
+    }
+    Ok(())
+}
+
 async fn run_umount_lf(target: String) -> Result<(), String> {
+    let t = target.clone();
+    tokio::task::spawn_blocking(move || check_ancestors(&t, read_ancestor_meta))
+        .await
+        .map_err(|e| e.to_string())??;
     let out = utils::privileged::host_command("umount")
         .map_err(|e| e.to_string())?
         .args(["-lf", "--no-canonicalize", "--", &target])
@@ -5432,6 +5486,84 @@ mod tests {
         // holds so ownership can never become the weaker of the two surfaces.
         assert!(!is_allowed_share_path("/etc"));
         assert!(!is_allowed_share_path("/mnt/user"));
+    }
+
+    fn fake_meta(
+        entries: Vec<(&'static str, bool, u32, u32)>,
+        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> impl Fn(&Path) -> std::io::Result<AncestorMeta> {
+        move |p| {
+            log.lock().unwrap().push(p.display().to_string());
+            entries
+                .iter()
+                .find(|(n, ..)| Path::new(n) == p)
+                .map(|&(_, is_dir, uid, mode)| AncestorMeta { is_dir, uid, mode })
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+    }
+
+    fn ancestor_run(mid: (bool, u32, u32)) -> (Result<(), String>, Vec<String>) {
+        let log = Default::default();
+        let m = fake_meta(
+            vec![
+                ("/", true, 0, 0o755),
+                ("/mnt", mid.0, mid.1, mid.2),
+                ("/mnt/x", true, 0, 0o755),
+            ],
+            std::sync::Arc::clone(&log),
+        );
+        let r = check_ancestors("/mnt/x/target/", m);
+        let calls = log.lock().unwrap().clone();
+        (r, calls)
+    }
+
+    #[test]
+    fn ancestors_root_owned_plain_dirs_accepted_and_target_never_queried() {
+        let (r, calls) = ancestor_run((true, 0, 0o755));
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(calls, ["/", "/mnt", "/mnt/x"]);
+    }
+
+    #[test]
+    fn ancestors_symlink_refused() {
+        let (r, _) = ancestor_run((false, 0, 0o755));
+        assert!(r.unwrap_err().contains("ancestor /mnt "));
+    }
+
+    #[test]
+    fn ancestors_group_writable_refused() {
+        let (r, _) = ancestor_run((true, 0, 0o775));
+        assert!(r.unwrap_err().contains("writable"));
+    }
+
+    #[test]
+    fn ancestors_world_writable_sticky_refused() {
+        let (r, _) = ancestor_run((true, 0, 0o1777));
+        assert!(r.unwrap_err().contains("ancestor /mnt "));
+    }
+
+    #[test]
+    fn ancestors_non_root_owner_refused() {
+        let (r, _) = ancestor_run((true, 1000, 0o755));
+        assert!(r.unwrap_err().contains("owned by root"));
+    }
+
+    #[test]
+    fn ancestors_real_tempdir_symlink_refused_without_root() {
+        let d = tempfile::tempdir().unwrap();
+        let real = d.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let t = link.join("t").display().to_string();
+        let err = check_ancestors(&t, |p| {
+            let mut m = read_ancestor_meta(p)?;
+            m.uid = 0;
+            m.mode = 0o755;
+            Ok(m)
+        })
+        .unwrap_err();
+        assert!(err.contains("not a real directory"), "{err}");
     }
 
     #[tokio::test]
