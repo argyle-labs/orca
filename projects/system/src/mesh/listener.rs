@@ -721,8 +721,8 @@ fn exec_error_object(e: &anyhow::Error) -> ErrorObject {
         e.chain()
             .find_map(|c| c.downcast_ref::<contract::OrcaError>())
     }) else {
-        if e.downcast_ref::<RelayedToolFailed>().is_some() {
-            return ErrorObject::internal(&format!("{MESH_EXEC_METHOD} failed"));
+        if let Some(RelayedToolFailed { id }) = e.downcast_ref::<RelayedToolFailed>() {
+            return ErrorObject::internal(&format!("{MESH_EXEC_METHOD} failed (ref {id})"));
         }
         return peer_facing_error(MESH_EXEC_METHOD, e);
     };
@@ -743,16 +743,20 @@ fn relayed_tool_error(tool: &str, e: anyhow::Error) -> anyhow::Error {
     {
         return e;
     }
-    warn!("[mesh] dispatch mesh-relayed tool '{tool}': {e:#}");
-    anyhow::Error::new(RelayedToolFailed)
+    let id: String = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+    tracing::error!("[mesh] dispatch mesh-relayed tool '{tool}' failed (ref {id}): {e:#}");
+    anyhow::Error::new(RelayedToolFailed { id })
 }
 
+/// `id` is the only detail a peer sees; the full chain is logged here under it.
 #[derive(Debug)]
-struct RelayedToolFailed;
+struct RelayedToolFailed {
+    id: String,
+}
 
 impl std::fmt::Display for RelayedToolFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("mesh-relayed tool failed")
+        write!(f, "mesh-relayed tool failed (ref {})", self.id)
     }
 }
 
@@ -1225,8 +1229,23 @@ mod tests {
             anyhow::anyhow!("open /secret/path/key.pem failed").context("token=ghp_abc123SECRET"),
         );
         let obj = exec_error_object(&e);
-        assert_eq!(obj.message, "internal error: mesh/exec failed");
+        let id = &e.downcast_ref::<RelayedToolFailed>().expect("untyped").id;
+        assert_eq!(
+            obj.message,
+            format!("internal error: mesh/exec failed (ref {id})")
+        );
+        assert_eq!(id.len(), 8);
+        for leak in ["secret", "key.pem", "ghp_", "container.exec"] {
+            assert!(!obj.message.contains(leak), "{}", obj.message);
+        }
         assert!(obj.data.is_none());
+    }
+
+    #[test]
+    fn each_untyped_relayed_failure_gets_its_own_ref() {
+        let a = relayed_tool_error("t", anyhow::anyhow!("x"));
+        let b = relayed_tool_error("t", anyhow::anyhow!("x"));
+        assert_ne!(exec_error_object(&a).message, exec_error_object(&b).message);
     }
 
     #[test]
