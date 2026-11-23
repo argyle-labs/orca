@@ -1729,11 +1729,12 @@ pub struct StorageRecoverOutput {
 /// This is what the periodic self-heal schedule invokes per host. Reached via
 /// `storage.mount.update{action=recover}`.
 async fn mount_recover(health_timeout_secs: Option<u64>) -> anyhow::Result<StorageRecoverOutput> {
-    let mounts: Vec<crate::managed_mounts::ManagedMount> =
-        crate::managed_mounts::endpoint_db::list()?
-            .into_iter()
-            .filter(|m| m.enabled && m.kind == "network_share")
-            .collect();
+    let desired = crate::mount_converge::desired_for_host(crate::host_identity::machine_id())?;
+    let mounts: Vec<crate::managed_mounts::ManagedMount> = desired
+        .iter()
+        .map(desired_to_render_mount)
+        .filter(|m| m.kind == "network_share")
+        .collect();
 
     let timeout = std::time::Duration::from_secs(health_timeout_secs.unwrap_or(5));
     let mut r = recover_via_backends(&mounts, timeout).await;
@@ -5920,6 +5921,99 @@ mod tests {
         });
     }
 
+    fn host() -> &'static str {
+        crate::host_identity::machine_id()
+    }
+
+    fn seed_recover_placement(backend: &str, host: &str, enabled: bool) {
+        let share = crate::shares::EndpointRow {
+            id: "01900000-0000-7000-8000-0000000000e1".into(),
+            name: "recover".into(),
+            backend: backend.into(),
+            fstype: "nfs4".into(),
+            options: String::new(),
+            credential: None,
+            replication: None,
+            sync_targets: "[]".to_string(),
+            fleet_export: false,
+            routes: [plugin_toolkit::route::Route::new(
+                "lan_v4",
+                "nfs",
+                "10.0.0.1",
+                Some(2049),
+            )]
+            .into_iter()
+            .collect(),
+            enabled: true,
+        };
+        crate::shares::endpoint_db::insert(&share).expect("insert share");
+        let row = crate::mounts::EndpointRow {
+            guest: None,
+            id: "01900000-0000-7000-8000-0000000000e2".into(),
+            name: "m-recover".into(),
+            share_id: share.id.clone(),
+            host: host.into(),
+            target: "/mnt/data".into(),
+            remount_policy: None,
+            health: plugin_toolkit::storage::MountHealth::Ok,
+            active_route: None,
+            active_options: None,
+            drift: false,
+            multi_mounted: false,
+            enabled,
+        };
+        crate::mounts::endpoint_db::insert(&row).expect("insert mount");
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn mount_recover_probes_replicated_placement_and_reports_stale() {
+        use plugin_toolkit::storage::StorageCapability;
+        with_db("mount_recover_placement.db", || {
+            seed_recover_placement("fake-recover5", host(), true);
+            let out = with_backend("fake-recover5", &[StorageCapability::RecoverStale], || {
+                rt().block_on(mount_recover(Some(1))).expect("recover ok")
+            });
+            assert!(out.recovered.contains(&"/mnt/data".to_string()));
+            assert!(out.still_stale.contains(&"/mnt/stuck".to_string()));
+            assert!(!out.no_stale_found);
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn mount_recover_ignores_other_hosts_and_disabled_placements() {
+        use plugin_toolkit::storage::StorageCapability;
+        with_db("mount_recover_ignored.db", || {
+            seed_recover_placement("fake-recover6", "some-other-host", true);
+            let out = with_backend("fake-recover6", &[StorageCapability::RecoverStale], || {
+                rt().block_on(mount_recover(Some(1))).expect("recover ok")
+            });
+            assert!(out.no_stale_found);
+        });
+        with_db("mount_recover_disabled.db", || {
+            seed_recover_placement("fake-recover7", host(), false);
+            let out = with_backend("fake-recover7", &[StorageCapability::RecoverStale], || {
+                rt().block_on(mount_recover(Some(1))).expect("recover ok")
+            });
+            assert!(out.no_stale_found);
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn mount_recover_does_not_consult_retired_managed_mounts() {
+        use plugin_toolkit::storage::StorageCapability;
+        with_db("mount_recover_retired.db", || {
+            let m = mm("/mnt/data", "fake-recover8");
+            crate::managed_mounts::endpoint_db::insert(&m).expect("insert managed mount");
+            let out = with_backend("fake-recover8", &[StorageCapability::RecoverStale], || {
+                rt().block_on(mount_recover(Some(1))).expect("recover ok")
+            });
+            assert!(out.no_stale_found);
+        });
+    }
+
     #[test]
     fn storage_mount_update_recover_returns_recover_variant() {
         with_db("mu_recover.db", || {
@@ -6429,22 +6523,7 @@ mod tests {
     fn mount_recover_folds_backend_remounted_into_flat_surface() {
         use plugin_toolkit::storage::StorageCapability;
         with_db("mount_recover_backend.db", || {
-            let m = crate::managed_mounts::ManagedMount {
-                name: "/mnt/data".into(),
-                backend: "fake-recover4".into(),
-                kind: "network_share".into(),
-                source: "primary:/srv/data".into(),
-                failover_sources: None,
-                target: "/mnt/data".into(),
-                fstype: "nfs4".into(),
-                options: None,
-                credential: None,
-                remount_policy: None,
-                placement_id: None,
-                routes: Default::default(),
-                enabled: true,
-            };
-            crate::managed_mounts::endpoint_db::insert(&m).expect("insert managed mount");
+            seed_recover_placement("fake-recover4", host(), true);
             let out = with_backend("fake-recover4", &[StorageCapability::RecoverStale], || {
                 rt().block_on(mount_recover(Some(1))).expect("recover ok")
             });
