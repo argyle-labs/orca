@@ -1822,10 +1822,8 @@ async fn ledger_update(
 }
 
 fn live_sources_match(live: &[String], recorded: &str) -> bool {
-    live.iter().all(|s| {
-        s.trim_end_matches('/')
-            .eq_ignore_ascii_case(recorded.trim_end_matches('/'))
-    })
+    live.iter()
+        .all(|s| crate::mount_converge::same_source(s, recorded))
 }
 
 /// Root-side body of [`PrivilegedOp::Adopt`]. The check and the write share one
@@ -1877,8 +1875,9 @@ where
 }
 
 /// Root-side gate for [`PrivilegedOp::Release`]: an id is released only if the root
-/// ledger holds it and every live network layer at its recorded target still
-/// reports the recorded source. Returns the result (keyed by target) and the ids
+/// ledger holds it and a network layer is live at its recorded target. The live
+/// source is deliberately not compared: after a failover the ledger names the
+/// elected source while the wedged mount is still on the dead one. Returns the result (keyed by target) and the ids
 /// to drop from the ledger.
 async fn guard_release<G, S, U, F>(
     ids: &[String],
@@ -1909,16 +1908,10 @@ where
             continue;
         };
         match sources(&entry.target) {
-            Ok(live) if !live.is_empty() && live_sources_match(&live, &entry.source) => {}
-            Ok(live) if live.is_empty() => {
-                res.errors.push(format!(
-                    "release {id}: refused: no network mount present at the recorded target"
-                ));
-                continue;
-            }
+            Ok(live) if !live.is_empty() => {}
             Ok(_) => {
                 res.errors.push(format!(
-                    "release {id}: refused: live source does not match the recorded source"
+                    "release {id}: refused: no network mount present at the recorded target"
                 ));
                 continue;
             }
@@ -3977,15 +3970,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_refuses_a_source_mismatch() {
-        let (res, released, calls) = run_release(ledgered(), &[ID_A], "//other/data").await;
+    async fn release_detaches_a_mount_live_from_a_different_source_than_the_ledger() {
+        let (res, released, calls) = run_release(ledgered(), &[ID_A], "//dead/data").await;
+        assert_eq!(calls, vec!["/mnt/data"]);
+        assert_eq!(released, vec![ID_A]);
+        assert!(res.errors.is_empty(), "{res:?}");
+    }
+
+    #[tokio::test]
+    async fn release_refuses_an_unledgered_target_whatever_is_live() {
+        let (res, released, calls) = run_release(Ok(String::new()), &[ID_A], "//willow/data").await;
         assert!(calls.is_empty() && released.is_empty());
         assert_eq!(
             res.errors,
-            vec![format!(
-                "release {ID_A}: refused: live source does not match the recorded source"
-            )]
+            vec![format!("release {ID_A}: refused: unknown placement id")]
         );
+    }
+
+    #[tokio::test]
+    async fn release_of_a_different_source_still_refuses_a_covering_non_network_layer() {
+        let table = stack(&["autofs", "cifs", "tmpfs"]);
+        let calls = std::cell::Cell::new(0);
+        let ids = vec![ID_A.to_string()];
+        let (res, released) = guard_release(
+            &ids,
+            ledgered,
+            |_| Ok(vec!["//dead/data".to_string()]),
+            |_| {
+                unwind_stacked(
+                    || Ok(table.borrow().clone()),
+                    || {
+                        calls.set(calls.get() + 1);
+                        async { Ok(()) }
+                    },
+                )
+            },
+        )
+        .await;
+        assert_eq!(calls.get(), 0);
+        assert!(released.is_empty());
+        assert!(res.errors[0].contains("tmpfs"), "{res:?}");
+    }
+
+    #[tokio::test]
+    async fn adopt_accepts_a_live_source_differing_only_by_host_case_and_trailing_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        let path = path.to_str().unwrap();
+        let t = adopt_with(path, ID_A, "/mnt/data", "//willow/data", |_| {
+            Ok(vec!["//WILLOW/data/".to_string()])
+        })
+        .await
+        .unwrap();
+        assert_eq!(t, "/mnt/data");
     }
 
     #[tokio::test]
