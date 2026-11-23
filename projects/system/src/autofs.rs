@@ -773,23 +773,50 @@ pub async fn run_privileged(op: &PrivilegedOp) -> PrivilegedResult {
 // ── Root side: the privileged executor (runs inside `orca admin storage-apply`) ─
 
 async fn execute_release(ids: &[String]) -> PrivilegedResult {
-    let (mut res, released) = guard_release(
+    let mapped = read_map_file().unwrap_or_default();
+    release_locked(
+        LEDGER_FILE,
         ids,
-        || read_ledger(LEDGER_FILE),
+        &declared_map_keys(&mapped),
         network_sources,
         |t| async move { force_unmount(&t).await },
     )
-    .await;
-    let mapped = read_map_file().unwrap_or_default();
-    if let Err(e) = ledger_release(LEDGER_FILE, &released, &declared_map_keys(&mapped)).await {
+    .await
+}
+
+/// Holds the ledger lock from the authorization check through the last umount so
+/// a concurrent Mount/Apply/Adopt cannot remount the target in between.
+async fn release_locked<S, U, F>(
+    path: &str,
+    ids: &[String],
+    map_keys: &std::collections::HashSet<String>,
+    sources: S,
+    umount: U,
+) -> PrivilegedResult
+where
+    S: Fn(&str) -> Result<Vec<String>, String>,
+    U: FnMut(String) -> F,
+    F: std::future::Future<Output = Result<Unwound, String>>,
+{
+    let _lock = match lock_ledger(path).await {
+        Ok(l) => l,
+        Err(e) => {
+            let mut res = PrivilegedResult::default();
+            res.errors
+                .extend(ids.iter().map(|id| format!("release {id}: refused: {e}")));
+            return res;
+        }
+    };
+    let (mut res, released) = guard_release(ids, || read_ledger(path), sources, umount).await;
+    if let Err(e) = ledger_release(path, &released, map_keys).await {
         res.warnings
             .push(format!("released, but ledger cleanup failed: {e}"));
     }
     res
 }
 
-/// Drops released rows not still keyed in the map, deciding and writing under one
-/// lock from one read; an unreadable ledger leaves every row in place.
+/// Drops released rows not still keyed in the map from one read of the ledger; an
+/// unreadable ledger leaves every row in place. Caller must hold [`lock_ledger`].
 async fn ledger_release(
     path: &str,
     released: &[String],
@@ -798,7 +825,6 @@ async fn ledger_release(
     if released.is_empty() {
         return Ok(());
     }
-    let _lock = lock_ledger(path).await?;
     let mut ledger = parse_ledger(&read_ledger(path)?)?;
     let drop = unmapped_ids(released.to_vec(), &ledger, map_keys);
     let before = ledger.len();
@@ -2013,11 +2039,26 @@ where
                 .push(format!("release {id}: refused: unknown placement id"));
             continue;
         };
-        match sources(&entry.target) {
-            Ok(live) if !live.is_empty() => {}
+        let checked = match sources(&entry.target) {
+            Ok(live) if !live.is_empty() => live,
             Ok(_) => {
                 res.unchanged.push(entry.target.clone());
                 released.push(id.clone());
+                continue;
+            }
+            Err(e) => {
+                res.errors.push(format!(
+                    "release {id}: refused: cannot read mount table: {e}"
+                ));
+                continue;
+            }
+        };
+        match sources(&entry.target) {
+            Ok(now) if now == checked => {}
+            Ok(_) => {
+                res.errors.push(format!(
+                    "release {id}: refused: mount at target changed since authorization"
+                ));
                 continue;
             }
             Err(e) => {
@@ -4128,6 +4169,67 @@ mod tests {
 
     fn ledgered() -> Result<String, String> {
         Ok(format!("{ID_A}\t/mnt/data\t//willow/data\n"))
+    }
+
+    #[tokio::test]
+    async fn release_holds_the_ledger_lock_through_the_umount() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("ledger").to_str().unwrap().to_string();
+        std::fs::write(&p, format!("{ID_A}\t/mnt/data\t//willow/data\n")).unwrap();
+        let blocked = std::cell::Cell::new(false);
+        let lock_path = format!("{p}.lock");
+        let res = release_locked(
+            &p,
+            &[ID_A.to_string()],
+            &keys(&[]),
+            |_| Ok(vec!["//willow/data".to_string()]),
+            |_| {
+                let f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .mode(0o600)
+                    .open(&lock_path)
+                    .unwrap();
+                let r = rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive);
+                blocked.set(r.is_err());
+                async { Ok(Unwound::Detached) }
+            },
+        )
+        .await;
+        assert!(blocked.get(), "Mount could take the lock mid-release");
+        assert_eq!(res.changed, vec!["/mnt/data"]);
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .expect("lock released after release");
+    }
+
+    #[tokio::test]
+    async fn release_refuses_when_a_different_mount_appears_before_the_umount() {
+        let calls = std::cell::Cell::new(0);
+        let ids = vec![ID_A.to_string()];
+        let (res, released) = guard_release(
+            &ids,
+            ledgered,
+            |_| {
+                calls.set(calls.get() + 1);
+                Ok(vec![
+                    if calls.get() == 1 {
+                        "//willow/data"
+                    } else {
+                        "//rogue/x"
+                    }
+                    .to_string(),
+                ])
+            },
+            |_| async { panic!("detached an unauthorized mount") },
+        )
+        .await;
+        assert!(released.is_empty());
+        assert_eq!(res.errors.len(), 1, "{res:?}");
+        assert!(res.errors[0].contains("changed since authorization"));
     }
 
     #[tokio::test]
