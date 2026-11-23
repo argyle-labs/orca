@@ -1242,13 +1242,17 @@ async fn mount_locked<R, F, T>(
     match run(m.clone()).await {
         Ok(()) => {
             res.changed.push(m.target.clone());
-            match observed_ledger_entry(table(), &m.target) {
+            let snapshot = table();
+            let rows = snapshot.as_ref().map(|t| t.clone()).unwrap_or_default();
+            match observed_ledger_entry(snapshot, &m.target) {
                 Ok(entry) => {
-                    if let Err(e) =
-                        ledger_update_locked(path, &[(m.placement_id.clone(), entry)], &[]).await
-                    {
-                        res.errors.push(e);
-                    }
+                    let out =
+                        ledger_update_locked(path, &[(m.placement_id.clone(), entry)], &[], || {
+                            Ok(rows.clone())
+                        })
+                        .await;
+                    res.errors.extend(out.errors);
+                    res.warnings.extend(out.warnings);
                 }
                 Err(w) => res.warnings.push(w),
             }
@@ -1428,9 +1432,25 @@ async fn sync_map_ledger(old_map: &str, placements: &[MapPlacement], res: &mut P
     );
     res.errors.extend(errors);
     res.warnings.extend(warnings);
-    if let Err(e) = ledger_update(LEDGER_FILE, &adds, &removes).await {
-        res.errors.push(e);
+    if adds.is_empty() && removes.is_empty() {
+        return;
     }
+    let _lock = match lock_ledger(LEDGER_FILE).await {
+        Ok(l) => l,
+        Err(e) => {
+            res.errors.push(e);
+            return;
+        }
+    };
+    let out = ledger_update_locked(
+        LEDGER_FILE,
+        &adds,
+        &removes,
+        plugin_toolkit::storage::mount_table::mount_table,
+    )
+    .await;
+    res.errors.extend(out.errors);
+    res.warnings.extend(out.warnings);
 }
 
 /// Execute a validated [`PrivilegedOp`] as root. Called only from the
@@ -2486,10 +2506,19 @@ async fn lock_ledger(path: &str) -> Result<std::fs::File, String> {
     .map_err(|e| format!("mount ledger lock task: {e}"))?
 }
 
-/// Root-side only. An add may refresh the source of an id already recorded for the
-/// same target; rebinding an id to another target, or taking a target recorded
-/// under another id, is an error. An add with a non-canonical id, unrepresentable
-/// target or invalid source is also an error. On any error nothing is written.
+#[derive(Debug, Default)]
+struct LedgerOutcome {
+    warnings: Vec<String>,
+    errors: Vec<String>,
+}
+
+/// Root-side only. Each add is applied independently: it may refresh the source
+/// of an id already recorded for the same target, but never rebinds an id to
+/// another target. A target recorded under another id is re-pointed to the new id
+/// only when no network mount is live there or every live layer is orca-made;
+/// a foreign live mount refuses. Rejected rows are reported in `errors` and do
+/// not stop the others; all accepted rows land in one atomic write.
+#[cfg(test)]
 async fn ledger_update(
     path: &str,
     add: &[(String, LedgerEntry)],
@@ -2499,66 +2528,110 @@ async fn ledger_update(
         return Ok(());
     }
     let _lock = lock_ledger(path).await?;
-    ledger_update_locked(path, add, remove).await
+    let out = ledger_update_locked(
+        path,
+        add,
+        remove,
+        plugin_toolkit::storage::mount_table::mount_table,
+    )
+    .await;
+    if out.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(out.errors.join("; "))
+    }
 }
 
 /// Body of [`ledger_update`] for a caller already holding [`lock_ledger`].
-async fn ledger_update_locked(
+async fn ledger_update_locked<T>(
     path: &str,
     add: &[(String, LedgerEntry)],
     remove: &[String],
-) -> Result<(), String> {
-    let mut adds = Vec::with_capacity(add.len());
+    table: T,
+) -> LedgerOutcome
+where
+    T: Fn() -> std::io::Result<Vec<MountEntry>>,
+{
+    let mut out = LedgerOutcome::default();
+    if add.is_empty() && remove.is_empty() {
+        return out;
+    }
+    let mut ledger = match read_ledger(path).and_then(|c| parse_ledger(&c)) {
+        Ok(l) => l,
+        Err(e) => {
+            out.errors.push(e);
+            return out;
+        }
+    };
+    let before = ledger.clone();
     for (id, e) in add {
-        let target = normalize_unmount_target(&e.target)
-            .map_err(|why| format!("mount ledger: target {:?}: {why}", e.target))?;
+        let target = match normalize_unmount_target(&e.target) {
+            Ok(t) => t,
+            Err(why) => {
+                out.errors
+                    .push(format!("mount ledger: target {:?}: {why}", e.target));
+                continue;
+            }
+        };
         if !is_canonical_placement_id(id) || !valid_ledger_source(&e.source) {
-            return Err(format!(
+            out.errors.push(format!(
                 "mount ledger: invalid placement id or source for {target}"
             ));
+            continue;
         }
-        adds.push((
+        if let Some(old) = ledger.get(id)
+            && old.target != target
+        {
+            out.errors.push(format!(
+                "mount ledger: placement {id} is already recorded for {}, refusing to rebind to {target}",
+                old.target
+            ));
+            continue;
+        }
+        let stale = ledger
+            .iter()
+            .find(|(other, old)| *other != id && old.target == target)
+            .map(|(other, _)| other.clone());
+        if let Some(other) = stale {
+            let safe = match table() {
+                Ok(t) => {
+                    network_sources_in(t.clone(), &target).is_empty() || orca_owned_in(&t, &target)
+                }
+                Err(err) => {
+                    out.errors.push(format!(
+                        "mount ledger: {target} is already recorded under placement {other}; cannot read mount table to re-point it: {err}"
+                    ));
+                    continue;
+                }
+            };
+            if !safe {
+                out.errors.push(format!(
+                    "mount ledger: {target} is already recorded under placement {other} and a foreign network mount is live there; refusing to re-point it to {id}"
+                ));
+                continue;
+            }
+            ledger.remove(&other);
+            out.warnings.push(format!(
+                "placement id for {target} changed from {other} to {id}"
+            ));
+        }
+        ledger.insert(
             id.clone(),
             LedgerEntry {
                 target,
                 source: e.source.clone(),
             },
-        ));
-    }
-    if adds.is_empty() && remove.is_empty() {
-        return Ok(());
-    }
-    let mut ledger = parse_ledger(&read_ledger(path)?)?;
-    let before = ledger.clone();
-    for (id, e) in adds {
-        if let Some(old) = ledger.get(&id)
-            && old.target != e.target
-        {
-            return Err(format!(
-                "mount ledger: placement {id} is already recorded for {}, refusing to rebind to {}",
-                old.target, e.target
-            ));
-        }
-        if let Some((other, _)) = ledger
-            .iter()
-            .find(|(other, old)| **other != id && old.target == e.target)
-        {
-            return Err(format!(
-                "mount ledger: {} is already recorded under placement {other}",
-                e.target
-            ));
-        }
-        ledger.insert(id, e);
+        );
     }
     for r in remove {
         ledger.remove(r);
     }
-    if ledger == before {
-        return Ok(());
+    if ledger != before
+        && let Err(e) = write_atomic(path, &render_ledger(&ledger), Some(0o600)).await
+    {
+        out.errors.push(format!("write mount ledger {path}: {e}"));
     }
-    write_atomic(path, &render_ledger(&ledger), Some(0o600))
-        .await
-        .map_err(|e| format!("write mount ledger {path}: {e}"))
+    out
 }
 
 fn live_sources_match(live: &[String], recorded: &str) -> bool {
@@ -5697,14 +5770,97 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(
-            ledger_update(path, &add(ID_B, "/mnt/a/", "h:/3"), &[])
-                .await
-                .is_err()
-        );
         let ledger = parse_ledger(&read_ledger(path).unwrap()).unwrap();
         assert_eq!(ledger.len(), 1);
         assert_eq!(ledger[ID_A], led_entry("/mnt/a", "h:/1"));
+    }
+
+    fn orca_cifs(target: &str, source: &str) -> MountEntry {
+        MountEntry {
+            source: source.into(),
+            mountpoint: target.into(),
+            fstype: "cifs".into(),
+            options: vec!["username=orca".into()],
+        }
+    }
+
+    async fn repoint(table: Vec<MountEntry>) -> (LedgerOutcome, Ledger) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        let path = path.to_str().unwrap();
+        ledger_update(
+            path,
+            &[(ID_A.to_string(), led_entry("/mnt/a", "h:/1"))],
+            &[],
+        )
+        .await
+        .unwrap();
+        let out = ledger_update_locked(
+            path,
+            &[(ID_B.to_string(), led_entry("/mnt/a/", "h:/3"))],
+            &[],
+            || Ok(table.clone()),
+        )
+        .await;
+        (out, parse_ledger(&read_ledger(path).unwrap()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn ledger_repoints_recreated_id_when_no_live_mount() {
+        let (out, ledger) = repoint(Vec::new()).await;
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.warnings.len(), 1);
+        assert!(out.warnings[0].contains("placement id for /mnt/a changed"));
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[ID_B], led_entry("/mnt/a", "h:/3"));
+    }
+
+    #[tokio::test]
+    async fn ledger_repoints_recreated_id_when_live_mount_is_orca_cifs() {
+        let (out, ledger) = repoint(vec![orca_cifs("/mnt/a", "//h/x")]).await;
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.warnings.len(), 1);
+        assert!(!ledger.contains_key(ID_A));
+        assert!(ledger.contains_key(ID_B));
+    }
+
+    #[tokio::test]
+    async fn ledger_refuses_repoint_when_live_mount_is_foreign() {
+        let (out, ledger) = repoint(vec![net_entry("/mnt/a", "h:/x")]).await;
+        assert_eq!(out.errors.len(), 1);
+        assert!(out.errors[0].contains("foreign network mount"));
+        assert!(out.warnings.is_empty());
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[ID_A], led_entry("/mnt/a", "h:/1"));
+    }
+
+    #[tokio::test]
+    async fn ledger_batch_records_non_conflicting_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        let path = path.to_str().unwrap();
+        ledger_update(
+            path,
+            &[(ID_A.to_string(), led_entry("/mnt/a", "h:/1"))],
+            &[],
+        )
+        .await
+        .unwrap();
+        let id_c = "0192f5a0-0000-7000-8000-00000000000c";
+        let out = ledger_update_locked(
+            path,
+            &[
+                (ID_A.to_string(), led_entry("/mnt/other", "h:/1")),
+                (id_c.to_string(), led_entry("/mnt/c", "h:/c")),
+            ],
+            &[],
+            || Ok(Vec::new()),
+        )
+        .await;
+        assert_eq!(out.errors.len(), 1);
+        let ledger = parse_ledger(&read_ledger(path).unwrap()).unwrap();
+        assert_eq!(ledger[ID_A], led_entry("/mnt/a", "h:/1"));
+        assert_eq!(ledger[id_c], led_entry("/mnt/c", "h:/c"));
     }
 
     fn net_entry(target: &str, source: &str) -> MountEntry {
