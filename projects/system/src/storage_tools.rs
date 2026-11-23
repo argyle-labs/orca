@@ -624,46 +624,69 @@ fn set_route_enabled(
     found
 }
 
-/// Lazily release every LOCAL placement of `share_id` mounted from a source on
-/// `route_value` host: `umount -l` → wait `settle_secs` → `umount -l -f`. Remote
-/// placements are left to each client's convergence loop (which sees the held
-/// route and fails off it). Returns the targets it released here.
-async fn drain_local_placements(share_id: &str, this_host: &str, settle_secs: u32) -> Vec<String> {
-    let (ids, targets): (Vec<String>, Vec<String>) = crate::mounts::endpoint_db::list()
+/// Per-target result of releasing one local placement.
+#[derive(Debug, PartialEq, Eq)]
+struct DrainOutcome {
+    target: String,
+    error: Option<String>,
+}
+
+/// Release each `(id, target)` once via `release`; a target is released only
+/// when its pass reported no errors.
+async fn release_each<F, Fut>(entries: Vec<(String, String)>, mut release: F) -> Vec<DrainOutcome>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Vec<String>>,
+{
+    let mut out = Vec::with_capacity(entries.len());
+    for (id, target) in entries {
+        let errors = release(id).await;
+        let error = (!errors.is_empty()).then(|| errors.join("; "));
+        out.push(DrainOutcome { target, error });
+    }
+    out
+}
+
+/// Release every LOCAL placement of `share_id` mounted from a source on
+/// `this_host`, one privileged `Release` per id. Remote placements are left to
+/// each client's convergence loop (which sees the held route and fails off it).
+async fn drain_local_placements(share_id: &str, this_host: &str) -> Vec<DrainOutcome> {
+    let entries: Vec<(String, String)> = crate::mounts::endpoint_db::list()
         .unwrap_or_default()
         .into_iter()
         .filter(|m| m.enabled && m.share_id == share_id && m.host == this_host)
         .map(|m| (m.id, m.target))
-        .unzip();
-    if targets.is_empty() {
-        return targets;
-    }
-    // Lazy detach first (lets in-flight I/O finish), settle, then force.
-    // The first pass is deliberately best-effort — non-fatal errors here are
-    // expected when I/O is still in flight and the forced retry below is the
-    // real attempt — so they are logged only at debug. `run_privileged`
-    // collects errors into the result rather than returning a `Result`.
-    let lazy =
-        crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Release { ids: ids.clone() })
-            .await;
-    if !lazy.errors.is_empty() {
-        tracing::debug!(
-            "[storage.drain] lazy unmount pass errors (will force-retry): {:?}",
-            lazy.errors
-        );
-    }
-    tokio::time::sleep(std::time::Duration::from_secs(settle_secs as u64)).await;
-    // Final forced pass: if even this reports errors the placement may still be
-    // mounted and the drain did not fully release it — surface that to the
-    // operator.
-    let forced = crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Release { ids }).await;
-    if !forced.errors.is_empty() {
+        .collect();
+    let outcomes = release_each(entries, |id| async move {
+        crate::autofs::run_privileged(&crate::autofs::PrivilegedOp::Release { ids: vec![id] })
+            .await
+            .errors
+    })
+    .await;
+    for o in outcomes.iter().filter(|o| o.error.is_some()) {
         tracing::warn!(
-            "[storage.drain] forced unmount of {targets:?} reported errors: {:?}",
-            forced.errors
+            "[storage.drain] release of {} failed: {:?}",
+            o.target,
+            o.error
         );
     }
-    targets
+    outcomes
+}
+
+/// Render drain outcomes as operator-visible step lines.
+fn drain_steps(outcomes: &[DrainOutcome]) -> Vec<String> {
+    let released: Vec<&str> = outcomes
+        .iter()
+        .filter(|o| o.error.is_none())
+        .map(|o| o.target.as_str())
+        .collect();
+    let mut steps = vec![format!("released local placements: {released:?}")];
+    for o in outcomes {
+        if let Some(e) = &o.error {
+            steps.push(format!("failed to release {}: {e}", o.target));
+        }
+    }
+    steps
 }
 
 /// Poll `probe_source_nfs` until the source host answers RPC (nfsd live, not just
@@ -817,8 +840,8 @@ async fn share_coord(
             crate::shares::endpoint_db::update(&row)?;
             steps.push(format!("held route {route_value} (enabled=false)"));
             if drain.enabled {
-                let released = drain_local_placements(&row.id, this_host, drain.settle_secs).await;
-                steps.push(format!("released local placements: {released:?}"));
+                let outcomes = drain_local_placements(&row.id, this_host).await;
+                steps.extend(drain_steps(&outcomes));
             }
             Ok(StorageShareCoordOutput {
                 share: share_entry(&row),
@@ -840,8 +863,8 @@ async fn share_coord(
             crate::shares::endpoint_db::update(&row)?;
             steps.push(format!("drained route {route_value}"));
             if drain.enabled {
-                let released = drain_local_placements(&row.id, this_host, drain.settle_secs).await;
-                steps.push(format!("released local placements: {released:?}"));
+                let outcomes = drain_local_placements(&row.id, this_host).await;
+                steps.extend(drain_steps(&outcomes));
             }
             // 2. Reboot the source host over the mesh.
             let exec = ctx
@@ -2639,6 +2662,40 @@ async fn storage_detail(
 #[allow(clippy::disallowed_types)] // tests build serde_json::Value fixtures directly
 mod tests {
     use super::*;
+
+    fn entries() -> Vec<(String, String)> {
+        vec![("a".into(), "/mnt/a".into()), ("b".into(), "/mnt/b".into())]
+    }
+
+    #[tokio::test]
+    async fn clean_drain_reports_all_released_in_one_pass() {
+        let mut calls = Vec::new();
+        let out = release_each(entries(), |id| {
+            calls.push(id);
+            async { Vec::new() }
+        })
+        .await;
+        assert_eq!(calls, vec!["a", "b"]);
+        assert!(out.iter().all(|o| o.error.is_none()));
+        assert_eq!(drain_steps(&out).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unledgered_id_is_reported_failed_others_released() {
+        let out = release_each(entries(), |id| async move {
+            if id == "b" {
+                vec!["unknown placement id".to_string()]
+            } else {
+                Vec::new()
+            }
+        })
+        .await;
+        assert_eq!(out[0].error, None);
+        assert_eq!(out[1].error.as_deref(), Some("unknown placement id"));
+        let steps = drain_steps(&out);
+        assert_eq!(steps[0], "released local placements: [\"/mnt/a\"]");
+        assert_eq!(steps[1], "failed to release /mnt/b: unknown placement id");
+    }
 
     #[test]
     fn parse_octal_mode_accepts_common_forms() {
