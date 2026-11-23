@@ -1891,7 +1891,6 @@ async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcom
     } else {
         Ok(Vec::new())
     };
-    let live_table = table.as_ref().map(|t| t.clone()).unwrap_or_default();
     let (me, rows) = if is_linux {
         (
             crate::host_identity::machine_id(),
@@ -1900,17 +1899,34 @@ async fn unmount_kernel_mount(target: &str) -> anyhow::Result<Option<MountOutcom
     } else {
         ("", Ok(Vec::new()))
     };
+    unmount_kernel_mount_with(target, is_linux, table, me, rows, |op| async move {
+        crate::autofs::run_privileged(&op).await
+    })
+    .await
+}
+
+async fn unmount_kernel_mount_with<F, Fut>(
+    target: &str,
+    is_linux: bool,
+    table: std::io::Result<Vec<storage::mount_table::MountEntry>>,
+    me: &str,
+    rows: Result<Vec<crate::mounts::EndpointRow>, String>,
+    run: F,
+) -> anyhow::Result<Option<MountOutcome>>
+where
+    F: FnMut(crate::autofs::PrivilegedOp) -> Fut,
+    Fut: std::future::Future<Output = crate::autofs::PrivilegedResult>,
+{
+    let live_table = table.as_ref().map(|t| t.clone()).unwrap_or_default();
     let declared = rows.clone().map(|r| declared_targets_for_host(r, me));
     let Some(norm) = plan_kernel_unmount(is_linux, target, table, &declared)? else {
         return Ok(None);
     };
     let rows = rows.map_err(|e| anyhow::anyhow!(e))?;
     let id = placement_id_for(&rows, me, &norm)?;
-    release_adopting(target, &id, &norm, &live_table, |op| async move {
-        crate::autofs::run_privileged(&op).await
-    })
-    .await
-    .map(Some)
+    release_adopting(target, &id, &norm, &live_table, run)
+        .await
+        .map(Some)
 }
 
 /// Releases `id`; if the root helper has no ledger entry for it, adopts the live
@@ -4653,26 +4669,88 @@ mod tests {
             .to_string()
     }
 
+    const INCIDENT_ID: &str = "01900000-0000-7000-8000-000000000011";
+
+    /// Runs the real kernel-unmount path for the placement seeded at `/mnt/data`
+    /// with `/mnt/data` live from `live_source`, recording each op sent to the helper.
+    fn unmount_live_placement(
+        replies: Vec<Vec<String>>,
+    ) -> (
+        anyhow::Result<Option<MountOutcome>>,
+        Vec<crate::autofs::PrivilegedOp>,
+    ) {
+        let table = vec![storage::mount_table::MountEntry {
+            source: "//willow/data".into(),
+            mountpoint: "/mnt/data".into(),
+            fstype: "cifs".into(),
+            options: vec![],
+        }];
+        let rows = crate::mounts::endpoint_db::list().map_err(|e| e.to_string());
+        let me = crate::host_identity::machine_id();
+        let calls = std::sync::Mutex::new(Vec::new());
+        let replies = std::sync::Mutex::new(replies.into_iter());
+        let out = rt().block_on(unmount_kernel_mount_with(
+            "/mnt/data",
+            true,
+            Ok(table),
+            me,
+            rows,
+            |op| {
+                calls.lock().unwrap().push(op);
+                let errors = replies.lock().unwrap().next().expect("extra helper call");
+                async move {
+                    crate::autofs::PrivilegedResult {
+                        errors,
+                        ..Default::default()
+                    }
+                }
+            },
+        ));
+        (out, calls.into_inner().unwrap())
+    }
+
     #[test]
-    fn unmount_by_id_alone_releases_that_placement() {
-        with_db("mount_unmount_id_only.db", || {
+    fn unmount_of_a_ledgered_placement_whose_live_source_differs_releases_its_id() {
+        with_db("mount_unmount_incident_ledgered.db", || {
             seed_odd_share();
-            seed_local_mount("01900000-0000-7000-8000-000000000011", "sh-odd", None);
-            let msg =
-                unmount_err(r#"{"action":"unmount","id":"01900000-0000-7000-8000-000000000011"}"#);
-            assert!(msg.contains("not-a-real-backend"), "{msg}");
+            seed_local_mount(INCIDENT_ID, "sh-odd", None);
+            let (out, calls) = unmount_live_placement(vec![vec![]]);
+            let out = out
+                .unwrap()
+                .expect("a live declared mount is released here");
+            assert_eq!(out.target, "/mnt/data");
+            assert_eq!(
+                out.detail.as_deref(),
+                Some("released via privileged helper")
+            );
+            assert!(matches!(
+                &calls[..],
+                [crate::autofs::PrivilegedOp::Release { ids }] if ids == &[INCIDENT_ID.to_string()]
+            ));
         });
     }
 
     #[test]
-    fn unmount_with_matching_target_proceeds() {
-        with_db("mount_unmount_match.db", || {
+    fn unmount_of_an_unledgered_placement_adopts_the_live_source_then_releases() {
+        with_db("mount_unmount_incident_unledgered.db", || {
             seed_odd_share();
-            seed_local_mount("01900000-0000-7000-8000-000000000012", "sh-odd", None);
-            let msg = unmount_err(
-                r#"{"action":"unmount","id":"01900000-0000-7000-8000-000000000012","target":"/mnt/data/"}"#,
-            );
-            assert!(msg.contains("not-a-real-backend"), "{msg}");
+            seed_local_mount(INCIDENT_ID, "sh-odd", None);
+            let unknown = "release: refused: unknown placement id".to_string();
+            let (out, calls) = unmount_live_placement(vec![vec![unknown], vec![], vec![]]);
+            let out = out.unwrap().expect("released after adopting");
+            assert!(out.detail.unwrap().contains("adopted"));
+            assert!(matches!(
+                &calls[..],
+                [
+                    crate::autofs::PrivilegedOp::Release { ids: first },
+                    crate::autofs::PrivilegedOp::Adopt { id, target, source },
+                    crate::autofs::PrivilegedOp::Release { ids: last },
+                ] if first == &[INCIDENT_ID.to_string()]
+                    && last == &[INCIDENT_ID.to_string()]
+                    && id == INCIDENT_ID
+                    && target == "/mnt/data"
+                    && source == "//willow/data"
+            ));
         });
     }
 

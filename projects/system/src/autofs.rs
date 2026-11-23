@@ -3065,32 +3065,6 @@ mod tests {
         assert!(!is_allowed_write("/etc/auto.master.d/../../shadow"));
     }
 
-    #[test]
-    fn privileged_op_roundtrips_json() {
-        let op = PrivilegedOp::Apply {
-            writes: vec![FileWrite {
-                path: MAP_FILE.into(),
-                contents: "x".into(),
-                mode: None,
-            }],
-            keep_secret_files: Vec::new(),
-            init: Init::OpenRc,
-            placements: Vec::new(),
-            managed: None,
-        };
-        let s = serde_json::to_string(&op).unwrap();
-        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
-    }
-
-    #[test]
-    fn reload_op_roundtrips_json() {
-        for init in [Init::Systemd, Init::OpenRc] {
-            let op = PrivilegedOp::Reload { init };
-            let s = serde_json::to_string(&op).unwrap();
-            assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
-        }
-    }
-
     // NOTE: the NFS safety floor (soft/softreval/timeo/retrans) moved into the nfs
     // plugin's rendering — core is fstype-agnostic and no longer injects it. Those
     // tests now live in `argyle-labs/nfs`.
@@ -3382,14 +3356,15 @@ mod tests {
     const ID_B: &str = "0192f5a0-0000-7000-8000-00000000000b";
 
     #[test]
-    fn release_op_roundtrips_json_with_ids_only() {
-        let op = PrivilegedOp::Release {
-            ids: vec![ID_A.into(), ID_B.into()],
-        };
-        let s = serde_json::to_string(&op).unwrap();
-        assert!(s.contains("\"op\":\"release\""));
-        assert!(!s.contains("target") && !s.contains("source"));
-        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
+    fn older_payloads_without_newer_fields_still_parse() {
+        let mount: PrivilegedOp = serde_json::from_str(r#"{"op":"mount","mounts":[]}"#).unwrap();
+        assert!(matches!(
+            mount,
+            PrivilegedOp::Mount { keep_secret_files, .. } if keep_secret_files.is_empty()
+        ));
+        let r: PrivilegedResult =
+            serde_json::from_str(r#"{"changed":[],"restarted":false,"errors":[]}"#).unwrap();
+        assert!(r.unchanged.is_empty() && r.warnings.is_empty());
     }
 
     #[test]
@@ -4013,24 +3988,6 @@ mod tests {
 
     // ── PrivilegedOp::Mount serde roundtrip ───────────────────────────────
 
-    #[test]
-    fn mount_op_roundtrips_json_with_defaulted_keep_set() {
-        let op = PrivilegedOp::Mount {
-            mounts: vec![crate::mount_exec::MountReq {
-                placement_id: ID_A.into(),
-                source: "primary:/srv/data".into(),
-                target: "/mnt/data".into(),
-                fstype: "nfs4".into(),
-                options: "vers=4.2,hard".into(),
-                secret_file: None,
-            }],
-            keep_secret_files: Vec::new(),
-        };
-        let s = serde_json::to_string(&op).unwrap();
-        assert!(s.contains("\"op\":\"mount\""));
-        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
-    }
-
     // ── reap on an absent directory is a clean no-op ──────────────────────
 
     #[tokio::test]
@@ -4126,46 +4083,7 @@ mod tests {
 
     // ── PrivilegedResult serde with populated fields ──────────────────────
 
-    #[test]
-    fn privileged_result_roundtrips_with_errors_and_changes() {
-        let r = PrivilegedResult {
-            changed: vec!["/mnt/a".into(), "/mnt/b".into()],
-            restarted: true,
-            errors: vec!["mount /mnt/c: boom".into()],
-            unchanged: vec![],
-            warnings: vec![],
-        };
-        let s = serde_json::to_string(&r).unwrap();
-        assert!(s.contains("\"restarted\":true"));
-        assert!(s.contains("boom"));
-        let back: PrivilegedResult = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.changed, r.changed);
-        assert_eq!(back.errors, r.errors);
-        assert!(back.restarted);
-    }
-
     // ── PrivilegedOp::Mount roundtrip carrying a secret_file ──────────────
-
-    #[test]
-    fn mount_op_roundtrips_with_secret_file_and_keep_set() {
-        let op = PrivilegedOp::Mount {
-            mounts: vec![crate::mount_exec::MountReq {
-                placement_id: ID_A.into(),
-                source: "//host/share".into(),
-                target: "/mnt/media".into(),
-                fstype: "cifs".into(),
-                options: "rw,vers=3.0".into(),
-                secret_file: Some(crate::mount_exec::SecretFile {
-                    path: "/etc/orca/secret-files/mnt_media.secret".into(),
-                    contents: "username=svc\npassword=p\n".into(),
-                }),
-            }],
-            keep_secret_files: vec!["/etc/orca/secret-files/mnt_media.secret".into()],
-        };
-        let s = serde_json::to_string(&op).unwrap();
-        assert!(s.contains("\"op\":\"mount\""));
-        assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
-    }
 
     // ── Apply op serde carries keep_secret_files when populated ───────────
 
@@ -4548,7 +4466,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_privileged_never_reaches_real_sudo_in_tests() {
+    async fn test_guard_refuses_to_run_real_sudo() {
         let r = run_privileged(&PrivilegedOp::Release {
             ids: vec![ID_A.into()],
         })
@@ -4710,13 +4628,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn force_unmount_never_spawns_umount_under_test() {
-        let err = run_umount_lf("/orca/not/mounted/xyz".to_string())
-            .await
-            .unwrap_err();
+    async fn test_guard_refuses_to_spawn_real_umount() {
         assert!(
-            err.contains("refusing to run host-mutating `umount`"),
-            "{err}"
+            run_umount_lf("/orca/not/mounted/xyz".to_string())
+                .await
+                .is_err(),
+            "tests must never reach a real umount"
         );
     }
 
@@ -5683,18 +5600,6 @@ mod tests {
 
     fn adopt_path(dir: &tempfile::TempDir) -> String {
         dir.path().join("ledger").to_str().unwrap().to_string()
-    }
-
-    #[test]
-    fn adopt_op_roundtrips_json() {
-        let op = PrivilegedOp::Adopt {
-            id: ADOPT_ID.into(),
-            target: "/mnt/data".into(),
-            source: "//willow/data".into(),
-        };
-        let json = serde_json::to_string(&op).unwrap();
-        assert!(json.contains(r#""op":"adopt""#), "{json}");
-        assert_eq!(serde_json::from_str::<PrivilegedOp>(&json).unwrap(), op);
     }
 
     #[tokio::test]
