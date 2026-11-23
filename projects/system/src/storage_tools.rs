@@ -2024,8 +2024,9 @@ pub struct StorageMountUpdateArgs {
     #[arg(long)]
     pub host: Option<SystemId>,
     /// New absolute mountpoint on `host`; also the `action=unmount` target.
-    /// With `action=unmount --id`, optional — it defaults to the addressed
-    /// placement's own target, and overrides it when given.
+    /// With `action=unmount --id`, optional — the addressed placement's own
+    /// target is always used; when given it must match that target (a
+    /// consistency check, not an override) or the unmount is refused.
     #[arg(long)]
     pub target: Option<String>,
     /// New serialized remount policy for this placement.
@@ -2251,6 +2252,16 @@ async fn mount_unmount_addressed(
             "mount placement `{id}` is applied inside guest `{guest}`; a host-level unmount would not release it"
         );
     }
+    if let Some(t) = args
+        .target
+        .as_deref()
+        .filter(|t| t.trim_end_matches('/') != row.target.trim_end_matches('/'))
+    {
+        anyhow::bail!(
+            "invalid args: `--target {t}` does not match placement `{id}`'s target `{}`; unmount is bound to the id, so nothing was released",
+            row.target
+        );
+    }
     let provider = match args.provider.as_deref() {
         Some(p) => p.to_string(),
         None => crate::shares::endpoint_db::list()
@@ -2265,9 +2276,8 @@ async fn mount_unmount_addressed(
                 )
             })?,
     };
-    let target = args.target.as_deref().unwrap_or(row.target.as_str());
     Ok(StorageMountUpdateOutput::Unmount(
-        mount_unmount(&provider, target).await?,
+        mount_unmount(&provider, row.target.as_str()).await?,
     ))
 }
 
@@ -4457,6 +4467,79 @@ mod tests {
             // path would report success having freed the wrong thing.
             assert!(msg.contains("inside guest `101`"), "{msg}");
         });
+    }
+
+    fn seed_odd_share() {
+        let share = crate::shares::EndpointRow {
+            id: "sh-odd".into(),
+            name: "odd".into(),
+            backend: "not-a-real-backend".into(),
+            fstype: "nfs4".into(),
+            options: String::new(),
+            credential: None,
+            replication: None,
+            sync_targets: "[]".to_string(),
+            fleet_export: false,
+            routes: Default::default(),
+            enabled: true,
+        };
+        crate::shares::endpoint_db::insert(&share).expect("insert share");
+    }
+
+    fn unmount_err(json: &str) -> String {
+        let args: StorageMountUpdateArgs = serde_json::from_str(json).unwrap();
+        rt().block_on(mount_unmount_addressed(&args, &test_ctx()))
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn unmount_by_id_alone_releases_that_placement() {
+        with_db("mount_unmount_id_only.db", || {
+            seed_odd_share();
+            seed_local_mount("01900000-0000-7000-8000-000000000011", "sh-odd", None);
+            let msg =
+                unmount_err(r#"{"action":"unmount","id":"01900000-0000-7000-8000-000000000011"}"#);
+            assert!(msg.contains("not-a-real-backend"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn unmount_with_matching_target_proceeds() {
+        with_db("mount_unmount_match.db", || {
+            seed_odd_share();
+            seed_local_mount("01900000-0000-7000-8000-000000000012", "sh-odd", None);
+            let msg = unmount_err(
+                r#"{"action":"unmount","id":"01900000-0000-7000-8000-000000000012","target":"/mnt/data/"}"#,
+            );
+            assert!(msg.contains("not-a-real-backend"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn unmount_with_a_different_declared_target_is_refused() {
+        with_db("mount_unmount_mismatch.db", || {
+            seed_odd_share();
+            seed_local_mount("01900000-0000-7000-8000-000000000013", "sh-odd", None);
+            seed_mount(
+                "01900000-0000-7000-8000-000000000014",
+                crate::host_identity::machine_id(),
+                "/mnt/other",
+            );
+            let msg = unmount_err(
+                r#"{"action":"unmount","id":"01900000-0000-7000-8000-000000000013","target":"/mnt/other"}"#,
+            );
+            assert!(msg.contains("does not match"), "{msg}");
+            assert!(!msg.contains("not-a-real-backend"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn unmount_raw_provider_and_target_is_unchanged() {
+        let msg = unmount_err(
+            r#"{"action":"unmount","provider":"not-a-real-backend","target":"/mnt/x"}"#,
+        );
+        assert!(msg.contains("no storage backend named"), "{msg}");
     }
 
     #[test]
