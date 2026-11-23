@@ -1252,7 +1252,16 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
         PrivilegedOp::Release { ids } => execute_release(&ids).await,
         PrivilegedOp::Adopt { id, target, source } => {
             let mut res = PrivilegedResult::default();
-            match adopt_with(LEDGER_FILE, &id, &target, &source, network_sources).await {
+            match adopt_with(
+                LEDGER_FILE,
+                &id,
+                &target,
+                &source,
+                network_sources,
+                orca_owned,
+            )
+            .await
+            {
                 Ok(target) => res.changed.push(target),
                 Err(e) => res.errors.push(format!("adopt {id}: refused: {e}")),
             }
@@ -2261,15 +2270,17 @@ fn live_sources_match(live: &[String], recorded: &str) -> bool {
 /// Root-side body of [`PrivilegedOp::Adopt`]. The check and the write share one
 /// ledger lock so a concurrent mount cannot slip a conflicting row in between.
 /// Returns the normalized target recorded.
-async fn adopt_with<S>(
+async fn adopt_with<S, O>(
     path: &str,
     id: &str,
     target: &str,
     source: &str,
     sources: S,
+    owned: O,
 ) -> Result<String, String>
 where
     S: Fn(&str) -> Result<Vec<String>, String>,
+    O: Fn(&str) -> Result<bool, String>,
 {
     let target = normalize_unmount_target(target).map_err(|why| format!("target: {why}"))?;
     if !is_canonical_placement_id(id) {
@@ -2284,6 +2295,9 @@ where
     }
     if !live_sources_match(&live, source) {
         return Err("live source does not match the given source".into());
+    }
+    if !owned(&target)? {
+        return Err("mount does not look orca-managed".into());
     }
     let _lock = lock_ledger(path).await?;
     let mut ledger = parse_ledger(&read_ledger(path)?)?;
@@ -2425,6 +2439,36 @@ fn network_sources(target: &str) -> Result<Vec<String>, String> {
     plugin_toolkit::storage::mount_table::mount_table()
         .map(|t| network_sources_in(t, target))
         .map_err(|e| format!("cannot read mount table: {e}"))
+}
+
+/// Root-readable proof orca made the mount: the target is keyed in the direct
+/// map, or a cifs/smb3 layer carries orca's own service credentials. Reads
+/// /proc/mounts only, never stats the target.
+fn orca_owned(target: &str) -> Result<bool, String> {
+    let keys = declared_map_keys(&read_map_file()?);
+    let table = plugin_toolkit::storage::mount_table::mount_table()
+        .map_err(|e| format!("cannot read mount table: {e}"))?;
+    Ok(orca_owned_in(&keys, &table, target))
+}
+
+fn orca_owned_in(
+    keys: &std::collections::HashSet<String>,
+    table: &[MountEntry],
+    target: &str,
+) -> bool {
+    if keys.contains(target.trim_end_matches('/')) {
+        return true;
+    }
+    let t = target.trim_end_matches('/');
+    let mut layers = table
+        .iter()
+        .filter(|m| m.mountpoint.trim_end_matches('/') == t && is_network_fstype(&m.fstype))
+        .peekable();
+    layers.peek().is_some()
+        && layers.all(|m| {
+            matches!(m.fstype.as_str(), "cifs" | "smb3")
+                && m.options.iter().any(|o| o == "username=orca")
+        })
 }
 
 fn network_sources_in(table: Vec<MountEntry>, target: &str) -> Vec<String> {
@@ -4815,9 +4859,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger");
         let path = path.to_str().unwrap();
-        let t = adopt_with(path, ID_A, "/mnt/data", "//willow/data", |_| {
-            Ok(vec!["//WILLOW/data/".to_string()])
-        })
+        let t = adopt_with(
+            path,
+            ID_A,
+            "/mnt/data",
+            "//willow/data",
+            |_| Ok(vec!["//WILLOW/data/".to_string()]),
+            |_| Ok(true),
+        )
         .await
         .unwrap();
         assert_eq!(t, "/mnt/data");
@@ -5572,6 +5621,7 @@ mod tests {
             "/mnt/data/",
             "//willow/data",
             live("//WILLOW/data/"),
+            |_| Ok(true),
         )
         .await
         .unwrap();
@@ -5585,6 +5635,72 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
+    fn owned_over(
+        map: &'static str,
+        table: Vec<MountEntry>,
+    ) -> impl Fn(&str) -> Result<bool, String> {
+        move |t| Ok(orca_owned_in(&declared_map_keys(map), &table, t))
+    }
+
+    fn opt_entry(fstype: &str, source: &str, opts: &[&str]) -> MountEntry {
+        MountEntry {
+            options: opts.iter().map(|o| o.to_string()).collect(),
+            ..entry("/mnt/data", fstype, source)
+        }
+    }
+
+    async fn adopt_over(map: &'static str, table: Vec<MountEntry>) -> Result<String, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = adopt_path(&dir);
+        let t = table.clone();
+        adopt_with(
+            &path,
+            ADOPT_ID,
+            "/mnt/data",
+            "h:/x",
+            move |tg| Ok(network_sources_in(t.clone(), tg)),
+            owned_over(map, table),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn adopt_accepts_a_map_keyed_target() {
+        let t = vec![opt_entry("nfs4", "h:/x", &["rw"])];
+        assert!(adopt_over("/mnt/data -fstype=nfs h:/x\n", t).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn adopt_accepts_a_cifs_mount_with_orca_credentials() {
+        let t = vec![opt_entry("cifs", "h:/x", &["rw", "username=orca"])];
+        assert!(adopt_over("", t).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn adopt_refuses_an_unrelated_nfs_mount() {
+        let t = vec![opt_entry("nfs4", "h:/x", &["rw"])];
+        let e = adopt_over("/mnt/other -fstype=nfs h:/y\n", t)
+            .await
+            .unwrap_err();
+        assert!(e.contains("orca-managed"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn adopt_refuses_a_cifs_mount_with_another_username() {
+        let t = vec![opt_entry("cifs", "h:/x", &["username=admin"])];
+        let e = adopt_over("", t).await.unwrap_err();
+        assert!(e.contains("orca-managed"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn adopt_refuses_an_orca_cifs_layer_stacked_under_a_foreign_one() {
+        let t = vec![
+            opt_entry("cifs", "h:/x", &["username=orca"]),
+            opt_entry("nfs4", "h:/x", &["rw"]),
+        ];
+        assert!(adopt_over("", t).await.is_err());
+    }
+
     #[tokio::test]
     async fn adopt_refuses_a_source_mismatch_and_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -5595,6 +5711,7 @@ mod tests {
             "/mnt/data",
             "//willow/data",
             live("//other/data"),
+            |_| Ok(true),
         )
         .await
         .unwrap_err();
@@ -5606,9 +5723,16 @@ mod tests {
     async fn adopt_refuses_when_no_network_layer_is_present() {
         let dir = tempfile::tempdir().unwrap();
         let path = adopt_path(&dir);
-        let e = adopt_with(&path, ADOPT_ID, "/mnt/data", "h:/x", |_| Ok(Vec::new()))
-            .await
-            .unwrap_err();
+        let e = adopt_with(
+            &path,
+            ADOPT_ID,
+            "/mnt/data",
+            "h:/x",
+            |_| Ok(Vec::new()),
+            |_| Ok(true),
+        )
+        .await
+        .unwrap_err();
         assert!(e.contains("no network mount"), "{e}");
     }
 
@@ -5617,9 +5741,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = adopt_path(&dir);
         let table = || vec![entry("/mnt/data", "autofs", "/etc/auto.orca")];
-        let e = adopt_with(&path, ADOPT_ID, "/mnt/data", "/etc/auto.orca", |t| {
-            Ok(network_sources_in(table(), t))
-        })
+        let e = adopt_with(
+            &path,
+            ADOPT_ID,
+            "/mnt/data",
+            "/etc/auto.orca",
+            |t| Ok(network_sources_in(table(), t)),
+            |_| Ok(true),
+        )
         .await
         .unwrap_err();
         assert!(e.contains("no network mount"), "{e}");
@@ -5631,14 +5760,23 @@ mod tests {
         let path = adopt_path(&dir);
         let upper = ADOPT_ID.to_uppercase();
         assert!(
-            adopt_with(&path, &upper, "/mnt/data", "h:/x", live("h:/x"))
-                .await
-                .is_err()
+            adopt_with(&path, &upper, "/mnt/data", "h:/x", live("h:/x"), |_| Ok(
+                true
+            ))
+            .await
+            .is_err()
         );
         assert!(
-            adopt_with(&path, ADOPT_ID, "/mnt/../etc", "h:/x", live("h:/x"))
-                .await
-                .is_err()
+            adopt_with(
+                &path,
+                ADOPT_ID,
+                "/mnt/../etc",
+                "h:/x",
+                live("h:/x"),
+                |_| Ok(true)
+            )
+            .await
+            .is_err()
         );
     }
 
@@ -5649,13 +5787,15 @@ mod tests {
         let add = [(ID_A.to_string(), led_entry("/mnt/a", "h:/a"))];
         ledger_update(&path, &add, &[]).await.unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
-        let e = adopt_with(&path, ID_A, "/mnt/b", "h:/b", live("h:/b"))
+        let e = adopt_with(&path, ID_A, "/mnt/b", "h:/b", live("h:/b"), |_| Ok(true))
             .await
             .unwrap_err();
         assert!(e.contains("id is already recorded"), "{e}");
-        let e = adopt_with(&path, ADOPT_ID, "/mnt/a/", "h:/a", live("h:/a"))
-            .await
-            .unwrap_err();
+        let e = adopt_with(&path, ADOPT_ID, "/mnt/a/", "h:/a", live("h:/a"), |_| {
+            Ok(true)
+        })
+        .await
+        .unwrap_err();
         assert!(e.contains("target is already recorded"), "{e}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
@@ -5665,9 +5805,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = adopt_path(&dir);
         std::fs::write(&path, "garbage line\n").unwrap();
-        let e = adopt_with(&path, ADOPT_ID, "/mnt/data", "h:/x", live("h:/x"))
-            .await
-            .unwrap_err();
+        let e = adopt_with(&path, ADOPT_ID, "/mnt/data", "h:/x", live("h:/x"), |_| {
+            Ok(true)
+        })
+        .await
+        .unwrap_err();
         assert!(e.contains("corrupt"), "{e}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "garbage line\n");
 
@@ -5679,6 +5821,7 @@ mod tests {
             "/mnt/data",
             "h:/x",
             live("h:/x"),
+            |_| Ok(true),
         )
         .await
         .unwrap_err();
@@ -5695,6 +5838,7 @@ mod tests {
             "/mnt/data",
             "//willow/data",
             live("//willow/data"),
+            |_| Ok(true),
         )
         .await
         .unwrap();
