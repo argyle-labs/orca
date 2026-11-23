@@ -669,18 +669,170 @@ fn unrepresentable_key_char(c: char) -> bool {
 fn refuse_unrepresentable(mounts: &[ManagedMount]) -> Option<ApplyOutcome> {
     let errors: Vec<String> = mounts
         .iter()
-        .filter(|m| m.target.contains(unrepresentable_key_char))
-        .map(|m| {
-            format!(
-                "mount target {:?} contains a control, whitespace or quote character, which an autofs map cannot represent",
-                m.target
-            )
-        })
+        .filter(|m| m.enabled && m.kind == "network_share")
+        .filter_map(|m| validate_mount_fields(m).err())
         .collect();
     (!errors.is_empty()).then(|| ApplyOutcome {
         errors,
         ..ApplyOutcome::default()
     })
+}
+
+const FOREIGN_MAP_SCHEMES: &[&str] = &[
+    "program:", "file:", "yp:", "nis:", "ldap:", "ldaps:", "sss:", "exec:", "hesiod:", "multi:",
+];
+
+fn token_char_forbidden(c: char) -> bool {
+    c.is_control() || c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '`' | '$')
+}
+
+fn validate_location(source: &str) -> Result<(), String> {
+    let lower = source.to_ascii_lowercase();
+    if source.is_empty()
+        || source.starts_with('-')
+        || source.contains(token_char_forbidden)
+        || FOREIGN_MAP_SCHEMES.iter().any(|p| lower.starts_with(p))
+    {
+        return Err(format!("source {source:?} is not a safe mount location"));
+    }
+    Ok(())
+}
+
+fn validate_options(options: &str) -> Result<(), String> {
+    if options.contains(token_char_forbidden) {
+        return Err(format!("options {options:?} contain a forbidden character"));
+    }
+    Ok(())
+}
+
+/// Every mount field that reaches a map line or mount argv, checked at the
+/// root helper so an unprivileged caller cannot smuggle grammar through it.
+fn validate_mount_fields(m: &ManagedMount) -> Result<(), String> {
+    validate_mount_strs(
+        &m.target,
+        &m.source,
+        m.failover_sources.as_deref().unwrap_or(""),
+        m.options.as_deref().unwrap_or(""),
+    )
+}
+
+fn validate_mount_strs(
+    target: &str,
+    source: &str,
+    failovers: &str,
+    options: &str,
+) -> Result<(), String> {
+    if target.contains(unrepresentable_key_char) || !target.starts_with('/') {
+        return Err(format!(
+            "mount target {target:?} is not a safe absolute path"
+        ));
+    }
+    validate_location(source)?;
+    for s in failovers.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        validate_location(s)?;
+    }
+    validate_options(options)
+}
+
+fn validate_map_contents(contents: &str) -> Result<(), String> {
+    if let Some(c) = contents
+        .chars()
+        .find(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+    {
+        return Err(format!("map contains control character {c:?}"));
+    }
+    for line in contents.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let key = first_map_key(t);
+        if !key.starts_with('/') {
+            return Err(format!("map key {key:?} is not an absolute path"));
+        }
+        let mut rest = t;
+        let mut chars = t.char_indices();
+        while let Some((i, c)) = chars.next() {
+            match c {
+                '\\' => {
+                    chars.next();
+                }
+                ' ' | '\t' => {
+                    rest = &t[i..];
+                    break;
+                }
+                _ => {}
+            }
+            rest = "";
+        }
+        let mut fields = rest.split_whitespace();
+        let opts = fields.next().ok_or("map entry has no options")?;
+        if !opts.starts_with('-') {
+            return Err(format!("map options {opts:?} must start with '-'"));
+        }
+        validate_options(opts)?;
+        let mut n = 0;
+        for loc in fields {
+            validate_location(loc)?;
+            n += 1;
+        }
+        if n == 0 {
+            return Err("map entry has no location".into());
+        }
+    }
+    Ok(())
+}
+
+/// The master file may register the orca-owned direct map; any other line must
+/// already be present verbatim in the current on-disk master (`existing`), so
+/// Apply can preserve pre-existing entries but never add or alter one.
+fn validate_master_contents(contents: &str, existing: &str) -> Result<(), String> {
+    if let Some(c) = contents
+        .chars()
+        .find(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+    {
+        return Err(format!("master contains control character {c:?}"));
+    }
+    for line in contents.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let f: Vec<&str> = t.split_whitespace().collect();
+        let timeout_ok = |o: &str| {
+            o.strip_prefix("--timeout=")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        };
+        let ok = match f.as_slice() {
+            ["/-", map] => *map == MAP_FILE,
+            ["/-", map, o] => *map == MAP_FILE && timeout_ok(o),
+            _ => false,
+        };
+        if !ok && !existing.lines().any(|l| l.trim() == t) {
+            return Err(format!(
+                "master entry {t:?} is neither the orca direct map nor already present"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_apply_writes(writes: &[FileWrite], existing_master: &str) -> Vec<String> {
+    writes
+        .iter()
+        .filter_map(|w| {
+            let r = if !is_allowed_write(&w.path) {
+                Err(format!("refused non-allowlisted path: {}", w.path))
+            } else if w.path == MAP_FILE {
+                validate_map_contents(&w.contents)
+            } else if w.path.ends_with("auto.master") {
+                validate_master_contents(&w.contents, existing_master)
+            } else {
+                Ok(())
+            };
+            r.err().map(|e| format!("refused write {}: {e}", w.path))
+        })
+        .collect()
 }
 
 /// Run a planned [`PrivilegedOp::Apply`], short-circuiting an empty diff with no
@@ -941,13 +1093,14 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             placements,
         } => {
             let mut res = PrivilegedResult::default();
+            let existing_master = std::fs::read_to_string(detect_master_file()).unwrap_or_default();
+            let refused = validate_apply_writes(&writes, &existing_master);
+            if !refused.is_empty() {
+                res.errors = refused;
+                return res;
+            }
             let old_map = read_map_file().unwrap_or_default();
             for w in &writes {
-                if !is_allowed_write(&w.path) {
-                    res.errors
-                        .push(format!("refused non-allowlisted path: {}", w.path));
-                    continue;
-                }
                 match write_atomic(&w.path, &w.contents, w.mode).await {
                     Ok(()) => {
                         res.changed.push(w.path.clone());
@@ -980,6 +1133,23 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             keep_secret_files,
         } => {
             let mut res = PrivilegedResult::default();
+            let refused: Vec<String> = mounts
+                .iter()
+                .filter_map(|m| {
+                    validate_mount_strs(&m.target, &m.source, "", &m.options)
+                        .and_then(|()| {
+                            m.fstype
+                                .contains(token_char_forbidden)
+                                .then(|| format!("fstype {:?} is forbidden", m.fstype))
+                                .map_or(Ok(()), Err)
+                        })
+                        .err()
+                })
+                .collect();
+            if !refused.is_empty() {
+                res.errors = refused;
+                return res;
+            }
             for m in &mounts {
                 match crate::mount_exec::run_mount(m).await {
                     Ok(()) => {
@@ -3144,6 +3314,113 @@ mod tests {
             "clean reap has no errors: {:?}",
             res.errors
         );
+    }
+
+    fn apply_writes(map: &str, master: &str) -> Vec<FileWrite> {
+        vec![
+            FileWrite {
+                path: MAP_FILE.into(),
+                contents: map.into(),
+                mode: None,
+            },
+            FileWrite {
+                path: "/etc/auto.master".into(),
+                contents: master.into(),
+                mode: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn root_helper_accepts_real_rendered_master_and_map() {
+        let ms = vec![mount("a", "host:/export", Some("h2:/export"))];
+        let w = apply_writes(&render_map(&ms), &merge_master("", &managed_targets(&ms)));
+        assert_eq!(validate_apply_writes(&w, ""), Vec::<String>::new());
+        let mut el = std::collections::HashMap::new();
+        el.insert("/mnt/a".to_string(), "host:/export".to_string());
+        let w = apply_writes(&render_map_elected(&ms, &el), &merge_master("", &[]));
+        assert!(validate_apply_writes(&w, "").is_empty());
+    }
+
+    #[test]
+    fn root_helper_refuses_newline_in_source() {
+        let m = mount("a", "host:/x\n/mnt/evil  -fstype=nfs  evil:/y", None);
+        assert!(validate_mount_fields(&m).is_err());
+        assert!(refuse_unrepresentable(&[m]).is_some());
+        let w = apply_writes("/mnt/a  -fstype=nfs  host:/x\0\n", "");
+        assert!(!validate_apply_writes(&w, "").is_empty());
+    }
+
+    #[test]
+    fn root_helper_refuses_space_in_options() {
+        let mut m = mount("a", "host:/x", None);
+        m.options = Some("vers=4 evil:/y".into());
+        assert!(validate_mount_fields(&m).is_err());
+        assert!(refuse_unrepresentable(&[m]).is_some());
+        let w = apply_writes("/mnt/a  vers=4  host:/x\n", "");
+        assert!(!validate_apply_writes(&w, "").is_empty());
+    }
+
+    #[test]
+    fn root_helper_refuses_program_master_entry() {
+        for line in [
+            "/- program:/x",
+            "/- /etc/other.map",
+            "/- /etc/auto.orca program:/x",
+            "/mnt ldap:foo",
+        ] {
+            let w = apply_writes("", &format!("{line}\n"));
+            assert!(!validate_apply_writes(&w, "").is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn root_helper_accepts_merge_preserving_existing_foreign_lines() {
+        let existing = "/net -hosts\n+auto.master\n/mnt/pool /etc/auto.pool\n";
+        let ms = vec![mount("a", "host:/export", None)];
+        let w = apply_writes(
+            &render_map(&ms),
+            &merge_master(existing, &managed_targets(&ms)),
+        );
+        assert_eq!(validate_apply_writes(&w, existing), Vec::<String>::new());
+    }
+
+    #[test]
+    fn root_helper_refuses_added_or_modified_foreign_master_lines() {
+        let existing = "/net -hosts\n";
+        for added in ["/- program:/x", "/evil /etc/other.map"] {
+            let master = merge_master(&format!("{existing}{added}\n"), &[]);
+            let w = apply_writes("", &master);
+            assert!(!validate_apply_writes(&w, existing).is_empty(), "{added}");
+        }
+        let master = merge_master("/net -hosts,nosuid\n", &[]);
+        let w = apply_writes("", &master);
+        assert!(!validate_apply_writes(&w, existing).is_empty());
+    }
+
+    #[test]
+    fn root_helper_tolerates_preexisting_program_master_line() {
+        let existing = "/misc program:/usr/bin/x\n";
+        let w = apply_writes("", &merge_master(existing, &[]));
+        assert!(validate_apply_writes(&w, existing).is_empty());
+    }
+
+    #[test]
+    fn root_helper_refuses_foreign_scheme_location() {
+        let w = apply_writes("/mnt/a  -fstype=nfs  program:/x\n", "");
+        assert!(!validate_apply_writes(&w, "").is_empty());
+    }
+
+    #[tokio::test]
+    async fn refused_apply_writes_nothing() {
+        let res = execute_privileged(PrivilegedOp::Apply {
+            writes: apply_writes(&render_map(&[mount("a", "h:/x", None)]), "/- program:/x\n"),
+            keep_secret_files: vec![],
+            init: Init::Systemd,
+            placements: vec![],
+        })
+        .await;
+        assert!(res.changed.is_empty() && !res.restarted && !res.errors.is_empty());
     }
 
     #[tokio::test]
