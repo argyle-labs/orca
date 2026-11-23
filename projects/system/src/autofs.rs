@@ -117,6 +117,80 @@ pub struct MapPlacement {
     pub source: String,
 }
 
+/// The mount fields a map line is rendered from, in wire form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapMount {
+    pub backend: String,
+    pub source: String,
+    #[serde(default)]
+    pub failover_sources: Option<String>,
+    pub target: String,
+    pub fstype: String,
+    #[serde(default)]
+    pub options: Option<String>,
+}
+
+/// Structured input of a rendered direct map: the enabled network-share mounts,
+/// plus the per-target elected source when rendered with [`render_map_elected`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedMaps {
+    pub mounts: Vec<MapMount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elected: Option<std::collections::HashMap<String, String>>,
+}
+
+impl ManagedMaps {
+    fn from_mounts(
+        mounts: &[ManagedMount],
+        elected: Option<&std::collections::HashMap<String, String>>,
+    ) -> Self {
+        Self {
+            mounts: mounts
+                .iter()
+                .filter(|m| m.enabled && m.kind == "network_share")
+                .map(|m| MapMount {
+                    backend: m.backend.clone(),
+                    source: m.source.clone(),
+                    failover_sources: m.failover_sources.clone(),
+                    target: m.target.clone(),
+                    fstype: m.fstype.to_string(),
+                    options: m.options.clone(),
+                })
+                .collect(),
+            elected: elected.cloned(),
+        }
+    }
+
+    fn managed_mounts(&self) -> Vec<ManagedMount> {
+        self.mounts
+            .iter()
+            .map(|m| ManagedMount {
+                name: String::new(),
+                backend: m.backend.clone(),
+                kind: "network_share".into(),
+                source: m.source.clone(),
+                failover_sources: m.failover_sources.clone(),
+                target: m.target.clone(),
+                fstype: m.fstype.as_str().into(),
+                options: m.options.clone(),
+                credential: None,
+                remount_policy: None,
+                placement_id: None,
+                routes: Default::default(),
+                enabled: true,
+            })
+            .collect()
+    }
+
+    fn render(&self) -> String {
+        let mounts = self.managed_mounts();
+        match &self.elected {
+            Some(e) => render_map_elected(&mounts, e),
+            None => render_map(&mounts),
+        }
+    }
+}
+
 /// The privileged operation handed to `orca admin storage-apply` over stdin.
 /// A closed, validated vocabulary — the helper does exactly these and nothing
 /// else, so the `sudo` grant is a narrow, auditable surface.
@@ -137,6 +211,11 @@ pub enum PrivilegedOp {
         /// ledger so autofs-managed mounts stay releasable by id.
         #[serde(default)]
         placements: Vec<MapPlacement>,
+        /// The structured mounts the map text was rendered from. When present the
+        /// helper validates each field and re-renders the map itself, refusing any
+        /// map write that is not byte-identical to its own rendering.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        managed: Option<ManagedMaps>,
     },
     /// Release mounts root itself recorded, addressed only by placement id. Each id
     /// must be in the root ledger and its recorded target must still report the
@@ -563,7 +642,13 @@ pub struct ApplyOutcome {
 /// host yields empty `writes`; the placements still ride along so root keeps its
 /// ledger current).
 pub async fn plan(mounts: &[ManagedMount]) -> PrivilegedOp {
-    plan_with_map(mounts, render_map(mounts), map_placements(mounts, None)).await
+    plan_with_map(
+        mounts,
+        render_map(mounts),
+        map_placements(mounts, None),
+        None,
+    )
+    .await
 }
 
 /// Ledger entries for the map's mounts that carry a placement id. With `elected`,
@@ -597,6 +682,7 @@ async fn plan_with_map(
     mounts: &[ManagedMount],
     map: String,
     placements: Vec<MapPlacement>,
+    elected: Option<&std::collections::HashMap<String, String>>,
 ) -> PrivilegedOp {
     let master_path = detect_master_file();
     let existing_master = tokio::fs::read_to_string(master_path)
@@ -626,6 +712,7 @@ async fn plan_with_map(
         keep_secret_files: Vec::new(),
         init: detect_init(),
         placements,
+        managed: Some(ManagedMaps::from_mounts(mounts, elected)),
     }
 }
 
@@ -654,6 +741,7 @@ pub async fn apply_elected(
             mounts,
             render_map_elected(mounts, elected),
             map_placements(mounts, Some(elected)),
+            Some(elected),
         )
         .await,
     )
@@ -817,6 +905,32 @@ fn validate_master_contents(contents: &str, existing: &str) -> Result<(), String
     Ok(())
 }
 
+/// Checks the structured mounts and that the map write is exactly their
+/// rendering, so nothing but the renderer's output can reach the map file.
+fn validate_managed(managed: &ManagedMaps, writes: &[FileWrite]) -> Vec<String> {
+    let mut errors: Vec<String> = managed
+        .managed_mounts()
+        .iter()
+        .filter_map(|m| validate_mount_fields(m).err())
+        .collect();
+    errors.extend(
+        managed
+            .elected
+            .iter()
+            .flatten()
+            .filter_map(|(_, src)| validate_location(src).err()),
+    );
+    if errors.is_empty()
+        && let Some(w) = writes.iter().find(|w| w.path == MAP_FILE)
+        && w.contents != managed.render()
+    {
+        errors.push(format!(
+            "refused write {MAP_FILE}: map does not match its structured mounts"
+        ));
+    }
+    errors
+}
+
 fn validate_apply_writes(writes: &[FileWrite], existing_master: &str) -> Vec<String> {
     writes
         .iter()
@@ -884,6 +998,7 @@ pub async fn retire_direct_map() -> ApplyOutcome {
         keep_secret_files: Vec::new(),
         init: detect_init(),
         placements: Vec::new(),
+        managed: None,
     })
     .await
 }
@@ -1091,10 +1206,14 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             keep_secret_files: _,
             init,
             placements,
+            managed,
         } => {
             let mut res = PrivilegedResult::default();
             let existing_master = std::fs::read_to_string(detect_master_file()).unwrap_or_default();
-            let refused = validate_apply_writes(&writes, &existing_master);
+            let mut refused = validate_apply_writes(&writes, &existing_master);
+            if let Some(m) = &managed {
+                refused.extend(validate_managed(m, &writes));
+            }
             if !refused.is_empty() {
                 res.errors = refused;
                 return res;
@@ -2860,6 +2979,7 @@ mod tests {
             keep_secret_files: Vec::new(),
             init: Init::OpenRc,
             placements: Vec::new(),
+            managed: None,
         };
         let s = serde_json::to_string(&op).unwrap();
         assert_eq!(serde_json::from_str::<PrivilegedOp>(&s).unwrap(), op);
@@ -3411,6 +3531,61 @@ mod tests {
         assert!(!validate_apply_writes(&w, "").is_empty());
     }
 
+    fn managed_apply(map: &str, mounts: &[ManagedMount]) -> PrivilegedOp {
+        PrivilegedOp::Apply {
+            writes: vec![FileWrite {
+                path: MAP_FILE.into(),
+                contents: map.into(),
+                mode: None,
+            }],
+            keep_secret_files: Vec::new(),
+            init: Init::Systemd,
+            placements: Vec::new(),
+            managed: Some(ManagedMaps::from_mounts(mounts, None)),
+        }
+    }
+
+    #[test]
+    fn managed_map_matching_render_is_accepted() {
+        let ms = vec![mount("a", "h:/x", Some("h2:/x"))];
+        let PrivilegedOp::Apply {
+            writes, managed, ..
+        } = managed_apply(&render_map(&ms), &ms)
+        else {
+            unreachable!()
+        };
+        assert!(validate_managed(&managed.unwrap(), &writes).is_empty());
+    }
+
+    #[tokio::test]
+    async fn managed_map_with_injected_line_is_refused_and_unwritten() {
+        let ms = vec![mount("a", "h:/x", None)];
+        let map = format!(
+            "{}/mnt/evil  -fstype=nfs  evil:/x
+",
+            render_map(&ms)
+        );
+        let res = execute_privileged(managed_apply(&map, &ms)).await;
+        assert!(res.changed.is_empty() && !res.restarted);
+        assert!(res.errors.iter().any(|e| e.contains("does not match")));
+    }
+
+    #[tokio::test]
+    async fn managed_source_with_newline_is_refused() {
+        let ms = vec![mount("a", "h:/x\n/mnt/evil  -fstype=nfs  e:/x", None)];
+        let res = execute_privileged(managed_apply(&render_map(&ms), &ms)).await;
+        assert!(res.changed.is_empty() && !res.errors.is_empty());
+    }
+
+    #[test]
+    fn apply_payload_without_managed_deserializes() {
+        let json = r#"{"op":"apply","writes":[],"init":"systemd"}"#;
+        match serde_json::from_str::<PrivilegedOp>(json).unwrap() {
+            PrivilegedOp::Apply { managed, .. } => assert!(managed.is_none()),
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn refused_apply_writes_nothing() {
         let res = execute_privileged(PrivilegedOp::Apply {
@@ -3418,6 +3593,7 @@ mod tests {
             keep_secret_files: vec![],
             init: Init::Systemd,
             placements: vec![],
+            managed: None,
         })
         .await;
         assert!(res.changed.is_empty() && !res.restarted && !res.errors.is_empty());
@@ -3434,6 +3610,7 @@ mod tests {
             keep_secret_files: Vec::new(),
             init: Init::OpenRc,
             placements: Vec::new(),
+            managed: None,
         };
         let res = execute_privileged(op).await;
         assert!(res.changed.is_empty());
@@ -3616,6 +3793,7 @@ mod tests {
             keep_secret_files: Vec::new(),
             init: Init::OpenRc,
             placements: Vec::new(),
+            managed: None,
         };
         let out = apply_op(op).await;
         assert!(out.changed.is_empty());
@@ -3852,6 +4030,7 @@ mod tests {
             keep_secret_files: vec!["/etc/orca/secret-files/mnt_x.secret".into()],
             init: Init::Systemd,
             placements: Vec::new(),
+            managed: None,
         };
         let s = serde_json::to_string(&op).unwrap();
         assert!(s.contains("mnt_x.secret"));
@@ -5150,6 +5329,7 @@ mod tests {
             keep_secret_files: vec![],
             init: Init::Systemd,
             placements: Vec::new(),
+            managed: None,
         })
         .await;
         assert!(r.errors[0].contains("refused non-allowlisted path"));
