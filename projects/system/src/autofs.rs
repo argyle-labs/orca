@@ -219,6 +219,9 @@ pub struct PrivilegedResult {
     pub unchanged: Vec<String>,
     /// Non-fatal errors — collected, not thrown, so one bad step doesn't abort.
     pub errors: Vec<String>,
+    /// Non-fatal problems after the operation itself succeeded (e.g. stale ledger row left behind).
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 // ── Pure rendering ────────────────────────────────────────────────────────────
@@ -778,14 +781,36 @@ async fn execute_release(ids: &[String]) -> PrivilegedResult {
     )
     .await;
     let mapped = read_map_file().unwrap_or_default();
-    let released = match read_ledger(LEDGER_FILE).and_then(|c| parse_ledger(&c)) {
-        Ok(ledger) => unmapped_ids(released, &ledger, &declared_map_keys(&mapped)),
-        Err(_) => released,
-    };
-    if let Err(e) = ledger_update(LEDGER_FILE, &[], &released).await {
-        res.errors.push(e);
+    if let Err(e) = ledger_release(LEDGER_FILE, &released, &declared_map_keys(&mapped)).await {
+        res.warnings
+            .push(format!("released, but ledger cleanup failed: {e}"));
     }
     res
+}
+
+/// Drops released rows not still keyed in the map, deciding and writing under one
+/// lock from one read; an unreadable ledger leaves every row in place.
+async fn ledger_release(
+    path: &str,
+    released: &[String],
+    map_keys: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    if released.is_empty() {
+        return Ok(());
+    }
+    let _lock = lock_ledger(path).await?;
+    let mut ledger = parse_ledger(&read_ledger(path)?)?;
+    let drop = unmapped_ids(released.to_vec(), &ledger, map_keys);
+    let before = ledger.len();
+    for id in &drop {
+        ledger.remove(id);
+    }
+    if ledger.len() == before {
+        return Ok(());
+    }
+    write_atomic(path, &render_ledger(&ledger), Some(0o600))
+        .await
+        .map_err(|e| format!("write mount ledger {path}: {e}"))
 }
 
 fn read_map_file() -> Result<String, String> {
@@ -1991,9 +2016,8 @@ where
         match sources(&entry.target) {
             Ok(live) if !live.is_empty() => {}
             Ok(_) => {
-                res.errors.push(format!(
-                    "release {id}: refused: no network mount present at the recorded target"
-                ));
+                res.unchanged.push(entry.target.clone());
+                released.push(id.clone());
                 continue;
             }
             Err(e) => {
@@ -3467,6 +3491,7 @@ mod tests {
             restarted: true,
             errors: vec!["mount /mnt/c: boom".into()],
             unchanged: vec![],
+            warnings: vec![],
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("\"restarted\":true"));
@@ -4198,7 +4223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_refuses_when_nothing_is_mounted_at_the_recorded_target() {
+    async fn release_is_idempotent_when_nothing_is_mounted_at_the_recorded_target() {
         let ids = vec![ID_A.to_string()];
         let (res, released) = guard_release(
             &ids,
@@ -4207,11 +4232,71 @@ mod tests {
             |_| async { panic!("must not umount") },
         )
         .await;
-        assert!(released.is_empty() && res.changed.is_empty());
+        assert_eq!(released, vec![ID_A]);
+        assert_eq!(res.unchanged, vec!["/mnt/data"]);
+        assert!(res.errors.is_empty() && res.changed.is_empty(), "{res:?}");
+    }
+
+    #[tokio::test]
+    async fn ledger_release_drops_unmapped_rows_and_keeps_mapped_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        std::fs::write(
+            &path,
+            format!("{ID_A}\t/mnt/a\th:/a\n{ID_B}\t/mnt/b\th:/b\n"),
+        )
+        .unwrap();
+        let p = path.to_str().unwrap();
+        ledger_release(p, &[ID_A.to_string(), ID_B.to_string()], &keys(&["/mnt/a"]))
+            .await
+            .unwrap();
+        let left = parse_ledger(&read_ledger(p).unwrap()).unwrap();
+        assert_eq!(left.keys().collect::<Vec<_>>(), vec![ID_A]);
+    }
+
+    #[tokio::test]
+    async fn ledger_release_keeps_every_row_when_ledger_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        std::fs::write(&path, format!("{ID_A}\t/mnt/a\th:/a\ngarbage\n")).unwrap();
+        let p = path.to_str().unwrap();
+        let before = std::fs::read_to_string(p).unwrap();
         assert!(
-            res.errors[0].contains("no network mount present"),
-            "{res:?}"
+            ledger_release(p, &[ID_A.to_string()], &keys(&[]))
+                .await
+                .is_err()
         );
+        assert_eq!(std::fs::read_to_string(p).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn ledger_write_failure_is_not_a_release_failure_and_second_release_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_dir = dir.path().join("ledger");
+        std::fs::create_dir(&ledger_dir).unwrap();
+        let p = ledger_dir.to_str().unwrap();
+        let ids = vec![ID_A.to_string()];
+        let (mut res, released) = guard_release(
+            &ids,
+            ledgered,
+            |_| Ok(vec!["//willow/data".to_string()]),
+            |_| async { Ok(Unwound::Detached) },
+        )
+        .await;
+        if let Err(e) = ledger_release(p, &released, &keys(&[])).await {
+            res.warnings.push(e);
+        }
+        assert!(res.errors.is_empty(), "{res:?}");
+        assert_eq!(res.changed, vec!["/mnt/data"]);
+        assert_eq!(res.warnings.len(), 1);
+        let (again, released) = guard_release(
+            &ids,
+            ledgered,
+            |_| Ok(Vec::new()),
+            |_| async { panic!("must not umount") },
+        )
+        .await;
+        assert!(again.errors.is_empty() && released == vec![ID_A]);
     }
 
     #[tokio::test]
