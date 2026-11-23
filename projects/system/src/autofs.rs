@@ -1227,8 +1227,9 @@ async fn mount_locked<R, F, T>(
 ) where
     R: FnOnce(crate::mount_exec::MountReq) -> F,
     F: std::future::Future<Output = Result<(), String>>,
-    T: FnOnce() -> std::io::Result<Vec<MountEntry>>,
+    T: FnMut() -> std::io::Result<Vec<MountEntry>>,
 {
+    let mut table = table;
     let _lock = match lock_ledger(path).await {
         Ok(l) => l,
         Err(e) => {
@@ -1239,6 +1240,17 @@ async fn mount_locked<R, F, T>(
             return;
         }
     };
+    match live_mount_verdict(table(), m) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            res.errors.push(format!(
+                "mount {} from {}: refused: {e}",
+                m.target, m.source
+            ));
+            return;
+        }
+    }
     match run(m.clone()).await {
         Ok(()) => {
             res.changed.push(m.target.clone());
@@ -1261,6 +1273,42 @@ async fn mount_locked<R, F, T>(
             .errors
             .push(format!("mount {} from {}: {e}", m.target, m.source)),
     }
+}
+
+/// Whether a mount at `m.target` may proceed: `Ok(false)` when no network layer is
+/// there, `Ok(true)` when it is already mounted from the requested source by
+/// orca, `Err` when a live network layer must be released first. Mounting over a
+/// live (possibly dead-server) layer would stack on it. Reads the table only.
+fn live_mount_verdict(
+    table: std::io::Result<Vec<MountEntry>>,
+    m: &crate::mount_exec::MountReq,
+) -> Result<bool, String> {
+    let table = table.map_err(|e| format!("cannot read mount table: {e}"))?;
+    let sources = network_sources_in(table.clone(), &m.target);
+    if sources.is_empty() {
+        return Ok(false);
+    }
+    if orca_owned_in(&table, &m.target) && sources.iter().all(|s| *s == m.source) {
+        return Ok(true);
+    }
+    Err(format!(
+        "a network mount is still live at {} (from {}); release it first (Release/unmount) before mounting",
+        m.target,
+        sources.join(", ")
+    ))
+}
+
+/// A stale-handle `umount -lf` rescue is only for targets with no foreign
+/// network layer: an unreadable table or someone else's live mount forbids it.
+pub(crate) fn rescue_allowed(target: &str) -> bool {
+    match plugin_toolkit::storage::mount_table::mount_table() {
+        Ok(t) => rescue_allowed_in(&t, target),
+        Err(_) => false,
+    }
+}
+
+fn rescue_allowed_in(table: &[MountEntry], target: &str) -> bool {
+    network_sources_in(table.to_vec(), target).is_empty() || orca_owned_in(table, target)
 }
 
 /// Holds the ledger lock from the authorization check through the last umount so
@@ -6629,5 +6677,74 @@ mod tests {
         assert_eq!(res.changed, vec!["/mnt/data".to_string()]);
         assert_eq!(released, vec![ADOPT_ID.to_string()]);
         assert!(res.errors.is_empty(), "{res:?}");
+    }
+
+    async fn mount_against(table: Vec<MountEntry>, source: &str) -> (PrivilegedResult, usize) {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("ledger").to_str().unwrap().to_string();
+        let m = crate::mount_exec::MountReq {
+            placement_id: ID_A.to_string(),
+            source: source.into(),
+            target: "/mnt/data".into(),
+            fstype: "cifs".into(),
+            options: String::new(),
+            secret_file: None,
+        };
+        let ran = std::cell::Cell::new(0usize);
+        let mut res = PrivilegedResult::default();
+        mount_locked(
+            &p,
+            &m,
+            |_| {
+                ran.set(ran.get() + 1);
+                async { Ok(()) }
+            },
+            || Ok(table.clone()),
+            &mut res,
+        )
+        .await;
+        (res, ran.get())
+    }
+
+    #[tokio::test]
+    async fn mount_refuses_over_a_live_foreign_nfs_layer() {
+        let (res, ran) = mount_against(vec![entry("/mnt/data", "nfs4", "h:/x")], "//a/b").await;
+        assert_eq!(ran, 0);
+        assert!(res.changed.is_empty());
+        assert!(res.errors[0].contains("release it first"), "{res:?}");
+    }
+
+    #[tokio::test]
+    async fn mount_refuses_over_orca_layer_from_another_source() {
+        let (res, ran) = mount_against(vec![orca_cifs("/mnt/data", "//a/b")], "//c/d").await;
+        assert_eq!(ran, 0);
+        assert!(res.errors[0].contains("release it first"), "{res:?}");
+    }
+
+    #[tokio::test]
+    async fn mount_of_the_live_source_is_unchanged() {
+        let (res, ran) = mount_against(vec![orca_cifs("/mnt/data", "//a/b")], "//a/b").await;
+        assert_eq!(ran, 0);
+        assert!(res.changed.is_empty() && res.errors.is_empty(), "{res:?}");
+    }
+
+    #[tokio::test]
+    async fn mount_onto_an_empty_target_mounts() {
+        let (res, ran) = mount_against(Vec::new(), "//a/b").await;
+        assert_eq!(ran, 1);
+        assert_eq!(res.changed, vec!["/mnt/data".to_string()]);
+    }
+
+    #[test]
+    fn rescue_allowed_only_without_a_foreign_network_layer() {
+        assert!(rescue_allowed_in(&[], "/mnt/data"));
+        assert!(rescue_allowed_in(
+            &[orca_cifs("/mnt/data", "//a/b")],
+            "/mnt/data"
+        ));
+        assert!(!rescue_allowed_in(
+            &[entry("/mnt/data", "nfs4", "h:/x")],
+            "/mnt/data"
+        ));
     }
 }

@@ -118,6 +118,7 @@ async fn prepare_mountpoint_with<M, MF, U, UF, D, DF>(
     mkdir: M,
     release: U,
     deadline: D,
+    may_release: bool,
 ) -> Result<(), String>
 where
     M: Fn(String) -> MF,
@@ -136,6 +137,11 @@ where
     let Err(first) = bounded().await else {
         return Ok(());
     };
+    if !may_release {
+        return Err(format!(
+            "create mountpoint {target}: {first} (not released: a network mount owned by someone else is live)"
+        ));
+    }
     // Best-effort: the retry below is authoritative for whether we can proceed.
     let _released = release(target.to_string()).await;
     bounded().await.map_err(|second| {
@@ -157,6 +163,7 @@ pub async fn run_mount(req: &MountReq) -> Result<(), String> {
         },
         |t| async move { run_umount(&t).await },
         || tokio::time::sleep(MOUNTPOINT_PREP_TIMEOUT),
+        crate::autofs::rescue_allowed(&req.target),
     )
     .await?;
     // Materialize the backend-produced secret-file (0600, root) before mounting so
@@ -331,6 +338,7 @@ mod tests {
                 async { Ok(()) }
             },
             std::future::pending::<()>,
+            true,
         )
         .await;
         assert_eq!(out, Ok(()));
@@ -359,6 +367,7 @@ mod tests {
                 async { Ok(()) }
             },
             std::future::pending::<()>,
+            true,
         )
         .await;
         assert_eq!(out, Ok(()));
@@ -378,10 +387,31 @@ mod tests {
                 async { Ok(()) }
             },
             || std::future::ready(()),
+            true,
         )
         .await;
         let err = out.unwrap_err();
         assert!(err.contains("timed out") && err.contains("/mnt/x"), "{err}");
         assert_eq!(rel.load(SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn prepare_refuses_rescue_when_not_allowed() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (_, rel) = dir_probe();
+        let r = rel.clone();
+        let out = prepare_mountpoint_with(
+            "/mnt/x",
+            |_| async { Err(std::io::Error::other("stale")) },
+            move |_| {
+                r.fetch_add(1, SeqCst);
+                async { Ok(()) }
+            },
+            std::future::pending::<()>,
+            false,
+        )
+        .await;
+        assert!(out.unwrap_err().contains("someone else"));
+        assert_eq!(rel.load(SeqCst), 0);
     }
 }
