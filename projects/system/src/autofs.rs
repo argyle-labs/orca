@@ -1292,11 +1292,63 @@ async fn restart_autofs(init: Init) -> Result<(), String> {
 /// mountpoint mounts on access). Best-effort — used after an apply so declared
 /// mounts come up now rather than on first consumer access.
 pub async fn trigger(targets: &[String]) -> Vec<String> {
+    trigger_with(
+        targets,
+        |t| async move {
+            Command::new("stat")
+                .arg("--")
+                .arg(t)
+                .kill_on_drop(true)
+                .output()
+                .await
+                .map(|_| ())
+        },
+        || tokio::time::sleep(TRIGGER_TIMEOUT),
+    )
+    .await
+}
+
+/// `stat` on a wedged hard mount enters D-state and never returns, so each
+/// access is abandoned (child killed on drop) after this bound.
+const TRIGGER_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn trigger_with<R, F, D, DF>(targets: &[String], run: R, deadline: D) -> Vec<String>
+where
+    R: Fn(String) -> F,
+    F: std::future::Future<Output = std::io::Result<()>>,
+    D: Fn() -> DF,
+    DF: std::future::Future<Output = ()>,
+{
     let mut errors = Vec::new();
     for t in targets {
-        if let Err(e) = Command::new("stat").arg("--").arg(t).output().await {
-            errors.push(format!("trigger {t}: {e}"));
+        tokio::select! {
+            r = run(t.clone()) => {
+                if let Err(e) = r {
+                    errors.push(format!("trigger {t}: {e}"));
+                }
+            }
+            () = deadline() => {
+                errors.push(format!("trigger {t}: timed out; still stale"));
+            }
         }
+    }
+    errors
+}
+
+/// Release then re-trigger. A failed release leaves the network mount live, so
+/// triggering it would block on the wedged server; skip it and report the errors.
+async fn release_then_trigger<R, RF, T, TF>(target: &str, release: R, trigger: T) -> Vec<String>
+where
+    R: FnOnce() -> RF,
+    RF: std::future::Future<Output = Vec<String>>,
+    T: FnOnce() -> TF,
+    TF: std::future::Future<Output = Vec<String>>,
+{
+    let mut errors = release().await;
+    if errors.is_empty() {
+        errors.extend(trigger().await);
+    } else {
+        errors.push(format!("trigger {target}: skipped, release failed"));
     }
     errors
 }
@@ -1497,9 +1549,12 @@ async fn release_by_id(target: &str) -> Vec<String> {
 /// access re-triggers autofs against the freshly-elected single-source map, then
 /// re-access to bring it up now. Routes the unmount through the privileged seam.
 async fn remount_to_elected(target: &str, _probe_timeout: Duration) -> Vec<String> {
-    let mut errors = release_by_id(target).await;
-    errors.extend(trigger(std::slice::from_ref(&target.to_string())).await);
-    errors
+    release_then_trigger(
+        target,
+        || release_by_id(target),
+        || async { trigger(std::slice::from_ref(&target.to_string())).await },
+    )
+    .await
 }
 
 /// Force remount of a **busy** target (opt-in `Force` policy only). Same lazy
@@ -1577,8 +1632,14 @@ pub async fn force_and_retrigger(
     }
 
     // Rung 2: lazy-unmount the (possibly wedged) handle + retrigger for failover.
-    errors.extend(release_by_id(target).await);
-    errors.extend(trigger(&one(target)).await);
+    errors.extend(
+        release_then_trigger(
+            target,
+            || release_by_id(target),
+            || async { trigger(&one(target)).await },
+        )
+        .await,
+    );
     if matches!(probe(target, health_timeout).await, MountHealth::Ok) {
         return (true, errors);
     }
@@ -3447,6 +3508,47 @@ mod tests {
             "absent legacy dir yields no error: {:?}",
             res.errors
         );
+    }
+
+    // ── trigger is bounded and skipped after a failed release ──────────────
+
+    #[tokio::test]
+    async fn trigger_that_never_completes_reports_still_stale() {
+        let errors = trigger_with(
+            &["/mnt/x".to_string()],
+            |_| std::future::pending::<std::io::Result<()>>(),
+            || std::future::ready(()),
+        )
+        .await;
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("still stale"), "{errors:?}");
+    }
+
+    #[tokio::test]
+    async fn refused_release_does_not_trigger() {
+        let called = std::sync::atomic::AtomicBool::new(false);
+        let errors = release_then_trigger(
+            "/mnt/x",
+            || async { vec!["refused".to_string()] },
+            || async {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+                Vec::new()
+            },
+        )
+        .await;
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(errors.iter().any(|e| e == "refused"));
+    }
+
+    #[tokio::test]
+    async fn clean_release_triggers() {
+        let errors = release_then_trigger(
+            "/mnt/x",
+            || async { Vec::new() },
+            || async { vec!["t".to_string()] },
+        )
+        .await;
+        assert_eq!(errors, vec!["t".to_string()]);
     }
 
     // ── trigger only records spawn failures, not non-zero stat exits ───────
