@@ -501,7 +501,7 @@ fn registers_our_map(line: &str) -> bool {
 pub fn merge_master(existing: &str, managed_targets: &[String]) -> String {
     let mut kept: Vec<&str> = Vec::new();
     let mut in_block = false;
-    for line in existing.lines() {
+    for line in existing.split_inclusive('\n') {
         let trimmed = line.trim();
         if trimmed == BLOCK_BEGIN {
             in_block = true;
@@ -538,7 +538,9 @@ pub fn merge_master(existing: &str, managed_targets: &[String]) -> String {
     }
     for line in kept {
         out.push_str(line);
-        out.push('\n');
+        if !line.ends_with('\n') {
+            out.push('\n');
+        }
     }
     out.push_str(BLOCK_BEGIN);
     out.push('\n');
@@ -558,7 +560,7 @@ pub fn merge_master(existing: &str, managed_targets: &[String]) -> String {
 pub fn retire_master(existing: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
     let mut in_block = false;
-    for line in existing.lines() {
+    for line in existing.split_inclusive('\n') {
         let trimmed = line.trim();
         if trimmed == BLOCK_BEGIN {
             in_block = true;
@@ -581,7 +583,9 @@ pub fn retire_master(existing: &str) -> String {
     let mut out = String::new();
     for line in kept {
         out.push_str(line);
-        out.push('\n');
+        if !line.ends_with('\n') {
+            out.push('\n');
+        }
     }
     out
 }
@@ -1015,22 +1019,38 @@ fn validate_map_contents(contents: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The master file may register the orca-owned direct map; any other line must
-/// already be present verbatim in the current on-disk master (`existing`), so
-/// Apply can preserve pre-existing entries but never add or alter one.
-fn validate_master_contents(contents: &str, existing: &str) -> Result<(), String> {
+/// The master file may register the orca-owned direct map; every other line must
+/// be byte-identical to a line already in the current on-disk master
+/// (`existing`), so Apply preserves pre-existing entries (CRLF included) but
+/// never adds or alters one. Pre-existing lines may only be dropped when they
+/// are orca's own registration or shadow a managed target.
+fn validate_master_contents(
+    contents: &str,
+    existing: &str,
+    targets: &[String],
+) -> Result<(), String> {
     if let Some(c) = contents
         .chars()
-        .find(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+        .find(|c| c.is_control() && !matches!(c, '\n' | '\t' | '\r'))
     {
         return Err(format!("master contains control character {c:?}"));
     }
-    for line in contents.lines() {
-        let t = line.trim();
+    let existing_lines: Vec<&str> = existing.split('\n').collect();
+    let new_lines: Vec<&str> = contents.split('\n').collect();
+    for line in &new_lines {
+        if existing_lines.contains(line) {
+            continue;
+        }
+        if let Some(c) = line.chars().find(|c| {
+            (c.is_control() && *c != '\t') || (c.is_whitespace() && !matches!(c, ' ' | '\t'))
+        }) {
+            return Err(format!("master entry contains disallowed character {c:?}"));
+        }
+        let t = line.trim_matches([' ', '\t']);
         if t.is_empty() || t.starts_with('#') {
             continue;
         }
-        let f: Vec<&str> = t.split_whitespace().collect();
+        let f: Vec<&str> = t.split([' ', '\t']).filter(|s| !s.is_empty()).collect();
         let timeout_ok = |o: &str| {
             o.strip_prefix("--timeout=")
                 .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
@@ -1040,11 +1060,26 @@ fn validate_master_contents(contents: &str, existing: &str) -> Result<(), String
             ["/-", map, o] => *map == MAP_FILE && timeout_ok(o),
             _ => false,
         };
-        if !ok && !existing.lines().any(|l| l.trim() == t) {
+        if !ok {
             return Err(format!(
                 "master entry {t:?} is neither the orca direct map nor already present"
             ));
         }
+    }
+    for line in &existing_lines {
+        if new_lines.contains(line) {
+            continue;
+        }
+        let Some(mp) = master_mountpoint(line) else {
+            continue;
+        };
+        if registers_our_map(line) || targets.iter().any(|t| is_ancestor_or_equal(&mp, t)) {
+            continue;
+        }
+        return Err(format!(
+            "master entry {:?} may not be removed: it does not shadow a managed target",
+            line.trim()
+        ));
     }
     Ok(())
 }
@@ -1095,7 +1130,11 @@ fn validate_managed(managed: Option<&ManagedMaps>, writes: &[FileWrite]) -> Vec<
     errors
 }
 
-fn validate_apply_writes(writes: &[FileWrite], existing_master: &str) -> Vec<String> {
+fn validate_apply_writes(
+    writes: &[FileWrite],
+    read_master: &dyn Fn(&str) -> String,
+    targets: &[String],
+) -> Vec<String> {
     writes
         .iter()
         .filter_map(|w| {
@@ -1104,7 +1143,7 @@ fn validate_apply_writes(writes: &[FileWrite], existing_master: &str) -> Vec<Str
             } else if w.path == MAP_FILE {
                 validate_map_contents(&w.contents)
             } else if w.path.ends_with("auto.master") {
-                validate_master_contents(&w.contents, existing_master)
+                validate_master_contents(&w.contents, &read_master(&w.path), targets)
             } else {
                 Ok(())
             };
@@ -1514,8 +1553,15 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             managed,
         } => {
             let mut res = PrivilegedResult::default();
-            let existing_master = std::fs::read_to_string(detect_master_file()).unwrap_or_default();
-            let mut refused = validate_apply_writes(&writes, &existing_master);
+            let targets: Vec<String> = managed
+                .iter()
+                .flat_map(|m| m.mounts.iter().map(|m| m.target.clone()))
+                .collect();
+            let mut refused = validate_apply_writes(
+                &writes,
+                &|p| std::fs::read_to_string(p).unwrap_or_default(),
+                &targets,
+            );
             refused.extend(validate_managed(managed.as_ref(), &writes));
             if !refused.is_empty() {
                 res.errors = refused;
@@ -3985,11 +4031,11 @@ mod tests {
     fn root_helper_accepts_real_rendered_master_and_map() {
         let ms = vec![mount("a", "host:/export", Some("h2:/export"))];
         let w = apply_writes(&render_map(&ms), &merge_master("", &managed_targets(&ms)));
-        assert_eq!(validate_apply_writes(&w, ""), Vec::<String>::new());
+        assert_eq!(check_writes(&w, ""), Vec::<String>::new());
         let mut el = std::collections::HashMap::new();
         el.insert("/mnt/a".to_string(), "host:/export".to_string());
         let w = apply_writes(&render_map_elected(&ms, &el), &merge_master("", &[]));
-        assert!(validate_apply_writes(&w, "").is_empty());
+        assert!(check_writes(&w, "").is_empty());
     }
 
     fn req(source: &str, fstype: &str, target: &str, options: &str) -> crate::mount_exec::MountReq {
@@ -4083,7 +4129,7 @@ mod tests {
         assert!(validate_mount_fields(&m).is_err());
         assert!(refuse_unrepresentable(&[m]).is_some());
         let w = apply_writes("/mnt/a  -fstype=nfs  host:/x\0\n", "");
-        assert!(!validate_apply_writes(&w, "").is_empty());
+        assert!(!check_writes(&w, "").is_empty());
     }
 
     #[test]
@@ -4093,7 +4139,7 @@ mod tests {
         assert!(validate_mount_fields(&m).is_err());
         assert!(refuse_unrepresentable(&[m]).is_some());
         let w = apply_writes("/mnt/a  vers=4  host:/x\n", "");
-        assert!(!validate_apply_writes(&w, "").is_empty());
+        assert!(!check_writes(&w, "").is_empty());
     }
 
     #[test]
@@ -4105,7 +4151,7 @@ mod tests {
             "/mnt ldap:foo",
         ] {
             let w = apply_writes("", &format!("{line}\n"));
-            assert!(!validate_apply_writes(&w, "").is_empty(), "{line}");
+            assert!(!check_writes(&w, "").is_empty(), "{line}");
         }
     }
 
@@ -4117,7 +4163,7 @@ mod tests {
             &render_map(&ms),
             &merge_master(existing, &managed_targets(&ms)),
         );
-        assert_eq!(validate_apply_writes(&w, existing), Vec::<String>::new());
+        assert_eq!(check_writes(&w, existing), Vec::<String>::new());
     }
 
     #[test]
@@ -4126,24 +4172,83 @@ mod tests {
         for added in ["/- program:/x", "/evil /etc/other.map"] {
             let master = merge_master(&format!("{existing}{added}\n"), &[]);
             let w = apply_writes("", &master);
-            assert!(!validate_apply_writes(&w, existing).is_empty(), "{added}");
+            assert!(!check_writes(&w, existing).is_empty(), "{added}");
         }
         let master = merge_master("/net -hosts,nosuid\n", &[]);
         let w = apply_writes("", &master);
-        assert!(!validate_apply_writes(&w, existing).is_empty());
+        assert!(!check_writes(&w, existing).is_empty());
     }
 
     #[test]
     fn root_helper_tolerates_preexisting_program_master_line() {
         let existing = "/misc program:/usr/bin/x\n";
         let w = apply_writes("", &merge_master(existing, &[]));
-        assert!(validate_apply_writes(&w, existing).is_empty());
+        assert!(check_writes(&w, existing).is_empty());
+    }
+
+    fn check_writes(w: &[FileWrite], existing: &str) -> Vec<String> {
+        validate_apply_writes(w, &|_| existing.to_string(), &[])
+    }
+
+    fn master_write(path: &str, contents: &str) -> Vec<FileWrite> {
+        vec![FileWrite {
+            path: path.into(),
+            contents: contents.into(),
+            mode: None,
+        }]
+    }
+
+    #[test]
+    fn master_write_is_validated_against_the_file_being_written() {
+        let w = master_write("/etc/autofs/auto.master", "/net -hosts\n");
+        let read = |p: &str| {
+            if p == "/etc/autofs/auto.master" {
+                "/net -hosts\n".to_string()
+            } else {
+                String::new()
+            }
+        };
+        assert!(validate_apply_writes(&w, &read, &[]).is_empty());
+        let w = master_write("/etc/auto.master", "/net -hosts\n");
+        assert!(!validate_apply_writes(&w, &read, &[]).is_empty());
+    }
+
+    #[test]
+    fn master_refuses_nbsp_separator() {
+        let w = master_write("/etc/auto.master", "/-\u{a0}/etc/auto.orca\n");
+        assert!(!check_writes(&w, "").is_empty());
+    }
+
+    #[test]
+    fn master_preserves_crlf_foreign_lines_and_refuses_added_cr() {
+        let existing = "/net -hosts\r\n+auto.master\r\n";
+        let merged = merge_master(existing, &[]);
+        assert!(merged.starts_with(existing));
+        let w = master_write("/etc/auto.master", &merged);
+        assert_eq!(check_writes(&w, existing), Vec::<String>::new());
+        let w = master_write("/etc/auto.master", &format!("{merged}/-  {MAP_FILE}\r\n"));
+        assert!(!check_writes(&w, existing).is_empty());
+        assert_eq!(retire_master(existing), existing);
+    }
+
+    #[test]
+    fn master_refuses_deleting_unrelated_line_but_allows_evicting_shadow() {
+        let existing = "/net -hosts\n/mnt/pool /etc/auto.pool\n";
+        let targets = vec!["/mnt/pool/data".to_string()];
+        let read = |_: &str| existing.to_string();
+        let w = master_write("/etc/auto.master", &merge_master(existing, &targets));
+        assert!(validate_apply_writes(&w, &read, &targets).is_empty());
+        let w = master_write(
+            "/etc/auto.master",
+            &merge_master("/mnt/pool /etc/auto.pool\n", &[]),
+        );
+        assert!(!validate_apply_writes(&w, &read, &targets).is_empty());
     }
 
     #[test]
     fn root_helper_refuses_foreign_scheme_location() {
         let w = apply_writes("/mnt/a  -fstype=nfs  program:/x\n", "");
-        assert!(!validate_apply_writes(&w, "").is_empty());
+        assert!(!check_writes(&w, "").is_empty());
     }
 
     fn managed_apply(map: &str, mounts: &[ManagedMount]) -> PrivilegedOp {
