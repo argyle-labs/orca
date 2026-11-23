@@ -6787,6 +6787,30 @@ mod tests {
         assert!(!out.no_stale_found);
     }
 
+    #[test]
+    #[serial_test::serial(storage_registry)]
+    fn mount_recover_reports_released_still_missing_target_stale_with_reason_when_no_source() {
+        let (out, calls) = recover_with_converge(
+            "fake-conv-missing-nosrc",
+            "/mnt/gone",
+            stale_outcome(&[], &["/mnt/gone"]),
+            Some(vec![converge_outcome(
+                "/mnt/gone",
+                None,
+                Some("no live source (2 ordered sources down)"),
+            )]),
+        );
+        assert_eq!(calls, vec![vec!["/mnt/gone".to_string()]]);
+        assert!(out.recovered.is_empty());
+        assert_eq!(out.still_stale, vec!["/mnt/gone".to_string()]);
+        assert_eq!(
+            out.errors,
+            vec!["/mnt/gone: no live source (2 ordered sources down)".to_string()]
+        );
+        assert!(out.healthy.is_empty());
+        assert!(!out.no_stale_found);
+    }
+
     /// Regression: peer-dispatch decodes this struct on the CALLING host, and
     /// every `skip_serializing_if` field vanishes from the wire in its empty
     /// case. Before `serde(default)` a detect run with no candidates round-tripped
