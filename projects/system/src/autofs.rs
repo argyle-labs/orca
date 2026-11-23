@@ -793,15 +793,159 @@ fn validate_options(options: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Every mount field that reaches a map line or mount argv, checked at the
-/// root helper so an unprivileged caller cannot smuggle grammar through it.
+const ALLOWED_FSTYPES: &[&str] = &["nfs", "nfs4", "cifs", "smb3"];
+
+const FORBIDDEN_TARGET_ROOTS: &[&str] = &[
+    "/",
+    "/etc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/boot",
+    "/dev",
+    "/proc",
+    "/sys",
+    "/run",
+    "/root",
+    "/var/spool",
+    "/var/log",
+];
+
+fn validate_fstype(fstype: &str) -> Result<(), String> {
+    if ALLOWED_FSTYPES.contains(&fstype) {
+        Ok(())
+    } else {
+        Err(format!(
+            "fstype {fstype:?} is not allowed (nfs, nfs4, cifs, smb3 only)"
+        ))
+    }
+}
+
+/// `host:/path` for nfs, `//host/share[/sub]` for cifs/smb3. Anything else is a
+/// local device or path the helper must never mount as root.
+fn validate_source_shape(fstype: &str, source: &str) -> Result<(), String> {
+    let bad = || format!("source {source:?} is not a valid {fstype} network source");
+    let host = if matches!(fstype, "cifs" | "smb3") {
+        let rest = source.strip_prefix("//").ok_or_else(bad)?;
+        let (host, share) = rest.split_once('/').ok_or_else(bad)?;
+        if share.is_empty() {
+            return Err(bad());
+        }
+        host
+    } else {
+        let (host, path) = source.split_once(":/").ok_or_else(bad)?;
+        let _ = path;
+        host
+    };
+    if host.is_empty() || host.starts_with('-') || host.contains('/') {
+        return Err(bad());
+    }
+    Ok(())
+}
+
+fn validate_options_meaning(options: &str) -> Result<(), String> {
+    for key in options.split(',').map(|o| {
+        o.split('=')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+    }) {
+        let k = key.as_str();
+        if matches!(
+            k,
+            "bind" | "rbind" | "move" | "remount" | "suid" | "dev" | "exec"
+        ) || k.starts_with("fuse")
+            || k.starts_with("ssh")
+            || k.starts_with("proxycommand")
+        {
+            return Err(format!("mount option {k:?} is not allowed"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_target_meaning(target: &str) -> Result<(), String> {
+    let normalized = target.starts_with('/')
+        && !target.contains("//")
+        && (target == "/" || !target.ends_with('/'))
+        && target
+            .split('/')
+            .skip(1)
+            .all(|c| !matches!(c, "." | "..") && (!c.is_empty() || target == "/"));
+    if !normalized {
+        return Err(format!(
+            "mount target {target:?} is not an absolute normalized path"
+        ));
+    }
+    let under = |root: &str| {
+        root == "/" && target == "/"
+            || root != "/" && (target == root || target.starts_with(&format!("{root}/")))
+    };
+    if FORBIDDEN_TARGET_ROOTS.iter().any(|r| under(r)) {
+        return Err(format!(
+            "mount target {target:?} is a protected system path"
+        ));
+    }
+    Ok(())
+}
+
+/// What a mount means, independent of how it is rendered: shared by the Mount op
+/// and the managed map path.
+fn validate_meaning(
+    target: &str,
+    fstype: &str,
+    sources: &[&str],
+    options: &str,
+) -> Result<(), String> {
+    validate_fstype(fstype)?;
+    validate_target_meaning(target)?;
+    for s in sources {
+        validate_source_shape(fstype, s)?;
+    }
+    validate_options_meaning(options)
+}
+
+/// Grammar for the Mount op, which is exec'd by argv with no shell: spaces,
+/// quotes, backslash and `$` are legitimate; control characters and a leading
+/// `-` are not.
+fn validate_argv_text(what: &str, v: &str) -> Result<(), String> {
+    if v.chars().any(char::is_control) {
+        return Err(format!("{what} {v:?} contains a control character"));
+    }
+    Ok(())
+}
+
+fn validate_mount_req(m: &crate::mount_exec::MountReq) -> Result<(), String> {
+    validate_argv_text("source", &m.source)?;
+    validate_argv_text("options", &m.options)?;
+    if m.source.starts_with('-') {
+        return Err(format!("source {:?} starts with '-'", m.source));
+    }
+    validate_meaning(&m.target, &m.fstype, &[&m.source], &m.options)
+}
+
+/// Every mount field that reaches a map line, checked at the root helper so an
+/// unprivileged caller cannot smuggle grammar or meaning through it.
 fn validate_mount_fields(m: &ManagedMount) -> Result<(), String> {
+    let failovers = m.failover_sources.as_deref().unwrap_or("");
+    let mut sources = vec![m.source.as_str()];
+    sources.extend(failovers.lines().map(str::trim).filter(|s| !s.is_empty()));
+    validate_meaning(
+        &m.target,
+        m.fstype.as_str(),
+        &sources,
+        m.options.as_deref().unwrap_or(""),
+    )?;
     validate_mount_strs(
         &m.target,
         &m.source,
-        m.failover_sources.as_deref().unwrap_or(""),
+        failovers,
         m.options.as_deref().unwrap_or(""),
     )
+    .map_err(|e| format!("{e} (not representable in an autofs map line)"))
 }
 
 fn validate_mount_strs(
@@ -932,6 +1076,13 @@ fn validate_managed(managed: Option<&ManagedMaps>, writes: &[FileWrite]) -> Vec<
             .flatten()
             .filter_map(|(_, src)| validate_location(src).err()),
     );
+    for (target, src) in managed.elected.iter().flatten() {
+        if let Some(m) = managed.mounts.iter().find(|m| &m.target == target)
+            && let Err(e) = validate_source_shape(&m.fstype, src)
+        {
+            errors.push(e);
+        }
+    }
     if errors.is_empty()
         && let Some(w) = map_write
         && w.contents != managed.render()
@@ -1272,24 +1423,14 @@ pub async fn execute_privileged(op: PrivilegedOp) -> PrivilegedResult {
             keep_secret_files,
         } => {
             let mut res = PrivilegedResult::default();
-            let refused: Vec<String> = mounts
-                .iter()
-                .filter_map(|m| {
-                    validate_mount_strs(&m.target, &m.source, "", &m.options)
-                        .and_then(|()| {
-                            m.fstype
-                                .contains(token_char_forbidden)
-                                .then(|| format!("fstype {:?} is forbidden", m.fstype))
-                                .map_or(Ok(()), Err)
-                        })
-                        .err()
-                })
-                .collect();
-            if !refused.is_empty() {
-                res.errors = refused;
-                return res;
-            }
             for m in &mounts {
+                if let Err(e) = validate_mount_req(m) {
+                    res.errors.push(format!(
+                        "mount {} from {}: refused: {e}",
+                        m.target, m.source
+                    ));
+                    continue;
+                }
                 match crate::mount_exec::run_mount(m).await {
                     Ok(()) => {
                         res.changed.push(m.target.clone());
@@ -3637,6 +3778,91 @@ mod tests {
         el.insert("/mnt/a".to_string(), "host:/export".to_string());
         let w = apply_writes(&render_map_elected(&ms, &el), &merge_master("", &[]));
         assert!(validate_apply_writes(&w, "").is_empty());
+    }
+
+    fn req(source: &str, fstype: &str, target: &str, options: &str) -> crate::mount_exec::MountReq {
+        crate::mount_exec::MountReq {
+            placement_id: "0192f5a0-0000-7000-8000-000000000001".into(),
+            source: source.into(),
+            target: target.into(),
+            fstype: fstype.into(),
+            options: options.into(),
+            secret_file: None,
+        }
+    }
+
+    #[test]
+    fn mount_op_refuses_exploits() {
+        for (src, fs, tgt, opt) in [
+            ("attacker:/x", "nfs4", "/etc/cron.d", ""),
+            ("attacker:/x", "nfs4", "/root/.ssh", ""),
+            ("h:/x", "fuse.sshfs", "/mnt/a", "ssh_command=/tmp/x"),
+            ("h:/x", "bind", "/mnt/a", ""),
+            ("/dev/sdb1", "nfs4", "/mnt/a", ""),
+            (":/etc", "nfs4", "/mnt/a", ""),
+            ("h:/x", "nfs4", "/mnt/a", "vers=4,suid"),
+            ("h:/x", "nfs4", "/mnt/a", "DEV"),
+            ("h:/x", "nfs4", "/mnt/a", "bind"),
+            ("h:/x", "nfs4", "/mnt/../etc", ""),
+            ("-o:/x", "nfs4", "/mnt/a", ""),
+        ] {
+            assert!(
+                validate_mount_req(&req(src, fs, tgt, opt)).is_err(),
+                "{src} {fs} {tgt} {opt}"
+            );
+        }
+    }
+
+    #[test]
+    fn mount_op_accepts_argv_text_and_legit_fixtures() {
+        let r = req(
+            "//nas/My Share",
+            "cifs",
+            "/mnt/s",
+            "username=DOMAIN\\user,password=p$a\"ss",
+        );
+        assert!(validate_mount_req(&r).is_ok());
+        assert!(
+            validate_mount_req(&req("10.0.0.1:/export", "nfs4", "/mnt/a", "vers=4.2,hard")).is_ok()
+        );
+        assert!(validate_mount_req(&req("//h/s", "cifs", "/srv/x", "")).is_ok());
+        assert!(validate_mount_req(&req("h:/x", "nfs4", "/mnt/a", "a\nb")).is_err());
+    }
+
+    #[test]
+    fn managed_map_path_refuses_what_a_map_line_cannot_hold() {
+        let mut m = mount("a", "//nas/My Share", None);
+        m.fstype = "cifs".into();
+        let e = validate_mount_fields(&m).unwrap_err();
+        assert!(e.contains("not representable"), "{e}");
+        let mut m = mount("a", "/dev/sdb1", None);
+        m.fstype = "ext4".into();
+        assert!(validate_mount_fields(&m).is_err());
+        let mut m = mount("a", "h:/x", None);
+        m.fstype = "bind".into();
+        assert!(validate_mount_fields(&m).is_err());
+        let mut m = mount("a", "h:/x", None);
+        m.target = "/etc/cron.d".into();
+        assert!(validate_mount_fields(&m).is_err());
+        assert!(validate_mount_fields(&mount("a", "h:/x", Some("h2:/x"))).is_ok());
+    }
+
+    #[test]
+    fn nosuid_nodev_in_built_argv() {
+        let argv = crate::mount_exec::mount_argv(&req("h:/x", "nfs4", "/mnt/a", "vers=4"));
+        assert!(argv.contains(&"vers=4,nosuid,nodev".to_string()));
+    }
+
+    #[tokio::test]
+    async fn one_bad_mount_does_not_stop_the_batch() {
+        let bad = req("/dev/sdb1", "ext4", "/etc/cron.d", "");
+        let res = execute_privileged(PrivilegedOp::Mount {
+            mounts: vec![bad.clone(), bad.clone(), bad],
+            keep_secret_files: vec![],
+        })
+        .await;
+        assert_eq!(res.errors.len(), 3, "{:?}", res.errors);
+        assert!(res.changed.is_empty());
     }
 
     #[test]

@@ -66,14 +66,16 @@ pub struct MountReq {
 
 /// Build the `mount(8)` argument vector for `req` (everything after the program
 /// name). `--` terminates option parsing so a source/target starting with `-`
-/// can never be read as a flag. An empty option string omits `-o` entirely
-/// rather than passing `-o ""` (which some `mount` builds reject).
+/// can never be read as a flag. `nosuid,nodev` is always appended so a
+/// network mount can never carry setuid binaries or device nodes.
 pub fn mount_argv(req: &MountReq) -> Vec<String> {
     let mut argv = vec!["-t".to_string(), req.fstype.clone()];
-    if !req.options.is_empty() {
-        argv.push("-o".to_string());
-        argv.push(req.options.clone());
-    }
+    argv.push("-o".to_string());
+    argv.push(if req.options.is_empty() {
+        "nosuid,nodev".to_string()
+    } else {
+        format!("{},nosuid,nodev", req.options)
+    });
     argv.push("--".to_string());
     argv.push(req.source.clone());
     argv.push(req.target.clone());
@@ -259,7 +261,7 @@ mod tests {
                 "-t",
                 "nfs4",
                 "-o",
-                "vers=4.2,soft,softreval,timeo=50,retrans=2,nconnect=4,actimeo=30",
+                "vers=4.2,soft,softreval,timeo=50,retrans=2,nconnect=4,actimeo=30,nosuid,nodev",
                 "--",
                 "10.0.0.10:/mnt/user/data",
                 "/mnt/data",
@@ -268,13 +270,20 @@ mod tests {
     }
 
     #[test]
-    fn mount_argv_omits_dash_o_when_no_options() {
+    fn mount_argv_always_forces_nosuid_nodev() {
         let argv = mount_argv(&req("10.0.0.10:/mnt/user/data", ""));
         assert_eq!(
             argv,
-            ["-t", "nfs4", "--", "10.0.0.10:/mnt/user/data", "/mnt/data"]
+            [
+                "-t",
+                "nfs4",
+                "-o",
+                "nosuid,nodev",
+                "--",
+                "10.0.0.10:/mnt/user/data",
+                "/mnt/data"
+            ]
         );
-        assert!(!argv.iter().any(|a| a == "-o"), "no empty -o");
     }
 
     #[test]
