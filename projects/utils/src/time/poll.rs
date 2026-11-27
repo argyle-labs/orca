@@ -11,9 +11,14 @@ use std::time::{Duration, Instant};
 pub struct Deadline(Instant);
 
 impl Deadline {
-    /// A deadline `dur` from now.
+    /// A deadline `dur` from now; a `dur` past the clock's range saturates to
+    /// a century out.
     pub fn after(dur: Duration) -> Self {
-        Self(now_instant() + dur)
+        let now = now_instant();
+        Self(
+            now.checked_add(dur)
+                .unwrap_or_else(|| now + Duration::from_secs(100 * 365 * 24 * 60 * 60)),
+        )
     }
 
     /// True once the current time is at or past the deadline.
@@ -102,6 +107,13 @@ mod tests {
         assert!(!d.reached());
         assert!(d.remaining() > Duration::ZERO);
         assert!(Deadline::after(Duration::ZERO).reached());
+    }
+
+    #[test]
+    fn deadline_after_an_unrepresentable_duration_saturates() {
+        let d = Deadline::after(Duration::MAX);
+        assert!(!d.reached());
+        assert!(d.remaining() > Duration::from_secs(3600));
     }
 
     #[test]
