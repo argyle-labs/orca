@@ -254,20 +254,6 @@ impl Command {
         }
     }
 
-    /// Run up to `budget`, capturing stdout + stderr. Never returns partial
-    /// output as success:
-    ///
-    /// - The child exits and both pipes reach EOF before the deadline:
-    ///   `Ok(Some(output))` with the complete output.
-    /// - The child has not exited by the deadline: `Ok(None)`; the child is
-    ///   killed and reaped.
-    /// - The child exits but a process it left behind still holds a pipe open at
-    ///   the deadline: `Err` wrapping a [`PipeHeldOpen`] that carries the child's
-    ///   exit status.
-    ///
-    /// On either deadline path the process group is also killed if
-    /// [`kill_process_group_on_timeout`](Self::kill_process_group_on_timeout) was
-    /// set; otherwise processes the child left behind keep running.
     pub async fn output_within(self, budget: Duration) -> std::io::Result<Option<Output>> {
         self.output_until(tokio::time::Instant::now() + budget)
             .await
@@ -281,9 +267,6 @@ impl Command {
         self.output_or(tokio::time::sleep_until(deadline)).await
     }
 
-    /// [`output_within`](Self::output_within) ended by `cancel` instead of a
-    /// clock; completing `cancel` is handled exactly like reaching the deadline,
-    /// including the [`PipeHeldOpen`] path when it fires while pipes drain.
     pub async fn output_or(
         mut self,
         cancel: impl std::future::Future<Output = ()>,
@@ -413,8 +396,6 @@ impl Command {
     }
 }
 
-/// [`Command::output_within`]'s error when the child exited but its stdout or
-/// stderr was still held open, by a process it left behind, at the deadline.
 #[derive(Clone, Copy, Debug)]
 pub struct PipeHeldOpen {
     pub status: ExitStatus,
