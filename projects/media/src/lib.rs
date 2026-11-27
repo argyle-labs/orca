@@ -53,6 +53,11 @@ pub mod editions;
 pub use editions::{EditionGap, EditionPolicy, compute_edition_gaps};
 pub mod diff_reconcile;
 pub use diff_reconcile::{DiffResult, diff_new_gaps, identity_key};
+pub mod audit;
+pub use audit::{
+    AuditItem, AuditSummary, BoundError, Bounds, Include, Selection, SeriesAudit, SeriesEntry,
+    StatusCount, decimal, parse_number, select, wantable,
+};
 pub mod series_add;
 pub use series_add::{
     Pending, Poll, SeriesAddPlan, SeriesAddReport, SeriesManager, SeriesRow, SeriesView, add_series,

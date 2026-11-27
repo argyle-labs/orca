@@ -48,14 +48,10 @@ directly — they are self-contained Markdown prompts.
 
 ## Code style (all languages)
 
-**HARD RULE — comments.** Every code comment must be concise, clear, and explain
-ONLY what is not directly apparent from the code itself. Do not restate what the
-next line plainly does — comment the non-obvious: the *why*, a real constraint,
-an invariant, a gotcha, or a contract the types don't express. Describe what the
-code DOES, never its history, evolution, or what it is *not* ("was retired",
-"unlike the old…", "not just a test hook"). When in doubt, delete the comment
-rather than pad it. Applies to every language and every surface (code and prose
-docs).
+**HARD RULE — NO COMMENTS.** There are exceptions, but each one must be asked
+for every time: ask the user before writing any comment, including doc comments.
+Never reword a wrong comment; delete it. Applies to every language and every
+surface.
 
 ## Agent provenance
 
