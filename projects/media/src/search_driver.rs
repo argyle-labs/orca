@@ -12,7 +12,7 @@
 //! tight loops: [`RateState`] carries the last-search time and a 429 cooldown,
 //! and the scheduled reconcile (#503) drives this on a throttle-safe cadence.
 
-use crate::MediaIdentity;
+use crate::{MediaError, MediaIdentity};
 use serde::{Deserialize, Serialize};
 
 /// Central pacing policy — owned by orca, not hand-managed.
@@ -33,6 +33,70 @@ impl Default for SearchPolicy {
             min_interval_secs: 300, // 5 min between bursts
             cooldown_secs: 45,      // > Prowlarr's ~30s auto-block
             prefer_global: true,
+        }
+    }
+}
+
+/// Per-run request budget: caps how many requests one run issues and paces
+/// consecutive requests. One budget spans every series a run reconciles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Budget {
+    limit: usize,
+    #[cfg(feature = "in-process")]
+    pace: std::time::Duration,
+    used: usize,
+}
+
+impl Budget {
+    pub fn new(limit: usize) -> Result<Self, MediaError> {
+        if limit == 0 {
+            return Err(MediaError::Other("limit must be at least 1".into()));
+        }
+        Ok(Budget {
+            limit,
+            #[cfg(feature = "in-process")]
+            pace: std::time::Duration::ZERO,
+            used: 0,
+        })
+    }
+
+    pub fn unlimited() -> Self {
+        Budget {
+            limit: usize::MAX,
+            #[cfg(feature = "in-process")]
+            pace: std::time::Duration::ZERO,
+            used: 0,
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    pub fn with_pace(mut self, pace: std::time::Duration) -> Self {
+        self.pace = pace;
+        self
+    }
+
+    pub fn used(&self) -> usize {
+        self.used
+    }
+
+    pub fn left(&self) -> usize {
+        self.limit.saturating_sub(self.used)
+    }
+
+    /// How many of `wanted` this budget still covers.
+    pub fn take(&self, wanted: usize) -> usize {
+        wanted.min(self.left())
+    }
+
+    pub(crate) fn spend(&mut self) {
+        self.used += 1;
+    }
+
+    /// Waits out the pace before a request; never before the run's first.
+    pub(crate) async fn pace(&self) {
+        #[cfg(feature = "in-process")]
+        if self.used > 0 && !self.pace.is_zero() {
+            tokio::time::sleep(self.pace).await;
         }
     }
 }

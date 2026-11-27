@@ -20,6 +20,7 @@
 
 use crate::identity;
 use crate::seam::{AddRequest, LibraryServer, QualityPolicy, Requester, Scope};
+use crate::search_driver::Budget;
 use crate::{MediaError, MediaIdentity, MediaType, RequestStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -117,6 +118,13 @@ pub fn compute_gaps(expected: &[MediaIdentity], owned: &[MediaIdentity]) -> Vec<
 
 // ── Report + driver ───────────────────────────────────────────────────────────
 
+/// Why a gap was not requested this run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    BudgetExhausted,
+}
+
 /// What one gap-add attempt did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GapAction {
@@ -128,6 +136,8 @@ pub struct GapAction {
     /// aborting the whole reconcile.
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub skipped: Option<SkipReason>,
 }
 
 /// The outcome of a series reconcile: the counts, the computed gaps, and — when
@@ -144,12 +154,16 @@ pub struct ReconcileOutcome {
     /// Empty when `dry_run`; otherwise one entry per gap.
     #[serde(default)]
     pub actions: Vec<GapAction>,
+    /// Gaps the run's [`Budget`] covered (requested, or would be on a dry run).
+    pub selected: usize,
+    /// Gaps left for a later run once the budget ran out.
+    pub remaining: usize,
     pub dry_run: bool,
 }
 
 /// Reconcile one canonical/series expected set against a library server +
 /// requester: read owned state for `scope`, diff, and (unless `dry_run`) emit a
-/// want-request for every gap under `quality`.
+/// want-request for each gap under `quality`, within `budget`.
 ///
 /// Add failures are captured per-gap in the outcome rather than aborting, so one
 /// bad volume never blocks the rest of the series. Reading owned state is the
@@ -160,15 +174,21 @@ pub async fn reconcile_series(
     requester: &dyn Requester,
     quality: &QualityPolicy,
     scope: &Scope,
+    budget: &mut Budget,
     dry_run: bool,
 ) -> Result<ReconcileOutcome, MediaError> {
     let state = server.library_state(scope).await?;
     let owned: Vec<MediaIdentity> = state.items.into_iter().map(|e| e.identity).collect();
     let gaps = compute_gaps(expected, &owned);
+    let selected = budget.take(gaps.len());
 
     let mut actions = Vec::new();
-    if !dry_run {
-        for gap in &gaps {
+    if dry_run {
+        (0..selected).for_each(|_| budget.spend());
+    } else {
+        for gap in &gaps[..selected] {
+            budget.pace().await;
+            budget.spend();
             let req = AddRequest {
                 identity: gap.clone(),
                 quality: quality.clone(),
@@ -179,14 +199,22 @@ pub async fn reconcile_series(
                     identity: gap.clone(),
                     status: Some(status),
                     error: None,
+                    skipped: None,
                 }),
                 Err(e) => actions.push(GapAction {
                     identity: gap.clone(),
                     status: None,
                     error: Some(e.to_string()),
+                    skipped: None,
                 }),
             }
         }
+        actions.extend(gaps[selected..].iter().map(|gap| GapAction {
+            identity: gap.clone(),
+            status: None,
+            error: None,
+            skipped: Some(SkipReason::BudgetExhausted),
+        }));
     }
 
     Ok(ReconcileOutcome {
@@ -195,8 +223,10 @@ pub async fn reconcile_series(
         requester: requester.name().to_string(),
         expected: expected.len(),
         owned: owned.len(),
-        gaps,
         actions,
+        selected,
+        remaining: gaps.len() - selected,
+        gaps,
         dry_run,
     })
 }
@@ -331,6 +361,14 @@ mod tests {
 
     struct Req {
         added: std::sync::Mutex<Vec<String>>,
+        fail: Option<&'static str>,
+    }
+
+    fn req() -> Req {
+        Req {
+            added: std::sync::Mutex::new(vec![]),
+            fail: None,
+        }
     }
     #[orca_async]
     impl Requester for Req {
@@ -342,6 +380,9 @@ mod tests {
         }
         async fn add(&self, req: &AddRequest) -> Result<RequestStatus, MediaError> {
             self.added.lock().unwrap().push(req.identity.title.clone());
+            if self.fail == Some(req.identity.title.as_str()) {
+                return Err(MediaError::Transport("unqueueable".into()));
+            }
             Ok(RequestStatus {
                 identity: req.identity.clone(),
                 state: RequestState::Wanted,
@@ -386,15 +427,14 @@ mod tests {
         let srv = Srv {
             owned: vec![isbn("B", "2")],
         };
-        let req = Req {
-            added: std::sync::Mutex::new(vec![]),
-        };
+        let req = req();
         let out = reconcile_series(
             &expected,
             &srv,
             &req,
             &QualityPolicy::default(),
             &Scope::All,
+            &mut Budget::unlimited(),
             false,
         )
         .await
@@ -413,15 +453,14 @@ mod tests {
     async fn dry_run_computes_gaps_but_emits_nothing() {
         let expected = vec![isbn("A", "1"), isbn("B", "2")];
         let srv = Srv { owned: vec![] };
-        let req = Req {
-            added: std::sync::Mutex::new(vec![]),
-        };
+        let req = req();
         let out = reconcile_series(
             &expected,
             &srv,
             &req,
             &QualityPolicy::default(),
             &Scope::All,
+            &mut Budget::unlimited(),
             true,
         )
         .await
@@ -429,5 +468,107 @@ mod tests {
         assert_eq!(out.gaps.len(), 2);
         assert!(out.actions.is_empty());
         assert!(req.added.lock().unwrap().is_empty());
+    }
+
+    async fn run(
+        expected: &[MediaIdentity],
+        req: &Req,
+        budget: &mut Budget,
+        dry_run: bool,
+    ) -> ReconcileOutcome {
+        reconcile_series(
+            expected,
+            &Srv { owned: vec![] },
+            req,
+            &QualityPolicy::default(),
+            &Scope::All,
+            budget,
+            dry_run,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[test]
+    fn budget_rejects_a_zero_limit() {
+        let err = Budget::new(0).unwrap_err().to_string();
+        assert!(err.contains("limit"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn limit_spans_series_and_reports_remaining() {
+        let req = req();
+        let mut budget = Budget::new(4).unwrap();
+        let mut left = vec![];
+        for s in ["X", "Y", "Z"] {
+            let expected: Vec<_> = (1..=3)
+                .map(|n| isbn(&format!("{s}{n}"), &format!("{s}{n}")))
+                .collect();
+            let out = run(&expected, &req, &mut budget, false).await;
+            let skipped = out
+                .actions
+                .iter()
+                .filter(|a| a.skipped == Some(SkipReason::BudgetExhausted))
+                .count();
+            assert_eq!(skipped, out.remaining);
+            left.push(out.remaining);
+        }
+        assert_eq!(left, vec![0, 2, 3]);
+        assert_eq!(budget.used(), 4);
+        assert_eq!(req.added.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn dry_run_spends_budget_without_requesting() {
+        let req = req();
+        let mut budget = Budget::new(2).unwrap();
+        let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
+        let out = run(&expected, &req, &mut budget, true).await;
+        assert_eq!((out.selected, out.remaining), (2, 1));
+        assert!(out.actions.is_empty());
+        assert!(req.added.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_request_is_reported_and_the_run_continues() {
+        let req = Req {
+            fail: Some("B"),
+            ..req()
+        };
+        let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
+        let out = run(&expected, &req, &mut Budget::unlimited(), false).await;
+        let failed: Vec<_> = out
+            .actions
+            .iter()
+            .filter(|a| a.error.is_some())
+            .map(|a| a.identity.title.as_str())
+            .collect();
+        assert_eq!(failed, vec!["B"]);
+        assert_eq!(req.added.lock().unwrap().len(), 3);
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test(start_paused = true)]
+    async fn pacing_sleeps_between_requests_across_series_not_before_the_first() {
+        let req = req();
+        let pace = std::time::Duration::from_secs(30);
+        let mut budget = Budget::new(100).unwrap().with_pace(pace);
+        let start = tokio::time::Instant::now();
+        run(&[isbn("A", "1"), isbn("B", "2")], &req, &mut budget, false).await;
+        run(&[isbn("C", "3")], &req, &mut budget, false).await;
+        assert_eq!(req.added.lock().unwrap().len(), 3);
+        assert_eq!(start.elapsed(), pace * 2);
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test(start_paused = true)]
+    async fn dry_run_never_sleeps() {
+        let req = req();
+        let mut budget = Budget::new(100)
+            .unwrap()
+            .with_pace(std::time::Duration::from_secs(30));
+        let start = tokio::time::Instant::now();
+        run(&[isbn("A", "1"), isbn("B", "2")], &req, &mut budget, true).await;
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO);
     }
 }
