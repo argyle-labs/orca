@@ -70,12 +70,21 @@ impl Bounds {
         self.from.is_some() || self.to.is_some()
     }
 
-    fn contains(&self, n: SeqNumber) -> bool {
-        let (lo, hi) = match n {
+    fn span(n: SeqNumber) -> (f64, f64) {
+        match n {
             SeqNumber::Whole(r) => (r.from as f64, r.to as f64),
             SeqNumber::Fraction(f) => (f, f),
-        };
+        }
+    }
+
+    fn contains(&self, n: SeqNumber) -> bool {
+        let (lo, hi) = Self::span(n);
         self.from.is_none_or(|f| lo >= f) && self.to.is_none_or(|t| hi <= t)
+    }
+
+    fn overlaps(&self, n: SeqNumber) -> bool {
+        let (lo, hi) = Self::span(n);
+        self.from.is_none_or(|f| hi >= f) && self.to.is_none_or(|t| lo <= t)
     }
 }
 
@@ -112,7 +121,7 @@ pub struct SeriesEntry<S> {
 #[derive(Debug, PartialEq)]
 pub struct Selection<'a, S> {
     pub picked: Vec<&'a SeriesEntry<S>>,
-    /// Wantable entries a range cannot place because they carry no number.
+    /// Wantable entries a range cannot place: no number, or a range straddling a bound.
     pub unranged: Vec<&'a SeriesEntry<S>>,
 }
 
@@ -133,8 +142,8 @@ pub fn select<'a, S>(
         match e.number {
             _ if !bounds.ranged() => out.picked.push(e),
             Some(n) if bounds.contains(n) => out.picked.push(e),
-            Some(_) => {}
-            None => out.unranged.push(e),
+            Some(n) if !bounds.overlaps(n) => {}
+            _ => out.unranged.push(e),
         }
     }
     out
@@ -434,10 +443,13 @@ mod tests {
         let mut e = saga();
         e.push(issue("8", "AU", Mylar::Wanted));
         e.push(issue("9", "4.5", Mylar::Wanted));
+        e.push(issue("10", "4-5", Mylar::Wanted));
+        e.push(issue("11", "8-9", Mylar::Wanted));
+        e.push(issue("12", "3-4", Mylar::Wanted));
         let b = Bounds::parse(Some("3"), Some("4.5")).unwrap();
         let s = select(&e, b, Include::default(), mylar);
-        assert_eq!(ids(&s.picked), vec!["4", "9"]);
-        assert_eq!(ids(&s.unranged), vec!["8"]);
+        assert_eq!(ids(&s.picked), vec!["4", "9", "12"]);
+        assert_eq!(ids(&s.unranged), vec!["8", "10"]);
         let open = Bounds::parse(None, Some("2")).unwrap();
         assert_eq!(
             ids(&select(&e, open, Include::default(), mylar).picked),
