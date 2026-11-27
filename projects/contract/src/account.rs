@@ -451,6 +451,34 @@ fn secret_values(v: &serde_json::Value, key: &str) -> Vec<String> {
     out
 }
 
+/// Key-name redaction misses a value echoed under an innocuous key
+/// (`{"msg": "set key to <value>"}`), so every string leaf is also checked
+/// against the request secret and any `generated` value. The top-level
+/// `generated` field itself is the one place the value is meant to travel.
+fn scrub_known_values(out: &mut serde_json::Value, values: &[String]) {
+    fn walk(v: &mut serde_json::Value, values: &[String]) {
+        match v {
+            serde_json::Value::String(s)
+                if values
+                    .iter()
+                    .any(|x| !x.is_empty() && s.contains(x.as_str())) =>
+            {
+                *s = scrubbed(s, values);
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|x| walk(x, values)),
+            serde_json::Value::Object(o) => o.values_mut().for_each(|x| walk(x, values)),
+            _ => {}
+        }
+    }
+    match out {
+        serde_json::Value::Object(o) => o
+            .iter_mut()
+            .filter(|(k, _)| k.as_str() != "generated")
+            .for_each(|(_, v)| walk(v, values)),
+        other => walk(other, values),
+    }
+}
+
 fn scrubbed(msg: &str, values: &[String]) -> String {
     let refs: Vec<&str> = values.iter().map(String::as_str).collect();
     utils::scrub::redact_values(msg, &refs)
@@ -524,7 +552,11 @@ pub async fn dispatch_op(
         }
     }
     .await;
-    out.map_err(err)
+    let mut out = out.map_err(err)?;
+    let mut known = secret.clone();
+    known.extend(secret_values(&out, "generated"));
+    scrub_known_values(&mut out, &known);
+    Ok(out)
 }
 
 #[cfg(feature = "in-process")]
@@ -581,8 +613,10 @@ impl AccountProxy {
                         crate::render_invoke_error(&e)
                     ))
                 })?;
+            let mut out = out;
             let mut leaked = secret.clone();
             leaked.extend(secret_values(&out, "generated"));
+            scrub_known_values(&mut out, &leaked);
             serde_json::from_value(out).map_err(|e| {
                 anyhow::anyhow!(scrubbed(
                     &format!("account '{name}' {op} returned invalid JSON: {e}"),
@@ -1719,5 +1753,125 @@ mod tests {
         assert_eq!(out.detail["password"], utils::scrub::REDACTED);
         assert_eq!(out.detail["id"], "x");
         assert!(!format!("{out:?}").contains(VALUE));
+    }
+
+    struct EchoOwner;
+
+    impl AccountProvider for EchoOwner {
+        fn name(&self) -> &str {
+            "account-echo"
+        }
+        fn decl(&self) -> BoxFuture<'_, Result<AccountDecl>> {
+            Box::pin(async {
+                Ok(AccountDecl {
+                    unit_kinds: vec![],
+                    account_kinds: vec![],
+                })
+            })
+        }
+        fn set_secret(&self, req: SetSecretRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+            Box::pin(async move {
+                let v = req.secret.as_ref().unwrap().expose_secret().clone();
+                Ok(AccountOutcome {
+                    executed: true,
+                    detail: serde_json::json!({"msg": format!("set key to {v}"), "list": [v]}),
+                    ..Default::default()
+                })
+            })
+        }
+        fn regenerate(&self, _req: RegenerateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+            Box::pin(async {
+                Ok(AccountOutcome {
+                    executed: true,
+                    detail: serde_json::json!({"msg": format!("new key {VALUE}")}),
+                    generated: Some(Secret::new(VALUE.to_string())),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn account_dispatch_op_scrubs_echoed_value_under_innocuous_key() {
+        let out = dispatch_op(
+            &EchoOwner,
+            SET_SECRET_OP,
+            serde_json::json!({"account": acct(), "secret": VALUE}),
+        )
+        .await
+        .unwrap();
+        assert!(!out.to_string().contains(VALUE), "{out}");
+        assert!(
+            out["detail"]["msg"]
+                .as_str()
+                .unwrap()
+                .starts_with("set key to")
+        );
+        let regen = dispatch_op(
+            &EchoOwner,
+            REGENERATE_OP,
+            serde_json::json!({"account": acct()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(regen["generated"], VALUE);
+        assert!(!regen["detail"].to_string().contains(VALUE));
+    }
+
+    #[cfg(feature = "in-process")]
+    fn echo_proxy() -> AccountProxy {
+        let invoke: InvokeThunk = Arc::new(|op, args, _call| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let mut raw = match op {
+                        SET_SECRET_OP => serde_json::json!({
+                            "executed": true,
+                            "detail": {"msg": format!("set key to {}", args["secret"].as_str().unwrap())},
+                        }),
+                        _ => dispatch_op(&EchoOwner, op, args).await?,
+                    };
+                    if op == REGENERATE_OP {
+                        raw["detail"]["msg"] = serde_json::json!(format!("new key {VALUE}"));
+                    }
+                    Ok(raw)
+                })
+        });
+        AccountProxy {
+            name: "account-proxy-echo".into(),
+            invoke,
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_scrubs_echoed_value_under_innocuous_key() {
+        let proxy = echo_proxy();
+        let out = proxy
+            .set_secret(SetSecretRequest {
+                account: acct(),
+                secret: Some(secret()),
+                dry_run: false,
+                rollback: false,
+            })
+            .await
+            .unwrap();
+        assert!(!out.detail.to_string().contains(VALUE), "{:?}", out.detail);
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_regenerate_keeps_generated_and_scrubs_detail() {
+        let out = echo_proxy()
+            .regenerate(RegenerateRequest {
+                account: acct(),
+                dry_run: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.generated.as_ref().unwrap().expose_secret(), VALUE);
+        assert!(!out.detail.to_string().contains(VALUE), "{:?}", out.detail);
+        assert!(out.detail["msg"].as_str().unwrap().starts_with("new key"));
     }
 }
