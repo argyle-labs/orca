@@ -47,8 +47,8 @@ pub enum IdSource {
     Hardcover,
     /// Open Library id (`OL…M/W`) — ebooks.
     OpenLibrary,
-    /// ComicVine issue/volume id — comics.
-    ComicVine,
+    /// ComicVine volume (`4050-`) id — comics.
+    ComicVineVolume,
     /// Podcast Index feed id — podcasts.
     PodcastIndex,
 }
@@ -66,7 +66,7 @@ impl IdSource {
             IdSource::Goodreads => "goodreads",
             IdSource::Hardcover => "hardcover",
             IdSource::OpenLibrary => "openlibrary",
-            IdSource::ComicVine => "comicvine",
+            IdSource::ComicVineVolume => "comicvine",
             IdSource::PodcastIndex => "podcastindex",
         }
     }
@@ -96,7 +96,7 @@ impl IdSource {
             "goodreads" | "gr" => Some(IdSource::Goodreads),
             "hardcover" => Some(IdSource::Hardcover),
             "openlibrary" | "olid" | "ol" => Some(IdSource::OpenLibrary),
-            "comicvine" | "cv" | "cvid" => Some(IdSource::ComicVine),
+            "comicvine" | "cv" | "cvid" => Some(IdSource::ComicVineVolume),
             "podcastindex" | "podcast_index" | "pi" => Some(IdSource::PodcastIndex),
             _ => None,
         }
@@ -117,7 +117,7 @@ impl IdSource {
             // Audible ASINs are audiobooks; Kindle ASINs are ebooks.
             IdSource::Asin => matches!(ty, Audiobooks | Ebooks),
             IdSource::OpenLibrary => matches!(ty, Ebooks | Audiobooks),
-            IdSource::ComicVine => matches!(ty, Comics),
+            IdSource::ComicVineVolume => matches!(ty, Comics),
             IdSource::PodcastIndex => matches!(ty, Podcasts),
         }
     }
@@ -138,7 +138,7 @@ impl IdSource {
             (Audiobooks, IdSource::Isbn) => 1,
             (Ebooks, IdSource::Isbn) => 0,
             (Ebooks, IdSource::Asin) => 1,
-            (Comics, IdSource::ComicVine) => 0,
+            (Comics, IdSource::ComicVineVolume) => 0,
             (Podcasts, IdSource::PodcastIndex) => 0,
             _ => u8::MAX,
         }
@@ -164,7 +164,7 @@ pub fn normalize_id(source: Option<IdSource>, raw: &str) -> String {
         // keep OpenLibrary as-is but stripped.
         Some(IdSource::Asin) => raw.to_ascii_uppercase(),
         Some(IdSource::OpenLibrary) => raw.trim().to_string(),
-        Some(IdSource::ComicVine) if let Ok(id) = comicvine_volume_id(raw) => id,
+        Some(IdSource::ComicVineVolume) if let Ok(id) = comicvine_volume_id(raw) => id,
         // Numeric/opaque ids: strip surrounding noise, drop a trailing query.
         Some(_) => raw
             .split(['?', '#'])
@@ -631,6 +631,10 @@ mod tests {
             "4000-33017"
         );
         assert_eq!(parse_guid("comicvine.gamespot.com/x/4000-5/"), None);
+        assert_eq!(
+            normalize_id(Some(IdSource::ComicVineVolume), "4000-33017"),
+            "4000-33017"
+        );
         assert_eq!(parse_guid("https://example.com/x/4050-1/"), None);
         assert_eq!(
             parse_guid("https://comicvine.gamespot.com.evil.test/x/4050-1/"),
