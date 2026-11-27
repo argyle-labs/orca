@@ -85,7 +85,6 @@ impl std::fmt::Display for Unsupported {
 
 impl std::error::Error for Unsupported {}
 
-/// A name that must not be blank; decoding rejects `""` and whitespace.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[serde(transparent)]
 pub struct NonEmpty(String);
@@ -227,9 +226,7 @@ pub struct SetSecretRequest {
     pub secret: Option<Secret<String>>,
     #[serde(default)]
     pub dry_run: bool,
-    /// Set when core is putting the previous value back after a failed
-    /// rotation step; the provider reports the result in
-    /// [`AccountOutcome::restored`].
+    /// Puts the previous value back; the outcome must set `restored`.
     #[serde(default)]
     pub rollback: bool,
 }
@@ -270,9 +267,7 @@ pub struct ConsumerApplyRequest {
     pub secret: Option<Secret<String>>,
     #[serde(default)]
     pub dry_run: bool,
-    /// Set when core is putting the previous value back after a failed
-    /// rotation step; the provider reports the result in
-    /// [`AccountOutcome::restored`].
+    /// Puts the previous value back; the outcome must set `restored`.
     #[serde(default)]
     pub rollback: bool,
 }
