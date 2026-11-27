@@ -431,7 +431,11 @@ pub async fn consumers_of(account: &AccountRef) -> Result<Vec<(String, ConsumerD
         .ok_or_else(|| anyhow::anyhow!("no account consumer authorizer installed"))?;
     let mut out: Vec<(String, ConsumerDecl)> = Vec::new();
     for p in providers() {
-        for held in p.consumers(req.clone()).await? {
+        let declared = p
+            .consumers(req.clone())
+            .await
+            .map_err(|e| e.context(format!("account provider '{}' consumers", p.name())))?;
+        for held in declared {
             if &held.account != account || !authorize(p.name(), &held.consumer_unit_id) {
                 continue;
             }
@@ -1401,6 +1405,26 @@ mod tests {
         holdings: Vec<ConsumerDecl>,
     }
 
+    struct BrokenClaimer;
+
+    impl AccountProvider for BrokenClaimer {
+        fn name(&self) -> &str {
+            "account-claim-broken"
+        }
+        fn decl(&self) -> BoxFuture<'_, Result<AccountDecl>> {
+            Box::pin(async {
+                Ok(AccountDecl {
+                    unit_kinds: vec![],
+                    account_kinds: vec![],
+                    capabilities: vec![],
+                })
+            })
+        }
+        fn consumers(&self, _req: ConsumersRequest) -> BoxFuture<'_, Result<Vec<ConsumerDecl>>> {
+            Box::pin(async { anyhow::bail!("settings file unreadable") })
+        }
+    }
+
     impl AccountProvider for Claimer {
         fn name(&self) -> &str {
             self.name
@@ -1491,8 +1515,16 @@ mod tests {
             err.contains("account-claim-a") && err.contains("account-claim-b"),
             "{err}"
         );
-        deregister_provider("account-claim-a");
         deregister_provider("account-claim-b");
+
+        register_provider(Arc::new(BrokenClaimer));
+        let err = format!("{:#}", consumers_of(&unit).await.unwrap_err());
+        assert!(
+            err.contains("account-claim-broken") && err.contains("settings file unreadable"),
+            "{err}"
+        );
+        deregister_provider("account-claim-broken");
+        deregister_provider("account-claim-a");
         set_consumer_authorizer(None);
     }
 
