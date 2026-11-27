@@ -201,32 +201,49 @@ pub async fn reconcile_series(
     let state = server.library_state(scope).await?;
     let owned: Vec<MediaIdentity> = state.items.into_iter().map(|e| e.identity).collect();
     let gaps = compute_gaps(expected, &owned);
-    let (requestable, unrequestable): (Vec<_>, Vec<_>) = gaps
-        .iter()
-        .map(|g| (g, requester.unrequestable(g)))
-        .partition(|(_, why)| why.is_none());
-    let cap = budget.take(requestable.len());
-    let mut selected = cap;
+    let left = budget.left();
+    let mut requestable = 0;
+    let mut selected = 0;
+    let mut deadline_hit = false;
 
-    let mut actions = Vec::new();
-    for (n, &(gap, _)) in requestable[..cap].iter().enumerate() {
+    let mut actions = Vec::with_capacity(gaps.len());
+    for gap in &gaps {
+        if let Some(why) = requester.unrequestable(gap) {
+            actions.push(GapAction::unsent(
+                gap,
+                Some(SkipReason::Unrequestable),
+                Some(why),
+            ));
+            continue;
+        }
+        requestable += 1;
+        if requestable > left {
+            actions.push(GapAction::unsent(
+                gap,
+                Some(SkipReason::BudgetExhausted),
+                None,
+            ));
+            continue;
+        }
         if dry_run {
+            selected += 1;
             actions.push(GapAction::unsent(gap, None, None));
             continue;
         }
-        if !budget.expired() {
+        if !deadline_hit && !budget.expired() {
             budget.pace().await;
         }
-        if budget.expired() {
-            actions.extend(
-                requestable[n..cap].iter().map(|(gap, _)| {
-                    GapAction::unsent(gap, Some(SkipReason::DeadlineReached), None)
-                }),
-            );
-            selected = n;
-            break;
+        deadline_hit = deadline_hit || budget.expired();
+        if deadline_hit {
+            actions.push(GapAction::unsent(
+                gap,
+                Some(SkipReason::DeadlineReached),
+                None,
+            ));
+            continue;
         }
         budget.spend(1);
+        selected += 1;
         let req = AddRequest {
             identity: gap.clone(),
             quality: quality.clone(),
@@ -247,17 +264,7 @@ pub async fn reconcile_series(
     if dry_run {
         budget.spend(selected);
     }
-    actions.extend(
-        requestable[cap..]
-            .iter()
-            .map(|(gap, _)| GapAction::unsent(gap, Some(SkipReason::BudgetExhausted), None)),
-    );
-    actions.extend(
-        unrequestable
-            .into_iter()
-            .map(|(gap, why)| GapAction::unsent(gap, Some(SkipReason::Unrequestable), why)),
-    );
-    let remaining = requestable.len() - selected;
+    let remaining = requestable - selected;
 
     Ok(ReconcileOutcome {
         media_type: requester.media_type(),
@@ -701,6 +708,30 @@ mod tests {
                 None,
                 Some(SkipReason::DeadlineReached),
                 Some(SkipReason::BudgetExhausted)
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn actions_follow_gap_order() {
+        let req = Req {
+            unrequestable: Some("A"),
+            ..req()
+        };
+        let mut budget = Budget::new(1, &SearchPolicy::default()).unwrap();
+        let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
+        let out = run(&expected, &req, &mut budget, false).await;
+        let rows: Vec<_> = out
+            .actions
+            .iter()
+            .map(|a| (a.identity.title.as_str(), a.skipped))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("A", Some(SkipReason::Unrequestable)),
+                ("B", None),
+                ("C", Some(SkipReason::BudgetExhausted)),
             ]
         );
     }
