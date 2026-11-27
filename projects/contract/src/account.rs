@@ -556,6 +556,20 @@ fn scrubbed(msg: &str, values: &[String]) -> String {
 }
 
 const UNSUPPORTED_KEY: &str = "unsupported";
+const ROLLBACK_UNREPORTED: &str = "rollback outcome must report `restored`";
+
+fn is_rollback(op: &str, flag: &Option<serde_json::Value>) -> bool {
+    matches!(op, SET_SECRET_OP | APPLY_CONSUMER_OP)
+        && flag.as_ref().and_then(serde_json::Value::as_bool) == Some(true)
+}
+
+#[cfg(feature = "in-process")]
+fn require_restored(rollback: bool, out: AccountOutcome) -> Result<AccountOutcome> {
+    if rollback && out.restored.is_none() {
+        anyhow::bail!(ROLLBACK_UNREPORTED);
+    }
+    Ok(out)
+}
 
 enum Fail {
     Msg(String),
@@ -586,6 +600,7 @@ pub async fn dispatch_op(
         Fail::Unsupported(op) => serde_json::json!({ UNSUPPORTED_KEY: op }),
     };
     gate_dry_run_secret(op, &mut args).map_err(|m| err(Fail::Msg(m)))?;
+    let rollback = args.get("rollback").cloned();
     fn dec<T: serde::de::DeserializeOwned>(
         op: &str,
         args: serde_json::Value,
@@ -620,6 +635,9 @@ pub async fn dispatch_op(
     }
     .await;
     let mut out = out.map_err(err)?;
+    if is_rollback(op, &rollback) && out.get("restored").is_none_or(serde_json::Value::is_null) {
+        return Err(err(Fail::Msg(ROLLBACK_UNREPORTED.to_string())));
+    }
     let mut known = secret.clone();
     known.extend(secret_values(&out, "generated"));
     scrub_known_values(&mut out, &known);
@@ -729,8 +747,9 @@ impl AccountProvider for AccountProxy {
     }
 
     fn set_secret(&self, req: SetSecretRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+        let rollback = req.rollback;
         let fut = self.call(SET_SECRET_OP, serde_json::to_value(&req));
-        Box::pin(async move { fut.await.map(redact_outcome) })
+        Box::pin(async move { require_restored(rollback, redact_outcome(fut.await?)) })
     }
 
     fn verify(&self, req: VerifyRequest) -> BoxFuture<'_, Result<VerifyOutcome>> {
@@ -748,8 +767,9 @@ impl AccountProvider for AccountProxy {
     }
 
     fn apply_consumer(&self, req: ConsumerApplyRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+        let rollback = req.rollback;
         let fut = self.call(APPLY_CONSUMER_OP, serde_json::to_value(&req));
-        Box::pin(async move { fut.await.map(redact_outcome) })
+        Box::pin(async move { require_restored(rollback, redact_outcome(fut.await?)) })
     }
 
     fn verify_consumer(&self, req: ConsumerVerifyRequest) -> BoxFuture<'_, Result<VerifyOutcome>> {
@@ -2012,6 +2032,72 @@ mod tests {
         assert_eq!(
             err.downcast_ref::<Unsupported>().map(|u| u.op.as_str()),
             Some("regenerate")
+        );
+    }
+
+    #[tokio::test]
+    async fn account_rollback_without_restored_is_refused() {
+        let err = dispatch_op(
+            &EchoOwner,
+            SET_SECRET_OP,
+            serde_json::json!({"account": acct(), "secret": "old-value", "rollback": true}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.as_str().unwrap().contains("must report `restored`"),
+            "{err}"
+        );
+        let ok = dispatch_op(
+            &FakeConsumer,
+            APPLY_CONSUMER_OP,
+            serde_json::json!({"holding": holding(), "secret": "old-value", "rollback": true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok["restored"], true);
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_rollback_without_restored_is_refused() {
+        let invoke: InvokeThunk =
+            Arc::new(|_op, _args, _call| Ok(serde_json::json!({"executed": true})));
+        let proxy = AccountProxy {
+            name: "account-proxy-rollback".into(),
+            invoke,
+        };
+        for result in [
+            proxy
+                .set_secret(SetSecretRequest {
+                    account: acct(),
+                    secret: Some(secret()),
+                    dry_run: false,
+                    rollback: true,
+                })
+                .await,
+            proxy
+                .apply_consumer(ConsumerApplyRequest {
+                    holding: holding(),
+                    secret: Some(secret()),
+                    dry_run: false,
+                    rollback: true,
+                })
+                .await,
+        ] {
+            let e = result.unwrap_err().to_string();
+            assert!(e.contains("must report `restored`"), "{e}");
+        }
+        assert!(
+            proxy
+                .set_secret(SetSecretRequest {
+                    account: acct(),
+                    secret: Some(secret()),
+                    dry_run: false,
+                    rollback: false,
+                })
+                .await
+                .is_ok()
         );
     }
 }
