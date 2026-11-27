@@ -228,10 +228,11 @@ impl Command {
         let mut child = spawn(&mut self.inner)?;
         let writer = self.start_writer(&mut child);
         let mut guard = GroupGuard::new(self.kill_group, &child);
+        let mut cancel = std::pin::pin!(cancel);
         let finished = tokio::select! {
             biased;
             result = guard.wait_leader(&mut child) => Some(result),
-            () = cancel => None,
+            () = &mut cancel => None,
         };
         match finished {
             Some(result) => {
@@ -239,9 +240,9 @@ impl Command {
                 if self.kill_on_exit {
                     guard.kill();
                 }
+                writer_result(writer, &mut cancel).await?;
                 guard.disarm();
                 let st = child.wait().await?;
-                writer_result(writer).await?;
                 Ok(Some(ExitStatus {
                     success: st.success(),
                     code: st.code(),
@@ -349,6 +350,8 @@ impl Command {
         if !eof {
             reader.abort();
             guard.kill();
+        } else {
+            writer_result(writer, &mut cancel).await?;
         }
         let status = child.wait().await?;
         guard.disarm();
@@ -359,7 +362,6 @@ impl Command {
         if !eof {
             return Err(std::io::Error::other(PipeHeldOpen { status }));
         }
-        writer_result(writer).await?;
         Ok(Some(Output {
             status,
             stdout: take_buf(&out_buf),
@@ -491,15 +493,18 @@ struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
 
 type StdinWriter = AbortOnDrop<std::io::Result<()>>;
 
-async fn writer_result(writer: Option<StdinWriter>) -> std::io::Result<()> {
-    if let Some(writer) = writer
-        && writer.0.is_finished()
-        && let Ok(Err(e)) = writer.await
-        && e.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        return Err(e);
+async fn writer_result(
+    writer: Option<StdinWriter>,
+    cancel: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
+    let Some(writer) = writer else {
+        return Ok(());
+    };
+    tokio::select! {
+        biased;
+        done = writer => done.map_err(std::io::Error::other)?,
+        () = cancel => Err(std::io::Error::other("child stdin was not fully consumed by the deadline")),
     }
-    Ok(())
 }
 
 impl<T> AbortOnDrop<T> {
@@ -1358,12 +1363,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stdin_bytes_the_child_never_reads_is_not_an_error() {
-        let out = Command::new("true")
+    async fn stdin_bytes_the_child_never_reads_is_an_error() {
+        let err = Command::new("true")
             .stdin_bytes(vec![b'a'; 1 << 20])
             .run_checked_within(Duration::from_secs(10))
-            .await;
-        assert!(out.is_ok(), "{out:?}");
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, None);
+    }
+
+    #[tokio::test]
+    async fn status_run_whose_child_never_reads_stdin_is_an_error() {
+        let err = Command::new("true")
+            .stdin_bytes(vec![b'a'; 1 << 20])
+            .status_within(Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
     }
 
     #[tokio::test]
