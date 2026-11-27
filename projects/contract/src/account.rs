@@ -669,6 +669,12 @@ fn gate_dry_run_secret(op: &str, args: &mut serde_json::Value) -> std::result::R
     {
         return Err(format!("{op} requires a secret unless dry_run is set"));
     }
+    if args
+        .get("secret")
+        .is_some_and(|v| !v.is_string() && !v.is_null())
+    {
+        return Err(format!("secret must be a string ({op})"));
+    }
     if matches!(op, SET_SECRET_OP | APPLY_CONSUMER_OP | CREATE_OP)
         && args
             .get("secret")
@@ -686,7 +692,7 @@ fn gate_dry_run_secret(op: &str, args: &mut serde_json::Value) -> std::result::R
     Ok(())
 }
 
-const SHORT_SECRET: &str = "{op}: secret is shorter than the 4-character minimum";
+const SHORT_SECRET: &str = "secret is shorter than the 4-character minimum ({op})";
 const ROTATED_KEY: &str = "rotated_but_rejected";
 
 fn requested_min_len(args: &serde_json::Value) -> usize {
@@ -695,10 +701,14 @@ fn requested_min_len(args: &serde_json::Value) -> usize {
         .map_or(MIN_SECRET_LEN, |n| (n as usize).max(MIN_SECRET_LEN))
 }
 
+/// A non-string `generated` counts as too short: it cannot be stored as a
+/// secret, and its length is not a character count.
 fn generated_too_short(out: &serde_json::Value, min_len: usize) -> bool {
-    out.get("generated")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|v| v.chars().count() < min_len)
+    match out.get("generated") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(v)) => v.chars().count() < min_len,
+        Some(_) => true,
+    }
 }
 
 /// Every rendering of `v[key]` an error message could echo, so a provider or
@@ -2141,7 +2151,7 @@ mod tests {
         assert!(!e.contains("5551234987"), "{e}");
     }
     #[tokio::test]
-    async fn account_dispatch_op_redacts_non_string_secret_in_decode_errors() {
+    async fn account_dispatch_op_refuses_non_string_secret() {
         for bad in [
             serde_json::json!(918273645),
             serde_json::json!(true),
@@ -2155,7 +2165,7 @@ mod tests {
             .await
             .unwrap_err();
             let msg = err.as_str().unwrap();
-            assert!(msg.starts_with("decode set_secret args:"), "{msg}");
+            assert!(msg.contains("secret must be a string"), "{msg}");
             assert!(!msg.contains("918273645"), "{msg}");
             assert!(!msg.contains("nested-s3cr3t-value"), "{msg}");
         }
@@ -3113,5 +3123,31 @@ mod tests {
         assert_eq!(rejected.generated.expose_secret(), &live);
         assert_eq!(*minter.sent_min_len.lock().unwrap(), Some(MIN_SECRET_LEN));
         assert!(!e.to_string().contains(&live));
+    }
+
+    #[test]
+    fn account_non_string_generated_counts_as_too_short() {
+        for (generated, short) in [
+            (serde_json::json!(918273645), true),
+            (serde_json::json!({"k": "longvalue"}), true),
+            (serde_json::json!("longvalue"), false),
+            (serde_json::Value::Null, false),
+        ] {
+            let out = serde_json::json!({"executed": true, "generated": generated});
+            assert_eq!(generated_too_short(&out, MIN_SECRET_LEN), short, "{out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn account_verify_refuses_non_string_secret() {
+        let err = dispatch_op(
+            &owner(),
+            VERIFY_OP,
+            serde_json::json!({"account": acct(), "secret": 918273645}),
+        )
+        .await
+        .unwrap_err();
+        let msg = err.as_str().unwrap();
+        assert!(msg.contains("secret must be a string") && !msg.contains("918273645"));
     }
 }
