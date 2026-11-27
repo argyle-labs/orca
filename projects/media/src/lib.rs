@@ -1493,6 +1493,7 @@ mod rescan_tests {
         ));
     }
 
+    #[cfg(feature = "in-process")]
     #[test]
     fn capability_string_round_trips() {
         // `as_str` and `parse_capability` are separate exhaustive matches; without
