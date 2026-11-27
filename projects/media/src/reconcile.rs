@@ -174,8 +174,10 @@ pub struct ReconcileOutcome {
     #[serde(default)]
     pub actions: Vec<GapAction>,
     /// Gaps the run's [`Budget`] covered (requested, or would be on a dry run).
+    #[serde(default)]
     pub selected: usize,
     /// Requestable gaps left for a later run once the budget ran out.
+    #[serde(default)]
     pub remaining: usize,
     pub dry_run: bool,
 }
@@ -609,6 +611,15 @@ mod tests {
             .collect();
         assert_eq!(failed, vec!["B"]);
         assert_eq!(req.added.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn outcome_without_budget_fields_still_deserializes() {
+        let out: ReconcileOutcome = serde_json::from_str(
+            r#"{"media_type":"comics","server":"s","requester":"r","expected":1,"owned":0,"gaps":[],"dry_run":true}"#,
+        )
+        .unwrap();
+        assert_eq!((out.selected, out.remaining), (0, 0));
     }
 
     #[tokio::test(start_paused = true)]
