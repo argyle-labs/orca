@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(timeout(Duration::from_secs(5), async { 7 }).await, Some(7));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn timeout_none_when_slow() {
         let out = timeout(Duration::from_millis(5), async {
             sleep(Duration::from_secs(30)).await;
@@ -146,7 +146,7 @@ mod tests {
         assert_eq!(out, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn deadline_reached_after_elapse() {
         let d = Deadline::after(Duration::from_millis(5));
         assert!(!d.reached());
