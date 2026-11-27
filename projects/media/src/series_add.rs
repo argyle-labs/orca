@@ -198,7 +198,7 @@ pub async fn add_series(
             } else {
                 add_and_want(manager, requester, plan, budget, &mut row).await;
             }
-            let run_stopped = row.pending == Some(Pending::DeadlineReached) && budget.expired();
+            let run_stopped = row.pending == Some(Pending::DeadlineReached);
             if !row.already_listed && !run_stopped {
                 new += 1;
             }
