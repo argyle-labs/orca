@@ -488,9 +488,9 @@ pub fn set_consumer_authorizer(authorizer: Option<ConsumerAuthorizer>) {
 /// the declaring provider's name. With no [`ConsumerAuthorizer`] installed
 /// this fails closed, and holdings on units the provider does not manage are
 /// dropped. Holdings are declared at call time, not at registration, so the
-/// one-declarer-per-`(consumer_unit_id, setting)` rule is enforced here: two
-/// providers claiming the same setting on the same unit is an error, since
-/// rotation could not know which one applies the value.
+/// one-declaration-per-`(consumer_unit_id, setting)` rule is enforced here,
+/// across all accounts: any two differing claims on one setting are an error,
+/// since rotation could not know which value or provider applies.
 pub async fn consumers_of(account: &AccountRef) -> Result<Vec<(String, ConsumerDecl)>> {
     let authorizer = AUTHORIZER
         .read()
@@ -505,9 +505,9 @@ pub async fn consumers_in(
     authorizer: Option<&ConsumerAuthorizer>,
     account: &AccountRef,
 ) -> Result<Vec<(String, ConsumerDecl)>> {
-    let req = ConsumersRequest {
-        account: Some(account.clone()),
-    };
+    // Every holding is fetched, not just this account's, so one setting
+    // claimed for two different accounts is caught.
+    let req = ConsumersRequest { account: None };
     let authorize =
         authorizer.ok_or_else(|| anyhow::anyhow!("no account consumer authorizer installed"))?;
     let mut out: Vec<(String, ConsumerDecl)> = Vec::new();
@@ -517,25 +517,32 @@ pub async fn consumers_in(
             .await
             .map_err(|e| e.context(format!("account provider '{}' consumers", p.name())))?;
         for held in declared {
-            if &held.account != account || !authorize(p.name(), &held.consumer_unit_id) {
+            if !authorize(p.name(), &held.consumer_unit_id) {
                 continue;
             }
-            if let Some((owner, _)) = out.iter().find(|(_, d)| {
+            if let Some((owner, prior)) = out.iter().find(|(_, d)| {
                 d.consumer_unit_id == held.consumer_unit_id && d.setting == held.setting
             }) {
-                if owner == p.name() {
+                if owner == p.name() && *prior == held {
                     continue;
                 }
+                let why = if owner != p.name() {
+                    format!("declared by both '{owner}' and '{}'", p.name())
+                } else if prior.account != held.account {
+                    format!("claimed for two accounts by '{owner}'")
+                } else {
+                    format!("declared twice with different capabilities by '{owner}'")
+                };
                 anyhow::bail!(
-                    "setting '{}' on unit {} is declared by both '{owner}' and '{}'",
+                    "setting '{}' on unit {} is {why}",
                     held.setting,
-                    held.consumer_unit_id,
-                    p.name()
+                    held.consumer_unit_id
                 );
             }
             out.push((p.name().to_string(), held));
         }
     }
+    out.retain(|(_, d)| &d.account == account);
     Ok(out)
 }
 
@@ -1599,7 +1606,7 @@ mod tests {
                 account: nm("other"),
             },
             consumer_unit_id: id(CONSUMER),
-            setting: nm("key"),
+            setting: nm("other_key"),
             capabilities: ConsumerCapabilities::default(),
         };
         (unit, held, stray)
@@ -2602,5 +2609,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["account_kinds"][0], "api_key");
+    }
+
+    #[tokio::test]
+    async fn account_consumers_in_rejects_conflicting_duplicate_holdings() {
+        let (unit, held, _) = claim_fixtures();
+        let allow: ConsumerAuthorizer = Arc::new(|_: &str, _: &Id| true);
+
+        let mut richer = held.clone();
+        richer.capabilities.rollback = true;
+        let p = claimer("account-claim-caps", vec![held.clone(), richer]);
+        let err = consumers_in(&[p], Some(&allow), &unit)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("different capabilities"), "{err}");
+
+        let both = claimer(
+            "account-claim-cross",
+            vec![
+                held.clone(),
+                ConsumerDecl {
+                    account: AccountRef {
+                        unit_id: id(OWNER),
+                        account: nm("admin"),
+                    },
+                    ..held.clone()
+                },
+            ],
+        );
+        let err = consumers_in(&[both], Some(&allow), &unit)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("claimed for two accounts"), "{err}");
     }
 }
