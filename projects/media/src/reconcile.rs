@@ -467,7 +467,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn driver_emits_want_requests_only_for_gaps() {
         let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
         let srv = Srv {
@@ -480,7 +480,7 @@ mod tests {
             &req,
             &QualityPolicy::default(),
             &Scope::All,
-            &mut Budget::unlimited(&unpaced()),
+            &mut Budget::unlimited(&SearchPolicy::default()),
             false,
         )
         .await
@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(added, vec!["A".to_string(), "C".to_string()]);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dry_run_computes_gaps_but_emits_nothing() {
         let expected = vec![isbn("A", "1"), isbn("B", "2")];
         let srv = Srv { owned: vec![] };
@@ -506,7 +506,7 @@ mod tests {
             &req,
             &QualityPolicy::default(),
             &Scope::All,
-            &mut Budget::unlimited(&unpaced()),
+            &mut Budget::unlimited(&SearchPolicy::default()),
             true,
         )
         .await
@@ -522,10 +522,6 @@ mod tests {
             request_pace_ms: pace.as_millis() as u64,
             ..SearchPolicy::default()
         }
-    }
-
-    fn unpaced() -> SearchPolicy {
-        paced(std::time::Duration::ZERO)
     }
 
     async fn run(
@@ -549,14 +545,16 @@ mod tests {
 
     #[test]
     fn budget_rejects_a_zero_limit() {
-        let err = Budget::new(0, &unpaced()).unwrap_err().to_string();
+        let err = Budget::new(0, &SearchPolicy::default())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("limit"), "{err}");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn limit_spans_series_and_reports_remaining() {
         let req = req();
-        let mut budget = Budget::new(4, &unpaced()).unwrap();
+        let mut budget = Budget::new(4, &SearchPolicy::default()).unwrap();
         let mut left = vec![];
         for s in ["X", "Y", "Z"] {
             let expected: Vec<_> = (1..=3)
@@ -576,10 +574,10 @@ mod tests {
         assert_eq!(req.added.lock().unwrap().len(), 4);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dry_run_spends_budget_without_requesting() {
         let req = req();
-        let mut budget = Budget::new(2, &unpaced()).unwrap();
+        let mut budget = Budget::new(2, &SearchPolicy::default()).unwrap();
         let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
         let out = run(&expected, &req, &mut budget, true).await;
         assert_eq!((out.selected, out.remaining), (2, 1));
@@ -589,14 +587,20 @@ mod tests {
         assert!(req.added.lock().unwrap().is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn failed_request_is_reported_and_the_run_continues() {
         let req = Req {
             fail: Some("B"),
             ..req()
         };
         let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
-        let out = run(&expected, &req, &mut Budget::unlimited(&unpaced()), false).await;
+        let out = run(
+            &expected,
+            &req,
+            &mut Budget::unlimited(&SearchPolicy::default()),
+            false,
+        )
+        .await;
         let failed: Vec<_> = out
             .actions
             .iter()
@@ -605,6 +609,15 @@ mod tests {
             .collect();
         assert_eq!(failed, vec!["B"]);
         assert_eq!(req.added.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pace_is_clamped_to_the_minimum() {
+        let mut budget = Budget::new(2, &paced(std::time::Duration::ZERO)).unwrap();
+        budget.spend(1);
+        let start = tokio::time::Instant::now();
+        budget.pace().await;
+        assert_eq!(start.elapsed(), crate::search_driver::MIN_REQUEST_PACE);
     }
 
     #[tokio::test(start_paused = true)]

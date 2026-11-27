@@ -47,6 +47,14 @@ impl Default for SearchPolicy {
 
 /// Per-run request budget: caps how many requests one run issues and paces
 /// consecutive requests. One budget spans every series a run reconciles.
+/// Floor on [`SearchPolicy::request_pace_ms`]: each request is an indexer
+/// search, and unpaced runs trip indexer rate limits.
+pub const MIN_REQUEST_PACE: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn request_pace(policy: &SearchPolicy) -> std::time::Duration {
+    std::time::Duration::from_millis(policy.request_pace_ms).max(MIN_REQUEST_PACE)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Budget {
     limit: usize,
@@ -62,7 +70,7 @@ impl Budget {
         }
         Ok(Budget {
             limit,
-            pace: std::time::Duration::from_millis(policy.request_pace_ms),
+            pace: request_pace(policy),
             deadline: None,
             used: 0,
         })
@@ -71,7 +79,7 @@ impl Budget {
     pub fn unlimited(policy: &SearchPolicy) -> Self {
         Budget {
             limit: usize::MAX,
-            pace: std::time::Duration::from_millis(policy.request_pace_ms),
+            pace: request_pace(policy),
             deadline: None,
             used: 0,
         }
@@ -108,7 +116,7 @@ impl Budget {
     /// Waits out the pace before a request; never before the run's first.
     /// Never sleeps past the deadline.
     pub(crate) async fn pace(&self) {
-        if self.used == 0 || self.pace.is_zero() {
+        if self.used == 0 {
             return;
         }
         let wake = tokio::time::Instant::now() + self.pace;

@@ -46,7 +46,9 @@ pub use matching::{MatchCandidate, MatchPolicy, MatchResult, MatchTarget, Reject
 pub mod blocklist;
 pub use blocklist::{BlocklistPolicy, BlocklistRecommendation, FailureRow, recommend_blocklist};
 pub mod search_driver;
-pub use search_driver::{Budget, RateState, SearchDecision, SearchPolicy, WaitReason, plan_search};
+pub use search_driver::{
+    Budget, MIN_REQUEST_PACE, RateState, SearchDecision, SearchPolicy, WaitReason, plan_search,
+};
 pub mod editions;
 pub use editions::{EditionGap, EditionPolicy, compute_edition_gaps};
 pub mod diff_reconcile;
