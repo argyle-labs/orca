@@ -655,7 +655,7 @@ fn scrub_known_values(out: &mut serde_json::Value, values: &[String]) {
             serde_json::Value::String(s)
                 if values
                     .iter()
-                    .any(|x| !x.is_empty() && s.contains(x.as_str())) =>
+                    .any(|x| scrubbable(x) && s.contains(x.as_str())) =>
             {
                 *s = scrubbed(s, values);
             }
@@ -673,8 +673,20 @@ fn scrub_known_values(out: &mut serde_json::Value, values: &[String]) {
     }
 }
 
+/// Below this many characters a value matches too much ordinary text to be
+/// worth redacting by substring; pattern scrubbing still applies.
+const MIN_SCRUB_LEN: usize = 4;
+
+fn scrubbable(v: &str) -> bool {
+    v.chars().count() >= MIN_SCRUB_LEN
+}
+
 fn scrubbed(msg: &str, values: &[String]) -> String {
-    let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+    let refs: Vec<&str> = values
+        .iter()
+        .map(String::as_str)
+        .filter(|v| scrubbable(v))
+        .collect();
     utils::scrub::redact_values(msg, &refs)
 }
 
@@ -2726,5 +2738,22 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(!e.contains("eyJhbGciOi.eyJzdWIi.c2ln"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn account_short_secrets_do_not_redact_ordinary_text() {
+        let out = dispatch_op(
+            &EchoOwner,
+            SET_SECRET_OP,
+            serde_json::json!({"account": acct(), "secret": "ab1"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["detail"]["msg"], "set key to ab1");
+        assert_eq!(scrubbed("tab1e row", &["ab1".to_string()]), "tab1e row");
+        assert_eq!(
+            scrubbed("tab1e row", &["ab1e".to_string()]),
+            format!("t{} row", utils::scrub::REDACTED)
+        );
     }
 }
