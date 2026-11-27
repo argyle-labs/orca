@@ -71,7 +71,8 @@ fn exact(b64: &str, lossy: &str) -> anyhow::Result<Vec<u8>> {
 /// round-trip completed and returns the container command's outcome (check
 /// [`LxcExecResult::success`]); `Err` means the seam itself could not be
 /// reached (spawn/parse failure). `argv[0]` must be on orca's lxc-exec allowlist
-/// (apt-get/apt/dpkg/dpkg-query/systemctl/true) or the op is refused.
+/// (apt/dpkg/systemctl on Debian, apk/rc-service/rc-update/rc-status on Alpine, plus
+/// read-only probes) or the op is refused.
 pub async fn lxc_exec(vmid: u32, argv: &[&str]) -> anyhow::Result<LxcExecResult> {
     let payload = crate::serde_json::json!({ "vmid": vmid, "argv": argv }).to_string();
     if let Some(out) = crate::capsink::privileged_route(crate::abi::LXC_EXEC, &payload) {

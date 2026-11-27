@@ -55,6 +55,9 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "find",
     "ps",
     "apk",
+    "rc-service",
+    "rc-update",
+    "rc-status",
     "update",
 ];
 
@@ -258,7 +261,51 @@ const SYSTEMCTL_DENIED_LONG: &[&str] = &["--host", "--machine", "--root", "--ima
 
 const SYSTEMCTL_DENIED_SHORT: &[char] = &['H', 'M'];
 
-const APK_SUBCOMMANDS: &[&str] = &["update", "upgrade"];
+const APK_SUBCOMMANDS: &[&str] = &["update", "upgrade", "add", "del", "info", "search", "list"];
+
+const RC_SERVICE_ACTIONS: &[&str] = &["start", "stop", "restart", "reload", "status"];
+
+const RC_SERVICE_OPTIONS: &[&str] = &[
+    "-q",
+    "--quiet",
+    "-i",
+    "--ifexists",
+    "-s",
+    "--ifstarted",
+    "-N",
+    "--ifnotstarted",
+    "-e",
+    "--exists",
+    "-l",
+    "--list",
+];
+
+const RC_UPDATE_SUBCOMMANDS: &[&str] = &["add", "del", "delete", "show"];
+
+const RC_UPDATE_OPTIONS: &[&str] = &["-q", "--quiet", "-v", "--verbose"];
+
+const RC_STATUS_OPTIONS: &[&str] = &[
+    "-a",
+    "--all",
+    "-l",
+    "--list",
+    "-r",
+    "--runlevel",
+    "-s",
+    "--servicelist",
+    "-S",
+    "--supervised",
+    "-c",
+    "--crashed",
+    "-m",
+    "--manual",
+    "-u",
+    "--unused",
+    "-C",
+    "--nocolor",
+    "-q",
+    "--quiet",
+];
 
 const APK_OPTIONS: &[&str] = &["-q", "--quiet", "--no-cache"];
 
@@ -423,22 +470,87 @@ fn check_systemctl(args: &[String]) -> Result<(), String> {
 }
 
 fn check_apk(args: &[String]) -> Result<(), String> {
-    let mut subcommand = false;
+    let mut subcommand = None;
     for arg in args {
         if is_option(arg) {
             if !APK_OPTIONS.contains(&arg.as_str()) {
                 return refuse("apk", arg);
             }
-        } else if subcommand || !APK_SUBCOMMANDS.contains(&arg.as_str()) {
-            return refuse("apk", arg);
+        } else if let Some(sub) = subcommand {
+            // Package names only: a path or `.apk` file would install unsigned local content.
+            if sub == "update" || arg.contains('/') || arg.ends_with(".apk") {
+                return refuse("apk", arg);
+            }
+        } else if APK_SUBCOMMANDS.contains(&arg.as_str()) {
+            subcommand = Some(arg.as_str());
         } else {
-            subcommand = true;
+            return refuse("apk", arg);
         }
     }
-    if subcommand {
-        Ok(())
-    } else {
-        Err("refused apk: needs update or upgrade".to_string())
+    match subcommand {
+        Some(_) => Ok(()),
+        None => Err("refused apk: needs a subcommand".to_string()),
+    }
+}
+
+fn is_rc_name(arg: &str) -> bool {
+    !arg.is_empty() && !arg.contains('/') && !arg.starts_with('.')
+}
+
+fn check_rc_service(args: &[String]) -> Result<(), String> {
+    let mut positionals = Vec::new();
+    for arg in args {
+        if is_option(arg) {
+            if !RC_SERVICE_OPTIONS.contains(&arg.as_str()) {
+                return refuse("rc-service", arg);
+            }
+        } else {
+            positionals.push(arg.as_str());
+        }
+    }
+    let listing = args.iter().any(|a| a == "-l" || a == "--list");
+    match positionals.as_slice() {
+        [] if listing => Ok(()),
+        [service] if is_rc_name(service) && !listing => Ok(()),
+        [service, action] if is_rc_name(service) && RC_SERVICE_ACTIONS.contains(action) => Ok(()),
+        _ => Err(format!(
+            "refused rc-service {}: needs <service> <{}>",
+            args.join(" "),
+            RC_SERVICE_ACTIONS.join("|")
+        )),
+    }
+}
+
+fn check_rc_update(args: &[String]) -> Result<(), String> {
+    let mut subcommand = false;
+    for arg in args {
+        if is_option(arg) {
+            if !RC_UPDATE_OPTIONS.contains(&arg.as_str()) {
+                return refuse("rc-update", arg);
+            }
+        } else if subcommand {
+            if !is_rc_name(arg) {
+                return refuse("rc-update", arg);
+            }
+        } else if RC_UPDATE_SUBCOMMANDS.contains(&arg.as_str()) {
+            subcommand = true;
+        } else {
+            return refuse("rc-update", arg);
+        }
+    }
+    Ok(())
+}
+
+fn check_rc_status(args: &[String]) -> Result<(), String> {
+    match args.iter().find(|arg| {
+        if is_option(arg) {
+            !RC_STATUS_OPTIONS.contains(&arg.as_str())
+        } else {
+            !is_rc_name(arg)
+        }
+    }) {
+        Some(arg) => refuse("rc-status", arg),
+        None => Ok(()),
     }
 }
 
@@ -557,6 +669,9 @@ pub fn validate(op: &LxcExecOp) -> Result<(), String> {
         "cat" | "head" | "tail" | "du" => check_read(cmd, args),
         "find" => check_find(args),
         "apk" => check_apk(args),
+        "rc-service" => check_rc_service(args),
+        "rc-update" => check_rc_update(args),
+        "rc-status" => check_rc_status(args),
         "update" => check_update(prog, args),
         _ => Ok(()),
     }
@@ -1286,27 +1401,85 @@ mod tests {
     }
 
     #[test]
-    fn apk_allows_only_index_refresh_and_upgrade() {
+    fn apk_package_management_allowed() {
         for argv in [
             &["apk", "update"][..],
             &["apk", "upgrade"],
             &["/sbin/apk", "update", "-q"],
             &["apk", "-q", "--no-cache", "upgrade"],
+            &["apk", "add", "openssh"],
+            &["apk", "add", "--no-cache", "openssh", "curl"],
+            &["apk", "del", "openssh"],
+            &["apk", "upgrade", "busybox"],
+            &["apk", "info", "openssh"],
+            &["apk", "search", "openssh"],
+            &["apk", "list"],
         ] {
             assert!(check(argv).is_ok(), "{argv:?}: {:?}", check(argv));
         }
+    }
+
+    #[test]
+    fn apk_injection_and_local_files_refused() {
         for argv in [
             &["apk"][..],
             &["apk", "-q"],
-            &["apk", "add", "curl"],
-            &["apk", "del", "openrc"],
-            &["apk", "upgrade", "busybox"],
+            &["apk", "fetch", "openssh"],
             &["apk", "update", "upgrade"],
+            &["apk", "add", "/tmp/evil.apk"],
+            &["apk", "add", "evil.apk"],
+            &["apk", "add", "./x"],
             &["apk", "--root", "/tmp/x", "upgrade"],
-            &["apk", "--repository=http://evil/", "upgrade"],
-            &["apk", "-X", "http://evil/", "upgrade"],
-            &["apk", "--allow-untrusted", "upgrade"],
+            &["apk", "--repository=http://evil/", "add", "openssh"],
+            &["apk", "-X", "http://evil/", "add", "openssh"],
+            &["apk", "--allow-untrusted", "add", "openssh"],
+            &["apk", "add", "-t", "virt", "openssh"],
             &["/tmp/apk", "update"],
+        ] {
+            assert!(check(argv).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn openrc_service_management_allowed() {
+        for argv in [
+            &["rc-service", "sshd", "start"][..],
+            &["rc-service", "sshd", "restart"],
+            &["rc-service", "-q", "sshd", "status"],
+            &["rc-service", "--ifexists", "sshd", "stop"],
+            &["rc-service", "-e", "sshd"],
+            &["rc-service", "-l"],
+            &["/sbin/rc-service", "sshd", "reload"],
+            &["rc-update", "add", "sshd", "default"],
+            &["rc-update", "del", "sshd"],
+            &["rc-update", "show"],
+            &["rc-update", "-v", "show", "default"],
+            &["rc-status"],
+            &["rc-status", "-a"],
+            &["rc-status", "default"],
+            &["/bin/rc-status", "--servicelist"],
+        ] {
+            assert!(check(argv).is_ok(), "{argv:?}: {:?}", check(argv));
+        }
+    }
+
+    #[test]
+    fn openrc_unknown_verbs_and_paths_refused() {
+        for argv in [
+            &["rc-service"][..],
+            &["rc-service", "sshd", "zap"],
+            &["rc-service", "sshd", "describe", "extra"],
+            &["rc-service", "/tmp/evil", "start"],
+            &["rc-service", "../evil", "start"],
+            &["rc-service", "-D", "sshd", "start"],
+            &["rc-service", "-l", "sshd"],
+            &["rc-update", "-u"],
+            &["rc-update", "add", "/tmp/evil"],
+            &["rc-update", "add", "-s", "x", "default"],
+            &["rc-update", "evil"],
+            &["rc-status", "/etc"],
+            &["rc-status", "--evil"],
+            &["/tmp/rc-service", "sshd", "start"],
         ] {
             assert!(check(argv).is_err(), "{argv:?}");
         }
