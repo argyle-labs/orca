@@ -141,10 +141,27 @@ pub struct ConsumerVerifyRequest {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+pub struct RegenerateRequest {
+    pub account: AccountRef,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `generated` carries a credential the unit minted itself (e.g. an app that
+/// regenerates its own api_key), so core can write it to the secrets backend.
+/// It is never placed in `detail`, which is scrubbed.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct AccountOutcome {
     pub executed: bool,
     #[serde(default)]
     pub detail: serde_json::Value,
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_secret",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub generated: Option<Secret<String>>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
@@ -193,6 +210,12 @@ pub trait AccountProvider: Send + Sync {
 
     fn verify(&self, _req: VerifyRequest) -> BoxFuture<'_, Result<VerifyOutcome>> {
         unsupported(VERIFY_OP)
+    }
+
+    /// For units that mint their own credential: the new value comes back in
+    /// [`AccountOutcome::generated`].
+    fn regenerate(&self, _req: RegenerateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+        unsupported(REGENERATE_OP)
     }
 
     fn consumers(&self) -> BoxFuture<'_, Result<Vec<ConsumerDecl>>> {
@@ -255,6 +278,7 @@ pub const UPDATE_OP: &str = "update";
 pub const DELETE_OP: &str = "delete";
 pub const SET_SECRET_OP: &str = "set_secret";
 pub const VERIFY_OP: &str = "verify";
+pub const REGENERATE_OP: &str = "regenerate";
 pub const CONSUMERS_OP: &str = "consumers";
 pub const APPLY_CONSUMER_OP: &str = "apply_consumer";
 pub const VERIFY_CONSUMER_OP: &str = "verify_consumer";
@@ -311,6 +335,10 @@ pub async fn dispatch_op(
                 .map_err(|e| format!("{e:#}"))?),
             VERIFY_OP => enc(&provider
                 .verify(dec(op, args)?)
+                .await
+                .map_err(|e| format!("{e:#}"))?),
+            REGENERATE_OP => enc(&provider
+                .regenerate(dec(op, args)?)
                 .await
                 .map_err(|e| format!("{e:#}"))?),
             CONSUMERS_OP => enc(&provider.consumers().await.map_err(|e| format!("{e:#}"))?),
@@ -425,6 +453,11 @@ impl AccountProvider for AccountProxy {
         Box::pin(async move { fut.await.map(redact_verify) })
     }
 
+    fn regenerate(&self, req: RegenerateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+        let fut = self.call(REGENERATE_OP, serde_json::to_value(&req));
+        Box::pin(async move { fut.await.map(redact_outcome) })
+    }
+
     fn consumers(&self) -> BoxFuture<'_, Result<Vec<ConsumerDecl>>> {
         self.call(CONSUMERS_OP, Ok(serde_json::json!({})))
     }
@@ -499,6 +532,7 @@ mod tests {
                 Ok(AccountOutcome {
                     executed: !req.dry_run,
                     detail: serde_json::json!({"has_secret": req.secret.is_some()}),
+                    generated: None,
                 })
             })
         }
@@ -507,6 +541,7 @@ mod tests {
                 Ok(AccountOutcome {
                     executed: !req.dry_run,
                     detail: serde_json::Value::Null,
+                    generated: None,
                 })
             })
         }
@@ -515,6 +550,7 @@ mod tests {
                 Ok(AccountOutcome {
                     executed: !req.dry_run,
                     detail: serde_json::Value::Null,
+                    generated: None,
                 })
             })
         }
@@ -526,6 +562,7 @@ mod tests {
                 Ok(AccountOutcome {
                     executed: !req.dry_run,
                     detail: serde_json::Value::Null,
+                    generated: None,
                 })
             })
         }
@@ -534,6 +571,15 @@ mod tests {
                 Ok(VerifyOutcome {
                     matches: req.secret.expose_secret() == VALUE,
                     detail: serde_json::Value::Null,
+                })
+            })
+        }
+        fn regenerate(&self, req: RegenerateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+            Box::pin(async move {
+                Ok(AccountOutcome {
+                    executed: !req.dry_run,
+                    detail: serde_json::json!({"account": req.account.account}),
+                    generated: (!req.dry_run).then(|| Secret::new(VALUE.to_string())),
                 })
             })
         }
@@ -564,6 +610,7 @@ mod tests {
                 Ok(AccountOutcome {
                     executed: !req.dry_run,
                     detail: serde_json::json!({"setting": req.holding.setting}),
+                    generated: None,
                 })
             })
         }
@@ -955,5 +1002,30 @@ mod tests {
         );
         assert_eq!(calls[5].1["secret"], VALUE);
         assert_eq!(calls[8].1["holding"]["consumer_unit_id"], CONSUMER);
+    }
+
+    #[tokio::test]
+    async fn account_regenerate_returns_generated_outside_detail() {
+        let out = dispatch_op(
+            &owner(),
+            REGENERATE_OP,
+            serde_json::json!({"account": acct()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["generated"], VALUE);
+        assert!(!out["detail"].to_string().contains(VALUE));
+        let back: AccountOutcome = serde_json::from_value(out).unwrap();
+        assert_eq!(back.generated.as_ref().unwrap().expose_secret(), VALUE);
+        assert!(!format!("{back:?}").contains(VALUE));
+
+        let dry = dispatch_op(
+            &owner(),
+            REGENERATE_OP,
+            serde_json::json!({"account": acct(), "dry_run": true}),
+        )
+        .await
+        .unwrap();
+        assert!(dry.get("generated").is_none());
     }
 }
