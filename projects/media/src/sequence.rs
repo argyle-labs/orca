@@ -1,6 +1,7 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NumberRange {
     pub from: i64,
     pub to: i64,
@@ -79,7 +80,7 @@ pub struct GapPolicy {
     pub max_ranges: Option<usize>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SequenceGaps {
     pub missing: Vec<NumberRange>,
     pub missing_count: usize,
