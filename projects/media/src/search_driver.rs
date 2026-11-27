@@ -14,6 +14,7 @@
 
 use crate::{MediaError, MediaIdentity};
 use serde::{Deserialize, Serialize};
+use utils::time::Deadline;
 
 /// Central pacing policy — owned by orca, not hand-managed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +60,7 @@ fn request_pace(policy: &SearchPolicy) -> std::time::Duration {
 pub struct Budget {
     limit: usize,
     pace: std::time::Duration,
-    deadline: Option<tokio::time::Instant>,
+    deadline: Option<Deadline>,
     used: usize,
 }
 
@@ -87,13 +88,17 @@ impl Budget {
 
     /// Stops the run from issuing requests once `within` has elapsed from now.
     pub fn with_deadline(mut self, within: std::time::Duration) -> Self {
-        self.deadline = Some(tokio::time::Instant::now() + within);
+        self.deadline = Some(Deadline::after(within));
         self
     }
 
     pub fn expired(&self) -> bool {
-        self.deadline
-            .is_some_and(|at| tokio::time::Instant::now() >= at)
+        self.deadline.is_some_and(|d| d.reached())
+    }
+
+    /// The run's deadline; `None` runs unbounded.
+    pub(crate) fn deadline(&self) -> Option<&Deadline> {
+        self.deadline.as_ref()
     }
 
     pub fn used(&self) -> usize {
@@ -119,8 +124,10 @@ impl Budget {
         if self.used == 0 {
             return;
         }
-        let wake = tokio::time::Instant::now() + self.pace;
-        tokio::time::sleep_until(self.deadline.map_or(wake, |at| wake.min(at))).await;
+        let wait = self
+            .deadline
+            .map_or(self.pace, |d| self.pace.min(d.remaining()));
+        tokio::time::sleep(wait).await;
     }
 }
 

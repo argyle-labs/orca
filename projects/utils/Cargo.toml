@@ -30,7 +30,9 @@ state = ["rt"]
 # `utils::framing` + `utils::shutdown` — async runtime helpers (tokio).
 rt = ["reactor", "dep:tokio-util"]
 # `utils::reactor` — the shared runtime and its sync→async `block_on` bridge.
-reactor = ["dep:tokio", "dep:libc"]
+reactor = ["clock", "dep:libc"]
+# `utils::time::{Deadline, poll_until}` — bounded polling on the tokio clock.
+clock = ["dep:tokio"]
 # `utils::invocation_scope::testing` — sync scope setters for other crates' tests.
 test-scope = ["reactor"]
 # `utils::search` — glob matching.

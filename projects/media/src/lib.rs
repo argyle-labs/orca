@@ -53,6 +53,10 @@ pub mod editions;
 pub use editions::{EditionGap, EditionPolicy, compute_edition_gaps};
 pub mod diff_reconcile;
 pub use diff_reconcile::{DiffResult, diff_new_gaps, identity_key};
+pub mod series_add;
+pub use series_add::{
+    Pending, Poll, SeriesAddPlan, SeriesAddReport, SeriesManager, SeriesRow, SeriesView, add_series,
+};
 pub mod sequence;
 pub use sequence::{
     Fractional, GapPolicy, GapStart, NumberRange, SeqNumber, SequenceGaps, SeriesSize,
