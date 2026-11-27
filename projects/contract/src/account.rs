@@ -619,7 +619,24 @@ fn gate_dry_run_secret(op: &str, args: &mut serde_json::Value) -> std::result::R
     {
         return Err(format!("{op} requires a secret unless dry_run is set"));
     }
+    if matches!(op, SET_SECRET_OP | APPLY_CONSUMER_OP | CREATE_OP)
+        && args
+            .get("secret")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|v| !scrubbable(v))
+    {
+        return Err(SHORT_SECRET.replace("{op}", op));
+    }
     Ok(())
+}
+
+const SHORT_SECRET: &str = "{op}: secret is shorter than the 4-character minimum";
+const SHORT_GENERATED: &str = "regenerate: generated value is shorter than the 4-character minimum";
+
+fn generated_too_short(out: &serde_json::Value) -> bool {
+    out.get("generated")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|v| !scrubbable(v))
 }
 
 /// Every rendering of `v[key]` an error message could echo, so a provider or
@@ -652,11 +669,7 @@ fn secret_values(v: &serde_json::Value, key: &str) -> Vec<String> {
 fn scrub_known_values(out: &mut serde_json::Value, values: &[String]) {
     fn walk(v: &mut serde_json::Value, values: &[String]) {
         match v {
-            serde_json::Value::String(s)
-                if values
-                    .iter()
-                    .any(|x| scrubbable(x) && s.contains(x.as_str())) =>
-            {
+            serde_json::Value::String(s) if mentions(s, values) => {
                 *s = scrubbed(s, values);
             }
             serde_json::Value::Array(a) => a.iter_mut().for_each(|x| walk(x, values)),
@@ -681,13 +694,47 @@ fn scrubbable(v: &str) -> bool {
     v.chars().count() >= MIN_SCRUB_LEN
 }
 
+/// Long values are redacted wherever they appear. A short value is redacted
+/// only as the whole text or a whole word, so it cannot leak by being echoed
+/// alone yet does not blank every word that happens to contain it.
 fn scrubbed(msg: &str, values: &[String]) -> String {
-    let refs: Vec<&str> = values
+    let (long, short): (Vec<&str>, Vec<&str>) = values
         .iter()
         .map(String::as_str)
-        .filter(|v| scrubbable(v))
-        .collect();
-    utils::scrub::redact_values(msg, &refs)
+        .filter(|v| !v.is_empty())
+        .partition(|v| scrubbable(v));
+    let mut text = msg.to_string();
+    for v in short {
+        text = redact_whole_words(&text, v);
+    }
+    utils::scrub::redact_values(&text, &long)
+}
+
+fn redact_whole_words(text: &str, v: &str) -> String {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut prev: Option<char> = None;
+    while let Some(i) = rest.find(v) {
+        let before = rest[..i].chars().next_back().or(prev);
+        let after = rest[i + v.len()..].chars().next();
+        out.push_str(&rest[..i]);
+        if before.is_none_or(|c| !is_word(c)) && after.is_none_or(|c| !is_word(c)) {
+            out.push_str(utils::scrub::REDACTED);
+        } else {
+            out.push_str(v);
+        }
+        prev = v.chars().next_back();
+        rest = &rest[i + v.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn mentions(s: &str, values: &[String]) -> bool {
+    values
+        .iter()
+        .any(|x| !x.is_empty() && s.contains(x.as_str()))
 }
 
 const UNSUPPORTED_KEY: &str = "unsupported";
@@ -777,6 +824,9 @@ pub async fn dispatch_op(
     }
     .await;
     let mut out = out.map_err(err)?;
+    if op == REGENERATE_OP && generated_too_short(&out) {
+        return Err(err(Fail::Msg(SHORT_GENERATED.to_string())));
+    }
     if is_rollback(op, &rollback) && out.get("restored").is_none_or(serde_json::Value::is_null) {
         return Err(err(Fail::Msg(ROLLBACK_UNREPORTED.to_string())));
     }
@@ -917,7 +967,17 @@ impl AccountProvider for AccountProxy {
 
     fn regenerate(&self, req: RegenerateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
         let fut = self.call(REGENERATE_OP, serde_json::to_value(&req));
-        Box::pin(async move { fut.await.map(redact_outcome) })
+        Box::pin(async move {
+            let out = redact_outcome(fut.await?);
+            if out
+                .generated
+                .as_ref()
+                .is_some_and(|g| !scrubbable(g.expose_secret()))
+            {
+                anyhow::bail!(SHORT_GENERATED);
+            }
+            Ok(out)
+        })
     }
 
     fn consumers(&self, req: ConsumersRequest) -> BoxFuture<'_, Result<Vec<ConsumerDecl>>> {
@@ -2740,20 +2800,143 @@ mod tests {
         assert!(!e.contains("eyJhbGciOi.eyJzdWIi.c2ln"), "{e}");
     }
 
-    #[tokio::test]
-    async fn account_short_secrets_do_not_redact_ordinary_text() {
-        let out = dispatch_op(
-            &EchoOwner,
-            SET_SECRET_OP,
-            serde_json::json!({"account": acct(), "secret": "ab1"}),
-        )
-        .await
-        .unwrap();
-        assert_eq!(out["detail"]["msg"], "set key to ab1");
-        assert_eq!(scrubbed("tab1e row", &["ab1".to_string()]), "tab1e row");
+    #[test]
+    fn account_short_values_redact_as_whole_text_or_word() {
+        let short = ["ab1".to_string()];
+        assert_eq!(scrubbed("ab1", &short), utils::scrub::REDACTED);
+        assert_eq!(
+            scrubbed("set key to ab1", &short),
+            format!("set key to {}", utils::scrub::REDACTED)
+        );
+        assert_eq!(
+            scrubbed("ab1/ab1", &short),
+            format!("{0}/{0}", utils::scrub::REDACTED)
+        );
+        assert_eq!(scrubbed("tab1e row", &short), "tab1e row");
         assert_eq!(
             scrubbed("tab1e row", &["ab1e".to_string()]),
             format!("t{} row", utils::scrub::REDACTED)
+        );
+        let mut leaf =
+            serde_json::json!({"detail": {"msg": "ab1", "other": "table"}, "n": ["ab1"]});
+        scrub_known_values(&mut leaf, &short);
+        assert_eq!(leaf["detail"]["msg"], utils::scrub::REDACTED);
+        assert_eq!(leaf["detail"]["other"], "table");
+        assert_eq!(leaf["n"][0], utils::scrub::REDACTED);
+        let mut num = serde_json::json!({"msg": "got 7 for code 7"});
+        scrub_known_values(&mut num, &["7".to_string()]);
+        assert!(!num["msg"].as_str().unwrap().contains('7'), "{num}");
+    }
+
+    #[tokio::test]
+    async fn account_short_secrets_are_rejected() {
+        let a = serde_json::to_value(acct()).unwrap();
+        let h = serde_json::to_value(holding()).unwrap();
+        for (op, args) in [
+            (
+                SET_SECRET_OP,
+                serde_json::json!({"account": a, "secret": "ab1"}),
+            ),
+            (
+                APPLY_CONSUMER_OP,
+                serde_json::json!({"holding": h, "secret": "ab1"}),
+            ),
+            (
+                CREATE_OP,
+                serde_json::json!({"account": a, "kind": "api_key", "secret": "ab1"}),
+            ),
+        ] {
+            let err = dispatch_op(&SeesSecret, op, args).await.unwrap_err();
+            let msg = err.as_str().unwrap();
+            assert!(msg.contains("4-character minimum"), "{op}: {msg}");
+        }
+        assert!(
+            dispatch_op(
+                &SeesSecret,
+                SET_SECRET_OP,
+                serde_json::json!({"account": a, "secret": "ab1", "dry_run": true}),
+            )
+            .await
+            .is_ok()
+        );
+    }
+
+    struct ShortMinter;
+
+    impl AccountProvider for ShortMinter {
+        fn name(&self) -> &str {
+            "account-short-minter"
+        }
+        fn decl(&self) -> BoxFuture<'_, Result<AccountDecl>> {
+            Box::pin(async {
+                Ok(AccountDecl {
+                    unit_kinds: vec![],
+                    account_kinds: vec![],
+                    capabilities: vec![],
+                })
+            })
+        }
+        fn regenerate(&self, _req: RegenerateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+            Box::pin(async {
+                Ok(AccountOutcome {
+                    executed: true,
+                    generated: Some(Secret::new("k9".to_string())),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn account_short_generated_value_is_rejected() {
+        let err = dispatch_op(
+            &ShortMinter,
+            REGENERATE_OP,
+            serde_json::json!({"account": acct()}),
+        )
+        .await
+        .unwrap_err();
+        let msg = err.as_str().unwrap();
+        assert!(msg.contains("4-character minimum"), "{msg}");
+        assert!(!msg.contains("k9"));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_rejects_short_secret_and_generated() {
+        let invoke: InvokeThunk = Arc::new(|op, _args, _call| match op {
+            SET_SECRET_OP => panic!("short secret must not reach the wire"),
+            _ => Ok(serde_json::json!({"executed": true, "generated": "k9"})),
+        });
+        let proxy = AccountProxy {
+            name: "account-proxy-short".into(),
+            invoke,
+        };
+        let e = proxy
+            .set_secret(SetSecretRequest {
+                account: acct(),
+                secret: Some(Secret::new("ab1".to_string())),
+                dry_run: false,
+                rollback: false,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("4-character minimum") && !e.contains("ab1"),
+            "{e}"
+        );
+        let e = proxy
+            .regenerate(RegenerateRequest {
+                account: acct(),
+                dry_run: false,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("4-character minimum") && !e.contains("k9"),
+            "{e}"
         );
     }
 }
