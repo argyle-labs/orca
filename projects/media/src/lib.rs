@@ -50,7 +50,8 @@ pub mod diff_reconcile;
 pub use diff_reconcile::{DiffResult, diff_new_gaps, identity_key};
 pub mod sequence;
 pub use sequence::{
-    Fractional, GapPolicy, GapStart, NumberRange, SequenceGaps, SparsePolicy, sequence_gaps,
+    Fractional, GapPolicy, GapStart, NumberRange, SeqNumber, SequenceGaps, SeriesSize,
+    SparsePolicy, sequence_gaps,
 };
 
 // ── Domain model ─────────────────────────────────────────────────────────────
