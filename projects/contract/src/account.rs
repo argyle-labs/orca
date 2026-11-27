@@ -158,6 +158,11 @@ pub struct SetSecretRequest {
     pub secret: Option<Secret<String>>,
     #[serde(default)]
     pub dry_run: bool,
+    /// Set when core is putting the previous value back after a failed
+    /// rotation step; the provider reports the result in
+    /// [`AccountOutcome::restored`].
+    #[serde(default)]
+    pub rollback: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
@@ -196,6 +201,11 @@ pub struct ConsumerApplyRequest {
     pub secret: Option<Secret<String>>,
     #[serde(default)]
     pub dry_run: bool,
+    /// Set when core is putting the previous value back after a failed
+    /// rotation step; the provider reports the result in
+    /// [`AccountOutcome::restored`].
+    #[serde(default)]
+    pub rollback: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
@@ -216,7 +226,7 @@ pub struct RegenerateRequest {
 /// `generated` carries a credential the unit minted itself (e.g. an app that
 /// regenerates its own api_key), so core can write it to the secrets backend.
 /// It is never placed in `detail`, which is scrubbed.
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
 pub struct AccountOutcome {
     pub executed: bool,
     #[serde(default)]
@@ -228,6 +238,9 @@ pub struct AccountOutcome {
     )]
     #[schemars(with = "Option<String>")]
     pub generated: Option<Secret<String>>,
+    /// For a `rollback` apply: whether the previous value is back in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
@@ -275,6 +288,7 @@ pub trait AccountProvider: Send + Sync {
         unsupported(DELETE_OP)
     }
 
+    /// Rollback is `set_secret` with the previous value and `rollback: true`.
     fn set_secret(&self, _req: SetSecretRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
         unsupported(SET_SECRET_OP)
     }
@@ -294,6 +308,10 @@ pub trait AccountProvider: Send + Sync {
         Box::pin(async { Ok(Vec::new()) })
     }
 
+    /// Writes the value into the held setting. Rollback is the same call with
+    /// the old secret and `rollback: true`; core restores the secrets backend
+    /// first, then each consumer, and reads `restored` to report a consumer
+    /// left holding the new value.
     fn apply_consumer(&self, _req: ConsumerApplyRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
         unsupported(APPLY_CONSUMER_OP)
     }
@@ -715,6 +733,7 @@ mod tests {
                     executed: !req.dry_run,
                     detail: serde_json::json!({"has_secret": req.secret.is_some()}),
                     generated: None,
+                    restored: None,
                 })
             })
         }
@@ -724,6 +743,7 @@ mod tests {
                     executed: !req.dry_run,
                     detail: serde_json::Value::Null,
                     generated: None,
+                    restored: None,
                 })
             })
         }
@@ -733,6 +753,7 @@ mod tests {
                     executed: !req.dry_run,
                     detail: serde_json::Value::Null,
                     generated: None,
+                    restored: None,
                 })
             })
         }
@@ -748,6 +769,7 @@ mod tests {
                     executed: !req.dry_run,
                     detail: serde_json::Value::Null,
                     generated: None,
+                    restored: None,
                 })
             })
         }
@@ -765,6 +787,7 @@ mod tests {
                     executed: !req.dry_run,
                     detail: serde_json::json!({"account": req.account.account}),
                     generated: (!req.dry_run).then(|| Secret::new(VALUE.to_string())),
+                    restored: None,
                 })
             })
         }
@@ -801,6 +824,7 @@ mod tests {
                     executed: !req.dry_run,
                     detail: serde_json::json!({"setting": req.holding.setting}),
                     generated: None,
+                    restored: req.rollback.then_some(true),
                 })
             })
         }
@@ -904,6 +928,7 @@ mod tests {
             account: acct(),
             secret: Some(secret()),
             dry_run: false,
+            rollback: false,
         };
         let dbg = format!("{req:?}");
         assert!(!dbg.contains(VALUE), "{dbg}");
@@ -911,6 +936,7 @@ mod tests {
             holding: holding(),
             secret: Some(secret()),
             dry_run: false,
+            rollback: false,
         };
         assert!(!format!("{apply:?}").contains(VALUE));
         let create = CreateRequest {
@@ -929,6 +955,7 @@ mod tests {
             account: acct(),
             secret: Some(secret()),
             dry_run: false,
+            rollback: false,
         })
         .unwrap();
         assert_eq!(wire["secret"], VALUE);
@@ -1153,6 +1180,7 @@ mod tests {
                 account: acct(),
                 secret: Some(secret()),
                 dry_run: false,
+                rollback: false,
             })
             .await
             .unwrap_err()
@@ -1188,6 +1216,7 @@ mod tests {
                 holding: holding(),
                 secret: Some(secret()),
                 dry_run: false,
+                rollback: false,
             })
             .await
             .unwrap();
@@ -1423,6 +1452,7 @@ mod tests {
             executed: false,
             detail: serde_json::json!({"has_secret": has_secret}),
             generated: None,
+            restored: None,
         })
     }
 
@@ -1485,6 +1515,7 @@ mod tests {
                 account: acct(),
                 secret: Some(secret()),
                 dry_run: true,
+                rollback: false,
             })
             .await
             .unwrap();
@@ -1493,6 +1524,7 @@ mod tests {
                 holding: holding(),
                 secret: Some(secret()),
                 dry_run: true,
+                rollback: false,
             })
             .await
             .unwrap();
@@ -1501,6 +1533,7 @@ mod tests {
                 account: acct(),
                 secret: None,
                 dry_run: false,
+                rollback: false,
             })
             .await
             .unwrap_err();
@@ -1529,6 +1562,7 @@ mod tests {
                 account: acct(),
                 secret: Some(secret()),
                 dry_run: false,
+                rollback: false,
             })
             .await
             .unwrap_err()
@@ -1565,5 +1599,28 @@ mod tests {
             assert!(!msg.contains("918273645"), "{msg}");
             assert!(!msg.contains("nested-s3cr3t-value"), "{msg}");
         }
+    }
+
+    #[tokio::test]
+    async fn account_consumer_rollback_reports_restored() {
+        let h = serde_json::to_value(holding()).unwrap();
+        let forward = dispatch_op(
+            &FakeConsumer,
+            APPLY_CONSUMER_OP,
+            serde_json::json!({"holding": h, "secret": VALUE}),
+        )
+        .await
+        .unwrap();
+        assert!(forward.get("restored").is_none());
+        let back = dispatch_op(
+            &FakeConsumer,
+            APPLY_CONSUMER_OP,
+            serde_json::json!({"holding": h, "secret": "old-value", "rollback": true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(back["restored"], true);
+        let decoded: AccountOutcome = serde_json::from_value(back).unwrap();
+        assert_eq!(decoded.restored, Some(true));
     }
 }
