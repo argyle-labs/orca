@@ -45,8 +45,6 @@ impl Default for SearchPolicy {
     }
 }
 
-/// Per-run request budget: caps how many requests one run issues and paces
-/// consecutive requests. One budget spans every series a run reconciles.
 /// Floor on [`SearchPolicy::request_pace_ms`]: each request is an indexer
 /// search, and unpaced runs trip indexer rate limits.
 pub const MIN_REQUEST_PACE: std::time::Duration = std::time::Duration::from_millis(500);
@@ -55,6 +53,8 @@ fn request_pace(policy: &SearchPolicy) -> std::time::Duration {
     std::time::Duration::from_millis(policy.request_pace_ms).max(MIN_REQUEST_PACE)
 }
 
+/// Per-run request budget: caps how many requests one run issues and paces
+/// consecutive requests. One budget spans every series a run reconciles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Budget {
     limit: usize,
