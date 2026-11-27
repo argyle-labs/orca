@@ -338,11 +338,7 @@ impl Command {
         }
         let drain_end = async {
             match self.drain_budget {
-                Some(budget) => tokio::select! {
-                    biased;
-                    () = &mut cancel => {}
-                    () = tokio::time::sleep(budget) => {}
-                },
+                Some(budget) => tokio::time::sleep(budget).await,
                 None => (&mut cancel).await,
             }
         };
@@ -1280,6 +1276,48 @@ mod tests {
             .and_then(|e| e.downcast_ref::<PipeHeldOpen>())
             .unwrap_or_else(|| panic!("expected PipeHeldOpen, got {err}"));
         assert!(held.status.success);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn drain_budget_outlasts_a_deadline_hit_just_after_leader_exit() {
+        let dir = HolderDir::new("pgdrainlate");
+        let cmd = dir
+            .command("echo $$ >&4; echo hi; sleep 3600 4>&- & echo $! >&4")
+            .kill_process_group_on_timeout()
+            .drain_budget(Duration::from_secs(3600));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let run = cmd.output_until(deadline);
+        let mut run = std::pin::pin!(run);
+        let leader = tokio::select! {
+            biased;
+            out = &mut run => panic!("run ended before the leader reported: {out:?}"),
+            pid = dir.pid() => pid,
+        };
+        let holder = tokio::select! {
+            biased;
+            out = &mut run => panic!("run ended before the holder reported: {out:?}"),
+            pid = dir.pid() => pid,
+        };
+        let out = loop {
+            tokio::select! {
+                biased;
+                out = &mut run => break out,
+                () = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+            let now = tokio::time::Instant::now();
+            if leader_exited(leader as u32).unwrap() && now < deadline {
+                tokio::time::sleep_until(deadline + Duration::from_secs(1)).await;
+                unsafe { libc::kill(holder, libc::SIGKILL) };
+            }
+            assert!(
+                now < deadline + Duration::from_secs(600),
+                "drain never ended"
+            );
+        };
+        let out = out.unwrap().expect("leader exited before the deadline");
+        assert!(out.status.success);
+        assert_eq!(out.stdout, b"hi\n");
     }
 
     #[tokio::test]
