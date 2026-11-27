@@ -65,11 +65,6 @@ pub fn resolve_bin(
     Err(tried)
 }
 
-/// Is `p` a file this process could execute?
-///
-/// The mode check matters: a non-executable file with the right name is not a
-/// command, and treating it as one turns a clear "not found" into a confusing
-/// spawn failure further along.
 #[cfg(unix)]
 pub fn is_executable_file(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
