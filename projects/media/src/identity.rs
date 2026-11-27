@@ -209,6 +209,7 @@ pub fn canonical_external_id(source: &str, id: &str, ty: Option<MediaType>) -> O
 /// * `imdb://tt0133093`, `tmdb://603`, `tvdb://12345`
 /// * `com.plexapp.agents.imdb://tt0133093?lang=en` (legacy Plex agent guids)
 /// * bare `tt0133093` (assumed IMDb)
+/// * ComicVine volume URLs (`https://comicvine.gamespot.com/x/4050-17993/`)
 ///
 /// Returns `None` for guids we can't attribute (e.g. `plex://movie/5d…`, a
 /// server-local surrogate that is not a cross-backend key).
@@ -307,10 +308,11 @@ pub fn comicvine_volume_ids<S: AsRef<str>>(inputs: &[S]) -> Result<Vec<String>, 
 
 fn is_comicvine_url(s: &str) -> bool {
     let lower = s.to_ascii_lowercase();
-    if lower.starts_with("https://") || lower.starts_with("http://") {
-        return true;
-    }
-    let host = lower.strip_prefix("www.").unwrap_or(&lower);
+    let rest = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .unwrap_or(&lower);
+    let host = rest.strip_prefix("www.").unwrap_or(rest);
     host == COMICVINE_HOST || host.starts_with(&format!("{COMICVINE_HOST}/"))
 }
 
@@ -629,5 +631,11 @@ mod tests {
             "4000-33017"
         );
         assert_eq!(parse_guid("comicvine.gamespot.com/x/4000-5/"), None);
+        assert_eq!(parse_guid("https://example.com/x/4050-1/"), None);
+        assert_eq!(
+            parse_guid("https://comicvine.gamespot.com.evil.test/x/4050-1/"),
+            None
+        );
+        assert!(cv(&["https://example.com/x/4050-1/"]).is_err());
     }
 }
