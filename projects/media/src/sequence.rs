@@ -52,9 +52,9 @@ pub enum GapStart {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SparsePolicy {
-    pub slack: i64,
+    pub slack: u64,
     pub small_series: usize,
-    pub small_series_span: i64,
+    pub small_series_span: u64,
     pub max_outliers: usize,
 }
 
@@ -134,11 +134,13 @@ pub fn sequence_gaps(numbers: &[SeqNumber], size: SeriesSize, policy: &GapPolicy
         let distinct = total(&ranges);
         let count =
             i64::try_from(size.expected.unwrap_or(size.entries).max(distinct)).unwrap_or(i64::MAX);
-        let limit = count.saturating_mul(2).saturating_add(sparse.slack);
+        let limit = count
+            .saturating_mul(2)
+            .saturating_add_unsigned(sparse.slack);
         if hi.saturating_sub(lo).saturating_add(1) > limit {
             let small = size.expected.is_none()
                 && distinct < sparse.small_series
-                && hi.saturating_sub(lo) < sparse.small_series_span;
+                && hi.abs_diff(lo) < sparse.small_series_span;
             let cut = lo.saturating_add(limit);
             let past: Vec<NumberRange> = ranges
                 .iter()
@@ -280,6 +282,33 @@ mod tests {
         let g = issue_gaps(&ns, Some(20));
         assert_eq!(g.renumbered_or_sparse, Some(r(1, 2022)));
         assert!(g.outliers.is_empty());
+    }
+
+    #[test]
+    fn huge_sparse_settings_saturate_and_keep_dense_series_whole() {
+        let policy = GapPolicy {
+            sparse: Some(SparsePolicy {
+                slack: u64::MAX,
+                small_series_span: u64::MAX,
+                ..SparsePolicy::default()
+            }),
+            ..GapPolicy::default()
+        };
+        let ns = whole([1, 3, 1_000_000]);
+        let g = sequence_gaps(&ns, size(3, Some(3)), &policy);
+        assert!(g.outliers.is_empty());
+        assert_eq!(g.renumbered_or_sparse, None);
+        assert_eq!(g.missing, vec![r(2, 2), r(4, 999_999)]);
+        let zero = GapPolicy {
+            sparse: Some(SparsePolicy {
+                slack: 0,
+                ..SparsePolicy::default()
+            }),
+            ..GapPolicy::default()
+        };
+        let g = sequence_gaps(&whole([1, 2, 3]), size(3, Some(3)), &zero);
+        assert!(g.outliers.is_empty());
+        assert_eq!(g.renumbered_or_sparse, None);
     }
 
     #[test]
