@@ -227,7 +227,8 @@ pub async fn add_series(
             } else {
                 add_and_want(manager, requester, plan, budget, &mut row).await;
             }
-            if !row.already_listed && row.pending != Some(Pending::DeadlineReached) {
+            let run_stopped = row.pending == Some(Pending::DeadlineReached) && budget.expired();
+            if !row.already_listed && !run_stopped {
                 new += 1;
             }
         }
@@ -249,16 +250,19 @@ async fn add_and_want(
     budget: &mut Budget,
     row: &mut SeriesRow,
 ) {
-    let deadline = budget
-        .deadline()
-        .copied()
-        .unwrap_or_else(|| Deadline::after(plan.poll.interval * plan.poll.attempts));
     if !row.already_listed {
         if let Err(e) = manager.add(&row.id).await {
             row.error = Some(e.to_string());
             return;
         }
-        match listed(manager, &row.id, plan.poll, &deadline).await {
+        match listed(
+            manager,
+            &row.id,
+            plan.poll,
+            &poll_deadline(budget, plan.poll),
+        )
+        .await
+        {
             Ok(Polled::Settled(())) => row.added = true,
             Ok(Polled::Expired(())) => {
                 row.pending = Some(Pending::DeadlineReached);
@@ -287,7 +291,13 @@ async fn add_and_want(
     let read = if row.already_listed {
         manager.series(&row.id).await.map(Polled::Settled)
     } else {
-        imported(manager, &row.id, plan.poll, &deadline).await
+        imported(
+            manager,
+            &row.id,
+            plan.poll,
+            &poll_deadline(budget, plan.poll),
+        )
+        .await
     };
     let (view, settled) = match read {
         Ok(Polled::Settled(view)) => (view, true),
@@ -320,6 +330,15 @@ async fn add_and_want(
         row.shortfall = view.expected.filter(|&t| t > loaded).map(|t| t - loaded);
         None
     };
+}
+
+/// Without a run deadline each poll gets its own, so one slow wait never eats
+/// into the next.
+fn poll_deadline(budget: &Budget, poll: Poll) -> Deadline {
+    budget
+        .deadline()
+        .copied()
+        .unwrap_or_else(|| Deadline::after(poll.interval.saturating_mul(poll.attempts.max(1))))
 }
 
 async fn listed(
@@ -931,5 +950,20 @@ mod tests {
             (r.queued, r.series_failed, r.pending, r.short),
             (11, 0, 0, 1)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_listing_without_a_run_deadline_keeps_the_full_import_poll() {
+        let mgr = Mgr::default()
+            .lists(&[&[], &[], &[], &[], &["2"]])
+            .views("2", (1..=5).map(|n| numbered("i", n, None)).collect());
+        let plan = SeriesAddPlan {
+            max_new: 1,
+            ..plan(true)
+        };
+        let r = run(&mgr, &Req::default(), &["2", "3"], &plan).await;
+        assert_eq!(r.series[0].pending, Some(Pending::Importing));
+        assert_eq!(r.series[1].pending, Some(Pending::MaxNew));
+        assert_eq!(mgr.sent("add"), 1);
     }
 }
