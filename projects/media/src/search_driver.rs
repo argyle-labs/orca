@@ -43,6 +43,7 @@ impl Default for SearchPolicy {
 pub struct Budget {
     limit: usize,
     pace: std::time::Duration,
+    deadline: Option<tokio::time::Instant>,
     used: usize,
 }
 
@@ -54,6 +55,7 @@ impl Budget {
         Ok(Budget {
             limit,
             pace: std::time::Duration::ZERO,
+            deadline: None,
             used: 0,
         })
     }
@@ -62,6 +64,7 @@ impl Budget {
         Budget {
             limit: usize::MAX,
             pace: std::time::Duration::ZERO,
+            deadline: None,
             used: 0,
         }
     }
@@ -69,6 +72,17 @@ impl Budget {
     pub fn with_pace(mut self, pace: std::time::Duration) -> Self {
         self.pace = pace;
         self
+    }
+
+    /// Stops the run from issuing requests once `at` is reached.
+    pub fn with_deadline(mut self, at: tokio::time::Instant) -> Self {
+        self.deadline = Some(at);
+        self
+    }
+
+    pub fn expired(&self) -> bool {
+        self.deadline
+            .is_some_and(|at| tokio::time::Instant::now() >= at)
     }
 
     pub fn used(&self) -> usize {

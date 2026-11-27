@@ -125,6 +125,8 @@ pub enum SkipReason {
     BudgetExhausted,
     /// The requester reported it cannot request this gap; `error` says why.
     Unrequestable,
+    /// The run's deadline passed before this gap was requested.
+    DeadlineReached,
 }
 
 /// What one gap-add attempt did.
@@ -186,13 +188,24 @@ pub async fn reconcile_series(
         .iter()
         .map(|g| (g, requester.unrequestable(g)))
         .partition(|(_, why)| why.is_none());
-    let selected = budget.take(requestable.len());
+    let cap = budget.take(requestable.len());
+    let mut selected = cap;
 
     let mut actions = Vec::new();
     if dry_run {
         budget.spend(selected);
     } else {
-        for &(gap, _) in &requestable[..selected] {
+        for (n, &(gap, _)) in requestable[..cap].iter().enumerate() {
+            if budget.expired() {
+                actions.extend(requestable[n..cap].iter().map(|(gap, _)| GapAction {
+                    identity: (*gap).clone(),
+                    status: None,
+                    error: None,
+                    skipped: Some(SkipReason::DeadlineReached),
+                }));
+                selected = n;
+                break;
+            }
             budget.pace().await;
             budget.spend(1);
             let req = AddRequest {
@@ -215,7 +228,7 @@ pub async fn reconcile_series(
                 }),
             }
         }
-        actions.extend(requestable[selected..].iter().map(|(gap, _)| GapAction {
+        actions.extend(requestable[cap..].iter().map(|(gap, _)| GapAction {
             identity: (*gap).clone(),
             status: None,
             error: None,
@@ -610,5 +623,34 @@ mod tests {
             .unwrap();
         assert_eq!(a.skipped, Some(SkipReason::Unrequestable));
         assert_eq!(a.error.as_deref(), Some("no backend id"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_stops_requesting_and_reports_the_rest() {
+        let req = req();
+        let pace = std::time::Duration::from_secs(30);
+        let start = tokio::time::Instant::now();
+        let mut budget = Budget::new(3)
+            .unwrap()
+            .with_pace(pace)
+            .with_deadline(start + pace);
+        let expected: Vec<_> = ["A", "B", "C", "D"].iter().map(|t| isbn(t, t)).collect();
+        let out = run(&expected, &req, &mut budget, false).await;
+        assert_eq!(
+            *req.added.lock().unwrap(),
+            vec!["A".to_string(), "B".to_string()]
+        );
+        assert_eq!((out.selected, out.remaining), (2, 2));
+        assert_eq!(budget.used(), 2);
+        let skipped: Vec<_> = out.actions.iter().map(|a| a.skipped).collect();
+        assert_eq!(
+            skipped,
+            vec![
+                None,
+                None,
+                Some(SkipReason::DeadlineReached),
+                Some(SkipReason::BudgetExhausted)
+            ]
+        );
     }
 }
