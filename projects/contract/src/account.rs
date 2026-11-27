@@ -1546,4 +1546,24 @@ mod tests {
         assert!(e.contains("returned invalid JSON"), "{e}");
         assert!(!e.contains("5551234987"), "{e}");
     }
+    #[tokio::test]
+    async fn account_dispatch_op_redacts_non_string_secret_in_decode_errors() {
+        for bad in [
+            serde_json::json!(918273645),
+            serde_json::json!(true),
+            serde_json::json!({"inner": "nested-s3cr3t-value"}),
+        ] {
+            let err = dispatch_op(
+                &owner(),
+                SET_SECRET_OP,
+                serde_json::json!({"account": acct(), "secret": bad.clone()}),
+            )
+            .await
+            .unwrap_err();
+            let msg = err.as_str().unwrap();
+            assert!(msg.starts_with("decode set_secret args:"), "{msg}");
+            assert!(!msg.contains("918273645"), "{msg}");
+            assert!(!msg.contains("nested-s3cr3t-value"), "{msg}");
+        }
+    }
 }
