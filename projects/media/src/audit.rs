@@ -1,8 +1,10 @@
 use crate::seam::RequestState;
 use crate::sequence::{GapPolicy, NumberRange, SeqNumber, SequenceGaps, SeriesSize, sequence_gaps};
+use crate::status::rank;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::HashMap;
 use thiserror::Error;
 
 // Plain decimals only: f64 parsing also takes "nan", "inf" and "1e3".
@@ -180,14 +182,17 @@ pub struct SeriesAudit {
     pub complete: bool,
 }
 
-fn counts(states: impl Iterator<Item = RequestState>) -> Vec<StatusCount> {
-    let mut by: BTreeMap<RequestState, usize> = BTreeMap::new();
-    for s in states {
-        *by.entry(s).or_default() += 1;
+fn tally(counts: impl Iterator<Item = (RequestState, usize)>) -> Vec<StatusCount> {
+    let mut by: HashMap<RequestState, usize> = HashMap::new();
+    for (state, n) in counts {
+        *by.entry(state).or_default() += n;
     }
-    by.into_iter()
+    let mut out: Vec<StatusCount> = by
+        .into_iter()
         .map(|(state, count)| StatusCount { state, count })
-        .collect()
+        .collect();
+    out.sort_by_key(|c| Reverse(rank(c.state)));
+    out
 }
 
 impl SeriesAudit {
@@ -233,7 +238,7 @@ impl SeriesAudit {
             id: id.into(),
             name,
             total: entries.len(),
-            by_status: counts(items.iter().map(|(i, _)| i.state)),
+            by_status: tally(items.iter().map(|(i, _)| (i.state, 1))),
             no_id: missing.iter().filter(|m| m.id.is_none()).count(),
             complete: missing.is_empty()
                 && gaps.missing_count == 0
@@ -268,7 +273,7 @@ pub struct AuditSummary {
 impl AuditSummary {
     pub fn of<'a>(series: impl IntoIterator<Item = &'a SeriesAudit>) -> Self {
         let mut out = Self::default();
-        let mut by: BTreeMap<RequestState, usize> = BTreeMap::new();
+        let mut by = Vec::new();
         for s in series {
             out.series += 1;
             out.entries += s.total;
@@ -282,14 +287,9 @@ impl AuditSummary {
             out.gap_numbers += s.gaps.missing_count;
             out.renumbered_or_sparse += usize::from(s.gaps.renumbered_or_sparse.is_some());
             out.outliers += s.gaps.outliers.len();
-            for c in &s.by_status {
-                *by.entry(c.state).or_default() += c.count;
-            }
+            by.extend(s.by_status.iter().map(|c| (c.state, c.count)));
         }
-        out.by_status = by
-            .into_iter()
-            .map(|(state, count)| StatusCount { state, count })
-            .collect();
+        out.by_status = tally(by.into_iter());
         out
     }
 }
@@ -562,12 +562,12 @@ mod tests {
             s.by_status,
             vec![
                 StatusCount {
-                    state: RequestState::Snatched,
-                    count: 1
-                },
-                StatusCount {
                     state: RequestState::Imported,
                     count: 3
+                },
+                StatusCount {
+                    state: RequestState::Snatched,
+                    count: 1
                 },
                 StatusCount {
                     state: RequestState::Failed,

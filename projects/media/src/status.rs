@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 /// Acquisition-progress rank: higher = more progressed / more authoritative.
 /// `Imported` is the terminal win; `Failed`/`Skipped`/`Unmonitored` outrank only `Unknown`,
 /// so a real positive state on ANY sibling always wins over a negative one.
-fn rank(state: RequestState) -> u8 {
+pub(crate) fn rank(state: RequestState) -> u8 {
     match state {
         RequestState::Imported => 8,
         RequestState::Downloading => 7,
