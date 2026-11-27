@@ -212,6 +212,9 @@ pub async fn reconcile_series(
             actions.push(GapAction::unsent(gap, None, None));
             continue;
         }
+        if !budget.expired() {
+            budget.pace().await;
+        }
         if budget.expired() {
             actions.extend(
                 requestable[n..cap].iter().map(|(gap, _)| {
@@ -221,7 +224,6 @@ pub async fn reconcile_series(
             selected = n;
             break;
         }
-        budget.pace().await;
         budget.spend(1);
         let req = AddRequest {
             identity: gap.clone(),
@@ -657,9 +659,10 @@ mod tests {
         let start = tokio::time::Instant::now();
         let mut budget = Budget::new(3, &paced(pace))
             .unwrap()
-            .with_deadline(start + pace);
+            .with_deadline(pace + pace / 2);
         let expected: Vec<_> = ["A", "B", "C", "D"].iter().map(|t| isbn(t, t)).collect();
         let out = run(&expected, &req, &mut budget, false).await;
+        assert_eq!(start.elapsed(), pace + pace / 2);
         assert_eq!(
             *req.added.lock().unwrap(),
             vec!["A".to_string(), "B".to_string()]

@@ -77,9 +77,9 @@ impl Budget {
         }
     }
 
-    /// Stops the run from issuing requests once `at` is reached.
-    pub fn with_deadline(mut self, at: tokio::time::Instant) -> Self {
-        self.deadline = Some(at);
+    /// Stops the run from issuing requests once `within` has elapsed from now.
+    pub fn with_deadline(mut self, within: std::time::Duration) -> Self {
+        self.deadline = Some(tokio::time::Instant::now() + within);
         self
     }
 
@@ -106,10 +106,13 @@ impl Budget {
     }
 
     /// Waits out the pace before a request; never before the run's first.
+    /// Never sleeps past the deadline.
     pub(crate) async fn pace(&self) {
-        if self.used > 0 && !self.pace.is_zero() {
-            tokio::time::sleep(self.pace).await;
+        if self.used == 0 || self.pace.is_zero() {
+            return;
         }
+        let wake = tokio::time::Instant::now() + self.pace;
+        tokio::time::sleep_until(self.deadline.map_or(wake, |at| wake.min(at))).await;
     }
 }
 
