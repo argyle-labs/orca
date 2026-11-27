@@ -30,7 +30,7 @@ path = "src/lib.rs"
 [features]
 default = ["full"]
 full = ["in-process"]
-in-process = ["dep:tokio", "utils/reactor"]
+in-process = ["dep:tokio", "utils/reactor", "utils/scrub_text"]
 
 [dependencies]
 # Light core only (`utils::{encoding,route,scrub}` — the sole modules this crate uses).

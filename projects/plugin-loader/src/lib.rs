@@ -200,6 +200,8 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "permissions" => Some(register_permissions_backend),
         "notification_source" => Some(register_notification_source_backend),
         "ups" => Some(register_ups_backend),
+        "tunnel" => Some(register_tunnel_backend),
+        "vpn" => Some(register_vpn_backend),
         "security" => Some(register_security_backend),
         "guest_exec" => Some(register_guest_exec_backend),
         "agents" => Some(register_agent_provider_backend),
@@ -381,6 +383,16 @@ fn register_notification_source_backend(def: &BackendDef, invoke: BackendInvoke)
 fn register_ups_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     contract::ups::register_from_def(def.name.clone(), invoke)
         .map_err(|e| anyhow!("register ups backend '{}': {e}", def.name))
+}
+
+fn register_tunnel_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::tunnel::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register tunnel backend '{}': {e}", def.name))
+}
+
+fn register_vpn_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::vpn::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register vpn backend '{}': {e}", def.name))
 }
 
 fn register_security_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
@@ -625,6 +637,12 @@ fn domain_deregister(domain: &str, name: &str) {
         "ups" => {
             contract::ups::deregister_provider(name);
         }
+        "tunnel" => {
+            contract::tunnel::deregister_provider(name);
+        }
+        "vpn" => {
+            contract::vpn::deregister_provider(name);
+        }
         "security" => {
             contract::security::deregister_scanner(name);
         }
@@ -722,6 +740,8 @@ const BUILTIN_BACKEND_DOMAINS: &[&str] = &[
     "permissions",
     "notification_source",
     "ups",
+    "tunnel",
+    "vpn",
     "security",
     "guest_exec",
     "agents",
@@ -2465,6 +2485,37 @@ mod loader_tests {
     }
 
     #[test]
+    fn tunnel_domains_register_and_unload_empties_each_registry() {
+        let name = "loader-test-tunnel-roundtrip";
+        for domain in ["tunnel", "vpn"] {
+            let def = BackendDef {
+                domain: domain.to_string(),
+                name: name.to_string(),
+                invoke_prefix: name.to_string(),
+                ..Default::default()
+            };
+            let ctor = domain_register(domain).expect("tunnel domain resolves");
+            ctor(&def, noop_invoke()).expect("tunnel domain registers");
+        }
+        assert!(
+            contract::tunnel::providers()
+                .iter()
+                .any(|p| p.name() == name)
+        );
+        assert!(contract::vpn::providers().iter().any(|p| p.name() == name));
+
+        domain_deregister("tunnel", name);
+        assert!(
+            !contract::tunnel::providers()
+                .iter()
+                .any(|p| p.name() == name)
+        );
+        assert!(contract::vpn::providers().iter().any(|p| p.name() == name));
+        domain_deregister("vpn", name);
+        assert!(!contract::vpn::providers().iter().any(|p| p.name() == name));
+    }
+
+    #[test]
     fn domain_deregister_unknown_domain_is_ignored() {
         // Must not panic on a domain with no registered constructor.
         domain_deregister("totally-unknown-domain", "whatever");
@@ -3765,6 +3816,11 @@ mod loader_tests {
             "secrets",
             "notify",
             "model",
+            "unit",
+            "diagnostics",
+            "ups",
+            "tunnel",
+            "vpn",
         ] {
             assert!(is_reserved_plugin_id(id), "{id} must be reserved");
         }

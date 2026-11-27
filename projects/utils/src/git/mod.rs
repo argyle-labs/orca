@@ -291,7 +291,9 @@ mod tests {
     use tempfile::tempdir;
 
     fn init_repo(dir: &Path) -> Repository {
-        let repo = Repository::init(dir).unwrap();
+        let repo =
+            Repository::init_opts(dir, git2::RepositoryInitOptions::new().initial_head("main"))
+                .unwrap();
         let mut cfg = repo.config().unwrap();
         cfg.set_str("user.name", "test").unwrap();
         cfg.set_str("user.email", "test@example.com").unwrap();
@@ -400,12 +402,6 @@ mod tests {
         let origin_dir = tempdir().unwrap();
         init_repo(origin_dir.path());
         make_commit(origin_dir.path(), "a.txt", "v1", "first");
-        // Move HEAD to a branch named "main" so pull's refs/heads/<branch>
-        // lookup works regardless of init.defaultBranch.
-        let origin = Repository::open(origin_dir.path()).unwrap();
-        let head_commit = origin.head().unwrap().peel_to_commit().unwrap();
-        origin.branch("main", &head_commit, true).unwrap();
-        origin.set_head("refs/heads/main").unwrap();
 
         let work = tempdir().unwrap();
         let work_path = work.path().join("clone");
@@ -426,10 +422,6 @@ mod tests {
         let origin_dir = tempdir().unwrap();
         init_repo(origin_dir.path());
         make_commit(origin_dir.path(), "a.txt", "v1", "first");
-        let origin = Repository::open(origin_dir.path()).unwrap();
-        let head_commit = origin.head().unwrap().peel_to_commit().unwrap();
-        origin.branch("main", &head_commit, true).unwrap();
-        origin.set_head("refs/heads/main").unwrap();
 
         let work = tempdir().unwrap();
         let work_path = work.path().join("clone");
@@ -489,10 +481,6 @@ mod tests {
         let origin_dir = tempdir().unwrap();
         init_repo(origin_dir.path());
         make_commit(origin_dir.path(), "a.txt", "v1", "first");
-        let origin = Repository::open(origin_dir.path()).unwrap();
-        let head_commit = origin.head().unwrap().peel_to_commit().unwrap();
-        origin.branch("main", &head_commit, true).unwrap();
-        origin.set_head("refs/heads/main").unwrap();
 
         let work = tempdir().unwrap();
         let work_path = work.path().join("clone");
@@ -515,9 +503,6 @@ mod tests {
         let work = tempdir().unwrap();
         let repo = init_repo(work.path());
         make_commit(work.path(), "a.txt", "v1", "first");
-        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
-        repo.branch("main", &head_commit, true).unwrap();
-        repo.set_head("refs/heads/main").unwrap();
         repo.remote("origin", &format!("file://{}", bare_dir.path().display()))
             .unwrap();
 

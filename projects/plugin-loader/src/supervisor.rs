@@ -330,7 +330,10 @@ pub fn invoke_on<S: Read + Write>(
                             ok: false,
                             value: Value::Null,
                             error: Some(e.to_string()),
-                            error_kind: None,
+                            error_kind: e
+                                .downcast_ref::<capability::HttpCapError>()
+                                .and_then(|h| h.kind)
+                                .map(Into::into),
                         },
                     },
                 };

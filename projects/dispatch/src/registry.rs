@@ -463,6 +463,8 @@ pub fn dispatchable(name: &str, args: &Value) -> bool {
         || crate::unit_surface::unit_owns(name)
         || crate::diagnostics_surface::diagnostics_owns(name)
         || crate::ups_surface::ups_owns(name)
+        || crate::tunnel_surface::tunnel_owns(name)
+        || crate::vpn_surface::vpn_owns(name)
         || args.get(SYSTEM_ID_KEY).is_some()
 }
 
@@ -514,6 +516,8 @@ pub fn mcp_definitions() -> Vec<Value> {
     defs.extend(crate::diagnostics_surface::diagnostics_mcp_defs());
     // The three fixed UPS ops (ups.state / .config / .configure).
     defs.extend(crate::ups_surface::ups_mcp_defs());
+    defs.extend(crate::tunnel_surface::tunnel_mcp_defs());
+    defs.extend(crate::vpn_surface::vpn_mcp_defs());
     defs
 }
 
@@ -620,6 +624,15 @@ fn core_verb(
     Some(key.chained(verb, ctx.call_chain().to_vec(), ctx.call_budget().cloned()))
 }
 
+// `dynamic_dispatch` runs before these surfaces, so a plugin tool of the same
+// name would take the call and ignore `dryRun`.
+fn fixed_surface_dry_run_ok(name: &str) -> bool {
+    (crate::unit_surface::unit_dry_run_ok(name)
+        || crate::tunnel_surface::tunnel_dry_run_ok(name)
+        || crate::vpn_surface::vpn_dry_run_ok(name))
+        && !dynamic_owns(name)
+}
+
 async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Value> {
     if let Some(system) = take_system_target(name, &mut args, ctx).await? {
         // Same rule as an ambient-peer forward: nothing proves the target
@@ -664,14 +677,13 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
     // its own gate. A tool this host does not have is refused even with a
     // peer named: no peer capability signal proves the peer honours `dryRun`,
     // and one that predates it would drop the flag and apply.
-    if dry_run
-        && !crate::tool_roles::plugin_dry_run_ok(name)
-        && !crate::unit_surface::unit_dry_run_ok(name)
-    {
+    if dry_run && !crate::tool_roles::plugin_dry_run_ok(name) && !fixed_surface_dry_run_ok(name) {
         let known_here = dynamic_owns(name)
             || crate::unit_surface::unit_owns(name)
             || crate::diagnostics_surface::diagnostics_owns(name)
-            || crate::ups_surface::ups_owns(name);
+            || crate::ups_surface::ups_owns(name)
+            || crate::tunnel_surface::tunnel_owns(name)
+            || crate::vpn_surface::vpn_owns(name);
         if known_here {
             return Err(
                 contract::OrcaError::invalid(format!("{name} does not support dryRun"))
@@ -707,14 +719,17 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
                     Some(result) => result,
                     None => match crate::ups_surface::ups_dispatch(name, &args).await {
                         Some(result) => result,
-                        // Unknown on THIS host — but if the caller named an
-                        // explicit peer, the tool almost certainly lives there
-                        // (a plugin loaded only on that peer, e.g. proxmox on a
-                        // PVE host). Forward the raw call over the mesh instead
-                        // of 404ing, so a host's surface can reach any tool
-                        // anywhere in the mesh, not just its locally-loaded set.
-                        // (mesh-tool-surface-must-expose-peer-tools)
-                        None => forward_unknown_to_peer(name, args, ctx).await,
+                        None => match crate::tunnel_surface::tunnel_dispatch(name, &args).await {
+                            Some(result) => result,
+                            None => match crate::vpn_surface::vpn_dispatch(name, &args).await {
+                                Some(result) => result,
+                                // Unknown on THIS host — but if the caller named an
+                                // explicit peer, the tool almost certainly lives there
+                                // (a plugin loaded only on that peer). Forward the raw
+                                // call over the mesh instead of 404ing.
+                                None => forward_unknown_to_peer(name, args, ctx).await,
+                            },
+                        },
                     },
                 },
             }
@@ -1544,6 +1559,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dry_run_is_refused_for_a_plugin_tool_shadowing_tunnel_apply() {
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        SHADOW_TUNNEL_SEEN.lock().unwrap().clear();
+        let err = dispatch(
+            SHADOW_TUNNEL_TOOL,
+            serde_json::json!({"dryRun": true}),
+            &make_ctx(),
+        )
+        .await
+        .unwrap_err();
+        let oe = err
+            .downcast_ref::<contract::OrcaError>()
+            .expect("OrcaError");
+        assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{err}");
+        assert!(
+            err.to_string()
+                .contains(&format!("{SHADOW_TUNNEL_TOOL} does not support dryRun")),
+            "{err}"
+        );
+        assert!(SHADOW_TUNNEL_SEEN.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dry_run_is_refused_for_a_plugin_tool_shadowing_vpn_ops() {
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        SHADOW_TUNNEL_SEEN.lock().unwrap().clear();
+        for tool in [SHADOW_VPN_SESSION_TOOL, SHADOW_VPN_PORT_FORWARD_TOOL] {
+            let err = dispatch(tool, serde_json::json!({"dryRun": true}), &make_ctx())
+                .await
+                .unwrap_err();
+            let oe = err
+                .downcast_ref::<contract::OrcaError>()
+                .expect("OrcaError");
+            assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{err}");
+            assert!(
+                err.to_string()
+                    .contains(&format!("{tool} does not support dryRun")),
+                "{err}"
+            );
+        }
+        assert!(SHADOW_TUNNEL_SEEN.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dry_run_is_refused_for_a_plugin_tool_shadowing_a_unit_delete() {
+        let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        SHADOW_UNIT_SEEN.lock().unwrap().clear();
+        let deleted = crate::unit_surface::tests::owner(
+            "shadow-u",
+            "tower",
+            SHADOW_UNIT_KIND,
+            &[("abc", "plex")],
+        );
+        assert!(crate::unit_surface::unit_dry_run_ok(SHADOW_UNIT_TOOL));
+        let err = dispatch(
+            SHADOW_UNIT_TOOL,
+            serde_json::json!({"id": "plex", "dryRun": true}),
+            &make_ctx(),
+        )
+        .await
+        .unwrap_err();
+        assert!(contract::unit::deregister_provider("shadow-u"));
+        let oe = err
+            .downcast_ref::<contract::OrcaError>()
+            .expect("OrcaError");
+        assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{err}");
+        assert!(
+            err.to_string()
+                .contains(&format!("{SHADOW_UNIT_TOOL} does not support dryRun")),
+            "{err}"
+        );
+        assert!(SHADOW_UNIT_SEEN.lock().unwrap().is_empty());
+        assert!(deleted.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn dispatch_unknown_tool_without_peer_still_errors() {
         let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         // No peer + no transport → genuine unknown-tool error, not a forward.
@@ -2050,6 +2145,17 @@ mod tests {
                             json!({})
                         }));
                     }
+                    if name == SHADOW_UNIT_TOOL {
+                        SHADOW_UNIT_SEEN.lock().unwrap().push(args.clone());
+                        return Some(Ok(json!({})));
+                    }
+                    if name == SHADOW_TUNNEL_TOOL
+                        || name == SHADOW_VPN_SESSION_TOOL
+                        || name == SHADOW_VPN_PORT_FORWARD_TOOL
+                    {
+                        SHADOW_TUNNEL_SEEN.lock().unwrap().push(args.clone());
+                        return Some(Ok(json!({})));
+                    }
                     if name == OWN_SYSTEM_TOOL {
                         return Some(Ok(args.clone()));
                     }
@@ -2070,6 +2176,10 @@ mod tests {
                         json!({ "name": OMITTED_GATED_PLUGIN_TOOL }),
                         json!({ "name": EXPLICIT_OFF_PLUGIN_TOOL, "execute_gated": false }),
                         json!({ "name": READ_OMITTED_PLUGIN_TOOL }),
+                        json!({ "name": SHADOW_TUNNEL_TOOL }),
+                        json!({ "name": SHADOW_VPN_SESSION_TOOL }),
+                        json!({ "name": SHADOW_VPN_PORT_FORWARD_TOOL }),
+                        json!({ "name": SHADOW_UNIT_TOOL }),
                         json!({
                             "name": OWN_SYSTEM_TOOL,
                             "input_schema": { "properties": { "systemId": { "type": "string" } } }
@@ -2258,6 +2368,15 @@ mod tests {
 
     /// Args the execute-gated fake plugin tool received.
     static GATED_SEEN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+    const SHADOW_TUNNEL_TOOL: &str = "tunnel.apply";
+    const SHADOW_VPN_SESSION_TOOL: &str = "vpn.session";
+    const SHADOW_VPN_PORT_FORWARD_TOOL: &str = "vpn.port_forward";
+    static SHADOW_TUNNEL_SEEN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+    const SHADOW_UNIT_KIND: &str = "shadow_unit";
+    const SHADOW_UNIT_TOOL: &str = "shadow_unit.delete";
+    static SHADOW_UNIT_SEEN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
 
     #[cfg(feature = "server")]
     async fn post_json(uri: &str, body: Value) -> (StatusCode, Value) {

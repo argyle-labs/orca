@@ -20,6 +20,36 @@ use anyhow::{Result, anyhow};
 
 use crate::abi::{HttpRequest, HttpResponse};
 
+/// Brackets a `CapResult.error_kind` the serve loop prefixes onto a sink error,
+/// so the kind survives the `String` sink signature.
+pub(crate) const ERROR_KIND_MARKER: char = '\u{1e}';
+
+/// An `http.request` failure core classified as a timeout or a connect failure
+/// (refused, DNS, unreachable). Reach it with `err.downcast_ref()`.
+#[derive(Debug)]
+pub struct HttpTransportError {
+    kind: String,
+    message: String,
+}
+
+impl HttpTransportError {
+    pub fn is_timeout(&self) -> bool {
+        self.kind == plugin_proto::HTTP_TIMEOUT
+    }
+
+    pub fn is_connect(&self) -> bool {
+        self.kind == plugin_proto::HTTP_CONNECT
+    }
+}
+
+impl std::fmt::Display for HttpTransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for HttpTransportError {}
+
 /// A capability round-trip: `(cap_name, op_json) -> reply_json | error`.
 pub type CapSink = Box<dyn FnMut(&str, &str) -> std::result::Result<String, String>>;
 
@@ -207,11 +237,31 @@ pub fn http_request(req: &HttpRequest) -> Result<HttpResponse> {
             crate::abi::HTTP_NO_FOLLOW
         ));
     }
-    match cap_route("http.request", &request_wire(req)?) {
+    let wire = request_wire(req)?;
+    let route = CAP_SINK.with(|c| {
+        c.borrow_mut()
+            .as_mut()
+            .map(|sink| sink("http.request", &wire).map_err(http_error))
+    });
+    match route {
         Some(reply_json) => Ok(serde_json::from_str(&reply_json?)?),
         None => Err(anyhow!(
             "http.request capability unavailable: this plugin is not running as an orca subprocess"
         )),
+    }
+}
+
+fn http_error(e: String) -> anyhow::Error {
+    let kinded = e
+        .strip_prefix(ERROR_KIND_MARKER)
+        .and_then(|rest| rest.split_once(ERROR_KIND_MARKER));
+    match kinded {
+        Some((kind, message)) => HttpTransportError {
+            kind: kind.to_string(),
+            message: format!("capability http.request: {message}"),
+        }
+        .into(),
+        None => anyhow!("capability http.request: {e}"),
     }
 }
 
@@ -267,6 +317,44 @@ mod tests {
             || http_request(&req),
         );
         assert_eq!(out.unwrap().status, 204);
+    }
+
+    fn kinded_failure(kind: &str) -> anyhow::Error {
+        let req = post(b"");
+        let reply =
+            format!("{ERROR_KIND_MARKER}{kind}{ERROR_KIND_MARKER}request timed out after 5ms");
+        with_cap_sink(Box::new(move |_: &str, _: &str| Err(reply.clone())), || {
+            http_request(&req)
+        })
+        .unwrap_err()
+    }
+
+    #[test]
+    fn http_timeout_kind_surfaces_as_typed_error() {
+        let err = kinded_failure(plugin_proto::HTTP_TIMEOUT);
+        let t = err.downcast_ref::<HttpTransportError>().unwrap();
+        assert!(t.is_timeout() && !t.is_connect());
+        assert_eq!(
+            err.to_string(),
+            "capability http.request: request timed out after 5ms"
+        );
+        assert!(
+            kinded_failure(plugin_proto::HTTP_CONNECT)
+                .downcast_ref::<HttpTransportError>()
+                .unwrap()
+                .is_connect()
+        );
+    }
+
+    #[test]
+    fn unkinded_http_failure_stays_untyped() {
+        let req = post(b"");
+        let err = with_cap_sink(Box::new(|_: &str, _: &str| Err("boom".to_string())), || {
+            http_request(&req)
+        })
+        .unwrap_err();
+        assert!(err.downcast_ref::<HttpTransportError>().is_none());
+        assert_eq!(err.to_string(), "capability http.request: boom");
     }
 
     fn post(body: &[u8]) -> HttpRequest {
