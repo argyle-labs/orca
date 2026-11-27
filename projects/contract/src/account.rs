@@ -51,10 +51,6 @@ pub struct KindCapabilities {
     pub restore_previous: bool,
     #[serde(default)]
     pub verify: bool,
-    #[serde(default)]
-    pub apply_consumer: bool,
-    #[serde(default)]
-    pub verify_consumer: bool,
 }
 
 impl AccountDecl {
@@ -247,6 +243,27 @@ pub struct ConsumerDecl {
     pub account: AccountRef,
     pub consumer_unit_id: Id,
     pub setting: NonEmpty,
+    #[serde(default)]
+    pub capabilities: ConsumerCapabilities,
+}
+
+/// Declared by the consumer for its own holding. Core refuses to rotate an
+/// account unless every holding can `apply` and, so a failure can be undone,
+/// `rollback`.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ConsumerCapabilities {
+    #[serde(default)]
+    pub apply: bool,
+    #[serde(default)]
+    pub verify: bool,
+    #[serde(default)]
+    pub rollback: bool,
+}
+
+impl ConsumerDecl {
+    pub fn can_be_undone(&self) -> bool {
+        self.capabilities.apply && self.capabilities.rollback
+    }
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Default)]
@@ -833,6 +850,11 @@ mod tests {
             account: acct(),
             consumer_unit_id: id(CONSUMER),
             setting: nm("prowlarr_api_key"),
+            capabilities: ConsumerCapabilities {
+                apply: true,
+                verify: true,
+                rollback: true,
+            },
         }
     }
 
@@ -1501,6 +1523,7 @@ mod tests {
             account: unit.clone(),
             consumer_unit_id: id(CONSUMER),
             setting: nm("key"),
+            capabilities: ConsumerCapabilities::default(),
         };
         let stray = ConsumerDecl {
             account: AccountRef {
@@ -1509,6 +1532,7 @@ mod tests {
             },
             consumer_unit_id: id(CONSUMER),
             setting: nm("key"),
+            capabilities: ConsumerCapabilities::default(),
         };
         register_provider(Arc::new(Claimer {
             name: "account-claim-a",
@@ -2055,7 +2079,7 @@ mod tests {
         assert!(!key.set_secret && !key.restore_previous);
         let user = decl.capabilities_for(AccountKind::OsUser);
         assert_eq!(user.kind, AccountKind::OsUser);
-        assert!(!user.set_secret && !user.apply_consumer && !user.verify_consumer);
+        assert!(!user.set_secret && !user.verify);
     }
 
     #[test]
@@ -2205,5 +2229,27 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("rollback cannot be a dry run"), "{e}");
+    }
+
+    #[test]
+    fn account_consumer_capabilities_are_per_holding() {
+        assert!(holding().can_be_undone());
+        let legacy: ConsumerDecl = serde_json::from_value(serde_json::json!({
+            "account": {"unit_id": OWNER, "account": "api"},
+            "consumer_unit_id": CONSUMER,
+            "setting": "k",
+        }))
+        .unwrap();
+        assert_eq!(legacy.capabilities, ConsumerCapabilities::default());
+        assert!(!legacy.can_be_undone());
+        let no_rollback: ConsumerDecl = serde_json::from_value(serde_json::json!({
+            "account": {"unit_id": OWNER, "account": "api"},
+            "consumer_unit_id": CONSUMER,
+            "setting": "k",
+            "capabilities": {"apply": true, "verify": true},
+        }))
+        .unwrap();
+        assert!(no_rollback.capabilities.verify);
+        assert!(!no_rollback.can_be_undone());
     }
 }
