@@ -125,6 +125,23 @@ mod tests {
         assert!(d.reached());
     }
 
+    #[test]
+    fn deadline_works_outside_a_runtime() {
+        let d = Deadline::after(Duration::from_secs(3600));
+        assert!(!d.reached());
+        assert!(d.remaining() > Duration::ZERO);
+        assert!(Deadline::after(Duration::ZERO).reached());
+    }
+
+    #[test]
+    fn poll_until_future_is_send() {
+        fn assert_send<T: Send>(_: T) {}
+        let d = Deadline::after(Duration::ZERO);
+        assert_send(poll_until(Duration::ZERO, 1, &d, |n| async move {
+            Ok::<_, ()>(Probe::Pending(n))
+        }));
+    }
+
     fn never() -> Deadline {
         Deadline::after(Duration::from_secs(3600))
     }
