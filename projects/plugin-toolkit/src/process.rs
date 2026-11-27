@@ -336,7 +336,10 @@ impl Command {
             code: status.code(),
         };
         if !eof {
-            return Err(std::io::Error::other(PipeHeldOpen { status }));
+            return Err(std::io::Error::other(PipeHeldOpen {
+                status,
+                drain_budget: self.drain_budget,
+            }));
         }
         Ok(Some(Output {
             status,
@@ -399,15 +402,22 @@ impl Command {
 #[derive(Clone, Copy, Debug)]
 pub struct PipeHeldOpen {
     pub status: ExitStatus,
+    pub drain_budget: Option<Duration>,
 }
 
 impl std::fmt::Display for PipeHeldOpen {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "process exited (exit {:?}) but its output pipe was still held open at the deadline",
-            self.status.code
-        )
+        let code = self.status.code;
+        match self.drain_budget {
+            Some(budget) => write!(
+                f,
+                "process exited (exit {code:?}) but its output pipe was still held open when the {budget:?} drain budget ran out"
+            ),
+            None => write!(
+                f,
+                "process exited (exit {code:?}) but its output pipe was still held open at the deadline"
+            ),
+        }
     }
 }
 
@@ -1515,6 +1525,7 @@ mod tests {
                 success: false,
                 code: Some(7),
             },
+            drain_budget: None,
         });
         let held = err
             .get_ref()
@@ -1522,6 +1533,23 @@ mod tests {
             .expect("PipeHeldOpen inside the io::Error");
         assert_eq!(held.status.code, Some(7));
         assert!(err.to_string().contains("still held open"), "{err}");
+        assert!(err.to_string().ends_with("at the deadline"), "{err}");
+    }
+
+    #[test]
+    fn pipe_held_open_names_the_drain_budget_when_set() {
+        let err = PipeHeldOpen {
+            status: ExitStatus {
+                success: true,
+                code: Some(0),
+            },
+            drain_budget: Some(Duration::from_secs(5)),
+        };
+        assert!(
+            err.to_string()
+                .ends_with("when the 5s drain budget ran out"),
+            "{err}"
+        );
     }
 
     #[cfg(unix)]
