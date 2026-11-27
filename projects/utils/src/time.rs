@@ -10,6 +10,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Datelike, SecondsFormat, Timelike, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+#[cfg(feature = "clock")]
+mod poll;
+#[cfg(feature = "clock")]
+pub use poll::{Deadline, Polled, Probe, poll_until};
+
 /// Seconds since the Unix epoch as i64, saturating to 0 on the
 /// (effectively impossible) pre-epoch clock case. Centralizes the
 /// `SystemTime::now().duration_since(UNIX_EPOCH)...` boilerplate.

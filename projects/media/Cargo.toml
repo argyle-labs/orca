@@ -23,7 +23,7 @@ full = ["in-process"]
 in-process = ["utils/reactor"]
 
 [dependencies]
-utils = { workspace = true }
+utils = { workspace = true, features = ["clock"] }
 derive = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
