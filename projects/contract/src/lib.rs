@@ -137,6 +137,9 @@ pub mod notification_source;
 pub mod permissions;
 pub use permissions::{PermCandidate, PermInfo, PermissionsProvider};
 
+pub mod account;
+pub use account::{AccountKind, AccountProvider};
+
 pub mod template_kind;
 pub use template_kind::{
     ApplyOutcome, ApplyRequest, CredentialSlotRef, DestroyRequest, PlanStep, RenderRequest,

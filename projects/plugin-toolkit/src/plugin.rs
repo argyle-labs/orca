@@ -424,6 +424,30 @@ impl Plugin {
         self
     }
 
+    #[must_use]
+    pub fn account<P: crate::contract::account::AccountProvider + 'static>(
+        mut self,
+        provider: P,
+    ) -> Self {
+        let prefix = format!("account.__backend.{}", provider.name());
+        self.defs.push(BackendDef {
+            domain: "account".to_string(),
+            name: provider.name().to_string(),
+            invoke_prefix: prefix.clone(),
+            ..Default::default()
+        });
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::account::dispatch_op(&provider, op, args),
+                ))
+            }));
+        self
+    }
+
     /// Register a **tunnel** facet: this plugin applies tunnel settings on the
     /// firewall side. Implements [`TunnelProvider`](crate::contract::tunnel::TunnelProvider).
     #[must_use]
@@ -917,6 +941,84 @@ mod tests {
         for d in &defs {
             assert_eq!(d.tool_calls, ["system.topology", "guest.read_packages"]);
         }
+    }
+
+    struct DemoAccount;
+    impl crate::contract::account::AccountProvider for DemoAccount {
+        fn name(&self) -> &str {
+            "prowlarr"
+        }
+        fn decl(
+            &self,
+        ) -> crate::contract::BoxFuture<
+            '_,
+            crate::anyhow::Result<crate::contract::account::AccountDecl>,
+        > {
+            Box::pin(async {
+                Ok(crate::contract::account::AccountDecl {
+                    unit_kinds: vec!["prowlarr".into()],
+                    account_kinds: vec![crate::contract::account::AccountKind::ApiKey],
+                    capabilities: vec![],
+                })
+            })
+        }
+        fn set_secret(
+            &self,
+            req: crate::contract::account::SetSecretRequest,
+        ) -> crate::contract::BoxFuture<
+            '_,
+            crate::anyhow::Result<crate::contract::account::AccountOutcome>,
+        > {
+            Box::pin(async move {
+                let v = req.secret.as_ref().unwrap().expose_secret().clone();
+                if req.account.account == "boom" {
+                    crate::anyhow::bail!("rejected {v}");
+                }
+                Ok(crate::contract::account::AccountOutcome {
+                    executed: true,
+                    detail: serde_json::json!({"msg": format!("set to {v}")}),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn account_facet_scrubs_secret_bearing_ops() {
+        const VALUE: &str = "facet-s3cr3t-0123456789";
+        let spec = Plugin::named("prowlarr").account(DemoAccount).into_spec();
+        let dispatch = spec.backend_dispatch.expect("has a dispatcher");
+        let unit = crate::id::new();
+        let out = dispatch(
+            "account.__backend.prowlarr.set_secret",
+            serde_json::json!({"account": {"unit_id": unit, "account": "api"}, "secret": VALUE}),
+        )
+        .expect("facet matched")
+        .expect("op ok");
+        assert_eq!(out["executed"], true);
+        assert!(!out.to_string().contains(VALUE), "{out}");
+        let err = dispatch(
+            "account.__backend.prowlarr.set_secret",
+            serde_json::json!({"account": {"unit_id": unit, "account": "boom"}, "secret": VALUE}),
+        )
+        .expect("facet matched")
+        .expect_err("provider error");
+        assert!(!err.to_string().contains(VALUE), "{err}");
+    }
+
+    #[test]
+    fn account_facet_advertises_and_routes_its_prefix() {
+        let spec = Plugin::named("prowlarr").account(DemoAccount).into_spec();
+        let defs: Vec<BackendDef> = serde_json::from_str(&spec.backends_json).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].domain, "account");
+        assert_eq!(defs[0].invoke_prefix, "account.__backend.prowlarr");
+        let dispatch = spec.backend_dispatch.expect("has a dispatcher");
+        let out = dispatch("account.__backend.prowlarr.decl", serde_json::json!({}))
+            .expect("facet matched")
+            .expect("op ok");
+        assert_eq!(out["account_kinds"][0], "api_key");
+        assert!(dispatch("account.__backend.prowlarrx.decl", serde_json::json!({})).is_none());
     }
 
     struct DemoTemplateKind;

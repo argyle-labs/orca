@@ -58,6 +58,10 @@ pub use audit::{
     AuditItem, AuditSummary, BoundError, Bounds, Include, Selection, SeriesAudit, SeriesEntry,
     StatusCount, decimal, parse_number, select, wantable,
 };
+pub mod series_add;
+pub use series_add::{
+    Pending, Poll, SeriesAddPlan, SeriesAddReport, SeriesManager, SeriesRow, SeriesView, add_series,
+};
 pub mod sequence;
 pub use sequence::{
     Fractional, GapPolicy, GapStart, NumberRange, SeqNumber, SequenceGaps, SeriesSize,

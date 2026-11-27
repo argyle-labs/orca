@@ -201,13 +201,46 @@ pub async fn reconcile_series(
     let state = server.library_state(scope).await?;
     let owned: Vec<MediaIdentity> = state.items.into_iter().map(|e| e.identity).collect();
     let gaps = compute_gaps(expected, &owned);
+    let Requested {
+        actions,
+        selected,
+        remaining,
+    } = request_gaps(&gaps, requester, quality, budget, dry_run).await;
+
+    Ok(ReconcileOutcome {
+        media_type: requester.media_type(),
+        server: server.name().to_string(),
+        requester: requester.name().to_string(),
+        expected: expected.len(),
+        owned: owned.len(),
+        actions,
+        selected,
+        remaining,
+        gaps,
+        dry_run,
+    })
+}
+
+pub(crate) struct Requested {
+    pub actions: Vec<GapAction>,
+    pub selected: usize,
+    pub remaining: usize,
+}
+
+pub(crate) async fn request_gaps(
+    gaps: &[MediaIdentity],
+    requester: &dyn Requester,
+    quality: &QualityPolicy,
+    budget: &mut Budget,
+    dry_run: bool,
+) -> Requested {
     let left = budget.left();
     let mut requestable = 0;
     let mut selected = 0;
     let mut deadline_hit = false;
 
     let mut actions = Vec::with_capacity(gaps.len());
-    for gap in &gaps {
+    for gap in gaps {
         if let Some(why) = requester.unrequestable(gap) {
             actions.push(GapAction::unsent(
                 gap,
@@ -265,19 +298,11 @@ pub async fn reconcile_series(
         budget.spend(selected);
     }
     let remaining = requestable - selected;
-
-    Ok(ReconcileOutcome {
-        media_type: requester.media_type(),
-        server: server.name().to_string(),
-        requester: requester.name().to_string(),
-        expected: expected.len(),
-        owned: owned.len(),
+    Requested {
         actions,
         selected,
         remaining,
-        gaps,
-        dry_run,
-    })
+    }
 }
 
 #[cfg(test)]
