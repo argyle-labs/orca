@@ -852,6 +852,7 @@ pub async fn dispatch_op(
     op: &str,
     mut args: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, serde_json::Value> {
+    // Collected before the gate strips a dry run's secret: over-redaction is harmless.
     let secret = secret_values(&args, "secret");
     let err = |f: Fail| match f {
         Fail::Msg(msg) => serde_json::Value::String(scrubbed(&msg, &secret)),
@@ -967,9 +968,11 @@ impl AccountProxy {
                     &[]
                 ))
             })?;
-            gate_dry_run_secret(op, &mut args)
-                .map_err(|e| anyhow::anyhow!(scrubbed(&format!("account '{name}' {e}"), &[])))?;
+            // Collected before the gate strips a dry run's secret: over-redaction is harmless.
             let secret = secret_values(&args, "secret");
+            gate_dry_run_secret(op, &mut args).map_err(|e| {
+                anyhow::anyhow!(scrubbed(&format!("account '{name}' {e}"), &secret))
+            })?;
             let scrub = |msg: String| anyhow::anyhow!(scrubbed(&msg, &secret));
             let call = crate::invocation_scope::capture("account", &name);
             let out = tokio::task::spawn_blocking(move || invoke(op, args, call))
@@ -3149,5 +3152,30 @@ mod tests {
         .unwrap_err();
         let msg = err.as_str().unwrap();
         assert!(msg.contains("secret must be a string") && !msg.contains("918273645"));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_dry_run_secret_is_still_scrubbed() {
+        let invoke: InvokeThunk = Arc::new(|_op, args, _call| {
+            assert!(args.get("secret").is_none());
+            Ok(
+                serde_json::json!({"executed": false, "detail": {"note": format!("would set {VALUE}")}}),
+            )
+        });
+        let proxy = AccountProxy {
+            name: "account-proxy-dry-scrub".into(),
+            invoke,
+        };
+        let out = proxy
+            .set_secret(SetSecretRequest {
+                account: acct(),
+                secret: Some(secret()),
+                dry_run: true,
+                rollback: false,
+            })
+            .await
+            .unwrap();
+        assert!(!out.detail.to_string().contains(VALUE), "{:?}", out.detail);
     }
 }
