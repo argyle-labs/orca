@@ -824,6 +824,11 @@ const PUSH_DENIED_PREFIXES: &[&str] = &[
     "/etc/cron",
     "/etc/apt/",
     "/etc/dpkg/",
+    "/etc/apk/",
+    "/etc/conf.d/",
+    "/etc/local.d/",
+    "/etc/runlevels/",
+    "/etc/sudoers",
     "/etc/ssh/",
     "/etc/init.d/",
     "/etc/rc",
@@ -857,6 +862,8 @@ fn validate_push_path(path: &str) -> Result<(), String> {
     if path.split('/').any(|seg| seg == "..") {
         return Err(format!("guest path '{path}' contains a '..' component"));
     }
+    let path = normalize_guest_path(path);
+    let path = path.as_str();
     if !PUSH_ALLOWED_PREFIXES.iter().any(|p| path.starts_with(p))
         && !PUSH_ALLOWED_FILES.contains(&path)
     {
@@ -865,10 +872,25 @@ fn validate_push_path(path: &str) -> Result<(), String> {
             PUSH_ALLOWED_PREFIXES.join(", ")
         ));
     }
-    if is_sensitive_path(path) || PUSH_DENIED_PREFIXES.iter().any(|p| path.starts_with(p)) {
+    // A denied directory prefix also covers the bare directory itself.
+    let denied = PUSH_DENIED_PREFIXES
+        .iter()
+        .any(|p| path.starts_with(p) || path == p.trim_end_matches('/'));
+    if is_sensitive_path(path) || denied {
         return Err(format!("guest path '{path}' is a protected location"));
     }
     Ok(())
+}
+
+/// Collapse empty and `.` segments and drop a trailing slash so `/etc//apk/`,
+/// `/etc/./apk/` and `/etc/apk/` match the same prefixes. Callers reject `..`
+/// before this runs.
+fn normalize_guest_path(path: &str) -> String {
+    let segs: Vec<&str> = path
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    format!("/{}", segs.join("/"))
 }
 
 /// Root-owned directory for host temp files staged before `pct push`. Under
@@ -1538,6 +1560,23 @@ mod tests {
             "/etc/ssh/sshd_config",
             "/run/systemd/system/evil.service",
             "/run/orca-update-backup.json.d/x",
+            "/etc/apk/repositories",
+            "/etc/apk/keys/evil.rsa.pub",
+            "/etc/conf.d/sshd",
+            "/etc/local.d/evil.start",
+            "/etc/runlevels/default/evil",
+            "/etc/sudoers",
+            "/etc/sudoers.d/orca",
+            "/etc//apk/repositories",
+            "/etc/./apk/repositories",
+            "/etc/apk/../apk/repositories",
+            "/etc/apk/",
+            "/etc/apk",
+            "/etc//conf.d//sshd",
+            "/etc/./local.d/./evil.start",
+            "/etc/runlevels/",
+            "/etc/sudoers/",
+            "/./etc/sudoers.d/x",
         ] {
             assert!(validate_push_path(path).is_err(), "{path}");
         }
