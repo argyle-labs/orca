@@ -1158,7 +1158,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_ne!(created.detail["password"], "leak");
+        assert_eq!(created.detail["password"], utils::scrub::REDACTED);
         proxy
             .update(UpdateRequest {
                 account: acct(),
