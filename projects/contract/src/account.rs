@@ -377,10 +377,14 @@ pub trait AccountProvider: Send + Sync {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    /// Writes the value into the held setting. Rollback is the same call with
-    /// the old secret and `rollback: true`; core restores the secrets backend
-    /// first, then each consumer, and reads `restored` to report a consumer
-    /// left holding the new value.
+    /// Writes the value into the held setting.
+    ///
+    /// Rotation runs: write the secrets backend, `set_secret` on the owner (or
+    /// `regenerate`, then write the backend), `apply_consumer` on every
+    /// holding, then verify all of them. Rollback undoes it in reverse:
+    /// `apply_consumer(old, rollback: true)` on each consumer already updated,
+    /// `set_secret(old, rollback: true)` on the owner, then `restore_previous`
+    /// on the secrets backend. Each rollback call reports `restored`.
     fn apply_consumer(&self, _req: ConsumerApplyRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
         unsupported(APPLY_CONSUMER_OP)
     }
