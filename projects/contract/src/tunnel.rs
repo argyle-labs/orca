@@ -5,8 +5,9 @@
 //! themselves are issued by a [`crate::tunnel_provider`] (the VPN side).
 //!
 //! The surface layer (`dispatch::tunnel_surface`) fans `list` across every
-//! provider, routes `apply` to the provider that owns the tunnel id and
-//! `port_alias_set` to the named provider, so the surface stays plugin-agnostic.
+//! provider and routes `apply` and `port_alias_set` to the named provider, so
+//! the surface stays plugin-agnostic. Tunnel ids are local to their provider,
+//! so a tunnel is always addressed as `(provider, tunnel_id)`.
 //!
 //! ## Provider registry
 //!
@@ -73,9 +74,11 @@ pub struct PeerSpec {
     pub keepalive_secs: Option<u16>,
 }
 
-/// Settings to apply to one tunnel, routed to the provider owning `tunnel_id`.
+/// Settings to apply to one tunnel, routed to the named provider.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct TunnelApply {
+    /// Provider registry name that owns the tunnel.
+    pub provider: String,
     pub tunnel_id: String,
     /// Local tunnel address in CIDR form.
     pub local_address: String,
@@ -113,6 +116,22 @@ pub struct PortAliasSetArgs {
     /// Provider registry name that owns the alias.
     pub provider: String,
     pub set: PortAliasSet,
+}
+
+/// One provider whose `list` failed during a fan-out.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+pub struct TunnelListError {
+    pub provider: String,
+    pub error: String,
+}
+
+/// Result of a `list` fan-out: every tunnel that was read, plus the providers
+/// that failed.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
+pub struct TunnelList {
+    pub tunnels: Vec<TunnelState>,
+    #[serde(default)]
+    pub errors: Vec<TunnelListError>,
 }
 
 // ── Provider registry ───────────────────────────────────────────────────────
@@ -161,33 +180,24 @@ pub fn deregister_provider(name: &str) -> bool {
 
 // ── Surface entry points (used by dispatch::tunnel_surface) ──────────────────
 
-/// Fan `list` across all providers. A provider that errors is skipped — one
-/// broken provider must not blank the whole report.
-pub async fn list(query: TunnelQuery) -> Vec<TunnelState> {
-    let mut out = Vec::new();
+/// Fan `list` across all providers. A failing provider is reported in
+/// `errors` rather than blanking the whole report.
+pub async fn list(query: TunnelQuery) -> TunnelList {
+    let mut out = TunnelList::default();
     for p in providers() {
-        if let Ok(mut s) = p.list(query.clone()).await {
-            out.append(&mut s);
+        match p.list(query.clone()).await {
+            Ok(tunnels) => out.tunnels.extend(tunnels.into_iter().map(|mut t| {
+                // The registry name is the routing key; a plugin's self-report can't override it.
+                t.provider = p.name().to_string();
+                t
+            })),
+            Err(e) => out.errors.push(TunnelListError {
+                provider: p.name().to_string(),
+                error: format!("{e:#}"),
+            }),
         }
     }
     out
-}
-
-/// The provider that reports tunnel `tunnel_id`.
-pub async fn owner_of(tunnel_id: &str) -> Result<Arc<dyn TunnelProvider>> {
-    let query = TunnelQuery {
-        id: Some(tunnel_id.to_string()),
-    };
-    for p in providers() {
-        if let Ok(tunnels) = p.list(query.clone()).await
-            && tunnels.iter().any(|t| t.id == tunnel_id)
-        {
-            return Ok(p);
-        }
-    }
-    Err(anyhow::anyhow!(
-        "no tunnel provider owns tunnel '{tunnel_id}'"
-    ))
 }
 
 /// The registered provider named `name`.
@@ -198,9 +208,9 @@ pub fn provider_named(name: &str) -> Result<Arc<dyn TunnelProvider>> {
         .ok_or_else(|| anyhow::anyhow!("no tunnel provider named '{name}'"))
 }
 
-/// Route one `apply` to the provider that owns `apply.tunnel_id`.
+/// Route one `apply` to the named provider.
 pub async fn apply(apply: TunnelApply) -> Result<TunnelApplyOutcome> {
-    owner_of(&apply.tunnel_id).await?.apply(apply).await
+    provider_named(&apply.provider)?.apply(apply).await
 }
 
 /// Route one `port_alias_set` to the named provider.
@@ -341,9 +351,20 @@ impl TunnelProvider for TunnelProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     struct FakeTunnel {
         name: String,
+        fail_list: bool,
+        applied: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn fake(name: &str) -> FakeTunnel {
+        FakeTunnel {
+            name: name.into(),
+            fail_list: false,
+            applied: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
     impl TunnelProvider for FakeTunnel {
@@ -351,11 +372,14 @@ mod tests {
             &self.name
         }
         fn list(&self, _query: TunnelQuery) -> BoxFuture<'_, Result<Vec<TunnelState>>> {
-            let provider = self.name.clone();
+            let fail = self.fail_list;
             Box::pin(async move {
+                if fail {
+                    anyhow::bail!("firewall unreachable");
+                }
                 Ok(vec![TunnelState {
-                    provider,
-                    id: "tun-test-1".into(),
+                    provider: "self-reported".into(),
+                    id: "wg0".into(),
                     device: "wg0".into(),
                     enabled: true,
                     local_address: "10.0.9.2/32".into(),
@@ -364,6 +388,7 @@ mod tests {
             })
         }
         fn apply(&self, apply: TunnelApply) -> BoxFuture<'_, Result<TunnelApplyOutcome>> {
+            self.applied.lock().unwrap().push(apply.tunnel_id.clone());
             Box::pin(async move {
                 Ok(TunnelApplyOutcome {
                     changed: true,
@@ -376,8 +401,9 @@ mod tests {
         }
     }
 
-    fn sample_apply(tunnel_id: &str) -> TunnelApply {
+    fn sample_apply(provider: &str, tunnel_id: &str) -> TunnelApply {
         TunnelApply {
+            provider: provider.into(),
             tunnel_id: tunnel_id.into(),
             local_address: "10.0.9.2/32".into(),
             peer: PeerSpec {
@@ -393,13 +419,18 @@ mod tests {
 
     #[tokio::test]
     async fn fan_out_and_route() {
-        register_provider(Arc::new(FakeTunnel {
-            name: "tunnel-test".into(),
-        }));
+        register_provider(Arc::new(fake("tunnel-test")));
         let s = list(TunnelQuery::default()).await;
-        assert!(s.iter().any(|t| t.provider == "tunnel-test" && t.enabled));
+        assert!(
+            s.tunnels
+                .iter()
+                .any(|t| t.provider == "tunnel-test" && t.enabled)
+        );
+        assert!(!s.tunnels.iter().any(|t| t.provider == "self-reported"));
 
-        let out = apply(sample_apply("tun-test-1")).await.expect("routes");
+        let out = apply(sample_apply("tunnel-test", "wg0"))
+            .await
+            .expect("routes");
         assert!(out.changed);
         assert_eq!(out.applied, vec!["local_address=10.0.9.2/32".to_string()]);
 
@@ -417,8 +448,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_owner_errors() {
-        assert!(apply(sample_apply("nope-tunnel")).await.is_err());
+    async fn apply_hits_only_the_named_provider_when_ids_collide() {
+        let a = fake("tunnel-dup-a");
+        let b = fake("tunnel-dup-b");
+        let (a_hits, b_hits) = (a.applied.clone(), b.applied.clone());
+        register_provider(Arc::new(a));
+        register_provider(Arc::new(b));
+
+        apply(sample_apply("tunnel-dup-b", "wg0"))
+            .await
+            .expect("routes");
+        assert!(a_hits.lock().unwrap().is_empty());
+        assert_eq!(*b_hits.lock().unwrap(), vec!["wg0".to_string()]);
+
+        assert!(deregister_provider("tunnel-dup-a"));
+        assert!(deregister_provider("tunnel-dup-b"));
+    }
+
+    #[tokio::test]
+    async fn failing_list_is_reported_in_errors() {
+        let mut broken = fake("tunnel-broken");
+        broken.fail_list = true;
+        register_provider(Arc::new(broken));
+
+        let s = list(TunnelQuery::default()).await;
+        let e = s
+            .errors
+            .iter()
+            .find(|e| e.provider == "tunnel-broken")
+            .expect("broken provider reported");
+        assert!(e.error.contains("firewall unreachable"));
+        assert!(!s.tunnels.iter().any(|t| t.provider == "tunnel-broken"));
+        assert!(deregister_provider("tunnel-broken"));
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_errors() {
+        let err = apply(sample_apply("tunnel-nope", "wg0")).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no tunnel provider named 'tunnel-nope'")
+        );
         assert!(
             port_alias_set(PortAliasSetArgs {
                 provider: "nope".into(),

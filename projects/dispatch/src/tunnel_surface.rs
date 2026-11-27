@@ -2,10 +2,10 @@
 //! provider registry onto MCP, HTTP (OpenAPI), and CLI as three fixed ops:
 //!
 //! - `tunnel.list`           → fan `list` across all providers.
-//! - `tunnel.apply`          → apply settings via the provider owning `tunnel_id` (admin).
+//! - `tunnel.apply`          → apply settings via the named provider (admin).
 //! - `tunnel.port_alias_set` → set a port alias via the named provider (admin).
 //!
-//! Both mutations honour `dryRun`: the owning provider is resolved and nothing
+//! Both mutations honour `dryRun`: the named provider is resolved and nothing
 //! is applied.
 
 // Assembling schemars schemas into MCP/CLI wire JSON is inherently dynamic JSON,
@@ -69,12 +69,12 @@ pub fn tunnel_mcp_defs() -> Vec<Value> {
     vec![
         json!({
             "name": LIST_TOOL,
-            "description": "List firewall-side tunnels (device, address, peers, handshakes) across every provider.",
+            "description": "List firewall-side tunnels (device, address, peers, handshakes) across every provider; providers that failed are listed in `errors`.",
             "inputSchema": schema_value::<TunnelQuery>(),
         }),
         json!({
             "name": APPLY_TOOL,
-            "description": "Apply tunnel settings (local address, peer, DNS) via the provider owning the tunnel.",
+            "description": "Apply tunnel settings (local address, peer, DNS) to `tunnel_id` on the named provider.",
             "inputSchema": mutation_schema::<TunnelApply>(),
         }),
         json!({
@@ -121,7 +121,7 @@ async fn run_apply(args: &Value) -> Result<Value> {
     let (args, dry_run) = args_without_dry_run(args)?;
     let a: TunnelApply = crate::erased::parse_named_args(APPLY_TOOL, args)?;
     if dry_run {
-        let owner = tunnel::owner_of(&a.tunnel_id).await?;
+        let owner = tunnel::provider_named(&a.provider)?;
         return Ok(json!({
             "dryRun": true,
             "changed": false,
@@ -167,7 +167,7 @@ pub fn tunnel_cli_command() -> clap::Command {
         )
         .subcommand(
             clap::Command::new("apply")
-                .about("Apply tunnel settings (JSON body: TunnelApply)")
+                .about("Apply tunnel settings (JSON body: {provider, tunnel_id, local_address, peer, dns})")
                 .arg(body.clone())
                 .arg(dry_run.clone()),
         )
@@ -225,6 +225,7 @@ mod tests {
 
     fn apply_body() -> Value {
         json!({
+            "provider": "tsurf-test",
             "tunnel_id": "tsurf-wg",
             "local_address": "10.0.9.2/32",
             "peer": { "pubkey": "pk", "endpoint_host": "h", "endpoint_port": 1337 },
@@ -267,11 +268,13 @@ mod tests {
             .expect("is a tunnel op")
             .expect("ok");
         assert!(
-            out.as_array()
+            out["tunnels"]
+                .as_array()
                 .unwrap()
                 .iter()
-                .any(|t| t["id"] == "tsurf-wg")
+                .any(|t| t["id"] == "tsurf-wg" && t["provider"] == "tsurf-test")
         );
+        assert!(out["errors"].is_array());
 
         let mut dry = apply_body();
         dry["dryRun"] = json!(true);
@@ -306,6 +309,20 @@ mod tests {
         assert_eq!(r["changed"], true);
         assert_eq!(*applied.lock().unwrap(), 2);
         assert!(contract::tunnel::deregister_provider("tsurf-test"));
+    }
+
+    #[tokio::test]
+    async fn apply_to_unknown_provider_errors() {
+        let mut body = apply_body();
+        body["provider"] = json!("tsurf-nope");
+        let err = tunnel_dispatch(APPLY_TOOL, &body)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no tunnel provider named 'tsurf-nope'")
+        );
     }
 
     #[tokio::test]

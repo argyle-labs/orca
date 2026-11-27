@@ -100,12 +100,12 @@ const NATURAL_KEY_IDS: &[(&str, &str, &str)] = &[
     (
         "tunnel.apply",
         "tunnel_id",
-        "firewall provider's tunnel instance id",
+        "firewall provider's tunnel id, unique only within the `provider` it is addressed with",
     ),
     (
         "tunnel.list",
         "id",
-        "firewall provider's tunnel instance id",
+        "firewall provider's tunnel id, unique only within the provider reported beside it",
     ),
     ("ups.config", "id", "UPS provider's device name"),
     ("ups.configure", "id", "UPS provider's device name"),
