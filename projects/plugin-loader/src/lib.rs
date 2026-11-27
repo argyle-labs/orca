@@ -2485,6 +2485,49 @@ mod loader_tests {
     }
 
     #[test]
+    fn tunnel_domains_register_and_unload_empties_each_registry() {
+        let name = "loader-test-tunnel-roundtrip";
+        for domain in ["tunnel", "tunnel_provider"] {
+            let def = BackendDef {
+                domain: domain.to_string(),
+                name: name.to_string(),
+                invoke_prefix: name.to_string(),
+                ..Default::default()
+            };
+            let ctor = domain_register(domain).expect("tunnel domain resolves");
+            ctor(&def, noop_invoke()).expect("tunnel domain registers");
+        }
+        assert!(
+            contract::tunnel::providers()
+                .iter()
+                .any(|p| p.name() == name)
+        );
+        assert!(
+            contract::tunnel_provider::providers()
+                .iter()
+                .any(|p| p.name() == name)
+        );
+
+        domain_deregister("tunnel", name);
+        assert!(
+            !contract::tunnel::providers()
+                .iter()
+                .any(|p| p.name() == name)
+        );
+        assert!(
+            contract::tunnel_provider::providers()
+                .iter()
+                .any(|p| p.name() == name)
+        );
+        domain_deregister("tunnel_provider", name);
+        assert!(
+            !contract::tunnel_provider::providers()
+                .iter()
+                .any(|p| p.name() == name)
+        );
+    }
+
+    #[test]
     fn domain_deregister_unknown_domain_is_ignored() {
         // Must not panic on a domain with no registered constructor.
         domain_deregister("totally-unknown-domain", "whatever");

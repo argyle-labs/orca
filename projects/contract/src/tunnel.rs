@@ -501,4 +501,103 @@ mod tests {
             .is_err()
         );
     }
+
+    #[cfg(feature = "in-process")]
+    fn bridge(provider: Arc<dyn TunnelProvider>) -> InvokeThunk {
+        Arc::new(move |op: &str, args, _call| {
+            tokio::runtime::Handle::current().block_on(dispatch_op(provider.as_ref(), op, args))
+        })
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn subprocess_round_trip_covers_every_op() {
+        let backend = fake("tunnel-rt-backend");
+        let hits = backend.applied.clone();
+        register_from_def("tunnel-rt".into(), bridge(Arc::new(backend))).unwrap();
+        let proxy = provider_named("tunnel-rt").expect("proxy registered");
+
+        let tunnels = proxy.list(TunnelQuery::default()).await.expect("list");
+        assert_eq!(tunnels.len(), 1);
+        assert_eq!(tunnels[0].local_address, "10.0.9.2/32");
+
+        let out = proxy
+            .apply(sample_apply("tunnel-rt", "wg7"))
+            .await
+            .expect("apply");
+        assert!(out.changed);
+        assert_eq!(*hits.lock().unwrap(), vec!["wg7".to_string()]);
+
+        let out = proxy
+            .port_alias_set(PortAliasSet {
+                alias: "vpn_fwd".into(),
+                ports: vec![51413],
+            })
+            .await
+            .expect("port_alias_set");
+        assert!(out.changed);
+        assert!(deregister_provider("tunnel-rt"));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn subprocess_provider_error_is_rendered() {
+        let mut backend = fake("tunnel-rt-err-backend");
+        backend.fail_list = true;
+        register_from_def("tunnel-rt-err".into(), bridge(Arc::new(backend))).unwrap();
+        let err = provider_named("tunnel-rt-err")
+            .unwrap()
+            .list(TunnelQuery::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "tunnel 'tunnel-rt-err' list failed: firewall unreachable"
+        );
+        assert!(deregister_provider("tunnel-rt-err"));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn subprocess_structured_error_and_bad_json_are_rendered() {
+        let invoke: InvokeThunk = Arc::new(|op: &str, _args, _call| match op {
+            LIST_OP => Err(serde_json::json!({"code": 7})),
+            _ => Ok(serde_json::json!("not an outcome")),
+        });
+        register_from_def("tunnel-rt-raw".into(), invoke).unwrap();
+        let proxy = provider_named("tunnel-rt-raw").unwrap();
+        let err = proxy
+            .list(TunnelQuery::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, r#"tunnel 'tunnel-rt-raw' list failed: {"code":7}"#);
+        let err = proxy
+            .apply(sample_apply("tunnel-rt-raw", "wg0"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("tunnel 'tunnel-rt-raw' apply returned invalid JSON:"),
+            "{err}"
+        );
+        assert!(deregister_provider("tunnel-rt-raw"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_op_rejects_unknown_op_and_bad_args() {
+        let backend = fake("tunnel-dispatch");
+        let err = dispatch_op(&backend, "teardown", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err, serde_json::json!("unknown tunnel op: teardown"));
+        let err = dispatch_op(&backend, APPLY_OP, serde_json::json!({"provider": 1}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.as_str().unwrap().starts_with("decode apply args:"),
+            "{err}"
+        );
+    }
 }

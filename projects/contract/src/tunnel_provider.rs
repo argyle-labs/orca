@@ -331,4 +331,118 @@ mod tests {
             .is_err()
         );
     }
+
+    #[cfg(feature = "in-process")]
+    fn bridge(provider: Arc<dyn TunnelSessionProvider>) -> InvokeThunk {
+        Arc::new(move |op: &str, args, _call| {
+            tokio::runtime::Handle::current().block_on(dispatch_op(provider.as_ref(), op, args))
+        })
+    }
+
+    #[cfg(feature = "in-process")]
+    fn proxy_named(name: &str) -> Arc<dyn TunnelSessionProvider> {
+        providers()
+            .into_iter()
+            .find(|p| p.name() == name)
+            .expect("proxy registered")
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn subprocess_round_trip_covers_every_op() {
+        register_from_def("tprov-rt".into(), bridge(Arc::new(FakeVpn))).unwrap();
+        let proxy = proxy_named("tprov-rt");
+
+        let s = proxy
+            .session(SessionReq {
+                region: Some("nl".into()),
+                require_port_forward: true,
+                client_pubkey: "cpk".into(),
+            })
+            .await
+            .expect("session");
+        assert_eq!(s.endpoint_host, "nl");
+        assert_eq!(s.endpoint_port, 1337);
+
+        let pf = proxy
+            .port_forward(PortForwardReq {
+                server_cn: s.server_cn,
+                server_vip: s.server_vip,
+            })
+            .await
+            .expect("port_forward");
+        assert_eq!(pf.port, 51413);
+        assert_eq!(pf.refresh_secs, 900);
+        assert!(deregister_provider("tprov-rt"));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn subprocess_errors_and_bad_json_are_rendered() {
+        let invoke: InvokeThunk = Arc::new(|op: &str, _args, _call| match op {
+            SESSION_OP => Err(serde_json::json!("auth rejected")),
+            _ => Err(serde_json::json!({"code": 7})),
+        });
+        register_from_def("tprov-rt-err".into(), invoke).unwrap();
+        let proxy = proxy_named("tprov-rt-err");
+        let err = proxy
+            .session(SessionReq::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "tunnel_provider 'tprov-rt-err' session failed: auth rejected"
+        );
+        let err = proxy
+            .port_forward(PortForwardReq {
+                server_cn: "cn".into(),
+                server_vip: "vip".into(),
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            r#"tunnel_provider 'tprov-rt-err' port_forward failed: {"code":7}"#
+        );
+        assert!(deregister_provider("tprov-rt-err"));
+
+        let invoke: InvokeThunk = Arc::new(|_op: &str, _args, _call| Ok(serde_json::json!(42)));
+        register_from_def("tprov-rt-bad".into(), invoke).unwrap();
+        let err = proxy_named("tprov-rt-bad")
+            .session(SessionReq::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("tunnel_provider 'tprov-rt-bad' session returned invalid JSON:"),
+            "{err}"
+        );
+        assert!(deregister_provider("tprov-rt-bad"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_op_rejects_unknown_op_and_bad_args() {
+        let err = dispatch_op(&FakeVpn, "teardown", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            serde_json::json!("unknown tunnel_provider op: teardown")
+        );
+        let err = dispatch_op(
+            &FakeVpn,
+            PORT_FORWARD_OP,
+            serde_json::json!({"server_cn": 1}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.as_str()
+                .unwrap()
+                .starts_with("decode port_forward args:"),
+            "{err}"
+        );
+    }
 }
