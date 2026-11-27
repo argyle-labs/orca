@@ -336,10 +336,12 @@ impl Command {
             code: status.code(),
         };
         if !eof {
-            return Err(std::io::Error::other(PipeHeldOpen {
-                status,
-                drain_budget: self.drain_budget,
-            }));
+            let held = PipeHeldOpen::new(status);
+            let held = match self.drain_budget {
+                Some(budget) => held.with_drain_budget(budget),
+                None => held,
+            };
+            return Err(std::io::Error::other(held));
         }
         Ok(Some(Output {
             status,
@@ -403,6 +405,20 @@ impl Command {
 pub struct PipeHeldOpen {
     pub status: ExitStatus,
     pub drain_budget: Option<Duration>,
+}
+
+impl PipeHeldOpen {
+    pub fn new(status: ExitStatus) -> Self {
+        Self {
+            status,
+            drain_budget: None,
+        }
+    }
+
+    pub fn with_drain_budget(mut self, budget: Duration) -> Self {
+        self.drain_budget = Some(budget);
+        self
+    }
 }
 
 impl std::fmt::Display for PipeHeldOpen {
@@ -1511,13 +1527,10 @@ mod tests {
 
     #[test]
     fn pipe_held_open_error_carries_exit_status() {
-        let err = std::io::Error::other(PipeHeldOpen {
-            status: ExitStatus {
-                success: false,
-                code: Some(7),
-            },
-            drain_budget: None,
-        });
+        let err = std::io::Error::other(PipeHeldOpen::new(ExitStatus {
+            success: false,
+            code: Some(7),
+        }));
         let held = err
             .get_ref()
             .and_then(|e| e.downcast_ref::<PipeHeldOpen>())
@@ -1529,13 +1542,11 @@ mod tests {
 
     #[test]
     fn pipe_held_open_names_the_drain_budget_when_set() {
-        let err = PipeHeldOpen {
-            status: ExitStatus {
-                success: true,
-                code: Some(0),
-            },
-            drain_budget: Some(Duration::from_secs(5)),
-        };
+        let err = PipeHeldOpen::new(ExitStatus {
+            success: true,
+            code: Some(0),
+        })
+        .with_drain_budget(Duration::from_secs(5));
         assert!(
             err.to_string()
                 .ends_with("when the 5s drain budget ran out"),
