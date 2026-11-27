@@ -84,8 +84,7 @@ pub mod lxc_exec;
 pub mod lxc_push;
 /// Unified multi-facet plugin entrypoint — the [`plugin::Plugin`] builder. One
 /// binary advertises any mix of domain backends (service + media, storage +
-/// topology, …), replacing the one-domain-per-macro constraint of the
-/// `serve_*_plugin!` family.
+/// topology, …).
 #[cfg(all(feature = "tools", feature = "endpoints"))]
 pub mod plugin;
 pub mod prelude;
@@ -140,8 +139,7 @@ pub mod ui;
 /// `topology_backend_def`, `host_facts_backend_def`, `service_identity_backend_def`,
 /// `media_backend_def`, …) that build a [`abi::BackendDef`] from a plugin's
 /// contract declarations, plus the single [`backend_def::backends_json`] that
-/// serializes any mix of them (replacing the former per-domain `*_backends_json`
-/// wrappers). Pure — no reactor, no FFI — so gated on `tools` alone, shared by
+/// serializes any mix of them. Pure — no reactor, no FFI — so gated on `tools` alone, shared by
 /// the in-process `export` glue and subprocess plugins.
 #[cfg(feature = "tools")]
 pub mod backend_def;
@@ -177,19 +175,7 @@ pub mod path {
         }
     }
 
-    /// Locate an executable on `$PATH` via the system `which` command. Returns
-    /// the resolved absolute path, or `None` if not found.
-    pub fn which(name: &str) -> Option<String> {
-        let out = std::process::Command::new("which")
-            .arg(name)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if path.is_empty() { None } else { Some(path) }
-    }
+    pub use ::utils::path::{is_executable_file, resolve_bin, which};
 }
 
 // `endpoint_resource!` is a function-like proc-macro defined in the
