@@ -283,8 +283,7 @@ pub struct ConsumerDecl {
 }
 
 /// Declared by the consumer for its own holding. Core refuses to rotate an
-/// account unless every holding can `apply` and, so a failure can be undone,
-/// `rollback`.
+/// account unless every holding [`supports_rotation`](ConsumerDecl::supports_rotation).
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct ConsumerCapabilities {
     #[serde(default)]
@@ -296,8 +295,11 @@ pub struct ConsumerCapabilities {
 }
 
 impl ConsumerDecl {
-    pub fn can_be_undone(&self) -> bool {
-        self.capabilities.apply && self.capabilities.rollback
+    /// Every rotation step is possible on this holding: apply the new value,
+    /// verify it, and roll it back on failure.
+    pub fn supports_rotation(&self) -> bool {
+        let c = self.capabilities;
+        c.apply && c.verify && c.rollback
     }
 }
 
@@ -2348,7 +2350,7 @@ mod tests {
 
     #[test]
     fn account_consumer_capabilities_are_per_holding() {
-        assert!(holding().can_be_undone());
+        assert!(holding().supports_rotation());
         let legacy: ConsumerDecl = serde_json::from_value(serde_json::json!({
             "account": {"unit_id": OWNER, "account": "api"},
             "consumer_unit_id": CONSUMER,
@@ -2356,7 +2358,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(legacy.capabilities, ConsumerCapabilities::default());
-        assert!(!legacy.can_be_undone());
+        assert!(!legacy.supports_rotation());
         let no_rollback: ConsumerDecl = serde_json::from_value(serde_json::json!({
             "account": {"unit_id": OWNER, "account": "api"},
             "consumer_unit_id": CONSUMER,
@@ -2365,7 +2367,10 @@ mod tests {
         }))
         .unwrap();
         assert!(no_rollback.capabilities.verify);
-        assert!(!no_rollback.can_be_undone());
+        assert!(!no_rollback.supports_rotation());
+        let mut no_verify = holding();
+        no_verify.capabilities.verify = false;
+        assert!(!no_verify.supports_rotation());
     }
 
     struct HalfRestorer;
