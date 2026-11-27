@@ -35,7 +35,7 @@ fi
 sec "unlock-keychain -p $q_kc_pw $q_kc"
 security set-keychain-settings -lut 3600 "$kc"
 sec "import $q_p12 -k $q_kc -f pkcs12 -P $q_p12_pw -T /usr/bin/codesign"
-security find-identity -v -p codesigning "$kc" | grep -qF "\"$identity\"" \
+[ -n "$(codesign_identity_hash "$identity" "$kc")" ] \
   || { echo "error: '$identity' not found in $kc after import" >&2; exit 1; }
 sec "set-key-partition-list -S apple-tool:,apple:,codesign: -s -k $q_kc_pw $q_kc" >/dev/null
 
@@ -51,7 +51,7 @@ if [ "$found" -eq 0 ]; then
   security list-keychains -d user -s "$kc" ${existing[@]+"${existing[@]}"}
 fi
 
-security find-identity -v -p codesigning "$kc" | grep -qF "\"$identity\"" \
+[ -n "$(codesign_identity_hash "$identity" "$kc")" ] \
   || { echo "error: '$identity' not found in $kc after import" >&2; exit 1; }
 security lock-keychain "$kc"
 echo "provisioned '$identity' in $kc"

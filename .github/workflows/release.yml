@@ -99,12 +99,13 @@ jobs:
           q_kc=$(secq "$kc")
           printf 'unlock-keychain -p %s %s\n' "$q_pw" "$q_kc" | security -i
           security set-keychain-settings -lut 3600 "$kc"
-          if ! security find-identity -v -p codesigning "$kc" | grep -qF "\"$IDENTITY\""; then
+          hash=$(codesign_identity_hash "$IDENTITY" "$kc")
+          if [ -z "$hash" ]; then
             echo "::error::codesigning identity '$IDENTITY' not found in $kc; run scripts/macos-codesign-setup.sh on the runner"
             exit 1
           fi
           echo "ORCA_CODESIGN_KEYCHAIN=$kc" >> "$GITHUB_ENV"
-          echo "ORCA_CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "ORCA_CODESIGN_IDENTITY=$hash" >> "$GITHUB_ENV"
       - name: Build aarch64-apple-darwin
         uses: argyle-labs/.github/.github/actions/job-release-build-macos@main
         with:

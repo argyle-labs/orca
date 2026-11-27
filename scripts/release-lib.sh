@@ -124,6 +124,11 @@ secq() {
   printf '"%s"' "$s"
 }
 
+codesign_identity_hash() {
+  security find-identity -p codesigning "$2" \
+    | awk -v id="\"$1\"" 'index($0, id) && $2 ~ /^[0-9A-F]{40}$/ { print $2; exit }'
+}
+
 codesign_orca() {
   local identity="${ORCA_CODESIGN_IDENTITY:--}"
   local args=(--force --sign "$identity" --identifier "$ORCA_CODESIGN_IDENTIFIER" --timestamp=none)
