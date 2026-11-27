@@ -116,6 +116,26 @@ impl std::fmt::Display for Unsupported {
 
 impl std::error::Error for Unsupported {}
 
+/// A provider's `consumers` call failed, so its holdings are unknown; core
+/// reports this as drift against `provider`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumerDiscoveryFailed {
+    pub provider: String,
+    pub cause: String,
+}
+
+impl std::fmt::Display for ConsumerDiscoveryFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "account provider '{}' consumers failed: {}",
+            self.provider, self.cause
+        )
+    }
+}
+
+impl std::error::Error for ConsumerDiscoveryFailed {}
+
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[serde(transparent)]
 pub struct NonEmpty(String);
@@ -514,10 +534,12 @@ pub async fn consumers_in(
         authorizer.ok_or_else(|| anyhow::anyhow!("no account consumer authorizer installed"))?;
     let mut out: Vec<(String, ConsumerDecl)> = Vec::new();
     for p in providers {
-        let declared = p
-            .consumers(req.clone())
-            .await
-            .map_err(|e| e.context(format!("account provider '{}' consumers", p.name())))?;
+        let declared = p.consumers(req.clone()).await.map_err(|e| {
+            anyhow::Error::new(ConsumerDiscoveryFailed {
+                provider: p.name().to_string(),
+                cause: format!("{e:#}"),
+            })
+        })?;
         for held in declared {
             if !authorize(p.name(), &held.consumer_unit_id) {
                 continue;
@@ -1661,12 +1683,16 @@ mod tests {
         );
 
         let broken: Arc<dyn AccountProvider> = Arc::new(BrokenClaimer);
-        let err = format!(
-            "{:#}",
-            consumers_in(&[a, broken], Some(&only_consumer), &unit)
-                .await
-                .unwrap_err()
+        let failed = consumers_in(&[a, broken], Some(&only_consumer), &unit)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            failed
+                .downcast_ref::<ConsumerDiscoveryFailed>()
+                .map(|f| f.provider.as_str()),
+            Some("account-claim-broken")
         );
+        let err = format!("{failed:#}");
         assert!(
             err.contains("account-claim-broken") && err.contains("settings file unreadable"),
             "{err}"
