@@ -119,7 +119,7 @@ mod tests {
             row("x", RequestState::Skipped),
             row("x", RequestState::Failed),
         ];
-        // Failed (2) outranks Skipped (1) — a failed acquisition is more
+        // Failed outranks Skipped: a failed acquisition is more
         // informative than a deliberately-skipped one.
         assert_eq!(normalize(&rows)["x"], RequestState::Failed);
     }
