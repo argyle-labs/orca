@@ -863,6 +863,47 @@ pub async fn dispatch_ups(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Res
     Some(run_diag(name, Value::Object(map), &ctx).await)
 }
 
+/// Dispatch `orca tunnel <list|apply|port-alias-set>` and
+/// `orca tunnel_provider <session|port-forward>`. Mutating ops take their typed
+/// body as `--args JSON`. Returns `None` for any other top subcommand.
+#[allow(clippy::disallowed_types)]
+pub async fn dispatch_tunnel(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Result<()>> {
+    use serde_json::{Map, Value};
+    let (top, sub) = matches.subcommand()?;
+    if top != "tunnel" && top != "tunnel_provider" {
+        return None;
+    }
+    let ctx = match ctx_with_peer(matches, ctx) {
+        Ok(ctx) => ctx,
+        Err(e) => return Some(Err(e)),
+    };
+    let Some((op, op_sub)) = sub.subcommand() else {
+        return Some(Err(anyhow::anyhow!("usage: orca {top} <op> [flags]")));
+    };
+    let name = match (top, op) {
+        ("tunnel", "list") => "tunnel.list",
+        ("tunnel", "apply") => "tunnel.apply",
+        ("tunnel", "port-alias-set") => "tunnel.port_alias_set",
+        ("tunnel_provider", "session") => "tunnel_provider.session",
+        ("tunnel_provider", "port-forward") => "tunnel_provider.port_forward",
+        _ => return Some(Err(anyhow::anyhow!("unknown {top} op: {op}"))),
+    };
+    let mut map = Map::new();
+    if let Ok(Some(body)) = op_sub.try_get_one::<String>("args") {
+        match serde_json::from_str::<Value>(body) {
+            Ok(Value::Object(m)) => map = m,
+            _ => return Some(Err(anyhow::anyhow!("--args must be a JSON object"))),
+        }
+    }
+    if let Ok(Some(id)) = op_sub.try_get_one::<String>("id") {
+        map.insert("id".into(), Value::String(id.clone()));
+    }
+    if let Ok(Some(true)) = op_sub.try_get_one::<bool>("dry-run") {
+        map.insert(contract::plan::DRY_RUN_FIELD.into(), Value::Bool(true));
+    }
+    Some(run_diag(name, Value::Object(map), &ctx).await)
+}
+
 // ── Live plugin-verb surface (runtime registry projection) ──────────────────────
 //
 // Loaded-plugin tools (`agents.install`, `dockge.<verb>`, …) aren't in the static

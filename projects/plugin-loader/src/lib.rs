@@ -200,6 +200,8 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "permissions" => Some(register_permissions_backend),
         "notification_source" => Some(register_notification_source_backend),
         "ups" => Some(register_ups_backend),
+        "tunnel" => Some(register_tunnel_backend),
+        "tunnel_provider" => Some(register_tunnel_provider_backend),
         "security" => Some(register_security_backend),
         "guest_exec" => Some(register_guest_exec_backend),
         "agents" => Some(register_agent_provider_backend),
@@ -381,6 +383,16 @@ fn register_notification_source_backend(def: &BackendDef, invoke: BackendInvoke)
 fn register_ups_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     contract::ups::register_from_def(def.name.clone(), invoke)
         .map_err(|e| anyhow!("register ups backend '{}': {e}", def.name))
+}
+
+fn register_tunnel_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::tunnel::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register tunnel backend '{}': {e}", def.name))
+}
+
+fn register_tunnel_provider_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::tunnel_provider::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register tunnel_provider backend '{}': {e}", def.name))
 }
 
 fn register_security_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
@@ -625,6 +637,12 @@ fn domain_deregister(domain: &str, name: &str) {
         "ups" => {
             contract::ups::deregister_provider(name);
         }
+        "tunnel" => {
+            contract::tunnel::deregister_provider(name);
+        }
+        "tunnel_provider" => {
+            contract::tunnel_provider::deregister_provider(name);
+        }
         "security" => {
             contract::security::deregister_scanner(name);
         }
@@ -722,6 +740,8 @@ const BUILTIN_BACKEND_DOMAINS: &[&str] = &[
     "permissions",
     "notification_source",
     "ups",
+    "tunnel",
+    "tunnel_provider",
     "security",
     "guest_exec",
     "agents",

@@ -53,6 +53,8 @@ pub mod openapi;
 mod registry;
 pub mod remote_ok;
 pub mod tool_roles;
+pub mod tunnel_provider_surface;
+pub mod tunnel_surface;
 pub mod unit_surface;
 pub mod ups_surface;
 

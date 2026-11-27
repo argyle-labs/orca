@@ -97,6 +97,16 @@ const NATURAL_KEY_IDS: &[(&str, &str, &str)] = &[
         "id",
         "storage backend locator (`s3://bucket/prefix`, …)",
     ),
+    (
+        "tunnel.apply",
+        "tunnel_id",
+        "firewall provider's tunnel instance id",
+    ),
+    (
+        "tunnel.list",
+        "id",
+        "firewall provider's tunnel instance id",
+    ),
     ("ups.config", "id", "UPS provider's device name"),
     ("ups.configure", "id", "UPS provider's device name"),
     ("ups.state", "id", "UPS provider's device name"),

@@ -1018,6 +1018,14 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
             root = root.subcommand(ups);
         }
     }
+    for cmd in [
+        dispatch::tunnel_surface::tunnel_cli_command(),
+        dispatch::tunnel_provider_surface::tunnel_provider_cli_command(),
+    ] {
+        if !existing.contains(cmd.get_name()) {
+            root = root.subcommand(cmd);
+        }
+    }
     // Live plugin verbs: project every loaded `<domain>.<verb>` tool as
     // `orca <domain> <verb>` (e.g. `orca agents install`). Static + unit + the
     // above commands win on a name collision, so recompute the taken set now and
@@ -1056,6 +1064,9 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
         return r;
     }
     if let Some(r) = op_cli::dispatch_ups(&matches, ctx.clone()).await {
+        return r;
+    }
+    if let Some(r) = op_cli::dispatch_tunnel(&matches, ctx.clone()).await {
         return r;
     }
     // Live plugin verbs (`orca <domain> <verb>`) route through the daemon's REST

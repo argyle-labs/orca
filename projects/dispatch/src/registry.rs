@@ -463,6 +463,8 @@ pub fn dispatchable(name: &str, args: &Value) -> bool {
         || crate::unit_surface::unit_owns(name)
         || crate::diagnostics_surface::diagnostics_owns(name)
         || crate::ups_surface::ups_owns(name)
+        || crate::tunnel_surface::tunnel_owns(name)
+        || crate::tunnel_provider_surface::tunnel_provider_owns(name)
         || args.get(SYSTEM_ID_KEY).is_some()
 }
 
@@ -514,6 +516,8 @@ pub fn mcp_definitions() -> Vec<Value> {
     defs.extend(crate::diagnostics_surface::diagnostics_mcp_defs());
     // The three fixed UPS ops (ups.state / .config / .configure).
     defs.extend(crate::ups_surface::ups_mcp_defs());
+    defs.extend(crate::tunnel_surface::tunnel_mcp_defs());
+    defs.extend(crate::tunnel_provider_surface::tunnel_provider_mcp_defs());
     defs
 }
 
@@ -667,11 +671,14 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
     if dry_run
         && !crate::tool_roles::plugin_dry_run_ok(name)
         && !crate::unit_surface::unit_dry_run_ok(name)
+        && !crate::tunnel_surface::tunnel_dry_run_ok(name)
     {
         let known_here = dynamic_owns(name)
             || crate::unit_surface::unit_owns(name)
             || crate::diagnostics_surface::diagnostics_owns(name)
-            || crate::ups_surface::ups_owns(name);
+            || crate::ups_surface::ups_owns(name)
+            || crate::tunnel_surface::tunnel_owns(name)
+            || crate::tunnel_provider_surface::tunnel_provider_owns(name);
         if known_here {
             return Err(
                 contract::OrcaError::invalid(format!("{name} does not support dryRun"))
@@ -707,14 +714,22 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
                     Some(result) => result,
                     None => match crate::ups_surface::ups_dispatch(name, &args).await {
                         Some(result) => result,
-                        // Unknown on THIS host — but if the caller named an
-                        // explicit peer, the tool almost certainly lives there
-                        // (a plugin loaded only on that peer, e.g. proxmox on a
-                        // PVE host). Forward the raw call over the mesh instead
-                        // of 404ing, so a host's surface can reach any tool
-                        // anywhere in the mesh, not just its locally-loaded set.
-                        // (mesh-tool-surface-must-expose-peer-tools)
-                        None => forward_unknown_to_peer(name, args, ctx).await,
+                        None => match crate::tunnel_surface::tunnel_dispatch(name, &args).await {
+                            Some(result) => result,
+                            None => match crate::tunnel_provider_surface::tunnel_provider_dispatch(
+                                name, &args,
+                            )
+                            .await
+                            {
+                                Some(result) => result,
+                                // Unknown on THIS host — but if the caller named an
+                                // explicit peer, the tool almost certainly lives there
+                                // (a plugin loaded only on that peer). Forward the raw
+                                // call over the mesh instead of 404ing.
+                                // (mesh-tool-surface-must-expose-peer-tools)
+                                None => forward_unknown_to_peer(name, args, ctx).await,
+                            },
+                        },
                     },
                 },
             }
