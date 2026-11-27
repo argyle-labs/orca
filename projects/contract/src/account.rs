@@ -319,7 +319,9 @@ pub struct AccountOutcome {
     )]
     #[schemars(with = "Option<String>")]
     pub generated: Option<Secret<String>>,
-    /// For a `rollback` apply: whether the previous value is back in place.
+    /// Set on every `rollback` call. `Some(false)` means the previous value is
+    /// not in place, so the unit and the secrets backend disagree and core
+    /// escalates instead of reporting the rollback done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored: Option<bool>,
 }
@@ -2256,5 +2258,73 @@ mod tests {
         .unwrap();
         assert!(no_rollback.capabilities.verify);
         assert!(!no_rollback.can_be_undone());
+    }
+
+    struct HalfRestorer;
+
+    impl AccountProvider for HalfRestorer {
+        fn name(&self) -> &str {
+            "account-half-restorer"
+        }
+        fn decl(&self) -> BoxFuture<'_, Result<AccountDecl>> {
+            Box::pin(async {
+                Ok(AccountDecl {
+                    unit_kinds: vec![],
+                    account_kinds: vec![],
+                    capabilities: vec![],
+                })
+            })
+        }
+        fn apply_consumer(
+            &self,
+            req: ConsumerApplyRequest,
+        ) -> BoxFuture<'_, Result<AccountOutcome>> {
+            Box::pin(async move {
+                Ok(AccountOutcome {
+                    executed: true,
+                    restored: req.rollback.then_some(false),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn account_rollback_restored_false_is_passed_through() {
+        let out = dispatch_op(
+            &HalfRestorer,
+            APPLY_CONSUMER_OP,
+            serde_json::json!({"holding": holding(), "secret": "old-value", "rollback": true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["restored"], false);
+        let decoded: AccountOutcome = serde_json::from_value(out).unwrap();
+        assert_eq!(decoded.restored, Some(false));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_rollback_restored_false_reaches_core() {
+        let invoke: InvokeThunk = Arc::new(|op, args, _call| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(dispatch_op(&HalfRestorer, op, args))
+        });
+        let proxy = AccountProxy {
+            name: "account-proxy-half".into(),
+            invoke,
+        };
+        let out = proxy
+            .apply_consumer(ConsumerApplyRequest {
+                holding: holding(),
+                secret: Some(secret()),
+                dry_run: false,
+                rollback: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.restored, Some(false));
     }
 }
