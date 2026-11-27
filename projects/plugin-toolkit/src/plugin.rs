@@ -397,6 +397,9 @@ impl Plugin {
         self
     }
 
+    /// Register a **template_kind** facet: this plugin renders and applies one
+    /// template kind. Implements the typed
+    /// [`TemplateKindProvider`](crate::contract::template_kind::TemplateKindProvider).
     #[must_use]
     pub fn template_kind<P: crate::contract::template_kind::TemplateKindProvider + 'static>(
         mut self,
