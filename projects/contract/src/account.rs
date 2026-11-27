@@ -983,12 +983,14 @@ impl AccountProxy {
                         anyhow::Error::new(Unsupported { op: op.to_string() })
                     }
                     _ if op == REGENERATE_OP && e.get(ROTATED_KEY).is_some() => {
-                        rotated_but_rejected(&e[ROTATED_KEY]).unwrap_or_else(|| {
-                            anyhow::anyhow!(
-                                "account '{name}' regenerate rotated the unit but returned a \
+                        rotated_but_rejected(&e[ROTATED_KEY])
+                            .map(|r| r.context(format!("account '{name}' regenerate")))
+                            .unwrap_or_else(|| {
+                                anyhow::anyhow!(
+                                    "account '{name}' regenerate rotated the unit but returned a \
                                  malformed rejection"
-                            )
-                        })
+                                )
+                            })
                     }
                     _ => {
                         let mut known = secret.clone();
@@ -1069,6 +1071,7 @@ impl AccountProvider for AccountProxy {
 
     fn regenerate(&self, req: RegenerateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
         let account = req.account.clone();
+        let name = self.name.clone();
         let min_len = req.min_len.max(MIN_SECRET_LEN);
         let fut = self.call(REGENERATE_OP, serde_json::to_value(&req));
         Box::pin(async move {
@@ -1081,7 +1084,8 @@ impl AccountProvider for AccountProxy {
                 return Err(anyhow::Error::new(RotatedButRejected {
                     account,
                     generated: out.generated.take().expect("checked above"),
-                }));
+                })
+                .context(format!("account '{name}' regenerate")));
             }
             Ok(out)
         })
@@ -3090,7 +3094,11 @@ mod tests {
         let rejected = e.downcast_ref::<RotatedButRejected>().expect("typed");
         assert_eq!(rejected.generated.expose_secret(), "k9");
         assert_eq!(rejected.account, acct());
-        let msg = e.to_string();
+        let msg = format!("{e:#}");
+        assert!(
+            msg.contains("account 'account-proxy-short' regenerate"),
+            "{msg}"
+        );
         assert!(
             msg.contains("already rotated") && !msg.contains("k9"),
             "{msg}"
@@ -3125,7 +3133,12 @@ mod tests {
         let live = minter.current.lock().unwrap().clone();
         assert_eq!(rejected.generated.expose_secret(), &live);
         assert_eq!(*minter.sent_min_len.lock().unwrap(), Some(MIN_SECRET_LEN));
-        assert!(!e.to_string().contains(&live));
+        let msg = format!("{e:#}");
+        assert!(
+            msg.contains("account 'account-proxy-rotated' regenerate"),
+            "{msg}"
+        );
+        assert!(!msg.contains(&live));
     }
 
     #[test]
