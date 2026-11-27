@@ -72,7 +72,9 @@ pub struct ReleaseRef {
 /// against LazyLibrarian's sibling-edition trap (#497): the adapter aggregates
 /// every edition/row it holds for one identity down to a SINGLE state here, so a
 /// caller never sees a false `Skipped` because status landed on a sibling row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestState {
     /// Monitored, not yet searched.
@@ -89,6 +91,8 @@ pub enum RequestState {
     Failed,
     /// Deliberately not wanted / ignored by the backend.
     Skipped,
+    /// Known to the backend but never requested.
+    Unmonitored,
     /// State could not be determined.
     Unknown,
 }
@@ -103,6 +107,7 @@ impl RequestState {
             RequestState::Imported => "imported",
             RequestState::Failed => "failed",
             RequestState::Skipped => "skipped",
+            RequestState::Unmonitored => "unmonitored",
             RequestState::Unknown => "unknown",
         }
     }

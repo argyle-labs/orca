@@ -16,17 +16,18 @@ use crate::seam::RequestState;
 use std::collections::BTreeMap;
 
 /// Acquisition-progress rank: higher = more progressed / more authoritative.
-/// `Imported` is the terminal win; `Failed`/`Skipped` outrank only `Unknown`,
+/// `Imported` is the terminal win; `Failed`/`Skipped`/`Unmonitored` outrank only `Unknown`,
 /// so a real positive state on ANY sibling always wins over a negative one.
 fn rank(state: RequestState) -> u8 {
     match state {
-        RequestState::Imported => 7,
-        RequestState::Downloading => 6,
-        RequestState::Snatched => 5,
-        RequestState::Searching => 4,
-        RequestState::Wanted => 3,
-        RequestState::Failed => 2,
-        RequestState::Skipped => 1,
+        RequestState::Imported => 8,
+        RequestState::Downloading => 7,
+        RequestState::Snatched => 6,
+        RequestState::Searching => 5,
+        RequestState::Wanted => 4,
+        RequestState::Failed => 3,
+        RequestState::Skipped => 2,
+        RequestState::Unmonitored => 1,
         RequestState::Unknown => 0,
     }
 }
