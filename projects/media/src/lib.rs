@@ -48,6 +48,10 @@ pub mod editions;
 pub use editions::{EditionGap, EditionPolicy, compute_edition_gaps};
 pub mod diff_reconcile;
 pub use diff_reconcile::{DiffResult, diff_new_gaps, identity_key};
+pub mod sequence;
+pub use sequence::{
+    Fractional, GapPolicy, GapStart, NumberRange, SequenceGaps, SparsePolicy, sequence_gaps,
+};
 
 // ── Domain model ─────────────────────────────────────────────────────────────
 
