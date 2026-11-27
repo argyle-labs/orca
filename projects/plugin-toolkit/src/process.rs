@@ -67,6 +67,9 @@ pub struct Command {
     /// name the tool in a [`ToolError`] without re-plumbing it from the caller.
     program: String,
     kill_group: bool,
+    kill_on_exit: bool,
+    stdin: Option<Vec<u8>>,
+    drain_budget: Option<Duration>,
 }
 
 impl Command {
@@ -80,6 +83,9 @@ impl Command {
             inner,
             program: name,
             kill_group: false,
+            kill_on_exit: false,
+            stdin: None,
+            drain_budget: None,
         }
     }
 
@@ -97,6 +103,22 @@ impl Command {
         #[cfg(unix)]
         self.inner.process_group(0);
         self.kill_group = true;
+        self
+    }
+
+    pub fn kill_process_group_on_exit(mut self) -> Self {
+        self = self.kill_process_group_on_timeout();
+        self.kill_on_exit = true;
+        self
+    }
+
+    pub fn drain_budget(mut self, budget: Duration) -> Self {
+        self.drain_budget = Some(budget);
+        self
+    }
+
+    pub fn stdin_bytes(mut self, data: impl Into<Vec<u8>>) -> Self {
+        self.stdin = Some(data.into());
         self
     }
 
@@ -149,6 +171,21 @@ impl Command {
     /// `DOCKER_HOST` without naming the executor's process API.
     pub fn env(mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> Self {
         self.inner.env(key, val);
+        self
+    }
+
+    pub fn env_clear(mut self) -> Self {
+        self.inner.env_clear();
+        self
+    }
+
+    pub fn envs<I, K, V>(mut self, vars: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        self.inner.envs(vars);
         self
     }
 
@@ -207,6 +244,9 @@ impl Command {
         match finished {
             Some(result) => {
                 result?;
+                if self.kill_on_exit {
+                    guard.kill();
+                }
                 guard.disarm();
                 let st = child.wait().await?;
                 Ok(Some(ExitStatus {
@@ -257,10 +297,23 @@ impl Command {
         mut self,
         cancel: impl std::future::Future<Output = ()>,
     ) -> std::io::Result<Option<Output>> {
+        let stdin = if self.stdin.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        };
         self.inner
+            .stdin(stdin)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         let mut child = spawn(&mut self.inner)?;
+        let writer = self.stdin.take().map(|data| {
+            let mut pipe = child
+                .stdin
+                .take()
+                .expect("stdin was piped, so it is present");
+            AbortOnDrop(tokio::spawn(async move { pipe.write_all(&data).await }))
+        });
         let stdout = child
             .stdout
             .take()
@@ -286,7 +339,12 @@ impl Command {
         };
         match finished {
             // Guard stays armed so its drop kills an opted-in group.
-            Some(result) => result?,
+            Some(result) => {
+                result?;
+                if self.kill_on_exit {
+                    guard.kill();
+                }
+            }
             None => {
                 reader.abort();
                 guard.kill_on_timeout(&mut child);
@@ -295,7 +353,17 @@ impl Command {
                 return Ok(None);
             }
         }
-        let eof = drain_pipes(&mut reader, cancel).await?;
+        let drain_end = async {
+            match self.drain_budget {
+                Some(budget) => tokio::select! {
+                    biased;
+                    () = &mut cancel => {}
+                    () = tokio::time::sleep(budget) => {}
+                },
+                None => (&mut cancel).await,
+            }
+        };
+        let eof = drain_pipes(&mut reader, drain_end).await?;
         if !eof {
             reader.abort();
             guard.kill();
@@ -308,6 +376,13 @@ impl Command {
         };
         if !eof {
             return Err(std::io::Error::other(PipeHeldOpen { status }));
+        }
+        if let Some(writer) = writer
+            && writer.0.is_finished()
+            && let Ok(Err(e)) = writer.await
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(e);
         }
         Ok(Some(Output {
             status,
@@ -1125,6 +1200,140 @@ mod tests {
     #[tokio::test]
     async fn output_within_returns_full_output_once_grandchild_in_group_releases_stdout() {
         grandchild_holding_stdout(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_on_exit_kills_the_group_after_a_clean_exit() {
+        let dir = HolderDir::new("pgexit");
+        let dead = dir.death_watch();
+        let cmd = dir
+            .command("echo hi; sleep 3600 4>&- & echo $! >&4")
+            .kill_process_group_on_exit();
+        let (out, _) = tokio::join!(cmd.output_within(Duration::from_secs(600)), dir.pid());
+        let out = out.unwrap().expect("leader exited in time");
+        assert!(out.status.success);
+        assert_eq!(out.stdout, b"hi\n");
+        assert_eq!(
+            read_to_eof(dead).await,
+            "",
+            "group member outlived the leader"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_on_exit_kills_the_group_for_status_runs() {
+        let dir = HolderDir::new("pgexitst");
+        let dead = dir.death_watch();
+        let cmd = dir
+            .command("sleep 3600 4>&- & echo $! >&4")
+            .kill_process_group_on_exit();
+        let (st, _) = tokio::join!(cmd.status_within(Duration::from_secs(600)), dir.pid());
+        assert!(st.unwrap().expect("leader exited in time").success);
+        assert_eq!(
+            read_to_eof(dead).await,
+            "",
+            "group member outlived the leader"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn kill_on_exit_still_kills_the_group_on_timeout() {
+        grandchild_dies_after_timeout(async |cmd| {
+            cmd.kill_process_group_on_exit()
+                .output_within(Duration::from_millis(300))
+                .await
+                .unwrap()
+                .is_none()
+        })
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn drain_budget_reports_a_holder_outside_the_group() {
+        let dir = HolderDir::new("pgdrain");
+        let cmd = detached_holder(&dir, false)
+            .kill_process_group_on_exit()
+            .drain_budget(Duration::from_millis(50));
+        let (out, _) = tokio::join!(
+            cmd.output_within(Duration::from_secs(10 * 365 * 24 * 3600)),
+            dir.pid()
+        );
+        let err = out.unwrap_err();
+        let held = err
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<PipeHeldOpen>())
+            .unwrap_or_else(|| panic!("expected PipeHeldOpen, got {err}"));
+        assert!(held.status.success);
+    }
+
+    #[tokio::test]
+    async fn env_clear_passes_only_the_given_environment() {
+        let out = Command::new("/usr/bin/env")
+            .env_clear()
+            .envs([("ORCA_A", "1"), ("ORCA_B", "two")])
+            .output_within(Duration::from_secs(10))
+            .await
+            .unwrap()
+            .expect("env exited in time");
+        assert_eq!(out.stdout, b"ORCA_A=1\nORCA_B=two\n");
+    }
+
+    #[tokio::test]
+    async fn bounded_runs_get_null_stdin() {
+        let out = Command::new("cat")
+            .run_checked_within(Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stdin_bytes_reach_the_child() {
+        let out = Command::new("cat")
+            .stdin_bytes(r#"{"k":"v"}"#)
+            .run_checked_within(Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(out, br#"{"k":"v"}"#);
+    }
+
+    #[tokio::test]
+    async fn large_stdin_and_output_on_both_pipes_does_not_deadlock() {
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg("tee /dev/stderr")
+            .stdin_bytes(vec![b'a'; 200_000])
+            .output_within(Duration::from_secs(20))
+            .await
+            .unwrap()
+            .expect("exited in time");
+        assert_eq!(out.stdout.len(), 200_000);
+        assert_eq!(out.stderr.len(), 200_000);
+    }
+
+    #[tokio::test]
+    async fn stdin_bytes_the_child_never_reads_is_not_an_error() {
+        let out = Command::new("true")
+            .stdin_bytes(vec![b'a'; 1 << 20])
+            .run_checked_within(Duration::from_secs(10))
+            .await;
+        assert!(out.is_ok(), "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn a_non_zero_exit_with_stdout_is_a_tool_error() {
+        let err = Command::new("sh")
+            .arg("-c")
+            .arg("echo partial; echo boom >&2; exit 3")
+            .run_checked_within(Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, Some(3));
+        assert_eq!(err.stderr, "boom");
     }
 
     fn pipe_reader() -> (

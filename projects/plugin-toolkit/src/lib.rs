@@ -177,19 +177,7 @@ pub mod path {
         }
     }
 
-    /// Locate an executable on `$PATH` via the system `which` command. Returns
-    /// the resolved absolute path, or `None` if not found.
-    pub fn which(name: &str) -> Option<String> {
-        let out = std::process::Command::new("which")
-            .arg(name)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if path.is_empty() { None } else { Some(path) }
-    }
+    pub use ::utils::path::{is_executable_file, resolve_bin, which};
 }
 
 // `endpoint_resource!` is a function-like proc-macro defined in the

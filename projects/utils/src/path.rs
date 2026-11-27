@@ -31,14 +31,38 @@ pub fn which(name: &str) -> Option<String> {
     }
     if name.contains(std::path::MAIN_SEPARATOR) {
         let p = Path::new(name);
-        return is_executable(p).then(|| p.to_string_lossy().into_owned());
+        return is_executable_file(p).then(|| p.to_string_lossy().into_owned());
     }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
+    resolve_bin(name, None, std::env::var_os("PATH").as_deref(), &[])
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+pub fn resolve_bin(
+    name: &str,
+    override_bin: Option<&Path>,
+    path_env: Option<&std::ffi::OsStr>,
+    well_known: &[&Path],
+) -> Result<std::path::PathBuf, Vec<String>> {
+    let mut tried = Vec::new();
+    if let Some(explicit) = override_bin.filter(|p| !p.as_os_str().is_empty()) {
+        if is_executable_file(explicit) {
+            return Ok(explicit.to_path_buf());
+        }
+        return Err(vec![explicit.to_string_lossy().into_owned()]);
+    }
+    let dirs = path_env.map(std::env::split_paths).into_iter().flatten();
+    for candidate in dirs
         .filter(|d| !d.as_os_str().is_empty())
         .map(|d| d.join(name))
-        .find(|c| is_executable(c))
-        .map(|c| c.to_string_lossy().into_owned())
+        .chain(well_known.iter().map(|p| p.to_path_buf()))
+    {
+        if is_executable_file(&candidate) {
+            return Ok(candidate);
+        }
+        tried.push(candidate.to_string_lossy().into_owned());
+    }
+    Err(tried)
 }
 
 /// Is `p` a file this process could execute?
@@ -47,13 +71,13 @@ pub fn which(name: &str) -> Option<String> {
 /// command, and treating it as one turns a clear "not found" into a confusing
 /// spawn failure further along.
 #[cfg(unix)]
-fn is_executable(p: &Path) -> bool {
+pub fn is_executable_file(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
-fn is_executable(p: &Path) -> bool {
+pub fn is_executable_file(p: &Path) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_file())
 }
 
@@ -195,5 +219,114 @@ mod tests {
         assert!(got.is_none(), "{got:?}");
         #[cfg(not(unix))]
         let _ = got;
+    }
+
+    const ABSENT: &[&str] = &[
+        "/nonexistent-dir/opt-homebrew/op",
+        "/nonexistent-dir/usr-local/op",
+    ];
+
+    fn absent() -> Vec<&'static Path> {
+        ABSENT.iter().map(Path::new).collect()
+    }
+
+    fn exec_stub(dir: &Path, name: &str, mode: u32) -> std::path::PathBuf {
+        let bin = dir.join(name);
+        std::fs::write(&bin, b"#!/bin/sh\n").expect("write stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        bin
+    }
+
+    #[test]
+    fn resolve_bin_override_wins() {
+        let got = resolve_bin(
+            "op",
+            Some(Path::new("/bin/sh")),
+            Some(std::ffi::OsStr::new("/bin:/usr/bin")),
+            &absent(),
+        );
+        assert_eq!(got.unwrap(), Path::new("/bin/sh"));
+    }
+
+    #[test]
+    fn resolve_bin_bogus_override_fails_without_falling_through() {
+        let err = resolve_bin(
+            "sh",
+            Some(Path::new("/nope/not/op")),
+            Some(std::ffi::OsStr::new("/bin")),
+            &[Path::new("/bin/sh")],
+        )
+        .unwrap_err();
+        assert_eq!(err, vec!["/nope/not/op".to_string()]);
+    }
+
+    #[test]
+    fn resolve_bin_empty_override_is_ignored() {
+        let got = resolve_bin("sh", Some(Path::new("")), None, &[Path::new("/bin/sh")]);
+        assert_eq!(got.unwrap(), Path::new("/bin/sh"));
+    }
+
+    #[test]
+    fn resolve_bin_scans_path_left_to_right_before_well_known() {
+        let first = tempfile::tempdir().expect("tempdir");
+        let second = tempfile::tempdir().expect("tempdir");
+        let want = exec_stub(first.path(), "op", 0o755);
+        exec_stub(second.path(), "op", 0o755);
+        let path =
+            std::env::join_paths([Path::new("/nonexistent-dir"), first.path(), second.path()])
+                .unwrap();
+        let got = resolve_bin("op", None, Some(&path), &[Path::new("/bin/sh")]);
+        assert_eq!(got.unwrap(), want);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_bin_skips_a_non_executable_candidate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skipped = exec_stub(dir.path(), "op", 0o644);
+        let err = resolve_bin("op", None, Some(dir.path().as_os_str()), &absent()).unwrap_err();
+        assert_eq!(err[0], skipped.to_string_lossy());
+        assert!(!is_executable_file(&skipped));
+        assert!(!is_executable_file(dir.path()));
+    }
+
+    #[test]
+    fn resolve_bin_falls_back_to_well_known_path() {
+        let got = resolve_bin(
+            "orca-definitely-absent",
+            None,
+            Some(std::ffi::OsStr::new("/usr/bin:/bin")),
+            &[Path::new("/bin/sh")],
+        );
+        assert_eq!(got.unwrap(), Path::new("/bin/sh"));
+    }
+
+    #[test]
+    fn resolve_bin_not_found_lists_every_path_tried() {
+        let err = resolve_bin(
+            "op",
+            None,
+            Some(std::ffi::OsStr::new("/nonexistent-a:/nonexistent-b")),
+            &absent(),
+        )
+        .unwrap_err();
+        let mut want = vec![
+            "/nonexistent-a/op".to_string(),
+            "/nonexistent-b/op".to_string(),
+        ];
+        want.extend(ABSENT.iter().map(|p| p.to_string()));
+        assert_eq!(err, want);
+    }
+
+    #[test]
+    fn resolve_bin_unset_path_tries_only_well_known() {
+        let err = resolve_bin("op", None, None, &absent()).unwrap_err();
+        assert_eq!(err, ABSENT.to_vec());
     }
 }
