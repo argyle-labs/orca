@@ -627,7 +627,9 @@ fn core_verb(
 // `dynamic_dispatch` runs before these surfaces, so a plugin tool of the same
 // name would take the call and ignore `dryRun`.
 fn fixed_surface_dry_run_ok(name: &str) -> bool {
-    (crate::unit_surface::unit_dry_run_ok(name) || crate::tunnel_surface::tunnel_dry_run_ok(name))
+    (crate::unit_surface::unit_dry_run_ok(name)
+        || crate::tunnel_surface::tunnel_dry_run_ok(name)
+        || crate::tunnel_provider_surface::tunnel_provider_dry_run_ok(name))
         && !dynamic_owns(name)
 }
 
@@ -1586,6 +1588,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dry_run_is_refused_for_a_plugin_tool_shadowing_tunnel_provider_ops() {
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        SHADOW_TUNNEL_SEEN.lock().unwrap().clear();
+        for tool in [SHADOW_TUNNEL_SESSION_TOOL, SHADOW_TUNNEL_PORT_FORWARD_TOOL] {
+            let err = dispatch(tool, serde_json::json!({"dryRun": true}), &make_ctx())
+                .await
+                .unwrap_err();
+            let oe = err
+                .downcast_ref::<contract::OrcaError>()
+                .expect("OrcaError");
+            assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{err}");
+            assert!(
+                err.to_string()
+                    .contains(&format!("{tool} does not support dryRun")),
+                "{err}"
+            );
+        }
+        assert!(SHADOW_TUNNEL_SEEN.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn dry_run_is_refused_for_a_plugin_tool_shadowing_a_unit_delete() {
         let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         let _serial = SEEN_TESTS.lock().await;
@@ -2130,7 +2154,10 @@ mod tests {
                         SHADOW_UNIT_SEEN.lock().unwrap().push(args.clone());
                         return Some(Ok(json!({})));
                     }
-                    if name == SHADOW_TUNNEL_TOOL {
+                    if name == SHADOW_TUNNEL_TOOL
+                        || name == SHADOW_TUNNEL_SESSION_TOOL
+                        || name == SHADOW_TUNNEL_PORT_FORWARD_TOOL
+                    {
                         SHADOW_TUNNEL_SEEN.lock().unwrap().push(args.clone());
                         return Some(Ok(json!({})));
                     }
@@ -2155,6 +2182,8 @@ mod tests {
                         json!({ "name": EXPLICIT_OFF_PLUGIN_TOOL, "execute_gated": false }),
                         json!({ "name": READ_OMITTED_PLUGIN_TOOL }),
                         json!({ "name": SHADOW_TUNNEL_TOOL }),
+                        json!({ "name": SHADOW_TUNNEL_SESSION_TOOL }),
+                        json!({ "name": SHADOW_TUNNEL_PORT_FORWARD_TOOL }),
                         json!({ "name": SHADOW_UNIT_TOOL }),
                         json!({
                             "name": OWN_SYSTEM_TOOL,
@@ -2346,6 +2375,8 @@ mod tests {
     static GATED_SEEN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
 
     const SHADOW_TUNNEL_TOOL: &str = "tunnel.apply";
+    const SHADOW_TUNNEL_SESSION_TOOL: &str = "tunnel_provider.session";
+    const SHADOW_TUNNEL_PORT_FORWARD_TOOL: &str = "tunnel_provider.port_forward";
     static SHADOW_TUNNEL_SEEN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
 
     const SHADOW_UNIT_KIND: &str = "shadow_unit";

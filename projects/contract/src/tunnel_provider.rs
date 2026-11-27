@@ -125,7 +125,7 @@ pub fn deregister_provider(name: &str) -> bool {
     before != g.len()
 }
 
-fn provider_named(name: &str) -> Result<Arc<dyn TunnelSessionProvider>> {
+pub fn provider_named(name: &str) -> Result<Arc<dyn TunnelSessionProvider>> {
     providers()
         .into_iter()
         .find(|p| p.name() == name)
