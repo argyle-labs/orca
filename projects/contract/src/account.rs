@@ -33,10 +33,52 @@ pub struct AccountDecl {
     pub account_kinds: Vec<AccountKind>,
 }
 
+/// A name that must not be blank; decoding rejects `""` and whitespace.
+#[derive(Serialize, JsonSchema, Clone, Debug, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct NonEmpty(String);
+
+impl NonEmpty {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for NonEmpty {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if s.trim().is_empty() {
+            return Err("value must not be empty".to_string());
+        }
+        Ok(Self(s.to_string()))
+    }
+}
+
+impl<'de> Deserialize<'de> for NonEmpty {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for NonEmpty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq<&str> for NonEmpty {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct AccountRef {
     pub unit_id: Id,
-    pub account: String,
+    pub account: NonEmpty,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
@@ -129,7 +171,7 @@ pub struct VerifyRequest {
 pub struct ConsumerDecl {
     pub account: AccountRef,
     pub consumer_unit_id: Id,
-    pub setting: String,
+    pub setting: NonEmpty,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Default)]
@@ -553,10 +595,14 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn nm(s: &str) -> NonEmpty {
+        s.parse().unwrap()
+    }
+
     fn acct() -> AccountRef {
         AccountRef {
             unit_id: id(OWNER),
-            account: "api".into(),
+            account: nm("api"),
         }
     }
 
@@ -564,7 +610,7 @@ mod tests {
         ConsumerDecl {
             account: acct(),
             consumer_unit_id: id(CONSUMER),
-            setting: "prowlarr_api_key".into(),
+            setting: nm("prowlarr_api_key"),
         }
     }
 
@@ -1171,7 +1217,7 @@ mod tests {
     async fn account_consumers_filter_by_account() {
         let other = AccountRef {
             unit_id: id(CONSUMER),
-            account: "admin".into(),
+            account: nm("admin"),
         };
         let none = dispatch_op(
             &FakeConsumer,
@@ -1195,20 +1241,20 @@ mod tests {
     async fn account_consumers_of_enforces_one_declarer_per_setting() {
         let unit = AccountRef {
             unit_id: "0192f0a0-0000-7000-8000-0000000000a1".parse().unwrap(),
-            account: "api".into(),
+            account: nm("api"),
         };
         let held = ConsumerDecl {
             account: unit.clone(),
             consumer_unit_id: id(CONSUMER),
-            setting: "key".into(),
+            setting: nm("key"),
         };
         let stray = ConsumerDecl {
             account: AccountRef {
                 unit_id: id(OWNER),
-                account: "other".into(),
+                account: nm("other"),
             },
             consumer_unit_id: id(CONSUMER),
-            setting: "key".into(),
+            setting: nm("key"),
         };
         register_provider(Arc::new(Claimer {
             name: "account-claim-a",
@@ -1261,5 +1307,29 @@ mod tests {
         .await
         .unwrap();
         assert!(missing.is_null());
+    }
+
+    #[test]
+    fn account_blank_names_rejected() {
+        for blank in ["", "  "] {
+            assert!(
+                serde_json::from_value::<AccountRef>(
+                    serde_json::json!({"unit_id": OWNER, "account": blank})
+                )
+                .is_err()
+            );
+            assert!(
+                serde_json::from_value::<ConsumerDecl>(serde_json::json!({
+                    "account": {"unit_id": OWNER, "account": "api"},
+                    "consumer_unit_id": CONSUMER,
+                    "setting": blank,
+                }))
+                .is_err()
+            );
+            assert!(blank.parse::<NonEmpty>().is_err());
+        }
+        let ok: ConsumerDecl =
+            serde_json::from_value(serde_json::to_value(holding()).unwrap()).unwrap();
+        assert_eq!(ok.setting.as_str(), "prowlarr_api_key");
     }
 }
