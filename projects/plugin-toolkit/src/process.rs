@@ -1300,7 +1300,9 @@ mod tests {
         let kill_holder_after_deadline = async {
             tokio::time::sleep_until(deadline + Duration::from_secs(1)).await;
             unsafe { libc::kill(holder, libc::SIGKILL) };
-            drop(tokio::task::spawn_blocking(move || clock_held.recv()));
+            drop(tokio::task::spawn_blocking(move || {
+                clock_held.recv_timeout(Duration::from_secs(30))
+            }));
             std::future::pending::<()>().await
         };
         let out = tokio::select! {
@@ -1317,24 +1319,13 @@ mod tests {
 
     #[cfg(unix)]
     fn block_until_exited(pid: libc::pid_t) {
-        loop {
-            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            let rc = unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    pid as libc::id_t,
-                    &mut info,
-                    libc::WEXITED | libc::WNOWAIT,
-                )
-            };
-            if rc == 0 {
-                return;
-            }
-            match std::io::Error::last_os_error().raw_os_error() {
-                Some(libc::EINTR) => continue,
-                Some(libc::ECHILD) => return,
-                e => panic!("waitid failed: {e:?}"),
-            }
+        let give_up = std::time::Instant::now() + Duration::from_secs(30);
+        while !leader_exited(pid as u32).unwrap() {
+            assert!(
+                std::time::Instant::now() < give_up,
+                "leader {pid} never exited"
+            );
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
