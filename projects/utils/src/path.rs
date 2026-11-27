@@ -137,6 +137,7 @@ mod tests {
 
     #[test]
     fn which_finds_common_binary() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // `sh` exists on every supported platform.
         let result = which("sh");
         assert!(result.is_some(), "expected to resolve `sh` on PATH");
