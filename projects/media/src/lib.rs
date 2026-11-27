@@ -23,7 +23,10 @@ use std::sync::{Arc, LazyLock, RwLock};
 use thiserror::Error;
 
 pub mod identity;
-pub use identity::{IdSource, canonical_external_id, normalize_id, parse_guid};
+pub use identity::{
+    ComicVineIdError, IdSource, canonical_external_id, comicvine_volume_id, comicvine_volume_ids,
+    normalize_id, parse_guid,
+};
 
 pub mod reconcile;
 pub use reconcile::{GapAction, ReconcileOutcome, compute_gaps, reconcile_series};

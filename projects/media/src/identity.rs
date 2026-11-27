@@ -21,6 +21,7 @@
 //!   source priority (for display and as a stable unit key).
 
 use crate::{ExternalId, MediaIdentity, MediaType};
+use thiserror::Error;
 
 /// A canonical external-id namespace. `ExternalId::source` stays a free-form
 /// `String` on the wire (plugins may carry sources we don't model yet), but any
@@ -163,6 +164,7 @@ pub fn normalize_id(source: Option<IdSource>, raw: &str) -> String {
         // keep OpenLibrary as-is but stripped.
         Some(IdSource::Asin) => raw.to_ascii_uppercase(),
         Some(IdSource::OpenLibrary) => raw.trim().to_string(),
+        Some(IdSource::ComicVine) if let Ok(id) = comicvine_volume_id(raw) => id,
         // Numeric/opaque ids: strip surrounding noise, drop a trailing query.
         Some(_) => raw
             .split(['?', '#'])
@@ -219,6 +221,10 @@ pub fn parse_guid(guid: &str) -> Option<ExternalId> {
     if g.starts_with("tt") && g[2..].chars().all(|c| c.is_ascii_digit()) && g.len() > 2 {
         return canonical_external_id("imdb", g, None);
     }
+    if is_comicvine_url(g) {
+        let id = comicvine_volume_id(g).ok()?;
+        return canonical_external_id("comicvine", &id, None);
+    }
     let (scheme, rest) = g.split_once("://")?;
     // Legacy Plex agent guids: `com.plexapp.agents.<src>`.
     let scheme = scheme
@@ -232,6 +238,117 @@ pub fn parse_guid(guid: &str) -> Option<ExternalId> {
     // server-local scheme (plex/jellyfin/local) is not a merge key.
     IdSource::parse(scheme)?;
     canonical_external_id(scheme, id, None)
+}
+
+const COMICVINE_VOLUME: &str = "4050-";
+const COMICVINE_HOST: &str = "comicvine.gamespot.com";
+
+/// Why ComicVine input could not be read as volume ids.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ComicVineIdError {
+    #[error("'{0}' is not a ComicVine volume id")]
+    NotAnId(String),
+    #[error("'{0}' is not a ComicVine volume URL; give a volume (4050-) URL or id")]
+    NotAVolumeUrl(String),
+    #[error(
+        "'{token}' is ambiguous: '{tail}' could be part of the URL or a separate id; \
+         pass '{tail}' as its own id or before the URL"
+    )]
+    Ambiguous { token: String, tail: String },
+    #[error("give at least one ComicVine id")]
+    Empty,
+}
+
+/// Parse one ComicVine volume reference into canonical `4050-N` form: a bare id
+/// (`12345`), the volume form (`4050-12345`), or a volume URL with or without a
+/// scheme (`https://comicvine.gamespot.com/invincible/4050-17993/`).
+pub fn comicvine_volume_id(raw: &str) -> Result<String, ComicVineIdError> {
+    let token = raw.trim();
+    let id = if is_comicvine_url(token) {
+        let path = token.split(['?', '#']).next().unwrap_or(token);
+        path.split('/')
+            .find(|seg| seg.starts_with(COMICVINE_VOLUME))
+            .ok_or_else(|| ComicVineIdError::NotAVolumeUrl(token.to_string()))?
+    } else {
+        token
+    };
+    let digits = id.strip_prefix(COMICVINE_VOLUME).unwrap_or(id).trim();
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(ComicVineIdError::NotAnId(token.to_string()));
+    }
+    let digits = match digits.trim_start_matches('0') {
+        "" => "0",
+        d => d,
+    };
+    Ok(format!("{COMICVINE_VOLUME}{digits}"))
+}
+
+/// Parse a list of ComicVine volume references, each entry possibly holding
+/// several comma-separated ids/URLs, into deduplicated canonical `4050-N` ids in
+/// first-seen order.
+pub fn comicvine_volume_ids<S: AsRef<str>>(inputs: &[S]) -> Result<Vec<String>, ComicVineIdError> {
+    let mut out: Vec<String> = Vec::new();
+    for input in inputs {
+        for token in split_comicvine_list(input.as_ref())? {
+            if token.trim().is_empty() {
+                continue;
+            }
+            let id = comicvine_volume_id(token)?;
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err(ComicVineIdError::Empty);
+    }
+    Ok(out)
+}
+
+fn is_comicvine_url(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    if lower.starts_with("https://") || lower.starts_with("http://") {
+        return true;
+    }
+    let host = lower.strip_prefix("www.").unwrap_or(&lower);
+    host == COMICVINE_HOST || host.starts_with(&format!("{COMICVINE_HOST}/"))
+}
+
+// Commas are legal in a URL query or fragment, so once a URL reaches `?`/`#` only
+// another URL ends it; a trailing id-shaped item there is ambiguous and rejected.
+fn split_comicvine_list(s: &str) -> Result<Vec<&str>, ComicVineIdError> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, _) in s.match_indices(',') {
+        let cur = s[start..i].trim_start();
+        let rest = s[i + 1..].trim_start();
+        if is_comicvine_url(cur) && cur.contains(['?', '#']) && !is_comicvine_url(rest) {
+            continue;
+        }
+        out.push(&s[start..i]);
+        start = i + 1;
+    }
+    out.push(&s[start..]);
+    for tok in &out {
+        let tok = tok.trim();
+        let Some(q) = tok.find(['?', '#']) else {
+            continue;
+        };
+        if !is_comicvine_url(tok) {
+            continue;
+        }
+        if let Some((_, tail)) = tok[q..].rsplit_once(',') {
+            let tail = tail.trim();
+            let digits = tail.strip_prefix(COMICVINE_VOLUME).unwrap_or(tail);
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(ComicVineIdError::Ambiguous {
+                    token: tok.to_string(),
+                    tail: tail.to_string(),
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Normalize an ISBN to bare ISBN-13 digits (converting a valid ISBN-10 by
@@ -388,5 +505,129 @@ mod tests {
             id.primary_external_id(MediaType::Movies).unwrap().source,
             "tmdb"
         );
+    }
+
+    fn cv(inputs: &[&str]) -> Result<Vec<String>, ComicVineIdError> {
+        comicvine_volume_ids(inputs)
+    }
+
+    #[test]
+    fn comicvine_ids_accept_volume_form_and_dedupe() {
+        assert_eq!(
+            cv(&["4050-12345, 678", "12345"]).unwrap(),
+            vec!["4050-12345", "4050-678"]
+        );
+        assert!(cv(&["Saga"]).is_err());
+        assert_eq!(cv(&[" "]), Err(ComicVineIdError::Empty));
+    }
+
+    #[test]
+    fn comicvine_ids_accept_volume_urls() {
+        let ids = cv(&[
+            "https://comicvine.gamespot.com/invincible/4050-17993/",
+            "http://comicvine.gamespot.com/saga/4050-48771",
+            "https://comicvine.gamespot.com/x/4050-0042/?utm_source=a&b=4000-1",
+        ])
+        .unwrap();
+        assert_eq!(ids, vec!["4050-17993", "4050-48771", "4050-42"]);
+    }
+
+    #[test]
+    fn comicvine_ids_keep_commas_inside_a_url_query() {
+        let ids = cv(&[
+            "678,https://comicvine.gamespot.com/x/4050-17993/?a=1,b,https://comicvine.gamespot.com/y/4050-48771/#c,d",
+            "9",
+        ])
+        .unwrap();
+        assert_eq!(ids, vec!["4050-678", "4050-17993", "4050-48771", "4050-9"]);
+        assert_eq!(cv(&["1,2,3"]).unwrap(), vec!["4050-1", "4050-2", "4050-3"]);
+        assert_eq!(
+            cv(&["https://comicvine.gamespot.com/x/4050-17993/,5"]).unwrap(),
+            vec!["4050-17993", "4050-5"]
+        );
+        assert_eq!(
+            cv(&["https://comicvine.gamespot.com/x/4050-1/?a=1,b,https://comicvine.gamespot.com/y/4050-9/"])
+                .unwrap(),
+            vec!["4050-1", "4050-9"]
+        );
+    }
+
+    #[test]
+    fn comicvine_ids_reject_an_id_swallowed_by_a_url_query() {
+        for input in [
+            "https://comicvine.gamespot.com/x/4050-1/?ref=a,2",
+            "https://comicvine.gamespot.com/x/4050-1/#frag,4050-5",
+        ] {
+            let err = cv(&[input]).unwrap_err();
+            assert!(matches!(err, ComicVineIdError::Ambiguous { .. }), "{err}");
+            assert!(err.to_string().contains(input), "{err}");
+        }
+    }
+
+    #[test]
+    fn comicvine_ids_reject_non_volume_urls() {
+        let err = cv(&["https://comicvine.gamespot.com/invincible-1/4000-33017/"]).unwrap_err();
+        assert!(
+            err.to_string().contains("volume (4050-) URL or id"),
+            "{err}"
+        );
+        assert!(cv(&["https://comicvine.gamespot.com/mark-grayson/4005-11/"]).is_err());
+    }
+
+    #[test]
+    fn comicvine_ids_accept_any_case_and_schemeless_urls() {
+        let ids = cv(&[
+            "HTTPS://comicvine.gamespot.com/x/4050-1/",
+            "comicvine.gamespot.com/x/4050-2/",
+            "WWW.ComicVine.gamespot.com/x/4050-3",
+        ])
+        .unwrap();
+        assert_eq!(ids, vec!["4050-1", "4050-2", "4050-3"]);
+        assert_eq!(
+            cv(&["comicvine.gamespot.com/x/4050-4/?a=1,b,www.comicvine.gamespot.com/y/4050-5/"])
+                .unwrap(),
+            vec!["4050-4", "4050-5"]
+        );
+        assert!(cv(&["comicvine.gamespot.com/x/4050-1/?ref=a,2"]).is_err());
+        let err = cv(&["comicvine.gamespot.com/x/4000-5/"]).unwrap_err();
+        assert!(
+            err.to_string().contains("volume (4050-) URL or id"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn comicvine_ids_reject_a_bare_volume_prefix() {
+        let err = cv(&["4050-"]).unwrap_err();
+        assert!(err.to_string().contains("'4050-'"), "{err}");
+        assert!(cv(&["4050- ", "1"]).is_err());
+    }
+
+    #[test]
+    fn comicvine_ids_dedupe_on_canonical_form() {
+        assert_eq!(
+            cv(&["012345, 12345", "4050-0012345"]).unwrap(),
+            vec!["4050-12345"]
+        );
+        assert_eq!(cv(&["000"]).unwrap(), vec!["4050-0"]);
+    }
+
+    #[test]
+    fn comicvine_ids_fold_into_external_ids() {
+        let want = canonical_external_id("comicvine", "4050-17993", None).unwrap();
+        assert_eq!(want.id, "4050-17993");
+        assert_eq!(canonical_external_id("cv", "017993", None).unwrap(), want);
+        assert_eq!(
+            parse_guid("https://comicvine.gamespot.com/invincible/4050-17993/?a=1"),
+            Some(want.clone())
+        );
+        assert_eq!(parse_guid("comicvine://4050-17993"), Some(want));
+        assert_eq!(
+            canonical_external_id("comicvine", "4000-33017", None)
+                .unwrap()
+                .id,
+            "4000-33017"
+        );
+        assert_eq!(parse_guid("comicvine.gamespot.com/x/4000-5/"), None);
     }
 }
