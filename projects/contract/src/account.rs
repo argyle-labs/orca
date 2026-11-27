@@ -38,7 +38,7 @@ pub struct AccountDecl {
 
 /// What a provider can do for one account kind. Core reads this before it
 /// writes the secrets backend: `regenerate` picks unit-minted over
-/// orca-generated values, and without `restore_previous` a failed rotation
+/// orca-generated values, and without `rollback_secret` a failed rotation
 /// cannot be rolled back on the unit.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq, Default)]
 pub struct KindCapabilities {
@@ -48,7 +48,7 @@ pub struct KindCapabilities {
     #[serde(default)]
     pub regenerate: bool,
     #[serde(default)]
-    pub restore_previous: bool,
+    pub rollback_secret: bool,
     #[serde(default)]
     pub verify: bool,
 }
@@ -395,8 +395,8 @@ pub trait AccountProvider: Send + Sync {
     /// `regenerate`, then write the backend), `apply_consumer` on every
     /// holding, then verify all of them. Rollback undoes it in reverse:
     /// `apply_consumer(old, rollback: true)` on each consumer already updated,
-    /// `set_secret(old, rollback: true)` on the owner, then `restore_previous`
-    /// on the secrets backend. Each rollback call reports `restored`.
+    /// `set_secret(old, rollback: true)` on the owner, then the secrets seam's
+    /// `restore` op ([`crate::secrets_backend::RESTORE_OP`]). Each rollback call reports `restored`.
     fn apply_consumer(&self, _req: ConsumerApplyRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
         unsupported(APPLY_CONSUMER_OP)
     }
@@ -2071,15 +2071,20 @@ mod tests {
     fn account_capabilities_decode_per_kind() {
         let decl: AccountDecl = serde_json::from_value(serde_json::json!({
             "account_kinds": ["api_key", "os_user"],
-            "capabilities": [{"kind": "api_key", "regenerate": true, "verify": true}],
+            "capabilities": [
+                {"kind": "api_key", "regenerate": true, "verify": true},
+                {"kind": "os_user", "set_secret": true, "rollback_secret": true},
+            ],
         }))
         .unwrap();
         let key = decl.capabilities_for(AccountKind::ApiKey);
         assert!(key.regenerate && key.verify);
-        assert!(!key.set_secret && !key.restore_previous);
+        assert!(!key.set_secret && !key.rollback_secret);
         let user = decl.capabilities_for(AccountKind::OsUser);
         assert_eq!(user.kind, AccountKind::OsUser);
-        assert!(!user.set_secret && !user.verify);
+        assert!(user.set_secret && user.rollback_secret && !user.verify);
+        let none = decl.capabilities_for(AccountKind::SshKey);
+        assert!(!none.set_secret && !none.rollback_secret);
     }
 
     #[test]
