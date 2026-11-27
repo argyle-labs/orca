@@ -10,7 +10,7 @@ use thiserror::Error;
 // Plain decimals only: f64 parsing also takes "nan", "inf" and "1e3".
 pub fn decimal(s: &str) -> Option<f64> {
     let digits = |d: &str| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit());
-    let unsigned = s.strip_prefix('-').unwrap_or(s);
+    let unsigned = s.strip_prefix(['-', '+']).unwrap_or(s);
     let ok = match unsigned.split_once('.') {
         Some((whole, frac)) => digits(whole) && digits(frac),
         None => digits(unsigned),
@@ -361,7 +361,8 @@ mod tests {
     fn decimal_is_plain_digits_only() {
         assert_eq!(decimal("12"), Some(12.0));
         assert_eq!(decimal("-1.5"), Some(-1.5));
-        for bad in ["", "nan", "inf", "1e3", "1.", ".5", "AU", "+1"] {
+        assert_eq!(decimal("+1"), Some(1.0));
+        for bad in ["", "nan", "inf", "1e3", "1.", ".5", "AU", "+-1", "--1"] {
             assert_eq!(decimal(bad), None, "{bad}");
         }
     }
@@ -374,6 +375,7 @@ mod tests {
         assert_eq!(parse_number("1/2"), Some(SeqNumber::Fraction(0.5)));
         assert_eq!(parse_number("7–9"), Some(SeqNumber::Whole(r(7, 9))));
         assert_eq!(parse_number("-1"), Some(SeqNumber::whole(-1)));
+        assert_eq!(parse_number("+1"), Some(SeqNumber::whole(1)));
         assert_eq!(parse_number("3-1"), None);
         assert_eq!(parse_number("AU"), None);
     }
