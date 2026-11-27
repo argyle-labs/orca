@@ -643,7 +643,10 @@ pub async fn dispatch_op(
     let secret = secret_values(&args, "secret");
     let err = |f: Fail| match f {
         Fail::Msg(msg) => serde_json::Value::String(scrubbed(&msg, &secret)),
-        Fail::Unsupported(op) => serde_json::json!({ UNSUPPORTED_KEY: op }),
+        Fail::Unsupported(other) if other == op => serde_json::json!({ UNSUPPORTED_KEY: other }),
+        Fail::Unsupported(other) => {
+            serde_json::Value::String(scrubbed(&Unsupported { op: other }.to_string(), &secret))
+        }
     };
     gate_dry_run_secret(op, &mut args).map_err(|m| err(Fail::Msg(m)))?;
     let rollback = args.get("rollback").cloned();
@@ -739,8 +742,10 @@ impl AccountProxy {
                 .await
                 .map_err(|e| scrub(format!("account '{name}' {op} task panicked: {e}")))?
                 .map_err(|e| match e.get(UNSUPPORTED_KEY).and_then(|v| v.as_str()) {
-                    Some(op) => anyhow::Error::new(Unsupported { op: op.to_string() }),
-                    None => scrub(format!(
+                    Some(returned) if returned == op => {
+                        anyhow::Error::new(Unsupported { op: op.to_string() })
+                    }
+                    _ => scrub(format!(
                         "account '{name}' {op} failed: {}",
                         crate::render_invoke_error(&e)
                     )),
@@ -2326,5 +2331,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.restored, Some(false));
+    }
+
+    struct WrongUnsupported;
+
+    impl AccountProvider for WrongUnsupported {
+        fn name(&self) -> &str {
+            "account-wrong-unsupported"
+        }
+        fn decl(&self) -> BoxFuture<'_, Result<AccountDecl>> {
+            Box::pin(async {
+                Ok(AccountDecl {
+                    unit_kinds: vec![],
+                    account_kinds: vec![],
+                    capabilities: vec![],
+                })
+            })
+        }
+        fn set_secret(&self, _req: SetSecretRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+            unsupported(VERIFY_OP)
+        }
+    }
+
+    #[tokio::test]
+    async fn account_dispatch_op_unsupported_must_name_the_requested_op() {
+        let err = dispatch_op(
+            &WrongUnsupported,
+            SET_SECRET_OP,
+            serde_json::json!({"account": acct(), "secret": VALUE}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.is_string(), "{err}");
+        assert!(err.as_str().unwrap().contains("unsupported: verify"));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_ignores_spoofed_unsupported() {
+        let invoke: InvokeThunk =
+            Arc::new(|_op, _args, _call| Err(serde_json::json!({"unsupported": "delete"})));
+        let proxy = AccountProxy {
+            name: "account-proxy-spoof".into(),
+            invoke,
+        };
+        let err = proxy
+            .set_secret(SetSecretRequest {
+                account: acct(),
+                secret: Some(secret()),
+                dry_run: false,
+                rollback: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.downcast_ref::<Unsupported>().is_none(), "{err}");
+        let invoke: InvokeThunk =
+            Arc::new(|_op, _args, _call| Err(serde_json::json!({"unsupported": "delete"})));
+        let proxy = AccountProxy {
+            name: "account-proxy-honest".into(),
+            invoke,
+        };
+        let err = proxy
+            .delete(DeleteRequest {
+                account: acct(),
+                dry_run: false,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<Unsupported>().map(|u| u.op.as_str()),
+            Some("delete")
+        );
     }
 }
