@@ -251,6 +251,12 @@ pub trait Requester: Send + Sync {
     /// the normalized status after the add (typically `Wanted`/`Searching`).
     async fn add(&self, req: &AddRequest) -> Result<RequestStatus, MediaError>;
 
+    /// Why this identity cannot be requested at all (e.g. the backend lacks an
+    /// id it needs), or `None` when it can. Checked before any budget is spent.
+    fn unrequestable(&self, _identity: &MediaIdentity) -> Option<String> {
+        None
+    }
+
     /// Want + search: mark a known identity wanted and run a search now,
     /// returning candidate hits. (The brain, not the adapter, decides to grab.)
     async fn search(&self, identity: &MediaIdentity) -> Result<Vec<SearchHit>, MediaError>;

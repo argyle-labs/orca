@@ -84,8 +84,8 @@ impl Budget {
         wanted.min(self.left())
     }
 
-    pub(crate) fn spend(&mut self) {
-        self.used += 1;
+    pub(crate) fn spend(&mut self, n: usize) {
+        self.used += n;
     }
 
     /// Waits out the pace before a request; never before the run's first.

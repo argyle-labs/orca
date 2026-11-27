@@ -123,6 +123,8 @@ pub fn compute_gaps(expected: &[MediaIdentity], owned: &[MediaIdentity]) -> Vec<
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
     BudgetExhausted,
+    /// The requester reported it cannot request this gap; `error` says why.
+    Unrequestable,
 }
 
 /// What one gap-add attempt did.
@@ -156,7 +158,7 @@ pub struct ReconcileOutcome {
     pub actions: Vec<GapAction>,
     /// Gaps the run's [`Budget`] covered (requested, or would be on a dry run).
     pub selected: usize,
-    /// Gaps left for a later run once the budget ran out.
+    /// Requestable gaps left for a later run once the budget ran out.
     pub remaining: usize,
     pub dry_run: bool,
 }
@@ -180,15 +182,19 @@ pub async fn reconcile_series(
     let state = server.library_state(scope).await?;
     let owned: Vec<MediaIdentity> = state.items.into_iter().map(|e| e.identity).collect();
     let gaps = compute_gaps(expected, &owned);
-    let selected = budget.take(gaps.len());
+    let (requestable, unrequestable): (Vec<_>, Vec<_>) = gaps
+        .iter()
+        .map(|g| (g, requester.unrequestable(g)))
+        .partition(|(_, why)| why.is_none());
+    let selected = budget.take(requestable.len());
 
     let mut actions = Vec::new();
     if dry_run {
-        (0..selected).for_each(|_| budget.spend());
+        budget.spend(selected);
     } else {
-        for gap in &gaps[..selected] {
+        for &(gap, _) in &requestable[..selected] {
             budget.pace().await;
-            budget.spend();
+            budget.spend(1);
             let req = AddRequest {
                 identity: gap.clone(),
                 quality: quality.clone(),
@@ -209,13 +215,20 @@ pub async fn reconcile_series(
                 }),
             }
         }
-        actions.extend(gaps[selected..].iter().map(|gap| GapAction {
-            identity: gap.clone(),
+        actions.extend(requestable[selected..].iter().map(|(gap, _)| GapAction {
+            identity: (*gap).clone(),
             status: None,
             error: None,
             skipped: Some(SkipReason::BudgetExhausted),
         }));
+        actions.extend(unrequestable.into_iter().map(|(gap, why)| GapAction {
+            identity: gap.clone(),
+            status: None,
+            error: why,
+            skipped: Some(SkipReason::Unrequestable),
+        }));
     }
+    let remaining = requestable.len() - selected;
 
     Ok(ReconcileOutcome {
         media_type: requester.media_type(),
@@ -225,7 +238,7 @@ pub async fn reconcile_series(
         owned: owned.len(),
         actions,
         selected,
-        remaining: gaps.len() - selected,
+        remaining,
         gaps,
         dry_run,
     })
@@ -362,12 +375,14 @@ mod tests {
     struct Req {
         added: std::sync::Mutex<Vec<String>>,
         fail: Option<&'static str>,
+        unrequestable: Option<&'static str>,
     }
 
     fn req() -> Req {
         Req {
             added: std::sync::Mutex::new(vec![]),
             fail: None,
+            unrequestable: None,
         }
     }
     #[orca_async]
@@ -389,6 +404,9 @@ mod tests {
                 active_release: None,
                 detail: None,
             })
+        }
+        fn unrequestable(&self, id: &MediaIdentity) -> Option<String> {
+            (self.unrequestable == Some(id.title.as_str())).then(|| "no backend id".into())
         }
         async fn search(&self, _id: &MediaIdentity) -> Result<Vec<crate::SearchHit>, MediaError> {
             Ok(vec![])
@@ -568,5 +586,29 @@ mod tests {
         let start = tokio::time::Instant::now();
         run(&[isbn("A", "1"), isbn("B", "2")], &req, &mut budget, true).await;
         assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrequestable_gaps_are_reported_without_spending_or_pacing() {
+        let req = Req {
+            unrequestable: Some("A"),
+            ..req()
+        };
+        let pace = std::time::Duration::from_secs(30);
+        let mut budget = Budget::new(1).unwrap().with_pace(pace);
+        let start = tokio::time::Instant::now();
+        let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
+        let out = run(&expected, &req, &mut budget, false).await;
+        assert_eq!(*req.added.lock().unwrap(), vec!["B".to_string()]);
+        assert_eq!((out.selected, out.remaining), (1, 1));
+        assert_eq!(budget.used(), 1);
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+        let a = out
+            .actions
+            .iter()
+            .find(|a| a.identity.title == "A")
+            .unwrap();
+        assert_eq!(a.skipped, Some(SkipReason::Unrequestable));
+        assert_eq!(a.error.as_deref(), Some("no backend id"));
     }
 }
