@@ -419,15 +419,12 @@ impl Plugin {
         self
     }
 
-    /// Register a **tunnel_provider** facet: this plugin issues VPN tunnel
+    /// Register a **vpn** facet: this plugin issues VPN tunnel
     /// settings. Implements
-    /// [`TunnelSessionProvider`](crate::contract::tunnel_provider::TunnelSessionProvider).
+    /// [`VpnProvider`](crate::contract::vpn::VpnProvider).
     #[must_use]
-    pub fn tunnel_provider<P: crate::contract::tunnel_provider::TunnelSessionProvider + 'static>(
-        mut self,
-        provider: P,
-    ) -> Self {
-        let def = crate::backend_def::tunnel_provider_backend_def(provider.name());
+    pub fn vpn<P: crate::contract::vpn::VpnProvider + 'static>(mut self, provider: P) -> Self {
+        let def = crate::backend_def::vpn_backend_def(provider.name());
         let prefix = def.invoke_prefix.clone();
         self.defs.push(def);
         self.dispatchers
@@ -435,9 +432,9 @@ impl Plugin {
                 let op = tool
                     .strip_prefix(&prefix)
                     .and_then(|r| r.strip_prefix('.'))?;
-                Some(crate::reactor::block_on(
-                    crate::contract::tunnel_provider::dispatch_op(&provider, op, args),
-                ))
+                Some(crate::reactor::block_on(crate::contract::vpn::dispatch_op(
+                    &provider, op, args,
+                )))
             }));
         self
     }

@@ -275,13 +275,13 @@ pub fn tunnel_backend_def(name: &str) -> crate::abi::BackendDef {
     }
 }
 
-/// Build the `tunnel_provider`-domain [`BackendDef`](crate::abi::BackendDef) for
-/// a VPN-side provider; ops route as `tunnel_provider.__backend.{name}.{op}`.
-pub fn tunnel_provider_backend_def(name: &str) -> crate::abi::BackendDef {
+/// Build the `vpn`-domain [`BackendDef`](crate::abi::BackendDef) for
+/// a VPN-side provider; ops route as `vpn.__backend.{name}.{op}`.
+pub fn vpn_backend_def(name: &str) -> crate::abi::BackendDef {
     crate::abi::BackendDef {
-        domain: "tunnel_provider".to_string(),
+        domain: "vpn".to_string(),
         name: name.to_string(),
-        invoke_prefix: format!("tunnel_provider.__backend.{name}"),
+        invoke_prefix: format!("vpn.__backend.{name}"),
         ..Default::default()
     }
 }
@@ -492,9 +492,9 @@ mod tests {
         let d = tunnel_backend_def("opnsense");
         assert_eq!(d.domain, "tunnel");
         assert_eq!(d.invoke_prefix, "tunnel.__backend.opnsense");
-        let d = tunnel_provider_backend_def("pia");
-        assert_eq!(d.domain, "tunnel_provider");
-        assert_eq!(d.invoke_prefix, "tunnel_provider.__backend.pia");
+        let d = vpn_backend_def("pia");
+        assert_eq!(d.domain, "vpn");
+        assert_eq!(d.invoke_prefix, "vpn.__backend.pia");
     }
 
     #[test]

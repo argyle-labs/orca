@@ -216,8 +216,8 @@ fn fixed_surface_role(tool: &str) -> Option<&'static str> {
         ups::ups_role_pairs()
     } else if crate::tunnel_surface::tunnel_owns(tool) {
         crate::tunnel_surface::tunnel_role_pairs()
-    } else if crate::tunnel_provider_surface::tunnel_provider_owns(tool) {
-        crate::tunnel_provider_surface::tunnel_provider_role_pairs()
+    } else if crate::vpn_surface::vpn_owns(tool) {
+        crate::vpn_surface::vpn_role_pairs()
     } else {
         return None;
     };

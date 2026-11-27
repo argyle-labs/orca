@@ -1,13 +1,13 @@
-//! Cross-crate tunnel-provider capability types and provider registry (VPN side).
+//! Cross-crate VPN provider capability types and provider registry.
 //!
-//! A tunnel provider *issues* tunnel settings: it opens a session with a VPN
+//! A VPN provider *issues* tunnel settings: it opens a session with a VPN
 //! service for a client public key and, optionally, a forwarded port. The
 //! firewall side ([`crate::tunnel`]) applies them. Provider credentials stay
 //! inside the provider (read via orca secrets) and never cross this seam.
 //!
-//! The surface layer (`dispatch::tunnel_provider_surface`) routes each op to the
+//! The surface layer (`dispatch::vpn_surface`) routes each op to the
 //! named provider. A subprocess plugin registers through [`register_from_def`]
-//! for `domain = "tunnel_provider"`.
+//! for `domain = "vpn"`.
 
 // The erased-invoke boundary carries args/results/errors as `serde_json::Value`;
 // the type-erased plugin seam cannot be typed, so the lint is allowed for this file only.
@@ -85,7 +85,7 @@ pub struct PortForwardArgs {
 // ── Provider registry ───────────────────────────────────────────────────────
 
 /// A VPN-side settings issuer — one per provider.
-pub trait TunnelSessionProvider: Send + Sync {
+pub trait VpnProvider: Send + Sync {
     /// Provider/registry name. Registry key; used to replace-in-place on
     /// re-register and to deregister on plugin unload.
     fn name(&self) -> &str;
@@ -95,12 +95,12 @@ pub trait TunnelSessionProvider: Send + Sync {
     fn port_forward(&self, req: PortForwardReq) -> BoxFuture<'_, Result<PortForward>>;
 }
 
-static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn TunnelSessionProvider>>>> =
+static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn VpnProvider>>>> =
     LazyLock::new(|| RwLock::new(Vec::new()));
 
 /// Register a provider. Re-registering the same `name()` replaces the entry.
-pub fn register_provider(provider: Arc<dyn TunnelSessionProvider>) {
-    let mut g = GLOBAL.write().expect("tunnel_provider registry poisoned");
+pub fn register_provider(provider: Arc<dyn VpnProvider>) {
+    let mut g = GLOBAL.write().expect("vpn registry poisoned");
     let name = provider.name().to_string();
     if let Some(slot) = g.iter_mut().find(|p| p.name() == name) {
         *slot = provider;
@@ -110,29 +110,26 @@ pub fn register_provider(provider: Arc<dyn TunnelSessionProvider>) {
 }
 
 /// Snapshot of every registered provider.
-pub fn providers() -> Vec<Arc<dyn TunnelSessionProvider>> {
-    GLOBAL
-        .read()
-        .expect("tunnel_provider registry poisoned")
-        .clone()
+pub fn providers() -> Vec<Arc<dyn VpnProvider>> {
+    GLOBAL.read().expect("vpn registry poisoned").clone()
 }
 
 /// Deregister the provider named `name`, if present. Returns `true` if removed.
 pub fn deregister_provider(name: &str) -> bool {
-    let mut g = GLOBAL.write().expect("tunnel_provider registry poisoned");
+    let mut g = GLOBAL.write().expect("vpn registry poisoned");
     let before = g.len();
     g.retain(|p| p.name() != name);
     before != g.len()
 }
 
-pub fn provider_named(name: &str) -> Result<Arc<dyn TunnelSessionProvider>> {
+pub fn provider_named(name: &str) -> Result<Arc<dyn VpnProvider>> {
     providers()
         .into_iter()
         .find(|p| p.name() == name)
-        .ok_or_else(|| anyhow::anyhow!("no tunnel_provider named '{name}'"))
+        .ok_or_else(|| anyhow::anyhow!("no vpn named '{name}'"))
 }
 
-// ── Surface entry points (used by dispatch::tunnel_provider_surface) ─────────
+// ── Surface entry points (used by dispatch::vpn_surface) ─────────
 
 pub async fn session(args: SessionArgs) -> Result<Session> {
     provider_named(&args.provider)?.session(args.session).await
@@ -166,7 +163,7 @@ pub const PORT_FORWARD_OP: &str = "port_forward";
 
 /// Plugin-side dispatch: answer a proxied op by calling the typed provider.
 pub async fn dispatch_op(
-    provider: &dyn TunnelSessionProvider,
+    provider: &dyn VpnProvider,
     op: &str,
     args: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, serde_json::Value> {
@@ -194,26 +191,26 @@ pub async fn dispatch_op(
                 .map_err(|e| err(format!("{e:#}")))?;
             serde_json::to_value(&out).map_err(|e| err(e.to_string()))
         }
-        other => Err(err(format!("unknown tunnel_provider op: {other}"))),
+        other => Err(err(format!("unknown vpn op: {other}"))),
     }
 }
 
 /// Build and register a provider from a plugin backend descriptor plus an
-/// [`InvokeThunk`]. The plugin-loader calls this for `domain = "tunnel_provider"`.
+/// [`InvokeThunk`]. The plugin-loader calls this for `domain = "vpn"`.
 #[cfg(feature = "in-process")]
 pub fn register_from_def(name: String, invoke: InvokeThunk) -> Result<()> {
-    register_provider(Arc::new(TunnelSessionProxy { name, invoke }));
+    register_provider(Arc::new(VpnProxy { name, invoke }));
     Ok(())
 }
 
 #[cfg(feature = "in-process")]
-struct TunnelSessionProxy {
+struct VpnProxy {
     name: String,
     invoke: InvokeThunk,
 }
 
 #[cfg(feature = "in-process")]
-impl TunnelSessionProxy {
+impl VpnProxy {
     fn call<T: for<'de> Deserialize<'de>>(
         &self,
         op: &'static str,
@@ -222,25 +219,24 @@ impl TunnelSessionProxy {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
-            let call = crate::invocation_scope::capture("tunnel_provider", &name);
+            let call = crate::invocation_scope::capture("vpn", &name);
             let out = tokio::task::spawn_blocking(move || invoke(op, args, call))
                 .await
-                .map_err(|e| anyhow::anyhow!("tunnel_provider '{name}' {op} task panicked: {e}"))?
+                .map_err(|e| anyhow::anyhow!("vpn '{name}' {op} task panicked: {e}"))?
                 .map_err(|e| {
                     anyhow::anyhow!(
-                        "tunnel_provider '{name}' {op} failed: {}",
+                        "vpn '{name}' {op} failed: {}",
                         crate::render_invoke_error(&e)
                     )
                 })?;
-            serde_json::from_value(out).map_err(|e| {
-                anyhow::anyhow!("tunnel_provider '{name}' {op} returned invalid JSON: {e}")
-            })
+            serde_json::from_value(out)
+                .map_err(|e| anyhow::anyhow!("vpn '{name}' {op} returned invalid JSON: {e}"))
         })
     }
 }
 
 #[cfg(feature = "in-process")]
-impl TunnelSessionProvider for TunnelSessionProxy {
+impl VpnProvider for VpnProxy {
     fn name(&self) -> &str {
         &self.name
     }
@@ -262,7 +258,7 @@ mod tests {
 
     struct FakeVpn;
 
-    impl TunnelSessionProvider for FakeVpn {
+    impl VpnProvider for FakeVpn {
         fn name(&self) -> &str {
             "tprov-test"
         }
@@ -333,14 +329,14 @@ mod tests {
     }
 
     #[cfg(feature = "in-process")]
-    fn bridge(provider: Arc<dyn TunnelSessionProvider>) -> InvokeThunk {
+    fn bridge(provider: Arc<dyn VpnProvider>) -> InvokeThunk {
         Arc::new(move |op: &str, args, _call| {
             tokio::runtime::Handle::current().block_on(dispatch_op(provider.as_ref(), op, args))
         })
     }
 
     #[cfg(feature = "in-process")]
-    fn proxy_named(name: &str) -> Arc<dyn TunnelSessionProvider> {
+    fn proxy_named(name: &str) -> Arc<dyn VpnProvider> {
         providers()
             .into_iter()
             .find(|p| p.name() == name)
@@ -390,10 +386,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert_eq!(
-            err,
-            "tunnel_provider 'tprov-rt-err' session failed: auth rejected"
-        );
+        assert_eq!(err, "vpn 'tprov-rt-err' session failed: auth rejected");
         let err = proxy
             .port_forward(PortForwardReq {
                 server_cn: "cn".into(),
@@ -402,10 +395,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert_eq!(
-            err,
-            r#"tunnel_provider 'tprov-rt-err' port_forward failed: {"code":7}"#
-        );
+        assert_eq!(err, r#"vpn 'tprov-rt-err' port_forward failed: {"code":7}"#);
         assert!(deregister_provider("tprov-rt-err"));
 
         let invoke: InvokeThunk = Arc::new(|_op: &str, _args, _call| Ok(serde_json::json!(42)));
@@ -416,7 +406,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.starts_with("tunnel_provider 'tprov-rt-bad' session returned invalid JSON:"),
+            err.starts_with("vpn 'tprov-rt-bad' session returned invalid JSON:"),
             "{err}"
         );
         assert!(deregister_provider("tprov-rt-bad"));
@@ -427,10 +417,7 @@ mod tests {
         let err = dispatch_op(&FakeVpn, "teardown", serde_json::json!({}))
             .await
             .unwrap_err();
-        assert_eq!(
-            err,
-            serde_json::json!("unknown tunnel_provider op: teardown")
-        );
+        assert_eq!(err, serde_json::json!("unknown vpn op: teardown"));
         let err = dispatch_op(
             &FakeVpn,
             PORT_FORWARD_OP,

@@ -2,7 +2,7 @@
 //!
 //! A tunnel provider owns the firewall/router end of a VPN tunnel (e.g. a
 //! WireGuard interface on OPNsense) and *applies* settings to it. The settings
-//! themselves are issued by a [`crate::tunnel_provider`] (the VPN side).
+//! themselves are issued by a [`crate::vpn`] provider.
 //!
 //! The surface layer (`dispatch::tunnel_surface`) fans `list` across every
 //! provider and routes `apply` and `port_alias_set` to the named provider, so

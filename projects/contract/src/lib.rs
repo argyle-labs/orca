@@ -147,7 +147,7 @@ pub use template_kind::{
 pub mod security;
 
 pub mod tunnel;
-pub mod tunnel_provider;
+pub mod vpn;
 
 pub mod ups;
 pub use ups::{UpsConfig, UpsConfigOutcome, UpsProvider, UpsState};

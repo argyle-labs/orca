@@ -1020,7 +1020,7 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
     }
     for cmd in [
         dispatch::tunnel_surface::tunnel_cli_command(),
-        dispatch::tunnel_provider_surface::tunnel_provider_cli_command(),
+        dispatch::vpn_surface::vpn_cli_command(),
     ] {
         if !existing.contains(cmd.get_name()) {
             root = root.subcommand(cmd);

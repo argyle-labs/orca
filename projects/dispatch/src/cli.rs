@@ -864,13 +864,13 @@ pub async fn dispatch_ups(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Res
 }
 
 /// Dispatch `orca tunnel <list|apply|port-alias-set>` and
-/// `orca tunnel_provider <session|port-forward>`. Mutating ops take their typed
+/// `orca vpn <session|port-forward>`. Mutating ops take their typed
 /// body as `--args JSON`. Returns `None` for any other top subcommand.
 #[allow(clippy::disallowed_types)]
 pub async fn dispatch_tunnel(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Result<()>> {
     use serde_json::{Map, Value};
     let (top, sub) = matches.subcommand()?;
-    if top != "tunnel" && top != "tunnel_provider" {
+    if top != "tunnel" && top != "vpn" {
         return None;
     }
     let ctx = match ctx_with_peer(matches, ctx) {
@@ -884,8 +884,8 @@ pub async fn dispatch_tunnel(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<
         ("tunnel", "list") => "tunnel.list",
         ("tunnel", "apply") => "tunnel.apply",
         ("tunnel", "port-alias-set") => "tunnel.port_alias_set",
-        ("tunnel_provider", "session") => "tunnel_provider.session",
-        ("tunnel_provider", "port-forward") => "tunnel_provider.port_forward",
+        ("vpn", "session") => "vpn.session",
+        ("vpn", "port-forward") => "vpn.port_forward",
         _ => return Some(Err(anyhow::anyhow!("unknown {top} op: {op}"))),
     };
     let mut map = Map::new();

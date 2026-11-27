@@ -464,7 +464,7 @@ pub fn dispatchable(name: &str, args: &Value) -> bool {
         || crate::diagnostics_surface::diagnostics_owns(name)
         || crate::ups_surface::ups_owns(name)
         || crate::tunnel_surface::tunnel_owns(name)
-        || crate::tunnel_provider_surface::tunnel_provider_owns(name)
+        || crate::vpn_surface::vpn_owns(name)
         || args.get(SYSTEM_ID_KEY).is_some()
 }
 
@@ -517,7 +517,7 @@ pub fn mcp_definitions() -> Vec<Value> {
     // The three fixed UPS ops (ups.state / .config / .configure).
     defs.extend(crate::ups_surface::ups_mcp_defs());
     defs.extend(crate::tunnel_surface::tunnel_mcp_defs());
-    defs.extend(crate::tunnel_provider_surface::tunnel_provider_mcp_defs());
+    defs.extend(crate::vpn_surface::vpn_mcp_defs());
     defs
 }
 
@@ -629,7 +629,7 @@ fn core_verb(
 fn fixed_surface_dry_run_ok(name: &str) -> bool {
     (crate::unit_surface::unit_dry_run_ok(name)
         || crate::tunnel_surface::tunnel_dry_run_ok(name)
-        || crate::tunnel_provider_surface::tunnel_provider_dry_run_ok(name))
+        || crate::vpn_surface::vpn_dry_run_ok(name))
         && !dynamic_owns(name)
 }
 
@@ -683,7 +683,7 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
             || crate::diagnostics_surface::diagnostics_owns(name)
             || crate::ups_surface::ups_owns(name)
             || crate::tunnel_surface::tunnel_owns(name)
-            || crate::tunnel_provider_surface::tunnel_provider_owns(name);
+            || crate::vpn_surface::vpn_owns(name);
         if known_here {
             return Err(
                 contract::OrcaError::invalid(format!("{name} does not support dryRun"))
@@ -721,11 +721,7 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
                         Some(result) => result,
                         None => match crate::tunnel_surface::tunnel_dispatch(name, &args).await {
                             Some(result) => result,
-                            None => match crate::tunnel_provider_surface::tunnel_provider_dispatch(
-                                name, &args,
-                            )
-                            .await
-                            {
+                            None => match crate::vpn_surface::vpn_dispatch(name, &args).await {
                                 Some(result) => result,
                                 // Unknown on THIS host — but if the caller named an
                                 // explicit peer, the tool almost certainly lives there
@@ -1587,11 +1583,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dry_run_is_refused_for_a_plugin_tool_shadowing_tunnel_provider_ops() {
+    async fn dry_run_is_refused_for_a_plugin_tool_shadowing_vpn_ops() {
         let _serial = SEEN_TESTS.lock().await;
         install_fake_plugin();
         SHADOW_TUNNEL_SEEN.lock().unwrap().clear();
-        for tool in [SHADOW_TUNNEL_SESSION_TOOL, SHADOW_TUNNEL_PORT_FORWARD_TOOL] {
+        for tool in [SHADOW_VPN_SESSION_TOOL, SHADOW_VPN_PORT_FORWARD_TOOL] {
             let err = dispatch(tool, serde_json::json!({"dryRun": true}), &make_ctx())
                 .await
                 .unwrap_err();
@@ -2154,8 +2150,8 @@ mod tests {
                         return Some(Ok(json!({})));
                     }
                     if name == SHADOW_TUNNEL_TOOL
-                        || name == SHADOW_TUNNEL_SESSION_TOOL
-                        || name == SHADOW_TUNNEL_PORT_FORWARD_TOOL
+                        || name == SHADOW_VPN_SESSION_TOOL
+                        || name == SHADOW_VPN_PORT_FORWARD_TOOL
                     {
                         SHADOW_TUNNEL_SEEN.lock().unwrap().push(args.clone());
                         return Some(Ok(json!({})));
@@ -2181,8 +2177,8 @@ mod tests {
                         json!({ "name": EXPLICIT_OFF_PLUGIN_TOOL, "execute_gated": false }),
                         json!({ "name": READ_OMITTED_PLUGIN_TOOL }),
                         json!({ "name": SHADOW_TUNNEL_TOOL }),
-                        json!({ "name": SHADOW_TUNNEL_SESSION_TOOL }),
-                        json!({ "name": SHADOW_TUNNEL_PORT_FORWARD_TOOL }),
+                        json!({ "name": SHADOW_VPN_SESSION_TOOL }),
+                        json!({ "name": SHADOW_VPN_PORT_FORWARD_TOOL }),
                         json!({ "name": SHADOW_UNIT_TOOL }),
                         json!({
                             "name": OWN_SYSTEM_TOOL,
@@ -2374,8 +2370,8 @@ mod tests {
     static GATED_SEEN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
 
     const SHADOW_TUNNEL_TOOL: &str = "tunnel.apply";
-    const SHADOW_TUNNEL_SESSION_TOOL: &str = "tunnel_provider.session";
-    const SHADOW_TUNNEL_PORT_FORWARD_TOOL: &str = "tunnel_provider.port_forward";
+    const SHADOW_VPN_SESSION_TOOL: &str = "vpn.session";
+    const SHADOW_VPN_PORT_FORWARD_TOOL: &str = "vpn.port_forward";
     static SHADOW_TUNNEL_SEEN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
 
     const SHADOW_UNIT_KIND: &str = "shadow_unit";

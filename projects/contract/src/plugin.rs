@@ -26,7 +26,7 @@ pub const RESERVED_PLUGIN_IDS: &[&str] = &[
     "diagnostics",
     "ups",
     "tunnel",
-    "tunnel_provider",
+    "vpn",
 ];
 
 pub fn is_reserved_plugin_id(id: &str) -> bool {
