@@ -487,16 +487,26 @@ pub fn set_consumer_authorizer(authorizer: Option<ConsumerAuthorizer>) {
 /// enforced here: two providers claiming the same setting on the same unit is
 /// an error, since rotation could not know which one applies the value.
 pub async fn consumers_of(account: &AccountRef) -> Result<Vec<(String, ConsumerDecl)>> {
+    let authorizer = AUTHORIZER
+        .read()
+        .expect("account authorizer poisoned")
+        .clone();
+    consumers_in(&providers(), authorizer.as_ref(), account).await
+}
+
+/// [`consumers_of`] over an explicit provider set and authorizer.
+pub async fn consumers_in(
+    providers: &[Arc<dyn AccountProvider>],
+    authorizer: Option<&ConsumerAuthorizer>,
+    account: &AccountRef,
+) -> Result<Vec<(String, ConsumerDecl)>> {
     let req = ConsumersRequest {
         account: Some(account.clone()),
     };
-    let authorize = AUTHORIZER
-        .read()
-        .expect("account authorizer poisoned")
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("no account consumer authorizer installed"))?;
+    let authorize =
+        authorizer.ok_or_else(|| anyhow::anyhow!("no account consumer authorizer installed"))?;
     let mut out: Vec<(String, ConsumerDecl)> = Vec::new();
-    for p in providers() {
+    for p in providers {
         let declared = p
             .consumers(req.clone())
             .await
@@ -1079,6 +1089,7 @@ mod tests {
 
     #[tokio::test]
     async fn account_register_replace_deregister() {
+        let _guard = GLOBALS.lock().await;
         register_provider(Arc::new(FakeOwner {
             name: "account-test".into(),
         }));
@@ -1562,8 +1573,11 @@ mod tests {
         assert_eq!(some.as_array().unwrap().len(), 1);
     }
 
-    #[tokio::test]
-    async fn account_consumers_of_enforces_one_declarer_per_setting() {
+    /// Serializes the tests that touch the process-global registry or
+    /// authorizer; everything else uses [`consumers_in`] with local state.
+    static GLOBALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn claim_fixtures() -> (AccountRef, ConsumerDecl, ConsumerDecl) {
         let unit = AccountRef {
             unit_id: "0192f0a0-0000-7000-8000-0000000000a1".parse().unwrap(),
             account: nm("api"),
@@ -1583,44 +1597,73 @@ mod tests {
             setting: nm("key"),
             capabilities: ConsumerCapabilities::default(),
         };
-        register_provider(Arc::new(Claimer {
-            name: "account-claim-a",
-            holdings: vec![held.clone(), held.clone(), stray],
-        }));
-        set_consumer_authorizer(None);
-        let err = consumers_of(&unit).await.unwrap_err().to_string();
+        (unit, held, stray)
+    }
+
+    fn claimer(name: &'static str, holdings: Vec<ConsumerDecl>) -> Arc<dyn AccountProvider> {
+        Arc::new(Claimer { name, holdings })
+    }
+
+    #[tokio::test]
+    async fn account_consumers_in_enforces_one_declarer_per_setting() {
+        let (unit, held, stray) = claim_fixtures();
+        let a = claimer("account-claim-a", vec![held.clone(), stray]);
+        let only_consumer: ConsumerAuthorizer =
+            Arc::new(|_: &str, unit: &Id| unit.as_str() == CONSUMER);
+
+        let err = consumers_in(std::slice::from_ref(&a), None, &unit)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no account consumer authorizer"), "{err}");
 
-        set_consumer_authorizer(Some(Arc::new(|name: &str, _: &Id| {
-            name != "account-claim-a"
-        })));
-        assert!(consumers_of(&unit).await.unwrap().is_empty());
+        let deny_a: ConsumerAuthorizer = Arc::new(|name: &str, _: &Id| name != "account-claim-a");
+        assert!(
+            consumers_in(std::slice::from_ref(&a), Some(&deny_a), &unit)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
-        set_consumer_authorizer(Some(Arc::new(|_: &str, unit: &Id| {
-            unit.as_str() == CONSUMER
-        })));
-        let got = consumers_of(&unit).await.unwrap();
+        let got = consumers_in(std::slice::from_ref(&a), Some(&only_consumer), &unit)
+            .await
+            .unwrap();
         assert_eq!(got, vec![("account-claim-a".to_string(), held.clone())]);
 
-        register_provider(Arc::new(Claimer {
-            name: "account-claim-b",
-            holdings: vec![held],
-        }));
-        let err = consumers_of(&unit).await.unwrap_err().to_string();
+        let b = claimer("account-claim-b", vec![held]);
+        let err = consumers_in(&[a.clone(), b], Some(&only_consumer), &unit)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("account-claim-a") && err.contains("account-claim-b"),
             "{err}"
         );
-        deregister_provider("account-claim-b");
 
-        register_provider(Arc::new(BrokenClaimer));
-        let err = format!("{:#}", consumers_of(&unit).await.unwrap_err());
+        let broken: Arc<dyn AccountProvider> = Arc::new(BrokenClaimer);
+        let err = format!(
+            "{:#}",
+            consumers_in(&[a, broken], Some(&only_consumer), &unit)
+                .await
+                .unwrap_err()
+        );
         assert!(
             err.contains("account-claim-broken") && err.contains("settings file unreadable"),
             "{err}"
         );
-        deregister_provider("account-claim-broken");
-        deregister_provider("account-claim-a");
+    }
+
+    #[tokio::test]
+    async fn account_consumers_of_reads_the_global_registry_and_authorizer() {
+        let _guard = GLOBALS.lock().await;
+        let (unit, held, _) = claim_fixtures();
+        register_provider(claimer("account-claim-global", vec![held.clone()]));
+        set_consumer_authorizer(None);
+        assert!(consumers_of(&unit).await.is_err());
+        set_consumer_authorizer(Some(Arc::new(|_: &str, _: &Id| true)));
+        let got = consumers_of(&unit).await.unwrap();
+        assert_eq!(got, vec![("account-claim-global".to_string(), held)]);
+        deregister_provider("account-claim-global");
         set_consumer_authorizer(None);
     }
 
