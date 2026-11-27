@@ -2688,6 +2688,19 @@ mod loader_tests {
     }
 
     #[test]
+    fn account_name_is_owned_by_its_plugin() {
+        assert_eq!(name_scope("account"), NameScope::Own);
+        check_backend_owner("acct-a", &def("account", "acct-a")).expect("own name allowed");
+        let err = check_backend_owner("acct-b", &def("account", "acct-a"))
+            .expect_err("second plugin refused")
+            .to_string();
+        assert!(
+            err.contains("acct-b") && err.contains("account") && err.contains("acct-a"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn no_two_plugins_share_a_domain_name_pair() {
         for domain in BUILTIN_DOMAINS {
             let mut names = vec!["dup-a".to_string()];
