@@ -20,6 +20,7 @@
 
 use crate::identity;
 use crate::seam::{AddRequest, LibraryServer, QualityPolicy, Requester, Scope};
+use crate::search_driver::Budget;
 use crate::{MediaError, MediaIdentity, MediaType, RequestStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -117,10 +118,24 @@ pub fn compute_gaps(expected: &[MediaIdentity], owned: &[MediaIdentity]) -> Vec<
 
 // ── Report + driver ───────────────────────────────────────────────────────────
 
+/// Why a gap was not requested this run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    BudgetExhausted,
+    /// The requester reported it cannot request this gap; `error` says why.
+    Unrequestable,
+    /// The run's deadline passed before this gap was requested.
+    DeadlineReached,
+}
+
 /// What one gap-add attempt did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GapAction {
     pub identity: MediaIdentity,
+    /// Whether the want-request was issued; false on a dry run or when skipped.
+    #[serde(default)]
+    pub sent: bool,
     /// Present when we actually issued a want-request (not a dry run).
     #[serde(default)]
     pub status: Option<RequestStatus>,
@@ -128,10 +143,24 @@ pub struct GapAction {
     /// aborting the whole reconcile.
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub skipped: Option<SkipReason>,
 }
 
-/// The outcome of a series reconcile: the counts, the computed gaps, and — when
-/// not a dry run — what each want-request did.
+impl GapAction {
+    fn unsent(gap: &MediaIdentity, skipped: Option<SkipReason>, error: Option<String>) -> Self {
+        GapAction {
+            identity: gap.clone(),
+            sent: false,
+            status: None,
+            error,
+            skipped,
+        }
+    }
+}
+
+/// The outcome of a series reconcile: the counts, the computed gaps, and what
+/// each want-request did (or would do, on a dry run).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconcileOutcome {
     pub media_type: MediaType,
@@ -141,15 +170,21 @@ pub struct ReconcileOutcome {
     pub owned: usize,
     /// Missing volumes (expected − owned), in expected order.
     pub gaps: Vec<MediaIdentity>,
-    /// Empty when `dry_run`; otherwise one entry per gap.
+    /// One entry per gap; on a dry run nothing is `sent`.
     #[serde(default)]
     pub actions: Vec<GapAction>,
+    /// Gaps the run's [`Budget`] covered (requested, or would be on a dry run).
+    #[serde(default)]
+    pub selected: usize,
+    /// Requestable gaps left for a later run once the budget ran out.
+    #[serde(default)]
+    pub remaining: usize,
     pub dry_run: bool,
 }
 
 /// Reconcile one canonical/series expected set against a library server +
 /// requester: read owned state for `scope`, diff, and (unless `dry_run`) emit a
-/// want-request for every gap under `quality`.
+/// want-request for each gap under `quality`, within `budget`.
 ///
 /// Add failures are captured per-gap in the outcome rather than aborting, so one
 /// bad volume never blocks the rest of the series. Reading owned state is the
@@ -160,34 +195,76 @@ pub async fn reconcile_series(
     requester: &dyn Requester,
     quality: &QualityPolicy,
     scope: &Scope,
+    budget: &mut Budget,
     dry_run: bool,
 ) -> Result<ReconcileOutcome, MediaError> {
     let state = server.library_state(scope).await?;
     let owned: Vec<MediaIdentity> = state.items.into_iter().map(|e| e.identity).collect();
     let gaps = compute_gaps(expected, &owned);
+    let left = budget.left();
+    let mut requestable = 0;
+    let mut selected = 0;
+    let mut deadline_hit = false;
 
-    let mut actions = Vec::new();
-    if !dry_run {
-        for gap in &gaps {
-            let req = AddRequest {
-                identity: gap.clone(),
-                quality: quality.clone(),
-                search_now: true,
-            };
-            match requester.add(&req).await {
-                Ok(status) => actions.push(GapAction {
-                    identity: gap.clone(),
-                    status: Some(status),
-                    error: None,
-                }),
-                Err(e) => actions.push(GapAction {
-                    identity: gap.clone(),
-                    status: None,
-                    error: Some(e.to_string()),
-                }),
-            }
+    let mut actions = Vec::with_capacity(gaps.len());
+    for gap in &gaps {
+        if let Some(why) = requester.unrequestable(gap) {
+            actions.push(GapAction::unsent(
+                gap,
+                Some(SkipReason::Unrequestable),
+                Some(why),
+            ));
+            continue;
         }
+        requestable += 1;
+        if requestable > left {
+            actions.push(GapAction::unsent(
+                gap,
+                Some(SkipReason::BudgetExhausted),
+                None,
+            ));
+            continue;
+        }
+        if dry_run {
+            selected += 1;
+            actions.push(GapAction::unsent(gap, None, None));
+            continue;
+        }
+        if !deadline_hit && !budget.expired() {
+            budget.pace().await;
+        }
+        deadline_hit = deadline_hit || budget.expired();
+        if deadline_hit {
+            actions.push(GapAction::unsent(
+                gap,
+                Some(SkipReason::DeadlineReached),
+                None,
+            ));
+            continue;
+        }
+        budget.spend(1);
+        selected += 1;
+        let req = AddRequest {
+            identity: gap.clone(),
+            quality: quality.clone(),
+            search_now: true,
+        };
+        let (status, error) = match requester.add(&req).await {
+            Ok(status) => (Some(status), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        actions.push(GapAction {
+            identity: gap.clone(),
+            sent: true,
+            status,
+            error,
+            skipped: None,
+        });
     }
+    if dry_run {
+        budget.spend(selected);
+    }
+    let remaining = requestable - selected;
 
     Ok(ReconcileOutcome {
         media_type: requester.media_type(),
@@ -195,8 +272,10 @@ pub async fn reconcile_series(
         requester: requester.name().to_string(),
         expected: expected.len(),
         owned: owned.len(),
-        gaps,
         actions,
+        selected,
+        remaining,
+        gaps,
         dry_run,
     })
 }
@@ -205,6 +284,7 @@ pub async fn reconcile_series(
 mod tests {
     use super::*;
     use crate::seam::{Collection, LibraryEntry, LibraryState, Metadata, RequestState};
+    use crate::search_driver::SearchPolicy;
     use crate::{ExternalId, MediaMutation, SeriesRef};
     use derive::orca_async;
 
@@ -331,6 +411,16 @@ mod tests {
 
     struct Req {
         added: std::sync::Mutex<Vec<String>>,
+        fail: Option<&'static str>,
+        unrequestable: Option<&'static str>,
+    }
+
+    fn req() -> Req {
+        Req {
+            added: std::sync::Mutex::new(vec![]),
+            fail: None,
+            unrequestable: None,
+        }
     }
     #[orca_async]
     impl Requester for Req {
@@ -342,12 +432,18 @@ mod tests {
         }
         async fn add(&self, req: &AddRequest) -> Result<RequestStatus, MediaError> {
             self.added.lock().unwrap().push(req.identity.title.clone());
+            if self.fail == Some(req.identity.title.as_str()) {
+                return Err(MediaError::Transport("unqueueable".into()));
+            }
             Ok(RequestStatus {
                 identity: req.identity.clone(),
                 state: RequestState::Wanted,
                 active_release: None,
                 detail: None,
             })
+        }
+        fn unrequestable(&self, id: &MediaIdentity) -> Option<String> {
+            (self.unrequestable == Some(id.title.as_str())).then(|| "no backend id".into())
         }
         async fn search(&self, _id: &MediaIdentity) -> Result<Vec<crate::SearchHit>, MediaError> {
             Ok(vec![])
@@ -380,21 +476,20 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn driver_emits_want_requests_only_for_gaps() {
         let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
         let srv = Srv {
             owned: vec![isbn("B", "2")],
         };
-        let req = Req {
-            added: std::sync::Mutex::new(vec![]),
-        };
+        let req = req();
         let out = reconcile_series(
             &expected,
             &srv,
             &req,
             &QualityPolicy::default(),
             &Scope::All,
+            &mut Budget::unlimited(&SearchPolicy::default()),
             false,
         )
         .await
@@ -404,30 +499,285 @@ mod tests {
         assert_eq!(out.owned, 1);
         assert_eq!(out.gaps.len(), 2);
         assert_eq!(out.actions.len(), 2);
-        assert!(out.actions.iter().all(|a| a.error.is_none()));
+        assert!(out.actions.iter().all(|a| a.sent && a.error.is_none()));
         let added = req.added.lock().unwrap().clone();
         assert_eq!(added, vec!["A".to_string(), "C".to_string()]);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dry_run_computes_gaps_but_emits_nothing() {
         let expected = vec![isbn("A", "1"), isbn("B", "2")];
         let srv = Srv { owned: vec![] };
-        let req = Req {
-            added: std::sync::Mutex::new(vec![]),
-        };
+        let req = req();
         let out = reconcile_series(
             &expected,
             &srv,
             &req,
             &QualityPolicy::default(),
             &Scope::All,
+            &mut Budget::unlimited(&SearchPolicy::default()),
             true,
         )
         .await
         .unwrap();
         assert_eq!(out.gaps.len(), 2);
-        assert!(out.actions.is_empty());
+        assert_eq!(out.actions.len(), 2);
+        assert!(out.actions.iter().all(|a| !a.sent && a.skipped.is_none()));
         assert!(req.added.lock().unwrap().is_empty());
+    }
+
+    fn paced(pace: std::time::Duration) -> SearchPolicy {
+        SearchPolicy {
+            request_pace_ms: pace.as_millis() as u64,
+            ..SearchPolicy::default()
+        }
+    }
+
+    async fn run(
+        expected: &[MediaIdentity],
+        req: &Req,
+        budget: &mut Budget,
+        dry_run: bool,
+    ) -> ReconcileOutcome {
+        reconcile_series(
+            expected,
+            &Srv { owned: vec![] },
+            req,
+            &QualityPolicy::default(),
+            &Scope::All,
+            budget,
+            dry_run,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[test]
+    fn budget_rejects_a_zero_limit() {
+        let err = Budget::new(0, &SearchPolicy::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("limit"), "{err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn limit_spans_series_and_reports_remaining() {
+        let req = req();
+        let mut budget = Budget::new(4, &SearchPolicy::default()).unwrap();
+        let mut left = vec![];
+        for s in ["X", "Y", "Z"] {
+            let expected: Vec<_> = (1..=3)
+                .map(|n| isbn(&format!("{s}{n}"), &format!("{s}{n}")))
+                .collect();
+            let out = run(&expected, &req, &mut budget, false).await;
+            let skipped = out
+                .actions
+                .iter()
+                .filter(|a| a.skipped == Some(SkipReason::BudgetExhausted))
+                .count();
+            assert_eq!(skipped, out.remaining);
+            left.push(out.remaining);
+        }
+        assert_eq!(left, vec![0, 2, 3]);
+        assert_eq!(budget.used(), 4);
+        assert_eq!(req.added.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dry_run_spends_budget_without_requesting() {
+        let req = req();
+        let mut budget = Budget::new(2, &SearchPolicy::default()).unwrap();
+        let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
+        let out = run(&expected, &req, &mut budget, true).await;
+        assert_eq!((out.selected, out.remaining), (2, 1));
+        let skipped: Vec<_> = out.actions.iter().map(|a| a.skipped).collect();
+        assert_eq!(skipped, vec![None, None, Some(SkipReason::BudgetExhausted)]);
+        assert!(out.actions.iter().all(|a| !a.sent));
+        assert!(req.added.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_request_is_reported_and_the_run_continues() {
+        let req = Req {
+            fail: Some("B"),
+            ..req()
+        };
+        let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
+        let out = run(
+            &expected,
+            &req,
+            &mut Budget::unlimited(&SearchPolicy::default()),
+            false,
+        )
+        .await;
+        let failed: Vec<_> = out
+            .actions
+            .iter()
+            .filter(|a| a.error.is_some())
+            .map(|a| a.identity.title.as_str())
+            .collect();
+        assert_eq!(failed, vec!["B"]);
+        assert_eq!(req.added.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn outcome_without_budget_fields_still_deserializes() {
+        let out: ReconcileOutcome = serde_json::from_str(
+            r#"{"media_type":"comics","server":"s","requester":"r","expected":1,"owned":0,"gaps":[],"dry_run":true}"#,
+        )
+        .unwrap();
+        assert_eq!((out.selected, out.remaining), (0, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pace_is_clamped_to_the_minimum() {
+        let mut budget = Budget::new(2, &paced(std::time::Duration::ZERO)).unwrap();
+        budget.spend(1);
+        let start = tokio::time::Instant::now();
+        budget.pace().await;
+        assert_eq!(start.elapsed(), crate::search_driver::MIN_REQUEST_PACE);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pacing_sleeps_between_requests_across_series_not_before_the_first() {
+        let req = req();
+        let pace = std::time::Duration::from_secs(30);
+        let mut budget = Budget::new(100, &paced(pace)).unwrap();
+        let start = tokio::time::Instant::now();
+        run(&[isbn("A", "1"), isbn("B", "2")], &req, &mut budget, false).await;
+        run(&[isbn("C", "3")], &req, &mut budget, false).await;
+        assert_eq!(req.added.lock().unwrap().len(), 3);
+        assert_eq!(start.elapsed(), pace * 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dry_run_never_sleeps() {
+        let req = req();
+        let mut budget = Budget::new(100, &paced(std::time::Duration::from_secs(30))).unwrap();
+        let start = tokio::time::Instant::now();
+        run(&[isbn("A", "1"), isbn("B", "2")], &req, &mut budget, true).await;
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrequestable_gaps_are_reported_without_spending_or_pacing() {
+        let req = Req {
+            unrequestable: Some("A"),
+            ..req()
+        };
+        let pace = std::time::Duration::from_secs(30);
+        let mut budget = Budget::new(1, &paced(pace)).unwrap();
+        let start = tokio::time::Instant::now();
+        let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
+        let out = run(&expected, &req, &mut budget, false).await;
+        assert_eq!(*req.added.lock().unwrap(), vec!["B".to_string()]);
+        assert_eq!((out.selected, out.remaining), (1, 1));
+        assert_eq!(budget.used(), 1);
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+        let a = out
+            .actions
+            .iter()
+            .find(|a| a.identity.title == "A")
+            .unwrap();
+        assert_eq!(a.skipped, Some(SkipReason::Unrequestable));
+        assert_eq!(a.error.as_deref(), Some("no backend id"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_stops_requesting_and_reports_the_rest() {
+        let req = req();
+        let pace = std::time::Duration::from_secs(30);
+        let start = tokio::time::Instant::now();
+        let mut budget = Budget::new(3, &paced(pace))
+            .unwrap()
+            .with_deadline(pace + pace / 2);
+        let expected: Vec<_> = ["A", "B", "C", "D"].iter().map(|t| isbn(t, t)).collect();
+        let out = run(&expected, &req, &mut budget, false).await;
+        assert_eq!(start.elapsed(), pace + pace / 2);
+        assert_eq!(
+            *req.added.lock().unwrap(),
+            vec!["A".to_string(), "B".to_string()]
+        );
+        assert_eq!((out.selected, out.remaining), (2, 2));
+        assert_eq!(budget.used(), 2);
+        let skipped: Vec<_> = out.actions.iter().map(|a| a.skipped).collect();
+        assert_eq!(
+            skipped,
+            vec![
+                None,
+                None,
+                Some(SkipReason::DeadlineReached),
+                Some(SkipReason::BudgetExhausted)
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn actions_follow_gap_order() {
+        let req = Req {
+            unrequestable: Some("A"),
+            ..req()
+        };
+        let mut budget = Budget::new(1, &SearchPolicy::default()).unwrap();
+        let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
+        let out = run(&expected, &req, &mut budget, false).await;
+        let rows: Vec<_> = out
+            .actions
+            .iter()
+            .map(|a| (a.identity.title.as_str(), a.skipped))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("A", Some(SkipReason::Unrequestable)),
+                ("B", None),
+                ("C", Some(SkipReason::BudgetExhausted)),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrequestable_after_cap_or_deadline_is_still_unrequestable() {
+        let req = Req {
+            unrequestable: Some("X"),
+            ..req()
+        };
+        let pace = std::time::Duration::from_secs(30);
+        let skips =
+            |out: &ReconcileOutcome| -> Vec<_> { out.actions.iter().map(|a| a.skipped).collect() };
+
+        let mut capped = Budget::new(1, &paced(pace)).unwrap();
+        let start = tokio::time::Instant::now();
+        let gaps: Vec<_> = ["A", "B", "X"].iter().map(|t| isbn(t, t)).collect();
+        let out = run(&gaps, &req, &mut capped, false).await;
+        assert_eq!(
+            skips(&out),
+            vec![
+                None,
+                Some(SkipReason::BudgetExhausted),
+                Some(SkipReason::Unrequestable)
+            ]
+        );
+        assert_eq!(capped.used(), 1);
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+
+        let mut timed = Budget::new(10, &paced(pace))
+            .unwrap()
+            .with_deadline(pace + pace / 2);
+        let start = tokio::time::Instant::now();
+        let gaps: Vec<_> = ["C", "D", "E", "X"].iter().map(|t| isbn(t, t)).collect();
+        let out = run(&gaps, &req, &mut timed, false).await;
+        assert_eq!(
+            skips(&out),
+            vec![
+                None,
+                None,
+                Some(SkipReason::DeadlineReached),
+                Some(SkipReason::Unrequestable)
+            ]
+        );
+        assert_eq!(timed.used(), 2);
+        assert_eq!(start.elapsed(), pace + pace / 2);
+        assert!(!req.added.lock().unwrap().contains(&"X".to_string()));
     }
 }

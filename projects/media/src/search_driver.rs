@@ -12,7 +12,7 @@
 //! tight loops: [`RateState`] carries the last-search time and a 429 cooldown,
 //! and the scheduled reconcile (#503) drives this on a throttle-safe cadence.
 
-use crate::MediaIdentity;
+use crate::{MediaError, MediaIdentity};
 use serde::{Deserialize, Serialize};
 
 /// Central pacing policy — owned by orca, not hand-managed.
@@ -25,6 +25,13 @@ pub struct SearchPolicy {
     pub cooldown_secs: u64,
     /// Prefer ONE global search over per-title storms when the backend can.
     pub prefer_global: bool,
+    /// Minimum milliseconds between individual requests within one run.
+    #[serde(default = "default_request_pace_ms")]
+    pub request_pace_ms: u64,
+}
+
+fn default_request_pace_ms() -> u64 {
+    2000
 }
 
 impl Default for SearchPolicy {
@@ -33,7 +40,87 @@ impl Default for SearchPolicy {
             min_interval_secs: 300, // 5 min between bursts
             cooldown_secs: 45,      // > Prowlarr's ~30s auto-block
             prefer_global: true,
+            request_pace_ms: default_request_pace_ms(),
         }
+    }
+}
+
+/// Floor on [`SearchPolicy::request_pace_ms`]: each request is an indexer
+/// search, and unpaced runs trip indexer rate limits.
+pub const MIN_REQUEST_PACE: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn request_pace(policy: &SearchPolicy) -> std::time::Duration {
+    std::time::Duration::from_millis(policy.request_pace_ms).max(MIN_REQUEST_PACE)
+}
+
+/// Per-run request budget: caps how many requests one run issues and paces
+/// consecutive requests. One budget spans every series a run reconciles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Budget {
+    limit: usize,
+    pace: std::time::Duration,
+    deadline: Option<tokio::time::Instant>,
+    used: usize,
+}
+
+impl Budget {
+    pub fn new(limit: usize, policy: &SearchPolicy) -> Result<Self, MediaError> {
+        if limit == 0 {
+            return Err(MediaError::Other("limit must be at least 1".into()));
+        }
+        Ok(Budget {
+            limit,
+            pace: request_pace(policy),
+            deadline: None,
+            used: 0,
+        })
+    }
+
+    pub fn unlimited(policy: &SearchPolicy) -> Self {
+        Budget {
+            limit: usize::MAX,
+            pace: request_pace(policy),
+            deadline: None,
+            used: 0,
+        }
+    }
+
+    /// Stops the run from issuing requests once `within` has elapsed from now.
+    pub fn with_deadline(mut self, within: std::time::Duration) -> Self {
+        self.deadline = Some(tokio::time::Instant::now() + within);
+        self
+    }
+
+    pub fn expired(&self) -> bool {
+        self.deadline
+            .is_some_and(|at| tokio::time::Instant::now() >= at)
+    }
+
+    pub fn used(&self) -> usize {
+        self.used
+    }
+
+    pub fn left(&self) -> usize {
+        self.limit.saturating_sub(self.used)
+    }
+
+    /// How many of `wanted` this budget still covers.
+    pub fn take(&self, wanted: usize) -> usize {
+        wanted.min(self.left())
+    }
+
+    pub(crate) fn spend(&mut self, n: usize) {
+        self.used += n;
+    }
+
+    /// Waits out the pace before a request; never before the run's first.
+    /// Never sleeps past the deadline.
+    pub(crate) async fn pace(&self) {
+        if self.used == 0 {
+            return;
+        }
+        let wake = tokio::time::Instant::now() + self.pace;
+        tokio::time::sleep_until(self.deadline.map_or(wake, |at| wake.min(at))).await;
     }
 }
 
@@ -217,5 +304,14 @@ mod tests {
                 reason: WaitReason::Throttled
             }
         );
+    }
+
+    #[test]
+    fn request_pace_defaults_when_absent_from_stored_policy() {
+        let p: SearchPolicy = serde_json::from_str(
+            r#"{"min_interval_secs":300,"cooldown_secs":45,"prefer_global":true}"#,
+        )
+        .unwrap();
+        assert_eq!(p, SearchPolicy::default());
     }
 }
