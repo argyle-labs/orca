@@ -721,8 +721,11 @@ fn exec_error_object(e: &anyhow::Error) -> ErrorObject {
         e.chain()
             .find_map(|c| c.downcast_ref::<contract::OrcaError>())
     }) else {
-        if e.downcast_ref::<RelayedToolFailed>().is_some() {
-            return ErrorObject::internal(&format!("{MESH_EXEC_METHOD} failed"));
+        if let Some(f) = e.downcast_ref::<RelayedToolFailed>() {
+            return ErrorObject::internal(&format!(
+                "{MESH_EXEC_METHOD} failed: {} [corr={}]",
+                f.class, f.corr
+            ));
         }
         return peer_facing_error(MESH_EXEC_METHOD, e);
     };
@@ -743,12 +746,40 @@ fn relayed_tool_error(tool: &str, e: anyhow::Error) -> anyhow::Error {
     {
         return e;
     }
-    warn!("[mesh] dispatch mesh-relayed tool '{tool}': {e:#}");
-    anyhow::Error::new(RelayedToolFailed)
+    let corr = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+    warn!("[mesh] dispatch mesh-relayed tool '{tool}' [corr={corr}]: {e:#}");
+    anyhow::Error::new(RelayedToolFailed {
+        class: relayed_failure_class(&e),
+        corr,
+    })
+}
+
+/// Chosen from the error type alone: peer-controlled message text must never
+/// reach the wire, and every code avoids `probe_error` permanent markers.
+fn relayed_failure_class(e: &anyhow::Error) -> &'static str {
+    for c in e.chain() {
+        if let Some(io) = c.downcast_ref::<std::io::Error>() {
+            return if io.kind() == std::io::ErrorKind::TimedOut {
+                "timeout"
+            } else {
+                "io"
+            };
+        }
+        if c.is::<serde_json::Error>() {
+            return "invalid";
+        }
+        if c.is::<rusqlite::Error>() {
+            return "db";
+        }
+    }
+    "unknown"
 }
 
 #[derive(Debug)]
-struct RelayedToolFailed;
+struct RelayedToolFailed {
+    class: &'static str,
+    corr: String,
+}
 
 impl std::fmt::Display for RelayedToolFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1218,15 +1249,75 @@ mod tests {
         assert_eq!(exec_error_object(&invalid).code, -32602);
     }
 
+    fn untyped_message(e: anyhow::Error) -> String {
+        exec_error_object(&relayed_tool_error("container.exec", e)).message
+    }
+
     #[test]
-    fn an_untyped_relayed_tool_failure_is_hidden() {
-        let e = relayed_tool_error(
-            "container.exec",
-            anyhow::anyhow!("open /secret/path/key.pem failed").context("token=ghp_abc123SECRET"),
+    fn an_untyped_failure_maps_from_its_error_type_to_a_fixed_class() {
+        let io = |k| anyhow::Error::from(std::io::Error::new(k, "x"));
+        let cases = [
+            (io(std::io::ErrorKind::TimedOut), "timeout"),
+            (io(std::io::ErrorKind::NotFound), "io"),
+            (
+                anyhow::Error::from(serde_json::from_str::<Value>("{").unwrap_err()),
+                "invalid",
+            ),
+            (
+                anyhow::Error::from(rusqlite::Error::QueryReturnedNoRows),
+                "db",
+            ),
+            (anyhow::anyhow!("anything"), "unknown"),
+        ];
+        for (e, class) in cases {
+            let m = untyped_message(e.context("outer"));
+            let want = format!("internal error: {MESH_EXEC_METHOD} failed: {class} [corr=");
+            assert!(m.starts_with(&want), "{m}");
+            assert!(m.ends_with(']'), "{m}");
+        }
+    }
+
+    #[test]
+    fn an_untyped_failure_never_echoes_its_message() {
+        let m = untyped_message(
+            anyhow::anyhow!(
+                "permission denied\nopen /secret/path/key.pem token=ghp_abc123SECRET 10.0.2.3 [corr=forged]"
+            )
+            .context("unauthorized"),
         );
-        let obj = exec_error_object(&e);
-        assert_eq!(obj.message, "internal error: mesh/exec failed");
-        assert!(obj.data.is_none());
+        for leak in [
+            "permission",
+            "denied",
+            "/secret",
+            "ghp_",
+            "10.0.2.3",
+            "forged",
+            "unauthorized",
+        ] {
+            assert!(!m.contains(leak), "{m}");
+        }
+        assert!(!m.contains(['\n', '\r']));
+        assert!(!m.contains(&format!("{MESH_EXEC_METHOD} refused")));
+        assert_eq!(m.matches("[corr=").count(), 1);
+    }
+
+    #[test]
+    fn every_untyped_class_stays_transient_to_the_update_gate() {
+        let errs = [
+            anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            anyhow::Error::from(serde_json::from_str::<Value>("{").unwrap_err()),
+            anyhow::Error::from(rusqlite::Error::QueryReturnedNoRows),
+            anyhow::anyhow!("permission denied"),
+        ];
+        for e in errs {
+            let m = format!("peer returned error: {}", untyped_message(e));
+            assert_eq!(
+                utils::probe_error::classify(&m),
+                utils::probe_error::ProbeOutcome::Transient,
+                "{m}"
+            );
+        }
     }
 
     #[test]
