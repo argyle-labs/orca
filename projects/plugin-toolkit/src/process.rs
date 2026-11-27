@@ -1280,25 +1280,52 @@ mod tests {
             out = &mut run => panic!("run ended before the holder reported: {out:?}"),
             pid = dir.pid() => pid,
         };
-        let out = loop {
-            tokio::select! {
-                biased;
-                out = &mut run => break out,
-                () = tokio::time::sleep(Duration::from_millis(10)) => {}
-            }
-            let now = tokio::time::Instant::now();
-            if leader_exited(leader as u32).unwrap() && now < deadline {
-                tokio::time::sleep_until(deadline + Duration::from_secs(1)).await;
-                unsafe { libc::kill(holder, libc::SIGKILL) };
-            }
-            assert!(
-                now < deadline + Duration::from_secs(600),
-                "drain never ended"
-            );
+        let leader_gone = tokio::task::spawn_blocking(move || block_until_exited(leader));
+        tokio::select! {
+            biased;
+            out = &mut run => panic!("run ended before the leader exited: {out:?}"),
+            gone = leader_gone => gone.unwrap(),
         };
+        let (release_clock, clock_held) = std::sync::mpsc::channel::<()>();
+        let kill_holder_after_deadline = async {
+            tokio::time::sleep_until(deadline + Duration::from_secs(1)).await;
+            unsafe { libc::kill(holder, libc::SIGKILL) };
+            drop(tokio::task::spawn_blocking(move || clock_held.recv()));
+            std::future::pending::<()>().await
+        };
+        let out = tokio::select! {
+            biased;
+            out = &mut run => out,
+            () = kill_holder_after_deadline => unreachable!(),
+        };
+        drop(release_clock);
+        assert!(tokio::time::Instant::now() > deadline);
         let out = out.unwrap().expect("leader exited before the deadline");
         assert!(out.status.success);
         assert_eq!(out.stdout, b"hi\n");
+    }
+
+    #[cfg(unix)]
+    fn block_until_exited(pid: libc::pid_t) {
+        loop {
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            if rc == 0 {
+                return;
+            }
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::ECHILD) => return,
+                e => panic!("waitid failed: {e:?}"),
+            }
+        }
     }
 
     #[tokio::test]
