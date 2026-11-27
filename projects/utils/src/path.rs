@@ -45,7 +45,10 @@ pub fn resolve_bin(
     well_known: &[&Path],
 ) -> Result<std::path::PathBuf, Vec<String>> {
     let mut tried = Vec::new();
-    if let Some(explicit) = override_bin.filter(|p| !p.as_os_str().is_empty()) {
+    let override_bin = override_bin
+        .map(|p| p.to_str().map_or(p, |s| Path::new(s.trim())))
+        .filter(|p| !p.as_os_str().is_empty());
+    if let Some(explicit) = override_bin {
         if is_executable_file(explicit) {
             return Ok(explicit.to_path_buf());
         }
@@ -259,6 +262,18 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, vec!["/nope/not/op".to_string()]);
+    }
+
+    #[test]
+    fn resolve_bin_trims_the_override() {
+        let got = resolve_bin("op", Some(Path::new("  /bin/sh\n")), None, &absent());
+        assert_eq!(got.unwrap(), Path::new("/bin/sh"));
+    }
+
+    #[test]
+    fn resolve_bin_blank_override_is_unset() {
+        let got = resolve_bin("sh", Some(Path::new(" \t ")), None, &[Path::new("/bin/sh")]);
+        assert_eq!(got.unwrap(), Path::new("/bin/sh"));
     }
 
     #[test]
