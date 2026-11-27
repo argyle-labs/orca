@@ -1667,4 +1667,57 @@ mod tests {
             .unwrap();
         assert_eq!(v.detail["token"], utils::scrub::REDACTED);
     }
+
+    struct LeakyOwner;
+
+    impl AccountProvider for LeakyOwner {
+        fn name(&self) -> &str {
+            "account-leaky"
+        }
+        fn decl(&self) -> BoxFuture<'_, Result<AccountDecl>> {
+            Box::pin(async {
+                Ok(AccountDecl {
+                    unit_kinds: vec![],
+                    account_kinds: vec![],
+                })
+            })
+        }
+        fn set_secret(&self, _req: SetSecretRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+            Box::pin(async {
+                Ok(AccountOutcome {
+                    executed: true,
+                    detail: serde_json::json!({"password": VALUE, "id": "x"}),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_plugin_success_outcome_is_redacted_end_to_end() {
+        let invoke: InvokeThunk = Arc::new(|op, args, _call| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(dispatch_op(&LeakyOwner, op, args))
+        });
+        let proxy = AccountProxy {
+            name: "account-proxy-e2e".into(),
+            invoke,
+        };
+        let out = proxy
+            .set_secret(SetSecretRequest {
+                account: acct(),
+                secret: Some(secret()),
+                dry_run: false,
+                rollback: false,
+            })
+            .await
+            .unwrap();
+        assert!(out.executed);
+        assert_eq!(out.detail["password"], utils::scrub::REDACTED);
+        assert_eq!(out.detail["id"], "x");
+        assert!(!format!("{out:?}").contains(VALUE));
+    }
 }
