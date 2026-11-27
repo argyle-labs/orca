@@ -805,12 +805,6 @@ mod tests {
 
     use super::*;
 
-    /// Serializes tests that repoint the process-global `ORCA_HOME`/`ORCA_DB_PATH`
-    /// (the `resolve_host_operator` session tests) so the threaded `cargo test`
-    /// hook can't race them (nextest isolates per process). Server has no
-    /// `serial_test` dep, so a local lock is used.
-    static ORCA_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn err(msg: &str) -> Result<Option<String>, std::io::Error> {
         Err(std::io::Error::other(msg))
     }
@@ -1216,7 +1210,7 @@ mod tests {
 
     #[test]
     fn resolve_host_operator_none_when_session_file_missing() {
-        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home_guard = crate::test_env::lock_orca_env();
         // With ORCA_HOME pointed at an empty dir there is no `session` file, so
         // `std::fs::read_to_string` fails and the `?` short-circuits to None —
         // no ambient operator is fabricated from mere local state.
@@ -1237,7 +1231,7 @@ mod tests {
 
     #[test]
     fn resolve_host_operator_none_for_empty_session_file() {
-        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home_guard = crate::test_env::lock_orca_env();
         // A present-but-blank `session` file trims to empty and must be rejected
         // (never treated as a valid session id) before any db lookup.
         let dir = std::env::temp_dir().join(format!("orca-mcp-test-empty-{}", std::process::id()));
@@ -1258,7 +1252,7 @@ mod tests {
 
     #[test]
     fn resolve_host_operator_none_for_unknown_session_id() {
-        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home_guard = crate::test_env::lock_orca_env();
         // A non-empty but bogus session id is looked up in `sessions` and finds
         // no active row (or the db can't be opened at all), so the resolver
         // still yields None — never an identity for an unrecognized session.
@@ -1282,8 +1276,7 @@ mod tests {
     // through ORCA_DB_PATH (so `db::open_default` targets it) and ORCA_HOME (so
     // `files::ops::orca_home` resolves the `session` file there). Returns the
     // opened connection and the home dir; caller seeds rows and writes the
-    // `session` file. nextest's process-per-test isolation makes the env set
-    // race-free.
+    // `session` file. Caller must hold `crate::test_env::lock_orca_env()`.
     fn wire_isolated_home(tag: &str) -> (db::Conn, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "orca-mcp-host-{tag}-{}-{}",
@@ -1310,7 +1303,7 @@ mod tests {
 
     #[test]
     fn resolve_host_operator_returns_identity_for_active_session() {
-        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home_guard = crate::test_env::lock_orca_env();
         // Happy path: a present `session` file whose id maps to a non-expired,
         // non-revoked row must yield the joined user's identity (user_id /
         // username / role), and the resolver slides the session's expiry.
@@ -1341,7 +1334,7 @@ mod tests {
 
     #[test]
     fn resolve_host_operator_none_for_expired_session() {
-        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home_guard = crate::test_env::lock_orca_env();
         // A session row whose `expires_at` is in the past must be rejected by the
         // wall-clock guard (`exp_parsed <= now`) even though it is non-revoked
         // and present on disk.
@@ -1369,7 +1362,7 @@ mod tests {
 
     #[test]
     fn core_tool_catalog_includes_plugin_declared_tools() {
-        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home_guard = crate::test_env::lock_orca_env();
         // A plugin-declared row in orca.db must surface in the catalog as an
         // `<namespace>.<name>` entry carrying the plugin's description and its
         // parsed input schema — this is the plugin bridge's slice of tools/list.
@@ -1405,7 +1398,7 @@ mod tests {
 
     #[test]
     fn core_tool_catalog_plugin_rows_carry_the_declared_id() {
-        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home_guard = crate::test_env::lock_orca_env();
         let (mut conn, dir) = wire_isolated_home("pluginid");
         let id = "019a5c1e-7b3a-7c4d-8e2f-0123456789ab";
         let decl = |name: &str, id: Option<&str>| {
@@ -1434,7 +1427,7 @@ mod tests {
 
     #[test]
     fn core_tool_catalog_defaults_invalid_plugin_schema_to_object() {
-        let _home_guard = ORCA_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home_guard = crate::test_env::lock_orca_env();
         // A plugin row whose stored input_schema is not valid JSON must not
         // break the catalog: the entry falls back to a bare `{"type":"object"}`
         // schema so tools/list stays a valid MCP catalog.

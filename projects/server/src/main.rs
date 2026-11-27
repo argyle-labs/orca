@@ -1749,12 +1749,18 @@ mod tests {
     #[test]
     fn daemon_log_path_creates_logs_dir_under_orca_home() {
         let dir = tempfile::tempdir().unwrap();
+        let prior = std::env::var_os(contract::config::paths::ENV_ORCA_HOME);
+        // SAFETY: the only ORCA_HOME mutator in the bin's test set; the prior
+        // value is restored so an outer scratch ORCA_HOME survives.
         unsafe {
             std::env::set_var(contract::config::paths::ENV_ORCA_HOME, dir.path());
         }
         let path = daemon_log_path().expect("resolves under ORCA_HOME");
         unsafe {
-            std::env::remove_var(contract::config::paths::ENV_ORCA_HOME);
+            match prior {
+                Some(v) => std::env::set_var(contract::config::paths::ENV_ORCA_HOME, v),
+                None => std::env::remove_var(contract::config::paths::ENV_ORCA_HOME),
+            }
         }
         assert!(path.ends_with("logs/daemon.jsonl"), "got {path}");
         assert!(dir.path().join("logs").is_dir());

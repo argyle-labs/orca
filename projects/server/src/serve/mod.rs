@@ -3028,11 +3028,11 @@ mod tests {
 
     // ── publish_http_port ───────────────────────────────────────────────────────
     // The CLI reads `$ORCA_HOME/http.port` to dial a non-default per-instance
-    // port. Under nextest each test is its own process, so mutating ORCA_HOME
-    // here is isolated. Assert the hint file lands with the exact bound port.
+    // port. Assert the hint file lands with the exact bound port.
 
     #[test]
     fn publish_http_port_writes_port_hint_file() {
+        let _home_guard = crate::test_env::lock_orca_env();
         let dir = std::env::temp_dir().join(format!(
             "orca-httpport-{}-{:?}",
             std::process::id(),
@@ -3041,8 +3041,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        // SAFETY: nextest isolates each test in its own process — no other
-        // thread races this env mutation.
+        // SAFETY: `_home_guard` serializes every ORCA_HOME mutation in the crate.
         unsafe { std::env::set_var("ORCA_HOME", &dir) };
         publish_http_port(54321);
         let contents = std::fs::read_to_string(dir.join("http.port"))

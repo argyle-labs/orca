@@ -37,3 +37,5 @@ pub mod daemon_client;
 pub mod mcp;
 pub mod serve;
 pub mod spec_detail;
+#[cfg(test)]
+pub(crate) mod test_env;
