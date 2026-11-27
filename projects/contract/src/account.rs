@@ -401,8 +401,22 @@ pub fn deregister_provider(name: &str) -> bool {
     before != g.len()
 }
 
+/// Decides whether provider `name` manages unit `unit_id`. A holding counts
+/// only when its declaring provider manages `consumer_unit_id`; otherwise any
+/// plugin could claim a setting on a unit it does not own and receive the
+/// rotated value. Core installs the unit→manager check.
+pub type ConsumerAuthorizer = Arc<dyn Fn(&str, &Id) -> bool + Send + Sync>;
+
+static AUTHORIZER: LazyLock<RwLock<Option<ConsumerAuthorizer>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+pub fn set_consumer_authorizer(authorizer: Option<ConsumerAuthorizer>) {
+    *AUTHORIZER.write().expect("account authorizer poisoned") = authorizer;
+}
+
 /// Every holding of `account` across all registered providers, paired with the
-/// declaring provider's name. Holdings are declared at call time, not at
+/// declaring provider's name. With no [`ConsumerAuthorizer`] installed this
+/// fails closed; holdings on units the provider does not manage are dropped. Holdings are declared at call time, not at
 /// registration, so the one-declarer-per-`(consumer_unit_id, setting)` rule is
 /// enforced here: two providers claiming the same setting on the same unit is
 /// an error, since rotation could not know which one applies the value.
@@ -410,10 +424,15 @@ pub async fn consumers_of(account: &AccountRef) -> Result<Vec<(String, ConsumerD
     let req = ConsumersRequest {
         account: Some(account.clone()),
     };
+    let authorize = AUTHORIZER
+        .read()
+        .expect("account authorizer poisoned")
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("no account consumer authorizer installed"))?;
     let mut out: Vec<(String, ConsumerDecl)> = Vec::new();
     for p in providers() {
         for held in p.consumers(req.clone()).await? {
-            if &held.account != account {
+            if &held.account != account || !authorize(p.name(), &held.consumer_unit_id) {
                 continue;
             }
             if let Some((owner, _)) = out.iter().find(|(_, d)| {
@@ -1428,6 +1447,18 @@ mod tests {
             name: "account-claim-a",
             holdings: vec![held.clone(), held.clone(), stray],
         }));
+        set_consumer_authorizer(None);
+        let err = consumers_of(&unit).await.unwrap_err().to_string();
+        assert!(err.contains("no account consumer authorizer"), "{err}");
+
+        set_consumer_authorizer(Some(Arc::new(|name: &str, _: &Id| {
+            name != "account-claim-a"
+        })));
+        assert!(consumers_of(&unit).await.unwrap().is_empty());
+
+        set_consumer_authorizer(Some(Arc::new(|_: &str, unit: &Id| {
+            unit.as_str() == CONSUMER
+        })));
         let got = consumers_of(&unit).await.unwrap();
         assert_eq!(got, vec![("account-claim-a".to_string(), held.clone())]);
 
@@ -1442,6 +1473,7 @@ mod tests {
         );
         deregister_provider("account-claim-a");
         deregister_provider("account-claim-b");
+        set_consumer_authorizer(None);
     }
 
     #[tokio::test]
