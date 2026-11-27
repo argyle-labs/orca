@@ -23,9 +23,42 @@ pub mod reqwest {
     pub use super::header;
     use super::header::{HeaderMap, HeaderValue};
 
-    /// Transport error (opaque — the generated code only formats it).
+    /// Transport error. The generated code only formats it; callers branch on
+    /// [`Error::is_timeout`] / [`Error::is_connect`].
     #[derive(Debug)]
-    pub struct Error(pub String);
+    pub struct Error(pub String, pub(crate) Option<TransportKind>);
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum TransportKind {
+        Timeout,
+        Connect,
+    }
+    impl Error {
+        pub fn new(message: impl Into<String>) -> Self {
+            Error(message.into(), None)
+        }
+        pub fn is_timeout(&self) -> bool {
+            self.1 == Some(TransportKind::Timeout)
+        }
+        pub fn is_connect(&self) -> bool {
+            self.1 == Some(TransportKind::Connect)
+        }
+    }
+    impl From<anyhow::Error> for Error {
+        fn from(e: anyhow::Error) -> Self {
+            let kind = e
+                .downcast_ref::<crate::capsink::HttpTransportError>()
+                .and_then(|t| {
+                    if t.is_timeout() {
+                        Some(TransportKind::Timeout)
+                    } else if t.is_connect() {
+                        Some(TransportKind::Connect)
+                    } else {
+                        None
+                    }
+                });
+            Error(e.to_string(), kind)
+        }
+    }
     impl std::fmt::Display for Error {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "{}", self.0)
@@ -178,7 +211,7 @@ pub mod reqwest {
                 connect_timeout_ms: self.connect_timeout.map(|d| d.as_millis() as u64),
                 retry: None,
             };
-            let resp = crate::capsink::http_request(&req).map_err(|e| Error(e.to_string()))?;
+            let resp = crate::capsink::http_request(&req).map_err(Error::from)?;
             let mut headers = HeaderMap::new();
             for (k, v) in resp.headers {
                 headers.append_str(&k, &v);
@@ -308,7 +341,7 @@ pub mod reqwest {
         }
         pub fn build(self) -> Result<Request> {
             if let Some(e) = self.error {
-                return Err(Error(e));
+                return Err(Error::new(e));
             }
             Ok(Request {
                 method: self.method,
@@ -1260,5 +1293,29 @@ mod tests {
         }
         assert!(map.iter().all(|(_, v)| v.is_sensitive()));
         assert!(!format!("{map:?}").contains("hunter2"));
+    }
+
+    fn failed_send(reply: String) -> super::reqwest::Error {
+        crate::capsink::with_cap_sink(Box::new(move |_: &str, _: &str| Err(reply.clone())), || {
+            block_on(super::reqwest::Client::new().get("http://x/").send()).unwrap_err()
+        })
+    }
+
+    #[test]
+    fn transport_error_reports_timeout_and_connect_kinds() {
+        let m = crate::capsink::ERROR_KIND_MARKER;
+        let err = failed_send(format!(
+            "{m}{}{m}http.request: request timed out after 5ms",
+            plugin_proto::HTTP_TIMEOUT
+        ));
+        assert!(err.is_timeout() && !err.is_connect());
+        assert!(
+            err.to_string().ends_with("request timed out after 5ms"),
+            "{err}"
+        );
+        let err = failed_send(format!("{m}{}{m}refused", plugin_proto::HTTP_CONNECT));
+        assert!(err.is_connect() && !err.is_timeout());
+        let err = failed_send("boom".into());
+        assert!(!err.is_timeout() && !err.is_connect());
     }
 }

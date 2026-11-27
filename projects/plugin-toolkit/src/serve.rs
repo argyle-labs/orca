@@ -585,6 +585,11 @@ fn cap_sink<S: Read + Write + 'static>(
                             .map_err(|e| format!("capability {cap}: bad reply: {e}"))
                     } else if error_kind.as_deref() == Some(plugin_proto::API_CALL_PLANNED) {
                         Err(format!("{}{value}", crate::api::PLANNED_MARKER))
+                    } else if let Some(kind) = error_kind.as_deref().filter(|k| {
+                        [plugin_proto::HTTP_TIMEOUT, plugin_proto::HTTP_CONNECT].contains(k)
+                    }) {
+                        let m = crate::capsink::ERROR_KIND_MARKER;
+                        Err(format!("{m}{kind}{m}{}", error.unwrap_or_default()))
                     } else {
                         Err(error.unwrap_or_else(|| format!("capability {cap} failed")))
                     };

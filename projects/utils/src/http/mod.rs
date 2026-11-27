@@ -59,7 +59,14 @@ const CROSS_ORIGIN_SAFE_HEADERS: &[&str] =
 pub enum HttpError {
     #[error("invalid url: {0}")]
     InvalidUrl(String),
-    #[error("request failed: {0}")]
+    #[error("{}", timed_out(*.connect, *.after_ms))]
+    Timeout {
+        connect: bool,
+        after_ms: Option<u64>,
+    },
+    #[error("connect failed: {}", cause_chain(.0))]
+    Connect(reqwest::Error),
+    #[error("request failed: {}", cause_chain(.0))]
     Request(reqwest::Error),
     #[error("decode response: {0}")]
     Decode(String),
@@ -81,8 +88,53 @@ pub enum HttpError {
 // callers put API keys in query params, so the URL is stripped at conversion.
 impl From<reqwest::Error> for HttpError {
     fn from(e: reqwest::Error) -> Self {
-        HttpError::Request(e.without_url())
+        if e.is_timeout() {
+            HttpError::Timeout {
+                connect: e.is_connect(),
+                after_ms: None,
+            }
+        } else if e.is_connect() {
+            HttpError::Connect(e.without_url())
+        } else {
+            HttpError::Request(e.without_url())
+        }
     }
+}
+
+impl HttpError {
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, HttpError::Timeout { .. })
+    }
+
+    pub fn is_connect(&self) -> bool {
+        matches!(
+            self,
+            HttpError::Connect(_) | HttpError::Timeout { connect: true, .. }
+        )
+    }
+}
+
+fn timed_out(connect: bool, after_ms: Option<u64>) -> String {
+    let what = if connect { "connect" } else { "request" };
+    match after_ms {
+        Some(ms) => format!("{what} timed out after {ms}ms"),
+        None => format!("{what} timed out"),
+    }
+}
+
+// reqwest's own Display is a generic "error sending request"; the refused /
+// DNS / TLS detail lives in the source chain, which carries no URL.
+fn cause_chain(e: &reqwest::Error) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        let text = s.to_string();
+        if parts.last() != Some(&text) {
+            parts.push(text);
+        }
+        src = s.source();
+    }
+    parts.join(": ")
 }
 
 /// HTTP client with a composable base configuration. Internally pools two
@@ -653,6 +705,25 @@ impl RequestBuilder {
         ))
     }
 
+    fn with_timeout_ms(&self, e: HttpError, total_applied: bool) -> HttpError {
+        let HttpError::Timeout {
+            connect,
+            after_ms: None,
+        } = e
+        else {
+            return e;
+        };
+        let limit = if connect {
+            Some(self.client.inner.config.connect_timeout)
+        } else {
+            total_applied.then_some(self.timeout)
+        };
+        HttpError::Timeout {
+            connect,
+            after_ms: limit.map(|d| d.as_millis() as u64),
+        }
+    }
+
     async fn dispatch(
         &self,
         extra_headers: &[(&str, &str)],
@@ -673,7 +744,10 @@ impl RequestBuilder {
                 .inner
                 .attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let result = self.dispatch_once(extra_headers, deadline).await;
+            let result = self
+                .dispatch_once(extra_headers, deadline)
+                .await
+                .map_err(|e| self.with_timeout_ms(e, deadline.is_some()));
             if attempt >= attempts {
                 return result;
             }
@@ -683,7 +757,7 @@ impl RequestBuilder {
                     502..=504 => backoff(attempt),
                     _ => return result,
                 },
-                Err(HttpError::Request(e)) if e.is_connect() || e.is_timeout() => backoff(attempt),
+                Err(HttpError::Connect(_) | HttpError::Timeout { .. }) => backoff(attempt),
                 Err(_) => return result,
             };
             if let Some(d) = deadline {
@@ -1487,7 +1561,7 @@ mod tests {
             .send()
             .await
             .unwrap_err();
-        assert!(matches!(err, HttpError::Request(e) if e.is_connect()));
+        assert!(matches!(err, HttpError::Connect(_)));
         assert!(
             client
                 .inner
@@ -1670,6 +1744,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unanswered_request_is_a_timeout_with_its_limit() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = Client::new();
+        client.pool(false, None).await.unwrap();
+        let err = client
+            .get(format!("http://127.0.0.1:{port}/?apikey=SECRET"))
+            .timeout(Duration::from_millis(20))
+            .retry(false)
+            .send()
+            .await
+            .unwrap_err();
+        drop(listener);
+        assert!(err.is_timeout() && !err.is_connect(), "{err:?}");
+        assert_eq!(err.to_string(), "request timed out after 20ms");
+    }
+
+    #[test]
+    fn timeout_text_names_the_phase_and_limit() {
+        let t = |connect, after_ms| HttpError::Timeout { connect, after_ms }.to_string();
+        assert_eq!(t(false, Some(5)), "request timed out after 5ms");
+        assert_eq!(t(true, Some(7)), "connect timed out after 7ms");
+        assert_eq!(t(false, None), "request timed out");
+    }
+
+    #[tokio::test]
+    async fn refused_connection_names_the_cause() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let err = Client::new()
+            .get(format!("http://127.0.0.1:{port}/"))
+            .retry(false)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_connect() && !err.is_timeout(), "{err:?}");
+        let text = err.to_string().to_lowercase();
+        assert!(text.starts_with("connect failed: "), "{text}");
+        assert!(text.contains("refused"), "{text}");
+    }
+
+    #[tokio::test]
     async fn transport_error_does_not_leak_query_secrets() {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -1682,7 +1801,7 @@ mod tests {
             .send()
             .await
             .unwrap_err();
-        assert!(matches!(err, HttpError::Request(_)));
+        assert!(matches!(err, HttpError::Connect(_)));
         assert!(!format!("{err}").contains("SECRET"), "{err}");
         assert!(!format!("{err:?}").contains("SECRET"), "{err:?}");
     }
