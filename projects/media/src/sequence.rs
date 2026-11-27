@@ -682,12 +682,6 @@ mod tests {
                             number: Some(s.clone()),
                         })
                         .collect();
-                    if case
-                        .iter()
-                        .any(|s| s.trim().parse::<i64>().is_ok_and(|n| n > 1 << 40))
-                    {
-                        continue;
-                    }
                     let want = mylar::gaps(&rows, total);
                     let ns: Vec<SeqNumber> = case
                         .iter()
