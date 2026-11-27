@@ -233,6 +233,7 @@ async fn add_and_want(
             &poll_deadline(budget, plan.poll),
         )
         .await
+        .map(|p| run_bounded(p, budget))
         {
             Ok(Polled::Settled(())) => row.added = true,
             Ok(Polled::Expired(())) => {
@@ -269,6 +270,7 @@ async fn add_and_want(
             &poll_deadline(budget, plan.poll),
         )
         .await
+        .map(|p| run_bounded(p, budget))
     };
     let (view, settled) = match read {
         Ok(Polled::Settled(view)) => (view, true),
@@ -300,6 +302,13 @@ async fn add_and_want(
         row.shortfall = view.expected.filter(|&t| t > loaded).map(|t| t - loaded);
         None
     };
+}
+
+fn run_bounded<T>(polled: Polled<T>, budget: &Budget) -> Polled<T> {
+    match polled {
+        Polled::Expired(v) if budget.deadline().is_none() => Polled::Exhausted(v),
+        p => p,
+    }
 }
 
 fn poll_deadline(budget: &Budget, poll: Poll) -> Deadline {
@@ -389,6 +398,7 @@ mod tests {
         lists: Mutex<VecDeque<Vec<String>>>,
         views: Mutex<BTreeMap<String, VecDeque<SeriesView>>>,
         refuse: Option<&'static str>,
+        slow: Duration,
         calls: Mutex<Vec<String>>,
     }
 
@@ -435,6 +445,7 @@ mod tests {
         }
         async fn listed(&self) -> Result<Vec<String>, MediaError> {
             self.calls.lock().unwrap().push("listed".into());
+            tokio::time::sleep(self.slow).await;
             Ok(next(&mut self.lists.lock().unwrap()).unwrap_or_default())
         }
         async fn add(&self, _id: &str) -> Result<(), MediaError> {
@@ -937,5 +948,19 @@ mod tests {
         assert_eq!(r.series[0].pending, Some(Pending::Importing));
         assert_eq!(r.series[1].pending, Some(Pending::MaxNew));
         assert_eq!(mgr.sent("add"), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_wait_expiring_without_a_run_deadline_is_exhausted() {
+        let mgr = Mgr {
+            slow: Duration::from_secs(10),
+            ..Mgr::default()
+        }
+        .lists(&[&[]]);
+        let r = run(&mgr, &Req::default(), &["2"], &plan(true)).await;
+        assert_eq!((r.added, r.series_failed, r.pending), (0, 1, 0));
+        let err = r.series[0].error.as_deref().unwrap();
+        assert!(err.contains("never appeared in its list"), "{err}");
+        assert!(mgr.sent("listed") < 1 + FAST.attempts as usize);
     }
 }
