@@ -104,6 +104,8 @@ async fn run_session(args: &Value) -> Result<Value> {
         let owner = tunnel_provider::provider_named(&a.provider)?;
         return Ok(json!({
             "dryRun": true,
+            "changed": null,
+            "would_request": { "provider": owner.name(), "session": a.session },
             "message": format!("dry run: would open a session for client key '{}' on {}", a.session.client_pubkey, owner.name()),
         }));
     }
@@ -118,6 +120,8 @@ async fn run_port_forward(args: &Value) -> Result<Value> {
         let owner = tunnel_provider::provider_named(&a.provider)?;
         return Ok(json!({
             "dryRun": true,
+            "changed": null,
+            "would_request": { "provider": owner.name(), "port_forward": a.port_forward },
             "message": format!("dry run: would request a forwarded port on {}", owner.name()),
         }));
     }
@@ -235,6 +239,8 @@ mod tests {
         .unwrap()
         .expect("dry");
         assert_eq!(r["dryRun"], true);
+        assert!(r["changed"].is_null());
+        assert_eq!(r["would_request"]["session"]["client_pubkey"], "cpk");
         let r = tunnel_provider_dispatch(
             PORT_FORWARD_TOOL,
             &json!({ "provider": "tpsurf-test", "port_forward": { "server_cn": "cn", "server_vip": "10.0.9.1" }, "dryRun": true }),
@@ -243,6 +249,8 @@ mod tests {
         .unwrap()
         .expect("dry");
         assert_eq!(r["dryRun"], true);
+        assert!(r["changed"].is_null());
+        assert_eq!(r["would_request"]["port_forward"]["server_cn"], "cn");
         assert_eq!(
             CALLS.load(Ordering::SeqCst),
             0,

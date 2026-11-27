@@ -5,8 +5,9 @@
 //! - `tunnel.apply`          → apply settings via the named provider (admin).
 //! - `tunnel.port_alias_set` → set a port alias via the named provider (admin).
 //!
-//! Both mutations honour `dryRun`: the named provider is resolved and nothing
-//! is applied.
+//! Both mutations honour `dryRun`: the named provider is resolved, nothing is
+//! applied or diffed, and the reply echoes the request as `would_apply` with
+//! `changed: null`.
 
 // Assembling schemars schemas into MCP/CLI wire JSON is inherently dynamic JSON,
 // same allow (and reason) as ups_surface.rs.
@@ -124,8 +125,14 @@ async fn run_apply(args: &Value) -> Result<Value> {
         let owner = tunnel::provider_named(&a.provider)?;
         return Ok(json!({
             "dryRun": true,
-            "changed": false,
-            "applied": [],
+            "changed": null,
+            "would_apply": {
+                "provider": owner.name(),
+                "tunnel_id": a.tunnel_id,
+                "local_address": a.local_address,
+                "peer": { "endpoint_host": a.peer.endpoint_host, "endpoint_port": a.peer.endpoint_port, "pubkey": a.peer.pubkey },
+                "dns": a.dns,
+            },
             "message": format!("dry run: would apply tunnel '{}' on {}", a.tunnel_id, owner.name()),
         }));
     }
@@ -139,7 +146,8 @@ async fn run_port_alias_set(args: &Value) -> Result<Value> {
         let owner = tunnel::provider_named(&a.provider)?;
         return Ok(json!({
             "dryRun": true,
-            "changed": false,
+            "changed": null,
+            "would_apply": { "provider": owner.name(), "alias": a.set.alias, "ports": a.set.ports },
             "message": format!("dry run: would set port alias '{}' to {:?} on {}", a.set.alias, a.set.ports, owner.name()),
         }));
     }
@@ -283,7 +291,13 @@ mod tests {
             .unwrap()
             .expect("dry");
         assert_eq!(r["dryRun"], true);
-        assert_eq!(r["changed"], false);
+        assert!(r["changed"].is_null());
+        assert_eq!(r["would_apply"]["tunnel_id"], "tsurf-wg");
+        assert_eq!(r["would_apply"]["local_address"], "10.0.9.2/32");
+        assert_eq!(r["would_apply"]["peer"]["endpoint_host"], "h");
+        assert_eq!(r["would_apply"]["peer"]["endpoint_port"], 1337);
+        assert_eq!(r["would_apply"]["peer"]["pubkey"], "pk");
+        assert_eq!(r["would_apply"]["dns"], json!([]));
         let r = tunnel_dispatch(
             PORT_ALIAS_SET_TOOL,
             &json!({ "provider": "tsurf-test", "set": { "alias": "fwd", "ports": [1] }, "dryRun": true }),
@@ -292,6 +306,9 @@ mod tests {
         .unwrap()
         .expect("dry");
         assert_eq!(r["dryRun"], true);
+        assert!(r["changed"].is_null());
+        assert_eq!(r["would_apply"]["alias"], "fwd");
+        assert_eq!(r["would_apply"]["ports"], json!([1]));
         assert_eq!(*applied.lock().unwrap(), 0);
 
         let r = tunnel_dispatch(APPLY_TOOL, &apply_body())
