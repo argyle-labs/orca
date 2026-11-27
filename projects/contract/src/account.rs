@@ -149,9 +149,13 @@ pub struct DeleteRequest {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct SetSecretRequest {
     pub account: AccountRef,
-    #[serde(serialize_with = "Secret::serialize_exposed")]
-    #[schemars(with = "String")]
-    pub secret: Secret<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_secret",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub secret: Option<Secret<String>>,
     #[serde(default)]
     pub dry_run: bool,
 }
@@ -183,9 +187,13 @@ pub struct ConsumersRequest {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct ConsumerApplyRequest {
     pub holding: ConsumerDecl,
-    #[serde(serialize_with = "Secret::serialize_exposed")]
-    #[schemars(with = "String")]
-    pub secret: Secret<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_secret",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub secret: Option<Secret<String>>,
     #[serde(default)]
     pub dry_run: bool,
 }
@@ -382,6 +390,26 @@ pub const CONSUMERS_OP: &str = "consumers";
 pub const APPLY_CONSUMER_OP: &str = "apply_consumer";
 pub const VERIFY_CONSUMER_OP: &str = "verify_consumer";
 
+/// A dry run never carries plaintext: `secret` is dropped from the args on
+/// both sides of the wire. A real `set_secret`/`apply_consumer` without one is
+/// refused before it reaches the provider.
+fn gate_dry_run_secret(op: &str, args: &mut serde_json::Value) -> std::result::Result<(), String> {
+    let dry_run = args
+        .get("dry_run")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if dry_run {
+        if let Some(obj) = args.as_object_mut() {
+            obj.remove("secret");
+        }
+    } else if matches!(op, SET_SECRET_OP | APPLY_CONSUMER_OP)
+        && args.get("secret").is_none_or(serde_json::Value::is_null)
+    {
+        return Err(format!("{op} requires a secret unless dry_run is set"));
+    }
+    Ok(())
+}
+
 /// Pulls the plaintext out of request args before decoding, so a provider
 /// error that echoes it is redacted on the way back over the wire.
 fn arg_secret(args: &serde_json::Value) -> Option<String> {
@@ -393,13 +421,14 @@ fn arg_secret(args: &serde_json::Value) -> Option<String> {
 pub async fn dispatch_op(
     provider: &dyn AccountProvider,
     op: &str,
-    args: serde_json::Value,
+    mut args: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, serde_json::Value> {
     let secret = arg_secret(&args);
     let err = |msg: String| {
         let values: Vec<&str> = secret.as_deref().into_iter().collect();
         serde_json::Value::String(utils::scrub::redact_values(&msg, &values))
     };
+    gate_dry_run_secret(op, &mut args).map_err(err)?;
     fn dec<T: serde::de::DeserializeOwned>(
         op: &str,
         args: serde_json::Value,
@@ -497,8 +526,10 @@ impl AccountProxy {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
-            let args =
+            let mut args =
                 args.map_err(|e| anyhow::anyhow!("account '{name}' {op} encode args: {e}"))?;
+            gate_dry_run_secret(op, &mut args)
+                .map_err(|e| anyhow::anyhow!("account '{name}' {e}"))?;
             let secret = arg_secret(&args);
             let scrub = move |msg: String| {
                 let values: Vec<&str> = secret.as_deref().into_iter().collect();
@@ -684,7 +715,10 @@ mod tests {
         fn set_secret(&self, req: SetSecretRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
             Box::pin(async move {
                 if req.account.account == "boom" {
-                    anyhow::bail!("upstream rejected {}", req.secret.expose_secret());
+                    anyhow::bail!(
+                        "upstream rejected {}",
+                        req.secret.as_ref().map_or("", |s| s.expose_secret())
+                    );
                 }
                 Ok(AccountOutcome {
                     executed: !req.dry_run,
@@ -844,14 +878,14 @@ mod tests {
     fn account_secret_never_debug_printed() {
         let req = SetSecretRequest {
             account: acct(),
-            secret: secret(),
+            secret: Some(secret()),
             dry_run: false,
         };
         let dbg = format!("{req:?}");
         assert!(!dbg.contains(VALUE), "{dbg}");
         let apply = ConsumerApplyRequest {
             holding: holding(),
-            secret: secret(),
+            secret: Some(secret()),
             dry_run: false,
         };
         assert!(!format!("{apply:?}").contains(VALUE));
@@ -869,14 +903,13 @@ mod tests {
     fn account_secret_crosses_the_wire_only_in_its_field() {
         let wire = serde_json::to_value(SetSecretRequest {
             account: acct(),
-            secret: secret(),
-            dry_run: true,
+            secret: Some(secret()),
+            dry_run: false,
         })
         .unwrap();
         assert_eq!(wire["secret"], VALUE);
         let back: SetSecretRequest = serde_json::from_value(wire).unwrap();
-        assert_eq!(back.secret.expose_secret(), VALUE);
-        assert!(back.dry_run);
+        assert_eq!(back.secret.unwrap().expose_secret(), VALUE);
 
         let no_secret = serde_json::to_value(CreateRequest {
             account: acct(),
@@ -1094,7 +1127,7 @@ mod tests {
         let e = proxy
             .set_secret(SetSecretRequest {
                 account: acct(),
-                secret: secret(),
+                secret: Some(secret()),
                 dry_run: false,
             })
             .await
@@ -1129,7 +1162,7 @@ mod tests {
         proxy
             .apply_consumer(ConsumerApplyRequest {
                 holding: holding(),
-                secret: secret(),
+                secret: Some(secret()),
                 dry_run: false,
             })
             .await
@@ -1331,5 +1364,128 @@ mod tests {
         let ok: ConsumerDecl =
             serde_json::from_value(serde_json::to_value(holding()).unwrap()).unwrap();
         assert_eq!(ok.setting.as_str(), "prowlarr_api_key");
+    }
+
+    struct SeesSecret;
+
+    impl AccountProvider for SeesSecret {
+        fn name(&self) -> &str {
+            "account-sees-secret"
+        }
+        fn decl(&self) -> BoxFuture<'_, Result<AccountDecl>> {
+            Box::pin(async {
+                Ok(AccountDecl {
+                    unit_kinds: vec![],
+                    account_kinds: vec![],
+                })
+            })
+        }
+        fn create(&self, req: CreateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+            Box::pin(async move { seen(req.secret.is_some()) })
+        }
+        fn set_secret(&self, req: SetSecretRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+            Box::pin(async move { seen(req.secret.is_some()) })
+        }
+        fn apply_consumer(
+            &self,
+            req: ConsumerApplyRequest,
+        ) -> BoxFuture<'_, Result<AccountOutcome>> {
+            Box::pin(async move { seen(req.secret.is_some()) })
+        }
+    }
+
+    fn seen(has_secret: bool) -> Result<AccountOutcome> {
+        Ok(AccountOutcome {
+            executed: false,
+            detail: serde_json::json!({"has_secret": has_secret}),
+            generated: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn account_dry_run_never_delivers_plaintext() {
+        let a = serde_json::to_value(acct()).unwrap();
+        let h = serde_json::to_value(holding()).unwrap();
+        for (op, args) in [
+            (
+                CREATE_OP,
+                serde_json::json!({"account": a, "kind": "api_key", "secret": VALUE, "dry_run": true}),
+            ),
+            (
+                SET_SECRET_OP,
+                serde_json::json!({"account": a, "secret": VALUE, "dry_run": true}),
+            ),
+            (
+                APPLY_CONSUMER_OP,
+                serde_json::json!({"holding": h, "secret": VALUE, "dry_run": true}),
+            ),
+        ] {
+            let out = dispatch_op(&SeesSecret, op, args).await.unwrap();
+            assert_eq!(out["detail"]["has_secret"], false, "{op}");
+        }
+        for (op, args) in [
+            (SET_SECRET_OP, serde_json::json!({"account": a})),
+            (APPLY_CONSUMER_OP, serde_json::json!({"holding": h})),
+        ] {
+            let err = dispatch_op(&SeesSecret, op, args).await.unwrap_err();
+            assert!(err.as_str().unwrap().contains("requires a secret"), "{op}");
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_strips_secret_on_dry_run() {
+        let sent: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = sent.clone();
+        let invoke: InvokeThunk = Arc::new(move |_op, args, _call| {
+            rec.lock().unwrap().push(args);
+            Ok(serde_json::json!({"executed": false}))
+        });
+        let proxy = AccountProxy {
+            name: "account-proxy-dry".into(),
+            invoke,
+        };
+        proxy
+            .create(CreateRequest {
+                account: acct(),
+                kind: AccountKind::ApiKey,
+                roles: vec![],
+                secret: Some(secret()),
+                dry_run: true,
+            })
+            .await
+            .unwrap();
+        proxy
+            .set_secret(SetSecretRequest {
+                account: acct(),
+                secret: Some(secret()),
+                dry_run: true,
+            })
+            .await
+            .unwrap();
+        proxy
+            .apply_consumer(ConsumerApplyRequest {
+                holding: holding(),
+                secret: Some(secret()),
+                dry_run: true,
+            })
+            .await
+            .unwrap();
+        let err = proxy
+            .set_secret(SetSecretRequest {
+                account: acct(),
+                secret: None,
+                dry_run: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("requires a secret"));
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 3);
+        for args in sent.iter() {
+            assert!(args.get("secret").is_none(), "{args}");
+            assert!(!args.to_string().contains(VALUE));
+        }
     }
 }
