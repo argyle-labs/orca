@@ -765,11 +765,15 @@ fn scrubbed(msg: &str, values: &[String]) -> String {
         .map(String::as_str)
         .filter(|v| !v.is_empty())
         .partition(|v| scrubbable(v));
-    let mut text = msg.to_string();
+    // Long first: redacting a short value inside a long one would break the
+    // long value's match and leave the rest of it in the text.
+    let mut text = long.iter().fold(msg.to_string(), |acc, v| {
+        acc.replace(v, utils::scrub::REDACTED)
+    });
     for v in short {
         text = redact_whole_words(&text, v);
     }
-    utils::scrub::redact_values(&text, &long)
+    utils::scrub::redact_values(&text, &[])
 }
 
 fn redact_whole_words(text: &str, v: &str) -> String {
@@ -2936,6 +2940,11 @@ mod tests {
             format!("{0}/{0}", utils::scrub::REDACTED)
         );
         assert_eq!(scrubbed("tab1e row", &short), "tab1e row");
+        let both = ["ab1".to_string(), "ab1-long-value".to_string()];
+        assert_eq!(
+            scrubbed("got ab1-long-value", &both),
+            format!("got {}", utils::scrub::REDACTED)
+        );
         assert_eq!(
             scrubbed("tab1e row", &["ab1e".to_string()]),
             format!("t{} row", utils::scrub::REDACTED)
