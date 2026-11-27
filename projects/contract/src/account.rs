@@ -13,10 +13,9 @@ use utils::secret::Secret;
 
 use crate::BoxFuture;
 
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountKind {
-    #[default]
     OsUser,
     AppUser,
     ApiKey,
@@ -40,7 +39,7 @@ pub struct AccountDecl {
 /// writes the secrets backend: `regenerate` picks unit-minted over
 /// orca-generated values, and without `rollback_secret` a failed rotation
 /// cannot be rolled back on the unit.
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct KindCapabilities {
     pub kind: AccountKind,
     #[serde(default)]
@@ -59,10 +58,42 @@ impl AccountDecl {
             .iter()
             .find(|c| c.kind == kind)
             .cloned()
-            .unwrap_or(KindCapabilities {
-                kind,
-                ..Default::default()
-            })
+            .unwrap_or_else(|| KindCapabilities::none(kind))
+    }
+
+    /// Each kind appears once in `account_kinds` and at most once in
+    /// `capabilities`, and only kinds listed in `account_kinds` carry
+    /// capabilities.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        for (i, k) in self.account_kinds.iter().enumerate() {
+            if self.account_kinds[..i].contains(k) {
+                return Err(format!("account kind {k:?} declared twice"));
+            }
+        }
+        for (i, c) in self.capabilities.iter().enumerate() {
+            if self.capabilities[..i].iter().any(|p| p.kind == c.kind) {
+                return Err(format!("capabilities for {:?} declared twice", c.kind));
+            }
+            if !self.account_kinds.contains(&c.kind) {
+                return Err(format!(
+                    "capabilities for {:?}, which is not in account_kinds",
+                    c.kind
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl KindCapabilities {
+    pub fn none(kind: AccountKind) -> Self {
+        Self {
+            kind,
+            set_secret: false,
+            regenerate: false,
+            rollback_secret: false,
+            verify: false,
+        }
     }
 }
 
@@ -661,7 +692,11 @@ pub async fn dispatch_op(
     }
     let out = async {
         match op {
-            DECL_OP => enc(&provider.decl().await.map_err(fail)?),
+            DECL_OP => {
+                let decl = provider.decl().await.map_err(fail)?;
+                decl.validate()?;
+                enc(&decl)
+            }
             LIST_OP => enc(&provider.list(dec(op, args)?).await.map_err(fail)?),
             DETAIL_OP => enc(&provider.detail(dec(op, args)?).await.map_err(fail)?),
             CREATE_OP => enc(&provider.create(dec(op, args)?).await.map_err(fail)?),
@@ -771,7 +806,14 @@ impl AccountProvider for AccountProxy {
     }
 
     fn decl(&self) -> BoxFuture<'_, Result<AccountDecl>> {
-        self.call(DECL_OP, Ok(serde_json::json!({})))
+        let name = self.name.clone();
+        let fut = self.call::<AccountDecl>(DECL_OP, Ok(serde_json::json!({})));
+        Box::pin(async move {
+            let decl = fut.await?;
+            decl.validate()
+                .map_err(|e| anyhow::anyhow!("account '{name}' decl invalid: {e}"))?;
+            Ok(decl)
+        })
     }
 
     fn list(&self, req: ListRequest) -> BoxFuture<'_, Result<Vec<AccountInfo>>> {
@@ -2402,5 +2444,82 @@ mod tests {
             err.downcast_ref::<Unsupported>().map(|u| u.op.as_str()),
             Some("delete")
         );
+    }
+
+    struct DeclOf(AccountDecl);
+
+    impl AccountProvider for DeclOf {
+        fn name(&self) -> &str {
+            "account-decl-of"
+        }
+        fn decl(&self) -> BoxFuture<'_, Result<AccountDecl>> {
+            let d = self.0.clone();
+            Box::pin(async move { Ok(d) })
+        }
+    }
+
+    #[tokio::test]
+    async fn account_decl_is_validated() {
+        let decl = |kinds: Vec<AccountKind>, caps: Vec<KindCapabilities>| AccountDecl {
+            unit_kinds: vec![],
+            account_kinds: kinds,
+            capabilities: caps,
+        };
+        let ok = decl(
+            vec![AccountKind::ApiKey, AccountKind::OsUser],
+            vec![KindCapabilities::none(AccountKind::ApiKey)],
+        );
+        assert!(ok.validate().is_ok());
+        assert!(
+            dispatch_op(&DeclOf(ok), DECL_OP, serde_json::json!({}))
+                .await
+                .is_ok()
+        );
+        for (bad, why) in [
+            (
+                decl(vec![AccountKind::ApiKey, AccountKind::ApiKey], vec![]),
+                "declared twice",
+            ),
+            (
+                decl(
+                    vec![AccountKind::ApiKey],
+                    vec![
+                        KindCapabilities::none(AccountKind::ApiKey),
+                        KindCapabilities::none(AccountKind::ApiKey),
+                    ],
+                ),
+                "declared twice",
+            ),
+            (
+                decl(
+                    vec![AccountKind::ApiKey],
+                    vec![KindCapabilities::none(AccountKind::SshKey)],
+                ),
+                "not in account_kinds",
+            ),
+        ] {
+            assert!(bad.validate().unwrap_err().contains(why));
+            let err = dispatch_op(&DeclOf(bad), DECL_OP, serde_json::json!({}))
+                .await
+                .unwrap_err();
+            assert!(err.as_str().unwrap().contains(why), "{err}");
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_rejects_invalid_decl() {
+        let invoke: InvokeThunk = Arc::new(|_op, _args, _call| {
+            Ok(serde_json::json!({
+                "account_kinds": ["api_key"],
+                "capabilities": [{"kind": "os_user", "set_secret": true}],
+            }))
+        });
+        let proxy = AccountProxy {
+            name: "account-proxy-decl".into(),
+            invoke,
+        };
+        let e = proxy.decl().await.unwrap_err().to_string();
+        assert!(e.contains("not in account_kinds"), "{e}");
     }
 }
