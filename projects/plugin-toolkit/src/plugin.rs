@@ -937,6 +937,48 @@ mod tests {
                 })
             })
         }
+        fn set_secret(
+            &self,
+            req: crate::contract::account::SetSecretRequest,
+        ) -> crate::contract::BoxFuture<
+            '_,
+            crate::anyhow::Result<crate::contract::account::AccountOutcome>,
+        > {
+            Box::pin(async move {
+                let v = req.secret.as_ref().unwrap().expose_secret().clone();
+                if req.account.account == "boom" {
+                    crate::anyhow::bail!("rejected {v}");
+                }
+                Ok(crate::contract::account::AccountOutcome {
+                    executed: true,
+                    detail: serde_json::json!({"msg": format!("set to {v}")}),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn account_facet_scrubs_secret_bearing_ops() {
+        const VALUE: &str = "facet-s3cr3t-0123456789";
+        let spec = Plugin::named("prowlarr").account(DemoAccount).into_spec();
+        let dispatch = spec.backend_dispatch.expect("has a dispatcher");
+        let unit = crate::id::new();
+        let out = dispatch(
+            "account.__backend.prowlarr.set_secret",
+            serde_json::json!({"account": {"unit_id": unit, "account": "api"}, "secret": VALUE}),
+        )
+        .expect("facet matched")
+        .expect("op ok");
+        assert_eq!(out["executed"], true);
+        assert!(!out.to_string().contains(VALUE), "{out}");
+        let err = dispatch(
+            "account.__backend.prowlarr.set_secret",
+            serde_json::json!({"account": {"unit_id": unit, "account": "boom"}, "secret": VALUE}),
+        )
+        .expect("facet matched")
+        .expect_err("provider error");
+        assert!(!err.to_string().contains(VALUE), "{err}");
     }
 
     #[test]

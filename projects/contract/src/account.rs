@@ -1630,6 +1630,12 @@ mod tests {
             .unwrap();
         assert_eq!(got, vec![("account-claim-a".to_string(), held.clone())]);
 
+        let twice = claimer("account-claim-a", vec![held.clone(), held.clone()]);
+        let got = consumers_in(&[twice], Some(&only_consumer), &unit)
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+
         let b = claimer("account-claim-b", vec![held]);
         let err = consumers_in(&[a.clone(), b], Some(&only_consumer), &unit)
             .await
