@@ -397,6 +397,58 @@ impl Plugin {
         self
     }
 
+    /// Register an **account** facet: this plugin manages credential-bearing
+    /// accounts on units and/or holds other units' credentials as a consumer.
+    #[must_use]
+    pub fn account<P: crate::contract::account::AccountProvider + 'static>(
+        mut self,
+        provider: P,
+    ) -> Self {
+        let prefix = format!("account.__backend.{}", provider.name());
+        self.defs.push(BackendDef {
+            domain: "account".to_string(),
+            name: provider.name().to_string(),
+            invoke_prefix: prefix.clone(),
+            ..Default::default()
+        });
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::account::dispatch_op(&provider, op, args),
+                ))
+            }));
+        self
+    }
+
+    /// Register a **template_kind** facet: this plugin renders and applies one
+    /// template kind.
+    #[must_use]
+    pub fn template_kind<P: crate::contract::template_kind::TemplateKindProvider + 'static>(
+        mut self,
+        provider: P,
+    ) -> Self {
+        let prefix = format!("template_kind.__backend.{}", provider.name());
+        self.defs.push(BackendDef {
+            domain: "template_kind".to_string(),
+            name: provider.name().to_string(),
+            invoke_prefix: prefix.clone(),
+            ..Default::default()
+        });
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::template_kind::dispatch_op(&provider, op, args),
+                ))
+            }));
+        self
+    }
+
     /// Register a **tunnel** facet: this plugin applies tunnel settings on the
     /// firewall side. Implements [`TunnelProvider`](crate::contract::tunnel::TunnelProvider).
     #[must_use]
@@ -890,5 +942,118 @@ mod tests {
         for d in &defs {
             assert_eq!(d.tool_calls, ["system.topology", "guest.read_packages"]);
         }
+    }
+
+    struct DemoAccount;
+    impl crate::contract::account::AccountProvider for DemoAccount {
+        fn name(&self) -> &str {
+            "prowlarr"
+        }
+        fn decl(
+            &self,
+        ) -> crate::contract::BoxFuture<
+            '_,
+            crate::anyhow::Result<crate::contract::account::AccountDecl>,
+        > {
+            Box::pin(async {
+                Ok(crate::contract::account::AccountDecl {
+                    unit_kinds: vec!["prowlarr".into()],
+                    account_kinds: vec![crate::contract::account::AccountKind::ApiKey],
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn account_facet_advertises_and_routes_its_prefix() {
+        let spec = Plugin::named("prowlarr").account(DemoAccount).into_spec();
+        let defs: Vec<BackendDef> = serde_json::from_str(&spec.backends_json).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].domain, "account");
+        assert_eq!(defs[0].invoke_prefix, "account.__backend.prowlarr");
+        let dispatch = spec.backend_dispatch.expect("has a dispatcher");
+        let out = dispatch("account.__backend.prowlarr.decl", serde_json::json!({}))
+            .expect("facet matched")
+            .expect("op ok");
+        assert_eq!(out["account_kinds"][0], "api_key");
+        assert!(dispatch("account.__backend.prowlarrx.decl", serde_json::json!({})).is_none());
+    }
+
+    struct DemoTemplateKind;
+    impl crate::contract::template_kind::TemplateKindProvider for DemoTemplateKind {
+        fn name(&self) -> &str {
+            "compose"
+        }
+        fn decl(
+            &self,
+        ) -> crate::contract::BoxFuture<
+            '_,
+            crate::anyhow::Result<crate::contract::template_kind::TemplateKindDecl>,
+        > {
+            Box::pin(async {
+                Ok(crate::contract::template_kind::TemplateKindDecl {
+                    kind: "compose".into(),
+                    layers: vec![],
+                    params_schema: None,
+                    unsupported_fields: vec![],
+                    runtimes: vec![],
+                })
+            })
+        }
+        fn render(
+            &self,
+            _req: crate::contract::template_kind::RenderRequest,
+        ) -> crate::contract::BoxFuture<
+            '_,
+            crate::anyhow::Result<crate::contract::template_kind::RenderedPayload>,
+        > {
+            Box::pin(async { crate::anyhow::bail!("unused") })
+        }
+        fn apply(
+            &self,
+            _req: crate::contract::template_kind::ApplyRequest,
+        ) -> crate::contract::BoxFuture<
+            '_,
+            crate::anyhow::Result<crate::contract::template_kind::ApplyOutcome>,
+        > {
+            Box::pin(async { crate::anyhow::bail!("unused") })
+        }
+        fn status(
+            &self,
+            _req: crate::contract::template_kind::StatusRequest,
+        ) -> crate::contract::BoxFuture<
+            '_,
+            crate::anyhow::Result<crate::contract::template_kind::StatusOutcome>,
+        > {
+            Box::pin(async { crate::anyhow::bail!("unused") })
+        }
+        fn destroy(
+            &self,
+            _req: crate::contract::template_kind::DestroyRequest,
+        ) -> crate::contract::BoxFuture<
+            '_,
+            crate::anyhow::Result<crate::contract::template_kind::ApplyOutcome>,
+        > {
+            Box::pin(async { crate::anyhow::bail!("unused") })
+        }
+    }
+
+    #[test]
+    fn template_kind_facet_advertises_and_routes_its_prefix() {
+        let spec = Plugin::named("compose")
+            .template_kind(DemoTemplateKind)
+            .into_spec();
+        let defs: Vec<BackendDef> = serde_json::from_str(&spec.backends_json).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].domain, "template_kind");
+        assert_eq!(defs[0].invoke_prefix, "template_kind.__backend.compose");
+        let dispatch = spec.backend_dispatch.expect("has a dispatcher");
+        let out = dispatch(
+            "template_kind.__backend.compose.decl",
+            serde_json::json!({}),
+        )
+        .expect("facet matched")
+        .expect("op ok");
+        assert_eq!(out["kind"], "compose");
     }
 }
