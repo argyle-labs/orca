@@ -826,10 +826,17 @@ impl AccountProxy {
                     Some(returned) if returned == op => {
                         anyhow::Error::new(Unsupported { op: op.to_string() })
                     }
-                    _ => scrub(format!(
-                        "account '{name}' {op} failed: {}",
-                        crate::render_invoke_error(&e)
-                    )),
+                    _ => {
+                        let mut known = secret.clone();
+                        known.extend(secret_values(&e, "generated"));
+                        anyhow::anyhow!(scrubbed(
+                            &format!(
+                                "account '{name}' {op} failed: {}",
+                                crate::render_invoke_error(&e)
+                            ),
+                            &known
+                        ))
+                    }
                 })?;
             let mut out = out;
             let mut leaked = secret.clone();
@@ -2674,5 +2681,50 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("claimed for two accounts"), "{err}");
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_scrubs_generated_value_in_regenerate_errors() {
+        const MINTED: &str = "minted-key-9f8e7d6c5b4a";
+        let invoke: InvokeThunk = Arc::new(|_op, _args, _call| {
+            Err(serde_json::json!({
+                "message": format!("could not persist {MINTED}"),
+                "generated": MINTED,
+            }))
+        });
+        let proxy = AccountProxy {
+            name: "account-proxy-regen-err".into(),
+            invoke,
+        };
+        let e = proxy
+            .regenerate(RegenerateRequest {
+                account: acct(),
+                dry_run: false,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("could not persist"), "{e}");
+        assert!(!e.contains(MINTED), "{e}");
+
+        let invoke: InvokeThunk = Arc::new(|_op, _args, _call| {
+            Err(serde_json::json!(
+                "upstream said Authorization: Bearer eyJhbGciOi.eyJzdWIi.c2ln"
+            ))
+        });
+        let proxy = AccountProxy {
+            name: "account-proxy-regen-generic".into(),
+            invoke,
+        };
+        let e = proxy
+            .regenerate(RegenerateRequest {
+                account: acct(),
+                dry_run: false,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!e.contains("eyJhbGciOi.eyJzdWIi.c2ln"), "{e}");
     }
 }
