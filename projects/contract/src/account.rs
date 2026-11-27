@@ -539,15 +539,6 @@ pub fn set_consumer_authorizer(authorizer: Option<ConsumerAuthorizer>) {
     *AUTHORIZER.write().expect("account authorizer poisoned") = authorizer;
 }
 
-/// Every holding of `account` across all registered providers, paired with
-/// the declaring provider's name. With no [`ConsumerAuthorizer`] installed
-/// this fails closed. Holdings on units the provider does not manage are kept
-/// out of rotation and returned in [`ConsumerSet::rejected`] so core can
-/// report them as drift; they take no part in conflict detection, so a rogue
-/// claim cannot block rotation. Holdings are declared at call time, not at registration, so the
-/// one-declaration-per-`(consumer_unit_id, setting)` rule is enforced here,
-/// across all accounts: any two differing claims on one setting are an error,
-/// since rotation could not know which value or provider applies.
 /// Holdings of one account, each paired with the declaring provider's name.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConsumerSet {
@@ -555,6 +546,16 @@ pub struct ConsumerSet {
     pub rejected: Vec<(String, ConsumerDecl)>,
 }
 
+/// Every holding of `account` across all registered providers, paired with
+/// the declaring provider's name. With no [`ConsumerAuthorizer`] installed
+/// this fails closed. Holdings on units the provider does not manage are kept
+/// out of rotation and returned in [`ConsumerSet::rejected`] so core can
+/// report them as drift; they take no part in conflict detection, so a rogue
+/// claim cannot block rotation. Holdings are declared at call time, not at
+/// registration, so the one-declaration-per-`(consumer_unit_id, setting)`
+/// rule is enforced here, across all accounts: any two differing claims on
+/// one setting are an error, since rotation could not know which value or
+/// provider applies.
 pub async fn consumers_of(account: &AccountRef) -> Result<ConsumerSet> {
     let authorizer = AUTHORIZER
         .read()
