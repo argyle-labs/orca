@@ -397,6 +397,48 @@ impl Plugin {
         self
     }
 
+    /// Register a **tunnel** facet: this plugin applies tunnel settings on the
+    /// firewall side. Implements [`TunnelProvider`](crate::contract::tunnel::TunnelProvider).
+    #[must_use]
+    pub fn tunnel<P: crate::contract::tunnel::TunnelProvider + 'static>(
+        mut self,
+        provider: P,
+    ) -> Self {
+        let def = crate::backend_def::tunnel_backend_def(provider.name());
+        let prefix = def.invoke_prefix.clone();
+        self.defs.push(def);
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(
+                    crate::contract::tunnel::dispatch_op(&provider, op, args),
+                ))
+            }));
+        self
+    }
+
+    /// Register a **vpn** facet: this plugin issues VPN tunnel
+    /// settings. Implements
+    /// [`VpnProvider`](crate::contract::vpn::VpnProvider).
+    #[must_use]
+    pub fn vpn<P: crate::contract::vpn::VpnProvider + 'static>(mut self, provider: P) -> Self {
+        let def = crate::backend_def::vpn_backend_def(provider.name());
+        let prefix = def.invoke_prefix.clone();
+        self.defs.push(def);
+        self.dispatchers
+            .push(Box::new(move |tool: &str, args: Value| {
+                let op = tool
+                    .strip_prefix(&prefix)
+                    .and_then(|r| r.strip_prefix('.'))?;
+                Some(crate::reactor::block_on(crate::contract::vpn::dispatch_op(
+                    &provider, op, args,
+                )))
+            }));
+        self
+    }
+
     #[must_use]
     pub fn security<S: crate::contract::security::SecurityScanner + 'static>(
         mut self,

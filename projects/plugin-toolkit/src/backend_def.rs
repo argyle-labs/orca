@@ -264,6 +264,28 @@ pub fn topology_backend_def(name: &str, invoke_prefix: &str) -> crate::abi::Back
     }
 }
 
+/// Build the `tunnel`-domain [`BackendDef`](crate::abi::BackendDef) for a
+/// firewall-side provider; ops route as `tunnel.__backend.{name}.{op}`.
+pub fn tunnel_backend_def(name: &str) -> crate::abi::BackendDef {
+    crate::abi::BackendDef {
+        domain: "tunnel".to_string(),
+        name: name.to_string(),
+        invoke_prefix: format!("tunnel.__backend.{name}"),
+        ..Default::default()
+    }
+}
+
+/// Build the `vpn`-domain [`BackendDef`](crate::abi::BackendDef) for
+/// a VPN-side provider; ops route as `vpn.__backend.{name}.{op}`.
+pub fn vpn_backend_def(name: &str) -> crate::abi::BackendDef {
+    crate::abi::BackendDef {
+        domain: "vpn".to_string(),
+        name: name.to_string(),
+        invoke_prefix: format!("vpn.__backend.{name}"),
+        ..Default::default()
+    }
+}
+
 /// Build the `host_facts`-domain [`BackendDef`](crate::abi::BackendDef) a plugin
 /// advertises so orca folds its [`HostFacts`](crate::contract::HostFacts) about
 /// the local host into that host's mesh-propagated `system` snapshot.
@@ -464,6 +486,16 @@ pub fn deploy_backend_def(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tunnel_defs_carry_domain_and_prefix() {
+        let d = tunnel_backend_def("opnsense");
+        assert_eq!(d.domain, "tunnel");
+        assert_eq!(d.invoke_prefix, "tunnel.__backend.opnsense");
+        let d = vpn_backend_def("pia");
+        assert_eq!(d.domain, "vpn");
+        assert_eq!(d.invoke_prefix, "vpn.__backend.pia");
+    }
 
     #[test]
     fn schemas_json_serializes_a_declaration_the_daemon_parses() {

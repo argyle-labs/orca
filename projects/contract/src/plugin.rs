@@ -22,6 +22,11 @@ pub const RESERVED_PLUGIN_IDS: &[&str] = &[
     "anthropic_api_key",
     "release_source_api",
     "ui",
+    "unit",
+    "diagnostics",
+    "ups",
+    "tunnel",
+    "vpn",
 ];
 
 pub fn is_reserved_plugin_id(id: &str) -> bool {

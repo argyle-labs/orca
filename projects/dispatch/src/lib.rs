@@ -53,8 +53,10 @@ pub mod openapi;
 mod registry;
 pub mod remote_ok;
 pub mod tool_roles;
+pub mod tunnel_surface;
 pub mod unit_surface;
 pub mod ups_surface;
+pub mod vpn_surface;
 
 pub use erased::{ErasedTool, ToolWrapper, dry_run_marked, require_dry_run_marked, value_to_text};
 pub use inventory_slice::ToolRegistration;
