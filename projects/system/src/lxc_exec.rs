@@ -833,7 +833,12 @@ const PUSH_DENIED_PREFIXES: &[&str] = &[
     "/etc/init.d/",
     "/etc/rc",
     "/etc/update-motd.d/",
+    "/etc/systemd/",
 ];
+
+// proxmox console autologin drop-in; any other systemd unit + systemctl restart is root exec.
+const PUSH_SYSTEMD_AUTOLOGIN: &str =
+    "/etc/systemd/system/container-getty@.service.d/autologin.conf";
 
 /// Split an `owner` string into `(--user, --group?)` arguments. `"u:g"` →
 /// `("u", Some("g"))`, `"u"` → `("u", None)`; empty/`None`/blank → `None` (apply
@@ -864,6 +869,9 @@ fn validate_push_path(path: &str) -> Result<(), String> {
     }
     let path = normalize_guest_path(path);
     let path = path.as_str();
+    if path == PUSH_SYSTEMD_AUTOLOGIN {
+        return Ok(());
+    }
     if !PUSH_ALLOWED_PREFIXES.iter().any(|p| path.starts_with(p))
         && !PUSH_ALLOWED_FILES.contains(&path)
     {
@@ -1536,7 +1544,13 @@ mod tests {
 
     #[test]
     fn push_destinations_restricted() {
-        assert!(validate_push_path("/etc/systemd/system/x.service.d/autologin.conf").is_ok());
+        for path in [
+            "/etc/systemd/system/container-getty@.service.d/autologin.conf",
+            "/etc//systemd/system//container-getty@.service.d/autologin.conf",
+            "/etc/./systemd/system/./container-getty@.service.d/autologin.conf",
+        ] {
+            assert!(validate_push_path(path).is_ok(), "{path}");
+        }
         assert!(validate_push_path("/etc/inittab").is_ok());
         assert!(validate_push_path("/.pxarexclude").is_ok());
         assert!(validate_push_path("/var/lib/app/config.yml").is_ok());
@@ -1577,6 +1591,10 @@ mod tests {
             "/etc/runlevels/",
             "/etc/sudoers/",
             "/./etc/sudoers.d/x",
+            "/etc/systemd/system/evil.service",
+            "/etc/systemd/system/container-getty@.service.d/evil.conf",
+            "/etc/systemd/system.conf",
+            "/etc/systemd/system/x.service.d/autologin.conf",
         ] {
             assert!(validate_push_path(path).is_err(), "{path}");
         }
