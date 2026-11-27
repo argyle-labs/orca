@@ -18,6 +18,9 @@ pub fn decimal(s: &str) -> Option<f64> {
 
 pub fn parse_number(s: &str) -> Option<SeqNumber> {
     let s = s.trim();
+    if matches!(s, "½" | "1/2") {
+        return Some(SeqNumber::Fraction(0.5));
+    }
     if let Some(n) = decimal(s) {
         return Some(match s.parse::<i64>() {
             Ok(w) => SeqNumber::whole(w),
@@ -358,6 +361,8 @@ mod tests {
     fn parse_number_reads_whole_fraction_and_range() {
         assert_eq!(parse_number(" 006 "), Some(SeqNumber::whole(6)));
         assert_eq!(parse_number("3.5"), Some(SeqNumber::Fraction(3.5)));
+        assert_eq!(parse_number("½"), Some(SeqNumber::Fraction(0.5)));
+        assert_eq!(parse_number("1/2"), Some(SeqNumber::Fraction(0.5)));
         assert_eq!(parse_number("7–9"), Some(SeqNumber::Whole(r(7, 9))));
         assert_eq!(parse_number("-1"), Some(SeqNumber::whole(-1)));
         assert_eq!(parse_number("3-1"), None);
