@@ -53,9 +53,12 @@ pub struct KindCapabilities {
 }
 
 impl AccountDecl {
+    /// `Unknown` always yields no capabilities: several unrecognised kinds
+    /// share that value, so no single entry describes it.
     pub fn capabilities_for(&self, kind: AccountKind) -> KindCapabilities {
         self.capabilities
             .iter()
+            .filter(|_| kind != AccountKind::Unknown)
             .find(|c| c.kind == kind)
             .cloned()
             .unwrap_or_else(|| KindCapabilities::none(kind))
@@ -2715,6 +2718,10 @@ mod tests {
         );
         assert!(decl.validate().is_ok());
         assert!(decl.capabilities_for(AccountKind::ApiKey).regenerate);
+        assert_eq!(
+            decl.capabilities_for(AccountKind::Unknown),
+            KindCapabilities::none(AccountKind::Unknown)
+        );
         let out = dispatch_op(&DeclOf(decl), DECL_OP, serde_json::json!({}))
             .await
             .unwrap();
