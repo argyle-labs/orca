@@ -211,6 +211,7 @@ fn domain_register(domain: &str) -> Option<DomainRegister> {
         "subprocess_env" => Some(register_subprocess_env_backend),
         "replication" => Some(register_replication_backend),
         "template_kind" => Some(register_template_kind_backend),
+        "account" => Some(register_account_backend),
         // Fall through to domains injected by downstream crates (backup KIND /
         // TARGET, contributed by `system` at startup).
         other => EXTRA_DOMAINS
@@ -403,6 +404,11 @@ fn register_security_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<
 fn register_template_kind_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
     contract::template_kind::register_from_def(def.name.clone(), invoke)
         .map_err(|e| anyhow!("register template_kind backend '{}': {e}", def.name))
+}
+
+fn register_account_backend(def: &BackendDef, invoke: BackendInvoke) -> Result<()> {
+    contract::account::register_from_def(def.name.clone(), invoke)
+        .map_err(|e| anyhow!("register account backend '{}': {e}", def.name))
 }
 
 /// Guest-exec entry: register a plugin-backed [`contract::guest_exec::GuestExec`]
@@ -670,6 +676,9 @@ fn domain_deregister(domain: &str, name: &str) {
         "template_kind" => {
             contract::template_kind::deregister_provider(name);
         }
+        "account" => {
+            contract::account::deregister_provider(name);
+        }
         other => {
             // A domain injected by a downstream crate (backup KIND / TARGET)?
             let injected = EXTRA_DOMAINS
@@ -751,6 +760,7 @@ const BUILTIN_BACKEND_DOMAINS: &[&str] = &[
     "subprocess_env",
     "replication",
     "template_kind",
+    "account",
 ];
 
 /// `(domain, name)` → plugin id for [`NameScope::Claimed`] registrations.
@@ -2485,6 +2495,31 @@ mod loader_tests {
     }
 
     #[test]
+    fn account_domain_registers_and_deregisters() {
+        let name = "loader-test-account-roundtrip";
+        let def = BackendDef {
+            domain: "account".to_string(),
+            name: name.to_string(),
+            invoke_prefix: name.to_string(),
+            ..Default::default()
+        };
+        let ctor = domain_register("account").expect("account resolves");
+        ctor(&def, noop_invoke()).expect("account registers");
+        assert!(
+            contract::account::providers()
+                .iter()
+                .any(|p| p.name() == name)
+        );
+        assert_eq!(name_scope("account"), NameScope::Own);
+        domain_deregister("account", name);
+        assert!(
+            !contract::account::providers()
+                .iter()
+                .any(|p| p.name() == name)
+        );
+    }
+
+    #[test]
     fn tunnel_domains_register_and_unload_empties_each_registry() {
         let name = "loader-test-tunnel-roundtrip";
         for domain in ["tunnel", "vpn"] {
@@ -3821,6 +3856,7 @@ mod loader_tests {
             "ups",
             "tunnel",
             "vpn",
+            "account",
         ] {
             assert!(is_reserved_plugin_id(id), "{id} must be reserved");
         }
