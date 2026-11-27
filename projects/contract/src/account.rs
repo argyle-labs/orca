@@ -122,6 +122,12 @@ pub struct ConsumerDecl {
     pub setting: String,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Default)]
+pub struct ConsumersRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AccountRef>,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct ConsumerApplyRequest {
     pub holding: ConsumerDecl,
@@ -218,7 +224,8 @@ pub trait AccountProvider: Send + Sync {
         unsupported(REGENERATE_OP)
     }
 
-    fn consumers(&self) -> BoxFuture<'_, Result<Vec<ConsumerDecl>>> {
+    /// Holdings this plugin declares, narrowed to `req.account` when set.
+    fn consumers(&self, _req: ConsumersRequest) -> BoxFuture<'_, Result<Vec<ConsumerDecl>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
@@ -257,6 +264,40 @@ pub fn deregister_provider(name: &str) -> bool {
     let before = g.len();
     g.retain(|p| p.name() != name);
     before != g.len()
+}
+
+/// Every holding of `account` across all registered providers, paired with the
+/// declaring provider's name. Holdings are declared at call time, not at
+/// registration, so the one-declarer-per-`(consumer_unit_id, setting)` rule is
+/// enforced here: two providers claiming the same setting on the same unit is
+/// an error, since rotation could not know which one applies the value.
+pub async fn consumers_of(account: &AccountRef) -> Result<Vec<(String, ConsumerDecl)>> {
+    let req = ConsumersRequest {
+        account: Some(account.clone()),
+    };
+    let mut out: Vec<(String, ConsumerDecl)> = Vec::new();
+    for p in providers() {
+        for held in p.consumers(req.clone()).await? {
+            if &held.account != account {
+                continue;
+            }
+            if let Some((owner, _)) = out.iter().find(|(_, d)| {
+                d.consumer_unit_id == held.consumer_unit_id && d.setting == held.setting
+            }) {
+                if owner == p.name() {
+                    continue;
+                }
+                anyhow::bail!(
+                    "setting '{}' on unit {} is declared by both '{owner}' and '{}'",
+                    held.setting,
+                    held.consumer_unit_id,
+                    p.name()
+                );
+            }
+            out.push((p.name().to_string(), held));
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(feature = "in-process")]
@@ -341,7 +382,10 @@ pub async fn dispatch_op(
                 .regenerate(dec(op, args)?)
                 .await
                 .map_err(|e| format!("{e:#}"))?),
-            CONSUMERS_OP => enc(&provider.consumers().await.map_err(|e| format!("{e:#}"))?),
+            CONSUMERS_OP => enc(&provider
+                .consumers(dec(op, args)?)
+                .await
+                .map_err(|e| format!("{e:#}"))?),
             APPLY_CONSUMER_OP => enc(&provider
                 .apply_consumer(dec(op, args)?)
                 .await
@@ -458,8 +502,8 @@ impl AccountProvider for AccountProxy {
         Box::pin(async move { fut.await.map(redact_outcome) })
     }
 
-    fn consumers(&self) -> BoxFuture<'_, Result<Vec<ConsumerDecl>>> {
-        self.call(CONSUMERS_OP, Ok(serde_json::json!({})))
+    fn consumers(&self, req: ConsumersRequest) -> BoxFuture<'_, Result<Vec<ConsumerDecl>>> {
+        self.call(CONSUMERS_OP, serde_json::to_value(&req))
     }
 
     fn apply_consumer(&self, req: ConsumerApplyRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
@@ -599,8 +643,13 @@ mod tests {
                 })
             })
         }
-        fn consumers(&self) -> BoxFuture<'_, Result<Vec<ConsumerDecl>>> {
-            Box::pin(async { Ok(vec![holding()]) })
+        fn consumers(&self, req: ConsumersRequest) -> BoxFuture<'_, Result<Vec<ConsumerDecl>>> {
+            Box::pin(async move {
+                Ok(vec![holding()]
+                    .into_iter()
+                    .filter(|h| req.account.as_ref().is_none_or(|a| &h.account == a))
+                    .collect())
+            })
         }
         fn apply_consumer(
             &self,
@@ -966,7 +1015,13 @@ mod tests {
                 .unwrap()
                 .matches
         );
-        assert!(proxy.consumers().await.unwrap().is_empty());
+        assert!(
+            proxy
+                .consumers(ConsumersRequest::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
         proxy
             .apply_consumer(ConsumerApplyRequest {
                 holding: holding(),
@@ -1027,5 +1082,91 @@ mod tests {
         .await
         .unwrap();
         assert!(dry.get("generated").is_none());
+    }
+
+    struct Claimer {
+        name: &'static str,
+        holdings: Vec<ConsumerDecl>,
+    }
+
+    impl AccountProvider for Claimer {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn decl(&self) -> BoxFuture<'_, Result<AccountDecl>> {
+            Box::pin(async {
+                Ok(AccountDecl {
+                    unit_kinds: vec![],
+                    account_kinds: vec![],
+                })
+            })
+        }
+        fn consumers(&self, _req: ConsumersRequest) -> BoxFuture<'_, Result<Vec<ConsumerDecl>>> {
+            let h = self.holdings.clone();
+            Box::pin(async move { Ok(h) })
+        }
+    }
+
+    #[tokio::test]
+    async fn account_consumers_filter_by_account() {
+        let other = AccountRef {
+            unit_id: id(CONSUMER),
+            account: "admin".into(),
+        };
+        let none = dispatch_op(
+            &FakeConsumer,
+            CONSUMERS_OP,
+            serde_json::json!({"account": other}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(none, serde_json::json!([]));
+        let some = dispatch_op(
+            &FakeConsumer,
+            CONSUMERS_OP,
+            serde_json::json!({"account": acct()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(some.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn account_consumers_of_enforces_one_declarer_per_setting() {
+        let unit = AccountRef {
+            unit_id: "0192f0a0-0000-7000-8000-0000000000a1".parse().unwrap(),
+            account: "api".into(),
+        };
+        let held = ConsumerDecl {
+            account: unit.clone(),
+            consumer_unit_id: id(CONSUMER),
+            setting: "key".into(),
+        };
+        let stray = ConsumerDecl {
+            account: AccountRef {
+                unit_id: id(OWNER),
+                account: "other".into(),
+            },
+            consumer_unit_id: id(CONSUMER),
+            setting: "key".into(),
+        };
+        register_provider(Arc::new(Claimer {
+            name: "account-claim-a",
+            holdings: vec![held.clone(), held.clone(), stray],
+        }));
+        let got = consumers_of(&unit).await.unwrap();
+        assert_eq!(got, vec![("account-claim-a".to_string(), held.clone())]);
+
+        register_provider(Arc::new(Claimer {
+            name: "account-claim-b",
+            holdings: vec![held],
+        }));
+        let err = consumers_of(&unit).await.unwrap_err().to_string();
+        assert!(
+            err.contains("account-claim-a") && err.contains("account-claim-b"),
+            "{err}"
+        );
+        deregister_provider("account-claim-a");
+        deregister_provider("account-claim-b");
     }
 }
