@@ -7,7 +7,6 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use thiserror::Error;
 
-// Plain decimals only: f64 parsing also takes "nan", "inf" and "1e3".
 pub fn decimal(s: &str) -> Option<f64> {
     let digits = |d: &str| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit());
     let unsigned = s.strip_prefix(['-', '+']).unwrap_or(s);
@@ -123,7 +122,6 @@ pub struct SeriesEntry<S> {
 #[derive(Debug, PartialEq)]
 pub struct Selection<'a, S> {
     pub picked: Vec<&'a SeriesEntry<S>>,
-    /// Wantable entries a range cannot place: no number, or a range straddling a bound.
     pub unranged: Vec<&'a SeriesEntry<S>>,
 }
 
@@ -170,15 +168,12 @@ pub struct SeriesAudit {
     pub name: Option<String>,
     pub total: usize,
     pub by_status: Vec<StatusCount>,
-    /// Wantable under the default [`Include`].
     pub missing: Vec<AuditItem>,
     pub in_flight: Vec<AuditItem>,
     pub skipped: Vec<AuditItem>,
-    /// Missing entries without a backend id, which cannot be acted on.
     pub no_id: usize,
     pub unnumbered: Vec<AuditItem>,
     pub gaps: SequenceGaps,
-    /// No missing entry, numbering gap or renumbered/sparse numbering.
     pub complete: bool,
 }
 
@@ -196,7 +191,6 @@ fn tally(counts: impl Iterator<Item = (RequestState, usize)>) -> Vec<StatusCount
 }
 
 impl SeriesAudit {
-    /// `gaps: None` skips gap detection, for entries numbered apart from the run (annuals).
     pub fn build<S>(
         id: impl Into<String>,
         name: Option<String>,
@@ -263,7 +257,6 @@ pub struct AuditSummary {
     pub no_id: usize,
     pub unnumbered: usize,
     pub series_with_gaps: usize,
-    /// Numbers absent across every gap range, including any truncated away.
     pub gap_numbers: usize,
     pub renumbered_or_sparse: usize,
     pub outliers: usize,

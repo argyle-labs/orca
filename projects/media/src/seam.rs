@@ -89,7 +89,6 @@ pub enum RequestState {
     Failed,
     /// Deliberately not wanted / ignored by the backend.
     Skipped,
-    /// Known to the backend but never requested.
     Unmonitored,
     /// State could not be determined.
     Unknown,

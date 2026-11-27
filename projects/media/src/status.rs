@@ -15,7 +15,6 @@
 use crate::seam::RequestState;
 use std::collections::BTreeMap;
 
-/// Acquisition progress; any positive state outranks every negative one.
 pub(crate) fn rank(state: RequestState) -> u8 {
     match state {
         RequestState::Imported => 8,
@@ -117,8 +116,6 @@ mod tests {
             row("x", RequestState::Skipped),
             row("x", RequestState::Failed),
         ];
-        // Failed outranks Skipped: a failed acquisition is more
-        // informative than a deliberately-skipped one.
         assert_eq!(normalize(&rows)["x"], RequestState::Failed);
     }
 
