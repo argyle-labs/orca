@@ -48,6 +48,9 @@ pub struct AccountInfo {
     pub roles: Vec<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// False for an account that existed before orca adopted it.
+    #[serde(default)]
+    pub managed: bool,
 }
 
 fn default_enabled() -> bool {
@@ -57,6 +60,13 @@ fn default_enabled() -> bool {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
 pub struct ListRequest {
     pub unit_id: Id,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AccountKind>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+pub struct DetailRequest {
+    pub account: AccountRef,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
@@ -198,6 +208,11 @@ pub trait AccountProvider: Send + Sync {
         unsupported(LIST_OP)
     }
 
+    /// `None` when the unit has no such account.
+    fn detail(&self, _req: DetailRequest) -> BoxFuture<'_, Result<Option<AccountInfo>>> {
+        unsupported(DETAIL_OP)
+    }
+
     fn create(&self, _req: CreateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
         unsupported(CREATE_OP)
     }
@@ -314,6 +329,7 @@ pub type InvokeThunk = Arc<
 
 pub const DECL_OP: &str = "decl";
 pub const LIST_OP: &str = "list";
+pub const DETAIL_OP: &str = "detail";
 pub const CREATE_OP: &str = "create";
 pub const UPDATE_OP: &str = "update";
 pub const DELETE_OP: &str = "delete";
@@ -356,6 +372,10 @@ pub async fn dispatch_op(
             DECL_OP => enc(&provider.decl().await.map_err(|e| format!("{e:#}"))?),
             LIST_OP => enc(&provider
                 .list(dec(op, args)?)
+                .await
+                .map_err(|e| format!("{e:#}"))?),
+            DETAIL_OP => enc(&provider
+                .detail(dec(op, args)?)
                 .await
                 .map_err(|e| format!("{e:#}"))?),
             CREATE_OP => enc(&provider
@@ -472,6 +492,10 @@ impl AccountProvider for AccountProxy {
         self.call(LIST_OP, serde_json::to_value(&req))
     }
 
+    fn detail(&self, req: DetailRequest) -> BoxFuture<'_, Result<Option<AccountInfo>>> {
+        self.call(DETAIL_OP, serde_json::to_value(&req))
+    }
+
     fn create(&self, req: CreateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
         let fut = self.call(CREATE_OP, serde_json::to_value(&req));
         Box::pin(async move { fut.await.map(redact_outcome) })
@@ -544,6 +568,17 @@ mod tests {
         }
     }
 
+    fn info(unit_id: Id) -> AccountInfo {
+        AccountInfo {
+            unit_id,
+            name: "api".into(),
+            kind: AccountKind::ApiKey,
+            roles: vec![],
+            enabled: true,
+            managed: true,
+        }
+    }
+
     struct FakeOwner {
         name: String,
     }
@@ -562,13 +597,15 @@ mod tests {
         }
         fn list(&self, req: ListRequest) -> BoxFuture<'_, Result<Vec<AccountInfo>>> {
             Box::pin(async move {
-                Ok(vec![AccountInfo {
-                    unit_id: req.unit_id,
-                    name: "api".into(),
-                    kind: AccountKind::ApiKey,
-                    roles: vec![],
-                    enabled: true,
-                }])
+                Ok(vec![info(req.unit_id)]
+                    .into_iter()
+                    .filter(|a| req.kind.is_none_or(|k| a.kind == k))
+                    .collect())
+            })
+        }
+        fn detail(&self, req: DetailRequest) -> BoxFuture<'_, Result<Option<AccountInfo>>> {
+            Box::pin(async move {
+                Ok((req.account.account == "api").then(|| info(req.account.unit_id)))
             })
         }
         fn create(&self, req: CreateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
@@ -753,6 +790,7 @@ mod tests {
         }))
         .unwrap();
         assert!(info.enabled);
+        assert!(!info.managed);
         assert!(info.roles.is_empty());
     }
 
@@ -947,6 +985,8 @@ mod tests {
             match op {
                 DECL_OP => Ok(serde_json::json!({})),
                 LIST_OP | CONSUMERS_OP => Ok(serde_json::json!([])),
+                DETAIL_OP => Ok(serde_json::Value::Null),
+                REGENERATE_OP => Ok(serde_json::json!({"executed": true, "generated": VALUE})),
                 VERIFY_OP | VERIFY_CONSUMER_OP => Ok(serde_json::json!({"matches": true})),
                 SET_SECRET_OP => Err(serde_json::json!(format!(
                     "bad key {}",
@@ -963,10 +1003,20 @@ mod tests {
         proxy.decl().await.unwrap();
         assert!(
             proxy
-                .list(ListRequest { unit_id: id(OWNER) })
+                .list(ListRequest {
+                    unit_id: id(OWNER),
+                    kind: None,
+                })
                 .await
                 .unwrap()
                 .is_empty()
+        );
+        assert!(
+            proxy
+                .detail(DetailRequest { account: acct() })
+                .await
+                .unwrap()
+                .is_none()
         );
         let created = proxy
             .create(CreateRequest {
@@ -1015,6 +1065,14 @@ mod tests {
                 .unwrap()
                 .matches
         );
+        let regen = proxy
+            .regenerate(RegenerateRequest {
+                account: acct(),
+                dry_run: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(regen.generated.unwrap().expose_secret(), VALUE);
         assert!(
             proxy
                 .consumers(ConsumersRequest::default())
@@ -1045,18 +1103,20 @@ mod tests {
             vec![
                 "decl",
                 "list",
+                "detail",
                 "create",
                 "update",
                 "delete",
                 "set_secret",
                 "verify",
+                "regenerate",
                 "consumers",
                 "apply_consumer",
                 "verify_consumer",
             ]
         );
-        assert_eq!(calls[5].1["secret"], VALUE);
-        assert_eq!(calls[8].1["holding"]["consumer_unit_id"], CONSUMER);
+        assert_eq!(calls[6].1["secret"], VALUE);
+        assert_eq!(calls[10].1["holding"]["consumer_unit_id"], CONSUMER);
     }
 
     #[tokio::test]
@@ -1168,5 +1228,38 @@ mod tests {
         );
         deregister_provider("account-claim-a");
         deregister_provider("account-claim-b");
+    }
+
+    #[tokio::test]
+    async fn account_list_kind_filter_and_detail() {
+        let p = owner();
+        let keys = dispatch_op(
+            &p,
+            LIST_OP,
+            serde_json::json!({"unit_id": OWNER, "kind": "api_key"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(keys[0]["managed"], true);
+        let users = dispatch_op(
+            &p,
+            LIST_OP,
+            serde_json::json!({"unit_id": OWNER, "kind": "os_user"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(users, serde_json::json!([]));
+        let found = dispatch_op(&p, DETAIL_OP, serde_json::json!({"account": acct()}))
+            .await
+            .unwrap();
+        assert_eq!(found["name"], "api");
+        let missing = dispatch_op(
+            &p,
+            DETAIL_OP,
+            serde_json::json!({"account": {"unit_id": OWNER, "account": "nobody"}}),
+        )
+        .await
+        .unwrap();
+        assert!(missing.is_null());
     }
 }
