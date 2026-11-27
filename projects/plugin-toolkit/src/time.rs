@@ -34,6 +34,11 @@ impl Deadline {
     pub fn reached(&self) -> bool {
         now_instant() >= self.0
     }
+
+    /// Time left until the deadline; zero once reached.
+    pub fn remaining(&self) -> Duration {
+        self.0.saturating_duration_since(now_instant())
+    }
 }
 
 /// The executor's clock, so paused time in tests drives deadlines and sleeps alike.
@@ -61,6 +66,7 @@ pub enum Polled<T> {
 /// Run `probe` (given the 1-based attempt number) until it settles, `attempts`
 /// probes have run, or `deadline` is reached, sleeping `interval`
 /// between probes. At least one probe always runs; a probe error ends the poll.
+/// A sleep never runs past the deadline, and no probe starts once it is reached.
 pub async fn poll_until<T, E, F, Fut>(
     interval: Duration,
     attempts: u32,
@@ -84,8 +90,11 @@ where
         if deadline.reached() {
             return Ok(Polled::Expired(value));
         }
+        sleep(interval.min(deadline.remaining())).await;
+        if deadline.reached() {
+            return Ok(Polled::Expired(value));
+        }
         attempt += 1;
-        sleep(interval).await;
     }
 }
 
@@ -173,14 +182,41 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn poll_expires_when_paused_time_passes_deadline() {
+    async fn poll_caps_sleep_at_deadline() {
+        let start = tokio::time::Instant::now();
         let deadline = Deadline::after(Duration::from_secs(12));
         let out: Result<_, ()> =
             poll_until(Duration::from_secs(5), 60, &deadline, |n| async move {
                 Ok(Probe::Pending(n))
             })
             .await;
-        assert_eq!(out, Ok(Polled::Expired(4)));
+        assert_eq!(out, Ok(Polled::Expired(3)));
+        assert_eq!(start.elapsed(), Duration::from_secs(12));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn poll_skips_probe_when_deadline_lands_on_interval() {
+        let start = tokio::time::Instant::now();
+        let deadline = Deadline::after(Duration::from_secs(10));
+        let mut calls = 0;
+        let out: Result<_, ()> = poll_until(Duration::from_secs(5), 60, &deadline, |n| {
+            calls += 1;
+            async move { Ok(Probe::Pending(n)) }
+        })
+        .await;
+        assert_eq!(out, Ok(Polled::Expired(2)));
+        assert_eq!(calls, 2);
+        assert_eq!(start.elapsed(), Duration::from_secs(10));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remaining_counts_down_to_zero() {
+        let d = Deadline::after(Duration::from_secs(10));
+        assert_eq!(d.remaining(), Duration::from_secs(10));
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert_eq!(d.remaining(), Duration::from_secs(6));
+        tokio::time::advance(Duration::from_secs(20)).await;
+        assert_eq!(d.remaining(), Duration::ZERO);
     }
 
     #[tokio::test(start_paused = true)]
