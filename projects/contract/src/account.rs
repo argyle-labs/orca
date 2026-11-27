@@ -376,6 +376,14 @@ fn serialize_opt_secret<S: serde::Serializer>(
 
 /// Provider ops default to "unsupported" and `consumers` to none, so a plugin
 /// that only holds other units' credentials implements just the consumer ops.
+///
+/// Rotation runs: write the secrets backend, `set_secret` on the owner (or
+/// `regenerate`, then write the backend), `apply_consumer` on every holding,
+/// then verify all of them. Rollback undoes it in reverse:
+/// `apply_consumer(old, rollback: true)` on each consumer already updated,
+/// `set_secret(old, rollback: true)` on the owner, then the secrets seam's
+/// `restore` op ([`crate::secrets_backend::RESTORE_OP`]). Each rollback call
+/// reports `restored`.
 pub trait AccountProvider: Send + Sync {
     fn name(&self) -> &str;
 
@@ -422,14 +430,6 @@ pub trait AccountProvider: Send + Sync {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    /// Writes the value into the held setting.
-    ///
-    /// Rotation runs: write the secrets backend, `set_secret` on the owner (or
-    /// `regenerate`, then write the backend), `apply_consumer` on every
-    /// holding, then verify all of them. Rollback undoes it in reverse:
-    /// `apply_consumer(old, rollback: true)` on each consumer already updated,
-    /// `set_secret(old, rollback: true)` on the owner, then the secrets seam's
-    /// `restore` op ([`crate::secrets_backend::RESTORE_OP`]). Each rollback call reports `restored`.
     fn apply_consumer(&self, _req: ConsumerApplyRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
         unsupported(APPLY_CONSUMER_OP)
     }
@@ -480,12 +480,13 @@ pub fn set_consumer_authorizer(authorizer: Option<ConsumerAuthorizer>) {
     *AUTHORIZER.write().expect("account authorizer poisoned") = authorizer;
 }
 
-/// Every holding of `account` across all registered providers, paired with the
-/// declaring provider's name. With no [`ConsumerAuthorizer`] installed this
-/// fails closed; holdings on units the provider does not manage are dropped. Holdings are declared at call time, not at
-/// registration, so the one-declarer-per-`(consumer_unit_id, setting)` rule is
-/// enforced here: two providers claiming the same setting on the same unit is
-/// an error, since rotation could not know which one applies the value.
+/// Every holding of `account` across all registered providers, paired with
+/// the declaring provider's name. With no [`ConsumerAuthorizer`] installed
+/// this fails closed, and holdings on units the provider does not manage are
+/// dropped. Holdings are declared at call time, not at registration, so the
+/// one-declarer-per-`(consumer_unit_id, setting)` rule is enforced here: two
+/// providers claiming the same setting on the same unit is an error, since
+/// rotation could not know which one applies the value.
 pub async fn consumers_of(account: &AccountRef) -> Result<Vec<(String, ConsumerDecl)>> {
     let authorizer = AUTHORIZER
         .read()
