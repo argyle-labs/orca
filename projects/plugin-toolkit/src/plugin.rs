@@ -397,8 +397,6 @@ impl Plugin {
         self
     }
 
-    /// Register an **account** facet: this plugin manages credential-bearing
-    /// accounts on units and/or holds other units' credentials as a consumer.
     #[must_use]
     pub fn account<P: crate::contract::account::AccountProvider + 'static>(
         mut self,

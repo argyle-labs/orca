@@ -35,10 +35,6 @@ pub struct AccountDecl {
     pub capabilities: Vec<KindCapabilities>,
 }
 
-/// What a provider can do for one account kind. Core reads this before it
-/// writes the secrets backend: `regenerate` picks unit-minted over
-/// orca-generated values, and without `rollback_secret` a failed rotation
-/// cannot be rolled back on the unit.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct KindCapabilities {
     pub kind: AccountKind,
@@ -53,8 +49,6 @@ pub struct KindCapabilities {
 }
 
 impl AccountDecl {
-    /// `Unknown` always yields no capabilities: several unrecognised kinds
-    /// share that value, so no single entry describes it.
     pub fn capabilities_for(&self, kind: AccountKind) -> KindCapabilities {
         self.capabilities
             .iter()
@@ -64,10 +58,6 @@ impl AccountDecl {
             .unwrap_or_else(|| KindCapabilities::none(kind))
     }
 
-    /// Each kind appears once in `account_kinds` and at most once in
-    /// `capabilities`, and only kinds listed in `account_kinds` carry
-    /// capabilities. `Unknown` is exempt: distinct kinds from a newer plugin
-    /// all decode to it, so they would look like duplicates.
     pub fn validate(&self) -> std::result::Result<(), String> {
         for (i, k) in self.account_kinds.iter().enumerate() {
             if *k != AccountKind::Unknown && self.account_kinds[..i].contains(k) {
@@ -104,8 +94,6 @@ impl KindCapabilities {
     }
 }
 
-/// The provider does not implement `op`. Survives the wire, so core can
-/// `downcast_ref::<Unsupported>()` on a proxied error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unsupported {
     pub op: String,
@@ -119,8 +107,6 @@ impl std::fmt::Display for Unsupported {
 
 impl std::error::Error for Unsupported {}
 
-/// A provider's `consumers` call failed, so its holdings are unknown; core
-/// reports this as drift against `provider`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerDiscoveryFailed {
     pub provider: String,
@@ -212,7 +198,6 @@ pub struct AccountInfo {
     pub roles: Vec<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    /// False for an account that existed before orca adopted it.
     #[serde(default)]
     pub managed: bool,
 }
@@ -280,7 +265,6 @@ pub struct SetSecretRequest {
     pub secret: Option<Secret<String>>,
     #[serde(default)]
     pub dry_run: bool,
-    /// Puts the previous value back; the outcome must set `restored`.
     #[serde(default)]
     pub rollback: bool,
 }
@@ -293,9 +277,6 @@ pub struct VerifyRequest {
     pub secret: Secret<String>,
 }
 
-/// "This plugin holds account `account` in its setting `setting` on unit
-/// `consumer_unit_id`." Owner and consumer are addressed by unit id only, so a
-/// consumer never names the plugin that provides the account.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct ConsumerDecl {
     pub account: AccountRef,
@@ -305,8 +286,6 @@ pub struct ConsumerDecl {
     pub capabilities: ConsumerCapabilities,
 }
 
-/// Declared by the consumer for its own holding. Core refuses to rotate an
-/// account unless every holding [`supports_rotation`](ConsumerDecl::supports_rotation).
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct ConsumerCapabilities {
     #[serde(default)]
@@ -318,8 +297,6 @@ pub struct ConsumerCapabilities {
 }
 
 impl ConsumerDecl {
-    /// Every rotation step is possible on this holding: apply the new value,
-    /// verify it, and roll it back on failure.
     pub fn supports_rotation(&self) -> bool {
         let c = self.capabilities;
         c.apply && c.verify && c.rollback
@@ -344,7 +321,6 @@ pub struct ConsumerApplyRequest {
     pub secret: Option<Secret<String>>,
     #[serde(default)]
     pub dry_run: bool,
-    /// Puts the previous value back; the outcome must set `restored`.
     #[serde(default)]
     pub rollback: bool,
 }
@@ -362,8 +338,6 @@ pub struct RegenerateRequest {
     pub account: AccountRef,
     #[serde(default)]
     pub dry_run: bool,
-    /// The provider must mint at least this many characters; never below
-    /// [`MIN_SECRET_LEN`].
     #[serde(default = "min_secret_len")]
     pub min_len: usize,
 }
@@ -372,9 +346,6 @@ fn min_secret_len() -> usize {
     MIN_SECRET_LEN
 }
 
-/// `regenerate` already rotated the credential on the unit, but the minted
-/// value is too short to accept. `generated` is the live value, so core can
-/// store it or roll the unit back; it never appears in the message.
 #[derive(Debug, Clone)]
 pub struct RotatedButRejected {
     pub account: AccountRef,
@@ -394,9 +365,6 @@ impl std::fmt::Display for RotatedButRejected {
 
 impl std::error::Error for RotatedButRejected {}
 
-/// `generated` carries a credential the unit minted itself (e.g. an app that
-/// regenerates its own api_key), so core can write it to the secrets backend.
-/// It is never placed in `detail`, which is scrubbed.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
 pub struct AccountOutcome {
     pub executed: bool,
@@ -409,9 +377,6 @@ pub struct AccountOutcome {
     )]
     #[schemars(with = "Option<String>")]
     pub generated: Option<Secret<String>>,
-    /// Set on every `rollback` call. `Some(false)` means the previous value is
-    /// not in place, so the unit and the secrets backend disagree and core
-    /// escalates instead of reporting the rollback done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored: Option<bool>,
 }
@@ -433,16 +398,6 @@ fn serialize_opt_secret<S: serde::Serializer>(
     }
 }
 
-/// Provider ops default to "unsupported" and `consumers` to none, so a plugin
-/// that only holds other units' credentials implements just the consumer ops.
-///
-/// Rotation runs: write the secrets backend, `set_secret` on the owner (or
-/// `regenerate`, then write the backend), `apply_consumer` on every holding,
-/// then verify all of them. Rollback undoes it in reverse:
-/// `apply_consumer(old, rollback: true)` on each consumer already updated,
-/// `set_secret(old, rollback: true)` on the owner, then the secrets seam's
-/// `restore` op ([`crate::secrets_backend::RESTORE_OP`]). Each rollback call
-/// reports `restored`.
 pub trait AccountProvider: Send + Sync {
     fn name(&self) -> &str;
 
@@ -452,7 +407,6 @@ pub trait AccountProvider: Send + Sync {
         unsupported(LIST_OP)
     }
 
-    /// `None` when the unit has no such account.
     fn detail(&self, _req: DetailRequest) -> BoxFuture<'_, Result<Option<AccountInfo>>> {
         unsupported(DETAIL_OP)
     }
@@ -469,7 +423,6 @@ pub trait AccountProvider: Send + Sync {
         unsupported(DELETE_OP)
     }
 
-    /// Rollback is `set_secret` with the previous value and `rollback: true`.
     fn set_secret(&self, _req: SetSecretRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
         unsupported(SET_SECRET_OP)
     }
@@ -478,13 +431,10 @@ pub trait AccountProvider: Send + Sync {
         unsupported(VERIFY_OP)
     }
 
-    /// For units that mint their own credential: the new value comes back in
-    /// [`AccountOutcome::generated`].
     fn regenerate(&self, _req: RegenerateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
         unsupported(REGENERATE_OP)
     }
 
-    /// Holdings this plugin declares, narrowed to `req.account` when set.
     fn consumers(&self, _req: ConsumersRequest) -> BoxFuture<'_, Result<Vec<ConsumerDecl>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -526,10 +476,6 @@ pub fn deregister_provider(name: &str) -> bool {
     before != g.len()
 }
 
-/// Decides whether provider `name` manages unit `unit_id`. A holding counts
-/// only when its declaring provider manages `consumer_unit_id`; otherwise any
-/// plugin could claim a setting on a unit it does not own and receive the
-/// rotated value. Core installs the unit→manager check.
 pub type ConsumerAuthorizer = Arc<dyn Fn(&str, &Id) -> bool + Send + Sync>;
 
 static AUTHORIZER: LazyLock<RwLock<Option<ConsumerAuthorizer>>> =
@@ -539,23 +485,12 @@ pub fn set_consumer_authorizer(authorizer: Option<ConsumerAuthorizer>) {
     *AUTHORIZER.write().expect("account authorizer poisoned") = authorizer;
 }
 
-/// Holdings of one account, each paired with the declaring provider's name.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConsumerSet {
     pub held: Vec<(String, ConsumerDecl)>,
     pub rejected: Vec<(String, ConsumerDecl)>,
 }
 
-/// Every holding of `account` across all registered providers, paired with
-/// the declaring provider's name. With no [`ConsumerAuthorizer`] installed
-/// this fails closed. Holdings on units the provider does not manage are kept
-/// out of rotation and returned in [`ConsumerSet::rejected`] so core can
-/// report them as drift; they take no part in conflict detection, so a rogue
-/// claim cannot block rotation. Holdings are declared at call time, not at
-/// registration, so the one-declaration-per-`(consumer_unit_id, setting)`
-/// rule is enforced here, across all accounts: any two differing claims on
-/// one setting are an error, since rotation could not know which value or
-/// provider applies.
 pub async fn consumers_of(account: &AccountRef) -> Result<ConsumerSet> {
     let authorizer = AUTHORIZER
         .read()
@@ -564,14 +499,11 @@ pub async fn consumers_of(account: &AccountRef) -> Result<ConsumerSet> {
     consumers_in(&providers(), authorizer.as_ref(), account).await
 }
 
-/// [`consumers_of`] over an explicit provider set and authorizer.
 pub async fn consumers_in(
     providers: &[Arc<dyn AccountProvider>],
     authorizer: Option<&ConsumerAuthorizer>,
     account: &AccountRef,
 ) -> Result<ConsumerSet> {
-    // Every holding is fetched, not just this account's, so one setting
-    // claimed for two different accounts is caught.
     let req = ConsumersRequest { account: None };
     let authorize =
         authorizer.ok_or_else(|| anyhow::anyhow!("no account consumer authorizer installed"))?;
@@ -645,9 +577,6 @@ pub const CONSUMERS_OP: &str = "consumers";
 pub const APPLY_CONSUMER_OP: &str = "apply_consumer";
 pub const VERIFY_CONSUMER_OP: &str = "verify_consumer";
 
-/// A dry run never carries plaintext: `secret` is dropped from the args on
-/// both sides of the wire. A real `set_secret`/`apply_consumer` without one is
-/// refused before it reaches the provider.
 fn gate_dry_run_secret(op: &str, args: &mut serde_json::Value) -> std::result::Result<(), String> {
     let dry_run = args
         .get("dry_run")
@@ -701,8 +630,6 @@ fn requested_min_len(args: &serde_json::Value) -> usize {
         .map_or(MIN_SECRET_LEN, |n| (n as usize).max(MIN_SECRET_LEN))
 }
 
-/// A non-string `generated` counts as too short: it cannot be stored as a
-/// secret, and its length is not a character count.
 fn generated_too_short(out: &serde_json::Value, min_len: usize) -> bool {
     match out.get("generated") {
         None | Some(serde_json::Value::Null) => false,
@@ -711,9 +638,6 @@ fn generated_too_short(out: &serde_json::Value, min_len: usize) -> bool {
     }
 }
 
-/// Every rendering of `v[key]` an error message could echo, so a provider or
-/// decode error that repeats the value is redacted. A non-string value (a
-/// number, a nested object) is covered too: serde quotes scalars verbatim.
 fn secret_values(v: &serde_json::Value, key: &str) -> Vec<String> {
     fn leaves(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
@@ -734,10 +658,6 @@ fn secret_values(v: &serde_json::Value, key: &str) -> Vec<String> {
     out
 }
 
-/// Key-name redaction misses a value echoed under an innocuous key
-/// (`{"msg": "set key to <value>"}`), so every string leaf is also checked
-/// against the request secret and any `generated` value. The top-level
-/// `generated` field itself is the one place the value is meant to travel.
 fn scrub_known_values(out: &mut serde_json::Value, values: &[String]) {
     fn walk(v: &mut serde_json::Value, values: &[String]) {
         match v {
@@ -758,25 +678,18 @@ fn scrub_known_values(out: &mut serde_json::Value, values: &[String]) {
     }
 }
 
-/// Below this many characters a value matches too much ordinary text to be
-/// worth redacting by substring; pattern scrubbing still applies.
 pub const MIN_SECRET_LEN: usize = 4;
 
 fn scrubbable(v: &str) -> bool {
     v.chars().count() >= MIN_SECRET_LEN
 }
 
-/// Long values are redacted wherever they appear. A short value is redacted
-/// only as the whole text or a whole word, so it cannot leak by being echoed
-/// alone yet does not blank every word that happens to contain it.
 fn scrubbed(msg: &str, values: &[String]) -> String {
     let (long, short): (Vec<&str>, Vec<&str>) = values
         .iter()
         .map(String::as_str)
         .filter(|v| !v.is_empty())
         .partition(|v| scrubbable(v));
-    // Long first: redacting a short value inside a long one would break the
-    // long value's match and leave the rest of it in the text.
     let mut text = long.iter().fold(msg.to_string(), |acc, v| {
         acc.replace(v, utils::scrub::REDACTED)
     });
@@ -852,7 +765,6 @@ pub async fn dispatch_op(
     op: &str,
     mut args: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, serde_json::Value> {
-    // Collected before the gate strips a dry run's secret: over-redaction is harmless.
     let secret = secret_values(&args, "secret");
     let err = |f: Fail| match f {
         Fail::Msg(msg) => serde_json::Value::String(scrubbed(&msg, &secret)),
@@ -968,7 +880,6 @@ impl AccountProxy {
                     &[]
                 ))
             })?;
-            // Collected before the gate strips a dry run's secret: over-redaction is harmless.
             let secret = secret_values(&args, "secret");
             gate_dry_run_secret(op, &mut args).map_err(|e| {
                 anyhow::anyhow!(scrubbed(&format!("account '{name}' {e}"), &secret))
@@ -1800,8 +1711,6 @@ mod tests {
         assert_eq!(some.as_array().unwrap().len(), 1);
     }
 
-    /// Serializes the tests that touch the process-global registry or
-    /// authorizer; everything else uses [`consumers_in`] with local state.
     static GLOBALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn claim_fixtures() -> (AccountRef, ConsumerDecl, ConsumerDecl) {
