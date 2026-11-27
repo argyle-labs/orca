@@ -141,6 +141,38 @@ impl std::fmt::Display for PlannedCall {
 
 impl std::error::Error for PlannedCall {}
 
+/// An `http.request` transport failure, carrying the kind the supervisor relays
+/// as `CapResult.error_kind` so plugins can tell a timeout from a refusal.
+#[derive(Debug)]
+pub struct HttpCapError {
+    pub kind: Option<&'static str>,
+    message: String,
+}
+
+impl From<utils::http::HttpError> for HttpCapError {
+    fn from(e: utils::http::HttpError) -> Self {
+        let kind = if e.is_timeout() {
+            Some(plugin_proto::HTTP_TIMEOUT)
+        } else if e.is_connect() {
+            Some(plugin_proto::HTTP_CONNECT)
+        } else {
+            None
+        };
+        HttpCapError {
+            kind,
+            message: e.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for HttpCapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "http.request: {}", self.message)
+    }
+}
+
+impl std::error::Error for HttpCapError {}
+
 fn api_call_reply(outcome: spec::surfaces::Outcome) -> Result<Value> {
     match outcome {
         spec::surfaces::Outcome::Response(value) => Ok(value),
@@ -272,7 +304,7 @@ pub fn handle_cap(cap: &str, args: Value, principal: &str) -> Result<Value> {
                 builder
                     .send_raw()
                     .await
-                    .map_err(|e| anyhow!("http.request: {e}"))
+                    .map_err(|e| anyhow::Error::new(HttpCapError::from(e)))
             })??;
             let reply = HttpResponse {
                 status: resp.status,
@@ -1038,6 +1070,57 @@ mod tests {
         assert_eq!(
             plugin_body_share("p").available_permits(),
             PLUGIN_BODY_SHARE_BYTES as usize
+        );
+    }
+
+    #[test]
+    fn http_request_timeout_carries_its_kind() {
+        handle_cap(
+            "http.request",
+            json!({"method": "GET", "url": "http://127.0.0.1:1/", "retry": false}),
+            "p",
+        )
+        .unwrap_err();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let err = handle_cap(
+            "http.request",
+            json!({"method": "GET", "url": url, "timeout_ms": 20, "retry": false}),
+            "p",
+        )
+        .unwrap_err();
+        drop(listener);
+        let http = err
+            .downcast_ref::<HttpCapError>()
+            .expect("typed http error");
+        assert_eq!(http.kind, Some(plugin_proto::HTTP_TIMEOUT));
+        assert_eq!(
+            err.to_string(),
+            "http.request: request timed out after 20ms"
+        );
+    }
+
+    #[test]
+    fn http_request_refused_carries_connect_kind() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let err = handle_cap(
+            "http.request",
+            json!({"method": "GET", "url": format!("http://127.0.0.1:{port}/"), "retry": false}),
+            "p",
+        )
+        .unwrap_err();
+        let http = err
+            .downcast_ref::<HttpCapError>()
+            .expect("typed http error");
+        assert_eq!(http.kind, Some(plugin_proto::HTTP_CONNECT));
+        assert!(
+            err.to_string()
+                .starts_with("http.request: connect failed: "),
+            "{err}"
         );
     }
 

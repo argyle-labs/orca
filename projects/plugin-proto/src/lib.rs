@@ -101,6 +101,11 @@ pub struct ApiSurfaceRef {
 }
 
 pub const API_CALL_PLANNED: &str = "api_call_planned";
+/// `CapResult.error_kind` for an `http.request` that hit its timeout.
+pub const HTTP_TIMEOUT: &str = "http_timeout";
+/// `CapResult.error_kind` for an `http.request` that could not connect
+/// (refused, DNS failure, unreachable).
+pub const HTTP_CONNECT: &str = "http_connect";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
