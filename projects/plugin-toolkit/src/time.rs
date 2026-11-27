@@ -1,25 +1,9 @@
-//! Async time — an orca abstraction, not a runtime re-export.
-//!
-//! Plugins stay `async` but reach timing through this orca-owned surface, so no
-//! executor type or crate name ever appears in plugin code. The executor behind
-//! these functions (tokio today) is an orca implementation detail: swap it and
-//! no plugin changes. Per [[orca-north-star-abstract-system-differences]] and
-//! [[plugins-stay-thin]] — the plugin depends on `plugin_toolkit`, never on the
-//! runtime.
-//!
-//! `Duration` is std vocabulary (like `String`), not a runtime dependency, so it
-//! is used directly at the boundary; every other type here is orca-owned. There
-//! is deliberately no way to obtain the executor's clock/`Instant` — use
-//! [`Deadline`].
+//! Async time for plugins. The executor stays hidden: deadlines go through
+//! [`Deadline`], never a runtime `Instant`.
 
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-// Wall-clock time (an orca-owned instant, chrono hidden) is the `utils::time`
-// utility. Re-exposed here so a plugin reaches both async time and wall-clock
-// time through one `time` module and never names the datetime library. Gated on
-// `tools` (which pulls light, tree-shaken `utils` — no http/tls/git), so any
-// tool plugin has it.
 #[cfg(feature = "tools")]
 pub use ::utils::time::{Timestamp, now};
 
