@@ -86,8 +86,9 @@ pub struct SeriesRow {
     pub expected: Option<usize>,
     #[serde(default)]
     pub loaded: Option<usize>,
-    /// False when the item list may still grow.
-    pub settled: bool,
+    /// `Some(false)` when the item list may still grow; `None` when it was never read.
+    #[serde(default)]
+    pub settled: Option<bool>,
     /// Items the metadata source reports beyond what settled in the manager.
     #[serde(default)]
     pub shortfall: Option<usize>,
@@ -114,7 +115,7 @@ impl SeriesRow {
             series: None,
             expected: None,
             loaded: None,
-            settled: true,
+            settled: None,
             shortfall: None,
             wantable: None,
             selected: None,
@@ -125,7 +126,8 @@ impl SeriesRow {
         }
     }
 
-    fn record(&mut self, view: &SeriesView, requested: Requested) {
+    fn record(&mut self, view: &SeriesView, settled: bool, requested: Requested) {
+        self.settled = Some(settled);
         self.series = view.name.clone();
         self.expected = view.expected;
         self.loaded = Some(view.items.len());
@@ -214,7 +216,7 @@ pub async fn add_series(
                         let gaps = compute_gaps(&view.items, &view.owned);
                         let requested =
                             request_gaps(&gaps, requester, &plan.quality, budget, true).await;
-                        row.record(&view, requested);
+                        row.record(&view, true, requested);
                     }
                     Err(e) => row.error = Some(e.to_string()),
                 }
@@ -317,8 +319,7 @@ async fn add_and_want(
         .actions
         .iter()
         .any(|a| a.skipped == Some(SkipReason::DeadlineReached));
-    row.settled = settled;
-    row.record(&view, requested);
+    row.record(&view, settled, requested);
     let loaded = view.items.len();
     row.pending = if deadline_hit {
         Some(Pending::DeadlineReached)
@@ -745,7 +746,7 @@ mod tests {
         let s = &r.series[0];
         assert_eq!(
             (s.expected, s.loaded, s.shortfall, s.settled),
-            (Some(10), Some(3), Some(7), true)
+            (Some(10), Some(3), Some(7), Some(true))
         );
         assert_eq!(mgr.sent("series"), 2);
     }
@@ -763,7 +764,10 @@ mod tests {
         );
         let s = &r.series[0];
         assert_eq!(s.pending, Some(Pending::Importing));
-        assert_eq!((s.loaded, s.settled, s.shortfall), (Some(5), false, None));
+        assert_eq!(
+            (s.loaded, s.settled, s.shortfall),
+            (Some(5), Some(false), None)
+        );
         assert_eq!(mgr.sent("series"), FAST.attempts as usize);
     }
 
@@ -863,6 +867,7 @@ mod tests {
         .unwrap();
         assert_eq!((r.added, r.series_failed, r.pending), (1, 0, 1));
         assert_eq!(r.series[0].pending, Some(Pending::DeadlineReached));
+        assert_eq!(r.series[0].settled, None);
         assert_eq!(mgr.sent("series"), 2);
     }
 
@@ -887,6 +892,8 @@ mod tests {
             (1, 3, 0, 1)
         );
         assert_eq!(r.series[1].pending, Some(Pending::BudgetExhausted));
+        assert_eq!(r.series[0].settled, Some(true));
+        assert_eq!(r.series[1].settled, None);
         assert_eq!(mgr.sent("series"), 1);
     }
 
