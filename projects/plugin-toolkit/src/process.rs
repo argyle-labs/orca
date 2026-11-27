@@ -476,7 +476,10 @@ async fn writer_result(
     };
     tokio::select! {
         biased;
-        done = writer => done.map_err(std::io::Error::other)?,
+        done = writer => match done.map_err(std::io::Error::other)? {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            other => other,
+        },
         () = cancel => Err(std::io::Error::other("child stdin was not fully consumed by the deadline")),
     }
 }
@@ -1379,23 +1382,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stdin_bytes_the_child_never_reads_is_an_error() {
-        let err = Command::new("true")
+    async fn unread_stdin_follows_the_exit_status() {
+        let ok = Command::new("true")
+            .stdin_bytes(vec![b'a'; 1 << 20])
+            .run_checked_within(Duration::from_secs(10))
+            .await;
+        assert!(ok.is_ok(), "{ok:?}");
+        let err = Command::new("false")
             .stdin_bytes(vec![b'a'; 1 << 20])
             .run_checked_within(Duration::from_secs(10))
             .await
             .unwrap_err();
-        assert_eq!(err.code, None);
+        assert_eq!(err.code, Some(1));
     }
 
     #[tokio::test]
-    async fn status_run_whose_child_never_reads_stdin_is_an_error() {
-        let err = Command::new("true")
-            .stdin_bytes(vec![b'a'; 1 << 20])
-            .status_within(Duration::from_secs(10))
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+    async fn status_run_with_unread_stdin_follows_the_exit_status() {
+        for (program, success) in [("true", true), ("false", false)] {
+            let st = Command::new(program)
+                .stdin_bytes(vec![b'a'; 1 << 20])
+                .status_within(Duration::from_secs(10))
+                .await
+                .unwrap()
+                .expect("exited in time");
+            assert_eq!(st.success, success, "{program}");
+        }
+    }
+
+    #[tokio::test]
+    async fn small_unread_stdin_gives_the_same_result_either_way_the_race_goes() {
+        for code in [0, 4] {
+            for script in [
+                format!("exec 0<&-; exit {code}"),
+                format!("perl -MIO::Select -e 'IO::Select->new(\\*STDIN)->can_read; exit {code}'"),
+            ] {
+                let out = Command::new("sh")
+                    .arg("-c")
+                    .arg(&script)
+                    .stdin_bytes("small")
+                    .output_within(Duration::from_secs(10))
+                    .await
+                    .unwrap()
+                    .expect("exited in time");
+                assert_eq!(out.status.code, Some(code), "{script}");
+            }
+        }
     }
 
     #[tokio::test]
