@@ -10,7 +10,7 @@
 //! for `domain = "tunnel_provider"`.
 
 // The erased-invoke boundary carries args/results/errors as `serde_json::Value`;
-// the sanctioned opaque seam, scoped here (same as `ups`).
+// the type-erased plugin seam cannot be typed, so the lint is allowed for this file only.
 #![allow(clippy::disallowed_types)]
 
 use std::sync::{Arc, LazyLock, RwLock};

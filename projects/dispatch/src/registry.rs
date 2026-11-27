@@ -731,7 +731,6 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
                                 // explicit peer, the tool almost certainly lives there
                                 // (a plugin loaded only on that peer). Forward the raw
                                 // call over the mesh instead of 404ing.
-                                // (mesh-tool-surface-must-expose-peer-tools)
                                 None => forward_unknown_to_peer(name, args, ctx).await,
                             },
                         },

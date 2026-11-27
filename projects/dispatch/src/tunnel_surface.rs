@@ -9,8 +9,8 @@
 //! applied or diffed, and the reply echoes the request as `would_apply` with
 //! `changed: null`.
 
-// Assembling schemars schemas into MCP/CLI wire JSON is inherently dynamic JSON,
-// same allow (and reason) as ups_surface.rs.
+// MCP/CLI wire schemas are assembled from schemars output as untyped JSON, so
+// `serde_json::Value` is unavoidable here.
 #![allow(clippy::disallowed_types)]
 
 use anyhow::Result;
