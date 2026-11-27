@@ -86,9 +86,26 @@ impl std::fmt::Display for Unsupported {
 impl std::error::Error for Unsupported {}
 
 /// A name that must not be blank; decoding rejects `""` and whitespace.
-#[derive(Serialize, JsonSchema, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[serde(transparent)]
 pub struct NonEmpty(String);
+
+impl JsonSchema for NonEmpty {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "NonEmpty".into()
+    }
+
+    fn json_schema(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "minLength": 1,
+        })
+    }
+}
 
 impl NonEmpty {
     pub fn as_str(&self) -> &str {
@@ -100,8 +117,8 @@ impl std::str::FromStr for NonEmpty {
     type Err = String;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        if s.trim().is_empty() {
-            return Err("value must not be empty".to_string());
+        if s.is_empty() || s.trim() != s {
+            return Err("value must be non-empty with no surrounding whitespace".to_string());
         }
         Ok(Self(s.to_string()))
     }
@@ -136,7 +153,7 @@ pub struct AccountRef {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
 pub struct AccountInfo {
     pub unit_id: Id,
-    pub name: String,
+    pub name: NonEmpty,
     pub kind: AccountKind,
     #[serde(default)]
     pub roles: Vec<String>,
@@ -816,7 +833,7 @@ mod tests {
     fn info(unit_id: Id) -> AccountInfo {
         AccountInfo {
             unit_id,
-            name: "api".into(),
+            name: nm("api"),
             kind: AccountKind::ApiKey,
             roles: vec![],
             enabled: true,
@@ -1563,7 +1580,7 @@ mod tests {
 
     #[test]
     fn account_blank_names_rejected() {
-        for blank in ["", "  "] {
+        for blank in ["", "  ", " api", "api ", "\tapi"] {
             assert!(
                 serde_json::from_value::<AccountRef>(
                     serde_json::json!({"unit_id": OWNER, "account": blank})
@@ -1583,6 +1600,16 @@ mod tests {
         let ok: ConsumerDecl =
             serde_json::from_value(serde_json::to_value(holding()).unwrap()).unwrap();
         assert_eq!(ok.setting.as_str(), "prowlarr_api_key");
+        assert!(
+            serde_json::from_value::<AccountInfo>(
+                serde_json::json!({"unit_id": OWNER, "name": " ", "kind": "api_key"})
+            )
+            .is_err()
+        );
+        let schema = serde_json::to_value(schemars::schema_for!(AccountRef)).unwrap();
+        assert_eq!(schema["properties"]["account"]["minLength"], 1);
+        let schema = serde_json::to_value(schemars::schema_for!(AccountInfo)).unwrap();
+        assert_eq!(schema["properties"]["name"]["minLength"], 1);
     }
 
     struct SeesSecret;
