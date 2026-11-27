@@ -1623,4 +1623,48 @@ mod tests {
         let decoded: AccountOutcome = serde_json::from_value(back).unwrap();
         assert_eq!(decoded.restored, Some(true));
     }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_scrubs_consumer_errors_and_verify_detail() {
+        let invoke: InvokeThunk = Arc::new(move |op, args, _call| match op {
+            APPLY_CONSUMER_OP | VERIFY_CONSUMER_OP => Err(serde_json::json!(format!(
+                "rejected {}",
+                args["secret"].as_str().unwrap()
+            ))),
+            _ => Ok(serde_json::json!({"matches": true, "detail": {"token": "leaky"}})),
+        });
+        let proxy = AccountProxy {
+            name: "account-proxy-consumer".into(),
+            invoke,
+        };
+        let e = proxy
+            .apply_consumer(ConsumerApplyRequest {
+                holding: holding(),
+                secret: Some(secret()),
+                dry_run: false,
+                rollback: false,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("rejected") && !e.contains(VALUE), "{e}");
+        let e = proxy
+            .verify_consumer(ConsumerVerifyRequest {
+                holding: holding(),
+                secret: secret(),
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("rejected") && !e.contains(VALUE), "{e}");
+        let v = proxy
+            .verify(VerifyRequest {
+                account: acct(),
+                secret: secret(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(v.detail["token"], utils::scrub::REDACTED);
+    }
 }
