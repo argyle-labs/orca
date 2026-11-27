@@ -362,7 +362,37 @@ pub struct RegenerateRequest {
     pub account: AccountRef,
     #[serde(default)]
     pub dry_run: bool,
+    /// The provider must mint at least this many characters; never below
+    /// [`MIN_SECRET_LEN`].
+    #[serde(default = "min_secret_len")]
+    pub min_len: usize,
 }
+
+fn min_secret_len() -> usize {
+    MIN_SECRET_LEN
+}
+
+/// `regenerate` already rotated the credential on the unit, but the minted
+/// value is too short to accept. `generated` is the live value, so core can
+/// store it or roll the unit back; it never appears in the message.
+#[derive(Debug, Clone)]
+pub struct RotatedButRejected {
+    pub account: AccountRef,
+    pub generated: Secret<String>,
+}
+
+impl std::fmt::Display for RotatedButRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "account {}/{} was already rotated on the unit, but its generated value is \
+             shorter than {MIN_SECRET_LEN} characters; store it or roll the unit back",
+            self.account.unit_id, self.account.account
+        )
+    }
+}
+
+impl std::error::Error for RotatedButRejected {}
 
 /// `generated` carries a credential the unit minted itself (e.g. an app that
 /// regenerates its own api_key), so core can write it to the secrets backend.
@@ -646,16 +676,28 @@ fn gate_dry_run_secret(op: &str, args: &mut serde_json::Value) -> std::result::R
     {
         return Err(SHORT_SECRET.replace("{op}", op));
     }
+    if op == REGENERATE_OP {
+        let min_len = requested_min_len(args);
+        if let Some(obj) = args.as_object_mut() {
+            obj.insert("min_len".into(), min_len.into());
+        }
+    }
     Ok(())
 }
 
 const SHORT_SECRET: &str = "{op}: secret is shorter than the 4-character minimum";
-const SHORT_GENERATED: &str = "regenerate: generated value is shorter than the 4-character minimum";
+const ROTATED_KEY: &str = "rotated_but_rejected";
 
-fn generated_too_short(out: &serde_json::Value) -> bool {
+fn requested_min_len(args: &serde_json::Value) -> usize {
+    args.get("min_len")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(MIN_SECRET_LEN, |n| (n as usize).max(MIN_SECRET_LEN))
+}
+
+fn generated_too_short(out: &serde_json::Value, min_len: usize) -> bool {
     out.get("generated")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|v| !scrubbable(v))
+        .is_some_and(|v| v.chars().count() < min_len)
 }
 
 /// Every rendering of `v[key]` an error message could echo, so a provider or
@@ -707,10 +749,10 @@ fn scrub_known_values(out: &mut serde_json::Value, values: &[String]) {
 
 /// Below this many characters a value matches too much ordinary text to be
 /// worth redacting by substring; pattern scrubbing still applies.
-const MIN_SCRUB_LEN: usize = 4;
+pub const MIN_SECRET_LEN: usize = 4;
 
 fn scrubbable(v: &str) -> bool {
-    v.chars().count() >= MIN_SCRUB_LEN
+    v.chars().count() >= MIN_SECRET_LEN
 }
 
 /// Long values are redacted wherever they appear. A short value is redacted
@@ -804,6 +846,8 @@ pub async fn dispatch_op(
         }
     };
     gate_dry_run_secret(op, &mut args).map_err(|m| err(Fail::Msg(m)))?;
+    let min_len = requested_min_len(&args);
+    let account_arg = args.get("account").cloned();
     let rollback = args.get("rollback").cloned();
     fn dec<T: serde::de::DeserializeOwned>(
         op: &str,
@@ -843,8 +887,11 @@ pub async fn dispatch_op(
     }
     .await;
     let mut out = out.map_err(err)?;
-    if op == REGENERATE_OP && generated_too_short(&out) {
-        return Err(err(Fail::Msg(SHORT_GENERATED.to_string())));
+    if op == REGENERATE_OP && generated_too_short(&out, min_len) {
+        return Err(serde_json::json!({ ROTATED_KEY: {
+            "account": account_arg,
+            "generated": out.get("generated"),
+        }}));
     }
     if is_rollback(op, &rollback) && out.get("restored").is_none_or(serde_json::Value::is_null) {
         return Err(err(Fail::Msg(ROLLBACK_UNREPORTED.to_string())));
@@ -880,6 +927,16 @@ fn redact_verify(mut out: VerifyOutcome) -> VerifyOutcome {
 }
 
 #[cfg(feature = "in-process")]
+fn rotated_but_rejected(v: &serde_json::Value) -> Option<anyhow::Error> {
+    let account: AccountRef = serde_json::from_value(v.get("account")?.clone()).ok()?;
+    let generated = v.get("generated")?.as_str()?.to_string();
+    Some(anyhow::Error::new(RotatedButRejected {
+        account,
+        generated: Secret::new(generated),
+    }))
+}
+
+#[cfg(feature = "in-process")]
 impl AccountProxy {
     fn call<T: for<'de> Deserialize<'de>>(
         &self,
@@ -906,6 +963,14 @@ impl AccountProxy {
                 .map_err(|e| match e.get(UNSUPPORTED_KEY).and_then(|v| v.as_str()) {
                     Some(returned) if returned == op => {
                         anyhow::Error::new(Unsupported { op: op.to_string() })
+                    }
+                    _ if op == REGENERATE_OP && e.get(ROTATED_KEY).is_some() => {
+                        rotated_but_rejected(&e[ROTATED_KEY]).unwrap_or_else(|| {
+                            anyhow::anyhow!(
+                                "account '{name}' regenerate rotated the unit but returned a \
+                                 malformed rejection"
+                            )
+                        })
                     }
                     _ => {
                         let mut known = secret.clone();
@@ -985,15 +1050,20 @@ impl AccountProvider for AccountProxy {
     }
 
     fn regenerate(&self, req: RegenerateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+        let account = req.account.clone();
+        let min_len = req.min_len.max(MIN_SECRET_LEN);
         let fut = self.call(REGENERATE_OP, serde_json::to_value(&req));
         Box::pin(async move {
-            let out = redact_outcome(fut.await?);
+            let mut out = redact_outcome(fut.await?);
             if out
                 .generated
                 .as_ref()
-                .is_some_and(|g| !scrubbable(g.expose_secret()))
+                .is_some_and(|g| g.expose_secret().chars().count() < min_len)
             {
-                anyhow::bail!(SHORT_GENERATED);
+                return Err(anyhow::Error::new(RotatedButRejected {
+                    account,
+                    generated: out.generated.take().expect("checked above"),
+                }));
             }
             Ok(out)
         })
@@ -1563,6 +1633,7 @@ mod tests {
             .regenerate(RegenerateRequest {
                 account: acct(),
                 dry_run: false,
+                min_len: MIN_SECRET_LEN,
             })
             .await
             .unwrap();
@@ -2056,6 +2127,7 @@ mod tests {
             .regenerate(RegenerateRequest {
                 account: acct(),
                 dry_run: false,
+                min_len: MIN_SECRET_LEN,
             })
             .await
             .unwrap_err()
@@ -2318,6 +2390,7 @@ mod tests {
             .regenerate(RegenerateRequest {
                 account: acct(),
                 dry_run: false,
+                min_len: MIN_SECRET_LEN,
             })
             .await
             .unwrap();
@@ -2379,6 +2452,7 @@ mod tests {
             .regenerate(RegenerateRequest {
                 account: acct(),
                 dry_run: false,
+                min_len: MIN_SECRET_LEN,
             })
             .await
             .unwrap_err();
@@ -2819,6 +2893,7 @@ mod tests {
             .regenerate(RegenerateRequest {
                 account: acct(),
                 dry_run: false,
+                min_len: MIN_SECRET_LEN,
             })
             .await
             .unwrap_err()
@@ -2839,6 +2914,7 @@ mod tests {
             .regenerate(RegenerateRequest {
                 account: acct(),
                 dry_run: false,
+                min_len: MIN_SECRET_LEN,
             })
             .await
             .unwrap_err()
@@ -2907,7 +2983,11 @@ mod tests {
         );
     }
 
-    struct ShortMinter;
+    #[derive(Default)]
+    struct ShortMinter {
+        current: std::sync::Mutex<String>,
+        sent_min_len: std::sync::Mutex<Option<usize>>,
+    }
 
     impl AccountProvider for ShortMinter {
         fn name(&self) -> &str {
@@ -2922,7 +3002,9 @@ mod tests {
                 })
             })
         }
-        fn regenerate(&self, _req: RegenerateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+        fn regenerate(&self, req: RegenerateRequest) -> BoxFuture<'_, Result<AccountOutcome>> {
+            *self.sent_min_len.lock().unwrap() = Some(req.min_len);
+            *self.current.lock().unwrap() = "k9".to_string();
             Box::pin(async {
                 Ok(AccountOutcome {
                     executed: true,
@@ -2934,17 +3016,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_short_generated_value_is_rejected() {
+    async fn account_short_generated_value_reports_the_rotation() {
+        let minter = ShortMinter::default();
         let err = dispatch_op(
-            &ShortMinter,
+            &minter,
             REGENERATE_OP,
-            serde_json::json!({"account": acct()}),
+            serde_json::json!({"account": acct(), "min_len": 1}),
         )
         .await
         .unwrap_err();
-        let msg = err.as_str().unwrap();
-        assert!(msg.contains("4-character minimum"), "{msg}");
-        assert!(!msg.contains("k9"));
+        assert_eq!(*minter.sent_min_len.lock().unwrap(), Some(MIN_SECRET_LEN));
+        let live = minter.current.lock().unwrap().clone();
+        assert_eq!(err[ROTATED_KEY]["generated"], live);
+        assert_eq!(err[ROTATED_KEY]["account"]["account"], "api");
     }
 
     #[cfg(feature = "in-process")]
@@ -2976,13 +3060,48 @@ mod tests {
             .regenerate(RegenerateRequest {
                 account: acct(),
                 dry_run: false,
+                min_len: MIN_SECRET_LEN,
             })
             .await
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
+        let rejected = e.downcast_ref::<RotatedButRejected>().expect("typed");
+        assert_eq!(rejected.generated.expose_secret(), "k9");
+        assert_eq!(rejected.account, acct());
+        let msg = e.to_string();
         assert!(
-            e.contains("4-character minimum") && !e.contains("k9"),
-            "{e}"
+            msg.contains("already rotated") && !msg.contains("k9"),
+            "{msg}"
         );
+        assert!(!format!("{e:?}").contains("k9"));
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_rotated_but_rejected_survives_the_wire() {
+        let minter = Arc::new(ShortMinter::default());
+        let m = minter.clone();
+        let invoke: InvokeThunk = Arc::new(move |op, args, _call| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(dispatch_op(m.as_ref(), op, args))
+        });
+        let proxy = AccountProxy {
+            name: "account-proxy-rotated".into(),
+            invoke,
+        };
+        let e = proxy
+            .regenerate(RegenerateRequest {
+                account: acct(),
+                dry_run: false,
+                min_len: 0,
+            })
+            .await
+            .unwrap_err();
+        let rejected = e.downcast_ref::<RotatedButRejected>().expect("typed");
+        let live = minter.current.lock().unwrap().clone();
+        assert_eq!(rejected.generated.expose_secret(), &live);
+        assert_eq!(*minter.sent_min_len.lock().unwrap(), Some(MIN_SECRET_LEN));
+        assert!(!e.to_string().contains(&live));
     }
 }
