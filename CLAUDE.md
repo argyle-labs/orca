@@ -9,4 +9,4 @@ MCP server: `orca` (HTTP, served by the daemon at `/api/mcp`; port in `~/.orca/h
 ## Rust style rules
 
 - Never write nested `if` / `if let` when clippy's `collapsible_if` lint applies. Always collapse using `&&` let-chains: `if cond && let Some(x) = expr { ... }`.
-- Comments: none unless absolutely necessary. Only for what code cannot express (a real invariant, an external constraint, a bug workaround), one line.
+- NO COMMENTS. There are exceptions, but each one must be asked for every time.

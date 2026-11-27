@@ -48,13 +48,10 @@ directly — they are self-contained Markdown prompts.
 
 ## Code style (all languages)
 
-**HARD RULE — comments.** No comments unless absolutely necessary. Zero
-comments is the default. Make intent clear through names, types, small
-functions and tests. A comment is allowed only for something the code cannot
-express: a real invariant, a non-obvious external constraint, or a workaround
-for a specific bug. Keep it to one line and say what IS, never history or what
-it is not. A comment that restates the code is a review finding. Applies to
-every language and every surface.
+**HARD RULE — NO COMMENTS.** There are exceptions, but each one must be asked
+for every time: ask the user before writing any comment, including doc comments.
+Never reword a wrong comment; delete it. Applies to every language and every
+surface.
 
 ## Agent provenance
 
