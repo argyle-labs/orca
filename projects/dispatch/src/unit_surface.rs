@@ -902,7 +902,7 @@ fn parse_id(tool: &str, args: &Value) -> Result<UnitId> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use contract::BoxFuture;
     use contract::unit::{
@@ -1588,7 +1588,7 @@ mod tests {
         }
     }
 
-    type Deleted = Arc<std::sync::Mutex<Vec<String>>>;
+    pub(crate) type Deleted = Arc<std::sync::Mutex<Vec<String>>>;
 
     fn units_of(manager: &str, kind: &str, units: &[(&str, &str)]) -> Vec<UnitId> {
         units
@@ -1621,7 +1621,7 @@ mod tests {
         deleted
     }
 
-    fn owner(base: &str, scope: &str, kind: &str, units: &[(&str, &str)]) -> Deleted {
+    pub(crate) fn owner(base: &str, scope: &str, kind: &str, units: &[(&str, &str)]) -> Deleted {
         let manager = UnitId::scoped_manager(base, scope);
         owner_with(base, kind, units_of(&manager, kind, units), false, None)
     }
