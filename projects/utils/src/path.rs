@@ -1,8 +1,7 @@
 use std::path::Path;
 
 /// Expand a leading `~/` to the user's `$HOME` directory. If `$HOME` is
-/// unset, the tilde is replaced with an empty string (matching prior
-/// per-crate copies — callers already handle the unusual no-HOME case).
+/// unset, the tilde is replaced with an empty string.
 pub fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         let home = std::env::var("HOME").unwrap_or_default();
@@ -12,18 +11,6 @@ pub fn expand_tilde(path: &str) -> String {
     }
 }
 
-/// Locate an executable on `$PATH`. Returns the resolved absolute path, or
-/// `None` if not found. For an existence check, `which(name).is_some()`.
-///
-/// Resolved IN-PROCESS. This used to shell out to the system `which`, which
-/// made the lookup depend on `which(1)` itself being on `$PATH`: where it was
-/// not — a minimal container, or any caller that narrowed `$PATH` — the spawn
-/// failed and EVERY binary was reported missing, including ones plainly
-/// present. A probe that answers "absent" when it means "I could not look" is
-/// the failure mode worth removing, and it also drops a subprocess per lookup.
-///
-/// A name containing a separator is treated as a path and checked directly,
-/// matching POSIX `command -v`.
 pub fn which(name: &str) -> Option<String> {
     let name = name.trim();
     if name.is_empty() {
@@ -164,11 +151,6 @@ mod tests {
 
     #[test]
     fn a_narrowed_path_still_resolves_what_is_on_it() {
-        // The bug this replaced: `which` shelled out to the system `which`, so
-        // a PATH not containing `which(1)` made the spawn fail and EVERY
-        // lookup report "not found" — including binaries plainly present.
-        // A probe that answers "absent" when it means "I could not look" is
-        // the failure worth removing.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         let exe = dir.path().join("orca-fake-tool");

@@ -41,9 +41,8 @@ pub struct Output {
 
 /// A failed shell-out through [`Command::run_checked`]: which tool ran, its exit
 /// code (`None` when killed by a signal), and its trimmed stderr. Backends map
-/// this into their own error type (`NfsError`/`SmbError`), so the "run a command
-/// and fail on non-zero" mechanic lives here once instead of being hand-rolled at
-/// every call site. `Display` renders `tool (exit <code>): <stderr>`.
+/// this into their own error type (`NfsError`/`SmbError`). `Display` renders
+/// `tool (exit <code>): <stderr>`.
 #[derive(Clone, Debug)]
 pub struct ToolError {
     pub tool: String,
@@ -124,8 +123,6 @@ impl Command {
 
     /// Run to completion and return captured stdout bytes on success, or a
     /// [`ToolError`] (tool name, exit code, trimmed stderr) on a non-zero exit.
-    /// The single "shell out and fail on non-zero" mechanic every backend maps
-    /// into its own error type, replacing hand-rolled `status.success()` checks.
     pub async fn run_checked(self) -> std::result::Result<Vec<u8>, ToolError> {
         let program = self.program.clone();
         checked(program, self.output().await.map(Some))
