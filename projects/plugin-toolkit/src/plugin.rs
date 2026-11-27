@@ -959,6 +959,7 @@ mod tests {
                 Ok(crate::contract::account::AccountDecl {
                     unit_kinds: vec!["prowlarr".into()],
                     account_kinds: vec![crate::contract::account::AccountKind::ApiKey],
+                    capabilities: vec![],
                 })
             })
         }

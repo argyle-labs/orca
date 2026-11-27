@@ -13,9 +13,10 @@ use utils::secret::Secret;
 
 use crate::BoxFuture;
 
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountKind {
+    #[default]
     OsUser,
     AppUser,
     ApiKey,
@@ -31,7 +32,58 @@ pub struct AccountDecl {
     pub unit_kinds: Vec<String>,
     #[serde(default)]
     pub account_kinds: Vec<AccountKind>,
+    #[serde(default)]
+    pub capabilities: Vec<KindCapabilities>,
 }
+
+/// What a provider can do for one account kind. Core reads this before it
+/// writes the secrets backend: `regenerate` picks unit-minted over
+/// orca-generated values, and without `restore_previous` a failed rotation
+/// cannot be rolled back on the unit.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq, Default)]
+pub struct KindCapabilities {
+    pub kind: AccountKind,
+    #[serde(default)]
+    pub set_secret: bool,
+    #[serde(default)]
+    pub regenerate: bool,
+    #[serde(default)]
+    pub restore_previous: bool,
+    #[serde(default)]
+    pub verify: bool,
+    #[serde(default)]
+    pub apply_consumer: bool,
+    #[serde(default)]
+    pub verify_consumer: bool,
+}
+
+impl AccountDecl {
+    pub fn capabilities_for(&self, kind: AccountKind) -> KindCapabilities {
+        self.capabilities
+            .iter()
+            .find(|c| c.kind == kind)
+            .cloned()
+            .unwrap_or(KindCapabilities {
+                kind,
+                ..Default::default()
+            })
+    }
+}
+
+/// The provider does not implement `op`. Survives the wire, so core can
+/// `downcast_ref::<Unsupported>()` on a proxied error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unsupported {
+    pub op: String,
+}
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "account op unsupported: {}", self.op)
+    }
+}
+
+impl std::error::Error for Unsupported {}
 
 /// A name that must not be blank; decoding rejects `""` and whitespace.
 #[derive(Serialize, JsonSchema, Clone, Debug, PartialEq, Eq, Hash)]
@@ -322,7 +374,7 @@ pub trait AccountProvider: Send + Sync {
 }
 
 fn unsupported<T>(op: &'static str) -> BoxFuture<'static, Result<T>> {
-    Box::pin(async move { Err(anyhow::anyhow!("account op unsupported: {op}")) })
+    Box::pin(async move { Err(anyhow::Error::new(Unsupported { op: op.to_string() })) })
 }
 
 static GLOBAL: LazyLock<RwLock<Vec<Arc<dyn AccountProvider>>>> =
@@ -484,71 +536,67 @@ fn scrubbed(msg: &str, values: &[String]) -> String {
     utils::scrub::redact_values(msg, &refs)
 }
 
+const UNSUPPORTED_KEY: &str = "unsupported";
+
+enum Fail {
+    Msg(String),
+    Unsupported(String),
+}
+
+impl From<String> for Fail {
+    fn from(msg: String) -> Self {
+        Fail::Msg(msg)
+    }
+}
+
+fn fail(e: anyhow::Error) -> Fail {
+    match e.downcast_ref::<Unsupported>() {
+        Some(u) => Fail::Unsupported(u.op.clone()),
+        None => Fail::Msg(format!("{e:#}")),
+    }
+}
+
 pub async fn dispatch_op(
     provider: &dyn AccountProvider,
     op: &str,
     mut args: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, serde_json::Value> {
     let secret = secret_values(&args, "secret");
-    let err = |msg: String| serde_json::Value::String(scrubbed(&msg, &secret));
-    gate_dry_run_secret(op, &mut args).map_err(err)?;
+    let err = |f: Fail| match f {
+        Fail::Msg(msg) => serde_json::Value::String(scrubbed(&msg, &secret)),
+        Fail::Unsupported(op) => serde_json::json!({ UNSUPPORTED_KEY: op }),
+    };
+    gate_dry_run_secret(op, &mut args).map_err(|m| err(Fail::Msg(m)))?;
     fn dec<T: serde::de::DeserializeOwned>(
         op: &str,
         args: serde_json::Value,
     ) -> std::result::Result<T, String> {
         serde_json::from_value(args).map_err(|e| format!("decode {op} args: {e}"))
     }
-    fn enc<T: Serialize>(out: &T) -> std::result::Result<serde_json::Value, String> {
-        serde_json::to_value(out).map_err(|e| e.to_string())
+    fn enc<T: Serialize>(out: &T) -> std::result::Result<serde_json::Value, Fail> {
+        serde_json::to_value(out).map_err(|e| Fail::Msg(e.to_string()))
     }
     let out = async {
         match op {
-            DECL_OP => enc(&provider.decl().await.map_err(|e| format!("{e:#}"))?),
-            LIST_OP => enc(&provider
-                .list(dec(op, args)?)
-                .await
-                .map_err(|e| format!("{e:#}"))?),
-            DETAIL_OP => enc(&provider
-                .detail(dec(op, args)?)
-                .await
-                .map_err(|e| format!("{e:#}"))?),
-            CREATE_OP => enc(&provider
-                .create(dec(op, args)?)
-                .await
-                .map_err(|e| format!("{e:#}"))?),
-            UPDATE_OP => enc(&provider
-                .update(dec(op, args)?)
-                .await
-                .map_err(|e| format!("{e:#}"))?),
-            DELETE_OP => enc(&provider
-                .delete(dec(op, args)?)
-                .await
-                .map_err(|e| format!("{e:#}"))?),
-            SET_SECRET_OP => enc(&provider
-                .set_secret(dec(op, args)?)
-                .await
-                .map_err(|e| format!("{e:#}"))?),
-            VERIFY_OP => enc(&provider
-                .verify(dec(op, args)?)
-                .await
-                .map_err(|e| format!("{e:#}"))?),
-            REGENERATE_OP => enc(&provider
-                .regenerate(dec(op, args)?)
-                .await
-                .map_err(|e| format!("{e:#}"))?),
-            CONSUMERS_OP => enc(&provider
-                .consumers(dec(op, args)?)
-                .await
-                .map_err(|e| format!("{e:#}"))?),
+            DECL_OP => enc(&provider.decl().await.map_err(fail)?),
+            LIST_OP => enc(&provider.list(dec(op, args)?).await.map_err(fail)?),
+            DETAIL_OP => enc(&provider.detail(dec(op, args)?).await.map_err(fail)?),
+            CREATE_OP => enc(&provider.create(dec(op, args)?).await.map_err(fail)?),
+            UPDATE_OP => enc(&provider.update(dec(op, args)?).await.map_err(fail)?),
+            DELETE_OP => enc(&provider.delete(dec(op, args)?).await.map_err(fail)?),
+            SET_SECRET_OP => enc(&provider.set_secret(dec(op, args)?).await.map_err(fail)?),
+            VERIFY_OP => enc(&provider.verify(dec(op, args)?).await.map_err(fail)?),
+            REGENERATE_OP => enc(&provider.regenerate(dec(op, args)?).await.map_err(fail)?),
+            CONSUMERS_OP => enc(&provider.consumers(dec(op, args)?).await.map_err(fail)?),
             APPLY_CONSUMER_OP => enc(&provider
                 .apply_consumer(dec(op, args)?)
                 .await
-                .map_err(|e| format!("{e:#}"))?),
+                .map_err(fail)?),
             VERIFY_CONSUMER_OP => enc(&provider
                 .verify_consumer(dec(op, args)?)
                 .await
-                .map_err(|e| format!("{e:#}"))?),
-            other => Err(format!("unknown account op: {other}")),
+                .map_err(fail)?),
+            other => Err(Fail::Msg(format!("unknown account op: {other}"))),
         }
     }
     .await;
@@ -607,11 +655,12 @@ impl AccountProxy {
             let out = tokio::task::spawn_blocking(move || invoke(op, args, call))
                 .await
                 .map_err(|e| scrub(format!("account '{name}' {op} task panicked: {e}")))?
-                .map_err(|e| {
-                    scrub(format!(
+                .map_err(|e| match e.get(UNSUPPORTED_KEY).and_then(|v| v.as_str()) {
+                    Some(op) => anyhow::Error::new(Unsupported { op: op.to_string() }),
+                    None => scrub(format!(
                         "account '{name}' {op} failed: {}",
                         crate::render_invoke_error(&e)
-                    ))
+                    )),
                 })?;
             let mut out = out;
             let mut leaked = secret.clone();
@@ -745,6 +794,7 @@ mod tests {
                 Ok(AccountDecl {
                     unit_kinds: vec!["prowlarr".into()],
                     account_kinds: vec![AccountKind::ApiKey],
+                    capabilities: vec![],
                 })
             })
         }
@@ -838,6 +888,7 @@ mod tests {
                 Ok(AccountDecl {
                     unit_kinds: vec![],
                     account_kinds: vec![],
+                    capabilities: vec![],
                 })
             })
         }
@@ -1066,11 +1117,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(
-            err.as_str()
-                .unwrap()
-                .contains("unsupported: apply_consumer")
-        );
+        assert_eq!(err, serde_json::json!({"unsupported": "apply_consumer"}));
     }
 
     #[tokio::test]
@@ -1102,7 +1149,7 @@ mod tests {
         let err = dispatch_op(&c, LIST_OP, serde_json::json!({"unit_id": OWNER}))
             .await
             .unwrap_err();
-        assert!(err.as_str().unwrap().contains("unsupported: list"));
+        assert_eq!(err, serde_json::json!({"unsupported": "list"}));
     }
 
     #[tokio::test]
@@ -1324,6 +1371,7 @@ mod tests {
                 Ok(AccountDecl {
                     unit_kinds: vec![],
                     account_kinds: vec![],
+                    capabilities: vec![],
                 })
             })
         }
@@ -1464,6 +1512,7 @@ mod tests {
                 Ok(AccountDecl {
                     unit_kinds: vec![],
                     account_kinds: vec![],
+                    capabilities: vec![],
                 })
             })
         }
@@ -1713,6 +1762,7 @@ mod tests {
                 Ok(AccountDecl {
                     unit_kinds: vec![],
                     account_kinds: vec![],
+                    capabilities: vec![],
                 })
             })
         }
@@ -1766,6 +1816,7 @@ mod tests {
                 Ok(AccountDecl {
                     unit_kinds: vec![],
                     account_kinds: vec![],
+                    capabilities: vec![],
                 })
             })
         }
@@ -1873,5 +1924,62 @@ mod tests {
         assert_eq!(out.generated.as_ref().unwrap().expose_secret(), VALUE);
         assert!(!out.detail.to_string().contains(VALUE), "{:?}", out.detail);
         assert!(out.detail["msg"].as_str().unwrap().starts_with("new key"));
+    }
+
+    #[test]
+    fn account_capabilities_decode_per_kind() {
+        let decl: AccountDecl = serde_json::from_value(serde_json::json!({
+            "account_kinds": ["api_key", "os_user"],
+            "capabilities": [{"kind": "api_key", "regenerate": true, "verify": true}],
+        }))
+        .unwrap();
+        let key = decl.capabilities_for(AccountKind::ApiKey);
+        assert!(key.regenerate && key.verify);
+        assert!(!key.set_secret && !key.restore_previous);
+        let user = decl.capabilities_for(AccountKind::OsUser);
+        assert_eq!(user.kind, AccountKind::OsUser);
+        assert!(!user.set_secret && !user.apply_consumer && !user.verify_consumer);
+    }
+
+    #[test]
+    fn account_unsupported_is_typed_in_process() {
+        let err = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(FakeConsumer.list(ListRequest {
+                unit_id: id(OWNER),
+                kind: None,
+            }))
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<Unsupported>(),
+            Some(&Unsupported { op: "list".into() })
+        );
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_unsupported_survives_the_proxy() {
+        let invoke: InvokeThunk = Arc::new(|op, args, _call| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(dispatch_op(&FakeConsumer, op, args))
+        });
+        let proxy = AccountProxy {
+            name: "account-proxy-unsupported".into(),
+            invoke,
+        };
+        let err = proxy
+            .regenerate(RegenerateRequest {
+                account: acct(),
+                dry_run: false,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<Unsupported>().map(|u| u.op.as_str()),
+            Some("regenerate")
+        );
     }
 }
