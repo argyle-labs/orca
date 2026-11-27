@@ -63,14 +63,18 @@ impl AccountDecl {
 
     /// Each kind appears once in `account_kinds` and at most once in
     /// `capabilities`, and only kinds listed in `account_kinds` carry
-    /// capabilities.
+    /// capabilities. `Unknown` is exempt: distinct kinds from a newer plugin
+    /// all decode to it, so they would look like duplicates.
     pub fn validate(&self) -> std::result::Result<(), String> {
         for (i, k) in self.account_kinds.iter().enumerate() {
-            if self.account_kinds[..i].contains(k) {
+            if *k != AccountKind::Unknown && self.account_kinds[..i].contains(k) {
                 return Err(format!("account kind {k:?} declared twice"));
             }
         }
         for (i, c) in self.capabilities.iter().enumerate() {
+            if c.kind == AccountKind::Unknown {
+                continue;
+            }
             if self.capabilities[..i].iter().any(|p| p.kind == c.kind) {
                 return Err(format!("capabilities for {:?} declared twice", c.kind));
             }
@@ -2571,5 +2575,32 @@ mod tests {
         };
         let e = proxy.decl().await.unwrap_err().to_string();
         assert!(e.contains("not in account_kinds"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn account_decl_tolerates_unknown_wire_kinds() {
+        let decl: AccountDecl = serde_json::from_value(serde_json::json!({
+            "account_kinds": ["api_key", "passkey", "webauthn"],
+            "capabilities": [
+                {"kind": "api_key", "regenerate": true},
+                {"kind": "passkey", "set_secret": true},
+                {"kind": "webauthn", "verify": true},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(
+            decl.account_kinds,
+            vec![
+                AccountKind::ApiKey,
+                AccountKind::Unknown,
+                AccountKind::Unknown
+            ]
+        );
+        assert!(decl.validate().is_ok());
+        assert!(decl.capabilities_for(AccountKind::ApiKey).regenerate);
+        let out = dispatch_op(&DeclOf(decl), DECL_OP, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(out["account_kinds"][0], "api_key");
     }
 }
