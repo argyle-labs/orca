@@ -410,12 +410,32 @@ fn gate_dry_run_secret(op: &str, args: &mut serde_json::Value) -> std::result::R
     Ok(())
 }
 
-/// Pulls the plaintext out of request args before decoding, so a provider
-/// error that echoes it is redacted on the way back over the wire.
-fn arg_secret(args: &serde_json::Value) -> Option<String> {
-    args.get("secret")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
+/// Every rendering of `v[key]` an error message could echo, so a provider or
+/// decode error that repeats the value is redacted. A non-string value (a
+/// number, a nested object) is covered too: serde quotes scalars verbatim.
+fn secret_values(v: &serde_json::Value, key: &str) -> Vec<String> {
+    fn leaves(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::Null => {}
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| leaves(x, out)),
+            serde_json::Value::Object(o) => o.values().for_each(|x| leaves(x, out)),
+            other => out.push(other.to_string()),
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(found) = v.get(key) {
+        leaves(found, &mut out);
+        if !found.is_string() && !found.is_null() {
+            out.push(found.to_string());
+        }
+    }
+    out
+}
+
+fn scrubbed(msg: &str, values: &[String]) -> String {
+    let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+    utils::scrub::redact_values(msg, &refs)
 }
 
 pub async fn dispatch_op(
@@ -423,11 +443,8 @@ pub async fn dispatch_op(
     op: &str,
     mut args: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, serde_json::Value> {
-    let secret = arg_secret(&args);
-    let err = |msg: String| {
-        let values: Vec<&str> = secret.as_deref().into_iter().collect();
-        serde_json::Value::String(utils::scrub::redact_values(&msg, &values))
-    };
+    let secret = secret_values(&args, "secret");
+    let err = |msg: String| serde_json::Value::String(scrubbed(&msg, &secret));
     gate_dry_run_secret(op, &mut args).map_err(err)?;
     fn dec<T: serde::de::DeserializeOwned>(
         op: &str,
@@ -526,27 +543,34 @@ impl AccountProxy {
         let invoke = self.invoke.clone();
         let name = self.name.clone();
         Box::pin(async move {
-            let mut args =
-                args.map_err(|e| anyhow::anyhow!("account '{name}' {op} encode args: {e}"))?;
+            let mut args = args.map_err(|e| {
+                anyhow::anyhow!(scrubbed(
+                    &format!("account '{name}' {op} encode args: {e}"),
+                    &[]
+                ))
+            })?;
             gate_dry_run_secret(op, &mut args)
-                .map_err(|e| anyhow::anyhow!("account '{name}' {e}"))?;
-            let secret = arg_secret(&args);
-            let scrub = move |msg: String| {
-                let values: Vec<&str> = secret.as_deref().into_iter().collect();
-                anyhow::anyhow!(utils::scrub::redact_values(&msg, &values))
-            };
+                .map_err(|e| anyhow::anyhow!(scrubbed(&format!("account '{name}' {e}"), &[])))?;
+            let secret = secret_values(&args, "secret");
+            let scrub = |msg: String| anyhow::anyhow!(scrubbed(&msg, &secret));
             let call = crate::invocation_scope::capture("account", &name);
             let out = tokio::task::spawn_blocking(move || invoke(op, args, call))
                 .await
-                .map_err(|e| anyhow::anyhow!("account '{name}' {op} task panicked: {e}"))?
+                .map_err(|e| scrub(format!("account '{name}' {op} task panicked: {e}")))?
                 .map_err(|e| {
                     scrub(format!(
                         "account '{name}' {op} failed: {}",
                         crate::render_invoke_error(&e)
                     ))
                 })?;
-            serde_json::from_value(out)
-                .map_err(|e| anyhow::anyhow!("account '{name}' {op} returned invalid JSON: {e}"))
+            let mut leaked = secret.clone();
+            leaked.extend(secret_values(&out, "generated"));
+            serde_json::from_value(out).map_err(|e| {
+                anyhow::anyhow!(scrubbed(
+                    &format!("account '{name}' {op} returned invalid JSON: {e}"),
+                    &leaked
+                ))
+            })
         })
     }
 }
@@ -1487,5 +1511,39 @@ mod tests {
             assert!(args.get("secret").is_none(), "{args}");
             assert!(!args.to_string().contains(VALUE));
         }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_scrubs_panic_and_invalid_json_errors() {
+        let invoke: InvokeThunk = Arc::new(move |op, _args, _call| match op {
+            SET_SECRET_OP => panic!("boom {VALUE}"),
+            _ => Ok(serde_json::json!({"executed": true, "generated": 5551234987u64})),
+        });
+        let proxy = AccountProxy {
+            name: "account-proxy-errs".into(),
+            invoke,
+        };
+        let e = proxy
+            .set_secret(SetSecretRequest {
+                account: acct(),
+                secret: Some(secret()),
+                dry_run: false,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("task panicked"), "{e}");
+        assert!(!e.contains(VALUE), "{e}");
+        let e = proxy
+            .regenerate(RegenerateRequest {
+                account: acct(),
+                dry_run: false,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("returned invalid JSON"), "{e}");
+        assert!(!e.contains("5551234987"), "{e}");
     }
 }
