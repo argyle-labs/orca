@@ -55,7 +55,7 @@ rust-embed = { workspace = true }
 tokio = { workspace = true, features = ["rt"], optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 utils = { workspace = true, features = ["test-scope"] }
 
 [lints]
