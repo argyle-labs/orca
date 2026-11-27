@@ -15,11 +15,12 @@ path = "src/lib.rs"
 # a *loaded* plugin over the FFI boundary via `spawn_blocking`. Only the daemon
 # does that, so it folds into `full`/default. A THIN subprocess plugin sets
 # `default-features = false`: it keeps the always-on domain model + trait +
-# registry + the tokio-free plugin-side `dispatch_op`, and links NO tokio.
+# registry + the plugin-side `dispatch_op`. tokio stays linked for `Budget`
+# pacing; plugin-toolkit hard-links it already.
 [features]
 default = ["full"]
 full = ["in-process"]
-in-process = ["dep:tokio", "utils/reactor"]
+in-process = ["utils/reactor"]
 
 [dependencies]
 utils = { workspace = true }
@@ -28,7 +29,7 @@ serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 schemars    = { workspace = true }
-tokio       = { workspace = true, optional = true }
+tokio       = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }

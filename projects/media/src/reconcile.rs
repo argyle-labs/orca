@@ -547,7 +547,6 @@ mod tests {
         assert_eq!(req.added.lock().unwrap().len(), 3);
     }
 
-    #[cfg(feature = "in-process")]
     #[tokio::test(start_paused = true)]
     async fn pacing_sleeps_between_requests_across_series_not_before_the_first() {
         let req = req();
@@ -560,7 +559,6 @@ mod tests {
         assert_eq!(start.elapsed(), pace * 2);
     }
 
-    #[cfg(feature = "in-process")]
     #[tokio::test(start_paused = true)]
     async fn dry_run_never_sleeps() {
         let req = req();

@@ -42,7 +42,6 @@ impl Default for SearchPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Budget {
     limit: usize,
-    #[cfg(feature = "in-process")]
     pace: std::time::Duration,
     used: usize,
 }
@@ -54,7 +53,6 @@ impl Budget {
         }
         Ok(Budget {
             limit,
-            #[cfg(feature = "in-process")]
             pace: std::time::Duration::ZERO,
             used: 0,
         })
@@ -63,13 +61,11 @@ impl Budget {
     pub fn unlimited() -> Self {
         Budget {
             limit: usize::MAX,
-            #[cfg(feature = "in-process")]
             pace: std::time::Duration::ZERO,
             used: 0,
         }
     }
 
-    #[cfg(feature = "in-process")]
     pub fn with_pace(mut self, pace: std::time::Duration) -> Self {
         self.pace = pace;
         self
@@ -94,7 +90,6 @@ impl Budget {
 
     /// Waits out the pace before a request; never before the run's first.
     pub(crate) async fn pace(&self) {
-        #[cfg(feature = "in-process")]
         if self.used > 0 && !self.pace.is_zero() {
             tokio::time::sleep(self.pace).await;
         }
