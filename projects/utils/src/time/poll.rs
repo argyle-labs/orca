@@ -1,18 +1,10 @@
-//! Monotonic deadlines and bounded polling on the tokio clock, so paused time
-//! in tests drives deadlines and sleeps alike.
-
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-/// A monotonic point in the future. orca-owned so plugins express "have we run
-/// past a budget?" without naming a runtime clock. Construct with
-/// [`Deadline::after`], poll with [`Deadline::reached`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Deadline(Instant);
 
 impl Deadline {
-    /// A deadline `dur` from now; a `dur` past the clock's range saturates to
-    /// a century out.
     pub fn after(dur: Duration) -> Self {
         let now = now_instant();
         Self(
@@ -21,43 +13,32 @@ impl Deadline {
         )
     }
 
-    /// True once the current time is at or past the deadline.
     pub fn reached(&self) -> bool {
         now_instant() >= self.0
     }
 
-    /// Time left until the deadline; zero once reached.
     pub fn remaining(&self) -> Duration {
         self.0.saturating_duration_since(now_instant())
     }
 }
 
-/// The executor's clock, so paused time in tests drives deadlines and sleeps alike.
 fn now_instant() -> Instant {
     tokio::time::Instant::now().into_std()
 }
 
-/// One probe's verdict for [`poll_until`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Probe<T> {
     Settled(T),
     Pending(T),
 }
 
-/// How [`poll_until`] ended; every variant carries the last probed value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Polled<T> {
     Settled(T),
-    /// `attempts` probes ran without settling.
     Exhausted(T),
-    /// The deadline was reached before settling or exhausting attempts.
     Expired(T),
 }
 
-/// Run `probe` (given the 1-based attempt number) until it settles, `attempts`
-/// probes have run, or `deadline` is reached, sleeping `interval`
-/// between probes. At least one probe always runs; a probe error ends the poll.
-/// A sleep never runs past the deadline, and no probe starts once it is reached.
 pub async fn poll_until<T, E, F, Fut>(
     interval: Duration,
     attempts: u32,

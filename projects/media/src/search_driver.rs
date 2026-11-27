@@ -96,7 +96,6 @@ impl Budget {
         self.deadline.is_some_and(|d| d.reached())
     }
 
-    /// The run's deadline; `None` runs unbounded.
     pub(crate) fn deadline(&self) -> Option<&Deadline> {
         self.deadline.as_ref()
     }

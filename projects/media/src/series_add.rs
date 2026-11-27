@@ -1,11 +1,3 @@
-//! Add series to a manager and want their missing items.
-//!
-//! A manager's add only queues the series; it shows up in the manager's list and
-//! fills in its items in the background. [`add_series`] adds each new series,
-//! waits until it is listed and its item count settles, then wants the gaps over
-//! the [`Requester`] seam within one run [`Budget`]. A backend supplies only the
-//! [`SeriesManager`] calls; the waits, caps and reporting live here.
-
 use crate::reconcile::{GapAction, Requested, SkipReason, compute_gaps, request_gaps};
 use crate::seam::{QualityPolicy, Requester};
 use crate::search_driver::Budget;
@@ -17,33 +9,26 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use utils::time::{Deadline, Polled, Probe, poll_until};
 
-/// What a manager currently lists for one series.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeriesView {
     #[serde(default)]
     pub name: Option<String>,
-    /// The item count the series' metadata source reports, when known.
     #[serde(default)]
     pub expected: Option<usize>,
-    /// Every item the manager lists for the series, in order.
     #[serde(default)]
     pub items: Vec<MediaIdentity>,
-    /// The listed items not to want (held, or excluded by the backend's policy).
     #[serde(default)]
     pub owned: Vec<MediaIdentity>,
 }
 
-/// A backend that tracks series and imports their item lists asynchronously.
 #[orca_async]
 pub trait SeriesManager: Send + Sync {
     fn name(&self) -> &str;
-    /// Ids of every series the manager lists, in the form [`add_series`] is given.
     async fn listed(&self) -> Result<Vec<String>, MediaError>;
     async fn add(&self, id: &str) -> Result<(), MediaError>;
     async fn series(&self, id: &str) -> Result<SeriesView, MediaError>;
 }
 
-/// How long to wait for a new series to be listed and for its import to settle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Poll {
     pub interval: Duration,
@@ -52,26 +37,19 @@ pub struct Poll {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeriesAddPlan {
-    /// Want the missing items, not just add the series.
     pub want: bool,
-    /// New series one run may attempt; listed series do not count.
     pub max_new: usize,
     pub poll: Poll,
     pub quality: QualityPolicy,
 }
 
-/// Why a series was left for a later run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Pending {
-    /// Not attempted: the run's `max_new` was reached.
     MaxNew,
     DeadlineReached,
-    /// Added, but the budget was spent before its items could be wanted.
     BudgetExhausted,
-    /// The item count was still rising when the poll ran out.
     Importing,
-    /// The manager lists no items for the series yet.
     NothingListed,
 }
 
@@ -86,10 +64,8 @@ pub struct SeriesRow {
     pub expected: Option<usize>,
     #[serde(default)]
     pub loaded: Option<usize>,
-    /// `Some(false)` when the item list may still grow; `None` when it was never read.
     #[serde(default)]
     pub settled: Option<bool>,
-    /// Items the metadata source reports beyond what settled in the manager.
     #[serde(default)]
     pub shortfall: Option<usize>,
     #[serde(default)]
@@ -146,16 +122,13 @@ pub struct SeriesAddReport {
     pub want: bool,
     pub added: usize,
     pub already_listed: usize,
-    /// Want-requests issued without error.
     pub queued: usize,
     pub series_failed: usize,
     pub items_failed: usize,
     pub selected: usize,
     pub remaining: usize,
-    /// Series whose wantable items were not read (not yet on the manager).
     pub unknown: usize,
     pub pending: usize,
-    /// Settled series with a shortfall.
     pub short: usize,
     pub series: Vec<SeriesRow>,
 }
@@ -192,10 +165,6 @@ impl SeriesAddReport {
     }
 }
 
-/// Add each id not yet on `manager` (at most `plan.max_new` per run) and, when
-/// `plan.want`, want each series' missing items within `budget`. Stops starting
-/// work once the budget's deadline is reached; per-series failures land in the
-/// row. A dry run adds nothing and only sizes the wants of listed series.
 pub async fn add_series(
     ids: &[String],
     manager: &dyn SeriesManager,
@@ -333,8 +302,6 @@ async fn add_and_want(
     };
 }
 
-/// Without a run deadline each poll gets its own, so one slow wait never eats
-/// into the next.
 fn poll_deadline(budget: &Budget, poll: Poll) -> Deadline {
     budget
         .deadline()
@@ -359,8 +326,6 @@ async fn listed(
     .await
 }
 
-/// Settles once the series lists items and either reaches its expected count or
-/// lists the same count on two consecutive probes.
 async fn imported(
     manager: &dyn SeriesManager,
     id: &str,

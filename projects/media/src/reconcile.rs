@@ -221,15 +221,12 @@ pub async fn reconcile_series(
     })
 }
 
-/// What [`request_gaps`] did with a gap list.
 pub(crate) struct Requested {
     pub actions: Vec<GapAction>,
     pub selected: usize,
     pub remaining: usize,
 }
 
-/// Emit a want-request per gap within `budget`, skipping unrequestable gaps and
-/// stopping at the budget's limit or deadline. Add failures stay per-gap.
 pub(crate) async fn request_gaps(
     gaps: &[MediaIdentity],
     requester: &dyn Requester,
