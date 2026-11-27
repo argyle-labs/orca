@@ -25,6 +25,13 @@ pub struct SearchPolicy {
     pub cooldown_secs: u64,
     /// Prefer ONE global search over per-title storms when the backend can.
     pub prefer_global: bool,
+    /// Minimum milliseconds between individual requests within one run.
+    #[serde(default = "default_request_pace_ms")]
+    pub request_pace_ms: u64,
+}
+
+fn default_request_pace_ms() -> u64 {
+    2000
 }
 
 impl Default for SearchPolicy {
@@ -33,6 +40,7 @@ impl Default for SearchPolicy {
             min_interval_secs: 300, // 5 min between bursts
             cooldown_secs: 45,      // > Prowlarr's ~30s auto-block
             prefer_global: true,
+            request_pace_ms: default_request_pace_ms(),
         }
     }
 }
@@ -48,30 +56,25 @@ pub struct Budget {
 }
 
 impl Budget {
-    pub fn new(limit: usize) -> Result<Self, MediaError> {
+    pub fn new(limit: usize, policy: &SearchPolicy) -> Result<Self, MediaError> {
         if limit == 0 {
             return Err(MediaError::Other("limit must be at least 1".into()));
         }
         Ok(Budget {
             limit,
-            pace: std::time::Duration::ZERO,
+            pace: std::time::Duration::from_millis(policy.request_pace_ms),
             deadline: None,
             used: 0,
         })
     }
 
-    pub fn unlimited() -> Self {
+    pub fn unlimited(policy: &SearchPolicy) -> Self {
         Budget {
             limit: usize::MAX,
-            pace: std::time::Duration::ZERO,
+            pace: std::time::Duration::from_millis(policy.request_pace_ms),
             deadline: None,
             used: 0,
         }
-    }
-
-    pub fn with_pace(mut self, pace: std::time::Duration) -> Self {
-        self.pace = pace;
-        self
     }
 
     /// Stops the run from issuing requests once `at` is reached.
@@ -290,5 +293,14 @@ mod tests {
                 reason: WaitReason::Throttled
             }
         );
+    }
+
+    #[test]
+    fn request_pace_defaults_when_absent_from_stored_policy() {
+        let p: SearchPolicy = serde_json::from_str(
+            r#"{"min_interval_secs":300,"cooldown_secs":45,"prefer_global":true}"#,
+        )
+        .unwrap();
+        assert_eq!(p, SearchPolicy::default());
     }
 }

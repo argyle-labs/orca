@@ -261,6 +261,7 @@ pub async fn reconcile_series(
 mod tests {
     use super::*;
     use crate::seam::{Collection, LibraryEntry, LibraryState, Metadata, RequestState};
+    use crate::search_driver::SearchPolicy;
     use crate::{ExternalId, MediaMutation, SeriesRef};
     use derive::orca_async;
 
@@ -465,7 +466,7 @@ mod tests {
             &req,
             &QualityPolicy::default(),
             &Scope::All,
-            &mut Budget::unlimited(),
+            &mut Budget::unlimited(&unpaced()),
             false,
         )
         .await
@@ -491,7 +492,7 @@ mod tests {
             &req,
             &QualityPolicy::default(),
             &Scope::All,
-            &mut Budget::unlimited(),
+            &mut Budget::unlimited(&unpaced()),
             true,
         )
         .await
@@ -499,6 +500,17 @@ mod tests {
         assert_eq!(out.gaps.len(), 2);
         assert!(out.actions.is_empty());
         assert!(req.added.lock().unwrap().is_empty());
+    }
+
+    fn paced(pace: std::time::Duration) -> SearchPolicy {
+        SearchPolicy {
+            request_pace_ms: pace.as_millis() as u64,
+            ..SearchPolicy::default()
+        }
+    }
+
+    fn unpaced() -> SearchPolicy {
+        paced(std::time::Duration::ZERO)
     }
 
     async fn run(
@@ -522,14 +534,14 @@ mod tests {
 
     #[test]
     fn budget_rejects_a_zero_limit() {
-        let err = Budget::new(0).unwrap_err().to_string();
+        let err = Budget::new(0, &unpaced()).unwrap_err().to_string();
         assert!(err.contains("limit"), "{err}");
     }
 
     #[tokio::test]
     async fn limit_spans_series_and_reports_remaining() {
         let req = req();
-        let mut budget = Budget::new(4).unwrap();
+        let mut budget = Budget::new(4, &unpaced()).unwrap();
         let mut left = vec![];
         for s in ["X", "Y", "Z"] {
             let expected: Vec<_> = (1..=3)
@@ -552,7 +564,7 @@ mod tests {
     #[tokio::test]
     async fn dry_run_spends_budget_without_requesting() {
         let req = req();
-        let mut budget = Budget::new(2).unwrap();
+        let mut budget = Budget::new(2, &unpaced()).unwrap();
         let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
         let out = run(&expected, &req, &mut budget, true).await;
         assert_eq!((out.selected, out.remaining), (2, 1));
@@ -567,7 +579,7 @@ mod tests {
             ..req()
         };
         let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
-        let out = run(&expected, &req, &mut Budget::unlimited(), false).await;
+        let out = run(&expected, &req, &mut Budget::unlimited(&unpaced()), false).await;
         let failed: Vec<_> = out
             .actions
             .iter()
@@ -582,7 +594,7 @@ mod tests {
     async fn pacing_sleeps_between_requests_across_series_not_before_the_first() {
         let req = req();
         let pace = std::time::Duration::from_secs(30);
-        let mut budget = Budget::new(100).unwrap().with_pace(pace);
+        let mut budget = Budget::new(100, &paced(pace)).unwrap();
         let start = tokio::time::Instant::now();
         run(&[isbn("A", "1"), isbn("B", "2")], &req, &mut budget, false).await;
         run(&[isbn("C", "3")], &req, &mut budget, false).await;
@@ -593,9 +605,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn dry_run_never_sleeps() {
         let req = req();
-        let mut budget = Budget::new(100)
-            .unwrap()
-            .with_pace(std::time::Duration::from_secs(30));
+        let mut budget = Budget::new(100, &paced(std::time::Duration::from_secs(30))).unwrap();
         let start = tokio::time::Instant::now();
         run(&[isbn("A", "1"), isbn("B", "2")], &req, &mut budget, true).await;
         assert_eq!(start.elapsed(), std::time::Duration::ZERO);
@@ -608,7 +618,7 @@ mod tests {
             ..req()
         };
         let pace = std::time::Duration::from_secs(30);
-        let mut budget = Budget::new(1).unwrap().with_pace(pace);
+        let mut budget = Budget::new(1, &paced(pace)).unwrap();
         let start = tokio::time::Instant::now();
         let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
         let out = run(&expected, &req, &mut budget, false).await;
@@ -630,9 +640,8 @@ mod tests {
         let req = req();
         let pace = std::time::Duration::from_secs(30);
         let start = tokio::time::Instant::now();
-        let mut budget = Budget::new(3)
+        let mut budget = Budget::new(3, &paced(pace))
             .unwrap()
-            .with_pace(pace)
             .with_deadline(start + pace);
         let expected: Vec<_> = ["A", "B", "C", "D"].iter().map(|t| isbn(t, t)).collect();
         let out = run(&expected, &req, &mut budget, false).await;
