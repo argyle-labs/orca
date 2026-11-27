@@ -671,7 +671,9 @@ async fn dispatch_verb(name: &str, mut args: Value, ctx: &ToolCtx) -> Result<Val
     if dry_run
         && !crate::tool_roles::plugin_dry_run_ok(name)
         && !crate::unit_surface::unit_dry_run_ok(name)
-        && !crate::tunnel_surface::tunnel_dry_run_ok(name)
+        // `dynamic_dispatch` runs first, so a plugin tool of the same name
+        // would take the call and ignore `dryRun`.
+        && (!crate::tunnel_surface::tunnel_dry_run_ok(name) || dynamic_owns(name))
     {
         let known_here = dynamic_owns(name)
             || crate::unit_surface::unit_owns(name)
@@ -1559,6 +1561,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dry_run_is_refused_for_a_plugin_tool_shadowing_tunnel_apply() {
+        let _serial = SEEN_TESTS.lock().await;
+        install_fake_plugin();
+        SHADOW_TUNNEL_SEEN.lock().unwrap().clear();
+        let err = dispatch(
+            SHADOW_TUNNEL_TOOL,
+            serde_json::json!({"dryRun": true}),
+            &make_ctx(),
+        )
+        .await
+        .unwrap_err();
+        let oe = err
+            .downcast_ref::<contract::OrcaError>()
+            .expect("OrcaError");
+        assert_eq!(oe.code.as_deref(), Some("args.invalid"), "{err}");
+        assert!(
+            err.to_string()
+                .contains(&format!("{SHADOW_TUNNEL_TOOL} does not support dryRun")),
+            "{err}"
+        );
+        assert!(SHADOW_TUNNEL_SEEN.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn dispatch_unknown_tool_without_peer_still_errors() {
         let _registry = crate::UNIT_REGISTRY_LOCK.lock().await;
         // No peer + no transport → genuine unknown-tool error, not a forward.
@@ -2065,6 +2091,10 @@ mod tests {
                             json!({})
                         }));
                     }
+                    if name == SHADOW_TUNNEL_TOOL {
+                        SHADOW_TUNNEL_SEEN.lock().unwrap().push(args.clone());
+                        return Some(Ok(json!({})));
+                    }
                     if name == OWN_SYSTEM_TOOL {
                         return Some(Ok(args.clone()));
                     }
@@ -2085,6 +2115,7 @@ mod tests {
                         json!({ "name": OMITTED_GATED_PLUGIN_TOOL }),
                         json!({ "name": EXPLICIT_OFF_PLUGIN_TOOL, "execute_gated": false }),
                         json!({ "name": READ_OMITTED_PLUGIN_TOOL }),
+                        json!({ "name": SHADOW_TUNNEL_TOOL }),
                         json!({
                             "name": OWN_SYSTEM_TOOL,
                             "input_schema": { "properties": { "systemId": { "type": "string" } } }
@@ -2273,6 +2304,9 @@ mod tests {
 
     /// Args the execute-gated fake plugin tool received.
     static GATED_SEEN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+    const SHADOW_TUNNEL_TOOL: &str = "tunnel.apply";
+    static SHADOW_TUNNEL_SEEN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
 
     #[cfg(feature = "server")]
     async fn post_json(uri: &str, body: Value) -> (StatusCode, Value) {

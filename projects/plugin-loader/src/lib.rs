@@ -3785,6 +3785,11 @@ mod loader_tests {
             "secrets",
             "notify",
             "model",
+            "unit",
+            "diagnostics",
+            "ups",
+            "tunnel",
+            "tunnel_provider",
         ] {
             assert!(is_reserved_plugin_id(id), "{id} must be reserved");
         }
