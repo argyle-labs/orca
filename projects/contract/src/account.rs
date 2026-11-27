@@ -511,12 +511,21 @@ pub fn set_consumer_authorizer(authorizer: Option<ConsumerAuthorizer>) {
 
 /// Every holding of `account` across all registered providers, paired with
 /// the declaring provider's name. With no [`ConsumerAuthorizer`] installed
-/// this fails closed, and holdings on units the provider does not manage are
-/// dropped. Holdings are declared at call time, not at registration, so the
+/// this fails closed. Holdings on units the provider does not manage are kept
+/// out of rotation and returned in [`ConsumerSet::rejected`] so core can
+/// report them as drift; they take no part in conflict detection, so a rogue
+/// claim cannot block rotation. Holdings are declared at call time, not at registration, so the
 /// one-declaration-per-`(consumer_unit_id, setting)` rule is enforced here,
 /// across all accounts: any two differing claims on one setting are an error,
 /// since rotation could not know which value or provider applies.
-pub async fn consumers_of(account: &AccountRef) -> Result<Vec<(String, ConsumerDecl)>> {
+/// Holdings of one account, each paired with the declaring provider's name.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConsumerSet {
+    pub held: Vec<(String, ConsumerDecl)>,
+    pub rejected: Vec<(String, ConsumerDecl)>,
+}
+
+pub async fn consumers_of(account: &AccountRef) -> Result<ConsumerSet> {
     let authorizer = AUTHORIZER
         .read()
         .expect("account authorizer poisoned")
@@ -529,13 +538,14 @@ pub async fn consumers_in(
     providers: &[Arc<dyn AccountProvider>],
     authorizer: Option<&ConsumerAuthorizer>,
     account: &AccountRef,
-) -> Result<Vec<(String, ConsumerDecl)>> {
+) -> Result<ConsumerSet> {
     // Every holding is fetched, not just this account's, so one setting
     // claimed for two different accounts is caught.
     let req = ConsumersRequest { account: None };
     let authorize =
         authorizer.ok_or_else(|| anyhow::anyhow!("no account consumer authorizer installed"))?;
     let mut out: Vec<(String, ConsumerDecl)> = Vec::new();
+    let mut rejected: Vec<(String, ConsumerDecl)> = Vec::new();
     for p in providers {
         let declared = p.consumers(req.clone()).await.map_err(|e| {
             anyhow::Error::new(ConsumerDiscoveryFailed {
@@ -545,6 +555,9 @@ pub async fn consumers_in(
         })?;
         for held in declared {
             if !authorize(p.name(), &held.consumer_unit_id) {
+                if &held.account == account {
+                    rejected.push((p.name().to_string(), held));
+                }
                 continue;
             }
             if let Some((owner, prior)) = out.iter().find(|(_, d)| {
@@ -570,7 +583,10 @@ pub async fn consumers_in(
         }
     }
     out.retain(|(_, d)| &d.account == account);
-    Ok(out)
+    Ok(ConsumerSet {
+        held: out,
+        rejected,
+    })
 }
 
 #[cfg(feature = "in-process")]
@@ -1718,6 +1734,10 @@ mod tests {
         (unit, held, stray)
     }
 
+    fn deny_rogue() -> ConsumerAuthorizer {
+        Arc::new(|name: &str, unit: &Id| name != "account-claim-rogue" && unit.as_str() == CONSUMER)
+    }
+
     fn claimer(name: &'static str, holdings: Vec<ConsumerDecl>) -> Arc<dyn AccountProvider> {
         Arc::new(Claimer { name, holdings })
     }
@@ -1736,23 +1756,42 @@ mod tests {
         assert!(err.contains("no account consumer authorizer"), "{err}");
 
         let deny_a: ConsumerAuthorizer = Arc::new(|name: &str, _: &Id| name != "account-claim-a");
-        assert!(
-            consumers_in(std::slice::from_ref(&a), Some(&deny_a), &unit)
-                .await
-                .unwrap()
-                .is_empty()
+        let denied = consumers_in(std::slice::from_ref(&a), Some(&deny_a), &unit)
+            .await
+            .unwrap();
+        assert!(denied.held.is_empty());
+        assert_eq!(
+            denied.rejected,
+            vec![("account-claim-a".to_string(), held.clone())]
+        );
+
+        let rogue = claimer("account-claim-rogue", vec![held.clone()]);
+        let mixed = consumers_in(&[a.clone(), rogue], Some(&deny_rogue()), &unit)
+            .await
+            .unwrap();
+        assert_eq!(
+            mixed.held,
+            vec![("account-claim-a".to_string(), held.clone())]
+        );
+        assert_eq!(
+            mixed.rejected,
+            vec![("account-claim-rogue".to_string(), held.clone())]
         );
 
         let got = consumers_in(std::slice::from_ref(&a), Some(&only_consumer), &unit)
             .await
             .unwrap();
-        assert_eq!(got, vec![("account-claim-a".to_string(), held.clone())]);
+        assert_eq!(
+            got.held,
+            vec![("account-claim-a".to_string(), held.clone())]
+        );
+        assert!(got.rejected.is_empty());
 
         let twice = claimer("account-claim-a", vec![held.clone(), held.clone()]);
         let got = consumers_in(&[twice], Some(&only_consumer), &unit)
             .await
             .unwrap();
-        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got.held.len(), 1, "{got:?}");
 
         let b = claimer("account-claim-b", vec![held]);
         let err = consumers_in(&[a.clone(), b], Some(&only_consumer), &unit)
@@ -1790,7 +1829,7 @@ mod tests {
         assert!(consumers_of(&unit).await.is_err());
         set_consumer_authorizer(Some(Arc::new(|_: &str, _: &Id| true)));
         let got = consumers_of(&unit).await.unwrap();
-        assert_eq!(got, vec![("account-claim-global".to_string(), held)]);
+        assert_eq!(got.held, vec![("account-claim-global".to_string(), held)]);
         deregister_provider("account-claim-global");
         set_consumer_authorizer(None);
     }
