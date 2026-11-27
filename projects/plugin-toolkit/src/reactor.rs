@@ -40,6 +40,35 @@ where
     futures_util::future::join_all(futures)
 }
 
+pub async fn spawn_blocking<T, F>(f: F) -> std::io::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("orca-blocking".to_string())
+        .spawn(move || {
+            drop(tx.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))));
+        })?;
+    match rx.await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(panic)) => {
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            Err(std::io::Error::other(format!(
+                "blocking task panicked: {msg}"
+            )))
+        }
+        Err(_) => Err(std::io::Error::other(
+            "blocking task ended without a result",
+        )),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fanout<K, T, E> {
     pub ok: Vec<(K, T)>,
@@ -194,6 +223,52 @@ mod tests {
             Ok::<_, ()>(name.as_str().len())
         }));
         assert_eq!(out.ok, vec![(&names[0], 5), (&names[1], 2)]);
+    }
+
+    #[test]
+    fn spawn_blocking_returns_the_value() {
+        assert_eq!(block_on(spawn_blocking(|| 7)).unwrap(), 7);
+    }
+
+    #[test]
+    fn spawn_blocking_turns_a_panic_into_err() {
+        let err = block_on(spawn_blocking(|| -> u8 { panic!("boom") })).unwrap_err();
+        assert!(err.to_string().contains("boom"), "{err}");
+    }
+
+    #[test]
+    fn spawn_blocking_runs_off_the_polling_thread() {
+        let caller = std::thread::current().id();
+        let worker = block_on(spawn_blocking(|| std::thread::current().id())).unwrap();
+        assert_ne!(caller, worker);
+    }
+
+    #[test]
+    fn spawn_blocking_completes_on_a_bare_executor() {
+        assert_eq!(
+            futures_executor_free_block_on(spawn_blocking(|| "ok")).unwrap(),
+            "ok"
+        );
+    }
+
+    fn futures_executor_free_block_on<F: Future>(fut: F) -> F::Output {
+        let waker = std::sync::Arc::new(ThreadWaker(std::thread::current())).into();
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut fut = std::pin::pin!(fut);
+        loop {
+            if let std::task::Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+                return v;
+            }
+            std::thread::park();
+        }
+    }
+
+    struct ThreadWaker(std::thread::Thread);
+
+    impl std::task::Wake for ThreadWaker {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
     }
 
     #[test]

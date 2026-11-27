@@ -41,9 +41,8 @@ pub struct Output {
 
 /// A failed shell-out through [`Command::run_checked`]: which tool ran, its exit
 /// code (`None` when killed by a signal), and its trimmed stderr. Backends map
-/// this into their own error type (`NfsError`/`SmbError`), so the "run a command
-/// and fail on non-zero" mechanic lives here once instead of being hand-rolled at
-/// every call site. `Display` renders `tool (exit <code>): <stderr>`.
+/// this into their own error type (`NfsError`/`SmbError`). `Display` renders
+/// `tool (exit <code>): <stderr>`.
 #[derive(Clone, Debug)]
 pub struct ToolError {
     pub tool: String,
@@ -67,6 +66,9 @@ pub struct Command {
     /// name the tool in a [`ToolError`] without re-plumbing it from the caller.
     program: String,
     kill_group: bool,
+    kill_on_exit: bool,
+    stdin: Option<Vec<u8>>,
+    drain_budget: Option<Duration>,
 }
 
 impl Command {
@@ -80,6 +82,9 @@ impl Command {
             inner,
             program: name,
             kill_group: false,
+            kill_on_exit: false,
+            stdin: None,
+            drain_budget: None,
         }
     }
 
@@ -100,10 +105,24 @@ impl Command {
         self
     }
 
+    pub fn kill_process_group_on_exit(mut self) -> Self {
+        self = self.kill_process_group_on_timeout();
+        self.kill_on_exit = true;
+        self
+    }
+
+    pub fn drain_budget(mut self, budget: Duration) -> Self {
+        self.drain_budget = Some(budget);
+        self
+    }
+
+    pub fn stdin_bytes(mut self, data: impl Into<Vec<u8>>) -> Self {
+        self.stdin = Some(data.into());
+        self
+    }
+
     /// Run to completion and return captured stdout bytes on success, or a
     /// [`ToolError`] (tool name, exit code, trimmed stderr) on a non-zero exit.
-    /// The single "shell out and fail on non-zero" mechanic every backend maps
-    /// into its own error type, replacing hand-rolled `status.success()` checks.
     pub async fn run_checked(self) -> std::result::Result<Vec<u8>, ToolError> {
         let program = self.program.clone();
         checked(program, self.output().await.map(Some))
@@ -152,6 +171,21 @@ impl Command {
         self
     }
 
+    pub fn env_clear(mut self) -> Self {
+        self.inner.env_clear();
+        self
+    }
+
+    pub fn envs<I, K, V>(mut self, vars: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        self.inner.envs(vars);
+        self
+    }
+
     /// Set the child's working directory.
     pub fn current_dir(mut self, dir: impl AsRef<Path>) -> Self {
         self.inner.current_dir(dir);
@@ -159,20 +193,10 @@ impl Command {
     }
 
     /// Run to completion, capturing stdout + stderr.
-    pub async fn output(mut self) -> std::io::Result<Output> {
-        self.inner
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        let out = spawn(&mut self.inner)?.wait_with_output().await?;
-        Ok(Output {
-            status: ExitStatus {
-                success: out.status.success(),
-                code: out.status.code(),
-            },
-            stdout: out.stdout,
-            stderr: out.stderr,
-        })
+    pub async fn output(self) -> std::io::Result<Output> {
+        self.output_or(std::future::pending())
+            .await?
+            .ok_or_else(|| std::io::Error::other("unbounded run reported a timeout"))
     }
 
     /// Spawn and wait up to `budget`. `Ok(Some(status))` if it exited in time;
@@ -197,16 +221,23 @@ impl Command {
         mut self,
         cancel: impl std::future::Future<Output = ()>,
     ) -> std::io::Result<Option<ExitStatus>> {
+        self.pipe_stdin();
         let mut child = spawn(&mut self.inner)?;
+        let writer = self.start_writer(&mut child);
         let mut guard = GroupGuard::new(self.kill_group, &child);
+        let mut cancel = std::pin::pin!(cancel);
         let finished = tokio::select! {
             biased;
             result = guard.wait_leader(&mut child) => Some(result),
-            () = cancel => None,
+            () = &mut cancel => None,
         };
         match finished {
             Some(result) => {
                 result?;
+                if self.kill_on_exit {
+                    guard.kill();
+                }
+                writer_result(writer, &mut cancel).await?;
                 guard.disarm();
                 let st = child.wait().await?;
                 Ok(Some(ExitStatus {
@@ -223,20 +254,6 @@ impl Command {
         }
     }
 
-    /// Run up to `budget`, capturing stdout + stderr. Never returns partial
-    /// output as success:
-    ///
-    /// - The child exits and both pipes reach EOF before the deadline:
-    ///   `Ok(Some(output))` with the complete output.
-    /// - The child has not exited by the deadline: `Ok(None)`; the child is
-    ///   killed and reaped.
-    /// - The child exits but a process it left behind still holds a pipe open at
-    ///   the deadline: `Err` wrapping a [`PipeHeldOpen`] that carries the child's
-    ///   exit status.
-    ///
-    /// On either deadline path the process group is also killed if
-    /// [`kill_process_group_on_timeout`](Self::kill_process_group_on_timeout) was
-    /// set; otherwise processes the child left behind keep running.
     pub async fn output_within(self, budget: Duration) -> std::io::Result<Option<Output>> {
         self.output_until(tokio::time::Instant::now() + budget)
             .await
@@ -250,17 +267,16 @@ impl Command {
         self.output_or(tokio::time::sleep_until(deadline)).await
     }
 
-    /// [`output_within`](Self::output_within) ended by `cancel` instead of a
-    /// clock; completing `cancel` is handled exactly like reaching the deadline,
-    /// including the [`PipeHeldOpen`] path when it fires while pipes drain.
     pub async fn output_or(
         mut self,
         cancel: impl std::future::Future<Output = ()>,
     ) -> std::io::Result<Option<Output>> {
+        self.pipe_stdin();
         self.inner
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         let mut child = spawn(&mut self.inner)?;
+        let writer = self.start_writer(&mut child);
         let stdout = child
             .stdout
             .take()
@@ -286,7 +302,12 @@ impl Command {
         };
         match finished {
             // Guard stays armed so its drop kills an opted-in group.
-            Some(result) => result?,
+            Some(result) => {
+                result?;
+                if self.kill_on_exit {
+                    guard.kill();
+                }
+            }
             None => {
                 reader.abort();
                 guard.kill_on_timeout(&mut child);
@@ -295,10 +316,18 @@ impl Command {
                 return Ok(None);
             }
         }
-        let eof = drain_pipes(&mut reader, cancel).await?;
+        let drain_end = async {
+            match self.drain_budget {
+                Some(budget) => tokio::time::sleep(budget).await,
+                None => (&mut cancel).await,
+            }
+        };
+        let eof = drain_pipes(&mut reader, drain_end).await?;
         if !eof {
             reader.abort();
             guard.kill();
+        } else {
+            writer_result(writer, &mut cancel).await?;
         }
         let status = child.wait().await?;
         guard.disarm();
@@ -307,13 +336,36 @@ impl Command {
             code: status.code(),
         };
         if !eof {
-            return Err(std::io::Error::other(PipeHeldOpen { status }));
+            let held = PipeHeldOpen::new(status);
+            let held = match self.drain_budget {
+                Some(budget) => held.with_drain_budget(budget),
+                None => held,
+            };
+            return Err(std::io::Error::other(held));
         }
         Ok(Some(Output {
             status,
             stdout: take_buf(&out_buf),
             stderr: take_buf(&err_buf),
         }))
+    }
+
+    fn pipe_stdin(&mut self) {
+        self.inner.stdin(if self.stdin.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        });
+    }
+
+    fn start_writer(&mut self, child: &mut tokio::process::Child) -> Option<StdinWriter> {
+        self.stdin.take().map(|data| {
+            let mut pipe = child
+                .stdin
+                .take()
+                .expect("stdin was piped, so it is present");
+            AbortOnDrop(tokio::spawn(async move { pipe.write_all(&data).await }))
+        })
     }
 
     /// Spawn a long-lived child with piped stdin/stdout, returning an orca-owned
@@ -349,20 +401,39 @@ impl Command {
     }
 }
 
-/// [`Command::output_within`]'s error when the child exited but its stdout or
-/// stderr was still held open, by a process it left behind, at the deadline.
 #[derive(Clone, Copy, Debug)]
 pub struct PipeHeldOpen {
     pub status: ExitStatus,
+    pub drain_budget: Option<Duration>,
+}
+
+impl PipeHeldOpen {
+    pub fn new(status: ExitStatus) -> Self {
+        Self {
+            status,
+            drain_budget: None,
+        }
+    }
+
+    pub fn with_drain_budget(mut self, budget: Duration) -> Self {
+        self.drain_budget = Some(budget);
+        self
+    }
 }
 
 impl std::fmt::Display for PipeHeldOpen {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "process exited (exit {:?}) but its output pipe was still held open at the deadline",
-            self.status.code
-        )
+        let code = self.status.code;
+        match self.drain_budget {
+            Some(budget) => write!(
+                f,
+                "process exited (exit {code:?}) but its output pipe was still held open when the {budget:?} drain budget ran out"
+            ),
+            None => write!(
+                f,
+                "process exited (exit {code:?}) but its output pipe was still held open at the deadline"
+            ),
+        }
     }
 }
 
@@ -419,6 +490,25 @@ fn checked(
 }
 
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+type StdinWriter = AbortOnDrop<std::io::Result<()>>;
+
+async fn writer_result(
+    writer: Option<StdinWriter>,
+    cancel: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
+    let Some(writer) = writer else {
+        return Ok(());
+    };
+    tokio::select! {
+        biased;
+        done = writer => match done.map_err(std::io::Error::other)? {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            other => other,
+        },
+        () = cancel => Err(std::io::Error::other("child stdin was not fully consumed by the deadline")),
+    }
+}
 
 impl<T> AbortOnDrop<T> {
     fn abort(&self) {
@@ -1127,6 +1217,274 @@ mod tests {
         grandchild_holding_stdout(true).await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_on_exit_kills_the_group_after_a_clean_exit() {
+        let dir = HolderDir::new("pgexit");
+        let dead = dir.death_watch();
+        let cmd = dir
+            .command("echo hi; sleep 3600 4>&- & echo $! >&4")
+            .kill_process_group_on_exit();
+        let (out, _) = tokio::join!(cmd.output_within(Duration::from_secs(600)), dir.pid());
+        let out = out.unwrap().expect("leader exited in time");
+        assert!(out.status.success);
+        assert_eq!(out.stdout, b"hi\n");
+        assert_eq!(
+            read_to_eof(dead).await,
+            "",
+            "group member outlived the leader"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_on_exit_kills_the_group_for_status_runs() {
+        let dir = HolderDir::new("pgexitst");
+        let dead = dir.death_watch();
+        let cmd = dir
+            .command("sleep 3600 4>&- & echo $! >&4")
+            .kill_process_group_on_exit();
+        let (st, _) = tokio::join!(cmd.status_within(Duration::from_secs(600)), dir.pid());
+        assert!(st.unwrap().expect("leader exited in time").success);
+        assert_eq!(
+            read_to_eof(dead).await,
+            "",
+            "group member outlived the leader"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn kill_on_exit_still_kills_the_group_on_timeout() {
+        grandchild_dies_after_timeout(async |cmd| {
+            cmd.kill_process_group_on_exit()
+                .output_within(Duration::from_millis(300))
+                .await
+                .unwrap()
+                .is_none()
+        })
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn drain_budget_reports_a_holder_outside_the_group() {
+        let dir = HolderDir::new("pgdrain");
+        let cmd = detached_holder(&dir, false)
+            .kill_process_group_on_exit()
+            .drain_budget(Duration::from_millis(50));
+        let (out, _) = tokio::join!(
+            cmd.output_within(Duration::from_secs(10 * 365 * 24 * 3600)),
+            dir.pid()
+        );
+        let err = out.unwrap_err();
+        let held = err
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<PipeHeldOpen>())
+            .unwrap_or_else(|| panic!("expected PipeHeldOpen, got {err}"));
+        assert!(held.status.success);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn drain_budget_outlasts_a_deadline_hit_just_after_leader_exit() {
+        let dir = HolderDir::new("pgdrainlate");
+        let cmd = dir
+            .command("echo $$ >&4; echo hi; sleep 3600 4>&- & echo $! >&4")
+            .kill_process_group_on_timeout()
+            .drain_budget(Duration::from_secs(3600));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let run = cmd.output_until(deadline);
+        let mut run = std::pin::pin!(run);
+        let leader = tokio::select! {
+            biased;
+            out = &mut run => panic!("run ended before the leader reported: {out:?}"),
+            pid = dir.pid() => pid,
+        };
+        let holder = tokio::select! {
+            biased;
+            out = &mut run => panic!("run ended before the holder reported: {out:?}"),
+            pid = dir.pid() => pid,
+        };
+        let leader_gone = tokio::task::spawn_blocking(move || block_until_exited(leader));
+        tokio::select! {
+            biased;
+            out = &mut run => panic!("run ended before the leader exited: {out:?}"),
+            gone = leader_gone => gone.unwrap(),
+        };
+        let (release_clock, clock_held) = std::sync::mpsc::channel::<()>();
+        let kill_holder_after_deadline = async {
+            tokio::time::sleep_until(deadline + Duration::from_secs(1)).await;
+            unsafe { libc::kill(holder, libc::SIGKILL) };
+            drop(tokio::task::spawn_blocking(move || {
+                clock_held.recv_timeout(Duration::from_secs(30))
+            }));
+            std::future::pending::<()>().await
+        };
+        let out = tokio::select! {
+            biased;
+            out = &mut run => out,
+            () = kill_holder_after_deadline => unreachable!(),
+        };
+        drop(release_clock);
+        assert!(tokio::time::Instant::now() > deadline);
+        let out = out.unwrap().expect("leader exited before the deadline");
+        assert!(out.status.success);
+        assert_eq!(out.stdout, b"hi\n");
+    }
+
+    #[cfg(unix)]
+    fn block_until_exited(pid: libc::pid_t) {
+        let give_up = std::time::Instant::now() + Duration::from_secs(30);
+        while !leader_exited(pid as u32).unwrap() {
+            assert!(
+                std::time::Instant::now() < give_up,
+                "leader {pid} never exited"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[tokio::test]
+    async fn env_clear_passes_only_the_given_environment() {
+        let out = Command::new("/usr/bin/env")
+            .env_clear()
+            .envs([("ORCA_A", "1"), ("ORCA_B", "two")])
+            .output_within(Duration::from_secs(10))
+            .await
+            .unwrap()
+            .expect("env exited in time");
+        assert_eq!(out.stdout, b"ORCA_A=1\nORCA_B=two\n");
+    }
+
+    #[tokio::test]
+    async fn bounded_runs_get_null_stdin() {
+        let out = Command::new("cat")
+            .run_checked_within(Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unbounded_output_feeds_stdin_bytes() {
+        let out = Command::new("cat")
+            .stdin_bytes("in")
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, b"in");
+    }
+
+    #[tokio::test]
+    async fn status_runs_feed_stdin_bytes() {
+        let st = Command::new("sh")
+            .arg("-c")
+            .arg(r#"read x; test "$x" = ok"#)
+            .stdin_bytes("ok\n")
+            .status_within(Duration::from_secs(10))
+            .await
+            .unwrap()
+            .expect("exited in time");
+        assert!(st.success);
+    }
+
+    #[tokio::test]
+    async fn status_runs_get_null_stdin() {
+        let st = Command::new("sh")
+            .arg("-c")
+            .arg(r#"test -z "$(cat)""#)
+            .status_within(Duration::from_secs(10))
+            .await
+            .unwrap()
+            .expect("exited in time");
+        assert!(st.success);
+    }
+
+    #[tokio::test]
+    async fn stdin_bytes_reach_the_child() {
+        let out = Command::new("cat")
+            .stdin_bytes(r#"{"k":"v"}"#)
+            .run_checked_within(Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(out, br#"{"k":"v"}"#);
+    }
+
+    #[tokio::test]
+    async fn large_stdin_and_output_on_both_pipes_does_not_deadlock() {
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg("tee /dev/stderr")
+            .stdin_bytes(vec![b'a'; 200_000])
+            .output_within(Duration::from_secs(20))
+            .await
+            .unwrap()
+            .expect("exited in time");
+        assert_eq!(out.stdout.len(), 200_000);
+        assert_eq!(out.stderr.len(), 200_000);
+    }
+
+    #[tokio::test]
+    async fn unread_stdin_follows_the_exit_status() {
+        let ok = Command::new("true")
+            .stdin_bytes(vec![b'a'; 1 << 20])
+            .run_checked_within(Duration::from_secs(10))
+            .await;
+        assert!(ok.is_ok(), "{ok:?}");
+        let err = Command::new("false")
+            .stdin_bytes(vec![b'a'; 1 << 20])
+            .run_checked_within(Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, Some(1));
+    }
+
+    #[tokio::test]
+    async fn status_run_with_unread_stdin_follows_the_exit_status() {
+        for (program, success) in [("true", true), ("false", false)] {
+            let st = Command::new(program)
+                .stdin_bytes(vec![b'a'; 1 << 20])
+                .status_within(Duration::from_secs(10))
+                .await
+                .unwrap()
+                .expect("exited in time");
+            assert_eq!(st.success, success, "{program}");
+        }
+    }
+
+    #[tokio::test]
+    async fn small_unread_stdin_gives_the_same_result_either_way_the_race_goes() {
+        for code in [0, 4] {
+            for script in [
+                format!("exec 0<&-; exit {code}"),
+                format!("perl -MIO::Select -e 'IO::Select->new(\\*STDIN)->can_read; exit {code}'"),
+            ] {
+                let out = Command::new("sh")
+                    .arg("-c")
+                    .arg(&script)
+                    .stdin_bytes("small")
+                    .output_within(Duration::from_secs(10))
+                    .await
+                    .unwrap()
+                    .expect("exited in time");
+                assert_eq!(out.status.code, Some(code), "{script}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_zero_exit_with_stdout_is_a_tool_error() {
+        let err = Command::new("sh")
+            .arg("-c")
+            .arg("echo partial; echo boom >&2; exit 3")
+            .run_checked_within(Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, Some(3));
+        assert_eq!(err.stderr, "boom");
+    }
+
     fn pipe_reader() -> (
         tokio::io::DuplexStream,
         AbortOnDrop<std::io::Result<()>>,
@@ -1169,18 +1527,31 @@ mod tests {
 
     #[test]
     fn pipe_held_open_error_carries_exit_status() {
-        let err = std::io::Error::other(PipeHeldOpen {
-            status: ExitStatus {
-                success: false,
-                code: Some(7),
-            },
-        });
+        let err = std::io::Error::other(PipeHeldOpen::new(ExitStatus {
+            success: false,
+            code: Some(7),
+        }));
         let held = err
             .get_ref()
             .and_then(|e| e.downcast_ref::<PipeHeldOpen>())
             .expect("PipeHeldOpen inside the io::Error");
         assert_eq!(held.status.code, Some(7));
         assert!(err.to_string().contains("still held open"), "{err}");
+        assert!(err.to_string().ends_with("at the deadline"), "{err}");
+    }
+
+    #[test]
+    fn pipe_held_open_names_the_drain_budget_when_set() {
+        let err = PipeHeldOpen::new(ExitStatus {
+            success: true,
+            code: Some(0),
+        })
+        .with_drain_budget(Duration::from_secs(5));
+        assert!(
+            err.to_string()
+                .ends_with("when the 5s drain budget ran out"),
+            "{err}"
+        );
     }
 
     #[cfg(unix)]
