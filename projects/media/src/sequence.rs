@@ -80,17 +80,17 @@ pub fn sequence_gaps(
     let mut out = SequenceGaps::default();
     if let Some(sparse) = &policy.sparse {
         let count = expected_total.map_or(rows, |t| t as usize).max(whole.len()) as i64;
-        let limit = 2 * count + sparse.slack;
-        if hi - lo + 1 > limit {
+        let limit = count.saturating_mul(2).saturating_add(sparse.slack);
+        if hi.saturating_sub(lo).saturating_add(1) > limit {
             let small = expected_total.is_none()
                 && whole.len() < sparse.small_series
-                && hi - lo < sparse.small_series_span;
+                && hi.saturating_sub(lo) < sparse.small_series_span;
             let past: Vec<i64> = match expected_total {
-                Some(_) => whole.range(lo + limit..).copied().collect(),
+                Some(_) => whole.range(lo.saturating_add(limit)..).copied().collect(),
                 None => Vec::new(),
             };
             if !past.is_empty() && past.len() <= sparse.max_outliers {
-                whole.retain(|n| *n < lo + limit);
+                whole.retain(|n| *n < lo.saturating_add(limit));
                 out.outliers = past;
             } else if !small {
                 out.renumbered_or_sparse = Some(NumberRange { from: lo, to: hi });
@@ -104,10 +104,11 @@ pub fn sequence_gaps(
     };
     let edges = std::iter::once(start - 1).chain(whole.iter().copied());
     for (a, b) in edges.clone().zip(edges.skip(1)) {
-        if b - a < 2 {
+        let gap = b.saturating_sub(a).saturating_sub(1);
+        if gap < 1 {
             continue;
         }
-        out.missing_count += (b - a - 1) as usize;
+        out.missing_count = out.missing_count.saturating_add(gap as usize);
         if policy.max_ranges == Some(out.missing.len()) {
             out.truncated = true;
         } else {
@@ -271,6 +272,15 @@ mod tests {
     fn books_missing_count_sums_ranges() {
         let g = sequence_gaps(&[1.0, 4.0], 2, None, &books());
         assert_eq!(g.missing_count, 2);
+    }
+
+    #[test]
+    fn huge_numbers_saturate_instead_of_overflowing() {
+        let open = GapPolicy::default();
+        let g = sequence_gaps(&[0.0, 1e300], 2, None, &open);
+        assert_eq!(g.missing, vec![r(1, i64::MAX - 1)]);
+        let g = sequence_gaps(&[0.0, 1e300], 2, Some(u32::MAX), &issues());
+        assert_eq!(g.outliers, vec![i64::MAX]);
     }
 
     #[test]
