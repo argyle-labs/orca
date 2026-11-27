@@ -512,6 +512,13 @@ fn gate_dry_run_secret(op: &str, args: &mut serde_json::Value) -> std::result::R
         .get("dry_run")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let rollback = args
+        .get("rollback")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if dry_run && rollback {
+        return Err(format!("a rollback cannot be a dry run ({op})"));
+    }
     if dry_run {
         if let Some(obj) = args.as_object_mut() {
             obj.remove("secret");
@@ -2162,5 +2169,46 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn account_rollback_dry_run_is_rejected() {
+        for (op, args) in [
+            (
+                SET_SECRET_OP,
+                serde_json::json!({"account": acct(), "secret": VALUE, "dry_run": true, "rollback": true}),
+            ),
+            (
+                APPLY_CONSUMER_OP,
+                serde_json::json!({"holding": holding(), "secret": VALUE, "dry_run": true, "rollback": true}),
+            ),
+        ] {
+            let err = dispatch_op(&FakeConsumer, op, args).await.unwrap_err();
+            let msg = err.as_str().unwrap();
+            assert!(msg.contains("rollback cannot be a dry run"), "{msg}");
+            assert!(!msg.contains(VALUE));
+        }
+    }
+
+    #[cfg(feature = "in-process")]
+    #[tokio::test]
+    async fn account_proxy_rollback_dry_run_never_reaches_the_wire() {
+        let invoke: InvokeThunk =
+            Arc::new(|_op, _args, _call| panic!("rollback dry run must not be sent"));
+        let proxy = AccountProxy {
+            name: "account-proxy-rollback-dry".into(),
+            invoke,
+        };
+        let e = proxy
+            .apply_consumer(ConsumerApplyRequest {
+                holding: holding(),
+                secret: Some(secret()),
+                dry_run: true,
+                rollback: true,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("rollback cannot be a dry run"), "{e}");
     }
 }
