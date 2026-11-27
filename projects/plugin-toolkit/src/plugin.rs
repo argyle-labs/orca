@@ -995,5 +995,12 @@ mod tests {
         .expect("facet matched")
         .expect("op ok");
         assert_eq!(out["kind"], "compose");
+        assert!(
+            dispatch(
+                "template_kind.__backend.composex.decl",
+                serde_json::json!({})
+            )
+            .is_none()
+        );
     }
 }
