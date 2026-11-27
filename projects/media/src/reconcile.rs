@@ -735,4 +735,49 @@ mod tests {
             ]
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrequestable_after_cap_or_deadline_is_still_unrequestable() {
+        let req = Req {
+            unrequestable: Some("X"),
+            ..req()
+        };
+        let pace = std::time::Duration::from_secs(30);
+        let skips =
+            |out: &ReconcileOutcome| -> Vec<_> { out.actions.iter().map(|a| a.skipped).collect() };
+
+        let mut capped = Budget::new(1, &paced(pace)).unwrap();
+        let start = tokio::time::Instant::now();
+        let gaps: Vec<_> = ["A", "B", "X"].iter().map(|t| isbn(t, t)).collect();
+        let out = run(&gaps, &req, &mut capped, false).await;
+        assert_eq!(
+            skips(&out),
+            vec![
+                None,
+                Some(SkipReason::BudgetExhausted),
+                Some(SkipReason::Unrequestable)
+            ]
+        );
+        assert_eq!(capped.used(), 1);
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+
+        let mut timed = Budget::new(10, &paced(pace))
+            .unwrap()
+            .with_deadline(pace + pace / 2);
+        let start = tokio::time::Instant::now();
+        let gaps: Vec<_> = ["C", "D", "E", "X"].iter().map(|t| isbn(t, t)).collect();
+        let out = run(&gaps, &req, &mut timed, false).await;
+        assert_eq!(
+            skips(&out),
+            vec![
+                None,
+                None,
+                Some(SkipReason::DeadlineReached),
+                Some(SkipReason::Unrequestable)
+            ]
+        );
+        assert_eq!(timed.used(), 2);
+        assert_eq!(start.elapsed(), pace + pace / 2);
+        assert!(!req.added.lock().unwrap().contains(&"X".to_string()));
+    }
 }
