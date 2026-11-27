@@ -93,6 +93,9 @@ fn covered(numbers: &[SeqNumber], policy: &GapPolicy) -> Vec<NumberRange> {
         .iter()
         .filter_map(|n| match *n {
             SeqNumber::Whole(r) => Some(r),
+            SeqNumber::Fraction(f) if f.fract() == 0.0 && f.abs() < i64::MAX as f64 => {
+                Some(NumberRange::single(f as i64))
+            }
             SeqNumber::Fraction(f) => match policy.fractional {
                 Fractional::Ignore => None,
                 Fractional::Truncate => {
@@ -585,18 +588,10 @@ mod tests {
             out
         }
 
-        fn whole_or_fraction(v: f64) -> SeqNumber {
-            if v.fract() == 0.0 && v.abs() < 9.0e15 {
-                SeqNumber::whole(v as i64)
-            } else {
-                SeqNumber::Fraction(v)
-            }
-        }
-
         fn abs_input(seqs: &[&str]) -> Vec<SeqNumber> {
             seqs.iter()
                 .filter_map(|s| match parse_seq(s) {
-                    Seq::Number(v) => Some(whole_or_fraction(v)),
+                    Seq::Number(v) => Some(SeqNumber::Fraction(v)),
                     Seq::Range(a, b) => Some(SeqNumber::Whole(NumberRange { from: a, to: b })),
                     Seq::Other(_) => None,
                 })
@@ -752,7 +747,7 @@ mod tests {
                 &[1.0, 2019.0, 3.0],
             ];
             for case in cases {
-                let ns: Vec<SeqNumber> = case.iter().map(|v| whole_or_fraction(*v)).collect();
+                let ns: Vec<SeqNumber> = case.iter().map(|v| SeqNumber::Fraction(*v)).collect();
                 let size = SeriesSize {
                     entries: case.len(),
                     expected: None,
