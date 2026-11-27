@@ -133,6 +133,9 @@ pub enum SkipReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GapAction {
     pub identity: MediaIdentity,
+    /// Whether the want-request was issued; false on a dry run or when skipped.
+    #[serde(default)]
+    pub sent: bool,
     /// Present when we actually issued a want-request (not a dry run).
     #[serde(default)]
     pub status: Option<RequestStatus>,
@@ -144,8 +147,20 @@ pub struct GapAction {
     pub skipped: Option<SkipReason>,
 }
 
-/// The outcome of a series reconcile: the counts, the computed gaps, and — when
-/// not a dry run — what each want-request did.
+impl GapAction {
+    fn unsent(gap: &MediaIdentity, skipped: Option<SkipReason>, error: Option<String>) -> Self {
+        GapAction {
+            identity: gap.clone(),
+            sent: false,
+            status: None,
+            error,
+            skipped,
+        }
+    }
+}
+
+/// The outcome of a series reconcile: the counts, the computed gaps, and what
+/// each want-request did (or would do, on a dry run).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconcileOutcome {
     pub media_type: MediaType,
@@ -155,7 +170,7 @@ pub struct ReconcileOutcome {
     pub owned: usize,
     /// Missing volumes (expected − owned), in expected order.
     pub gaps: Vec<MediaIdentity>,
-    /// Empty when `dry_run`; otherwise one entry per gap.
+    /// One entry per gap; on a dry run nothing is `sent`.
     #[serde(default)]
     pub actions: Vec<GapAction>,
     /// Gaps the run's [`Budget`] covered (requested, or would be on a dry run).
@@ -192,55 +207,52 @@ pub async fn reconcile_series(
     let mut selected = cap;
 
     let mut actions = Vec::new();
+    for (n, &(gap, _)) in requestable[..cap].iter().enumerate() {
+        if dry_run {
+            actions.push(GapAction::unsent(gap, None, None));
+            continue;
+        }
+        if budget.expired() {
+            actions.extend(
+                requestable[n..cap].iter().map(|(gap, _)| {
+                    GapAction::unsent(gap, Some(SkipReason::DeadlineReached), None)
+                }),
+            );
+            selected = n;
+            break;
+        }
+        budget.pace().await;
+        budget.spend(1);
+        let req = AddRequest {
+            identity: gap.clone(),
+            quality: quality.clone(),
+            search_now: true,
+        };
+        let (status, error) = match requester.add(&req).await {
+            Ok(status) => (Some(status), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        actions.push(GapAction {
+            identity: gap.clone(),
+            sent: true,
+            status,
+            error,
+            skipped: None,
+        });
+    }
     if dry_run {
         budget.spend(selected);
-    } else {
-        for (n, &(gap, _)) in requestable[..cap].iter().enumerate() {
-            if budget.expired() {
-                actions.extend(requestable[n..cap].iter().map(|(gap, _)| GapAction {
-                    identity: (*gap).clone(),
-                    status: None,
-                    error: None,
-                    skipped: Some(SkipReason::DeadlineReached),
-                }));
-                selected = n;
-                break;
-            }
-            budget.pace().await;
-            budget.spend(1);
-            let req = AddRequest {
-                identity: gap.clone(),
-                quality: quality.clone(),
-                search_now: true,
-            };
-            match requester.add(&req).await {
-                Ok(status) => actions.push(GapAction {
-                    identity: gap.clone(),
-                    status: Some(status),
-                    error: None,
-                    skipped: None,
-                }),
-                Err(e) => actions.push(GapAction {
-                    identity: gap.clone(),
-                    status: None,
-                    error: Some(e.to_string()),
-                    skipped: None,
-                }),
-            }
-        }
-        actions.extend(requestable[cap..].iter().map(|(gap, _)| GapAction {
-            identity: (*gap).clone(),
-            status: None,
-            error: None,
-            skipped: Some(SkipReason::BudgetExhausted),
-        }));
-        actions.extend(unrequestable.into_iter().map(|(gap, why)| GapAction {
-            identity: gap.clone(),
-            status: None,
-            error: why,
-            skipped: Some(SkipReason::Unrequestable),
-        }));
     }
+    actions.extend(
+        requestable[cap..]
+            .iter()
+            .map(|(gap, _)| GapAction::unsent(gap, Some(SkipReason::BudgetExhausted), None)),
+    );
+    actions.extend(
+        unrequestable
+            .into_iter()
+            .map(|(gap, why)| GapAction::unsent(gap, Some(SkipReason::Unrequestable), why)),
+    );
     let remaining = requestable.len() - selected;
 
     Ok(ReconcileOutcome {
@@ -476,7 +488,7 @@ mod tests {
         assert_eq!(out.owned, 1);
         assert_eq!(out.gaps.len(), 2);
         assert_eq!(out.actions.len(), 2);
-        assert!(out.actions.iter().all(|a| a.error.is_none()));
+        assert!(out.actions.iter().all(|a| a.sent && a.error.is_none()));
         let added = req.added.lock().unwrap().clone();
         assert_eq!(added, vec!["A".to_string(), "C".to_string()]);
     }
@@ -498,7 +510,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out.gaps.len(), 2);
-        assert!(out.actions.is_empty());
+        assert_eq!(out.actions.len(), 2);
+        assert!(out.actions.iter().all(|a| !a.sent && a.skipped.is_none()));
         assert!(req.added.lock().unwrap().is_empty());
     }
 
@@ -568,7 +581,9 @@ mod tests {
         let expected = vec![isbn("A", "1"), isbn("B", "2"), isbn("C", "3")];
         let out = run(&expected, &req, &mut budget, true).await;
         assert_eq!((out.selected, out.remaining), (2, 1));
-        assert!(out.actions.is_empty());
+        let skipped: Vec<_> = out.actions.iter().map(|a| a.skipped).collect();
+        assert_eq!(skipped, vec![None, None, Some(SkipReason::BudgetExhausted)]);
+        assert!(out.actions.iter().all(|a| !a.sent));
         assert!(req.added.lock().unwrap().is_empty());
     }
 
