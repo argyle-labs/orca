@@ -196,20 +196,10 @@ impl Command {
     }
 
     /// Run to completion, capturing stdout + stderr.
-    pub async fn output(mut self) -> std::io::Result<Output> {
-        self.inner
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        let out = spawn(&mut self.inner)?.wait_with_output().await?;
-        Ok(Output {
-            status: ExitStatus {
-                success: out.status.success(),
-                code: out.status.code(),
-            },
-            stdout: out.stdout,
-            stderr: out.stderr,
-        })
+    pub async fn output(self) -> std::io::Result<Output> {
+        self.output_or(std::future::pending())
+            .await?
+            .ok_or_else(|| std::io::Error::other("unbounded run reported a timeout"))
     }
 
     /// Spawn and wait up to `budget`. `Ok(Some(status))` if it exited in time;
@@ -234,7 +224,9 @@ impl Command {
         mut self,
         cancel: impl std::future::Future<Output = ()>,
     ) -> std::io::Result<Option<ExitStatus>> {
+        self.pipe_stdin();
         let mut child = spawn(&mut self.inner)?;
+        let writer = self.start_writer(&mut child);
         let mut guard = GroupGuard::new(self.kill_group, &child);
         let finished = tokio::select! {
             biased;
@@ -249,6 +241,7 @@ impl Command {
                 }
                 guard.disarm();
                 let st = child.wait().await?;
+                writer_result(writer).await?;
                 Ok(Some(ExitStatus {
                     success: st.success(),
                     code: st.code(),
@@ -297,23 +290,12 @@ impl Command {
         mut self,
         cancel: impl std::future::Future<Output = ()>,
     ) -> std::io::Result<Option<Output>> {
-        let stdin = if self.stdin.is_some() {
-            std::process::Stdio::piped()
-        } else {
-            std::process::Stdio::null()
-        };
+        self.pipe_stdin();
         self.inner
-            .stdin(stdin)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         let mut child = spawn(&mut self.inner)?;
-        let writer = self.stdin.take().map(|data| {
-            let mut pipe = child
-                .stdin
-                .take()
-                .expect("stdin was piped, so it is present");
-            AbortOnDrop(tokio::spawn(async move { pipe.write_all(&data).await }))
-        });
+        let writer = self.start_writer(&mut child);
         let stdout = child
             .stdout
             .take()
@@ -377,18 +359,30 @@ impl Command {
         if !eof {
             return Err(std::io::Error::other(PipeHeldOpen { status }));
         }
-        if let Some(writer) = writer
-            && writer.0.is_finished()
-            && let Ok(Err(e)) = writer.await
-            && e.kind() != std::io::ErrorKind::BrokenPipe
-        {
-            return Err(e);
-        }
+        writer_result(writer).await?;
         Ok(Some(Output {
             status,
             stdout: take_buf(&out_buf),
             stderr: take_buf(&err_buf),
         }))
+    }
+
+    fn pipe_stdin(&mut self) {
+        self.inner.stdin(if self.stdin.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        });
+    }
+
+    fn start_writer(&mut self, child: &mut tokio::process::Child) -> Option<StdinWriter> {
+        self.stdin.take().map(|data| {
+            let mut pipe = child
+                .stdin
+                .take()
+                .expect("stdin was piped, so it is present");
+            AbortOnDrop(tokio::spawn(async move { pipe.write_all(&data).await }))
+        })
     }
 
     /// Spawn a long-lived child with piped stdin/stdout, returning an orca-owned
@@ -494,6 +488,19 @@ fn checked(
 }
 
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+type StdinWriter = AbortOnDrop<std::io::Result<()>>;
+
+async fn writer_result(writer: Option<StdinWriter>) -> std::io::Result<()> {
+    if let Some(writer) = writer
+        && writer.0.is_finished()
+        && let Ok(Err(e)) = writer.await
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(e);
+    }
+    Ok(())
+}
 
 impl<T> AbortOnDrop<T> {
     fn abort(&self) {
@@ -1289,6 +1296,41 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unbounded_output_feeds_stdin_bytes() {
+        let out = Command::new("cat")
+            .stdin_bytes("in")
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, b"in");
+    }
+
+    #[tokio::test]
+    async fn status_runs_feed_stdin_bytes() {
+        let st = Command::new("sh")
+            .arg("-c")
+            .arg(r#"read x; test "$x" = ok"#)
+            .stdin_bytes("ok\n")
+            .status_within(Duration::from_secs(10))
+            .await
+            .unwrap()
+            .expect("exited in time");
+        assert!(st.success);
+    }
+
+    #[tokio::test]
+    async fn status_runs_get_null_stdin() {
+        let st = Command::new("sh")
+            .arg("-c")
+            .arg(r#"test -z "$(cat)""#)
+            .status_within(Duration::from_secs(10))
+            .await
+            .unwrap()
+            .expect("exited in time");
+        assert!(st.success);
     }
 
     #[tokio::test]
