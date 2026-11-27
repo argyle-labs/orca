@@ -21,12 +21,18 @@ pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T
 /// there is no String hop. A `Value::String` is used verbatim (no surrounding
 /// quotes); any other shape is JSON-rendered. This is the one place that
 /// flattens an erased error `Value` back to text.
+///
+/// Plugin errors can echo upstream response bodies, so the rendered text is
+/// secret-scrubbed before it reaches any caller.
 #[allow(clippy::disallowed_types)]
 pub fn render_invoke_error(err: &serde_json::Value) -> String {
-    match err {
+    let text = match err {
         serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
+        other => utils::scrub::redact_json(other.clone()).to_string(),
+    };
+    #[cfg(feature = "in-process")]
+    let text = utils::scrub::redact_text(&text);
+    text
 }
 
 mod def;
@@ -58,6 +64,32 @@ pub use json_any::JsonAny;
 
 mod types;
 pub use types::{ToolCall, ToolDef, ToolResult};
+
+#[cfg(all(test, feature = "in-process"))]
+mod render_invoke_error_tests {
+    use super::render_invoke_error;
+
+    #[test]
+    fn provider_error_tokens_reach_caller_redacted() {
+        let err = serde_json::Value::String(
+            r#"upstream 401: {"token":"abc123def456","ok":false} at https://api.example/v1?apikey=zz9988&x=1 Authorization: Bearer eyJhbGciOi.eyJzdWIi.c2ln"#
+                .to_string(),
+        );
+        let out = render_invoke_error(&err);
+        for leak in ["abc123def456", "zz9988", "eyJhbGciOi"] {
+            assert!(!out.contains(leak), "{out}");
+        }
+        assert!(out.contains("upstream 401"), "{out}");
+    }
+
+    #[test]
+    fn structured_provider_error_is_redacted() {
+        let err = serde_json::json!({"message": "denied", "token": "abc123def456"});
+        let out = render_invoke_error(&err);
+        assert!(!out.contains("abc123def456"), "{out}");
+        assert!(out.contains("denied"), "{out}");
+    }
+}
 
 pub mod arg_hint;
 pub use arg_hint::ArgRefusalHint;
