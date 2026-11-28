@@ -102,7 +102,7 @@ while IFS=$'\t' read -r name version; do
       printf '%s\n' "$out"
     else
       printf '%s\n' "$out" >&2
-      grep -qF "already exists on \`gitea\` index" <<<"$out" || exit 1
+      grep -qiE "already exists|409 Conflict" <<<"$out" || exit 1
       echo "skip    $name $version (registry has it; waiting for the index)"
     fi
     # Dependents resolve against the index; wait until this version is visible.
