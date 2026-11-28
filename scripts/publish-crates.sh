@@ -98,7 +98,13 @@ while IFS=$'\t' read -r name version; do
   else
     echo "publish $name $version"
     # CI built and tested this commit; skip cargo's rebuild of each package.
-    cargo publish --locked --no-verify --registry gitea -p "$name"
+    if out="$(cargo publish --locked --no-verify --registry gitea -p "$name" 2>&1)"; then
+      printf '%s\n' "$out"
+    else
+      printf '%s\n' "$out" >&2
+      grep -qiE "already exists|409 Conflict" <<<"$out" || exit 1
+      echo "skip    $name $version (registry has it; waiting for the index)"
+    fi
     # Dependents resolve against the index; wait until this version is visible.
     for attempt in $(seq 1 30); do
       published "$name" "$version" && break
